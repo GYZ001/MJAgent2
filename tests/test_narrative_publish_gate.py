@@ -567,7 +567,7 @@ def test_screenplay_certificate_requires_gate_from_the_exact_artifact() -> None:
         verify_completion_certificate(certificate)
 
 
-def test_narrative_certificate_accepts_exact_score_only_evaluation() -> None:
+def test_narrative_certificate_requires_exact_runtime_gate_evaluation() -> None:
     screenplay_contract = get_contract("screenplay").version
     qa_profile = "screenplay-qa-gate-2"
     artifact = _artifact(
@@ -588,8 +588,8 @@ def test_narrative_certificate_accepts_exact_score_only_evaluation() -> None:
             evaluator_version=qa_profile,
             status="passed",
             hard_gate_passed=True,
-            evaluation_role="score_only",
-            runtime_blocking=False,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
             score=100,
         ),
     )

@@ -20,6 +20,7 @@ def _begin_clear_transaction(
     episode_id: str,
     *,
     active_storyboard_run_id: str | None = None,
+    allow_storyboard_workspace_mutation: bool = False,
 ) -> None:
     """Serialize the final upstream check and media purge in SQLite."""
     # Supervisor 局部修复可能在同一连接已有事务（例如先写修复计划再清理相邻镜）。
@@ -62,7 +63,11 @@ def _begin_clear_transaction(
         if not run or run["status"] not in _CLEAR_TERMINAL_RUN_STATES:
             active.append(str(run_id))
     writing_status = ep["status"] in {"planned", "scripting", "storyboarding", "generating"}
-    if (writing_status and not authorized_storyboard_run) or active:
+    if (
+        writing_status
+        and not authorized_storyboard_run
+        and not allow_storyboard_workspace_mutation
+    ) or active:
         conn.rollback()
         raise ValueError("编剧或分镜任务仍在写入，清空已原子拒绝")
 
@@ -499,6 +504,7 @@ def clear_shot_artifacts(
         conn,
         shot["episode_id"],
         active_storyboard_run_id=active_storyboard_run_id,
+        allow_storyboard_workspace_mutation=True,
     )
     try:
         refs = _delete_shot_reference_dir(conn, shot)

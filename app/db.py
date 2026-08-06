@@ -1542,6 +1542,28 @@ def _repair_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
     return report
 
 
+def _repair_invalid_provider_metadata(conn: sqlite3.Connection) -> None:
+    """Replace legacy character-truncated metadata with valid audit summaries."""
+    try:
+        rows = conn.execute(
+            "SELECT id,meta FROM provider_calls "
+            "WHERE meta IS NOT NULL AND json_valid(meta)=0"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    for row in rows:
+        raw = str(row["meta"] or "")
+        summary = {
+            "_legacy_invalid": True,
+            "_original_chars": len(raw),
+            "_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        }
+        conn.execute(
+            "UPDATE provider_calls SET meta=? WHERE id=?",
+            (json.dumps(summary, ensure_ascii=False, sort_keys=True), row["id"]),
+        )
+
+
 def _prune_observability_logs(conn: sqlite3.Connection) -> None:
     """Bound diagnostic tables so routine monitoring cannot grow the DB forever."""
     def retention_days(key: str, fallback: int) -> int:
@@ -1781,6 +1803,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (f"_monitor_effective_{key}", key),
         )
+    _repair_invalid_provider_metadata(conn)
     _prune_observability_logs(conn)
     if reconcile_interrupted:
         # 只有持有运行时恢复锁的实例才能宣告旧调用中断。

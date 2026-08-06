@@ -382,11 +382,14 @@ def storyboard_mutation_block_reason(conn, episode_id: str) -> str | None:
     if task_registry.active("video_completion", episode_id):
         return "视频任务正在运行；请先在生成台停止任务并等待状态收口"
     episode = conn.execute(
-        "SELECT status,active_storyboard_run_id,active_video_run_id FROM episodes WHERE id=?",
+        "SELECT status,screenplay_publish_fence,active_storyboard_run_id,active_video_run_id "
+        "FROM episodes WHERE id=?",
         (episode_id,),
     ).fetchone()
     if not episode:
         return "剧集不存在"
+    if episode["screenplay_publish_fence"]:
+        return "分镜正在执行确认或上游发布，请等待当前原子操作完成"
     active_statuses = tuple(sorted(evidence_repository.ACTIVE_RUN_STATUSES))
     marks = ",".join("?" for _ in active_statuses)
     row = conn.execute(

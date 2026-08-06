@@ -42,6 +42,9 @@ class _PriorityGate:
             raise
 
     def release(self) -> None:
+        if self.active > self.limit:
+            self.active -= 1
+            return
         while self.waiters:
             _priority, _sequence, future = heapq.heappop(self.waiters)
             if future.cancelled():
@@ -49,6 +52,19 @@ class _PriorityGate:
             future.set_result(None)
             return
         self.active = max(0, self.active - 1)
+
+    def resize(self, limit: int) -> None:
+        new_limit = max(1, int(limit))
+        previous = self.limit
+        self.limit = new_limit
+        if new_limit <= previous:
+            return
+        while self.active < self.limit and self.waiters:
+            _priority, _sequence, future = heapq.heappop(self.waiters)
+            if future.cancelled():
+                continue
+            self.active += 1
+            future.set_result(None)
 
 
 _loop_gates: weakref.WeakKeyDictionary[
@@ -64,7 +80,10 @@ def _resource_key(workflow_type: str) -> str:
 
 
 def _configured_limit(_workflow_type: str) -> int:
-    raw = get_setting("storyboard_concurrency")
+    raw = (
+        get_setting("text_generation_concurrency")
+        or get_setting("storyboard_concurrency")
+    )
     try:
         return max(1, int(raw or 2))
     except (TypeError, ValueError):
@@ -81,6 +100,8 @@ def gate_for(workflow_type: str) -> _PriorityGate:
     if gate is None:
         gate = _PriorityGate(desired)
         by_type[resource] = gate
+    else:
+        gate.resize(desired)
     return gate
 
 

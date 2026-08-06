@@ -2618,6 +2618,44 @@ def test_certificate_derives_blockers_from_evaluation() -> None:
         )
 
 
+def test_modern_certificate_rejects_missing_narrative_plan() -> None:
+    from app.evidence import repository as evidence_repository
+
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content={"screenplay_metadata": {"episode_no": 1}},
+        contract_version="4.0.0",
+    ))
+    evaluation = evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version="screenplay-qa-gate-2",
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
+            issues=[],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="要求 narrative_plan"):
+        issue_completion_certificate(
+            kind="screenplay",
+            scope_id="ep_p",
+            artifact_id=artifact["id"],
+            artifact_hash=artifact["content_hash"],
+            contract_version="4.0.0",
+            qa_profile_version="screenplay-qa-gate-2",
+            evaluation_ids=[evaluation["id"]],
+        )
+
+
 def test_repair_router_no_longer_emits_redo_or_replan():
     assert strategy_for_level("L3") == "insert_shot"
     assert strategy_for_level("L4") == "split_shot"

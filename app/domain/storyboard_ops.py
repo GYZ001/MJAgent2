@@ -704,6 +704,8 @@ def _ensure_current_storyboard_shot_artifacts(
     conn,
     episode_id: str,
     board: Storyboard,
+    *,
+    commit: bool = True,
 ):
     """Bind every current shot to immutable evidence for its current number and content."""
     rows = conn.execute(
@@ -726,16 +728,6 @@ def _ensure_current_storyboard_shot_artifacts(
         ):
             continue
 
-        artifact = evidence_repository.create_artifact(EvidenceArtifact(
-            type="storyboard_shot",
-            scope_type="storyboard_checkpoint",
-            scope_id=f"{episode_id}:{shot.shot_no}",
-            status="candidate",
-            trust_level="T1",
-            content=content,
-            parent_artifact_ids=[str(current_id)] if current_id else [],
-            contract_version=contract_version,
-        ))
         evaluation = Evaluation(
             evaluator_type="deterministic",
             evaluator_name="storyboard_projection_rebind",
@@ -750,14 +742,33 @@ def _ensure_current_storyboard_shot_artifacts(
                 "reason": "current shot projection and immutable evidence were realigned",
             },
         )
-        artifact = evidence_repository.commit_artifact(
-            None, artifact["id"], [evaluation],
+        artifact_input = EvidenceArtifact(
+            type="storyboard_shot",
+            scope_type="storyboard_checkpoint",
+            scope_id=f"{episode_id}:{shot.shot_no}",
+            status="candidate",
+            trust_level="T1",
+            content=content,
+            parent_artifact_ids=[str(current_id)] if current_id else [],
+            contract_version=contract_version,
         )
+        if commit:
+            artifact = evidence_repository.create_artifact(artifact_input)
+            artifact = evidence_repository.commit_artifact(
+                None, artifact["id"], [evaluation],
+            )
+        else:
+            artifact = evidence_repository.create_and_commit_artifact_in_transaction(
+                conn,
+                artifact_input,
+                [evaluation],
+            )
         conn.execute(
             "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
             (artifact["id"], row["id"]),
         )
-        conn.commit()
+        if commit:
+            conn.commit()
 
     return conn.execute(
         "SELECT id,shot_no,source_excerpt,storyboard_artifact_id FROM shots "
@@ -3092,6 +3103,7 @@ def _storyboard_status_snapshot(
         ]
     gate_errors: list[str] = list(dict.fromkeys(active_repair_errors))
     score_warnings: list[str] = []
+    gate_system_error: str | None = None
     if complete_structure:
         try:
             try:
@@ -3129,7 +3141,9 @@ def _storyboard_status_snapshot(
             # 分镜结构错误。发布证据仍会记录该 finding，但不能让状态快照误报
             # 一个没有镜号、没有修复入口的整集门禁。
         except Exception as exc:  # noqa: BLE001
-            gate_errors.append(f"确认门禁暂不可用：{exc}")
+            gate_system_error = (
+                f"确认门禁执行失败（{type(exc).__name__}）：{exc}"
+            )
     for index, shot in enumerate(shots):
         shot_no = int(shot.get("shot_no") or index + 1)
         localized = [
@@ -3159,7 +3173,13 @@ def _storyboard_status_snapshot(
         or (full_terminal and running)
         or (confirmed and not shots)
     )
-    if invalid:
+    if gate_system_error:
+        state, headline, action = (
+            "syncing",
+            "确认门禁服务异常，暂不可执行写操作",
+            "refresh_status",
+        )
+    elif invalid:
         state, headline, action = "syncing", "状态同步中，暂不可执行高影响操作", "refresh_status"
     elif not screenplay_ready:
         state, headline, action = "no_screenplay", "尚无可用于分镜的剧本", "go_screenplay"
@@ -3220,6 +3240,7 @@ def _storyboard_status_snapshot(
         "hard_gates_passed": bool(not gate_errors and (full_terminal or confirmed)),
         "hard_gate_issue_count": len(gate_errors),
         "hard_gate_issues": gate_errors[:30],
+        "system_error": gate_system_error,
         "feature_flags": feature_flags,
         "confirmed": confirmed,
         "editable": bool(screenplay_ready and not running and not invalid and not feature_flags["safe_readonly"]),
@@ -3227,6 +3248,8 @@ def _storyboard_status_snapshot(
         "recommended_action": action,
         "write_block_reason": (
             "分镜正在生成或修复，请先暂停" if running
+            else gate_system_error
+            if gate_system_error
             else "状态组合不安全，请刷新" if invalid or state == "syncing"
             else None
         ),
@@ -3503,7 +3526,25 @@ def _set_row_final_contract(conn, shot_id: str, final: bool) -> None:
 
 @router.post("/episodes/{episode_id}/storyboard/structure")
 def apply_storyboard_structure(episode_id: str, body: dict):
-    from app.storyboard_workspace import consume_preview, require_preview, source_binding_for_shot
+    conn = get_conn()
+    try:
+        return _apply_storyboard_structure_transaction(episode_id, body)
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
+    from app.artifacts import (
+        flush_media_cleanup_outbox,
+        stage_shot_artifact_cleanup,
+    )
+    from app.storyboard_workspace import (
+        assert_storyboard_mutation_allowed,
+        require_preview,
+        source_binding_for_shot,
+    )
 
     preview = require_preview(
         body.get("preview_token"), "structure", episode_id,
@@ -3519,9 +3560,25 @@ def apply_storyboard_structure(episode_id: str, body: dict):
         if value != preview.get(key):
             raise HTTPException(409, "结构操作与已批准预览不一致，请重新预览")
     conn = get_conn()
+    conn.execute("BEGIN IMMEDIATE")
+    assert_storyboard_mutation_allowed(conn, episode_id)
+    require_preview(
+        body.get("preview_token"),
+        "structure",
+        episode_id,
+        shot_id=str(body.get("shot_id") or ""),
+        consume=True,
+    )
     rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
     ).fetchall()
+    cleanup_outbox_ids: list[str] = []
+    invalidated = 0
+    for row in rows:
+        cleanup = stage_shot_artifact_cleanup(conn, str(row["id"]))
+        invalidated += int(cleanup.get("videos", 0)) + int(cleanup.get("references", 0))
+        if cleanup.get("outbox_id"):
+            cleanup_outbox_ids.append(str(cleanup["outbox_id"]))
     prior_shot_artifact_ids = [
         str(row["storyboard_artifact_id"])
         for row in rows
@@ -3654,17 +3711,15 @@ def apply_storyboard_structure(episode_id: str, body: dict):
         f"分镜结构已执行 {operation}，旧叙事审读失效",
         upstream_artifact_ids=prior_shot_artifact_ids,
     )
-    conn.commit()
     _ensure_current_storyboard_shot_artifacts(
         conn,
         episode_id,
         _board_from_shot_rows(current_rows, int(ep["episode_no"])),
+        commit=False,
     )
-    invalidated = 0
-    for item_id in ordered_ids:
-        cleared = worker.clear_shot_artifacts(item_id) or {}
-        invalidated += int(cleared.get("videos", 0)) + int(cleared.get("references", 0))
-    consume_preview(str(body["preview_token"]))
+    conn.commit()
+    for outbox_id in cleanup_outbox_ids:
+        flush_media_cleanup_outbox(outbox_id)
     return {
         "ok": True,
         "operation": operation,
@@ -4268,7 +4323,7 @@ async def edit_shot(shot_id: str, body: dict):
         raise HTTPException(404, "镜头不存在")
     _resolve_storyboard_mutation_screenplay(conn, str(shot["episode_id"]))
     from app.storyboard_workspace import (
-        close_edit_session, consume_preview, persist_source_binding, require_edit_session,
+        persist_source_binding, require_edit_session,
         require_preview, validate_source_binding,
     )
     session = require_edit_session(body.get("edit_session_token"), shot_id)
@@ -4527,90 +4582,111 @@ async def edit_shot(shot_id: str, body: dict):
             "message": "编辑候选未通过整集叙事不变量，本次未保存",
             "errors": deduped[:20],
         })
-    # 业务结构检查只写评分警告。人工编辑的已成形镜头不能因门禁被拒绝保存。
+    # 正式镜头、证据、下游失效索引和编辑会话必须在同一事务收口。
     previous_artifact_id = shot["storyboard_artifact_id"]
-    conn.execute(
-        "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_time=?, scene_setting=?, scene_name=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
-        (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_time,
-         instance.scene_setting, instance.scene_name or None,
-         json.dumps(instance.characters, ensure_ascii=False), instance.action_desc, instance.first_frame_desc, instance.last_frame_desc,
-         instance.source_excerpt, instance.narration,
-         json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
-         instance.transition, int(instance.continuity_from_prev), _shot_contract_json(instance),
-         instance.continuity_mode, instance.observed_state_out, shot_id))
+    contract_version = get_contract("storyboard").version
+    from app.artifacts import (
+        flush_media_cleanup_outbox,
+        stage_shot_artifact_cleanup,
+    )
     from app.narrative_review import invalidate_episode_narrative_review
 
-    invalidate_episode_narrative_review(
-        conn,
-        episode_id,
-        f"镜头 {shot_id} 已人工修订，旧叙事审读失效",
-        upstream_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
-    )
-    conn.commit()
-    if normalized_source_binding is not None:
-        persist_source_binding(shot_id, normalized_source_binding)
-    manual_artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="storyboard_shot",
-        scope_type="storyboard_checkpoint",
-        scope_id=f"{episode_id}:{shot['shot_no']}",
-        status="validated",
-        trust_level="T2",
-        content=instance.model_dump(mode="json"),
-        parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
-        contract_version=get_contract("storyboard").version,
-    ))
-    contract_version = get_contract("storyboard").version
-    # Human authorship is provenance, not a hard gate.
-    evidence_repository.create_evaluation(
-        manual_artifact["id"],
-        Evaluation(
-            evaluator_type="human",
-            evaluator_name="storyboard_editor",
-            evaluator_version="1.0.0",
-            status="passed",
-            hard_gate_passed=False,
-            score=100,
-            evidence={"decision": "authored_or_reviewed", "shot_id": shot_id},
-        ),
-    )
-    manual_artifact = evidence_repository.commit_artifact(
-        None,
-        manual_artifact["id"],
-        [Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="storyboard_shot_business_gate",
-            evaluator_version=contract_version,
-            status="warning" if deduped else "passed",
-            hard_gate_passed=not bool(deduped),
-            evaluation_role="score_only",
-            runtime_blocking=False,
-            retry_eligible=False,
-            score=0 if deduped else 100,
-            evidence={
-                "shot_id": shot_id,
-                "spoken_contract_status": instance.spoken_contract_status,
-                "gate_retry_exhausted": bool(deduped),
-                "warnings": deduped[:12],
-            },
-        )],
-    )
-    conn.execute(
-        "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
-        (manual_artifact["id"], shot_id),
-    )
-    conn.commit()
-    # 任一分镜字段都参与参考图或视频 prompt。保存后统一清理全部旧衍生产物，
-    # 避免 done/generating 状态继续展示旧成片；剧集必须重新确认后才能花钱生成。
-    invalidated = worker.clear_shot_artifacts(shot_id)
-    # 任一人工修订都使上次确认的评分警告失效。若不同步清空，
-    # 即使当前台词合同已通过 0 错误预检，页面仍会展示旧的“缺失台词”。
-    conn.execute(
-        "UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?",
-        (episode_id,),
-    )
-    conn.commit()
-    consume_preview(str(body["preview_token"]))
-    close_edit_session(str(body["edit_session_token"]), "saved")
+    conn.execute("BEGIN IMMEDIATE")
+    cleanup_outbox_id = None
+    try:
+        session = require_edit_session(body.get("edit_session_token"), shot_id)
+        require_preview(
+            body.get("preview_token"),
+            "shot_edit",
+            episode_id,
+            shot_id=shot_id,
+            consume=True,
+        )
+        if body.get("baseline_content_hash") != session["baseline_content_hash"]:
+            raise HTTPException(409, "保存基线已变化，请重新对比最新版")
+        conn.execute(
+            "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_time=?, scene_setting=?, scene_name=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
+            (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_time,
+             instance.scene_setting, instance.scene_name or None,
+             json.dumps(instance.characters, ensure_ascii=False), instance.action_desc, instance.first_frame_desc, instance.last_frame_desc,
+             instance.source_excerpt, instance.narration,
+             json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
+             instance.transition, int(instance.continuity_from_prev), _shot_contract_json(instance),
+             instance.continuity_mode, instance.observed_state_out, shot_id))
+        invalidate_episode_narrative_review(
+            conn,
+            episode_id,
+            f"镜头 {shot_id} 已人工修订，旧叙事审读失效",
+            upstream_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
+        )
+        if normalized_source_binding is not None:
+            persist_source_binding(
+                shot_id,
+                normalized_source_binding,
+                conn=conn,
+                commit=False,
+            )
+        manual_artifact = evidence_repository.create_and_commit_artifact_in_transaction(
+            conn,
+            EvidenceArtifact(
+                type="storyboard_shot",
+                scope_type="storyboard_checkpoint",
+                scope_id=f"{episode_id}:{shot['shot_no']}",
+                status="validated",
+                trust_level="T2",
+                content=instance.model_dump(mode="json"),
+                parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
+                contract_version=contract_version,
+            ),
+            [
+                Evaluation(
+                    evaluator_type="human",
+                    evaluator_name="storyboard_editor",
+                    evaluator_version="1.0.0",
+                    status="passed",
+                    hard_gate_passed=False,
+                    score=100,
+                    evidence={"decision": "authored_or_reviewed", "shot_id": shot_id},
+                ),
+                Evaluation(
+                    evaluator_type="deterministic",
+                    evaluator_name="storyboard_shot_business_gate",
+                    evaluator_version=contract_version,
+                    status="warning" if deduped else "passed",
+                    hard_gate_passed=not bool(deduped),
+                    evaluation_role="score_only",
+                    runtime_blocking=False,
+                    retry_eligible=False,
+                    score=0 if deduped else 100,
+                    evidence={
+                        "shot_id": shot_id,
+                        "spoken_contract_status": instance.spoken_contract_status,
+                        "gate_retry_exhausted": bool(deduped),
+                        "warnings": deduped[:12],
+                    },
+                ),
+            ],
+        )
+        conn.execute(
+            "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
+            (manual_artifact["id"], shot_id),
+        )
+        invalidated = stage_shot_artifact_cleanup(conn, shot_id)
+        cleanup_outbox_id = invalidated.get("outbox_id")
+        conn.execute(
+            "UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?",
+            (episode_id,),
+        )
+        conn.execute(
+            "UPDATE storyboard_edit_sessions SET status='saved' WHERE token=?",
+            (body.get("edit_session_token"),),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if cleanup_outbox_id:
+        flush_media_cleanup_outbox(str(cleanup_outbox_id))
     try:
         from app.observability.metrics import inc
         inc(

@@ -455,6 +455,28 @@ def recover_screenplay_tasks() -> int:
     from app.generation_concurrency import PRIORITY_RECOVERY
 
     conn = get_conn()
+    published_rows = conn.execute(
+        "SELECT * FROM episodes WHERE screenplay_status='ready' "
+        "AND screenplay_artifact_id IS NOT NULL"
+    ).fetchall()
+    for published in published_rows:
+        try:
+            valid = _screenplay_ready(dict(published))
+        except Exception:
+            valid = False
+        if valid:
+            continue
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,"
+            "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+            (
+                "现有完成凭证未通过当前生产门禁；旧剧本与证据已保留，"
+                "请重新发起剧本生成",
+                now(),
+                published["id"],
+            ),
+        )
+    conn.commit()
     rows = conn.execute(
         """SELECT e.*
              FROM episodes e
@@ -921,7 +943,11 @@ def _new_screenplay_recorder(
             "prompt_version": SCREENPLAY_BASELINE_PROMPT_VERSION,
             "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
             "model": config.MODEL_TEXT,
-            "text_generation_concurrency": get_setting("storyboard_concurrency") or "2",
+            "text_generation_concurrency": (
+                get_setting("text_generation_concurrency")
+                or get_setting("storyboard_concurrency")
+                or "2"
+            ),
             "duration_policy": "content_derived_unbounded",
         },
         parent_run_id=parent_run_id,
@@ -1748,7 +1774,7 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
         "screenplay_contract_version": (
             contract_row["contract_version"]
             if contract_row and contract_row["contract_version"]
-            else get_contract("screenplay").version
+            else ("2.0.0" if current_version else get_contract("screenplay").version)
         ),
     }
     issues, evaluation = run_screenplay_qa(
@@ -2181,6 +2207,18 @@ async def cancel_screenplay_all(project_id: str):
         "WHERE project_id=? AND screenplay_status IN ('queued','running','repairing')",
         (project_id,)).fetchall()
     episode_ids = [row["id"] for row in rows]
+    batch_rows = conn.execute(
+        "SELECT id FROM workflow_runs WHERE workflow_type='screenplay_batch' "
+        "AND scope_type='project' AND scope_id=? AND status='RUNNING'",
+        (project_id,),
+    ).fetchall()
+    cancelled_batches = 0
+    for batch in batch_rows:
+        try:
+            WorkflowRecorder(batch["id"]).cancel("用户停止批量剧本")
+            cancelled_batches += 1
+        except StateConflict:
+            continue
     stopped = await task_registry.cancel_many_and_wait(
         "screenplay",
         episode_ids,
@@ -2195,18 +2233,6 @@ async def cancel_screenplay_all(project_id: str):
             (fallback, now(), eid),
         )
     conn.commit()
-    batch_rows = conn.execute(
-        "SELECT id FROM workflow_runs WHERE workflow_type='screenplay_batch' "
-        "AND scope_type='project' AND scope_id=? AND status='RUNNING'",
-        (project_id,),
-    ).fetchall()
-    cancelled_batches = 0
-    for batch in batch_rows:
-        try:
-            WorkflowRecorder(batch["id"]).cancel("用户停止批量剧本")
-            cancelled_batches += 1
-        except StateConflict:
-            continue
     return {
         "stopped": stopped,
         "matched": len(rows),
@@ -2504,10 +2530,23 @@ async def edit_screenplay(episode_id: str, body: dict):
             "artifact_id": current_version or None,
             "downstream_cleared": False,
         }
+    contract_row = (
+        conn.execute(
+            "SELECT contract_version FROM artifacts WHERE id=?",
+            (current_version,),
+        ).fetchone()
+        if current_version
+        else None
+    )
     qa_episode = {
         **ep,
         "required_dialogue_lines": _screenplay_required_dialogues(ep),
         "character_resolutions": resolutions,
+        "screenplay_contract_version": (
+            contract_row["contract_version"]
+            if contract_row and contract_row["contract_version"]
+            else ("2.0.0" if current_version else get_contract("screenplay").version)
+        ),
     }
     qa_issues, qa_evaluation = run_screenplay_qa(
         instance,

@@ -11,7 +11,6 @@ except NameError:  # pragma: no cover - direct module import
     from app.domain.storyboard_ops import (
         _board_from_shot_rows,
         _finalize_storyboard_evidence,
-        _persist_storyboard_character_policy_repairs,
     )
 
 def _shot_contract_json(shot: Shot) -> str:
@@ -771,11 +770,68 @@ def confirm_episode_core(
     reason: str | None = None,
     preview_token: str | None = None,
 ) -> dict:
+    already = _episode_or_404(episode_id)
+    if already["status"] == "confirmed":
+        return _confirm_episode_core_impl(
+            episode_id,
+            decided_by=decided_by,
+            reason=reason,
+            preview_token=preview_token,
+            preview_validated=True,
+        )
+    from app.storyboard_workspace import require_preview
+
+    conn = get_conn()
+    claim = f"confirming:{int(now())}:{new_id('storyboard')}"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        require_preview(
+            preview_token,
+            "confirm",
+            episode_id,
+            consume=True,
+        )
+        claimed = conn.execute(
+            """UPDATE episodes SET active_storyboard_run_id=?
+                 WHERE id=? AND active_storyboard_run_id IS ?""",
+            (claim, episode_id, already["active_storyboard_run_id"]),
+        )
+        if claimed.rowcount != 1:
+            raise HTTPException(409, "确认状态已被其他请求抢占，请刷新后重新预览")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    try:
+        return _confirm_episode_core_impl(
+            episode_id,
+            decided_by=decided_by,
+            reason=reason,
+            preview_token=preview_token,
+            preview_validated=True,
+        )
+    finally:
+        cleanup = get_conn()
+        cleanup.execute(
+            "UPDATE episodes SET active_storyboard_run_id=NULL "
+            "WHERE id=? AND active_storyboard_run_id=?",
+            (episode_id, claim),
+        )
+        cleanup.commit()
+
+
+def _confirm_episode_core_impl(
+    episode_id: str,
+    *,
+    decided_by: str = "user",
+    reason: str | None = None,
+    preview_token: str | None = None,
+    preview_validated: bool = False,
+) -> dict:
     """人工确认门：只有整集硬门禁通过的分镜才能 confirmed。
     失败抛 ValueError（消息面向 UI）；供路由与 Supervisor 复用。
     """
     from app.storyboard_workspace import (
-        consume_preview,
         require_preview,
         verify_or_bind_existing_excerpt,
     )
@@ -832,7 +888,8 @@ def confirm_episode_core(
             "shot_count": len(shots),
             "total_duration_s": sum(int(row["duration_s"] or 0) for row in shots),
         }
-    require_preview(preview_token, "confirm", episode_id)
+    if not preview_validated:
+        require_preview(preview_token, "confirm", episode_id, consume=True)
     ep = _episode_or_404(episode_id)
     conn = get_conn()
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
@@ -848,12 +905,6 @@ def confirm_episode_core(
         if narrative_authority
         else _compact_episode_target(ep["target_duration_s"])
     )
-    if not narrative_authority and compact_target != ep["target_duration_s"]:
-        conn.execute(
-            "UPDATE episodes SET target_duration_s=? WHERE id=?",
-            (compact_target, episode_id),
-        )
-        conn.commit()
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
     if not shots_rows:
         raise ValueError("本集还没有分镜脚本")
@@ -864,12 +915,17 @@ def confirm_episode_core(
             f"已完成 {len(shots_rows)}/{progress['planned_shots']} 镜，"
             f"最终镜{'有效' if progress['final_shot_valid'] else '缺失'}"
         )
+    verified_legacy_bindings: list[tuple[str, dict]] = []
     if not narrative_authority:
         for row in shots_rows:
             try:
-                verify_or_bind_existing_excerpt(
-                    episode_id, row["id"], row["source_excerpt"] or "",
+                binding = verify_or_bind_existing_excerpt(
+                    episode_id,
+                    row["id"],
+                    row["source_excerpt"] or "",
+                    persist_legacy=False,
                 )
+                verified_legacy_bindings.append((str(row["id"]), binding))
             except HTTPException:
                 pass
     # 来源回绑是后台审计 finding：可在 evidence evaluation 中追踪，但不属于
@@ -902,9 +958,7 @@ def confirm_episode_core(
             )
     if shots and not shots[-1].is_final and not narrative_authority:
         shots[-1].is_final = True
-    character_changes = (
-        [] if narrative_authority else normalize_offbible_characters(board, bible)
-    )
+    character_changes = []
     stripped = sorted({
         str(change.get("stripped") or "").strip()
         for change in character_changes
@@ -916,57 +970,9 @@ def confirm_episode_core(
             + "、".join(stripped)
             + "；已停止确认，未删除人物或台词"
         )
-    character_artifact_ids = (
-        []
-        if narrative_authority
-        else _persist_storyboard_character_policy_repairs(
-            conn, episode_id, board, character_changes
-        )
-    )
-    before = [
-        (
-            s.continuity_from_prev, s.transition, s.duration_s, s.shot_size, s.camera_move,
-            s.continuity_mode, s.observed_state_out,
-            (r["shot_contract_json"] if "shot_contract_json" in r.keys() else "") or "",
-        )
-        for r, s in zip(shots_rows, shots)
-    ]
-    if not narrative_authority:
-        normalize_continuity(board)
-        from app.validators import prefer_default_shot_durations
-
-        prefer_default_shot_durations(board)
-        normalize_transition_visuals(board)
-    actual_total = sum(int(s.duration_s or 0) for s in shots)
-    synced_target = _compact_episode_target(actual_total or compact_target)
-    if not narrative_authority and synced_target != compact_target:
-        compact_target = synced_target
-        conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
+    character_artifact_ids: list[str] = []
     normalized_fields_changed = False
-    for r, s, (old_cont, old_trans, old_dur, old_size, old_move, old_mode, old_observed, old_contract) in zip(shots_rows, shots, before):
-        if (old_cont != s.continuity_from_prev or old_trans != s.transition or old_dur != s.duration_s
-                or old_size != s.shot_size or old_move != s.camera_move
-                or old_mode != s.continuity_mode or old_observed != s.observed_state_out
-                or old_contract != _shot_contract_json(s)
-                or (r["last_frame_desc"] or "") != s.last_frame_desc):
-            normalized_fields_changed = True
-            if narrative_authority:
-                raise ValueError(
-                    "已发布叙事分镜与当前权威投影不一致，"
-                    "禁止在确认阶段原地归一化"
-                )
-            conn.execute(
-                "UPDATE shots SET continuity_from_prev=?, transition=?, duration_s=?, shot_size=?, camera_move=?, last_frame_desc=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
-                (int(s.continuity_from_prev), s.transition, s.duration_s, s.shot_size, s.camera_move,
-                 s.last_frame_desc, _shot_contract_json(s), s.continuity_mode, s.observed_state_out, r["id"]))
-    if not narrative_authority:
-        conn.commit()
-
-    # 重新从当前（可能已归一）镜头构建 board，再跑同源只读评估。
-    board = _board_from_shot_rows(
-        conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall(),
-        ep["episode_no"],
-    )
+    original_board_payload = board.model_dump(mode="json")
     evaluation = evaluate_storyboard_for_confirmation(
         ep, board, screenplay, bible,
         has_real_bible=has_real_bible,
@@ -980,6 +986,11 @@ def confirm_episode_core(
         )
     confirmation_warnings = list(dict.fromkeys(evaluation.warnings))
     board = evaluation.board
+    if board.model_dump(mode="json") != original_board_payload:
+        raise ValueError(
+            "确认门禁检测到分镜仍需确定性归一化；本次未修改正式数据，"
+            "请返回分镜台继续修复后重新预览"
+        )
     compact_target = evaluation.compact_target
     est = evaluation.estimated_cost_cny
     shots = board.shots
@@ -1109,7 +1120,10 @@ def confirm_episode_core(
         ),
     )
     conn.commit()
-    consume_preview(str(preview_token))
+    if verified_legacy_bindings:
+        from app.storyboard_workspace import persist_source_binding
+        for shot_id, binding in verified_legacy_bindings:
+            persist_source_binding(shot_id, binding)
     # 手动确认是 Supervisor 「已就绪待确认」状态的真正终点。
     _converge_confirmed_storyboard_state(
         episode_id,

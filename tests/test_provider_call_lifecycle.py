@@ -479,6 +479,31 @@ def test_success_cache_requires_matching_contract_version(tmp_path, monkeypatch)
     assert matching == {"choices": [{"message": {"content": "old contract result"}}]}
 
 
+def test_provider_metadata_truncation_preserves_valid_json(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-meta.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+
+    call_id = db.start_provider_call(
+        "chat",
+        "text-model",
+        meta={
+            "stage": "screenplay",
+            "latest_errors": ["错误" * 500 for _ in range(20)],
+        },
+        request_json={"messages": []},
+    )
+    row = db.get_conn().execute(
+        "SELECT meta FROM provider_calls WHERE id=?",
+        (call_id,),
+    ).fetchone()
+    metadata = json.loads(row["meta"])
+
+    assert metadata["_truncated"] is True
+    assert metadata["_original_chars"] > 800
+    assert metadata["_sha256"]
+
+
 def test_semantic_attempt_id_separates_new_repair_from_crash_recovery(
     tmp_path, monkeypatch,
 ) -> None:

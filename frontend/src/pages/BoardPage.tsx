@@ -98,6 +98,13 @@ type DraftItem = {
   issues: string[]; created_at: number
 }
 
+type SpokenConflictPreview = ImpactSummary & {
+  preview_token: string
+  edit_session_token: string
+  baseline_content_hash: string
+  choice: 'rebuild_timeline_from_dialogues' | 'rebuild_dialogues_from_timeline'
+}
+
 type StructurePreview = ImpactSummary & {
   preview_token: string
   operation: 'add_after' | 'duplicate_after' | 'delete' | 'move'
@@ -1029,7 +1036,7 @@ export default function BoardPage() {
         {progressCopy.detail && <div className="board-progress-explanation" role="status">
           <b>数字口径</b><span>{progressCopy.detail}</span>
         </div>}
-        {status.write_block_reason && status.state === 'syncing' && <div className="board-sync-banner" role="status"><b>正在同步状态</b><span>{status.write_block_reason}</span></div>}
+        {status.write_block_reason && status.state === 'syncing' && <div className="board-sync-banner" role={status.system_error ? 'alert' : 'status'}><b>{status.system_error ? '系统校验异常' : '正在同步状态'}</b><span>{status.write_block_reason}</span></div>}
         {(taskNotice || ep.storyboard_warning) && (
           <div
             className={`storyboard-error-details open ${(taskNotice?.severity ?? 'warning') === 'warning' ? 'warning' : 'error'}`}
@@ -1237,6 +1244,9 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
   const [detailTab, setDetailTab] = useState<'frames' | 'script'>('frames')
   const [deletedDialogue, setDeletedDialogue] = useState<{ value: Shot['dialogues'][number]; index: number } | null>(null)
   const [conflictOpen, setConflictOpen] = useState(false)
+  const [conflictImpact, setConflictImpact] = useState<SpokenConflictPreview | null>(null)
+  const [conflictImpactLoading, setConflictImpactLoading] = useState(false)
+  const [conflictImpactError, setConflictImpactError] = useState<string | null>(null)
   const [discardDraftId, setDiscardDraftId] = useState<string | null>(null)
   const [discardEditOpen, setDiscardEditOpen] = useState(false)
   const [reloadLatestOpen, setReloadLatestOpen] = useState(false)
@@ -1421,17 +1431,35 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
     setEdit({ ...edit, new_information_ids: values.includes(id) ? values.filter(item => item !== id) : [...values, id] })
   }
 
-  const resolveConflict = async (choice: 'rebuild_timeline_from_dialogues' | 'rebuild_dialogues_from_timeline') => {
+  const previewConflictResolution = async (
+    choice: SpokenConflictPreview['choice'],
+  ) => {
+    setConflictImpactLoading(true)
+    setConflictImpactError(null)
     try {
-      const preview = await api.post(`/shots/${shot.id}/spoken-conflict-preview`, { choice }) as {
-        preview_token: string; edit_session_token: string; baseline_content_hash: string
-      }
+      const preview = await api.post(
+        `/shots/${shot.id}/spoken-conflict-preview`,
+        { choice },
+      ) as SpokenConflictPreview
+      setConflictImpact(preview)
+    } catch (caught) {
+      setConflictImpactError((caught as Error).message)
+    } finally {
+      setConflictImpactLoading(false)
+    }
+  }
+
+  const resolveConflict = async () => {
+    if (!conflictImpact) return
+    const preview = conflictImpact
+    setConflictImpact(null)
+    try {
       await api.post(`/shots/${shot.id}/resolve-spoken-conflict`, {
-        choice, invalidate_media: true, preview_token: preview.preview_token,
+        choice: preview.choice, invalidate_media: true, preview_token: preview.preview_token,
         edit_session_token: preview.edit_session_token,
         baseline_content_hash: preview.baseline_content_hash,
       })
-      toast(choice === 'rebuild_timeline_from_dialogues' ? '已按台词重建时间轴' : '已按时间轴重建台词')
+      toast(preview.choice === 'rebuild_timeline_from_dialogues' ? '已按台词重建时间轴' : '已按时间轴重建台词')
       setConflictOpen(false); discard(); onChanged()
     } catch (caught) { toast((caught as Error).message, true) }
   }
@@ -1467,9 +1495,11 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
 
       {conflictOpen && <div className="shot-conflict-panel" role="region" aria-label="口播冲突修复">
         <p>台词与高级时间轴分别发生了变化。选择前会先计算视频、成片与重新确认影响。</p>
-        <div className="shot-conflict-actions"><button className="btn small primary" onClick={() => void resolveConflict('rebuild_timeline_from_dialogues')}>以台词为准</button>
-          <button className="btn small" onClick={() => void resolveConflict('rebuild_dialogues_from_timeline')}>以时间轴为准</button><button className="btn small ghost" onClick={() => setConflictOpen(false)}>取消</button></div>
+        <div className="shot-conflict-actions"><button className="btn small primary" onClick={() => void previewConflictResolution('rebuild_timeline_from_dialogues')}>以台词为准</button>
+          <button className="btn small" onClick={() => void previewConflictResolution('rebuild_dialogues_from_timeline')}>以时间轴为准</button>
+          <button className="btn small ghost" onClick={() => setConflictOpen(false)}>稍后处理</button></div>
       </div>}
+
 
       {!!shot.qa_warnings?.length && <details className="shot-drafts"><summary>质量优化建议（{shot.qa_warnings.length}）</summary>
         <ul>{shot.qa_warnings.map((item, index) => <li key={`${item}-${index}`}>{storyboardGateIssueLabel(item)}</li>)}</ul>
@@ -1590,6 +1620,26 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
         impact={impact} loading={impactLoading} error={impactError} confirmLabel="批准影响并保存"
         knownEffects={impact ? [`重新校验：${((impact as unknown as { revalidation_shots?: number[] }).revalidation_shots ?? []).join('、') || '本镜与相邻镜'}`, '失败时只保留工作草稿，不覆盖发布版'] : []}
         onClose={() => { setImpact(null); setImpactError(null); setImpactLoading(false) }} onConfirm={() => void save()} />
+      <ImpactDialog
+        open={!!conflictImpact || conflictImpactLoading || !!conflictImpactError}
+        title={`解决镜 ${shot.shot_no} 的口播冲突`}
+        impact={conflictImpact}
+        loading={conflictImpactLoading}
+        error={conflictImpactError}
+        confirmLabel="批准影响并解决冲突"
+        knownEffects={[
+          conflictImpact?.choice === 'rebuild_timeline_from_dialogues'
+            ? '将以当前台词重建口播时间轴'
+            : '将以当前口播时间轴重建台词',
+          '关联媒体失效后需要重新生成，不会沿用旧视频',
+        ]}
+        onClose={() => {
+          setConflictImpact(null)
+          setConflictImpactError(null)
+          setConflictImpactLoading(false)
+        }}
+        onConfirm={() => void resolveConflict()}
+      />
       <Modal open={discardEditOpen} title={`放弃镜 ${shot.shot_no} 的未保存修改？`} onClose={() => setDiscardEditOpen(false)}
         actions={<><button className="btn" onClick={() => setDiscardEditOpen(false)}>继续编辑</button><button className="btn danger" onClick={() => {
           setDiscardEditOpen(false)

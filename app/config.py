@@ -247,7 +247,8 @@ DEFAULT_SETTINGS = {
     "hiagent_model_vlm": MODEL_VLM,
     "hiagent_model_video": MODEL_VIDEO,
     "hiagent_model_image": MODEL_IMAGE,
-    "storyboard_concurrency": "2",      # 手动批量分镜的并发上限
+    "text_generation_concurrency": "2", # 剧本与分镜共享文本模型资源池
+    "storyboard_concurrency": "2",      # 旧设置兼容读取，不再作为新资源池名称
     # PRD-03 分镜台独立灰度/回滚开关；P0 服务端防线不受 UI 开关影响。
     "storyboard_workspace_safe_readonly": "false",
     "storyboard_structure_edit_enabled": "true",

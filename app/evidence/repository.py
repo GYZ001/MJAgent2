@@ -321,6 +321,11 @@ def create_and_commit_artifact_in_transaction(
     gate_evaluations = [
         evaluation for evaluation in evaluations
         if not _is_score_only_evaluation(evaluation)
+        and not (
+            evaluation.evaluator_type == "human"
+            and evaluation.evaluator_name == "storyboard_editor"
+            and not evaluation.hard_gate_passed
+        )
     ]
     if any(
         not evaluation.hard_gate_passed or evaluation.status in {"failed", "error"}

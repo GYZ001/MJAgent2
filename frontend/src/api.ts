@@ -1898,6 +1898,7 @@ export interface StoryboardStatus {
   hard_gates_passed: boolean;
   hard_gate_issue_count?: number;
   hard_gate_issues?: string[];
+  system_error?: string | null;
   feature_flags?: {
     safe_readonly: boolean;
     structure_edit: boolean;
