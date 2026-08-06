@@ -481,6 +481,143 @@ def test_narrative_graph_normalizer_repairs_unique_source_span_and_event_aliases
     }
 
 
+def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
+    from app.production.screenplay_repair import (
+        _normalize_screenplay_narrative_graph,
+    )
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "propositions": [{
+                "proposition_id": "P1",
+                "semantic_identity_key": "state-change",
+                "canonical_statement": "The state changes.",
+                "narrative_domain": "adapted_story",
+            }],
+            "state_facts": [
+                {
+                    "fact_id": "F1",
+                    "proposition_id": "P1",
+                    "subject_id": "char-a",
+                    "predicate_id": "state",
+                },
+                {
+                    "fact_id": "F2",
+                    "proposition_id": "P1",
+                    "subject_id": "char-a",
+                    "predicate_id": "state",
+                },
+            ],
+            "events": [{
+                "event_id": "E1",
+                "action_ids": ["A1"],
+            }],
+            "atomic_actions": [{
+                "action_id": "A1",
+                "actor_ids": ["char-a"],
+                "semantic_intent": "Change the state.",
+                "precondition_fact_ids": ["F1"],
+                "effects_add": ["F2"],
+                "effects_remove": ["F1"],
+                "completion_condition": "The changed state is visible.",
+            }],
+            "character_beliefs": [{
+                "character_belief_id": "CB1",
+                "character_id": "char-a",
+                "anchor": {"type": "event", "id": "E1"},
+                "beliefs": [{
+                    "proposition_id": "P1",
+                    "stance": "confirmed",
+                }],
+            }],
+            "audience_priors": [{
+                "audience_prior_id": "AP1",
+                "scope_id": "ep_p",
+                "audience_description": "A viewer.",
+            }],
+            "audience_states": [
+                {
+                    "audience_state_id": "AS-IN",
+                    "audience_prior_id": "AP1",
+                    "anchor": {"type": "event", "id": "E1"},
+                    "beliefs": [{
+                        "proposition_id": "P1",
+                        "stance": "unknown",
+                    }],
+                },
+                {
+                    "audience_state_id": "AS-OUT",
+                    "audience_prior_id": "AP1",
+                    "anchor": {"type": "event", "id": "E1"},
+                    "beliefs": [{
+                        "proposition_id": "P1",
+                        "stance": "committed",
+                    }],
+                },
+            ],
+            "experience_intents": [{
+                "experience_intent_id": "XI1",
+                "scope_id": "ep_p",
+                "anchor_event_ids": ["E1"],
+                "director_objective": "Register the event.",
+                "audience_paths": [{
+                    "audience_path_id": "XP1",
+                    "audience_prior_id": "AP1",
+                    "audience_state_in_id": "AS-IN",
+                    "audience_state_out_target_id": "AS-OUT",
+                    "target_deltas": [{
+                        "target_delta_id": "XD-NOOP",
+                        "dimension": "attention",
+                        "description": "No actual attention change.",
+                        "from_state": {"attention_residue_ids": []},
+                        "to_state": {"attention_residue_ids": []},
+                        "deadline_event_id": "E1",
+                        "primary_delivery_window_id": "RW1",
+                    }],
+                }],
+            }],
+            "assimilation_tasks": [{
+                "assimilation_task_id": "AT1",
+                "experience_intent_id": "XI1",
+                "audience_path_id": "XP1",
+                "target_delta_id": "XD-NOOP",
+                "satisfaction_criteria": "No-op task.",
+            }],
+            "readability_windows": [{
+                "readability_window_id": "RW1",
+                "event_ids": ["E1"],
+                "target_delta_ids": ["XD-NOOP"],
+            }],
+        }),
+    )
+
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={},
+    )
+
+    event = script.narrative_plan.events[0]
+    assert event.precondition_fact_ids == ["F1"]
+    assert event.effects_add == ["F2"]
+    assert event.effects_remove == ["F1"]
+    assert script.narrative_plan.character_beliefs[0].beliefs[0].stance == "believed"
+    assert script.narrative_plan.audience_states[1].beliefs[0].stance == "believed"
+    deltas = script.narrative_plan.experience_intents[0].audience_paths[0].target_deltas
+    assert [delta.target_delta_id for delta in deltas] == ["XP1-belief"]
+    assert script.narrative_plan.readability_windows[0].target_delta_ids == [
+        "XP1-belief"
+    ]
+    assert script.narrative_plan.assimilation_tasks == []
+    assert {change["kind"] for change in changes} >= {
+        "event_action_fact_refs",
+        "belief_stance",
+        "no_change_target_delta_removed",
+        "removed_delta_window_refs",
+        "removed_delta_assimilation_tasks",
+    }
+
+
 def test_screenplay_document_patch_stakes_only():
     script = _minimal_script()
     doc = screenplay_to_document(script)
@@ -2131,6 +2268,29 @@ def test_repair_router_no_longer_emits_redo_or_replan():
         candidate.strategy not in {"redo_suffix", "replan_outline"}
         for candidate in capacity.candidates
     )
+
+
+def test_empty_dialogue_chain_requires_local_content_patch_not_rederive():
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    script = _minimal_script(
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC-EMPTY",
+                topic="Source-grounded letter",
+                turns=[],
+            ),
+        ],
+    )
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains[0].turns 需包含 1~8 个连续话轮",
+        subject="screenplay",
+        path="/dialogue_chains",
+        stage="screenplay",
+    )
+
+    assert plan_screenplay_patch(issue, script) == []
 
 
 def test_apply_screenplay_patch_cas_and_noop(monkeypatch):

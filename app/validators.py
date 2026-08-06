@@ -1430,6 +1430,10 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
             })
     for chain in script.dialogue_chains:
         turns = list(chain.turns or [])
+        narrator_only_chain = bool(turns) and all(
+            str(item.speaker or "").strip() == "旁白"
+            for item in turns
+        )
         normalized_turns = []
         for index, turn in enumerate(turns):
             speaker = str(turn.speaker or "").strip()
@@ -1455,7 +1459,10 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                 )
                 or (
                     speaker == "旁白"
-                    and speaker not in allowed_speakers
+                    and (
+                        speaker not in allowed_speakers
+                        or not narrator_only_chain
+                    )
                     and not source_contains_line
                 )
             ):

@@ -51,7 +51,7 @@ from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX, OVERDETAIL_TERMS
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-14"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-15"
 NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
     "CHARACTER_IDENTITY_UNRESOLVED",
 })
@@ -1295,6 +1295,7 @@ def plan_screenplay_patch(
     if (
         code == "KEY_LINE_MISSING"
         and "主线对白上下文断裂" not in (issue.message or "")
+        and "turns 需包含" not in (issue.message or "")
         and not _strategy_was_tried(tried, "rederive")
     ):
         return [PatchOperation(op="rederive")]
@@ -1855,6 +1856,14 @@ def _normalize_screenplay_narrative_graph(
                 walk(child, f"{path}[{index}]")
 
     walk(data)
+    actions_by_id = {
+        str(item.get("action_id") or "").strip(): item
+        for item in (data.get("atomic_actions") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("action_id") or "").strip()
+        )
+    }
     fact_propositions = {
         str(fact.get("fact_id") or "").strip(): str(
             fact.get("proposition_id") or ""
@@ -1869,6 +1878,57 @@ def _normalize_screenplay_narrative_graph(
     for event in data.get("events") or []:
         if not isinstance(event, dict):
             continue
+        bound_actions = [
+            actions_by_id[action_id]
+            for action_id in (event.get("action_ids") or [])
+            if action_id in actions_by_id
+        ]
+        action_preconditions = {
+            str(fact_id)
+            for action in bound_actions
+            for fact_id in (action.get("precondition_fact_ids") or [])
+            if str(fact_id or "").strip()
+        }
+        action_adds = {
+            str(fact_id)
+            for action in bound_actions
+            for fact_id in (action.get("effects_add") or [])
+            if str(fact_id or "").strip()
+        }
+        action_removes = {
+            str(fact_id)
+            for action in bound_actions
+            for fact_id in (action.get("effects_remove") or [])
+            if str(fact_id or "").strip()
+        }
+        touched_action_facts = (
+            action_preconditions | action_adds | action_removes
+        )
+        derived_action_facts = {
+            "precondition_fact_ids": action_preconditions - action_adds,
+            "effects_add": action_adds - action_removes,
+            "effects_remove": action_removes - action_adds,
+        }
+        for field, derived_facts in derived_action_facts.items():
+            existing_facts = list(event.get(field) or [])
+            preserved_event_facts = [
+                fact_id
+                for fact_id in existing_facts
+                if str(fact_id) not in touched_action_facts
+            ]
+            normalized_facts = list(dict.fromkeys([
+                *preserved_event_facts,
+                *sorted(derived_facts),
+            ]))
+            if normalized_facts != existing_facts:
+                changes.append({
+                    "kind": "event_action_fact_refs",
+                    "id": event.get("event_id"),
+                    "field": field,
+                    "from": existing_facts,
+                    "to": normalized_facts,
+                })
+                event[field] = normalized_facts
         existing = list(event.get("proposition_ids") or [])
         required = [
             fact_propositions[fact_id]
@@ -1895,14 +1955,6 @@ def _normalize_screenplay_narrative_graph(
         if (
             isinstance(item, dict)
             and str(item.get("proposition_id") or "").strip()
-        )
-    }
-    actions_by_id = {
-        str(item.get("action_id") or ""): item
-        for item in (data.get("atomic_actions") or [])
-        if (
-            isinstance(item, dict)
-            and str(item.get("action_id") or "").strip()
         )
     }
     evidence_by_id = {
@@ -2194,29 +2246,36 @@ def _normalize_screenplay_narrative_graph(
 
     stance_aliases = {
         "accepted": "believed",
+        "committed": "believed",
+        "confirmed": "believed",
         "disbelieved": "rejected",
+        "known": "believed",
         "uncertain": "suspected",
     }
-    for snapshot in data.get("character_beliefs") or []:
-        if not isinstance(snapshot, dict):
-            continue
-        for belief in snapshot.get("beliefs") or []:
-            if not isinstance(belief, dict):
+    for collection, id_field in (
+        ("character_beliefs", "character_belief_id"),
+        ("audience_states", "audience_state_id"),
+    ):
+        for snapshot in data.get(collection) or []:
+            if not isinstance(snapshot, dict):
                 continue
-            stance = str(belief.get("stance") or "").strip()
-            normalized = stance_aliases.get(stance, stance)
-            if normalized == stance:
-                continue
-            changes.append({
-                "kind": "belief_stance",
-                "id": (
-                    f"{snapshot.get('character_belief_id')}/"
-                    f"{belief.get('proposition_id')}"
-                ),
-                "from": stance,
-                "to": normalized,
-            })
-            belief["stance"] = normalized
+            for belief in snapshot.get("beliefs") or []:
+                if not isinstance(belief, dict):
+                    continue
+                stance = str(belief.get("stance") or "").strip()
+                normalized = stance_aliases.get(stance, stance)
+                if normalized == stance:
+                    continue
+                changes.append({
+                    "kind": "belief_stance",
+                    "id": (
+                        f"{snapshot.get(id_field)}/"
+                        f"{belief.get('proposition_id')}"
+                    ),
+                    "from": stance,
+                    "to": normalized,
+                })
+                belief["stance"] = normalized
 
     events = [
         event for event in (data.get("events") or [])
@@ -2326,6 +2385,7 @@ def _normalize_screenplay_narrative_graph(
             and str(delta.get("target_delta_id") or "").strip()
         )
     }
+    removed_delta_ids: set[str] = set()
 
     def unique_delta_id(path_id: str, suffix: str) -> str:
         base = f"{path_id}-{suffix}"
@@ -2540,10 +2600,16 @@ def _normalize_screenplay_narrative_graph(
                     "attention_residue_ids": list(
                         state_in.get("attention_residue_ids") or []
                     ),
+                    "working_memory": deepcopy(
+                        state_in.get("working_memory") or []
+                    ),
                 }
                 attention_delta["to_state"] = {
                     "attention_residue_ids": list(
                         state_out.get("attention_residue_ids") or []
+                    ),
+                    "working_memory": deepcopy(
+                        state_out.get("working_memory") or []
                     ),
                 }
 
@@ -2640,6 +2706,57 @@ def _normalize_screenplay_narrative_graph(
                         state_out.get("active_question_ids") or []
                     ),
                 }
+            retained_deltas = []
+            for delta in deltas:
+                if delta.get("from_state") != delta.get("to_state"):
+                    retained_deltas.append(delta)
+                    continue
+                delta_id = str(
+                    delta.get("target_delta_id") or ""
+                ).strip()
+                if delta_id:
+                    removed_delta_ids.add(delta_id)
+                changes.append({
+                    "kind": "no_change_target_delta_removed",
+                    "id": delta_id,
+                    "path_id": path.get("audience_path_id"),
+                })
+            path["target_deltas"] = retained_deltas
+
+    if removed_delta_ids:
+        for window in data.get("readability_windows") or []:
+            if not isinstance(window, dict):
+                continue
+            existing = list(window.get("target_delta_ids") or [])
+            normalized = [
+                delta_id
+                for delta_id in existing
+                if str(delta_id) not in removed_delta_ids
+            ]
+            if normalized != existing:
+                window["target_delta_ids"] = normalized
+                changes.append({
+                    "kind": "removed_delta_window_refs",
+                    "id": window.get("readability_window_id"),
+                    "from": existing,
+                    "to": normalized,
+                })
+        existing_tasks = list(data.get("assimilation_tasks") or [])
+        normalized_tasks = [
+            task
+            for task in existing_tasks
+            if (
+                not isinstance(task, dict)
+                or str(task.get("target_delta_id") or "")
+                not in removed_delta_ids
+            )
+        ]
+        if normalized_tasks != existing_tasks:
+            data["assimilation_tasks"] = normalized_tasks
+            changes.append({
+                "kind": "removed_delta_assimilation_tasks",
+                "removed_target_delta_ids": sorted(removed_delta_ids),
+            })
 
     delta_requirements: dict[str, tuple[str, float]] = {}
     delta_windows: dict[str, str] = {}
