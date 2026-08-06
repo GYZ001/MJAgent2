@@ -393,6 +393,7 @@ def _focus_operation_errors(
     diagnosis: SemanticRepairDiagnosis,
     *,
     focus_shot_no: int | None,
+    outline: StoryboardOutline | None = None,
 ) -> list[str]:
     if focus_shot_no is None:
         return []
@@ -414,12 +415,71 @@ def _focus_operation_errors(
         )
         if shot_no > 0
     }
-    targeted = {
-        int(operation.target.shot_no)
-        for operation in selected.outline_operations
-        if operation.target.shot_no is not None
-    }
     errors: list[str] = []
+    targeted: set[int] = set()
+    for operation in selected.outline_operations:
+        executable_op = operation.executable_op()
+        target = operation.execution_target(executable_op)
+        if outline is None:
+            if operation.target.shot_no is not None:
+                targeted.add(int(operation.target.shot_no))
+            if operation.target.after_shot_no is not None:
+                targeted.update({
+                    int(operation.target.after_shot_no),
+                    int(operation.target.after_shot_no) + 1,
+                })
+            if operation.target.to_index is not None:
+                targeted.add(int(operation.target.to_index) + 1)
+            continue
+        try:
+            if executable_op in {
+                "replace_outline_shot",
+                "delete_outline_shot",
+            }:
+                targeted.add(
+                    int(outline.shots[_outline_target_index(outline, target)].shot_no)
+                )
+            elif executable_op == "insert_outline_shot":
+                if target.get("after_shot_id"):
+                    anchor = _outline_target_index(
+                        outline, {"shot_id": target["after_shot_id"]},
+                    )
+                    targeted.update({
+                        int(outline.shots[anchor].shot_no),
+                        anchor + 2,
+                    })
+                elif target.get("after_shot_no") is not None:
+                    anchor = _outline_target_index(
+                        outline, {"shot_no": target["after_shot_no"]},
+                    )
+                    targeted.update({
+                        int(outline.shots[anchor].shot_no),
+                        anchor + 2,
+                    })
+                else:
+                    insertion_index = max(
+                        0,
+                        min(
+                            len(outline.shots),
+                            int(target.get("to_index", len(outline.shots))),
+                        ),
+                    )
+                    targeted.add(insertion_index + 1)
+            else:
+                source_index = _outline_target_index(outline, target)
+                destination_index = max(
+                    0,
+                    min(
+                        len(outline.shots) - 1,
+                        int(target.get("to_index") or 0),
+                    ),
+                )
+                targeted.update({
+                    int(outline.shots[source_index].shot_no),
+                    destination_index + 1,
+                })
+        except (KeyError, ValueError) as exc:
+            errors.append(f"逐镜局部修复目标无法解析：{exc}")
     outside = sorted(targeted - allowed)
     if outside:
         errors.append(
@@ -603,6 +663,7 @@ async def diagnose_narrative_repair(
         errors.extend(_focus_operation_errors(
             diagnosis,
             focus_shot_no=focus_shot_no,
+            outline=outline,
         ))
         selected_strategy = normalize_strategy(diagnosis.selected_strategy)
         selected = next((
@@ -646,7 +707,18 @@ async def diagnose_narrative_repair(
                         candidate_outline,
                         screenplay,
                     )
-                    if (
+                    introduced_local_errors = list(
+                        (
+                            Counter(candidate_local_errors)
+                            - Counter(baseline_local_errors)
+                        ).elements()
+                    )
+                    if introduced_local_errors:
+                        errors.append(
+                            "候选引入了新的必保留台词容量/说话人硬错误："
+                            + "；".join(introduced_local_errors[:4])
+                        )
+                    elif (
                         baseline_local_errors
                         and len(candidate_local_errors)
                         >= len(baseline_local_errors)

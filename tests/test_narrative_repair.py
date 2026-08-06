@@ -219,6 +219,68 @@ def test_focus_operation_errors_reject_remote_future_shot() -> None:
     assert any("禁止跨到远端镜头：[9]" in error for error in errors)
 
 
+def test_focus_operation_errors_resolve_stable_ids_and_insert_positions() -> None:
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot.model_validate(
+                _shot(shot_no=1, shot_id="SH-1").model_dump(mode="json")
+            ),
+            StoryboardOutlineShot.model_validate(
+                _settled_followup_shot(
+                    shot_no=2, shot_id="SH-2",
+                ).model_dump(mode="json")
+            ),
+            StoryboardOutlineShot.model_validate(
+                _settled_followup_shot(
+                    shot_no=3, shot_id="SH-3",
+                ).model_dump(mode="json")
+            ),
+            StoryboardOutlineShot.model_validate(
+                _settled_followup_shot(
+                    shot_no=4, shot_id="SH-4",
+                ).model_dump(mode="json")
+            ),
+        ],
+    )
+    replacement = outline.shots[-1].model_copy(deep=True)
+    selected = SemanticCandidateAssessment(
+        strategy="repair_remote_stable_id",
+        expected_narrative_gain=0.9,
+        destructive_cost=0.2,
+        satisfies_gap_test=True,
+        passes_marginal_gain_test=True,
+        preserves_invariants=True,
+        outline_operations=[
+            SemanticOutlineOperation(
+                op="replace-remote",
+                executor="replace_outline_shot",
+                target={"shot_id": "SH-4"},
+                value=replacement,
+            ),
+        ],
+    )
+    diagnosis = SemanticRepairDiagnosis(
+        diagnosis_id="NRD-stable-id",
+        semantic_gap="The model targeted a remote stable ID.",
+        candidate_assessments=[
+            _assessment("repair_current", gain=0.2, cost=0.1),
+            selected,
+        ],
+        selected_strategy=selected.strategy,
+        selection_reason="The remote edit must be rejected.",
+    )
+
+    errors = _focus_operation_errors(
+        diagnosis,
+        focus_shot_no=1,
+        outline=outline,
+    )
+
+    assert any("禁止跨到远端镜头：[4]" in error for error in errors)
+    assert any("未触及当前失败镜" in error for error in errors)
+
+
 @pytest.mark.asyncio
 async def test_uncommitted_candidate_retries_current_slot_before_semantic_planning(
     monkeypatch,

@@ -2737,6 +2737,32 @@ def _normalize_screenplay_narrative_graph(
             if state_id:
                 current_state_by_prior[prior_id] = state_id
 
+    intent_paths_by_event_prior: dict[
+        tuple[str, str],
+        tuple[str, str],
+    ] = {}
+    for intent in intent_items:
+        anchor_event_ids = [
+            str(value or "").strip()
+            for value in (intent.get("anchor_event_ids") or [])
+            if str(value or "").strip()
+        ]
+        for path in intent.get("audience_paths") or []:
+            if not isinstance(path, dict):
+                continue
+            prior_id = str(path.get("audience_prior_id") or "").strip()
+            state_in_id = str(path.get("audience_state_in_id") or "").strip()
+            state_out_id = str(
+                path.get("audience_state_out_target_id") or ""
+            ).strip()
+            if not prior_id or not state_in_id or not state_out_id:
+                continue
+            for event_id in anchor_event_ids:
+                intent_paths_by_event_prior[(event_id, prior_id)] = (
+                    state_in_id,
+                    state_out_id,
+                )
+
     for scene in data.get("scene_contracts") or []:
         if not isinstance(scene, dict):
             continue
@@ -2750,28 +2776,44 @@ def _normalize_screenplay_narrative_graph(
             str(path.get("audience_prior_id") or "").strip()
             for path in paths
         }
+        scene_event_ids = [
+            str(value or "").strip()
+            for value in (scene.get("turn_event_ids") or [])
+            if str(value or "").strip()
+        ]
         for prior_id in prior_ids:
             if prior_id in existing_priors:
                 continue
-            state_id = (
-                current_state_by_prior.get(prior_id)
-                or next(
+            scene_transitions = [
+                intent_paths_by_event_prior[(event_id, prior_id)]
+                for event_id in scene_event_ids
+                if (event_id, prior_id) in intent_paths_by_event_prior
+            ]
+            if scene_transitions:
+                state_in_id = scene_transitions[0][0]
+                state_out_id = scene_transitions[-1][1]
+            else:
+                # Without an event-local transition, only the earliest known
+                # state is temporally safe. The episode-final state may contain
+                # facts learned in later scenes.
+                state_in_id = next(
                     iter(states_by_prior.get(prior_id) or []),
                     "",
                 )
-            )
-            if not state_id:
+                state_out_id = state_in_id
+            if not state_in_id or not state_out_id:
                 continue
             paths.append({
                 "audience_prior_id": prior_id,
-                "audience_state_in_id": state_id,
-                "audience_state_out_target_id": state_id,
+                "audience_state_in_id": state_in_id,
+                "audience_state_out_target_id": state_out_id,
             })
             changes.append({
                 "kind": "coarse_scene_audience_path",
                 "id": scene.get("scene_id"),
                 "audience_prior_id": prior_id,
-                "state_id": state_id,
+                "state_in_id": state_in_id,
+                "state_out_id": state_out_id,
             })
 
     for intent in intent_items:
@@ -4323,18 +4365,19 @@ def _introduced_issue_messages(
     candidate_issues: list[Issue],
 ) -> list[str]:
     """Detect new validation slots while allowing one aggregate slot to shrink."""
-    def slot(issue: Issue) -> tuple[str, str, str, str, str]:
+    def slot(issue: Issue) -> tuple[str, str, str, str, str, str]:
         evidence = issue.evidence or {}
         return (
             issue.code,
             issue.subject,
+            issue.rule_id,
             str(evidence.get("path") or evidence.get("span") or ""),
             str(evidence.get("stage") or ""),
             issue.severity.value,
         )
 
     baseline_counts = Counter(slot(issue) for issue in baseline_issues)
-    candidate_counts: Counter[tuple[str, str, str, str, str]] = Counter()
+    candidate_counts: Counter[tuple[str, str, str, str, str, str]] = Counter()
     introduced: list[str] = []
     for issue in candidate_issues:
         key = slot(issue)
