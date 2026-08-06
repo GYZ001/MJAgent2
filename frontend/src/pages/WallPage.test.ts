@@ -3,6 +3,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Shot, ShotVersion, ReferenceImage } from '../api'
 import {
+  EPISODE_COMPLETION_BUDGET_CAP_CNY,
+  EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
   InfoSection,
   MaterialGallery,
   REVIEW_TABS,
@@ -12,6 +14,7 @@ import {
   classifyReferenceBuckets,
   countReferenceImages,
   describeShotUpdate,
+  episodeCompletionRequest,
   episodeGenerationAction,
   isVideoModelInputRejection,
   refSourceLabel,
@@ -449,6 +452,19 @@ describe('视频预览工作区', () => {
 })
 
 describe('整集生成按钮状态', () => {
+  it('新建整集任务走可补齐资产的 Supervisor，并绑定当前资格版本', () => {
+    expect(episodeCompletionRequest('qualification-v3')).toEqual({
+      mode: 'fresh',
+      budget_cap_cny: EPISODE_COMPLETION_BUDGET_CAP_CNY,
+      wall_clock_cap_s: EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
+      allow_fallback_adopt: true,
+      allow_storyboard_edit: false,
+      qualification_version: 'qualification-v3',
+    })
+    expect(EPISODE_COMPLETION_BUDGET_CAP_CNY).toBe(150)
+    expect(EPISODE_COMPLETION_WALL_CLOCK_CAP_S).toBe(4 * 60 * 60)
+  })
+
   it('运行时停止，暂停或失败停止后继续，其余情况生成', () => {
     expect(episodeGenerationAction(true, 0, 0)).toBe('stop')
     expect(episodeGenerationAction(false, 2, 0)).toBe('resume')

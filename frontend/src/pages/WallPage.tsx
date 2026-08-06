@@ -211,6 +211,20 @@ export function videoCandidateNote(version: ShotVersion): string {
 
 export type EpisodeGenerationAction = 'generate' | 'stop' | 'resume'
 
+export const EPISODE_COMPLETION_BUDGET_CAP_CNY = 150
+export const EPISODE_COMPLETION_WALL_CLOCK_CAP_S = 4 * 60 * 60
+
+export function episodeCompletionRequest(qualificationVersion?: string) {
+  return {
+    mode: 'fresh',
+    budget_cap_cny: EPISODE_COMPLETION_BUDGET_CAP_CNY,
+    wall_clock_cap_s: EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
+    allow_fallback_adopt: true,
+    allow_storyboard_edit: false,
+    qualification_version: qualificationVersion,
+  }
+}
+
 export function episodeGenerationAction(
   active: boolean,
   pausedCount: number,
@@ -683,19 +697,17 @@ export default function WallPage() {
     setGenerationSubmitting(true)
     setGenerationOperation('generate')
     try {
-      const response = await api.episodeGenerate(ep!.id) as {
-        enqueued?: Array<{ job_id?: string; reused?: boolean; error?: unknown }>
+      const response = await api.episodeVideoCompletion(
+        ep!.id,
+        episodeCompletionRequest(context.upstream.qualification_version),
+      ) as {
+        run_id?: string
+        message?: string
       }
-      const results = response.enqueued || []
-      const created = results.filter(item => item.job_id).length
-      const reused = results.filter(item => item.reused).length
-      const failed = results.filter(item => item.error).length
-      const message = [
-        created ? `已创建 ${created} 个视频任务` : '',
-        reused ? `复用 ${reused} 个已有结果` : '',
-        failed ? `${failed} 镜未能入队` : '',
-      ].filter(Boolean).join('；') || '请求已返回，正在同步任务状态'
-      showToast(`${message}。可在下方镜头按钮查看实时状态。`, undefined, failed > 0)
+      showToast(
+        response.message
+          || `全片补齐任务已启动${response.run_id ? ` · ${response.run_id}` : ''}；可在下方查看实时状态`,
+      )
       await loadVideoPlan()
       await refreshAll()
     } catch (reason) {
@@ -906,14 +918,14 @@ export default function WallPage() {
                 ? '继续本集未完成任务？'
                 : '清空本集全部资源？'}
           summary={generationDecision === 'generate'
-            ? `${shots.length} 镜 · 当前估算合计 ¥${quickGenerationEstimate.toFixed(2)}`
+            ? `${shots.length} 镜 · 首轮预计 ¥${quickGenerationEstimate.toFixed(2)} · 累计授权上限 ¥${EPISODE_COMPLETION_BUDGET_CAP_CNY.toFixed(2)}`
             : generationDecision === 'stop'
               ? `${generatingCount} 镜仍在处理`
               : generationDecision === 'resume'
                 ? `${(ep.pipeline_summary?.paused ?? 0) + (ep.pipeline_summary?.failed ?? 0)} 镜待继续或重试`
                 : `${shots.length} 个分镜 · ${episodeVideoCandidateCount} 个视频候选 · 已采用 ${adoptedCount} 镜 · 图像资源一并清空`}
           message={generationDecision === 'generate'
-            ? '系统会逐镜创建独立视频候选，不会自动采用、拼接成片或创建交付包。'
+            ? '系统会先补齐缺失的人物与场景素材，再逐镜生成、质检并采用可用视频；不会自动拼接成片或创建交付包。'
             : generationDecision === 'stop'
               ? '系统会暂停本地排队和后续处理；供应商已接单的任务可能继续执行并产生费用。'
               : generationDecision === 'resume'
@@ -921,8 +933,9 @@ export default function WallPage() {
                 : '将删除本集所有视频候选、采用关系、关键帧和参考图；分镜与剧本文本会保留。'}
           details={generationDecision === 'generate'
             ? [
+              `最长运行 ${EPISODE_COMPLETION_WALL_CLOCK_CAP_S / 3600} 小时，达到累计授权上限后会暂停并保留进度`,
               '已采用视频会保留；新候选失败时不会覆盖旧采用版',
-              '实际费用以供应商返回为准',
+              '实际费用以供应商返回为准，不会超过本次累计授权上限',
             ]
             : generationDecision === 'stop'
               ? ['停止请求不代表供应商已经终止', '已完成候选和已发生费用会保留']
