@@ -74,20 +74,6 @@ _IMPLICIT_SPEECH_RE = re.compile(
     r"嘴(?:巴|唇)[^，。；！？]{0,8}(?:张开|微张|开合|翕动)"
 )
 
-# 有对白不等于只能拍脸。角色在说话的同时完成走位、离场或操作剧情道具时，
-# 这些可见动作本身就是主线交付，若仍强制单人大近景，视频模型通常只保留口型，
-# 把走位/道具动作整段省略。此处只识别大形体、可核验动作，不把抬眼、微笑等
-# 表情表演误判成动作调度镜。
-_DIALOGUE_SPATIAL_STAGING_RE = re.compile(
-    r"走(?:向|到|过|进|出|开)|穿过|转身|离开|退(?:到|向|开)|上前|跑(?:向|到|出|进)|"
-    r"快步|缓步|迈步|起身|站起|坐下|跪下|绕过|移步|追上|进入|退出"
-)
-_DIALOGUE_PROP_STAGING_RE = re.compile(
-    r"翻开|合拢|拿起|放下|举起|抬手|伸手|收回手|触碰|触摸|按住|按上|贴上|"
-    r"握住|递出|递给|接过|拔出|推开|拉开|打开|关闭|指向|挥击|敲击|端起|拾起"
-)
-
-
 def _scene_time_context(value: Any) -> str:
     """Use the same broad time buckets as storyboard validation."""
     raw = scene_time_of(value)
@@ -276,24 +262,20 @@ def dialogue_action_staging_kind(
         name != speakers[0]
         for name in required_visual_action_characters(shot)
     ):
-        return "semantic"
-    if narrative_authority:
-        return "semantic" if "dialogue_action_staging" in (shot.risk_tags or []) else ""
-    visual_text = "；".join(
-        str(value or "")
-        for value in (
-            shot.primary_action,
-            shot.action_desc,
-            shot.first_frame_desc,
-            shot.last_frame_desc,
-        )
-    )
-    if _DIALOGUE_SPATIAL_STAGING_RE.search(visual_text):
         return "spatial"
-    if _DIALOGUE_PROP_STAGING_RE.search(visual_text):
-        return "prop"
     if "dialogue_action_staging" in (shot.risk_tags or []):
-        return "prop"
+        return "spatial" if len(raw_characters_visible(shot)) > 1 else "prop"
+    if narrative_authority:
+        return ""
+    state_in = shot.continuity_state_in
+    state_out = shot.continuity_state_out
+    if state_in is not None and state_out is not None:
+        if state_in.scene != state_out.scene:
+            return "spatial"
+        if state_in.characters != state_out.characters:
+            return "spatial"
+        if state_in.props != state_out.props:
+            return "prop"
     return ""
 
 

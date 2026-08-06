@@ -296,6 +296,7 @@ def test_dialogue_with_spatial_action_is_not_collapsed_to_static_closeup() -> No
         first_frame_desc="甲站在乙面前尚未转身，门位于画面右后方。",
         last_frame_desc="同一机位，甲已走向右后方门口，乙仍留在原位。",
         primary_action="甲说完后转身走向门外。",
+        risk_tags=["dialogue_action_staging"],
     )
 
     assert dialogue_action_staging_kind(shot) == "spatial"
@@ -317,6 +318,7 @@ def test_dialogue_with_story_prop_keeps_hands_and_prop_in_frame() -> None:
         first_frame_desc="甲站在石碑左侧，双手托住尚未翻开的名册。",
         last_frame_desc="同一机位，甲保持名册翻开，抬头看向画外。",
         primary_action="甲翻开名册并宣布名字。",
+        risk_tags=["dialogue_action_staging"],
     )
 
     assert dialogue_action_staging_kind(shot) == "prop"
@@ -337,6 +339,7 @@ def test_prop_dialogue_prompt_does_not_visualize_unreferenced_listener_state() -
         state_in=original_state_in,
         primary_action="甲抬手向乙说明缘由。",
         state_out=original_state_out,
+        risk_tags=["dialogue_action_staging"],
     )
 
     assert dialogue_action_staging_kind(shot) == "prop"

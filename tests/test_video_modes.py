@@ -818,12 +818,13 @@ def test_build_reference_assets_collects_score_only_warning_without_discard(monk
         return {
             "status": "scored", "overall": 0.55, "action_match": 0.55, "body_proportion": 0.55,
             "face_identity": 0.55, "outfit_match": 0.55, "hair_match": 0.55, "scene_match": 0.55,
+            "identity_contract_passed": True,
             "hard_failures": [], "issues": ["低分"], "absolute_quality": 0.55,
         }
 
     monkeypatch.setattr(video_modes, "_generate_reference_keep_best", fake_keep_best)
     monkeypatch.setattr(mv, "review_keyframe_with_evidence", fake_review)
-    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: False)
+    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: True)
 
     decision = ShotVideoModeDecision(
         mode=REFERENCE_IMAGE_MODE, reason="对白", confidence=0.9,
@@ -1102,7 +1103,7 @@ def test_multi_character_height_contract_keeps_best_when_all_keyframes_fail(monk
     }, expected_fingerprint=meta["keyframe_contract_fingerprint"])
 
 
-def test_keyframe_best_of_three_all_unverified_keeps_first_deterministically(monkeypatch, tmp_path) -> None:
+def test_keyframe_best_of_three_all_unverified_fails_closed(monkeypatch, tmp_path) -> None:
     _patch_reference_build_unit(monkeypatch)
     import app.multiview as mv
 
@@ -1146,29 +1147,21 @@ def test_keyframe_best_of_three_all_unverified_keeps_first_deterministically(mon
 
     assert len(generated_paths) == 3
     generated = [asset for asset in assets if asset.source == "seedream_generated"]
-    assert len(generated) == 1
-    winner = generated[0]
-    assert winner.path == str(generated_paths[0])
-    assert winner.selectedForSeedance is True
-    assert winner.qa and winner.qa["status"] == "unverified"
-    assert winner.qualityScore is None
-    assert generated_paths[0].is_file()
-    assert not generated_paths[1].exists()
-    assert not generated_paths[2].exists()
+    assert generated == []
+    assert all(not path.exists() for path in generated_paths)
     assert rejected == []
 
     slot = existing_meta["reference_slots"]["narrative_keyframe"]
-    assert slot["winner_candidate_no"] == 1
+    assert slot["winner_candidate_no"] is None
     assert slot["candidate_count"] == 3
-    assert slot["status"] == "unverified"
+    assert slot["status"] == "contract_gate_failed"
     serialized_slot = json.dumps(slot, ensure_ascii=False)
-    assert str(generated_paths[1]) not in serialized_slot
-    assert str(generated_paths[2]) not in serialized_slot
-    video_inputs = build_seedance_image_inputs({
-        "mode": REFERENCE_IMAGE_MODE,
-        "reference_images": [asset.public_dict() for asset in assets],
-    })
-    assert video_inputs == [(hiagent.data_url_from_file(str(generated_paths[0])), "reference_image")]
+    assert all(str(path) not in serialized_slot for path in generated_paths)
+    with pytest.raises(hiagent.ProviderError, match="缺少通过门禁"):
+        build_seedance_image_inputs({
+            "mode": REFERENCE_IMAGE_MODE,
+            "reference_images": [asset.public_dict() for asset in assets],
+        })
 
 
 def test_all_identity_bad_keyframes_are_deleted_and_fall_back_to_truth_anchors(
@@ -1288,7 +1281,7 @@ def test_all_identity_bad_keyframes_are_deleted_and_fall_back_to_truth_anchors(
     assert {
         asset.entity_type for asset in assets if asset.selectedForSeedance
     } == {"character", "scene"}
-    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "identity_gate_failed"
+    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "contract_gate_failed"
     assert meta["keyframe_fallback_mode"] == video_modes.KEYFRAME_STRUCTURAL_FALLBACK_MODE
     assert meta["keyframe_structural_fallback_slots"] == ["narrative_keyframe"]
     assert meta["narrative_keyframe_missing"] is False
@@ -2101,9 +2094,10 @@ def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monke
     async def _fake_kf_review(b64, **kwargs):
         return {"status": "scored", "overall": 0.5, "action_match": 0.5, "body_proportion": 0.5,
                 "face_identity": 0.5, "outfit_match": 0.5, "hair_match": 0.5, "scene_match": 0.5,
+                "identity_contract_passed": True,
                 "hard_failures": [], "issues": [], "absolute_quality": 0.5}
     monkeypatch.setattr(mv, "review_keyframe_with_evidence", _fake_kf_review)
-    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: False)
+    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: True)
     monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)
@@ -2174,9 +2168,10 @@ def test_build_reference_assets_all_low_scores_still_keep_best_without_gate(monk
         ]
         return {"status": "scored", "overall": score, "action_match": score, "body_proportion": score,
                 "face_identity": score, "outfit_match": score, "hair_match": score, "scene_match": score,
+                "identity_contract_passed": True,
                 "hard_failures": [], "issues": [], "absolute_quality": score}
     monkeypatch.setattr(mv, "review_keyframe_with_evidence", _fake_kf_review)
-    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: False)
+    monkeypatch.setattr(mv, "keyframe_gate_passed", lambda qa: True)
     monkeypatch.setattr(video_modes, "reusable_previous_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "scene_reference_assets", lambda *a, **k: [])
     monkeypatch.setattr(video_modes, "min_generated_references", lambda: 1)

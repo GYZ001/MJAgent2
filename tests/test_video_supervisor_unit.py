@@ -131,12 +131,12 @@ def test_repair_router_levels_and_upgrade():
             evidence={"shot_no": 9, "path": "9", "rule_id": "state_mismatch"},
         )
     ])
-    assert plan.level == "L0"
-    assert plan.strategy == "handoff_human"
-    assert plan.is_paid is False
+    assert plan.level == "L1"
+    assert plan.strategy == "retake_same_input"
+    assert plan.is_paid is True
     assert plan.pause_state is None
 
-    # QA-only issues never escalate into the repair router.
+    # A generic blocker enters repair by severity, not by an issue-code list.
     fp = plan.fingerprint
     counts = bump_fingerprint_count({}, fp)
     counts = bump_fingerprint_count(counts, fp)
@@ -151,9 +151,9 @@ def test_repair_router_levels_and_upgrade():
         fingerprint_counts=counts,
         current_level="L2",
     )
-    assert plan2.level == "L0"
-    assert plan2.strategy == "handoff_human"
-    assert plan2.is_paid is False
+    assert plan2.level == "L3"
+    assert plan2.strategy == "rebuild_reference"
+    assert plan2.is_paid is True
     assert plan2.pause_state is None
 
     # L5 without auth
