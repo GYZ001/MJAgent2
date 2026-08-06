@@ -543,6 +543,15 @@ def clear_episode_artifacts(episode_id: str) -> dict:
                   AND status IN ('draft','valid','blocked','stale')""",
             (episode_id,),
         )
+        conn.execute(
+            """UPDATE artifacts
+                  SET status='superseded',
+                      stale_reason='用户已清空本集生成资源'
+                WHERE type='video_supervisor_checkpoint'
+                  AND scope_type='episode' AND scope_id=?
+                  AND status IN ('candidate','validated','approved')""",
+            (episode_id,),
+        )
         versions, affected_eps = _purge_shots(
             conn,
             shots,

@@ -871,7 +871,8 @@ def rebuild_coverage_ledger(
         for row in conn.execute(
             f"""SELECT shot_id, id, qa_json, technical_validation_json, cost_cny,
                        provider_task_id, status, image_inputs, version_no
-                FROM shot_versions WHERE shot_id IN ({placeholders})""",
+                FROM shot_versions
+                WHERE shot_id IN ({placeholders}) AND status!='cleared'""",
             shot_ids,
         ).fetchall():
             sid = row["shot_id"]
@@ -2892,7 +2893,13 @@ async def run_video_completion_resilient(
                 error_type=type(exc).__name__,
             )
             recoveries += 1
-            cp = load_latest_checkpoint(episode_id) or VideoSupervisorCheckpoint(
+            cp = load_latest_checkpoint(episode_id)
+            if run_id and (cp is None or cp.run_id != run_id):
+                # A fresh run may fail before its first checkpoint is durable.
+                # Never recover from an older execution epoch: its attempt
+                # counters, budget and terminal fences belong to cleared work.
+                cp = None
+            cp = cp or VideoSupervisorCheckpoint(
                 episode_id=episode_id,
                 run_id=run_id,
                 phase="RECOVERING_CONTROL_PLANE",
