@@ -8,8 +8,7 @@ from app.renderability import (
     strip_overdetail_terms,
 )
 from app.schemas import (
-    Bible, Character, EpisodeScreenplay, KeyDialogueChain, KeyDialogueTurn,
-    PlotSpine, PlotSpineBeat, World,
+    Bible, Character, EpisodeScreenplay, PlotSpine, PlotSpineBeat, World,
 )
 from app.validators import validate_plot_spine, validate_screenplay, storyboard_shot_count_range
 
@@ -188,31 +187,11 @@ def _minimal_valid_body(**overrides) -> EpisodeScreenplay:
     return EpisodeScreenplay(**base)
 
 
-def test_episode_target_from_spine_has_no_product_maximum() -> None:
+def test_episode_target_from_spine_shrinks() -> None:
     from app.renderability import episode_target_from_spine
     assert episode_target_from_spine(5) == 50
     assert episode_target_from_spine(8) == 80
-    assert episode_target_from_spine(12) == 120
-    assert episode_target_from_spine(100) == 1000
-
-
-def test_screenplay_duration_expands_for_spoken_capacity() -> None:
-    from app.renderability import screenplay_required_duration_s
-
-    script = EpisodeScreenplay(
-        episode_no=1,
-        dialogue_chains=[KeyDialogueChain(
-            chain_id="DC1",
-            topic="完整交付",
-            turns=[KeyDialogueTurn(
-                speaker="甲",
-                line="剧情" * 200,
-                source_text="剧情" * 200,
-            )],
-        )],
-    )
-
-    assert screenplay_required_duration_s(script, minimum_s=50) >= 120
+    assert episode_target_from_spine(12) == 80
 
 
 def test_duration_gt5_blocked_when_fits_five() -> None:

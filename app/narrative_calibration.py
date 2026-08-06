@@ -29,16 +29,12 @@ from app.schemas import EpisodeScreenplay, NarrativeReviewReport
 
 HUMAN_ONE_WATCH_CONTRACT_VERSION = "human-one-watch.v1"
 HUMAN_CALIBRATION_CONTRACT_VERSION = "narrative-human-calibration.v1"
-AI_ONE_WATCH_CONTRACT_VERSION = "narrative-ai-one-watch.v1"
-AI_ONE_WATCH_AUTHORITY_TYPE = "ai_one_watch_simulation_report"
 DEFAULT_CROSS_CONTENT_DIMENSIONS = ("genre", "form")
 GLOBAL_CALIBRATION_SCOPE_ID = "global-narrative-continuity"
 DEFAULT_MINIMUM_CORRELATION = 0.6
 DEFAULT_HUMAN_SUCCESS_THRESHOLD = 0.8
 
 __all__ = [
-    "AI_ONE_WATCH_AUTHORITY_TYPE",
-    "AI_ONE_WATCH_CONTRACT_VERSION",
     "CalibrationContractError",
     "CurrentCalibrationAuthority",
     "CalibrationReport",
@@ -51,7 +47,6 @@ __all__ = [
     "assert_report_meets_current_calibration",
     "calibrate_and_persist_human_one_watch",
     "persist_calibration_report",
-    "persist_ai_one_watch_simulation_authority",
     "persist_human_one_watch_freeze",
     "persist_human_one_watch_observation",
     "require_current_calibration_authority",
@@ -227,7 +222,6 @@ class DimensionCalibrationResult(_OpenSemanticModel):
 class CalibrationReport(_OpenSemanticModel):
     calibration_report_id: str
     calibration_scope_id: str
-    authority_mode: str = "human_calibration"
     contract_version: str = HUMAN_CALIBRATION_CONTRACT_VERSION
     narrative_contract_version: str = NARRATIVE_CONTRACT_VERSION
     blind_prompt_version: str = BLIND_READER_PROMPT_VERSION
@@ -262,7 +256,6 @@ class CurrentCalibrationAuthority:
     artifact_hash: str
     report: CalibrationReport
     model_pass_threshold: float
-    authority_mode: str = "human_calibration"
 
 
 def _expected_pairs(
@@ -1217,201 +1210,29 @@ def persist_calibration_report(
     return evidence_repository.get_artifact(artifact["id"]) or artifact
 
 
-def persist_ai_one_watch_simulation_authority(
-    report: NarrativeReviewReport,
-    *,
-    narrative_review_artifact_id: str,
-    model_pass_threshold: float = DEFAULT_HUMAN_SUCCESS_THRESHOLD,
-) -> dict[str, Any]:
-    """Persist an explicit AI-simulation authority without claiming human data.
-
-    The blind multi-prior review remains the blocking content gate.  This
-    authority only replaces the unavailable human-to-model calibration layer.
-    If the simulated scores are not usable, the layer is recorded as waived
-    and contributes no additional threshold.
-    """
-    review_artifact_id = str(narrative_review_artifact_id or "").strip()
-    review_artifact = evidence_repository.get_artifact(review_artifact_id)
-    errors: list[str] = []
-    if (
-        review_artifact is None
-        or review_artifact.get("type") != "narrative_review_report"
-        or review_artifact.get("status")
-        in {"stale", "rejected", "superseded", "needs_revision"}
-    ):
-        errors.append(
-            "[AI_ONE_WATCH_REVIEW_INVALID] AI 模拟必须绑定当前已通过的冷观众审读报告"
-        )
-    elif review_artifact.get("content") != report.model_dump(mode="json"):
-        errors.append(
-            "[AI_ONE_WATCH_REVIEW_DRIFT] AI 模拟输入与审读 Artifact 内容不一致"
-        )
-    try:
-        _require_review_lineage([review_artifact_id])
-    except CalibrationContractError as exc:
-        errors.extend(exc.errors)
-    if report.decision != "pass":
-        errors.append("[AI_ONE_WATCH_REVIEW_NOT_PASSED] 冷观众审读尚未通过")
-    if errors:
-        raise CalibrationContractError(errors)
-
-    requested_threshold = float(model_pass_threshold)
-    if not 0.0 <= requested_threshold <= 1.0:
-        raise CalibrationContractError([
-            "[AI_ONE_WATCH_THRESHOLD_INVALID] AI 模拟门槛必须位于 0..1"
-        ])
-    scores = [
-        float(item.predicted_score)
-        for item in report.target_delta_results
-        if item.predicted_score is not None
-    ]
-    simulation_supported = bool(
-        report.target_delta_results
-        and len(scores) == len(report.target_delta_results)
-        and all(item.result == "satisfied" for item in report.target_delta_results)
-        and min(scores) >= requested_threshold
-    )
-    authority_mode = "ai_simulation" if simulation_supported else "waived"
-    effective_threshold = requested_threshold if simulation_supported else 0.0
-    minimum_score = min(scores) if scores else None
-    previous_rows = evidence_repository.get_conn().execute(
-        """SELECT id FROM artifacts
-           WHERE type=? AND scope_type='calibration' AND scope_id=?
-             AND status='approved'""",
-        (AI_ONE_WATCH_AUTHORITY_TYPE, GLOBAL_CALIBRATION_SCOPE_ID),
-    ).fetchall()
-    previous_approved_ids = {str(row["id"]) for row in previous_rows}
-    calibration_report = CalibrationReport(
-        calibration_report_id=f"AI-{report.narrative_review_report_id}",
-        calibration_scope_id=GLOBAL_CALIBRATION_SCOPE_ID,
-        authority_mode=authority_mode,
-        scope_ids=[report.scope_id],
-        narrative_review_artifact_ids=[review_artifact_id],
-        sample_summary={
-            "source": "ai_blind_multi_prior_review",
-            "scope_count": 1,
-            "audience_prior_count": len({
-                item.audience_prior_id for item in report.target_delta_results
-            }),
-            "target_delta_count": len(report.target_delta_results),
-            "minimum_predicted_score": minimum_score,
-            "simulation_supported": simulation_supported,
-        },
-        correlation_analysis={
-            "status": "not_applicable",
-            "reason": "AI 模拟不伪造真人相关性",
-        },
-        coverage_gaps=(
-            []
-            if simulation_supported
-            else ["[AI_ONE_WATCH_SIMULATION_UNSUPPORTED] 模拟结果不足，校准层已取消"]
-        ),
-        calibration_score=None,
-        minimum_correlation=0.0,
-        human_success_threshold=requested_threshold,
-        recommended_model_pass_threshold=effective_threshold,
-        confidence_status=authority_mode,
-        decision="calibrated",
-        reason=(
-            f"AI 多先验一次观看模拟通过，最低逐目标分 {minimum_score:.3f}"
-            if simulation_supported and minimum_score is not None
-            else "AI 一次观看模拟不足；按策略取消额外校准层，保留冷观众硬门禁"
-        ),
-        evidence_lineage={
-            "authority_mode": authority_mode,
-            "source_review_artifact_id": review_artifact_id,
-            "human_observation_count": 0,
-        },
-    )
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type=AI_ONE_WATCH_AUTHORITY_TYPE,
-        scope_type="calibration",
-        scope_id=GLOBAL_CALIBRATION_SCOPE_ID,
-        status="candidate",
-        trust_level="T2",
-        content=calibration_report.model_dump(mode="json"),
-        parent_artifact_ids=[review_artifact_id],
-        contract_version=AI_ONE_WATCH_CONTRACT_VERSION,
-    ))
-    committed = evidence_repository.commit_artifact(
-        None,
-        artifact["id"],
-        [Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="ai_one_watch_simulation_authority",
-            evaluator_version=AI_ONE_WATCH_CONTRACT_VERSION,
-            status="passed",
-            hard_gate_passed=True,
-            evaluation_role="runtime_gate",
-            score_status=authority_mode,
-            runtime_blocking=True,
-            score=(
-                max(0.0, min(100.0, float(minimum_score) * 100.0))
-                if minimum_score is not None else None
-            ),
-            evidence={
-                "authority_mode": authority_mode,
-                "source_review_artifact_id": review_artifact_id,
-                "model_pass_threshold": effective_threshold,
-                "human_observation_count": 0,
-            },
-        )],
-    )
-    if previous_approved_ids:
-        conn = evidence_repository.get_conn()
-        marks = ",".join("?" for _ in previous_approved_ids)
-        conn.execute(
-            f"""UPDATE episodes
-                   SET narrative_status='needs_review'
-                 WHERE narrative_calibration_artifact_id IN ({marks})""",
-            tuple(sorted(previous_approved_ids)),
-        )
-        conn.commit()
-    return committed
-
-
 def require_current_calibration_authority(
     *,
     expected_artifact_id: str | None = None,
 ) -> CurrentCalibrationAuthority:
-    """Resolve the active human calibration or explicit AI fallback authority."""
+    """Resolve the active cross-content human calibration or fail closed."""
     conn = evidence_repository.get_conn()
-    if expected_artifact_id:
-        row = conn.execute(
-            """SELECT id,type FROM artifacts
-               WHERE id=?
-                 AND type IN ('human_one_watch_calibration_report',?)
-                 AND scope_type='calibration' AND scope_id=?
-                 AND status='approved'""",
-            (
-                str(expected_artifact_id),
-                AI_ONE_WATCH_AUTHORITY_TYPE,
-                GLOBAL_CALIBRATION_SCOPE_ID,
-            ),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """SELECT id,type FROM artifacts
-               WHERE type='human_one_watch_calibration_report'
-                 AND scope_type='calibration' AND scope_id=?
-                 AND status='approved'
-               ORDER BY version DESC LIMIT 1""",
-            (GLOBAL_CALIBRATION_SCOPE_ID,),
-        ).fetchone()
-        if row is None:
-            row = conn.execute(
-                """SELECT id,type FROM artifacts
-                   WHERE type=? AND scope_type='calibration' AND scope_id=?
-                     AND status='approved'
-                   ORDER BY version DESC LIMIT 1""",
-                (AI_ONE_WATCH_AUTHORITY_TYPE, GLOBAL_CALIBRATION_SCOPE_ID),
-            ).fetchone()
+    row = conn.execute(
+        """SELECT id FROM artifacts
+           WHERE type='human_one_watch_calibration_report'
+             AND scope_type='calibration' AND scope_id=?
+             AND status='approved'
+           ORDER BY version DESC LIMIT 1""",
+        (GLOBAL_CALIBRATION_SCOPE_ID,),
+    ).fetchone()
     if row is None:
         raise CalibrationContractError([
-            "[NARRATIVE_CALIBRATION_REQUIRED] 尚无真人校准或 AI 一次观看模拟权威"
+            "[NARRATIVE_CALIBRATION_REQUIRED] 尚无通过跨作品真人一次观看校准的当前权威"
         ])
     artifact_id = str(row["id"])
-    artifact_type = str(row["type"])
+    if expected_artifact_id and artifact_id != str(expected_artifact_id):
+        raise CalibrationContractError([
+            "[NARRATIVE_CALIBRATION_STALE] 分镜绑定的真人校准版本已不是当前权威"
+        ])
     artifact = evidence_repository.get_artifact(artifact_id)
     if artifact is None:
         raise CalibrationContractError([
@@ -1434,10 +1255,7 @@ def require_current_calibration_authority(
     errors: list[str] = []
     if report.calibration_scope_id != GLOBAL_CALIBRATION_SCOPE_ID:
         errors.append("[NARRATIVE_CALIBRATION_SCOPE_INVALID] 校准作用域不是全局叙事合同")
-    ai_authority = artifact_type == AI_ONE_WATCH_AUTHORITY_TYPE
-    if report.decision != "calibrated" or (
-        not ai_authority and report.confidence_status != "supported"
-    ):
+    if report.decision != "calibrated" or report.confidence_status != "supported":
         errors.append("[NARRATIVE_CALIBRATION_NOT_SUPPORTED] 当前校准结论未达到 supported")
     if report.narrative_contract_version != NARRATIVE_CONTRACT_VERSION:
         errors.append("[NARRATIVE_CALIBRATION_CONTRACT_DRIFT] 叙事合同版本已变化")
@@ -1448,7 +1266,7 @@ def require_current_calibration_authority(
     threshold = report.recommended_model_pass_threshold
     if threshold is None or not 0 <= float(threshold) <= 1:
         errors.append("[NARRATIVE_CALIBRATION_THRESHOLD_MISSING] 当前校准没有有效模型门槛")
-    if not ai_authority and (
+    if (
         report.calibration_score is None
         or report.calibration_score < report.minimum_correlation
     ):
@@ -1460,65 +1278,6 @@ def require_current_calibration_authority(
         _require_review_lineage(report.narrative_review_artifact_ids)
     except CalibrationContractError as exc:
         errors.extend(exc.errors)
-    if ai_authority:
-        if report.authority_mode not in {"ai_simulation", "waived"}:
-            errors.append("[AI_ONE_WATCH_AUTHORITY_MODE_INVALID] AI 权威模式无效")
-        if report.confidence_status != report.authority_mode:
-            errors.append("[AI_ONE_WATCH_CONFIDENCE_MODE_DRIFT] AI 权威状态与模式不一致")
-        if len(report.narrative_review_artifact_ids) != 1:
-            errors.append("[AI_ONE_WATCH_REVIEW_COUNT_INVALID] AI 权威必须绑定一个来源审读")
-        source_review = (
-            evidence_repository.get_artifact(report.narrative_review_artifact_ids[0])
-            if len(report.narrative_review_artifact_ids) == 1 else None
-        )
-        try:
-            source_report = NarrativeReviewReport.model_validate(
-                (source_review or {}).get("content") or {}
-            )
-        except Exception as exc:  # noqa: BLE001 - immutable authority boundary
-            errors.append(f"[AI_ONE_WATCH_SOURCE_REVIEW_INVALID] {exc}")
-            source_report = None
-        if source_report is not None:
-            source_scores = [
-                float(item.predicted_score)
-                for item in source_report.target_delta_results
-                if item.predicted_score is not None
-            ]
-            if source_report.decision != "pass":
-                errors.append("[AI_ONE_WATCH_SOURCE_REVIEW_NOT_PASSED] 来源审读未通过")
-            if report.authority_mode == "ai_simulation" and (
-                not source_report.target_delta_results
-                or len(source_scores) != len(source_report.target_delta_results)
-                or any(
-                    item.result != "satisfied"
-                    for item in source_report.target_delta_results
-                )
-                or min(source_scores) < float(threshold)
-            ):
-                errors.append("[AI_ONE_WATCH_SIMULATION_DRIFT] 来源模拟已不满足权威门槛")
-            if report.authority_mode == "waived" and float(threshold) != 0.0:
-                errors.append("[AI_ONE_WATCH_WAIVER_THRESHOLD_INVALID] 取消校准时门槛必须为 0")
-        gate_rows = [
-            item
-            for item in evidence_repository.get_evaluations(artifact_id)
-            if item.get("evaluator_name") == "ai_one_watch_simulation_authority"
-            and item.get("evaluator_version") == AI_ONE_WATCH_CONTRACT_VERSION
-            and item.get("evaluation_role") == "runtime_gate"
-            and bool(item.get("runtime_blocking"))
-            and item.get("status") == "passed"
-            and bool(item.get("hard_gate_passed"))
-        ]
-        if len(gate_rows) != 1:
-            errors.append("[AI_ONE_WATCH_GATE_INVALID] AI 模拟权威缺少唯一通过的 runtime gate")
-        if errors:
-            raise CalibrationContractError(errors)
-        return CurrentCalibrationAuthority(
-            artifact_id=artifact_id,
-            artifact_hash=current_hash,
-            report=report,
-            model_pass_threshold=float(threshold),
-            authority_mode=report.authority_mode,
-        )
     observation_parent_ids = [
         str(parent_id)
         for parent_id in parents
@@ -1620,7 +1379,6 @@ def require_current_calibration_authority(
         artifact_hash=current_hash,
         report=report,
         model_pass_threshold=float(threshold),
-        authority_mode="human_calibration",
     )
 
 

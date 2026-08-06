@@ -14,7 +14,6 @@ from app.continuity import (
     information_ledger_errors,
     preflight_seedance_gates,
     reference_role_plan,
-    resolve_first_last_boundary_relation,
     resolve_do_not_repeat_texts,
     speech_capacity_errors,
     sync_shot_continuity_fields,
@@ -114,102 +113,6 @@ def test_short_primary_action_uses_complete_action_desc_for_generation() -> None
     )
 
 
-def test_silent_shot_cannot_require_character_to_invent_dialogue() -> None:
-    shot = _shot(
-        action_desc="林风看向苏婉，开口主动和她打招呼。",
-        primary_action="林风开口打招呼并等待回应。",
-        first_frame_desc="林风看向苏婉，嘴唇微张准备说话。",
-        last_frame_desc="同一机位，林风刚说完话，等待苏婉回应。",
-        dialogues=[],
-        audio_timeline=[],
-    )
-
-    errors = preflight_seedance_gates(shot)
-
-    assert any("禁止让视频模型自行发明台词" in error for error in errors)
-    with pytest.raises(CompileError, match="没有有效 dialogues/audio_timeline"):
-        compile_prompt(shot, _bible())
-
-
-def test_silent_prompt_explicitly_forbids_speech_and_lip_motion() -> None:
-    prompt = compile_prompt(_shot(), _bible())
-
-    assert "所有人物全程闭口，不做说话口型" in prompt
-    assert "不得自行补充问候、应答、语气词" in prompt
-
-
-def test_silent_nonverbal_response_may_reference_an_existing_request() -> None:
-    shot = _shot(
-        action_desc="林风听完苏婉的请求后点头，起身走向山门。",
-        primary_action="林风以点头答应请求，随后起身走向山门。",
-        first_frame_desc="林风坐在石阶上看向苏婉，双手撑住膝盖。",
-        last_frame_desc="同一机位，林风已经起身走到山门铜环前。",
-    )
-
-    assert not any(
-        "自行发明台词" in error
-        for error in preflight_seedance_gates(shot)
-    )
-
-
-def test_first_last_prompt_uses_real_boundary_contract_and_moving_camera() -> None:
-    shot = _shot(
-        shot_no=3,
-        action_desc="苏婉转身看向林风，抬手指向山门。",
-        primary_action="苏婉转身并抬手指向山门。",
-        first_frame_desc="苏婉站在山门右侧，双手自然垂下。",
-        last_frame_desc="苏婉仍在山门右侧，右手已经指向铜环。",
-        state_in="苏婉站在山门右侧，尚未动作。",
-        state_out="苏婉右手已经指向铜环。",
-        characters=["苏婉"],
-        characters_visible=["苏婉"],
-    )
-
-    prompt = compile_prompt(
-        shot,
-        _bible(),
-        video_generation_mode="FIRST_LAST_FRAME_MODE",
-        first_frame_source="PREVIOUS_STATIC_TAIL",
-        boundary_relation_edit="reverse_angle",
-        boundary_relation_action="starts_new_action",
-        boundary_start_state="林风独自站在山门左侧，刚收回按住铜环的右手。",
-    )
-
-    assert "first_frame 是上一镜已冻结的静态尾帧" in prompt
-    assert "[FIRST-LAST CONTINUOUS PATH]" in prompt
-    assert "林风独自站在山门左侧" in prompt
-    assert "0.0–1.1 秒" in prompt
-    assert "1.1–3.9 秒" in prompt
-    assert "3.9–5 秒" in prompt
-    assert "连续跟随主体的轨道移动、横摇、推拉与弧形重构运镜" in prompt
-    assert "端点构图差距越大" in prompt
-    assert "运镜不能掩盖换人、换装、换景或身份漂移" in prompt
-    assert "不要沿用上一镜完整构图或主体尾帧姿势" not in prompt
-
-
-def test_first_last_relation_uses_reverse_angle_when_speaker_changes() -> None:
-    previous = _shot(
-        shot_no=2,
-        characters=["林风"],
-        characters_visible=["林风"],
-        dialogues=[Dialogue(speaker="林风", line="你要去哪里？", emotion="平静")],
-    )
-    current = _shot(
-        shot_no=3,
-        characters=["苏婉"],
-        characters_visible=["苏婉"],
-        dialogues=[Dialogue(speaker="苏婉", line="去山门。", emotion="平静")],
-    )
-
-    edit, action, reason = resolve_first_last_boundary_relation(
-        current,
-        previous,
-        planned_edit="angle_cut",
-        planned_action="continues_same_action",
-    )
-
-    assert (edit, action, reason) == (
-        "reverse_angle",
         "starts_new_action",
         "onscreen_speaker_changed",
     )
@@ -619,27 +522,6 @@ def test_action_continuation_with_prev_still_allowed() -> None:
         characters=["林风"],
         characters_visible=["林风"],
     )
-
-    assert derive_continuity_mode(second, prev=first) == "action_continuation"
-    preflight = preflight_seedance_gates(second, prev=first)
-    assert not any("第一个镜头没有上一镜可承接" in err for err in preflight)
-    assert second.continuity_mode == "action_continuation"
-
-
-def test_continuity_mode_is_derived_from_scene_and_time_context() -> None:
-    first = _shot(
-        shot_no=1,
-        scene_setting="日，办公室",
-        continuity_mode="scene_change",
-    )
-    same_context = _shot(
-        shot_no=2,
-        scene_setting="日，办公室",
-        continuity_mode="scene_change",
-    )
-    changed_context = _shot(
-        shot_no=3,
-        scene_setting="夜，街道",
         continuity_mode="same_scene_cut",
     )
 

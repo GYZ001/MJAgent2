@@ -188,22 +188,23 @@ def _episode_or_404(episode_id: str):
 def _compact_episode_target(target_duration_s: int | None) -> int:
     if target_duration_s is None:
         return config.EPISODE_TARGET_DEFAULT_S
-    target = max(int(target_duration_s), config.EPISODE_TARGET_MIN_S)
+    target = int(target_duration_s)
+    if target > config.EPISODE_TARGET_MAX_S:
+        target = config.EPISODE_TARGET_MAX_S
+    elif target < config.EPISODE_TARGET_MIN_S:
+        target = config.EPISODE_TARGET_MIN_S
     step = config.EPISODE_TARGET_STEP_S
     rounded = ((target + step // 2) // step) * step
-    return max(config.EPISODE_TARGET_MIN_S, rounded)
+    return min(config.EPISODE_TARGET_MAX_S, max(config.EPISODE_TARGET_MIN_S, rounded))
 
 
 def _storyboard_target_for_source(target_duration_s: int | None, source_chars: int,
                                   *, spine_beat_count: int | None = None) -> int:
-    """Return a lower-bound duration without imposing a product maximum."""
-    _ = source_chars
+    """Renderability：集时长跟主线走，不再因原文很长就抬高目标秒数。"""
+    _ = source_chars  # 保留参数兼容旧调用
     if spine_beat_count is not None and spine_beat_count > 0:
         from app.renderability import episode_target_from_spine
-        return max(
-            _compact_episode_target(target_duration_s),
-            episode_target_from_spine(spine_beat_count),
-        )
+        return episode_target_from_spine(spine_beat_count)
     return _compact_episode_target(target_duration_s)
 
 

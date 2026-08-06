@@ -250,11 +250,6 @@ def test_product_clear_requires_current_impact_preview(monkeypatch) -> None:
     assert db.get_conn().execute(
         "SELECT status FROM production_revisions WHERE id='rev_storyboard'"
     ).fetchone()["status"] == "superseded"
-    outline = db.get_conn().execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id='art_outline'"
-    ).fetchone()
-    assert outline["status"] == "rejected"
-    assert outline["stale_reason"] == "用户已清空分镜工作区"
     assert api._storyboard_start_preflight_payload("e1")["action"] == "create"
 
 

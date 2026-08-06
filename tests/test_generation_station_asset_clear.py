@@ -168,57 +168,6 @@ def test_resource_clear_removes_video_images_and_reference_indexes(tmp_path, mon
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", root)
 
-    result = artifacts.clear_shot_artifacts("s")
-
-    assert result["videos"] == 1
-    assert result["references"] == 1
-    assert not video_path.exists()
-    assert not ref_path.exists()
-    assert not scene_path.exists()
-    assert not boundary_path.exists()
-    for table in (
-        "shot_versions", "shot_scenes", "reference_sets", "reference_assets",
-        "video_boundary_assets", "jobs",
-    ):
-        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
-    shot = conn.execute(
-        "SELECT adopted_version_id,approved_scene_id,mode_plan FROM shots WHERE id='s'"
-    ).fetchone()
-    assert tuple(shot) == (None, None, None)
-
-
-def test_episode_resource_clear_supersedes_active_video_plan(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    conn = _database()
-    conn.execute(
-        """INSERT INTO provider_video_capability_snapshots(
-               id,provider,model,capabilities_json,probe_time,probe_result,
-               technical_success,created_at
-           ) VALUES('cap','provider','model','{}',0,'succeeded',1,0)"""
-    )
-    conn.execute(
-        """INSERT INTO episode_video_generation_plans(
-               id,episode_id,plan_revision,source_storyboard_revision_id,
-               capability_snapshot_id,status,created_at
-           ) VALUES('plan','e',1,'storyboard','cap','valid',0)"""
-    )
-    conn.execute(
-        """INSERT INTO shot_video_generation_plans(
-               id,episode_video_plan_id,shot_id,shot_no,planned_mode,
-               capability_snapshot_id,status,created_at,updated_at
-           ) VALUES(
-               'shot-plan','plan','s',1,'FIRST_LAST_FRAME_MODE',
-               'cap','planned',0,0
-           )"""
-    )
-    conn.execute(
-        "UPDATE shots SET mode_plan=? WHERE id='s'",
-        (json.dumps({"mode": "FIRST_LAST_FRAME_MODE"}),),
-    )
-    conn.execute(
-        """INSERT INTO shot_versions(
                id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
            ) VALUES('version-audit','s',1,'prompt','idem','failed',NULL,0)"""
     )

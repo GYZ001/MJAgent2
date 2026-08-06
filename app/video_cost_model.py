@@ -9,16 +9,6 @@ from app.db import get_conn
 from app import video_modes
 
 
-def initial_shot_generation_cost(duration_s: float) -> float:
-    """Match the exact first-pass reservation shown at UI approval."""
-    return round(
-        shot_cost_cny(int(duration_s or 5))
-        + IMAGE_PRICE_PER_UNIT
-        * video_modes.estimated_keyframe_generation_count(),
-        6,
-    )
-
-
 def historical_attempt_stats(
     *,
     project_id: str | None = None,
@@ -96,7 +86,10 @@ def predict_shot_completion_cost(
 ) -> dict[str, float]:
     """预测单镜补齐到可用的期望成本。"""
     stats = historical_attempt_stats(project_id=project_id, episode_id=episode_id)
-    base = initial_shot_generation_cost(duration_s)
+    base = (
+        shot_cost_cny(int(duration_s or 5))
+        + IMAGE_PRICE_PER_UNIT * video_modes.estimated_keyframe_generation_count()
+    )
     hist = float(stats["avg_cost_per_paid_version"]) or base
     unit = max(base, hist * 0.5)  # 不完全信任历史离群
     if retry_factor is None:

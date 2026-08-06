@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import portraits, stages
+from app import portraits
 from app.character_policy import is_collective_role, is_functional_extra
 from app.compiler import CompileError, compile_prompt, keyframe_visual_contract
 from app.identity_contracts import (
@@ -172,37 +172,6 @@ def test_resolver_handles_named_transient_collective_and_offscreen_by_policy() -
         resolver.resolve("井下回声", usage="visual")
 
 
-def test_keyframe_contract_uses_text_verification_for_contextual_identity() -> None:
-    contract = keyframe_visual_contract(
-        _shot(characters=["云吞七号"], characters_visible=["云吞七号"]),
-        _bible(),
-        screenplay=_screenplay(),
-    )
-
-    verification = contract["identity_verification"]["云吞七号"]
-    assert verification["mode"] == "text_contract"
-    assert verification["visual_policy"] == "contextual"
-    assert verification["visual_canonical"] == (
-        "浅褐短袍，素面木簪，面容普通且不抢主体"
-    )
-
-
-def test_bible_identity_overrides_redundant_model_identity_contract() -> None:
-    screenplay = _screenplay()
-    screenplay.narrative_plan.identity_contracts.append(
-        NarrativeIdentityContract(
-            identity_id="character-lead",
-            display_name="主角",
-            kind="model-declared lead",
-            visual_policy="canonical",
-            visual_canonical="与人物谱冲突的银发白衣外观",
-            asset_requirement="required",
-            voice_ids=["主角"],
-            evidence=_evidence("模型重复声明了人物谱已有角色"),
-        )
-    )
-    screenplay.voice_bible.append(
-        VoiceCanonical(
             speaker_id="主角",
             voice_canonical="young lead voice",
         )
@@ -285,41 +254,6 @@ def test_storyboard_operational_identity_projection_uses_contract_and_dialogue()
             delivery="spoken_dialogue",
         )],
     )
-    board = Storyboard(episode_no=1, shots=[shot, second])
-
-    changes = canonicalize_storyboard_operational_identities(
-        board,
-        _bible(),
-        screenplay,
-    )
-
-    assert changes
-    assert board.shots[0].characters_visible == ["主角", "云吞七号"]
-    assert board.shots[0].audio_cast == ["主角"]
-    assert board.shots[0].dialogues[0].speaker == "主角"
-    assert board.shots[1].audio_cast == ["阿烬", "主角"]
-
-
-def test_storyboard_candidate_projects_operational_identity_before_validation() -> None:
-    screenplay = _screenplay()
-    screenplay.voice_bible.append(VoiceCanonical(
-        speaker_id="主角",
-        voice_canonical="young lead voice",
-    ))
-    screenplay.key_lines = ["主角：出发。"]
-    shot = _shot(
-        characters=["主角"],
-        characters_visible=["character-main"],
-        audio_cast=["character-main"],
-        dialogues=[Dialogue(
-            speaker="character-main",
-            line="出发。",
-            delivery="spoken_dialogue",
-        )],
-    )
-
-    board, errors = stages._normalized_candidate_board(
-        1,
         [],
         shot,
         _bible(),
@@ -359,51 +293,6 @@ def test_narrative_compiler_uses_typed_policy_not_role_name_classifiers() -> Non
     assert "井下回声" in prompt
     assert contract["collective_visible_roles"] == ["静默议会"]
     assert contract["individual_visible_characters"] == ["云吞七号"]
-
-
-def test_narrative_compiler_fails_closed_for_undeclared_legacy_whitelist_role() -> None:
-    screenplay = _screenplay()
-    shot = _shot(
-        characters=["医生"],
-        characters_visible=["医生"],
-        audio_cast=[],
-        dialogues=[],
-        action_desc="医生走到门前伸手推开木门。",
-    )
-
-    assert is_functional_extra("医生")
-    with pytest.raises(CompileError, match="未在 Bible 或 narrative identity contract 中声明"):
-        compile_prompt(shot, _bible(), screenplay=screenplay)
-
-
-def test_narrative_compiler_does_not_treat_ambient_source_as_voice_identity() -> None:
-    screenplay = _screenplay()
-    shot = _shot(
-        audio_cast=["untyped-metallic-impact"],
-        dialogues=[],
-        audio_timeline=[{
-            "start_s": 0.0,
-            "end_s": 5.0,
-            "type": "ambient_sound",
-            "speaker_id": None,
-            "text": "A metallic impact echoes through the room.",
-            "lip_sync": False,
-        }],
-    )
-
-    prompt = compile_prompt(
-        shot,
-        _bible(),
-        screenplay=screenplay,
-        voice_bible=screenplay.voice_bible,
-    )
-
-    assert "A metallic impact echoes through the room." in prompt
-
-
-def test_narrative_compiler_still_rejects_undeclared_spoken_identity() -> None:
-    screenplay = _screenplay()
-    shot = _shot(
         audio_cast=["undeclared-speaker"],
         dialogues=[Dialogue(
             speaker="undeclared-speaker",

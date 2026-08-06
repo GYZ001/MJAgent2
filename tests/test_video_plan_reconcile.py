@@ -9,12 +9,11 @@ from app.video_plan import (
     EpisodeVideoGenerationPlan,
     PlanAssetRequirement,
     ProviderVideoCapabilitySnapshot,
-    SHOT_RELATION_ENUM_CONTRACT,
     ShotVideoGenerationPlan,
     VideoGenerationMode,
+    VideoInputIntent,
     VideoPlanValidationError,
     _scene_identity,
-    active_plan_is_current,
     apply_scene_boundary_strategy,
     assert_video_provider_submission_authority,
     bind_plan_release_identity,
@@ -60,9 +59,6 @@ def _conn() -> sqlite3.Connection:
         id="cap-1",
         provider="provider",
         model="model",
-        supports_reference_image=True,
-        supports_first_frame=True,
-        supports_last_frame=True,
         supports_first_last_pair=True,
         supports_reference_video=True,
         probe_time=1,
@@ -93,18 +89,14 @@ def _conn() -> sqlite3.Connection:
                 source_storyboard_revision_id="storyboard_rev_1",
                 shot_id="SH-2",
                 published_shot_id="SH-2",
-                shot_no=2,
+                mode=VideoGenerationMode.VIDEO_INPUT_MODE,
+                video_input_intent=VideoInputIntent.MOTION_REFERENCE,
                 mode=VideoGenerationMode.FIRST_LAST_FRAME_MODE,
                 depends_on_shot_id="SH-1",
                 required_assets=[
-                    PlanAssetRequirement(
-                        role="first_frame",
-                        source=AssetSource.PREVIOUS_ADOPTED_TAIL,
-                        source_shot_id="SH-1",
-                    ),
-                    PlanAssetRequirement(
-                        role="last_frame",
-                        source=AssetSource.STATIC_BOUNDARY_ASSET,
+                        role="previous_adopted_video",
+                        source=AssetSource.PREVIOUS_ADOPTED_VIDEO,
+                    )
                     ),
                 ],
                 confidence=0.9,
@@ -140,7 +132,7 @@ def test_ai_plan_candidate_normalizes_known_relation_and_asset_aliases() -> None
             "action": "origin",
         },
         "required_assets": [{
-            "role": "reference_image",
+            "source": "STATIC_BOUNDARY_ASSET",
             "source": "ASSET_REPO",
             "source_shot_id": None,
         }],
@@ -154,221 +146,6 @@ def test_ai_plan_candidate_normalizes_known_relation_and_asset_aliases() -> None
     }
     assert normalized["required_assets"] == []
     assert len(changes) == 5
-
-
-def test_ai_plan_prompt_contract_lists_every_strict_relation_enum() -> None:
-    assert SHOT_RELATION_ENUM_CONTRACT == {
-        "temporal": ["same_moment", "elapsed", "jump", "new_domain", "unknown"],
-        "spatial": ["same_space", "adjacent_space", "new_space", "unknown"],
-        "edit": [
-            "continuous_take",
-            "match_cut",
-            "angle_cut",
-            "reaction_cut",
-            "reverse_angle",
-            "insert_cut",
-            "montage",
-            "scene_cut",
-            "unknown",
-        ],
-        "action": [
-            "continues_same_action",
-            "starts_new_action",
-            "shows_result",
-            "observes_result",
-            "no_action",
-            "unknown",
-        ],
-    }
-
-
-@pytest.mark.parametrize(
-    ("first_source", "source_shot_id", "supplied_dependency", "expected_dependency"),
-    [
-        ("STATIC_BOUNDARY_ASSET", None, "previous-shot", None),
-        ("PREVIOUS_STATIC_TAIL", "previous-shot", "previous-shot", None),
-        ("PREVIOUS_ADOPTED_TAIL", "previous-shot", None, "previous-shot"),
-    ],
-)
-def test_first_last_dependency_is_derived_from_first_frame_source(
-    first_source: str,
-    source_shot_id: str | None,
-    supplied_dependency: str | None,
-    expected_dependency: str | None,
-) -> None:
-    normalized, changes = normalize_ai_shot_plan_candidate({
-        "mode": "FIRST_LAST_FRAME_MODE",
-        "depends_on_shot_id": supplied_dependency,
-        "required_assets": [
-            {
-                "role": "first_frame",
-                "source": first_source,
-                "source_shot_id": source_shot_id,
-            },
-            {
-                "role": "last_frame",
-                "source": "STATIC_BOUNDARY_ASSET",
-                "source_shot_id": None,
-            },
-        ],
-    })
-
-    assert normalized["depends_on_shot_id"] == expected_dependency
-    assert changes[-1]["reason"] == "derived_from_first_frame_source"
-
-
-def test_ai_plan_candidate_removes_automatic_mode_fallback() -> None:
-    normalized, changes = normalize_ai_shot_plan_candidate({
-        "mode": "FIRST_LAST_FRAME_MODE",
-        "fallback_order": ["REFERENCE_IMAGE_MODE"],
-    })
-
-    assert normalized["fallback_order"] == []
-    assert changes[-1]["reason"] == "automatic_mode_fallback_disabled"
-
-
-@pytest.mark.parametrize(
-    "relations",
-    [
-        {"temporal": "new_domain", "spatial": "same_space", "edit": "angle_cut"},
-        {"temporal": "jump", "spatial": "new_space", "edit": "scene_cut"},
-        {"temporal": "jump", "spatial": "same_space", "edit": "scene_cut"},
-    ],
-)
-def test_scene_domain_change_requires_reference_mode(relations: dict) -> None:
-    normalized, changes = normalize_ai_shot_plan_candidate({
-        "mode": "FIRST_LAST_FRAME_MODE",
-        "depends_on_shot_id": "previous-shot",
-        "relations": relations,
-        "state_dependency": "start_and_end",
-        "motion_dependency": "pose",
-        "required_assets": [
-            {"role": "first_frame", "source": "PREVIOUS_ADOPTED_TAIL"},
-            {"role": "last_frame", "source": "STATIC_BOUNDARY_ASSET"},
-        ],
-        "reason_codes": ["MODEL_SELECTED_BOUNDARY_MODE"],
-    })
-
-    assert normalized["mode"] == "REFERENCE_IMAGE_MODE"
-    assert normalized["depends_on_shot_id"] is None
-    assert normalized["required_assets"] == []
-    assert normalized["state_dependency"] == "none"
-    assert normalized["motion_dependency"] == "none"
-    assert "SCENE_DOMAIN_CHANGED" in normalized["reason_codes"]
-    assert any(
-        change.get("reason") == "scene_domain_requires_recomposition"
-        for change in changes
-    )
-
-
-def test_same_space_relation_does_not_force_a_mode() -> None:
-    normalized, _changes = normalize_ai_shot_plan_candidate({
-        "mode": "FIRST_LAST_FRAME_MODE",
-        "relations": {
-            "temporal": "elapsed",
-            "spatial": "same_space",
-            "edit": "angle_cut",
-        },
-    })
-
-    assert normalized["mode"] == "FIRST_LAST_FRAME_MODE"
-
-
-def test_scene_boundary_strategy_only_waits_for_each_scene_second_shot() -> None:
-    shots = [
-        ShotVideoGenerationPlan(
-            source_storyboard_revision_id="rev",
-            shot_id=f"shot-{number}",
-            published_shot_id=f"shot-{number}",
-            shot_no=number,
-            mode=VideoGenerationMode.VIDEO_INPUT_MODE,
-            video_input_intent="MOTION_REFERENCE",
-            relations=relations,
-            confidence=1,
-            capability_snapshot_id="cap",
-        )
-        for number, relations in (
-            (1, {}),
-            (2, {"spatial": "same_space", "edit": "angle_cut"}),
-            (3, {"spatial": "same_space", "edit": "continuous_take"}),
-            (4, {"spatial": "new_space", "edit": "scene_cut"}),
-            (5, {"spatial": "same_space", "edit": "angle_cut"}),
-            (6, {"spatial": "same_space", "edit": "continuous_take"}),
-        )
-    ]
-
-    apply_scene_boundary_strategy(shots)
-
-    assert [item.mode for item in shots] == [
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-    ]
-    assert [item.depends_on_shot_id for item in shots] == [
-        None, "shot-1", None, None, "shot-4", None,
-    ]
-    assert [
-        next(
-            (
-                asset.source
-                for asset in item.required_assets
-                if asset.role == "first_frame"
-            ),
-            None,
-        )
-        for item in shots
-    ] == [
-        None,
-        AssetSource.PREVIOUS_ADOPTED_TAIL,
-        AssetSource.PREVIOUS_STATIC_TAIL,
-        None,
-        AssetSource.PREVIOUS_ADOPTED_TAIL,
-        AssetSource.PREVIOUS_STATIC_TAIL,
-    ]
-
-
-def test_published_scene_identity_overrides_ai_boundary_drift() -> None:
-    shots = [
-        ShotVideoGenerationPlan(
-            source_storyboard_revision_id="rev",
-            shot_id=f"shot-{number}",
-            published_shot_id=f"shot-{number}",
-            shot_no=number,
-            mode=VideoGenerationMode.REFERENCE_IMAGE_MODE,
-            relations=relations,
-            confidence=1,
-            capability_snapshot_id="cap",
-        )
-        for number, relations in (
-            (1, {}),
-            (2, {"spatial": "new_space", "edit": "scene_cut"}),
-            (3, {"spatial": "same_space", "edit": "angle_cut"}),
-            (4, {"spatial": "same_space", "edit": "angle_cut"}),
-        )
-    ]
-
-    apply_scene_boundary_strategy(
-        shots,
-        scene_identity_by_shot_id={
-            "shot-1": "set-a",
-            "shot-2": "set-a",
-            "shot-3": "set-b",
-            "shot-4": "set-b",
-        },
-    )
-
-    assert [item.mode for item in shots] == [
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-        VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-    ]
-    assert [item.depends_on_shot_id for item in shots] == [
-        None, "shot-1", None, "shot-3",
-    ]
 
 
 def test_same_location_with_different_time_is_a_new_scene_entry() -> None:
@@ -559,16 +336,6 @@ def test_missing_projection_with_durable_screenplay_pointer_cannot_use_legacy_ma
                   published_screenplay_artifact_id='modern-screenplay'
             WHERE id='e'"""
     )
-    conn.commit()
-
-    with pytest.raises(ValueError, match="投影"):
-        current_storyboard_release_manifest("e", conn=conn)
-
-
-def test_local_replan_changes_only_target_contract_identity(
-    monkeypatch,
-    tmp_path,
-) -> None:
     conn = _conn()
     monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
     monkeypatch.setattr(
@@ -588,9 +355,9 @@ def test_local_replan_changes_only_target_contract_identity(
                'passed','{}','fp',0
            )""",
         (str(boundary_path),),
-    )
-    conn.commit()
-
+        "mode": "VIDEO_INPUT_MODE",
+        "planned_mode": "VIDEO_INPUT_MODE",
+        "actual_mode": "VIDEO_INPUT_MODE",
     replacement = create_local_replan_revision(
         "s2",
         reason="single_shot_reroll",
@@ -626,8 +393,8 @@ def test_local_replan_changes_only_target_contract_identity(
     copied_boundary = conn.execute(
         """SELECT episode_video_plan_id,shot_plan_id,path
              FROM video_boundary_assets
-            WHERE shot_plan_id=? AND role='last_frame'""",
-        (unchanged.shot_plan_id,),
+           ) VALUES('attempt-stale','svp-2','stale-v',1,'VIDEO_INPUT_MODE',
+                    'VIDEO_INPUT_MODE','provider_running','provider-task',1,1)"""
     ).fetchone()
     assert dict(copied_boundary) == {
         "episode_video_plan_id": replacement.episode_video_plan_id,

@@ -16,16 +16,13 @@ from app.narrative_calibration import (
     HumanOneWatchObservation,
     HumanTargetDeltaObservation,
     ModelTargetEstimate,
-    assert_report_meets_current_calibration,
     build_calibration_report,
-    persist_ai_one_watch_simulation_authority,
     persist_calibration_report,
     persist_human_one_watch_freeze,
     persist_human_one_watch_observation,
-    require_current_calibration_authority,
     validate_human_one_watch_observation,
 )
-from app.schemas import EpisodeScreenplay, NarrativeReviewReport
+from app.schemas import EpisodeScreenplay
 from app.stages import _narrative_plan_schema_example
 
 
@@ -427,50 +424,7 @@ def test_board_ui_exposes_two_stage_human_calibration_without_internal_codes() -
 
     assert "narrative-calibration/freeze" in source
     assert "narrative-calibration/observations" in source
-    assert "narrative-calibration/ai-simulate" in source
-    assert "运行 AI 一次观看模拟" in source
     assert source.index("冻结首次复述") < source.index("提交真人观察")
     assert "title={freezeBlockedReason || undefined}" in source
     assert "human_one_watch_calibration_report" not in source
     assert "NARRATIVE_CALIBRATION_REQUIRED" not in source
-
-
-def test_ai_one_watch_waives_only_the_extra_layer_when_simulation_is_weak(
-    calibration_db,
-) -> None:
-    report = NarrativeReviewReport(
-        narrative_review_report_id="NRR-WEAK-SIMULATION",
-        scope_id="scope-1",
-        target_delta_results=[{
-            "audience_prior_id": "AP-1",
-            "target_delta_id": "XD-AP1-1",
-            "result": "satisfied",
-            "predicted_score": 0.4,
-        }],
-        decision="pass",
-        reason="The blind review gate passed but its confidence is weak.",
-    )
-    review = evidence_repository.create_artifact(EvidenceArtifact(
-        type="narrative_review_report",
-        scope_type="episode",
-        scope_id="scope-1",
-        status="validated",
-        trust_level="T2",
-        content=report.model_dump(mode="json"),
-    ))
-
-    artifact = persist_ai_one_watch_simulation_authority(
-        report,
-        narrative_review_artifact_id=review["id"],
-    )
-    authority = require_current_calibration_authority(
-        expected_artifact_id=artifact["id"],
-    )
-
-    assert authority.authority_mode == "waived"
-    assert authority.model_pass_threshold == 0.0
-    assert authority.report.sample_summary["simulation_supported"] is False
-    assert_report_meets_current_calibration(
-        report,
-        expected_calibration_artifact_id=artifact["id"],
-    )

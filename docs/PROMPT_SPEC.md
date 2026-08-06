@@ -161,13 +161,11 @@
       "location": "主地点短标签",
       "characters": ["角色圣经准确姓名"],
       "dramatic_event": "谁做了什么",
-      "visible_action": "画面里能看见的动作、表情和道具反应",
+- `continuity_mode` 是真实连续性语义；只有 `action_continuation` 使用上镜尾帧作为视频 0 秒起点。`transition` 存在后一镜上，表示它如何从前一镜进入，并由最终编辑执行
       "key_dialogues": ["本拍最值得保留的台词"],
       "turn": "局势变化/新信息",
       "carry": "留给下一拍的未完成动作或悬念",
-      "beat_type": "钩子|铺垫|升级|反转|高潮|尾钩",
       "source_excerpt": "小说原文逐字摘录"
-    }
   ]
 }
 ```
@@ -321,9 +319,9 @@
 |---|---|---|
 | V1 | 单集不设镜头数或总时长产品上限；完整覆盖剧本和尾钩后结束 | `分镜异常超过技术熔断值，请检查重复生成` |
 | V2 | duration 为 5~10s 整数；口播按台词纯文字（不计标点）随时长增长：5s≤18 … 10s≤36 | `超过本镜 {d}s 的口播上限 {n} 字` / `台词纯文字 {x} 字（不计标点）` |
-| V3 | narration **禁止**：非空即失败；source_excerpt 仍必填且至少 8 字 | `shots[i].narration 非空…禁止旁白/内心OS` / `shots[i].source_excerpt 仅{x}字` |
+### D1. Seedance 结构化连续性提示词合同（`seedance_structured_continuity_v4`）
 | V4 | 角色合法性；具体姓名必须来自角色圣经；确定性功能性路人标签可放行但必须明确入画；characters 非空；speaker 必须在本镜头 characters 中 | `既不在角色圣经中，也不是允许的功能性路人标签` / `功能性路人未明确入画` |
-| V5 | action_desc = 一个连贯主动作；按与视频门禁相同的顺序动作节拍计数，5~6s≤2、7~10s≤3；显式切镜词仍单独禁止 | `shot_no={n} 含约{x}个顺序动作节拍，超过{d}s镜头容量上限{limit}` / `出现多镜头/快切标记[…]` |
+视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_structured_continuity_v4`。核心输入是 `continuity_mode`、自然语言状态链与可比较的 `continuity_state_in/out`；仅 `action_continuation` 可使用上一镜尾帧作为 0 秒起点，其余模式必须重新构图。
 | V6 | 场景连续性；scene_setting 只作时间+地点标签（长度不校验）；同场景必须接上镜，换场必须写承接 | `scene_setting"{x}"在 shots[i] 与 shots[j] 间被打断` / `缺少承接说明` |
 | V7 | shot_no 连续 / 枚举值合法 | 同模板 |
 | V8 | 单镜一个连贯动作：action_desc 目标 70 字（硬下限 40，够写清一个动作即可） | `action_desc 仅{x}字，低于硬下限 40 字` |

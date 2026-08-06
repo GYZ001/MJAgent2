@@ -66,26 +66,4 @@ class LeaseLost(RuntimeError):
     """The current process was fenced by recovery or another worker claim."""
 
 
-def episode_video_budget_limit(episode_id: str) -> float:
-    """Resolve the user-approved episode cap before the static safety default."""
-    static_limit = float(get_setting("episode_cost_limit_cny") or 100)
-    authority_limit: float | None = None
-    try:
-        from app.completion_grant import episode_video_budget_snapshot
-
-        authority = episode_video_budget_snapshot(episode_id)
-        if authority is not None:
-            authority_limit = float(authority["cap_cny"])
-    except Exception:  # noqa: BLE001 - legacy databases retain static cap
-        pass
-    try:
-        from app.completion_grant import active_video_grant_budget_cap
-
-        grant_cap = active_video_grant_budget_cap(episode_id)
-        if grant_cap is not None:
-            return float(grant_cap)
-    except Exception:  # noqa: BLE001
-        pass
-    return authority_limit if authority_limit is not None else static_limit
-
 __all__ = [name for name in globals() if not name.startswith("__")]

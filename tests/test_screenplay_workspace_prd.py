@@ -229,19 +229,19 @@ def test_target_duration_can_be_changed_before_generation_and_versions_constrain
     )
     conn.commit()
 
-    changed = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 1000})
+    changed = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 70})
     assert changed.status_code == 200
     assert changed.json()["previous_target_duration_s"] == 50
-    assert changed.json()["target_duration_s"] == 1000
+    assert changed.json()["target_duration_s"] == 70
     assert changed.json()["constraint_version"] == 1
     assert changed.json()["snapshot_version"] == 1
     row = conn.execute(
         "SELECT target_duration_s, screenplay_constraint_version, screenplay_snapshot_version "
         "FROM episodes WHERE id='e1'"
     ).fetchone()
-    assert tuple(row) == (1000, 1, 1)
+    assert tuple(row) == (70, 1, 1)
 
-    unchanged = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 1000})
+    unchanged = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 70})
     assert unchanged.status_code == 200
     assert unchanged.json()["unchanged"] is True
     row = conn.execute(
@@ -255,8 +255,7 @@ def test_target_duration_rejects_unknown_step_and_published_episode(client) -> N
 
     invalid = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 55})
     assert invalid.status_code == 422
-    assert invalid.json()["detail"]["minimum_s"] == 40
-    assert invalid.json()["detail"]["step_s"] == 10
+    assert invalid.json()["detail"]["allowed_choices"] == [40, 50, 60, 70, 80, 90]
     fractional = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 70.9})
     assert fractional.status_code == 422
 
@@ -380,24 +379,29 @@ def test_manual_publish_turns_identity_model_failure_into_retriable_screenplay_e
     ).fetchone()["c"] == 1
 
 
-def test_qa_failed_manual_draft_never_publishes() -> None:
+def test_qa_failed_manual_draft_publishes_with_score_only_warnings() -> None:
     _seed_episode(with_artifact=True)
     changed = _valid_script()
     changed.stakes = ""
     conn = db.get_conn()
 
-    with enter_handler(), pytest.raises(HTTPException) as caught:
-        asyncio.run(api.edit_screenplay("e1", {
+    with enter_handler():
+        result = asyncio.run(api.edit_screenplay("e1", {
             "screenplay": changed.model_dump(mode="json"),
             "expected_version": "art_sp_old",
         }))
-    assert caught.value.status_code == 422
-    assert caught.value.detail["code"] == "screenplay_qa_failed"
+    assert result["saved"] is True
+    assert result["gate_retry_exhausted"] is True
+    assert result["qa_warnings"]
     published = conn.execute(
         "SELECT screenplay_artifact_id,screenplay_status FROM episodes WHERE id='e1'"
     ).fetchone()
-    assert published["screenplay_artifact_id"] == "art_sp_old"
+    assert published["screenplay_artifact_id"] != "art_sp_old"
     assert published["screenplay_status"] == "ready"
+    artifact = conn.execute(
+        "SELECT type,status FROM artifacts WHERE id=?", (result["artifact_id"],)
+    ).fetchone()
+    assert tuple(artifact) == ("screenplay_document", "approved")
 
 
 def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(
@@ -453,7 +457,6 @@ def test_manual_screenplay_edit_uses_model_identity_resolution_before_publish(mo
         "青衣人放下一封信后离开。雨水顺着玻璃滑下",
         1,
     )
-    changed.full_script_text += "\n门外再次响起更重的敲门声。"
 
     async def fake_chat(_messages, **_kwargs):
         return json.dumps({"characters": [{
@@ -494,7 +497,6 @@ def test_unchanged_legacy_screenplay_is_canonicalized_before_noop_return(monkeyp
         "青衣人放下一封信后离开。雨水顺着玻璃滑下",
         1,
     )
-    legacy.full_script_text += "\n门外再次响起更重的敲门声。"
     conn = db.get_conn()
     conn.execute(
         "UPDATE episodes SET screenplay_json=? WHERE id='e1'",
@@ -542,20 +544,6 @@ def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:
     failed = api._screenplay_status_snapshot(ep, shot_count=5, production={})
     assert failed["code"] == "ready_storyboard_failed"
     assert failed["checkpoint_shot"] == 5
-
-
-def test_invalid_published_certificate_recommends_revalidation(monkeypatch) -> None:
-    _seed_episode(with_artifact=True)
-    conn = db.get_conn()
-    ep = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
-    ep["screenplay_status"] = "ready"
-    monkeypatch.setattr(api, "_screenplay_ready", lambda _ep: False)
-
-    state = api._screenplay_status_snapshot(ep, shot_count=8, production={})
-
-    assert state["code"] == "qa_certificate_invalid"
-    assert state["recommended_action"] == "resume_screenplay"
-    assert "重新校验" in state["message"]
 
 
 def test_dialogue_grouping_only_suggests_clear_semantic_pairs() -> None:

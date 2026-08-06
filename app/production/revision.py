@@ -237,17 +237,9 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
     rev = get_active_production_revision(episode_id, "screenplay")
     if rev is None:
         rev = _row_to_revision(get_conn().execute(
-            """SELECT revision.*
-                 FROM production_revisions AS revision
-                 JOIN episodes AS episode
-                   ON episode.screenplay_production_revision_id=revision.id
-                WHERE episode.id=?
-                  AND revision.episode_id=episode.id
-                  AND revision.kind='screenplay'
-                  AND revision.status='published'
-                  AND episode.screenplay_artifact_id IS NOT NULL
-                  AND episode.screenplay_artifact_id=revision.published_artifact_id
-                LIMIT 1""",
+            "SELECT * FROM production_revisions "
+            "WHERE episode_id=? AND kind='screenplay' AND status='published' "
+            "ORDER BY updated_at DESC LIMIT 1",
             (episode_id,),
         ).fetchone())
     active = task_registry.active("screenplay", episode_id)

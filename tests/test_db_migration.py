@@ -103,9 +103,7 @@ def test_init_db_migrates_legacy_jobs_before_creating_claim_index(tmp_path, monk
     project_columns = {row[1] for row in migrated.execute("PRAGMA table_info(projects)").fetchall()}
     indexes = {row[1] for row in migrated.execute("PRAGMA index_list(jobs)").fetchall()}
     assert {"next_retry_at", "lease_expires_at", "retry_count"}.issubset(columns)
-    assert {
-        "refs_resume", "refs_batch_started_at", "scene_refs_batch_started_at",
-    }.issubset(project_columns)
+    assert {"refs_resume", "refs_batch_started_at"}.issubset(project_columns)
     assert "idx_jobs_claim" in indexes
     assert "idx_jobs_run" in indexes
     migrated.close()

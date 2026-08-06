@@ -32,7 +32,6 @@ from app.schemas import (
     NarrativeEvidence,
     NarrativeProposition,
     NarrativeReviewReport,
-    RequiredOnScreenText,
     SetupPayoffContract,
     ShotCapacityBudget,
     ShotContribution,
@@ -252,28 +251,6 @@ def test_joint_shot_budget_rejects_action_inference_and_speech_overbooking() -> 
     assert "SHOT_ACTION_CAPACITY_EXCEEDED" not in codes
     assert "SHOT_INFERENCE_CAPACITY_EXCEEDED" not in codes
     assert "SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED" not in codes
-
-
-def test_audio_only_required_text_does_not_duplicate_spoken_capacity() -> None:
-    screenplay, board = _two_phase_action_story()
-    shot = board.shots[1]
-    spoken_line = "一二三四五六七八九十一二三四五六七八"
-    shot.duration_s = 10
-    shot.narration = spoken_line
-    shot.required_text = RequiredOnScreenText(
-        exact_text=spoken_line,
-        strategy="audio_only",
-    )
-    shot.capacity_budget = ShotCapacityBudget(
-        action_phase_s=1.0,
-        inference_processing_s=2.0,
-        spoken_and_text_s=5.0,
-    )
-
-    codes = _codes(validate_storyboard_narrative(board, screenplay))
-
-    assert "SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED" not in codes
-    assert "SHOT_JOINT_CAPACITY_EXCEEDED" not in codes
 
 
 def test_parallel_audience_priors_share_the_same_processing_time() -> None:
@@ -738,11 +715,6 @@ def test_character_resolution_atomically_rewrites_the_narrative_graph() -> None:
     assert source_evidence_before == [
         item.model_dump(mode="json") for item in plan.source_evidence
     ]
-    payload = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False)
-    assert source_id in payload
-    assert canonical_id in payload
-    assert plan.atomic_actions[-1].actor_ids == [canonical_id]
-    assert plan.character_states[-1].character_id == canonical_id
-    assert source_id in screenplay.full_script_text
-    assert canonical_id not in screenplay.full_script_text
+    assert source_id not in json.dumps(plan.model_dump(mode="json"), ensure_ascii=False)
+    assert canonical_id in json.dumps(plan.model_dump(mode="json"), ensure_ascii=False)
     assert validate_screenplay_narrative(screenplay, require=True) == []

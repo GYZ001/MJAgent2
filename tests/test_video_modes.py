@@ -1595,8 +1595,8 @@ def _shot_row(**kwargs) -> dict:
         "characters": json.dumps(["A"]),
         "action_desc": "A站在魔石碑前，碑面爆发出嘈杂声，A紧握双拳，淡出淡入。",
         "first_frame_desc": "A站在魔石碑前。",
-        "last_frame_desc": "A仍站在碑前。",
-        "source_excerpt": "A站在魔石碑前。",
+def test_runtime_uses_anchor_fallback_when_required_keyframe_gate_is_exhausted(monkeypatch) -> None:
+    """关键帧修复耗尽后继续提交已有锚点，不得把任务判失败。"""
         "narration": None,
         "dialogues": json.dumps([]),
         "transition": "淡出淡入",
@@ -1624,23 +1624,19 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
         kwargs["on_progress"](assets, [])
         meta = kwargs.get("existing_meta")
         if isinstance(meta, dict):
-            meta["narrative_keyframe_missing"] = False
-            meta["reference_group_gate_passed"] = True
-        return assets
-
-    # 运行期一旦调用 LLM 选择即视为回归（应已被移除）
-    monkeypatch.setattr(ShotVideoModeSelector, "select", fail_select)
-    writes: list[dict] = []
-    monkeypatch.setattr(worker, "_set_version", lambda *a, **k: writes.append(k))
-    monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
-
-    reference_decision = decision_to_dict(ShotVideoModeDecision(
-        mode=REFERENCE_IMAGE_MODE, reason="对白镜，保持角色与场景一致", confidence=0.9,
-        needGenerateNewReferences=True,
-        referenceImagePlan=ReferenceImagePlan(totalCount=2, reusePreviousSceneCount=0, generateNewCount=2),
+    out_meta, _ = asyncio.run(worker._prepare_reference_mode_inputs(
+        conn,
+        {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"},
+        {"id": "v1"},
+        _shot_row(),
+        {"episode_no": 1},
+        meta,
+        "PROMPT",
     ))
-    conn = _FakeConn({"bible_json": _bible().model_dump_json()})
-    job = {"id": "j1", "project_id": "p1", "episode_id": "e1", "shot_id": "s1"}
+        referenceImagePlan=ReferenceImagePlan(totalCount=2, reusePreviousSceneCount=0, generateNewCount=2),
+    assert out_meta["reference_group_gate_passed"] is True
+    assert out_meta["reference_gate_retry_exhausted"] is True
+    assert out_meta["reference_fallback_mode"] == "available_anchors"
     version = {"id": "v1"}
     shot = _shot_row()
     ep = {"episode_no": 1}

@@ -63,16 +63,6 @@ _DIALOGUE_TWO_SHOT_INTERACTION_RE = re.compile(
     r"递给|递出|接过|抢夺|碰杯|亲吻|背起|抱起|交手|对打|扭打|"
     r"共同(?:握住|托住|抬起|推动|按住)|同时(?:握住|托住|抬起|推动|按住)"
 )
-_IMPLICIT_SPEECH_RE = re.compile(
-    r"开口|说出|说完|说话|问话|打招呼|询问|"
-    r"宣读|宣布|告知|解释|质问|反问|承诺|喊出|呼喊|"
-    r"念出|念道|嘀咕|喃喃|自语|台词|口型|"
-    r"(?<!准备)(?<!正要)(?<!打算)(?<!即将)(?:提出|发出|说出)"
-    r"[^，。；！？]{0,8}请求|"
-    r"(?:开口|出声)[^，。；！？]{0,6}(?:回答|回应)|"
-    r"(?:回答|回应)(?:道|说|问题|问话)|"
-    r"嘴(?:巴|唇)[^，。；！？]{0,8}(?:张开|微张|开合|翕动)"
-)
 
 def _scene_time_context(value: Any) -> str:
     """Use the same broad time buckets as storyboard validation."""
@@ -368,17 +358,11 @@ def dialogue_framing_errors(
         errors.append(
             f"shot_no={shot.shot_no} 是单人对白镜头，camera_move 应为固定或推近，"
             f"当前为「{shot.camera_move}」"
-        )
-    return errors
-
-
-def effective_state_in(shot: Shot) -> str:
-    return (shot.state_in or shot.first_frame_desc or "").strip()
-
-
 def effective_state_out(shot: Shot) -> str:
     return (shot.observed_state_out or shot.state_out or shot.last_frame_desc or "").strip()
-
+    same_location = same_scene(shot, prev)
+    same_time = scene_time_of(shot) == scene_time_of(prev)
+    if not same_location or not same_time:
 
 def planned_state_out(shot: Shot) -> str:
     return (shot.state_out or shot.last_frame_desc or "").strip()
@@ -386,52 +370,6 @@ def planned_state_out(shot: Shot) -> str:
 
 def effective_primary_action(shot: Shot) -> str:
     return (shot.primary_action or shot.action_desc or "").strip()
-
-
-def effective_characters_visible(shot: Shot) -> list[str]:
-    focus = dialogue_focus_subject(shot)
-    if focus:
-        return [focus]
-    return list(dict.fromkeys([
-        *raw_characters_visible(shot),
-        *required_visual_action_characters(shot),
-    ]))
-
-
-def effective_audio_cast(shot: Shot) -> list[str]:
-    """声轨说话人唯一口径：显式 audio_cast 优先，否则读有效口播段。"""
-    if shot.audio_cast:
-        return list(shot.audio_cast)
-    return spoken_speakers(shot)
-
-
-def uses_previous_tail_frame(mode: str) -> bool:
-    return (mode or "").strip() == "action_continuation"
-
-
-def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
-    """解析连续性模式。旧 continuity_from_prev 不得直接映射为 action_continuation。
-
-    无上一镜时不得保留 action_continuation：单镜 preflight / 缺 prev 入队会把该镜
-    当成链首，否则会误报「第一个镜头没有上一镜可承接」。
-    """
-    mode = (shot.continuity_mode or "").strip()
-    if mode == "action_continuation" and dialogue_focus_subject(shot):
-        # 对白近景是一次明确切镜，不能把上一镜尾帧当作 0 秒构图继续复制。
-        mode = "same_scene_cut"
-    if prev is None:
-        if mode == "action_continuation" or mode not in CONTINUITY_MODES:
-            return "scene_change" if int(shot.shot_no or 0) == 1 else "same_scene_cut"
-        return mode
-    same_context = (
-        same_scene(shot, prev)
-        and _scene_time_context(shot) == _scene_time_context(prev)
-    )
-    if mode == "scene_change" and same_context:
-        return "same_scene_cut"
-    if mode in CONTINUITY_MODES and not same_context:
-        return "scene_change"
-    if mode in CONTINUITY_MODES:
         return mode
     if not same_context:
         return "scene_change"
@@ -867,30 +805,6 @@ def action_capacity_errors(
     if narrative_authority:
         phases, estimated_min_s, contract_errors = narrative_action_capacity_profile(
             shot, narrative_plan,
-        )
-        errors.extend(contract_errors)
-        # The authority path is governed by an explicit time equation, not a
-        # genre-agnostic phase-count table.  Three very short observable phases
-        # can be cheaper than one long transformation; only their declared
-        # minimum time and the joint audience-task budget determine feasibility.
-        if estimated_min_s > float(getattr(shot, "duration_s", 0) or 0):
-            errors.append(
-                f"[NARRATIVE_ACTION_TIME_CAPACITY_EXCEEDED] shot_no={shot.shot_no} "
-                f"AtomicAction 阶段最短执行时间 {estimated_min_s:g}s "
-                f"超过镜头时长 {shot.duration_s}s"
-            )
-        return list(dict.fromkeys(errors))
-
-    # primary_action 常被模型压成一句摘要，真正会交给视频模型执行的细节仍在
-    # action_desc。容量必须取两者中节拍更多的一份，否则“穿过人群→停下→开口”
-    # 会以单动作摘要绕过门禁，最终只剩静态口型。
-    action_candidates = [
-        text.strip() for text in (effective_primary_action(shot), shot.action_desc or "") if text.strip()
-    ]
-    beats = max((count_sequential_action_beats(text) for text in action_candidates), default=0)
-    limit = action_capacity_limit(getattr(shot, "duration_s", 5))
-    if beats > limit:
-        errors.append(
             f"shot_no={shot.shot_no} 含约 {beats} 个顺序动作节拍，超过 {shot.duration_s}s 镜头容量上限 {limit}；"
             "请删减超纲动作，优先保留单一主线动作；确需拆镜时最多 +1 相邻镜，禁止无限拆碎"
         )
@@ -1468,7 +1382,6 @@ def reference_role_plan(
     continuity_mode: str | None = None,
     individual_names: set[str] | None = None,
     collective_names: set[str] | None = None,
-) -> list[str]:
     from app.character_policy import is_collective_role
 
     mode = continuity_mode or derive_continuity_mode(shot)

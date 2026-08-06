@@ -8,10 +8,9 @@ from app.video_plan import ProviderVideoCapabilitySnapshot
 
 def test_video_mode_api_surface_is_registered() -> None:
     routes = {
-        (method.upper(), path)
-        for path, operations in app.openapi()["paths"].items()
-        for method in operations
-        if method in {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
+        (method, route.path)
+        for route in app.routes
+        for method in (getattr(route, "methods", None) or [])
     }
     expected = {
         ("POST", "/api/episodes/{episode_id}/video-generation-plan"),
@@ -19,8 +18,8 @@ def test_video_mode_api_surface_is_registered() -> None:
         ("POST", "/api/episodes/{episode_id}/video-generation-plan/validate"),
         ("POST", "/api/episodes/{episode_id}/video-generation-plan/reconcile"),
         ("POST", "/api/episodes/{episode_id}/video-generation-plan/{plan_id}/execute"),
-        ("GET", "/api/video-capabilities/{provider}/{model}"),
-        ("POST", "/api/video-capabilities/{provider}/{model}/probe"),
+        ("GET", "/api/video-capabilities/{provider}/{model:path}"),
+        ("POST", "/api/video-capabilities/{provider}/{model:path}/probe"),
         ("POST", "/api/provider-media-publications"),
         ("GET", "/api/jobs/{job_id}/video-mode-audit"),
     }

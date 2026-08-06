@@ -8,7 +8,6 @@ export interface ProductionStatusMeta {
 
 const SCREENPLAY_STATUS: Record<string, Omit<ProductionStatusMeta, 'known'>> = {
   pending: { label: '剧本待生成', tone: 'grey' },
-  queued: { label: '剧本排队中', tone: 'blue' },
   running: { label: '剧本生成中', tone: 'gold' },
   repairing: { label: '剧本修复中', tone: 'gold' },
   ready: { label: '剧本已就绪', tone: 'green' },

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -23,11 +22,9 @@ from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.errors import ContentGenerationError, code_ref
 from app.db import get_conn, new_id, now
-from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
-from app.harness.types import EvidenceArtifact
-from app.refs import _safe_name, scene_visual_style_lock
+from app.refs import _safe_name
 from app.scene_contract import split_legacy_scene_setting
 from app.schemas import Bible, Scene, extract_json
 from app.validators import match_scene_name
@@ -329,7 +326,12 @@ def scene_ref_prompt(
         if scene_name.strip()
         else ""
     )
-    style_constraint = scene_visual_style_lock(visual_style) if visual_style.strip() else ""
+    style_constraint = (
+        f"画风最高优先级：必须严格保持「{visual_style.strip()}」，"
+        "不得擅自切换成与该画风冲突的真人摄影、照片写实、3D CG 或其他渲染风格。"
+        if visual_style.strip()
+        else ""
+    )
     generation_canonical = scene_generation_canonical(scene_name, scene_canonical)
     functional_constraints = scene_name_visual_constraints(scene_name, generation_canonical)
     return normalize_scene_prompt(
@@ -493,24 +495,16 @@ def register_initial_scene_ref(conn, project_id: str, name: str, image_path: str
 
 
 def scene_ref_exists(conn, project_id: str, name: str) -> bool:
-    """Whether a complete current scene pack exists."""
-    from app.multiview import (
-        list_scene_views,
-        scene_multiview_enabled,
-        scene_pack_is_usable,
-    )
-
+    """该场景是否已有一张落盘可用的场景图（已登记 scene_references 且文件还在）。
+    批量出图据此跳过已生成的场景，使按钮可幂等重复点击。"""
     rows = conn.execute(
         "SELECT * FROM scene_references WHERE project_id=? AND scene_name=?",
         (project_id, name)).fetchall()
-    for row in rows:
-        if not (row["image_path"] and Path(row["image_path"]).exists()):
-            continue
-        if not scene_multiview_enabled():
-            return True
-        if scene_pack_is_usable(row, list_scene_views(row["id"], conn=conn)):
-            return True
-    return False
+    existing = [r for r in rows if r["image_path"] and Path(r["image_path"]).exists()]
+    if not existing:
+        return False
+    # 主图已经是可交付产物；多视角补齐失败不能让幂等重跑再次烧图。
+    return True
 
 
 def _scene_gate_evaluations(artifact_id: str) -> list[dict]:
@@ -1170,11 +1164,14 @@ def scene_ref_for_episode(project_id: str, name: str, episode_no: int | None) ->
         "WHERE project_id=? AND scene_name=? AND ep_start<=? AND (ep_end IS NULL OR ep_end>=?) "
         "ORDER BY ep_start DESC LIMIT 1", (project_id, name, ep, ep)).fetchone()
     if row:
-        from app.multiview import list_scene_views, scene_multiview_enabled, scene_pack_is_usable
+        from app.multiview import (
+            list_scene_views, scene_multiview_enabled, scene_pack_is_usable, scene_primary_is_usable,
+        )
         views = list_scene_views(row["id"], conn=conn)
         usable = (
             not scene_multiview_enabled()
             or scene_pack_is_usable(row, views)
+            or scene_primary_is_usable(row, views)
         )
     else:
         usable = False
@@ -1238,7 +1235,6 @@ async def generate_scene_refs(
     only_scene: str | list[str] | None = None,
     *,
     resume: bool = False,
-    operation_started_at: float | None = None,
 ) -> None:
     """为项目全部（或指定）场景生成定场图，写回 bible_json 的 scenes[*].ref_image_path。"""
     conn = get_conn()
@@ -1422,29 +1418,16 @@ async def generate_scene_refs(
                 ))
                 prompt = retry_prompt or base_prompt
                 try:
-                    call_meta = {
-                        "asset_kind": "scene_reference",
-                        "scene_name": sc.name,
-                        "episode_no": 1,
-                        "scene_ref_mode": "initial",
-                        "attempt": attempt,
-                    }
-                    if operation_started_at is not None:
-                        operation_material = (
-                            f"{project_id}:{operation_started_at}:{sc.name}:"
-                            f"scene_reference:{attempt}"
-                        )
-                        call_meta.update({
-                            "operation_id": "op_scene_reference_" + hashlib.sha256(
-                                operation_material.encode("utf-8")
-                            ).hexdigest()[:32],
-                            "reuse_successful_operation": True,
-                        })
                     item = await _generate_scene_image(
                         prompt,
                         retry_seed,
-                        call_meta=call_meta,
-                    )
+                        call_meta={
+                            "asset_kind": "scene_reference",
+                            "scene_name": sc.name,
+                            "episode_no": 1,
+                            "scene_ref_mode": "initial",
+                            "attempt": attempt,
+                        })
                     await _save_image_item(item, path)
                     # ``record_reference_asset`` 会物理删除硬失败候选。先在
                     # 内存中保留一次纠偏编辑所需的输入，不让失败文件落盘滞留。
@@ -1525,10 +1508,11 @@ async def generate_scene_refs(
                             conn, project_id, sc.name, path, sc.scene_canonical,
                             prompt, qa, bible_version, artifact_id=artifact["id"],
                         )
-                    # The candidate is publishable only after its required views exist.
+                    # 初始场景多视角资产包有界补齐；耗尽后发布主图与已有视角。
                     from app.multiview import (
                         ensure_scene_multiview_pack, scene_multiview_enabled, pack_result_ok,
                     )
+                    pack_fallback = False
                     if scene_multiview_enabled():
                         pack = await ensure_scene_multiview_pack(
                             project_id=project_id,
@@ -1541,9 +1525,12 @@ async def generate_scene_refs(
                             optional_views=[role for role in (sc.required_views or []) if role == "action_zone"],
                         )
                         if not pack_result_ok(pack):
-                            raise ContentGenerationError(
-                                f"场景多视角资产包结构不完整：{sc.name}"
+                            pack_fallback = True
+                            conn.execute(
+                                "UPDATE scene_references SET pack_status='partial_fallback' WHERE id=?",
+                                (scene_id,),
                             )
+                            conn.commit()
                     if is_atomic_replacement and old_current:
                         # 完整包已通过：先把旧当前版本移入新的历史槽，再把候选切为当前。
                         minimum = conn.execute(
@@ -1561,14 +1548,17 @@ async def generate_scene_refs(
                         )
                         adoption_change = {
                             "change_type": "pack_regeneration", "previous_version_id": old_current["id"],
-                            "adoption_reason": "付费整包重生完成",
-                            "adopted_at": now(), "gate_retry_exhausted": False,
+                            "adoption_reason": (
+                                "多视角补齐重试耗尽后采用当前最佳产物"
+                                if pack_fallback else "付费整包重生完成"
+                            ),
+                            "adopted_at": now(), "gate_retry_exhausted": pack_fallback,
                         }
                         if "change_json" in cols:
                             conn.execute(
                                 "UPDATE scene_references SET ep_start=?,ep_end=NULL,pack_status=?,"
                                 "change_json=? WHERE id=?",
-                                (adopted_start, "ready",
+                                (adopted_start, "partial_fallback" if pack_fallback else "ready",
                                  json.dumps(adoption_change, ensure_ascii=False), scene_id),
                             )
                         else:
@@ -1577,6 +1567,7 @@ async def generate_scene_refs(
                                 (adopted_start, scene_id),
                             )
                         conn.commit()
+                    # 主场景图技术可用即发布；多视角补齐耗尽时保留当前最佳产物。
                     sc.ref_image_path = path
                     break
                 except asyncio.CancelledError:
@@ -1664,48 +1655,6 @@ async def assess_new_scene(label: str, context: str, *, style: str,
     }
 
 
-def _commit_scene_bible_mutation(
-    conn,
-    project_id: str,
-    data: dict,
-    *,
-    operation: str,
-    scene_name: str,
-) -> bool:
-    row = conn.execute(
-        "SELECT bible_version,bible_artifact_id FROM projects WHERE id=?",
-        (project_id,),
-    ).fetchone()
-    if not row:
-        return False
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="character_bible",
-        scope_type="project",
-        scope_id=project_id,
-        status="approved",
-        trust_level="T2",
-        content=data,
-        parent_artifact_ids=[row["bible_artifact_id"]] if row["bible_artifact_id"] else [],
-        contract_version="character-bible-1.0.0",
-        prompt_version="reactive-scene-bible-1.0.0",
-        model_snapshot={"operation": operation, "scene_name": scene_name},
-    ))
-    expected_version = int(row["bible_version"] or 0)
-    cursor = conn.execute(
-        "UPDATE projects SET bible_json=?,bible_version=?,bible_artifact_id=? "
-        "WHERE id=? AND COALESCE(bible_version,0)=?",
-        (
-            json.dumps(data, ensure_ascii=False),
-            expected_version + 1,
-            artifact["id"],
-            project_id,
-            expected_version,
-        ),
-    )
-    conn.commit()
-    return cursor.rowcount == 1
-
-
 def _append_scene_to_bible(conn, project_id: str, scene: dict) -> bool:
     """把 AI 已确认的新场景追加进 bible，并推进版本；内部处理不产生人工待审。"""
     row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -1717,13 +1666,12 @@ def _append_scene_to_bible(conn, project_id: str, scene: dict) -> bool:
     normalized = Scene.model_validate(scene).model_dump(mode="json")
     data.setdefault("scenes", []).append(normalized)
     Bible.model_validate(data)
-    return _commit_scene_bible_mutation(
-        conn,
-        project_id,
-        data,
-        operation="incremental_scene_add",
-        scene_name=str(scene.get("name") or ""),
+    conn.execute(
+        "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
+        (json.dumps(data, ensure_ascii=False), project_id),
     )
+    conn.commit()
+    return True
 
 
 def _append_scene_alias(conn, project_id: str, scene_name: str, alias: str) -> bool:
@@ -1743,13 +1691,12 @@ def _append_scene_alias(conn, project_id: str, scene_name: str, alias: str) -> b
         aliases.append(alias)
         scene["aliases"] = aliases
         Bible.model_validate(data)
-        return _commit_scene_bible_mutation(
-            conn,
-            project_id,
-            data,
-            operation="incremental_scene_alias",
-            scene_name=scene_name,
+        conn.execute(
+            "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), project_id),
         )
+        conn.commit()
+        return True
     return False
 
 
@@ -1931,72 +1878,12 @@ async def _ensure_reactive_scene_image(
             return {"image_path": current_path, "reused": True}
         conn = get_conn()
         broken = conn.execute(
-            "SELECT * FROM scene_references WHERE project_id=? AND scene_name=? "
+            "SELECT id,image_path FROM scene_references WHERE project_id=? AND scene_name=? "
             "AND ep_start=? ORDER BY created_at DESC LIMIT 1",
             (project_id, scene.name, episode_no),
         ).fetchone()
-        if broken:
-            broken_path = str(broken["image_path"] or "")
-            if broken_path and Path(broken_path).is_file():
-                from app.multiview import (
-                    complete_legacy_scene_pack,
-                    pack_result_ok,
-                    scene_multiview_enabled,
-                )
-
-                if scene_multiview_enabled():
-                    try:
-                        pack = await complete_legacy_scene_pack(
-                            project_id,
-                            scene.name,
-                            episode_no,
-                            style,
-                        )
-                        if not pack_result_ok(pack):
-                            raise hiagent.ProviderError(
-                                f"场景多视角资产包结构不完整：{scene.name}"
-                            )
-                    except Exception as exc:
-                        conn.execute(
-                            """UPDATE scene_references
-                                  SET pack_status='failed',group_qa_json=?
-                                WHERE id=?""",
-                            (
-                                json.dumps(
-                                    {
-                                        "status": "failed",
-                                        "error": str(exc),
-                                        "recovery": "resume_missing_views",
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                                broken["id"],
-                            ),
-                        )
-                        conn.commit()
-                        raise
-                    _update_bible_scene_canonical(
-                        conn,
-                        project_id,
-                        scene.name,
-                        scene.scene_canonical,
-                        broken_path,
-                    )
-                    return {
-                        "image_path": broken_path,
-                        "reused": True,
-                        "resumed_pack": True,
-                        "pack_status": "ready",
-                    }
-                return {
-                    "image_path": broken_path,
-                    "reused": True,
-                    "pack_status": str(broken["pack_status"] or ""),
-                }
-            conn.execute(
-                "DELETE FROM scene_references WHERE id=?",
-                (broken["id"],),
-            )
+        if broken and not (broken["image_path"] and Path(broken["image_path"]).is_file()):
+            conn.execute("DELETE FROM scene_references WHERE id=?", (broken["id"],))
             conn.commit()
         image_path = await _generate_and_register_scene(
             project_id,
@@ -2011,42 +1898,17 @@ async def _ensure_reactive_scene_image(
         _update_bible_scene_canonical(
             conn, project_id, scene.name, scene.scene_canonical, image_path,
         )
+        pack_status = "primary_ready"
         try:
-            from app.multiview import (
-                complete_legacy_scene_pack,
-                pack_result_ok,
-                scene_multiview_enabled,
-            )
+            from app.multiview import complete_legacy_scene_pack, scene_multiview_enabled
             if scene_multiview_enabled():
                 pack = await complete_legacy_scene_pack(
                     project_id, scene.name, episode_no, style,
                 )
-                if not pack_result_ok(pack):
-                    raise hiagent.ProviderError(
-                        f"场景多视角资产包结构不完整：{scene.name}"
-                    )
-        except Exception as exc:
-            failed = _open_scene_ref(conn, project_id, scene.name)
-            if failed:
-                conn.execute(
-                    """UPDATE scene_references
-                          SET pack_status='failed',group_qa_json=?
-                        WHERE id=?""",
-                    (
-                        json.dumps(
-                            {
-                                "status": "failed",
-                                "error": str(exc),
-                                "recovery": "resume_missing_views",
-                            },
-                            ensure_ascii=False,
-                        ),
-                        failed["id"],
-                    ),
-                )
-                conn.commit()
-            raise
-        return {"image_path": image_path, "reused": False, "pack_status": "ready"}
+                pack_status = str((pack or {}).get("status") or "primary_ready")
+        except Exception:  # noqa: BLE001 主图已经可用；附加视角沿用人物包的安全降级语义
+            pack_status = "partial_fallback"
+        return {"image_path": image_path, "reused": False, "pack_status": pack_status}
 
 
 async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenplay, bible) -> dict:

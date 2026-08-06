@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import math
 import re
 
 # 镜头数量由剧情交付和场景上下文决定，不设产品软/硬上限。
@@ -129,50 +128,17 @@ HUMAN_DURATION_REVIEW_TAG = "duration_human_reviewed"
 
 
 def episode_target_from_spine(spine_beat_count: int) -> int:
-    """Estimate duration from the delivered spine without a product maximum."""
+    """按主线节拍估算集目标时长（秒）：约 1 beat ≈ 1~2 镜 × 5s，落入产品档位。"""
     from app import config
 
     n = max(0, int(spine_beat_count or 0))
     if n <= 0:
         return config.EPISODE_TARGET_DEFAULT_S
     raw = n * 2 * PREFERRED_SHOT_DURATION_S
-    raw = max(config.EPISODE_TARGET_MIN_S, raw)
+    raw = max(config.EPISODE_TARGET_MIN_S, min(80, raw))
     step = config.EPISODE_TARGET_STEP_S
-    return max(config.EPISODE_TARGET_MIN_S, math.ceil(raw / step) * step)
-
-
-def screenplay_required_duration_s(screenplay, *, minimum_s: int = 0) -> int:
-    """Derive an unbounded duration floor from spoken, spine, and scene capacity."""
-    from app import config
-    from app.spoken_contract import content_char_count
-
-    spoken_chars = sum(
-        content_char_count(turn.line)
-        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
-        for turn in (chain.turns or [])
-    )
-    spoken_rate = (
-        config.SPOKEN_CHARS_PER_5_SECONDS
-        / config.VIDEO_DURATION_MIN_S
-    )
-    spoken_seconds = math.ceil(spoken_chars / spoken_rate) if spoken_chars else 0
-    spine = getattr(screenplay, "plot_spine", None)
-    beats = list(getattr(spine, "spine_beats", None) or [])
-    must_keep = [beat for beat in beats if beat.must_keep] or beats
-    beat_seconds = len(must_keep) * 2 * PREFERRED_SHOT_DURATION_S
-    scene_seconds = (
-        len(getattr(screenplay, "scene_outline", None) or [])
-        * PREFERRED_SHOT_DURATION_S
-    )
-    raw = max(
-        int(minimum_s or 0),
-        config.EPISODE_TARGET_MIN_S,
-        spoken_seconds,
-        beat_seconds,
-        scene_seconds,
-    )
-    step = config.EPISODE_TARGET_STEP_S
-    return math.ceil(raw / step) * step
+    rounded = ((raw + step // 2) // step) * step
+    return min(config.EPISODE_TARGET_MAX_S, max(config.EPISODE_TARGET_MIN_S, rounded))
 
 
 def shot_duration_should_prefer_five(*, spoken_chars: int, action_beats: int) -> bool:

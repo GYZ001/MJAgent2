@@ -25,7 +25,6 @@ from app.schemas import (
     Storyboard,
     StoryboardOutline,
 )
-from app.spoken_contract import onscreen_text_for_capacity
 
 NARRATIVE_CONTRACT_VERSION = "narrative-continuity.v1"
 AUDIENCE_PERCEPTUAL_SURFACE_VERSION = "audience-perceptual-surface.v1"
@@ -256,20 +255,18 @@ def _target_state_fragment_matches(delta: Any, fragment: dict[str, Any], state: 
     if dimension == "character_goal":
         actual = state.character_goal_hypotheses
         if set(fragment) == {"character_goal_hypotheses"}:
-            return fragment["character_goal_hypotheses"] == actual
+            return _json_fragment_matches(fragment["character_goal_hypotheses"], actual)
         return _json_fragment_matches(fragment, actual)
     if dimension == "spatial_temporal":
         wrapped = {
             "spatial_model": state.spatial_model,
             "temporal_model": state.temporal_model,
         }
-        if fragment and set(fragment).issubset(wrapped):
-            return all(fragment[key] == wrapped[key] for key in fragment)
         return _json_fragment_matches(fragment, wrapped)
     if dimension == "affective":
         actual = state.affective_state
         if set(fragment) == {"affective_state"}:
-            return fragment["affective_state"] == actual
+            return _json_fragment_matches(fragment["affective_state"], actual)
         return _json_fragment_matches(fragment, actual)
     if dimension == "question":
         return _json_fragment_matches(
@@ -279,17 +276,7 @@ def _target_state_fragment_matches(delta: Any, fragment: dict[str, Any], state: 
     if dimension == "attention":
         return _json_fragment_matches(
             fragment,
-            {
-                "attention_residue_ids": state.attention_residue_ids,
-                "working_memory": [
-                    (
-                        item.model_dump(mode="json")
-                        if hasattr(item, "model_dump")
-                        else item
-                    )
-                    for item in state.working_memory
-                ],
-            },
+            {"attention_residue_ids": state.attention_residue_ids},
         )
     # Open semantic dimensions remain expressible, but must point at an actual
     # changed fragment of the snapshot instead of becoming unbound prose.
@@ -846,14 +833,7 @@ def validate_screenplay_narrative(
                 errors.append(f"[EVENT_PRECONDITION_FROM_FUTURE] {event_id} 依赖由未来事件 {producer} 才产生的 {fact_id}")
 
     initial_facts = set(plan.initial_state_fact_ids)
-    produced_facts = {
-        *fact_producer,
-        *(
-            fact_id
-            for action in index.actions.values()
-            for fact_id in action.effects_add
-        ),
-    }
+    produced_facts = set(fact_producer)
     if initial_facts & produced_facts:
         errors.append(
             f"[INITIAL_FACT_HAS_PRODUCER] 初始事实不得同时由本作用域事件产生："
@@ -927,35 +907,15 @@ def validate_screenplay_narrative(
                 errors.append(f"[ACTION_SPLIT_BOUNDARY_MISSING] {action_id} 引用了不存在阶段 {boundary_id}")
 
     for event_id, event in index.events.items():
-        bound_actions = [
-            index.actions[action_id]
-            for action_id in event.action_ids
-            if action_id in index.actions
-        ]
-        action_adds = {
-            fact_id
-            for action in bound_actions
-            for fact_id in action.effects_add
-        }
-        action_removes = {
-            fact_id
-            for action in bound_actions
-            for fact_id in action.effects_remove
-        }
         for action_id in event.action_ids:
             action = index.actions.get(action_id)
             if action is None:
                 continue
-            external_preconditions = (
-                set(action.precondition_fact_ids) - action_adds
-            )
-            net_adds = set(action.effects_add) - action_removes
-            net_removes = set(action.effects_remove) - action_adds
-            if not external_preconditions.issubset(event.precondition_fact_ids):
+            if not set(action.precondition_fact_ids).issubset(event.precondition_fact_ids):
                 errors.append(f"[ACTION_EVENT_PRECONDITION_MISMATCH] {event_id} 未承接 {action_id} 的全部前置事实")
-            if not net_adds.issubset(event.effects_add):
+            if not set(action.effects_add).issubset(event.effects_add):
                 errors.append(f"[ACTION_EVENT_EFFECT_MISMATCH] {event_id} 未承接 {action_id} 的新增事实")
-            if not net_removes.issubset(event.effects_remove):
+            if not set(action.effects_remove).issubset(event.effects_remove):
                 errors.append(f"[ACTION_EVENT_EFFECT_MISMATCH] {event_id} 未承接 {action_id} 的移除事实")
 
     structurally_equivalent_pairs: set[frozenset[str]] = set()
@@ -1414,11 +1374,10 @@ def validate_screenplay_narrative(
                     if (
                         delta.dimension == "attention"
                         and set(state_in.attention_residue_ids) == set(state_out.attention_residue_ids)
-                        and state_in.working_memory == state_out.working_memory
                     ):
                         errors.append(
                             f"[TARGET_DELTA_STATE_MISMATCH] {delta.target_delta_id} 声明注意变化，"
-                            "但 attention_residue_ids 与 working_memory 均未变化"
+                            "但 attention_residue_ids 未变化"
                         )
                     if delta.dimension == "attention":
                         covered_state_fields.update({"attention_residue_ids", "working_memory"})
@@ -1436,11 +1395,11 @@ def validate_screenplay_narrative(
                         f"入/出状态的结构变化没有 target_delta 负责：{sorted(uncovered_fields)}"
                     )
                 before_by_prop = {
-                    item.proposition_id: (item.stance, item.confidence)
+                    item.proposition_id: item.model_dump(mode="json", exclude={"proposition_id"})
                     for item in state_in.beliefs
                 }
                 after_by_prop = {
-                    item.proposition_id: (item.stance, item.confidence)
+                    item.proposition_id: item.model_dump(mode="json", exclude={"proposition_id"})
                     for item in state_out.beliefs
                 }
                 changed_belief_props = {
@@ -1879,11 +1838,7 @@ def validate_storyboard_narrative(
     contribution_character_owners: dict[str, str] = {}
     contribution_audience_owners: dict[str, str] = {}
     delta_paths = {
-        delta.target_delta_id: (
-            path.audience_prior_id,
-            delta,
-            path.audience_state_out_target_id,
-        )
+        delta.target_delta_id: (path.audience_prior_id, delta)
         for intent in plan.experience_intents
         for path in intent.audience_paths
         for delta in path.target_deltas
@@ -2337,7 +2292,7 @@ def validate_storyboard_narrative(
                 path_contract = delta_paths.get(delta_id)
                 if path_contract is None:
                     continue
-                prior_id, delta, final_state_id = path_contract
+                prior_id, delta = path_contract
                 current_path = current_paths.get(prior_id)
                 if current_path is None:
                     errors.append(f"[SHOT_TARGET_PRIOR_PATH_MISSING] {label}/{delta_id} 没有对应观众路径")
@@ -2346,24 +2301,8 @@ def validate_storyboard_narrative(
                 state_out = index.audience_states.get(current_path.audience_state_out_target_id)
                 if state_in and not _target_state_fragment_matches(delta, delta.from_state, state_in):
                     errors.append(f"[SHOT_TARGET_FROM_STATE_MISMATCH] {label}/{delta_id} 未从合同约定的观众状态出发")
-                if state_out and not _target_state_fragment_matches(
-                    delta,
-                    delta.to_state,
-                    state_out,
-                ):
-                    final_state = index.audience_states.get(final_state_id)
-                    coarse_snapshot_holds = (
-                        current_path.audience_state_in_id
-                        == current_path.audience_state_out_target_id
-                        and final_state is not None
-                        and _target_state_fragment_matches(
-                            delta,
-                            delta.to_state,
-                            final_state,
-                        )
-                    )
-                    if not coarse_snapshot_holds:
-                        errors.append(f"[SHOT_TARGET_TO_STATE_MISMATCH] {label}/{delta_id} 未到达合同约定的观众状态")
+                if state_out and not _target_state_fragment_matches(delta, delta.to_state, state_out):
+                    errors.append(f"[SHOT_TARGET_TO_STATE_MISMATCH] {label}/{delta_id} 未到达合同约定的观众状态")
             if contribution.affective_delta and not any(
                 _declared_change_matches(
                     contribution.affective_delta,
@@ -2444,7 +2383,7 @@ def validate_storyboard_narrative(
                 }
             )
             required_text = getattr(shot, "required_text", None)
-            onscreen_text = onscreen_text_for_capacity(required_text)
+            onscreen_text = _norm(getattr(required_text, "exact_text", ""))
             from app.spoken_contract import content_char_count
 
             linguistic_chars = max(
@@ -2479,7 +2418,7 @@ def validate_storyboard_narrative(
             ):
                 if delta_id not in delta_paths:
                     continue
-                prior_id, delta, _final_state_id = delta_paths[delta_id]
+                prior_id, delta = delta_paths[delta_id]
                 processing_by_prior[prior_id] += max(
                     0.0, delta.required_processing_s,
                 )

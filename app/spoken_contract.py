@@ -85,25 +85,6 @@ def content_char_count(text: str | None) -> int:
     return total
 
 
-def onscreen_text_for_capacity(required_text: object) -> str:
-    """Return only text that the viewer must visually read in this shot."""
-    if required_text is None:
-        return ""
-    if isinstance(required_text, dict):
-        strategy = str(
-            required_text.get("strategy") or "deterministic_insert"
-        ).strip().casefold()
-        exact_text = required_text.get("exact_text")
-    else:
-        strategy = str(
-            getattr(required_text, "strategy", None) or "deterministic_insert"
-        ).strip().casefold()
-        exact_text = getattr(required_text, "exact_text", "")
-    if strategy in {"audio_only", "none"}:
-        return ""
-    return str(exact_text or "")
-
-
 def _condense(text: str | None) -> str:
     """比较用的归一化文本：标点/空白不参与发声，不应制造伪冲突。"""
     return "".join(

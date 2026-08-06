@@ -41,13 +41,19 @@ def digest(value: Any) -> str:
 def episode_fingerprint(episode_id: str) -> str:
     conn = get_conn()
     ep = conn.execute(
-        "SELECT * FROM episodes WHERE id=?",
+        """SELECT id, project_id, source_chapters, status, screenplay_status, screenplay_artifact_id,
+                  storyboard_artifact_id, active_storyboard_run_id,
+                  storyboard_outline_json, screenplay_json
+           FROM episodes WHERE id=?""",
         (episode_id,),
     ).fetchone()
     if not ep:
         raise HTTPException(404, "剧集不存在")
     shots = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+        """SELECT id, shot_uid, shot_no, storyboard_artifact_id, duration_s, shot_contract_json,
+                  action_desc, first_frame_desc, last_frame_desc, source_excerpt,
+                  characters, dialogues, transition
+           FROM shots WHERE episode_id=? ORDER BY shot_no""",
         (episode_id,),
     ).fetchall()
     try:
@@ -92,38 +98,27 @@ def episode_fingerprint(episode_id: str) -> str:
 def monotonic_snapshot_version(episode_id: str, fingerprint: str | None = None) -> int:
     fingerprint = fingerprint or episode_fingerprint(episode_id)
     conn = get_conn()
-    owns_transaction = not conn.in_transaction
-    if owns_transaction:
-        conn.execute("BEGIN IMMEDIATE")
-    try:
-        row = conn.execute(
-            "SELECT snapshot_version, state_fingerprint FROM storyboard_workspace_state WHERE episode_id=?",
-            (episode_id,),
-        ).fetchone()
-        stamp = now()
-        if row is None:
-            conn.execute(
-                "INSERT INTO storyboard_workspace_state(episode_id,snapshot_version,state_fingerprint,updated_at) "
-                "VALUES(?,?,?,?)",
-                (episode_id, 1, fingerprint, stamp),
-            )
-            version = 1
-        elif row["state_fingerprint"] != fingerprint:
-            version = int(row["snapshot_version"]) + 1
-            conn.execute(
-                "UPDATE storyboard_workspace_state "
-                "SET snapshot_version=?,state_fingerprint=?,updated_at=? WHERE episode_id=?",
-                (version, fingerprint, stamp, episode_id),
-            )
-        else:
-            version = int(row["snapshot_version"])
-        if owns_transaction:
-            conn.commit()
-        return version
-    except Exception:
-        if owns_transaction:
-            conn.rollback()
-        raise
+    row = conn.execute(
+        "SELECT snapshot_version, state_fingerprint FROM storyboard_workspace_state WHERE episode_id=?",
+        (episode_id,),
+    ).fetchone()
+    stamp = now()
+    if row is None:
+        conn.execute(
+            "INSERT INTO storyboard_workspace_state(episode_id,snapshot_version,state_fingerprint,updated_at) VALUES(?,?,?,?)",
+            (episode_id, 1, fingerprint, stamp),
+        )
+        version = 1
+    elif row["state_fingerprint"] != fingerprint:
+        version = int(row["snapshot_version"]) + 1
+        conn.execute(
+            "UPDATE storyboard_workspace_state SET snapshot_version=?,state_fingerprint=?,updated_at=? WHERE episode_id=?",
+            (version, fingerprint, stamp, episode_id),
+        )
+    else:
+        version = int(row["snapshot_version"])
+    conn.commit()
+    return version
 
 
 def finalize_storyboard_cancellation(
@@ -145,14 +140,13 @@ def finalize_storyboard_cancellation(
     from app.orchestration.engine import WorkflowRecorder
     from app.storyboard_supervisor import (
         SupervisorCheckpoint,
-        _recover_outline_from_current_artifact,
         load_latest_checkpoint,
         save_checkpoint,
     )
 
     conn = get_conn()
     episode = conn.execute(
-        "SELECT * FROM episodes WHERE id=?",
+        "SELECT status,active_storyboard_run_id FROM episodes WHERE id=?",
         (episode_id,),
     ).fetchone()
     if not episode:
@@ -178,14 +172,6 @@ def finalize_storyboard_cancellation(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"])
     checkpoint = load_latest_checkpoint(episode_id)
-    if checkpoint is not None and not episode["storyboard_outline_json"]:
-        recovered_outline = _recover_outline_from_current_artifact(
-            conn,
-            episode,
-            checkpoint,
-        )
-        if recovered_outline is not None:
-            save_checkpoint(checkpoint, run_id=effective_run_id)
     checkpoint_created = False
     if checkpoint is None and paused:
         checkpoint = SupervisorCheckpoint(
@@ -207,14 +193,8 @@ def finalize_storyboard_cancellation(
 
     target_status = "scripting" if paused else ("script_failed" if shot_count else "planned")
     if paused:
-        outline_note = (
-            "，首版分镜大纲也已保留"
-            if checkpoint is not None and checkpoint.outline_artifact_id
-            else ""
-        )
         script_error = (
-            f"用户已暂停分镜任务：已保留 {shot_count} 个工作镜头和安全检查点"
-            f"{outline_note}，"
+            f"用户已暂停分镜任务：已保留 {shot_count} 个工作镜头和安全检查点，"
             "可继续任务或清空分镜。"
         )
     else:
@@ -308,46 +288,30 @@ def require_preview(
         _inc("storyboard_preview_rejected_total", action=action_type, reason="missing")
         raise HTTPException(428, "请先查看并批准最新影响预览")
     conn = get_conn()
-    owns_transaction = consume and not conn.in_transaction
-    if owns_transaction:
-        conn.execute("BEGIN IMMEDIATE")
+    row = conn.execute(
+        "SELECT * FROM storyboard_action_previews WHERE token=?", (token,),
+    ).fetchone()
+    if not row or row["action_type"] != action_type or row["episode_id"] != episode_id:
+        raise HTTPException(409, "预览凭据与本次操作不匹配，请重新预览")
+    if shot_id is not None and row["shot_id"] != shot_id:
+        raise HTTPException(409, "预览凭据对应了其他镜头，请重新预览")
+    if row["consumed_at"] is not None:
+        _inc("storyboard_preview_rejected_total", action=action_type, reason="consumed")
+        raise HTTPException(409, "该预览已使用，请重新预览")
+    if float(row["expires_at"]) < now():
+        _inc("storyboard_preview_rejected_total", action=action_type, reason="expired")
+        raise HTTPException(409, "预览已过期，请重新预览")
+    current = episode_fingerprint(episode_id)
+    if current != row["baseline_fingerprint"]:
+        _inc("storyboard_preview_rejected_total", action=action_type, reason="state_drift")
+        raise HTTPException(409, "预览后分镜或费率基线已变化，请重新预览")
+    if consume:
+        conn.execute("UPDATE storyboard_action_previews SET consumed_at=? WHERE token=?", (now(), token))
+        conn.commit()
     try:
-        row = conn.execute(
-            "SELECT * FROM storyboard_action_previews WHERE token=?", (token,),
-        ).fetchone()
-        if not row or row["action_type"] != action_type or row["episode_id"] != episode_id:
-            raise HTTPException(409, "预览凭据与本次操作不匹配，请重新预览")
-        if shot_id is not None and row["shot_id"] != shot_id:
-            raise HTTPException(409, "预览凭据对应了其他镜头，请重新预览")
-        if row["consumed_at"] is not None:
-            _inc("storyboard_preview_rejected_total", action=action_type, reason="consumed")
-            raise HTTPException(409, "该预览已使用，请重新预览")
-        if float(row["expires_at"]) < now():
-            _inc("storyboard_preview_rejected_total", action=action_type, reason="expired")
-            raise HTTPException(409, "预览已过期，请重新预览")
-        current = episode_fingerprint(episode_id)
-        if current != row["baseline_fingerprint"]:
-            _inc("storyboard_preview_rejected_total", action=action_type, reason="state_drift")
-            raise HTTPException(409, "预览后分镜、运行状态或费率基线已变化，请重新预览")
-        if consume:
-            consumed = conn.execute(
-                "UPDATE storyboard_action_previews SET consumed_at=? "
-                "WHERE token=? AND consumed_at IS NULL",
-                (now(), token),
-            )
-            if consumed.rowcount != 1:
-                raise HTTPException(409, "该预览已被其他请求使用，请重新预览")
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except json.JSONDecodeError:
-            raise HTTPException(409, "预览数据损坏，请重新预览") from None
-        if owns_transaction:
-            conn.commit()
-        return payload
-    except Exception:
-        if owns_transaction:
-            conn.rollback()
-        raise
+        return json.loads(row["payload_json"] or "{}")
+    except json.JSONDecodeError:
+        raise HTTPException(409, "预览数据损坏，请重新预览") from None
 
 
 def consume_preview(token: str) -> None:
@@ -374,60 +338,23 @@ def shot_content_hash(shot_row) -> str:
     return digest({key: shot_row[key] for key in keys})
 
 
-def storyboard_mutation_block_reason(conn, episode_id: str) -> str | None:
+def _storyboard_run_active(conn, episode_id: str) -> bool:
     from app import task_registry
 
     if task_registry.active("storyboard", episode_id):
-        return "分镜正在生成或修复；请先暂停并等待进入可编辑状态"
-    if task_registry.active("video_completion", episode_id):
-        return "视频任务正在运行；请先在生成台停止任务并等待状态收口"
-    episode = conn.execute(
-        "SELECT status,screenplay_publish_fence,active_storyboard_run_id,active_video_run_id "
-        "FROM episodes WHERE id=?",
-        (episode_id,),
-    ).fetchone()
-    if not episode:
-        return "剧集不存在"
-    if episode["screenplay_publish_fence"]:
-        return "分镜正在执行确认或上游发布，请等待当前原子操作完成"
+        return True
     active_statuses = tuple(sorted(evidence_repository.ACTIVE_RUN_STATUSES))
     marks = ",".join("?" for _ in active_statuses)
     row = conn.execute(
-        f"""SELECT workflow_type FROM workflow_runs
+        f"""SELECT 1 FROM workflow_runs
               WHERE scope_type='episode' AND scope_id=?
-                AND workflow_type IN ('storyboard','episode_video_completion')
+                AND workflow_type='storyboard'
                 AND status IN ({marks})
                 AND recovered_by_run_id IS NULL
               LIMIT 1""",
         (episode_id, *active_statuses),
     ).fetchone()
-    if row and row["workflow_type"] == "episode_video_completion":
-        return "视频任务仍处于活动状态；请先在生成台停止任务并等待运行收口"
-    if row or episode["active_storyboard_run_id"]:
-        return "分镜任务仍处于活动状态；请先暂停并等待运行收口"
-    if episode["active_video_run_id"] or episode["status"] == "generating":
-        return "视频任务仍处于活动状态；请先在生成台停止任务并等待运行收口"
-    media_job = conn.execute(
-        """SELECT 1 FROM jobs
-             WHERE episode_id=?
-               AND kind IN ('video','scene','reference','video_generation')
-               AND status IN ('queued','pending','running','waiting','waiting_provider')
-             LIMIT 1""",
-        (episode_id,),
-    ).fetchone()
-    if media_job:
-        return "本集仍有媒体任务写入；请先停止任务再修改分镜"
-    return None
-
-
-def assert_storyboard_mutation_allowed(conn, episode_id: str) -> None:
-    reason = storyboard_mutation_block_reason(conn, episode_id)
-    if reason:
-        raise HTTPException(409, reason)
-
-
-def _storyboard_run_active(conn, episode_id: str) -> bool:
-    return storyboard_mutation_block_reason(conn, episode_id) is not None
+    return bool(row)
 
 
 def create_edit_session(shot_id: str) -> dict[str, Any]:
@@ -435,7 +362,9 @@ def create_edit_session(shot_id: str) -> dict[str, Any]:
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot:
         raise HTTPException(404, "镜头不存在")
-    assert_storyboard_mutation_allowed(conn, shot["episode_id"])
+    ep = conn.execute("SELECT status FROM episodes WHERE id=?", (shot["episode_id"],)).fetchone()
+    if not ep or _storyboard_run_active(conn, shot["episode_id"]):
+        raise HTTPException(409, "分镜正在生成或修复；请先暂停并等待进入可编辑状态")
     token = f"sblease_{secrets.token_urlsafe(24)}"
     baseline_hash = shot_content_hash(shot)
     expires = now() + EDIT_LEASE_TTL_S
@@ -468,11 +397,9 @@ def require_edit_session(token: str | None, shot_id: str) -> dict[str, Any]:
         conn.commit()
         raise HTTPException(409, "编辑租约已过期；本地内容仍保留，请重新取得编辑基线")
     shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
-    if not shot:
-        raise HTTPException(409, "镜头已不存在，当前草稿只能保留，不能发布")
-    reason = storyboard_mutation_block_reason(conn, row["episode_id"])
-    if reason:
-        raise HTTPException(409, f"{reason}；当前草稿只能保留，不能发布")
+    ep = conn.execute("SELECT status FROM episodes WHERE id=?", (row["episode_id"],)).fetchone()
+    if not shot or not ep or _storyboard_run_active(conn, row["episode_id"]):
+        raise HTTPException(409, "任务已恢复运行，当前草稿只能保留，不能发布")
     current_hash = shot_content_hash(shot)
     if (shot["storyboard_artifact_id"] or None) != (row["baseline_artifact_id"] or None) or current_hash != row["baseline_content_hash"]:
         _inc("storyboard_stale_edit_blocked_total", episode_id=row["episode_id"], shot_id=shot_id)
@@ -641,23 +568,8 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
     """
     conn = get_conn()
     sources = chapter_sources(episode_id)
-    episode = conn.execute(
-        "SELECT screenplay_json FROM episodes WHERE id=?",
-        (episode_id,),
-    ).fetchone()
-    try:
-        screenplay_payload = json.loads(
-            (episode["screenplay_json"] if episode else None) or "{}"
-        )
-    except (TypeError, ValueError, json.JSONDecodeError):
-        screenplay_payload = {}
-    event_source_spans = {
-        str(item.get("event_id") or ""): str(item.get("source_span") or "")
-        for item in (screenplay_payload.get("events") or [])
-        if isinstance(item, dict) and str(item.get("event_id") or "")
-    }
     shots = conn.execute(
-        """SELECT s.id,s.shot_no,s.source_excerpt,s.shot_contract_json
+        """SELECT s.id,s.shot_no,s.source_excerpt
            FROM shots s
            LEFT JOIN storyboard_source_bindings b ON b.shot_id=s.id
            WHERE s.episode_id=? AND b.shot_id IS NULL
@@ -674,37 +586,6 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
             aligned = align_source_excerpt(candidate, source["content"] or "")
             if aligned is not None:
                 matches.append((aligned.match_chars, int(aligned.exact), source, aligned))
-        if not matches:
-            try:
-                contract = json.loads(row["shot_contract_json"] or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                contract = {}
-            event_candidates: list[str] = []
-            for event_id in contract.get("event_ids") or []:
-                source_span = event_source_spans.get(str(event_id), "").strip()
-                if not source_span:
-                    continue
-                _prefix, separator, span_text = source_span.partition("：")
-                if not separator:
-                    _prefix, separator, span_text = source_span.partition(":")
-                event_candidates.append(
-                    (span_text if separator else source_span).strip()
-                )
-            for event_candidate in event_candidates:
-                for source in sources:
-                    aligned = align_source_excerpt(
-                        event_candidate,
-                        source["content"] or "",
-                    )
-                    if aligned is not None:
-                        matches.append(
-                            (
-                                aligned.match_chars,
-                                int(aligned.exact),
-                                source,
-                                aligned,
-                            )
-                        )
         if not matches:
             unresolved.append(int(row["shot_no"]))
             continue

@@ -1,12 +1,7 @@
 import json
 import sqlite3
 
-from app.refs import (
-    _merge_generated_portraits,
-    effective_portrait_prompt,
-    portrait_appearance_anchor,
-    portrait_prompt,
-    production_appearance_anchor,
+from app.refs import _merge_generated_portraits, portrait_appearance_anchor, portrait_prompt
 )
 from app.multiview import character_view_prompt
 from app.portraits import bible_for_episode
@@ -32,53 +27,7 @@ def test_ordinary_portrait_prompt_keeps_standard_model_sheet_pose() -> None:
 
     assert "正面站立，中性表情，双臂自然下垂" in prompt
     assert "鞋底均不得贴边或出画" in prompt
-    assert "8% 安全边距" in prompt
-    assert "明显动画化比例和非照片级卡通渲染材质" in prompt
     assert "不得生成可误认成真人照片的写实人脸" in prompt
-    assert "禁止额外火焰、斗气光环" in prompt
-
-
-def test_portrait_prompt_keeps_only_clothed_visible_identity_traits() -> None:
-    anchor = (
-        "24岁女性，黑色长发，常穿低领露肤上衣配半身裙，杏眼，"
-        "标志性特征是粉色乳头、腰侧淡褐色小痣、左手臂烟疤与右眉上方细疤"
-    )
-
-    production_anchor = production_appearance_anchor(anchor)
-    prompt = portrait_prompt("3D动漫CG，虚构数字角色", anchor)
-
-    assert "粉色乳头" not in production_anchor
-    assert "腰侧淡褐色小痣" not in production_anchor
-    assert "低领露肤上衣" not in production_anchor
-    assert "左手臂烟疤" not in production_anchor
-    assert "右眉上方细疤" in production_anchor
-    assert "粉色乳头" not in prompt
-    assert "腰侧淡褐色小痣" not in prompt
-    assert "服装面料不透明并完整覆盖身体" in prompt
-
-
-def test_production_anchor_removes_behavior_and_subjective_identity_claims() -> None:
-    anchor = (
-        "40岁男性，短发，身材微胖，深色西装配白衬衫，"
-        "标志性特征是看向女性时色欲外露的眼神，气质强势"
-    )
-
-    production_anchor = production_appearance_anchor(anchor)
-
-    assert production_anchor == "40岁男性，短发，身材微胖，深色西装配白衬衫"
-
-
-def test_production_anchor_removes_sexualized_body_and_hosiery_emphasis() -> None:
-    anchor = (
-        "24岁女性，黑色长发，杏眼秀眉，身材丰满修长，"
-        "常穿简约通勤衬衫配及膝裙、丝袜、高跟鞋"
-    )
-
-    production_anchor = production_appearance_anchor(anchor)
-
-    assert production_anchor == (
-        "24岁女性，黑色长发，杏眼秀眉，"
-        "常穿简约通勤衬衫配及膝裙、高跟鞋"
     )
 
 

@@ -1,10 +1,5 @@
 from app.compiler import SOURCE_EXCERPT_MARKER, sanitize_seedance_prompt
-from app.worker import (
-    _is_seedance_copyright_restricted,
-    _is_seedance_input_image_sensitive,
-    _is_seedance_text_sensitive,
-    _video_model_rejection_guidance,
-)
+from app.worker import _is_seedance_copyright_restricted, _is_seedance_text_sensitive
 
 
 def test_sanitize_nonaggressive_only_softens_safety_terms() -> None:
@@ -81,36 +76,6 @@ def test_seedance_sensitive_error_detection() -> None:
     assert _is_seedance_text_sensitive("The request failed because the input text may contain sensitive information")
     assert _is_seedance_text_sensitive("输入文本可能包含敏感信息")
     assert not _is_seedance_text_sensitive("轮询超出 15 分钟预算")
-
-
-def test_seedance_input_image_privacy_detection() -> None:
-    assert _is_seedance_input_image_sensitive(
-        "InputImageSensitiveContentDetected.PrivacyInformation"
-    )
-    assert _is_seedance_input_image_sensitive(
-        "the input image 'content[1]' may contain real person"
-    )
-    assert _is_seedance_input_image_sensitive(
-        "输入图片可能包含真人隐私信息"
-    )
-    assert not _is_seedance_input_image_sensitive(
-        "InputTextSensitiveContentDetected"
-    )
-    assert not _is_seedance_text_sensitive(
-        "输入图片可能包含真人隐私信息"
-    )
-
-
-def test_seedance_privacy_rejection_keeps_planned_mode_and_points_to_models() -> None:
-    guidance = _video_model_rejection_guidance(
-        {"mode": "FIRST_LAST_FRAME_MODE"},
-        "the input image 'content[1]' may contain real person",
-    )
-
-    assert guidance is not None
-    assert guidance[0] == "VIDEO_INPUT_PRIVACY_REJECTED"
-    assert "FIRST_LAST_FRAME_MODE" in guidance[1]
-    assert "更换视频模型" in guidance[1]
 
 
 def test_seedance_copyright_error_detection() -> None:

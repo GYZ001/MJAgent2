@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import difflib
 import re
-import sys
 from typing import Any
 
 from app import config, textmatch
@@ -32,7 +31,6 @@ from app.continuity import (
     dialogue_focus_subject,
     dialogue_framing_errors,
     dialogue_two_shot_required,
-    implicit_speech_without_dialogue_errors,
     spoken_chars_from_shot,
 )
 from app.spoken_contract import (
@@ -41,34 +39,35 @@ from app.spoken_contract import (
     content_char_count,
     max_speech_chars,
     segments_from_timeline,
-    spoken_speakers,
     spoken_text_of,
     synchronize_spoken_contract,
     validate_spoken_contract,
 )
-from app.schemas import (Bible, EpisodeScreenplay, InformationItem,
-                         KeyDialogueChain, NarrativeContinuityPlan, PlotSpineBeat, Shot,
-                         Storyboard, StoryboardOutline, StoryEvent, SHOT_SIZES,
-                         CAMERA_MOVES, TRANSITIONS, CONTINUITY_MODES,
-                         DELIVERY_OWNERS)
+from app.schemas import (Bible, EpisodeScreenplay, InformationItem, NarrativeContinuityPlan,
+                         Shot, Storyboard, StoryboardOutline, StoryEvent, SHOT_SIZES,
+                         CAMERA_MOVES, TRANSITIONS, CONTINUITY_MODES, DELIVERY_OWNERS)
 from app.scene_contract import (
     compose_scene_setting,
     scene_name_of,
     scene_time_of,
     split_legacy_scene_setting,
 )
-from app.source_excerpt import index_source_segments
 from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
     ACTION_DESC_TARGET_MIN,
+    DROP_LIST_MIN,
     DIALOGUE_CHAIN_TURNS_HARD_MAX,
     DURATION_REVIEW_RISK_TAG,
     HUMAN_DURATION_REVIEW_TAG,
     KEY_LINES_MIN,
+    KEY_PLOT_POINTS_MAX,
     KEY_PLOT_POINTS_MIN,
     PREFERRED_SHOT_DURATION_S,
+    SCENE_OUTLINE_MAX,
     SCENE_OUTLINE_MIN,
+    SHOT_HARD_MAX,
+    SPINE_BEATS_MAX,
     SPINE_BEATS_MIN,
     duration_gt5_errors,
     overdetail_errors,
@@ -142,9 +141,9 @@ def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
 
 
 def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
-    """镜头数由剧情交付决定；上界仅为旧调用方需要的无界整数哨兵。"""
+    """镜头数由剧情完整覆盖决定，仅保留防失控的技术硬上限。"""
     _ = target_duration_s
-    return 1, sys.maxsize
+    return 1, SHOT_HARD_MAX
 
 
 def _voiced_shot_count(shots: list[Shot]) -> int:
@@ -380,7 +379,7 @@ def validate_storyboard(
     if target_duration_s % beat_unit != 0:
         errors.append(
             f"目标时长 {target_duration_s}s 不是 {beat_unit}s 的整数倍；"
-            f"节拍单元按 {beat_unit}s 换算，目标时长不设上限")
+            f"节拍单元按 5s 换算要求目标取 {'/'.join(str(x) for x in config.EPISODE_TARGET_CHOICES)}s")
     # 镜头数量和整集总时长不设产品上限；完整覆盖剧本是唯一收束条件。
 
     scene_last_seen: dict[str, int] = {}
@@ -480,7 +479,6 @@ def validate_storyboard(
         ))
         # 同一镜头只能有一套有效口播：dialogues 与 audio_timeline 分叉即 blocker。
         errors.extend(spoken_contract_coherence_errors(shot))
-        errors.extend(implicit_speech_without_dialogue_errors(shot))
         # 产品合同：禁止一切旁白/内心OS；信息由真实台词或画面动作承载。
         narration_len = len((shot.narration or "").strip())
         if narration_len > 0:
@@ -540,19 +538,23 @@ def validate_storyboard(
             if action is not None
             for target_id in action.target_ids
         }
-        spoken_identity_names = set(spoken_speakers(shot))
         delivered_actor_ids = {
             *shot.characters,
             *(shot.characters_visible or []),
             *(shot.visible_entity_ids or []),
-            *spoken_identity_names,
+            *(shot.audio_cast or []),
+            *(
+                (dialogue.speaker or "").strip()
+                for dialogue in (shot.dialogues or [])
+                if (dialogue.speaker or "").strip()
+            ),
             *(shot.offscreen_action_actor_ids or []),
         }
         delivered_target_ids = {
             *shot.characters,
             *(shot.characters_visible or []),
             *(shot.visible_entity_ids or []),
-            *spoken_identity_names,
+            *(shot.audio_cast or []),
             *(shot.offscreen_action_target_ids or []),
         }
         missing_task_actors = task_actor_ids - delivered_actor_ids
@@ -612,7 +614,18 @@ def validate_storyboard(
                     f"{tag}.characters_visible 含「{name}」，但 characters 中没有该角色；"
                     "可见名单必须是镜头角色名单的子集"
                 )
-        for name in spoken_speakers(shot):
+        contract_speakers = list(shot.audio_cast or [])
+        contract_speakers.extend(
+            (item.speaker_id or "").strip()
+            for item in (shot.audio_timeline or [])
+            if (item.speaker_id or "").strip()
+        )
+        contract_speakers.extend(
+            (dialogue.speaker or "").strip()
+            for dialogue in (shot.dialogues or [])
+            if (dialogue.speaker or "").strip()
+        )
+        for name in dict.fromkeys(contract_speakers):
             if narrative_authority:
                 try:
                     if identity_resolver is None:
@@ -1226,6 +1239,7 @@ KEY_POINT_COVERAGE = textmatch.KEY_POINT_COVERAGE
 KEY_CONTENT_MAX_REPORT = 4       # 单条错误最多点名几条，避免错误列表过长把 prompt 撑爆
 MIN_KEY_LINES = KEY_LINES_MIN
 MIN_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MIN
+MAX_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MAX
 
 
 _strip_speaker = textmatch.strip_speaker
@@ -1409,204 +1423,6 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
     """Make structured dialogue chains authoritative for downstream key-line delivery."""
     if not script.dialogue_chains:
         return script
-    allowed_speakers = {
-        str(item.speaker_id or "").strip()
-        for item in (script.voice_bible or [])
-        if str(item.speaker_id or "").strip()
-    }
-    if script.narrative_plan is not None:
-        for identity in script.narrative_plan.identity_contracts:
-            allowed_speakers.update({
-                str(identity.identity_id or "").strip(),
-                str(identity.display_name or "").strip(),
-                *(
-                    str(voice_id or "").strip()
-                    for voice_id in (identity.voice_ids or [])
-                ),
-            })
-    for chain in script.dialogue_chains:
-        turns = list(chain.turns or [])
-        narrator_only_chain = bool(turns) and all(
-            str(item.speaker or "").strip() == "旁白"
-            for item in turns
-        )
-        normalized_turns = []
-        for index, turn in enumerate(turns):
-            speaker = str(turn.speaker or "").strip()
-            source = _condense(turn.source_text)
-            duplicate_source = bool(source) and any(
-                index != other_index
-                and (
-                    source == _condense(other.source_text)
-                    or source in _condense(other.source_text)
-                    or _condense(other.source_text) in source
-                )
-                for other_index, other in enumerate(turns)
-                if _condense(other.source_text)
-            )
-            source_contains_line = bool(
-                _condense(turn.line)
-                and _condense(turn.line) in source
-            )
-            if duplicate_source and (
-                (
-                    allowed_speakers
-                    and speaker not in allowed_speakers
-                )
-                or (
-                    speaker == "旁白"
-                    and (
-                        speaker not in allowed_speakers
-                        or not narrator_only_chain
-                    )
-                    and not source_contains_line
-                )
-            ):
-                line = str(turn.line or "").strip()
-                for separator in ("：", ":"):
-                    dialogue_line = f"{speaker}{separator}{line}"
-                    if dialogue_line in (script.full_script_text or ""):
-                        replacement = (
-                            line
-                            if speaker == "旁白"
-                            else f"{speaker.rstrip('，,。；; ')}，{line}"
-                        )
-                        script.full_script_text = script.full_script_text.replace(
-                            dialogue_line,
-                            replacement,
-                        )
-                continue
-            normalized_turns.append(turn)
-        chain.turns = normalized_turns
-    full_script_turns = _script_dialogue_turns(
-        script.full_script_text or ""
-    )
-
-    def chain_scene_nos(chain: KeyDialogueChain) -> set[int]:
-        identities = {
-            (
-                _condense(turn.speaker),
-                _condense(turn.line),
-            )
-            for turn in (chain.turns or [])
-        }
-        return {
-            scene_no
-            for scene_no, speaker, line in full_script_turns
-            if (_condense(speaker), _condense(line)) in identities
-        }
-
-    used_chain_ids = {
-        str(chain.chain_id or "").strip()
-        for chain in script.dialogue_chains
-        if str(chain.chain_id or "").strip()
-    }
-    next_chain_number = 1
-
-    def next_chain_id() -> str:
-        nonlocal next_chain_number
-        while f"DC{next_chain_number}" in used_chain_ids:
-            next_chain_number += 1
-        value = f"DC{next_chain_number}"
-        used_chain_ids.add(value)
-        next_chain_number += 1
-        return value
-
-    split_chains: list[KeyDialogueChain] = []
-    for chain in script.dialogue_chains:
-        located_groups: list[tuple[int, list[Any]]] = []
-        previous_scene = 0
-        for turn in chain.turns or []:
-            turn_identity = (
-                _condense(turn.speaker),
-                _condense(turn.line),
-            )
-            scene_no = next((
-                candidate_scene
-                for candidate_scene, speaker, line in full_script_turns
-                if (
-                    _condense(speaker),
-                    _condense(line),
-                ) == turn_identity
-            ), 0)
-            scene_no = scene_no or previous_scene
-            previous_scene = scene_no
-            if located_groups and located_groups[-1][0] == scene_no:
-                located_groups[-1][1].append(turn)
-            else:
-                located_groups.append((scene_no, [turn]))
-        nonzero_scenes = {
-            scene_no for scene_no, _turns in located_groups if scene_no
-        }
-        if len(nonzero_scenes) <= 1:
-            split_chains.append(chain)
-            continue
-        for group_index, (_scene_no, turns) in enumerate(located_groups):
-            split = chain.model_copy(deep=True)
-            split.chain_id = (
-                chain.chain_id
-                if group_index == 0
-                else next_chain_id()
-            )
-            split.topic = (
-                chain.topic
-                if group_index == 0
-                else f"{str(chain.topic or '').strip()}（续）"
-            )
-            split.turns = turns
-            if (
-                group_index > 0
-                and split.turns
-                and split.turns[0].function == "response"
-            ):
-                split.turns[0].function = "statement"
-            split_chains.append(split)
-    script.dialogue_chains = split_chains
-
-    merged_chains: list[KeyDialogueChain] = []
-    for chain in script.dialogue_chains:
-        if merged_chains:
-            previous = merged_chains[-1]
-            previous_topic = re.sub(
-                r"[（(]\s*续\s*[）)]\s*$",
-                "",
-                str(previous.topic or "").strip(),
-            )
-            current_topic = re.sub(
-                r"[（(]\s*续\s*[）)]\s*$",
-                "",
-                str(chain.topic or "").strip(),
-            )
-            first_function = (
-                str(chain.turns[0].function or "").strip()
-                if chain.turns else ""
-            )
-            combined_scenes = {
-                *chain_scene_nos(previous),
-                *chain_scene_nos(chain),
-            }
-            if (
-                previous_topic
-                and previous_topic == current_topic
-                and first_function == "response"
-                and len(combined_scenes) <= 1
-                and len(previous.turns) + len(chain.turns)
-                <= DIALOGUE_CHAIN_TURNS_HARD_MAX
-            ):
-                previous.turns = [
-                    *previous.turns,
-                    *chain.turns,
-                ]
-                continue
-            if (
-                previous_topic
-                and previous_topic == current_topic
-                and first_function == "response"
-                and len(combined_scenes) > 1
-            ):
-                chain.turns[0].function = "statement"
-        merged_chains.append(chain)
-    script.dialogue_chains = merged_chains
     flattened: list[str] = []
     for chain in script.dialogue_chains:
         for turn in chain.turns or []:
@@ -1660,19 +1476,15 @@ def validate_dialogue_chains(
     total_turns = 0
     full_turns = _script_dialogue_turns(script.full_script_text or "")
     full_texts = [turn[2] for turn in full_turns]
+    source_fragments = source_dialogue_fragments(source_text)
     required_lines = [line for line in (required_dialogue_lines or []) if (line or "").strip()]
     for chain_index, chain in enumerate(chains):
         tag = f"dialogue_chains[{chain_index}]"
         chain_id = (chain.chain_id or "").strip().upper()
         if not re.fullmatch(r"DC\d{1,3}", chain_id):
-            errors.append(
-                f"[DIALOGUE_CHAIN_ID_INVALID] {tag}.chain_id "
-                "必须使用 DC1、DC2 这类稳定编号"
-            )
+            errors.append(f"{tag}.chain_id 必须使用 DC1、DC2 这类稳定编号")
         elif chain_id in chain_ids:
-            errors.append(
-                f"[DIALOGUE_CHAIN_ID_INVALID] {tag}.chain_id=「{chain_id}」重复"
-            )
+            errors.append(f"{tag}.chain_id=「{chain_id}」重复")
         else:
             chain_ids.add(chain_id)
         if len((chain.topic or "").strip()) < 4:
@@ -1681,8 +1493,7 @@ def validate_dialogue_chains(
         total_turns += len(turns)
         if not 1 <= len(turns) <= DIALOGUE_CHAIN_TURNS_HARD_MAX:
             errors.append(
-                f"[DIALOGUE_CHAIN_LENGTH_INVALID] {tag}.turns "
-                f"需包含 1~{DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮"
+                f"{tag}.turns 需包含 1~{DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮"
             )
             continue
         if turns and (turns[0].function or "").strip() == "response":
@@ -1711,7 +1522,7 @@ def validate_dialogue_chains(
                 )
             if function not in _DIALOGUE_TURN_FUNCTIONS:
                 errors.append(
-                    f"[DIALOGUE_FUNCTION_INVALID] {turn_tag}.function=「{function}」非法；只能是 "
+                    f"{turn_tag}.function=「{function}」非法；只能是 "
                     "trigger|announcement|question|response|decision|statement"
                 )
             if function in _DIALOGUE_RESPONSE_FUNCTIONS and (
@@ -1727,10 +1538,7 @@ def validate_dialogue_chains(
                     _longest_run_ratio(source_line, source_text) < KEY_LINE_PRESENT_RATIO
                     and _bigram_coverage(source_line, source_text) < KEY_LINE_BIGRAM_COVERAGE
                 ):
-                    errors.append(
-                        f"[SOURCE_EVIDENCE_MISMATCH] {turn_tag}.source_text "
-                        f"未在本集原文中找到：{source_line}"
-                    )
+                    errors.append(f"{turn_tag}.source_text 未在本集原文中找到：{source_line}")
             candidates = _matching_text_indices(line, full_texts)
             # A short character-address line can fuzzily match an earlier,
             # unrelated utterance that merely contains the same name.  Prefer
@@ -1778,37 +1586,30 @@ def validate_dialogue_chains(
             f"dialogue_chains 共 {total_turns} 个话轮；请至少保留 {MIN_KEY_LINES} 个"
             "推动主线且可追溯的完整话轮"
         )
-    first_chain_source = (
-        (chains[0].turns[0].source_text or "").strip()
-        if chains and chains[0].turns else ""
-    )
-    first_chain_line = (
-        (chains[0].turns[0].line or "").strip()
-        if chains and chains[0].turns else ""
-    )
-    if (
-        first_chain_source
-        and first_chain_line
-        and not textmatch.spoken_digit_sequence_equivalent(
-            first_chain_source,
-            first_chain_line,
+    if source_fragments:
+        opening = source_fragments[0]
+        first_chain_source = (
+            (chains[0].turns[0].source_text or "").strip()
+            if chains and chains[0].turns else ""
         )
-        and _longest_run_ratio(
-            first_chain_line,
-            first_chain_source,
-        ) < KEY_LINE_PRESENT_RATIO
-        and _bigram_coverage(
-            first_chain_line,
-            first_chain_source,
-        ) < KEY_LINE_BIGRAM_COVERAGE
-    ):
-        errors.append(
-            "[SOURCE_EVIDENCE_MISMATCH] "
-            "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配："
-            f"原文证据「{first_chain_source}」→台词「{first_chain_line}」；"
-            "D001 必须引用语义支持首条改编对白的原文话语，"
-            "不能强绑整章第一处引号、拟声或已舍弃场景中的无关话语"
+        first_chain_line = (
+            (chains[0].turns[0].line or "").strip()
+            if chains and chains[0].turns else ""
         )
+        if _condense(opening) != _condense(first_chain_source):
+            errors.append(
+                f"原文开场第一句对白未作为 dialogue_chains[0].turns[0]：{opening}；"
+                "开场对白是第一条对白链锚点，不能在模型挑选 key_lines 前静默丢失"
+            )
+        elif (
+            not textmatch.spoken_digit_sequence_equivalent(opening, first_chain_line)
+            and _longest_run_ratio(opening, first_chain_line) < KEY_LINE_PRESENT_RATIO
+            and _bigram_coverage(opening, first_chain_line) < KEY_LINE_BIGRAM_COVERAGE
+        ):
+            errors.append(
+                f"开场对白锚点被改写到失去原意：原文「{opening}」→台词「{first_chain_line}」；"
+                "D001 只允许口语压缩，不得替换成另一句台词"
+            )
     if required_lines:
         chain_sources = [
             (turn.source_text or "").strip()
@@ -2171,51 +1972,6 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
             ))
     script.events = cleaned_events
     event_ids = {(e.event_id or "").strip() for e in cleaned_events if (e.event_id or "").strip()}
-    known_voice_ids = {
-        str(item.speaker_id or "").strip()
-        for item in (script.voice_bible or [])
-        if str(item.speaker_id or "").strip()
-    }
-    known_voice_ids.update(
-        str(turn.speaker or "").strip()
-        for chain in (script.dialogue_chains or [])
-        for turn in (chain.turns or [])
-        if str(turn.speaker or "").strip()
-    )
-
-    def normalized_speaker_id(item: InformationItem) -> str | None:
-        raw = str(item.speaker_id or "").strip()
-        if not raw or raw in known_voice_ids:
-            return raw or None
-        candidates = [
-            speaker
-            for speaker in known_voice_ids
-            if speaker and speaker in raw
-        ]
-        if len(candidates) == 1:
-            return candidates[0]
-        evidence = "；".join(
-            value
-            for value in (
-                str(item.content or "").strip(),
-                str(item.exact_text or "").strip(),
-            )
-            if value
-        )
-        positions = sorted(
-            (
-                evidence.find(speaker),
-                speaker,
-            )
-            for speaker in candidates
-            if evidence.find(speaker) >= 0
-        )
-        if positions and (
-            len(positions) == 1
-            or positions[0][0] < positions[1][0]
-        ):
-            return positions[0][1]
-        return raw
 
     # 3) 清洗 ledger：丢掉无中文 content 的空壳；event_id 空/非法时按序号挂到事件
     cleaned_ledger: list[InformationItem] = []
@@ -2241,7 +1997,7 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
             event_id=eid,
             content=content,
             delivery_owner=item.delivery_owner if item.delivery_owner in DELIVERY_OWNERS else "visual_action",
-            speaker_id=normalized_speaker_id(item),
+            speaker_id=item.speaker_id,
             exact_text=item.exact_text,
             reinforcement_allowed=bool(item.reinforcement_allowed),
             status=(item.status or "unassigned"),
@@ -2304,10 +2060,10 @@ def validate_plot_spine(
     if len((spine.episode_premise or "").strip()) < 8:
         errors.append("plot_spine.episode_premise 过短；请用一句话写本集主角要什么、碰到什么阻力")
     beats = spine.spine_beats or []
-    if len(beats) < SPINE_BEATS_MIN:
+    if not SPINE_BEATS_MIN <= len(beats) <= SPINE_BEATS_MAX:
         errors.append(
-            f"plot_spine.spine_beats 共 {len(beats)} 条；至少需要 {SPINE_BEATS_MIN} 条，"
-            "并完整覆盖有效剧情单元，数量不设上限"
+            f"plot_spine.spine_beats 共 {len(beats)} 条；必须在 {SPINE_BEATS_MIN}~{SPINE_BEATS_MAX} 条，"
+            "每条写清谁做了什么→局势变化"
         )
     beat_ids: set[str] = set()
     must_keep_count = 0
@@ -2331,128 +2087,18 @@ def validate_plot_spine(
         if not narrative_authority:
             errors.extend(overdetail_errors(
                 f"{beat.who}{beat.does}{beat.turn}", tag))
-    if beats and must_keep_count < 1:
+    if beats and must_keep_count < 3:
         errors.append(
-            "plot_spine 至少需要一条 must_keep=true 的实际剧情交付节拍"
+            f"plot_spine 中 must_keep=true 仅 {must_keep_count} 条；主线因果至少保留 3 条必拍节拍"
         )
     if len((spine.must_keep_ending or "").strip()) < 8:
         errors.append(
             "plot_spine.must_keep_ending 过短；请锁定本章收束（与原文本章结局同向，禁止发明下一章钩子）"
         )
-    return errors
-
-
-def validate_screenplay_source_coverage(
-    script: EpisodeScreenplay,
-    source_text: str | None,
-) -> list[str]:
-    """Every indexed source segment is delivered or has an explicit disposition."""
-    segments = index_source_segments(source_text or "")
-    if not segments:
-        return []
-    if not script.source_coverage:
-        return [
-            "source_coverage 为空；每个 SRC* 原文段必须明确标记为 "
-            "deliver/merge/context/duplicate，禁止静默删戏"
-        ]
-    expected = {segment.segment_id for segment in segments}
-    segments_by_id = {segment.segment_id: segment for segment in segments}
-    beat_ids = {
-        str(beat.beat_id or "").strip()
-        for beat in ((script.plot_spine.spine_beats if script.plot_spine else []) or [])
-        if str(beat.beat_id or "").strip()
-    }
-    beats_by_id = {
-        str(beat.beat_id or "").strip(): beat
-        for beat in ((script.plot_spine.spine_beats if script.plot_spine else []) or [])
-        if str(beat.beat_id or "").strip()
-    }
-    seen: set[str] = set()
-    errors: list[str] = []
-    for index, decision in enumerate(script.source_coverage):
-        segment_id = str(
-            (decision.get("source_segment_id") if isinstance(decision, dict) else decision.source_segment_id)
-            or ""
-        ).strip()
-        if segment_id not in expected:
-            errors.append(
-                f"source_coverage[{index}].source_segment_id={segment_id} 不属于当前原文"
-            )
-        if segment_id in seen:
-            errors.append(f"source_coverage 中 {segment_id} 重复")
-        seen.add(segment_id)
-        raw_beat_ids = (
-            decision.get("beat_ids", []) if isinstance(decision, dict) else decision.beat_ids
-        )
-        raw_beat_ids = list(raw_beat_ids or [])
-        unknown_beats = sorted(set(raw_beat_ids or []) - beat_ids)
-        if unknown_beats:
-            errors.append(
-                f"source_coverage[{index}] 引用了不存在的 beat_ids：{unknown_beats}"
-            )
-        disposition = (
-            decision.get("disposition") if isinstance(decision, dict) else decision.disposition
-        )
-        duplicate_of = (
-            decision.get("duplicate_of") if isinstance(decision, dict) else decision.duplicate_of
-        )
-        reason = (
-            decision.get("reason", "") if isinstance(decision, dict) else decision.reason
-        )
-        if disposition in {"deliver", "merge"}:
-            if not raw_beat_ids:
-                errors.append(
-                    f"[SOURCE_COVERAGE_LINK_MISSING] source_coverage[{index}] "
-                    f"{segment_id} 标记为 {disposition}，但没有绑定 beat_ids"
-                )
-            for beat_id in raw_beat_ids:
-                beat = beats_by_id.get(str(beat_id))
-                if beat is not None and segment_id not in set(beat.source_segment_ids or []):
-                    errors.append(
-                        f"[SOURCE_COVERAGE_LINK_MISMATCH] source_coverage[{index}] "
-                        f"{segment_id} 引用 {beat_id}，但该 beat 未反向引用此原文段"
-                    )
-        if disposition == "context" and len(str(reason or "").strip()) < 8:
-            errors.append(
-                f"[SOURCE_CONTEXT_UNLOCATED] source_coverage[{index}] {segment_id} "
-                "标记为 context 时必须说明它在场景、关系、因果或环境中的具体保留位置"
-            )
-        if (
-            disposition == "duplicate"
-            and duplicate_of not in expected
-        ):
-            errors.append(
-                f"source_coverage[{index}].duplicate_of={duplicate_of} 不属于当前原文"
-            )
-        elif disposition == "duplicate":
-            source_segment = segments_by_id.get(segment_id)
-            target_segment = segments_by_id.get(str(duplicate_of))
-            if (
-                source_segment is not None
-                and target_segment is not None
-                and segment_id == duplicate_of
-            ):
-                errors.append(
-                    f"[SOURCE_DUPLICATE_INVALID] source_coverage[{index}] "
-                    f"{segment_id} 不能声明自己重复自己"
-                )
-            elif source_segment is not None and target_segment is not None:
-                similarity = min(
-                    _bigram_coverage(source_segment.text, target_segment.text),
-                    _bigram_coverage(target_segment.text, source_segment.text),
-                )
-                if similarity < 0.55:
-                    errors.append(
-                        f"[SOURCE_DUPLICATE_UNPROVEN] source_coverage[{index}] "
-                        f"{segment_id} 与 {duplicate_of} 缺少可核验的重复关系"
-                    )
-    missing = sorted(expected - seen)
-    if missing:
-        shown = "、".join(missing[:20])
-        extra = f"（另有 {len(missing) - 20} 段）" if len(missing) > 20 else ""
+    drops = [d.strip() for d in (spine.drop_list or []) if d and d.strip()]
+    if len(drops) < DROP_LIST_MIN:
         errors.append(
-            f"source_coverage 漏掉 {len(missing)} 个原文段：{shown}{extra}；"
-            "必须交付、合并、作为上下文保留，或给出可核验的重复指向"
+            f"plot_spine.drop_list 仅 {len(drops)} 条；至少列出 {DROP_LIST_MIN} 条「本章有但不拍」的支线/气氛戏"
         )
     return errors
 
@@ -2468,73 +2114,8 @@ def validate_screenplay_spine_delivery(
         return []
     dialogue_turns = _script_dialogue_turns(script.full_script_text or "")
     missing: list[str] = []
-    all_spoken = "".join(spoken for _scene_no, _speaker, spoken in dialogue_turns)
-    full_delivery_text = action_text + "\n" + all_spoken
-
-    def _beat_is_substantially_delivered(beat: PlotSpineBeat) -> bool:
-        """Use broad semantic evidence for long beat summaries.
-
-        ``beat.does`` is authored by the same model and can be phrased more
-        narrowly or more explicitly than the screenplay body.  The gate should
-        catch real omissions, not require near-verbatim repetition of the
-        planning sentence.  We therefore combine subject presence, whole-beat
-        lexical coverage, and source-coverage linkage before falling back to
-        per-clause checks.
-        """
-        parts = [
-            beat.who or "",
-            beat.does or "",
-            beat.turn or "",
-            beat.purpose or "",
-        ]
-        claim = "。".join(part for part in parts if str(part).strip())
-        if not claim.strip():
-            return False
-        # Whole-beat coverage tolerates paraphrase better than requiring every
-        # comma-separated clause to independently pass.
-        if (
-            _longest_run_ratio(claim, full_delivery_text) >= 0.22
-            or _bigram_coverage(claim, full_delivery_text) >= 0.18
-        ):
-            return True
-        if beat.source_segment_ids:
-            linked = [
-                decision for decision in (script.source_coverage or [])
-                if str(
-                    (decision.get("source_segment_id") if isinstance(decision, dict) else decision.source_segment_id)
-                    or ""
-                ) in set(beat.source_segment_ids)
-                and (
-                    (beat.beat_id or "") in (
-                        (decision.get("beat_ids", []) if isinstance(decision, dict) else decision.beat_ids)
-                        or []
-                    )
-                    or (
-                        (decision.get("disposition") if isinstance(decision, dict) else decision.disposition)
-                        in {"deliver", "merge"}
-                    )
-                )
-            ]
-            if linked:
-                who = (beat.who or "").strip()
-                who_hit = not who or who in full_delivery_text
-                weak_hits = [
-                    text
-                    for text in (beat.does, beat.turn, beat.purpose)
-                    if str(text or "").strip()
-                    and (
-                        _longest_run_ratio(str(text), full_delivery_text) >= 0.12
-                        or _bigram_coverage(str(text), full_delivery_text) >= 0.08
-                    )
-                ]
-                if who_hit and weak_hits:
-                    return True
-        return False
-
     for beat in spine.spine_beats:
         if not beat.must_keep:
-            continue
-        if _beat_is_substantially_delivered(beat):
             continue
         visible_clauses, spoken_clauses, receptive_clauses = (
             _spine_delivery_clauses(beat.does or "")
@@ -2544,6 +2125,7 @@ def validate_screenplay_spine_delivery(
             if _claim_clearly_absent(clause, action_text)
         ]
         speaker = (beat.who or "").strip()
+        all_spoken = "".join(spoken for _scene_no, _speaker, spoken in dialogue_turns)
         spoken_by_owner = "".join(
             spoken for _scene_no, actual_speaker, spoken in dialogue_turns
             if (
@@ -2591,8 +2173,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                         episode_no: int | None = None, source_text: str | None = None,
                         require_dialogue_chains: bool = False,
                         required_dialogue_lines: list[str] | None = None,
-                        validate_narrative: bool = True,
-                        require_source_coverage: bool = False) -> list[str]:
+                        validate_narrative: bool = True) -> list[str]:
     """纯 QA：只读取候选并返回问题，不补字段、不覆盖投影、不修改输入。"""
     errors: list[str] = []
     narrative_authority = script.narrative_plan is not None
@@ -2609,8 +2190,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         script, source_text=source_text, required=require_dialogue_chains,
         required_dialogue_lines=required_dialogue_lines,
     ))
-    if require_source_coverage:
-        errors.extend(validate_screenplay_source_coverage(script, source_text))
     if episode_no is not None and script.episode_no != episode_no:
         errors.append(f"episode_no={script.episode_no}，必须等于 {episode_no}")
     if (script.mode or "full_script") != "full_script":
@@ -2626,10 +2205,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len((script.script_format_note or "").strip()) < 6:
         errors.append("script_format_note 过短或缺失；请说明正文采用的台本格式")
     scenes = script.scene_outline or []
-    if len(scenes) < SCENE_OUTLINE_MIN:
+    if not SCENE_OUTLINE_MIN <= len(scenes) <= SCENE_OUTLINE_MAX:
         errors.append(
-            f"scene_outline 场次数量为 {len(scenes)}；至少需要 {SCENE_OUTLINE_MIN} 场，"
-            "场次数由完整剧情与时空边界决定，不设上限"
+            f"scene_outline 场次数量为 {len(scenes)}；只演主线时需提供 "
+            f"{SCENE_OUTLINE_MIN}~{SCENE_OUTLINE_MAX} 场连续场次结构"
         )
     bible_names = {c.name for c in bible.characters}
     narrative_character_ids = set(bible_names)
@@ -2673,20 +2252,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         if len((scene.turn or "").strip()) < 4:
             errors.append(f"{tag}.turn 过短；请说明本场交给下一场的状态变化")
         if len((scene.source_basis or "").strip()) < 8:
-                errors.append(
-                    f"[SCENE_SOURCE_BASIS_INVALID] {tag}.source_basis "
-                    "过短；请保留本场原文依据"
-                )
-        if script.source_coverage:
-            if len((scene.entry_state or "").strip()) < 6:
-                errors.append(f"{tag}.entry_state 过短；请写清人物位置、目标和关键道具")
-            if len((scene.exit_state or "").strip()) < 6:
-                errors.append(f"{tag}.exit_state 过短；请写清交给下一场的状态")
-            if not scene.context_requirements:
-                errors.append(
-                    f"{tag}.context_requirements 为空；必须声明本场先建立的"
-                    "时间、地点、空间关系、人物关系或关键道具"
-                )
+            errors.append(f"{tag}.source_basis 过短；请保留本场原文依据")
         if not scene.characters:
             errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
         unknown = (
@@ -2917,7 +2483,12 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len(key_points) < MIN_KEY_PLOT_POINTS:
         errors.append(
             f"key_plot_points 仅 {len(key_points)} 条；请列出至少 {MIN_KEY_PLOT_POINTS} 条与 spine 对齐的局势变化"
-            "，数量由完整剧情决定")
+            f"（上限 {MAX_KEY_PLOT_POINTS}）")
+    if len(key_points) > MAX_KEY_PLOT_POINTS:
+        errors.append(
+            f"key_plot_points 共 {len(key_points)} 条，超过上限 {MAX_KEY_PLOT_POINTS}；"
+            "只保留主线局势变化，细节支线放入 drop_list"
+        )
     event_ids: set[str] = set()
     if not script.events:
         errors.append("events 不能为空；必须把完整剧本拆成可追溯的状态变化事件")
@@ -2940,6 +2511,12 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if not script.information_ledger:
         errors.append("information_ledger 不能为空；必须为观众需要获得的剧情信息建立中文交付台账")
     ledger = script.information_ledger or []
+    ledger_cap = max(SPINE_BEATS_MIN * 2, (spine_n or len(script.events or [])) * 2)
+    if spine_n and len(ledger) > ledger_cap:
+        errors.append(
+            f"information_ledger 共 {len(ledger)} 条，超过主线容量上限 {ledger_cap}"
+            f"（≤ spine_beats×2）；请只登记主线信息，禁止为气氛声拆 info"
+        )
     for i, item in enumerate(ledger):
         tag = f"information_ledger[{i}]"
         info_id = (item.info_id or "").strip()
@@ -3475,7 +3052,6 @@ def outline_key_line_capacity_errors(
             text = catalog.get(kid)
             if not text:
                 errors.append(
-                    "[OUTLINE_KEY_LINE_CAPACITY_INVALID] "
                     f"大纲第 {shot.shot_no} 镜 key_line_ids 含未知「{kid}」；"
                     f"合法范围：{', '.join(catalog)}"
                 )
@@ -3486,7 +3062,6 @@ def outline_key_line_capacity_errors(
             lines_for_msg.append(f"{kid}({chars}字)")
         if required_chars > capacity:
             errors.append(
-                "[OUTLINE_KEY_LINE_CAPACITY_INVALID] "
                 f"大纲第 {shot.shot_no} 镜必保留台词约 {required_chars} 字，"
                 f"超过 {duration}s 口播上限 {capacity} 字（{', '.join(lines_for_msg)}）；"
                 "请拆镜或把部分 key_line_ids 挪到相邻镜头，禁止把不可满足合同交给逐镜修复"
@@ -3496,63 +3071,10 @@ def outline_key_line_capacity_errors(
         missing = [kid for kid in catalog if kid not in assigned]
         if missing:
             errors.append(
-                "[OUTLINE_KEY_LINE_CAPACITY_INVALID] "
                 f"大纲未分配关键台词 ID：{', '.join(missing)}；"
                 "请把每条 KL* 写入某一镜的 key_line_ids"
             )
     return errors
-
-
-def normalize_outline_spoken_durations(
-    outline: StoryboardOutline,
-    screenplay: EpisodeScreenplay,
-) -> list[dict]:
-    """Raise outline durations to the smallest supported exact-speech window."""
-    catalog = key_line_catalog(screenplay)
-    allowed = sorted(
-        duration
-        for duration in config.ALLOWED_DURATIONS
-        if config.VIDEO_DURATION_MIN_S
-        <= duration
-        <= config.VIDEO_DURATION_MAX_S
-    )
-    if not allowed:
-        return []
-    changes: list[dict] = []
-    for shot in outline.shots or []:
-        current = int(shot.duration_s or config.DEFAULT_VIDEO_DURATION_S)
-        required_chars = sum(
-            content_char_count(_strip_speaker(catalog[key_line_id]))
-            for raw_id in (shot.key_line_ids or [])
-            if (
-                (key_line_id := str(raw_id).strip().upper())
-                in catalog
-            )
-        )
-        required_duration = next(
-            (
-                duration
-                for duration in allowed
-                if max_speech_chars(duration) >= required_chars
-            ),
-            allowed[-1],
-        )
-        normalized = max(
-            allowed[0],
-            min(allowed[-1], current),
-            required_duration,
-        )
-        if normalized == current:
-            continue
-        shot.duration_s = normalized
-        changes.append({
-            "shot_no": shot.shot_no,
-            "from_duration_s": current,
-            "to_duration_s": normalized,
-            "required_chars": required_chars,
-            "reason": "exact_spoken_capacity",
-        })
-    return changes
 
 
 def assign_outline_delivery_ids(
@@ -3620,7 +3142,6 @@ def outline_key_line_speaker_errors(
                 speaker_order.append(speaker)
         if len(speaker_order) > 1:
             errors.append(
-                "[OUTLINE_KEY_LINE_SPEAKER_MIXED] "
                 f"大纲第 {shot.shot_no} 镜分配了多个说话人 {speaker_order}；"
                 "请按话轮拆成相邻单人近景/特写，使用 reverse_angle 或 reaction_cut 正反打"
             )
@@ -4165,125 +3686,6 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     if bible is not None:
         errors.extend(validate_storyboard_outline_scene_alignment(outline, screenplay, bible))
     return errors
-
-
-def validate_storyboard_direction_contract(
-    board: Storyboard,
-    outline: StoryboardOutline | None,
-) -> list[str]:
-    """Validate shot purpose, context delivery and camera grammar for scene packs."""
-    if outline is None or not outline.scene_contexts:
-        return []
-    errors: list[str] = []
-    briefs = {int(item.shot_no): item for item in outline.shots}
-    scene_shots: dict[str, list[Shot]] = {}
-    valid_focuses = {
-        "context", "action", "emotion", "dialogue", "evidence", "transition",
-    }
-    for shot in board.shots:
-        brief = briefs.get(int(shot.shot_no))
-        if brief is None:
-            errors.append(f"第 {shot.shot_no} 镜没有对应导演规划任务")
-            continue
-        scene_id = str(shot.scene_id or brief.scene_id or "").strip()
-        if not scene_id:
-            errors.append(f"第 {shot.shot_no} 镜缺少 scene_id")
-        scene_shots.setdefault(scene_id, []).append(shot)
-        if len((shot.purpose or "").strip()) < 6:
-            errors.append(f"第 {shot.shot_no} 镜 purpose 过短；必须说明本镜为何存在")
-        if len((shot.resulting_change or "").strip()) < 4:
-            errors.append(
-                f"第 {shot.shot_no} 镜 resulting_change 过短；"
-                "必须写清剧情、人物、空间、情绪或上下文发生了什么变化"
-            )
-        if shot.readability_focus not in valid_focuses:
-            errors.append(
-                f"第 {shot.shot_no} 镜 readability_focus={shot.readability_focus!r} 非法；"
-                f"必须从 {sorted(valid_focuses)} 中选择"
-            )
-        if not (shot.camera_angle or "").strip():
-            errors.append(f"第 {shot.shot_no} 镜缺少 camera_angle；摄影三元组不完整")
-        if len((shot.camera_motivation or "").strip()) < 6:
-            errors.append(
-                f"第 {shot.shot_no} 镜 camera_motivation 过短；"
-                "必须解释景别、角度与运动如何服务本镜作用"
-            )
-        if shot.repeat_of_shot_id and len((shot.repeat_gain or "").strip()) < 6:
-            errors.append(
-                f"第 {shot.shot_no} 镜声明重复 {shot.repeat_of_shot_id}，"
-                "但 repeat_gain 未说明新增视角、反应或兑现价值"
-            )
-        if set(shot.context_requirement_ids or []) - set(
-            brief.context_requirement_ids or []
-        ):
-            errors.append(
-                f"第 {shot.shot_no} 镜交付了导演规划未分配的 context_requirement_ids"
-            )
-
-    for index in range(1, len(board.shots)):
-        previous = board.shots[index - 1]
-        current = board.shots[index]
-        same_delivery = (
-            set(previous.spine_beat_ids or []) == set(current.spine_beat_ids or [])
-            and set(previous.context_requirement_ids or [])
-            == set(current.context_requirement_ids or [])
-            and _too_similar(previous.resulting_change, current.resulting_change)
-        )
-        if same_delivery and not current.repeat_of_shot_id:
-            errors.append(
-                f"第 {previous.shot_no} 与第 {current.shot_no} 镜交付内容和结果几乎相同；"
-                "请合并，或显式填写 repeat_of_shot_id/repeat_gain 说明新作用"
-            )
-
-    for scene in outline.scene_contexts:
-        shots = scene_shots.get(scene.scene_id, [])
-        if not shots:
-            errors.append(f"场景 {scene.scene_id} 没有生成任何镜头")
-            continue
-        delivered: dict[str, int] = {}
-        for shot in shots:
-            for requirement_id in shot.context_requirement_ids or []:
-                delivered.setdefault(requirement_id, int(shot.shot_no))
-        for requirement in scene.context_requirements:
-            owner = delivered.get(requirement.requirement_id)
-            if owner is None:
-                errors.append(
-                    f"场景 {scene.scene_id} 未建立上下文 {requirement.requirement_id}："
-                    f"{requirement.description}"
-                )
-            elif (
-                requirement.required_before_shot_no is not None
-                and owner > requirement.required_before_shot_no
-            ):
-                errors.append(
-                    f"场景 {scene.scene_id} 的上下文 {requirement.requirement_id} "
-                    f"到第 {owner} 镜才建立，晚于依赖镜 {requirement.required_before_shot_no}"
-                )
-        action_shots = [
-            shot for shot in shots if shot.readability_focus == "action"
-        ]
-        if action_shots and not any(
-            shot.shot_size in {"中景", "全景", "远景"}
-            and shot.camera_move in {"跟随", "横摇"}
-            for shot in action_shots
-        ):
-            errors.append(
-                f"场景 {scene.scene_id} 含动作段，但缺少中景/全景/远景配合跟随或横摇的"
-                "空间可读镜头；动作路径、主体和作用对象可能不清楚"
-            )
-        emotion_shots = [
-            shot for shot in shots if shot.readability_focus == "emotion"
-        ]
-        if emotion_shots and not any(
-            shot.shot_size in {"近景", "特写"}
-            and shot.camera_move in {"固定", "推近"}
-            for shot in emotion_shots
-        ):
-            errors.append(
-                f"场景 {scene.scene_id} 含情绪转折，但缺少近景/特写配合固定或推近的"
-                "情绪可读镜头"
-            )
-    return list(dict.fromkeys(errors))
 
 
 # ---------- C2 基于完整剧本的分镜校验 ----------
@@ -4840,13 +4242,6 @@ def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> lis
 
 
 def validate_bible(bible: Bible) -> list[str]:
-    from app.refs import (
-        PRODUCTION_APPEARANCE_MAX_CHARS,
-        PRODUCTION_APPEARANCE_MIN_CHARS,
-        contains_non_production_appearance,
-        missing_production_appearance_dimensions,
-    )
-
     errors = []
     # 初始人物谱由 prompt 约束为 ≤8 个；上限放宽到 60，给「按 20 集补录新登场角色」留出增长空间。
     if not 1 <= len(bible.characters) <= 60:
@@ -4855,23 +4250,8 @@ def validate_bible(bible: Bible) -> list[str]:
     if len(names) != len(set(names)):
         errors.append("characters.name 存在重复")
     for i, c in enumerate(bible.characters):
-        if not PRODUCTION_APPEARANCE_MIN_CHARS <= len(c.appearance_canonical) <= PRODUCTION_APPEARANCE_MAX_CHARS:
-            errors.append(
-                f"characters[{i}]({c.name}).appearance_canonical 长度 "
-                f"{len(c.appearance_canonical)} 字，要求 "
-                f"{PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字"
-            )
-        missing_dimensions = missing_production_appearance_dimensions(c.appearance_canonical)
-        if missing_dimensions:
-            errors.append(
-                f"characters[{i}]({c.name}).appearance_canonical "
-                f"缺少生产身份维度：{','.join(missing_dimensions)}"
-            )
-        if contains_non_production_appearance(c.appearance_canonical):
-            errors.append(
-                f"characters[{i}]({c.name}).appearance_canonical "
-                "包含不属于常规完整着装、中性站姿下静态可见身份的信息"
-            )
+        if not 30 <= len(c.appearance_canonical) <= 80:
+            errors.append(f"characters[{i}]({c.name}).appearance_canonical 长度 {len(c.appearance_canonical)} 字，要求 30~80 字")
         for r in c.relationships:
             if r.to not in names:
                 errors.append(f"characters[{i}]({c.name}).relationships 指向「{r.to}」不在角色列表中")

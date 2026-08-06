@@ -130,31 +130,6 @@ def test_paused_budget_jobs_are_not_resumed(monkeypatch) -> None:
     assert job["status"] == "paused_budget"
 
 
-def test_page_approved_budget_overrides_static_safety_default(
-    monkeypatch,
-) -> None:
-    import app.completion_grant as completion_grant
-
-    monkeypatch.setattr(worker, "get_setting", lambda *_args: "100")
-    monkeypatch.setattr(
-        completion_grant,
-        "episode_video_budget_snapshot",
-        lambda _episode_id: {
-            "baseline_cny": 0.0,
-            "claimed_cny": 0.0,
-            "used_cny": 0.0,
-            "cap_cny": 440.0,
-        },
-    )
-    monkeypatch.setattr(
-        completion_grant,
-        "active_video_grant_budget_cap",
-        lambda _episode_id: None,
-    )
-
-    assert worker.episode_video_budget_limit("episode") == 440.0
-
-
 def test_page_approved_budget_can_be_lower_than_static_default(
     monkeypatch,
 ) -> None:

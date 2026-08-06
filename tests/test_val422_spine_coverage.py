@@ -14,7 +14,6 @@ from app.schemas import (
 from app.validators import (
     assign_outline_delivery_ids,
     key_line_catalog,
-    normalize_outline_spoken_durations,
     outline_key_line_capacity_errors,
     split_outline_over_key_line_capacity,
     validate_spine_delivery_ledger,
@@ -350,44 +349,11 @@ def test_outline_capacity_split_moves_key_lines() -> None:
     )
     before = outline_key_line_capacity_errors(outline, sp)
     assert before, before
-    assert all(
-        error.startswith("[OUTLINE_KEY_LINE_CAPACITY_INVALID]")
-        for error in before
-    )
     events = split_outline_over_key_line_capacity(outline, sp, max_shots=16)
     assert events, "应触发容量拆镜"
     assert len(outline.shots) >= 3
     after = outline_key_line_capacity_errors(outline, sp)
     assert not after, after
-
-
-def test_outline_spoken_duration_normalizer_only_raises_to_supported_capacity() -> None:
-    screenplay = EpisodeScreenplay(
-        episode_no=1,
-        key_lines=["角色甲：" + ("甲" * 24)],
-    )
-    outline = StoryboardOutline(
-        episode_no=1,
-        shots=[
-            StoryboardOutlineShot(
-                shot_no=1,
-                beat="角色甲说出完整台词",
-                key_line_ids=["KL01"],
-                duration_s=2,
-            ),
-            StoryboardOutlineShot(
-                shot_no=2,
-                beat="无对白反应镜",
-                duration_s=2,
-            ),
-        ],
-    )
-
-    changes = normalize_outline_spoken_durations(outline, screenplay)
-
-    assert [shot.duration_s for shot in outline.shots] == [7, 5]
-    assert [change["to_duration_s"] for change in changes] == [7, 5]
-    assert outline_key_line_capacity_errors(outline, screenplay) == []
 
 
 def test_assign_outline_delivery_ids_from_covers() -> None:

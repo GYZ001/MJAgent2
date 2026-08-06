@@ -154,24 +154,6 @@ def test_scene_recovery_prepares_missing_list_for_ready_bible(tmp_path, monkeypa
     ).fetchone()["scene_refs_status"] == "running"
 
 
-def test_scene_reference_batch_persists_operation_boundary(tmp_path, monkeypatch) -> None:
-    conn = _fresh_database(tmp_path, monkeypatch)
-    spawned = _capture_spawn(monkeypatch)
-    monkeypatch.setattr(api, "_scene_refs_task_active", lambda _pid: False)
-
-    assert api._start_scene_refs_generation(
-        "p1", ["客厅"], resume=True,
-    ) is True
-
-    row = conn.execute(
-        "SELECT scene_refs_status,scene_refs_batch_started_at "
-        "FROM projects WHERE id='p1'"
-    ).fetchone()
-    assert row["scene_refs_status"] == "running"
-    assert row["scene_refs_batch_started_at"] is not None
-    assert spawned == [("scene_refs", "p1")]
-
-
 def test_single_view_redo_spawn_failure_cancels_created_runs(tmp_path, monkeypatch) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
 
@@ -314,24 +296,6 @@ def test_fresh_character_reference_batch_persists_restart_mode(tmp_path, monkeyp
     assert row["refs_status"] == "running"
     assert json.loads(row["refs_target"]) == ["萧炎", "药老"]
     assert row["refs_resume"] == 0
-    assert row["refs_batch_started_at"] is not None
-    assert spawned == [("refs", "p1")]
-
-
-def test_gap_character_reference_batch_persists_operation_boundary(tmp_path, monkeypatch) -> None:
-    conn = _fresh_database(tmp_path, monkeypatch)
-    spawned = _capture_spawn(monkeypatch)
-    monkeypatch.setattr(api, "_refs_task_active", lambda _pid: False)
-
-    started = api._start_refs_generation(
-        "p1", None, only_characters=["药老"], resume=True,
-    )
-
-    assert started and started["task_id"] == "refs:p1"
-    row = conn.execute(
-        "SELECT refs_resume,refs_batch_started_at FROM projects WHERE id='p1'"
-    ).fetchone()
-    assert row["refs_resume"] == 1
     assert row["refs_batch_started_at"] is not None
     assert spawned == [("refs", "p1")]
 
@@ -530,12 +494,8 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "scene_references", "scene_history_review", "episode_mapping",
         "screenplay", "storyboard", "video_completion", "project_video_completion", "delivery",
     ]
-    assert {
-        key: value for key, value in report.items()
-        if key not in {"recovery_meta", "media_cleanup_outbox"}
-    } == {
-        "media": 1,
-        "abandoned_partial_files_removed": 2, "character_bible": 1,
+    assert {key: value for key, value in report.items() if key != "recovery_meta"} == {
+        "media": 1, "abandoned_partial_files_removed": 2, "character_bible": 1,
         "rejected_media_purged": {"artifacts": 2, "records": 3, "files": 2},
         "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
         "scene_history_review": 1,

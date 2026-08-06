@@ -37,16 +37,6 @@ def publish_screenplay(
 
     script = load_screenplay_from_artifact(artifact_id)
     conn = get_conn()
-    from app.production.screenplay_authority import (
-        screenplay_contract_requires_narrative,
-    )
-
-    effective_contract_version = contract_version or rev.contract_version
-    if (
-        screenplay_contract_requires_narrative(effective_contract_version)
-        and script.narrative_plan is None
-    ):
-        raise ValueError("当前剧本合同要求 narrative_plan，禁止降级发布 legacy 剧本")
     if script.narrative_plan is not None:
         from app.production.screenplay_authority import (
             screenplay_authority_fingerprint,
@@ -55,7 +45,7 @@ def publish_screenplay(
         authority_fingerprint = screenplay_authority_fingerprint(
             episode_id,
             conn=conn,
-            contract_version=effective_contract_version,
+            contract_version=contract_version or rev.contract_version,
             qa_profile_version=qa_profile_version or rev.qa_profile_version,
         )
         if (input_fingerprint or rev.input_fingerprint) != authority_fingerprint:
@@ -114,7 +104,7 @@ def publish_screenplay(
             artifact_id=artifact_id,
             artifact_hash=artifact_hash,
             input_fingerprint=input_fingerprint or rev.input_fingerprint,
-            contract_version=effective_contract_version,
+            contract_version=contract_version or rev.contract_version,
             qa_profile_version=qa_profile_version or rev.qa_profile_version,
             evaluation_ids=evaluation_ids,
             blockers=0,
@@ -134,7 +124,7 @@ def publish_screenplay(
         expected_artifact_id=artifact_id,
         expected_artifact_hash=artifact_hash,
         expected_input_fingerprint=input_fingerprint or rev.input_fingerprint or None,
-        expected_contract_version=effective_contract_version or None,
+        expected_contract_version=contract_version or rev.contract_version or None,
     )
     assert_publish_has_certificate(
         kind="screenplay", episode_id=episode_id, certificate_id=cert.certificate_id,

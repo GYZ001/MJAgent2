@@ -1,7 +1,6 @@
 """AI semantic diagnosis and constraint-based repair candidate selection."""
 from __future__ import annotations
 
-from collections import Counter
 import json
 from typing import Any, Literal, cast
 
@@ -19,7 +18,7 @@ from app.schemas import (
     extract_json,
 )
 
-REPAIR_DIAGNOSIS_VERSION = "narrative-repair-diagnosis.v3"
+REPAIR_DIAGNOSIS_VERSION = "narrative-repair-diagnosis.v1"
 
 OutlineExecutorOp = Literal[
     "replace_outline_shot",
@@ -270,8 +269,6 @@ def _compact_context(
     board: Storyboard,
     outline: StoryboardOutline | None,
 ) -> dict[str, Any]:
-    from app.validators import key_line_catalog
-
     plan = screenplay.narrative_plan
     index = index_narrative_plan(plan) if plan else None
     return {
@@ -312,33 +309,7 @@ def _compact_context(
             for shot in board.shots
         ],
         "outline": outline.model_dump(mode="json") if outline else None,
-        "key_line_catalog": key_line_catalog(screenplay),
-        "outline_local_hard_errors": (
-            _outline_local_hard_errors(outline, screenplay)
-            if outline is not None else []
-        ),
     }
-
-
-def _outline_local_hard_errors(
-    outline: StoryboardOutline,
-    screenplay: EpisodeScreenplay,
-) -> list[str]:
-    from app.validators import (
-        outline_key_line_capacity_errors,
-        outline_key_line_speaker_errors,
-    )
-
-    return list(dict.fromkeys([
-        *outline_key_line_capacity_errors(outline, screenplay),
-        *outline_key_line_speaker_errors(outline, screenplay),
-    ]))
-
-
-def _error_code_counts(messages: list[str]) -> Counter[str]:
-    from app.evaluations.issues import issue_code
-
-    return Counter(issue_code(message) or message for message in messages)
 
 
 def validate_semantic_diagnosis(diagnosis: SemanticRepairDiagnosis) -> list[str]:
@@ -353,8 +324,6 @@ def validate_semantic_diagnosis(diagnosis: SemanticRepairDiagnosis) -> list[str]
     if selected is None:
         errors.append("selected_strategy 没有对应候选评估")
     if selected is not None:
-        if len(selected.outline_operations) > 3:
-            errors.append("选中候选最多允许 3 个局部大纲操作")
         executable_ops: list[OutlineExecutorOp] = []
         for operation in selected.outline_operations:
             try:
@@ -389,50 +358,6 @@ def validate_semantic_diagnosis(diagnosis: SemanticRepairDiagnosis) -> list[str]
     return errors
 
 
-def _focus_operation_errors(
-    diagnosis: SemanticRepairDiagnosis,
-    *,
-    focus_shot_no: int | None,
-    outline: StoryboardOutline | None = None,
-) -> list[str]:
-    if focus_shot_no is None:
-        return []
-    selected_strategy = normalize_strategy(diagnosis.selected_strategy)
-    selected = next((
-        item
-        for item in diagnosis.candidate_assessments
-        if normalize_strategy(item.strategy) == selected_strategy
-    ), None)
-    if selected is None or not selected.outline_operations:
-        return []
-
-    allowed = {
-        shot_no
-        for shot_no in (
-            focus_shot_no - 1,
-            focus_shot_no,
-            focus_shot_no + 1,
-        )
-        if shot_no > 0
-    }
-    errors: list[str] = []
-    targeted: set[int] = set()
-    for operation in selected.outline_operations:
-        try:
-            executable_op = operation.executable_op()
-            target = operation.execution_target(executable_op)
-        except ValueError as exc:
-            errors.append(str(exc))
-            continue
-        if outline is None:
-            if operation.target.shot_no is not None:
-                targeted.add(int(operation.target.shot_no))
-            if operation.target.after_shot_no is not None:
-                targeted.update({
-                    int(operation.target.after_shot_no),
-                    int(operation.target.after_shot_no) + 1,
-                })
-            if operation.target.to_index is not None:
                 targeted.add(int(operation.target.to_index) + 1)
             continue
         try:
@@ -440,8 +365,6 @@ def _focus_operation_errors(
                 "replace_outline_shot",
                 "delete_outline_shot",
             }:
-                targeted.add(
-                    int(outline.shots[_outline_target_index(outline, target)].shot_no)
                 )
             elif executable_op == "insert_outline_shot":
                 if target.get("after_shot_id"):
@@ -453,15 +376,6 @@ def _focus_operation_errors(
                         anchor + 2,
                     })
                 elif target.get("after_shot_no") is not None:
-                    anchor = _outline_target_index(
-                        outline, {"shot_no": target["after_shot_no"]},
-                    )
-                    targeted.update({
-                        int(outline.shots[anchor].shot_no),
-                        anchor + 2,
-                    })
-                else:
-                    insertion_index = max(
                         0,
                         min(
                             len(outline.shots),
@@ -511,29 +425,10 @@ async def diagnose_narrative_repair(
     """Ask AI to compare general edit operations using semantic relations.
 
     The prompt contains no story-category/action whitelist.  Unknown semantic
-    dimensions are retained in ``unclassified_dimensions`` and may still route
-    through ``SEMANTIC_GAP_OTHER``.
-    """
-    prompt = {
-        "task": "诊断叙事缺口并比较多个最小修复候选；问题码只说明不变量，不代表修复动作",
-        "context": _compact_context(issues, screenplay, board, outline),
-        "repair_focus": {
             "focus_shot_no": focus_shot_no,
             "validated_prefix_end": max(0, int(validated_prefix_end)),
             "rule": (
                 "逐镜生成时，focus_shot_no 是当前失败候选；"
-                "大于 validated_prefix_end 的 outline.shots 是尚未生成的任务 brief，"
-                "其缺少最终 Shot 字段不代表整集已有同类错误"
-            ),
-        },
-        "semantic_intent_contract": (
-            "strategy 和 op 是开放语义意图，可根据当前关系自由命名；"
-            "不得用 issue code 选定唯一修复"
-        ),
-        "available_execution_capabilities": [
-            "replace_outline_shot", "insert_outline_shot",
-            "delete_outline_shot", "move_outline_shot",
-        ],
         "non_structural_examples": ["repair_current", "repair_window"],
         "tests": {
             "gap_test": "现有镜头证据是否真的无法让对应观众路径达到目标",
@@ -541,40 +436,9 @@ async def diagnose_narrative_repair(
             "marginal_gain_test": "候选相对改现镜是否有新增可验证收益",
             "minimality_test": "是否是通过全部不变量的最低破坏方案",
         },
-        "output_contract": {
-            "diagnosis_id": f"NRD-{episode_id}",
-            "semantic_gap": "自由语义描述",
-            "affected_shot_nos": [],
-            "affected_relation_ids": [],
-            "assimilation_task_ids": [],
-            "scope": "normalize|current_shot|adjacent_window|structure|multi_shot_structure|human",
-            "candidate_assessments": [
-                {
-                    "strategy": "自由命名的候选语义意图",
-                    "expected_narrative_gain": 0.0,
-                    "destructive_cost": 0.0,
-                    "satisfies_gap_test": False,
-                    "passes_deletion_test": False,
                     "passes_marginal_gain_test": False,
                     "preserves_invariants": False,
                     "rationale": "基于关系和证据的理由",
-                    "outline_operations": [
-                        {
-                            "op": "自由命名的语义操作意图",
-                            "executor": "当前可用执行能力之一",
-                            "target": "按 executor 选择且只选一组定位字段",
-                            "value": "新建/替换时输出完整 StoryboardOutlineShot，其他操作为 null",
-                        }
-                    ],
-                }
-            ],
-            "selected_strategy": "候选操作之一",
-            "selection_reason": "为什么最小充分",
-            "unclassified_dimensions": [],
-        },
-        "hard_rules": [
-            "至少比较两个候选，不得由 issue code 直接选唯一动作",
-            "能改现镜时不增镜；增镜必须通过 gap 与 marginal gain",
             "key_line_catalog 中的 KL* 是逐字必保留合同；只能在相邻镜间重分配，禁止删除、改写或遗漏，且顺序不变",
             "单镜时长必须为 5~10 秒；当必保留台词总字数超过 10 秒容量时，原镜压缩在数学上不可行，结构拆分具有可验证边际收益",
             "选中候选只能包含 1~3 个局部 outline_operations，不得借局部问题重写整集大纲",
@@ -600,10 +464,6 @@ async def diagnose_narrative_repair(
             ),
             "无法归类的语义写入 unclassified_dimensions，不得丢弃",
         ],
-        "target_contracts": {
-            "replace/delete": "shot_id 或 shot_no 二选一",
-            "insert": "after_shot_id、after_shot_no、to_index 最多选一；全空表示末尾",
-            "move": "shot_id 或 shot_no 二选一，并必须给出 to_index",
         },
         "boundary_state_transition_contract": {
             "transition_id": "本集唯一的结构关系 ID，必填",
@@ -621,40 +481,13 @@ async def diagnose_narrative_repair(
         },
     }
     prior = ""
-    errors: list[str] = []
+                    errors.extend(validate_storyboard_narrative(
     baseline_graph_errors: list[str] = []
     baseline_local_errors: list[str] = []
     if outline is not None:
         from app.narrative import validate_storyboard_narrative
 
-        baseline_graph_errors = validate_storyboard_narrative(
-            board=None,
-            screenplay=screenplay,
-            outline=outline,
-            complete=True,
-            expected_scope_id=episode_id,
-        )
-        baseline_local_errors = _outline_local_hard_errors(
-            outline,
-            screenplay,
-        )
-    baseline_graph_counts = _error_code_counts(baseline_graph_errors)
-    for attempt in range(1, max_attempts + 1):
-        user = json.dumps(prompt, ensure_ascii=False)
-        if errors:
-            user += "\n修正下列合同问题：\n- " + "\n- ".join(errors) + "\n上一候选：\n" + prior[:12000]
-        prior = await model_gateway.chat(
-            [
-                {"role": "system", "content": "你是叙事修复诊断导演。只按关系、状态和观众证据判断，只输出 JSON。"},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.2,
-            max_tokens=8192,
-            call_meta={
-                "stage": "narrative_repair_diagnosis",
-                "stage_key": "semantic_repair_planner",
-                "episode_id": episode_id,
-                "repair_round": attempt - 1,
+                    ))
                 "contract_version": REPAIR_DIAGNOSIS_VERSION,
             },
         )
@@ -673,7 +506,6 @@ async def diagnose_narrative_repair(
         selected = next((
             item
             for item in diagnosis.candidate_assessments
-            if normalize_strategy(item.strategy) == selected_strategy
         ), None)
         if selected is not None and selected.outline_operations:
             if outline is None:
@@ -694,28 +526,6 @@ async def diagnose_narrative_repair(
                         expected_scope_id=episode_id,
                     )
                     candidate_graph_counts = _error_code_counts(
-                        candidate_graph_errors,
-                    )
-                    regressed_codes = {
-                        code
-                        for code, count in candidate_graph_counts.items()
-                        if count > baseline_graph_counts.get(code, 0)
-                    }
-                    errors.extend([
-                        message
-                        for message in candidate_graph_errors
-                        if _error_code_counts([message]).keys()
-                        & regressed_codes
-                    ])
-                    candidate_local_errors = _outline_local_hard_errors(
-                        candidate_outline,
-                        screenplay,
-                    )
-                    introduced_local_errors = list(
-                        (
-                            Counter(candidate_local_errors)
-                            - Counter(baseline_local_errors)
-                        ).elements()
                     )
                     if introduced_local_errors:
                         errors.append(
@@ -724,8 +534,6 @@ async def diagnose_narrative_repair(
                         )
                     elif (
                         baseline_local_errors
-                        and len(candidate_local_errors)
-                        >= len(baseline_local_errors)
                     ):
                         errors.append(
                             "候选没有减少当前大纲的必保留台词容量/说话人硬错误："

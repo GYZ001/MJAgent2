@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 import threading
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import db
-from app.evidence import repository as evidence_repository
-from app.harness.types import Evaluation, EvidenceArtifact
 from conftest import SessionTestClient
 from tests.test_narrative_publish_gate import _reviewed_publish_candidate
 
@@ -88,85 +85,3 @@ async def test_human_calibration_http_flow_freezes_before_target_scoring(
     status_response = client.get("/api/narrative-calibration")
     assert status_response.status_code == 200
     assert status_response.json()["ready"] is True
-
-
-@pytest.mark.asyncio
-async def test_ai_one_watch_simulation_activates_without_human_claims(
-    monkeypatch,
-) -> None:
-    case = await _reviewed_publish_candidate(monkeypatch)
-    conn = db.get_conn()
-    previous_shot_artifact = evidence_repository.get_artifact(
-        case["shot_artifacts"][0]
-    )
-    assert previous_shot_artifact is not None
-    rebound_shot_artifact = evidence_repository.create_artifact(
-        EvidenceArtifact(
-            type="storyboard_shot",
-            scope_type=previous_shot_artifact["scope_type"],
-            scope_id=previous_shot_artifact["scope_id"],
-            status="candidate",
-            trust_level="T1",
-            content=previous_shot_artifact["content"],
-            parent_artifact_ids=[previous_shot_artifact["id"]],
-            contract_version=previous_shot_artifact["contract_version"],
-        )
-    )
-    rebound_shot_artifact = evidence_repository.commit_artifact(
-        None,
-        rebound_shot_artifact["id"],
-        [Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="test_storyboard_projection_rebind",
-            evaluator_version="test.v1",
-            status="passed",
-            hard_gate_passed=True,
-            score=100,
-        )],
-    )
-    conn.execute(
-        "UPDATE shots SET storyboard_artifact_id=? WHERE storyboard_artifact_id=?",
-        (rebound_shot_artifact["id"], previous_shot_artifact["id"]),
-    )
-    conn.execute(
-        "UPDATE artifacts SET status='superseded' WHERE id=?",
-        (case["calibration_artifact"]["id"],),
-    )
-    conn.commit()
-    from app.main import app
-
-    client = SessionTestClient(TestClient(app))
-    response = client.post(
-        "/api/episodes/episode-generic/narrative-calibration/ai-simulate",
-        json={},
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["activated"] is True
-    assert payload["authority_mode"] == "ai_simulation"
-    assert payload["model_pass_threshold"] == pytest.approx(0.8)
-    assert payload["minimum_predicted_score"] == pytest.approx(0.95)
-    artifact = conn.execute(
-        "SELECT type,trust_level,content_json FROM artifacts WHERE id=?",
-        (payload["artifact_id"],),
-    ).fetchone()
-    assert artifact["type"] == "ai_one_watch_simulation_report"
-    assert artifact["trust_level"] == "T2"
-    assert '"human_observation_count":0' in artifact["content_json"]
-    ai_parents = conn.execute(
-        "SELECT parent_artifact_ids_json FROM artifacts WHERE id=?",
-        (payload["artifact_id"],),
-    ).fetchone()["parent_artifact_ids_json"]
-    assert case["report_artifact"]["id"] not in ai_parents
-    rebound_report_id = json.loads(ai_parents)[0]
-    rebound_report = conn.execute(
-        "SELECT type,status FROM artifacts WHERE id=?",
-        (rebound_report_id,),
-    ).fetchone()
-    assert rebound_report["type"] == "narrative_review_report"
-    assert rebound_report["status"] == "validated"
-
-    status = client.get("/api/narrative-calibration").json()
-    assert status["ready"] is True
-    assert status["authority_mode"] == "ai_simulation"

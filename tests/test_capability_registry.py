@@ -213,8 +213,8 @@ def test_video_batch_preflight_quotes_exact_pending_shot_cost() -> None:
         {"episode_id": "video-quote-ep"},
     )
 
-    assert result.estimated_cost_cny == pytest.approx(20.4)
-    assert "¥20.4" in result.summary
+    assert result.estimated_cost_cny == pytest.approx(16.8)
+    assert "¥16.8" in result.summary
 
 
 def test_approval_token_single_use() -> None:

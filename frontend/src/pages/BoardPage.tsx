@@ -20,12 +20,10 @@ const CONTINUITY_MODES: Record<string, string> = {
 }
 
 const EDITABLE_FIELDS: Array<keyof Shot> = [
-  'duration_s', 'shot_size', 'camera_angle', 'camera_move', 'scene_time', 'scene_name', 'characters', 'action_desc',
+  'duration_s', 'shot_size', 'camera_move', 'scene_time', 'scene_name', 'characters', 'action_desc',
   'first_frame_desc', 'last_frame_desc', 'dialogues', 'transition', 'continuity_from_prev',
   'continuity_mode', 'state_in', 'primary_action', 'state_out', 'characters_visible',
   'audio_cast', 'new_information_ids', 'spine_beat_ids', 'key_line_ids',
-  'purpose', 'resulting_change', 'readability_focus', 'camera_motivation',
-  'repeat_of_shot_id', 'repeat_gain',
 ]
 
 type EditSession = {
@@ -68,17 +66,6 @@ export type StartPreview = {
   }
 }
 
-export function storyboardCharacterFilterOptions(shots: Shot[]): string[] {
-  const internalIdentity = /^(?:character|entity|speaker|voice|passerby)[-_]/i
-  const internalSlug = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)+$/i
-  return [...new Set(
-    shots
-      .flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])])
-      .map(value => value.trim())
-      .filter(value => value && !internalIdentity.test(value) && !internalSlug.test(value)),
-  )]
-}
-
 type ConfirmPreview = {
   preview_token?: string
   storyboard_artifact_id?: string | null
@@ -96,13 +83,6 @@ type ConfirmPreview = {
 type DraftItem = {
   id: string; version: number; content: Partial<Shot>; baseline_artifact_ids: string[]
   issues: string[]; created_at: number
-}
-
-type SpokenConflictPreview = ImpactSummary & {
-  preview_token: string
-  edit_session_token: string
-  baseline_content_hash: string
-  choice: 'rebuild_timeline_from_dialogues' | 'rebuild_dialogues_from_timeline'
 }
 
 type StructurePreview = ImpactSummary & {
@@ -171,7 +151,7 @@ export function storyboardToolbarActions(state: StoryboardStatus['state']): {
 } {
   return {
     pause: state === 'running',
-    clear: ['paused', 'failed', 'ready_to_confirm', 'confirmed'].includes(state),
+    clear: state === 'paused' || state === 'failed',
   }
 }
 
@@ -223,7 +203,7 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   if (repairsExisting) {
     return {
       summary,
-      detail: `当前 ${working} 镜已完成逐镜校验，但整集仍有 ${gateIssueCount} 个确认必检项。继续任务会重开整集修复，不是从第 ${resumeFrom} 镜续写；修复候选通过前不会覆盖现有镜头。`,
+      detail: `当前 ${working} 镜已完成逐镜校验，但整集仍有 ${gateIssueCount} 个确认门禁问题。继续任务会重开整集修复，不是从第 ${resumeFrom} 镜续写；修复候选通过前不会覆盖现有镜头。`,
     }
   }
   const finalDraftNote = status.final_shot_valid
@@ -237,7 +217,7 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   }
   return {
     summary,
-    detail: `当前 ${validated} 镜已通过逐镜校验；任务将从第 ${resumeFrom} 镜继续。镜头完整并经人工确认后才会交给生成台。${finalDraftNote}`,
+    detail: `当前 ${validated} 镜已通过逐镜校验；任务将从第 ${resumeFrom} 镜继续。整集门禁通过并经人工确认后才会交给生成台。${finalDraftNote}`,
   }
 }
 
@@ -265,7 +245,7 @@ export function storyboardStartPreviewCopy(preview: StartPreview): {
     return {
       title: '继续修复分镜',
       confirmLabel: '开始修复',
-      summary: `现有 ${preview.kept_validated_shots} 镜保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认必检项。`,
+      summary: `现有 ${preview.kept_validated_shots} 镜保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认门禁问题。`,
       detail: `这是重开整集修复，不是从第 ${preview.checkpoint.resume_from_shot} 镜续写；候选通过前不会覆盖现有镜头。`,
     }
   }
@@ -287,7 +267,7 @@ export function storyboardShotCheckpointLabel(
   const draft = status.draft_shots ?? status.produced_shots
   const safe = Math.min(draft, status.safe_checkpoint_shots ?? status.validated_shots)
   if (shotNo <= safe) {
-    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐镜校验；整集仍需完成结构检查并由人工确认' }
+    return { label: '已校验', className: 'checkpoint-safe', title: '本轮已通过逐镜校验；整集仍需通过门禁并由人工确认' }
   }
   return { label: '待校验', className: 'checkpoint-pending', title: '仍在工作副本中，继续任务时可能更新' }
 }
@@ -503,84 +483,58 @@ function HumanCalibrationControls({
     }
   }
 
-  async function activateAiSimulation() {
-    setBusy(true)
-    try {
-      const result = await api.post(
-        `/episodes/${episode.id}/narrative-calibration/ai-simulate`,
-        {},
-      ) as Record<string, any>
-      await onChanged()
-      notify(result.message || 'AI 一次观看模拟权威已激活')
-    } catch (caught) {
-      notify((caught as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
   return <details className="narrative-calibration-controls">
-    <summary>一次观看校准</summary>
-    <div className="narrative-calibration-rebuild">
-      <p>AI 一次观看模拟与真人样本均为可选评分，只用于提示观众理解风险，不影响分镜发布、确认或后续生成。</p>
-      <button type="button" className="btn primary" disabled={busy}
-        onClick={() => void activateAiSimulation()}>
-        {busy ? '正在模拟…' : '运行 AI 一次观看模拟'}
-      </button>
-    </div>
-    <details>
-      <summary>可选：录入真实观看样本</summary>
-      {!protocol ? <button type="button" className="btn" disabled={busy} onClick={() => void loadProtocol()}>
-        {busy ? '正在读取…' : '开始记录真人样本'}
-      </button> : <>
-        {!frozen ? <div className="narrative-calibration-form">
-          <label>匿名参与者编号<input value={participant} onChange={event => setParticipant(event.target.value)} /></label>
-          <label>观看前提<select value={priorId} onChange={event => setPriorId(event.target.value)}>
-            {protocol.audience_priors.map(item => <option key={item.audience_prior_id} value={item.audience_prior_id}>
-              {item.audience_description}（已有 {item.existing_observation_count} 份）
-            </option>)}
-          </select></label>
-          <label>题材标签<input value={genre} onChange={event => setGenre(event.target.value)} placeholder="例如：都市悬疑" /></label>
-          <label>叙事形式<input value={form} onChange={event => setForm(event.target.value)} placeholder="例如：纯对白或追逐" /></label>
-          <label className="wide">首次自由复述<textarea value={recall} onChange={event => setRecall(event.target.value)}
-            placeholder="只记录第一次看完后自然记住的人物、因果、问题和下一步预期" /></label>
-          <label className="wide calibration-confirm"><input type="checkbox" checked={protocolConfirmed}
-            onChange={event => setProtocolConfirmed(event.target.checked)} />
-            我确认参与者只连续观看一次，未回放、未看原文、目标答案或导演意图
+    <summary>真人一次观看校准</summary>
+    {!protocol ? <button type="button" className="btn" disabled={busy} onClick={() => void loadProtocol()}>
+      {busy ? '正在读取…' : '开始记录真人样本'}
+    </button> : <>
+      {!frozen ? <div className="narrative-calibration-form">
+        <label>匿名参与者编号<input value={participant} onChange={event => setParticipant(event.target.value)} /></label>
+        <label>观看前提<select value={priorId} onChange={event => setPriorId(event.target.value)}>
+          {protocol.audience_priors.map(item => <option key={item.audience_prior_id} value={item.audience_prior_id}>
+            {item.audience_description}（已有 {item.existing_observation_count} 份）
+          </option>)}
+        </select></label>
+        <label>题材标签<input value={genre} onChange={event => setGenre(event.target.value)} placeholder="例如：都市悬疑" /></label>
+        <label>叙事形式<input value={form} onChange={event => setForm(event.target.value)} placeholder="例如：纯对白或追逐" /></label>
+        <label className="wide">首次自由复述<textarea value={recall} onChange={event => setRecall(event.target.value)}
+          placeholder="只记录第一次看完后自然记住的人物、因果、问题和下一步预期" /></label>
+        <label className="wide calibration-confirm"><input type="checkbox" checked={protocolConfirmed}
+          onChange={event => setProtocolConfirmed(event.target.checked)} />
+          我确认参与者只连续观看一次，未回放、未看原文、目标答案或导演意图
+        </label>
+        <button type="button" className="btn primary" disabled={busy || Boolean(freezeBlockedReason)}
+          title={freezeBlockedReason || undefined} onClick={() => void freezeRecall()}>
+          冻结首次复述
+        </button>
+        {freezeBlockedReason && <small>{freezeBlockedReason}</small>}
+      </div> : <div className="narrative-calibration-targets">
+        <p>首次复述已冻结。以下评分不会反写首次理解率。</p>
+        {frozen.target_contract.map(item => <fieldset key={item.target_delta_id}>
+          <legend>{item.description}</legend>
+          <label>实际达成度 {scores[item.target_delta_id] ?? 50}%
+            <input type="range" min="0" max="100" step="5" value={scores[item.target_delta_id] ?? 50}
+              onChange={event => setScores(current => ({ ...current, [item.target_delta_id]: Number(event.target.value) }))} />
           </label>
-          <button type="button" className="btn primary" disabled={busy || Boolean(freezeBlockedReason)}
-            title={freezeBlockedReason || undefined} onClick={() => void freezeRecall()}>
-            冻结首次复述
-          </button>
-          {freezeBlockedReason && <small>{freezeBlockedReason}</small>}
-        </div> : <div className="narrative-calibration-targets">
-          <p>首次复述已冻结。以下评分不会反写首次理解率。</p>
-          {frozen.target_contract.map(item => <fieldset key={item.target_delta_id}>
-            <legend>{item.description}</legend>
-            <label>实际达成度 {scores[item.target_delta_id] ?? 50}%
-              <input type="range" min="0" max="100" step="5" value={scores[item.target_delta_id] ?? 50}
-                onChange={event => setScores(current => ({ ...current, [item.target_delta_id]: Number(event.target.value) }))} />
-            </label>
-            <label>观察说明<textarea value={interpretations[item.target_delta_id] || ''}
-              onChange={event => setInterpretations(current => ({ ...current, [item.target_delta_id]: event.target.value }))} /></label>
-          </fieldset>)}
-          <button type="button" className="btn primary" disabled={busy} onClick={() => void submitObservation()}>
-            提交真人观察
-          </button>
-        </div>}
-        <div className="narrative-calibration-rebuild">
-          <button type="button" className="btn" disabled={busy} onClick={() => void rebuildCalibration(false)}>预览全局校准</button>
-          {calibrationPreview?.report && <p>
-            样本 {calibrationPreview.report.sample_summary?.observation_count ?? 0} 份 ·
-            结论 {calibrationPreview.report.decision === 'calibrated' ? '可激活' : '仍需补样本'}
-          </p>}
-          {calibrationPreview?.report?.decision === 'calibrated' && !calibrationPreview.activated &&
-            <button type="button" className="btn primary" disabled={busy} onClick={() => void rebuildCalibration(true)}>
-              激活校准权威
-            </button>}
-        </div>
-      </>}
-    </details>
+          <label>观察说明<textarea value={interpretations[item.target_delta_id] || ''}
+            onChange={event => setInterpretations(current => ({ ...current, [item.target_delta_id]: event.target.value }))} /></label>
+        </fieldset>)}
+        <button type="button" className="btn primary" disabled={busy} onClick={() => void submitObservation()}>
+          提交真人观察
+        </button>
+      </div>}
+      <div className="narrative-calibration-rebuild">
+        <button type="button" className="btn" disabled={busy} onClick={() => void rebuildCalibration(false)}>预览全局校准</button>
+        {calibrationPreview?.report && <p>
+          样本 {calibrationPreview.report.sample_summary?.observation_count ?? 0} 份 ·
+          结论 {calibrationPreview.report.decision === 'calibrated' ? '可激活' : '仍需补样本'}
+        </p>}
+        {calibrationPreview?.report?.decision === 'calibrated' && !calibrationPreview.activated &&
+          <button type="button" className="btn primary" disabled={busy} onClick={() => void rebuildCalibration(true)}>
+            激活校准权威
+          </button>}
+      </div>
+    </>}
   </details>
 }
 
@@ -609,24 +563,21 @@ function NarrativeReadinessPanel({
   const duplicateActions = numberMetric('duplicate_primary_action_count')
   const stateRegressions = numberMetric('state_regression_count')
   const processingDebt = numberMetric('audience_processing_debt')
-  const scored = review?.decision === 'pass' || review?.decision === 'revise'
-  const calibrationMode = calibration?.authority_mode
+  const ready = metrics.narrative_ready === true && calibration?.ready === true
   const reviewCopy = review?.decision === 'pass'
     ? calibration?.ready
-      ? calibrationMode === 'human_calibration'
-        ? '冷观众与真人样本已评分'
-        : '冷观众与 AI 模拟已评分'
-      : '冷观众评分已完成'
+      ? '冷观众与真人校准通过'
+      : '等待真人校准'
     : review?.decision === 'revise'
-      ? '评分提示存在风险'
+      ? '冷观众要求修订'
       : review?.decision === 'needs_human_review'
-        ? '评分建议人工复核'
-        : '尚未运行可选评分'
+        ? '等待人工复核'
+        : '等待冷观众审读'
 
-  return <section className="card narrative-readiness" aria-label="叙事理解评分（可选）">
+  return <section className="card narrative-readiness" aria-label="全链路叙事一致性">
     <header>
-      <div><b>叙事理解评分（可选）</b><span>检查事件、动作、人物认知与观众理解风险，不改变生产资格</span></div>
-      <span className={`stamp ${scored ? 'green' : 'gold'}`}>{reviewCopy}</span>
+      <div><b>全链路叙事一致性</b><span>同一事件、动作、人物认知与观众理解合同贯穿剧本和分镜</span></div>
+      <span className={`stamp ${ready ? 'green' : 'gold'}`}>{ready ? '叙事就绪' : reviewCopy}</span>
     </header>
     <dl>
       <div><dt>命题 / 事件</dt><dd>{summary.proposition_count} / {summary.event_count}</dd></div>
@@ -635,14 +586,11 @@ function NarrativeReadinessPanel({
       <div><dt>重复主动作</dt><dd>{duplicateActions ?? '待计算'}</dd></div>
       <div><dt>状态回退</dt><dd>{stateRegressions ?? '待计算'}</dd></div>
       <div><dt>观众处理欠债</dt><dd>{processingDebt === null ? '待计算' : `${processingDebt.toFixed(1)}s`}</dd></div>
-      <div><dt>一次观看</dt><dd>{calibration?.ready
-        ? calibrationMode === 'human_calibration' ? '真人校准已绑定' : 'AI 模拟已绑定'
-        : '未评分'}</dd></div>
+      <div><dt>真人校准</dt><dd>{calibration?.ready ? '当前版本已绑定' : '待完成'}</dd></div>
     </dl>
-    <p>评分仅供审阅；镜头结构完整、版本证据一致并经人工确认后即可进入生成台。</p>
     {review?.reason && <p>{review.reason}</p>}
-    {calibration?.blockers?.length ? <p className="narrative-calibration-blocker">可选评分提示：{calibration.blockers[0]}</p> : null}
-    <details><summary>查看理解与结构指标</summary><p>体验意图覆盖 {percentMetric('experience_intent_coverage_rate')} · 认知任务截止通过 {percentMetric('assimilation_deadline_pass_rate')} · 镜头功能贡献 {percentMetric('shot_contribution_coverage')}</p><p>系统逐个观众路径给出风险提示，低分不会触发自动修镜或阻止发布。</p></details>
+    {calibration?.blockers?.length ? <p className="narrative-calibration-blocker">{calibration.blockers[0]}</p> : null}
+    <details><summary>查看理解与结构指标</summary><p>体验意图覆盖 {percentMetric('experience_intent_coverage_rate')} · 认知任务截止通过 {percentMetric('assimilation_deadline_pass_rate')} · 镜头功能贡献 {percentMetric('shot_contribution_coverage')}</p><p>系统逐个观众先验验收，不以平均高分替代低分位失败。</p></details>
     <HumanCalibrationControls episode={episode} notify={notify} onChanged={onChanged} />
   </section>
 }
@@ -714,7 +662,7 @@ export default function BoardPage() {
   }, [registerNavigationGuard, selectedShot, shotEditDirty])
 
   const scenes = useMemo(() => [...new Set(shots.map(shot => shot.scene_name || shot.scene_setting).filter(Boolean))], [shots])
-  const characters = useMemo(() => storyboardCharacterFilterOptions(shots), [shots])
+  const characters = useMemo(() => [...new Set(shots.flatMap(shot => [...(shot.characters ?? []), ...(shot.audio_cast ?? [])]).filter(Boolean))], [shots])
 
   useEffect(() => {
     if (!selectedShot || selectedShot.id === selectedShotId) return
@@ -1036,7 +984,7 @@ export default function BoardPage() {
         {progressCopy.detail && <div className="board-progress-explanation" role="status">
           <b>数字口径</b><span>{progressCopy.detail}</span>
         </div>}
-        {status.write_block_reason && status.state === 'syncing' && <div className="board-sync-banner" role={status.system_error ? 'alert' : 'status'}><b>{status.system_error ? '系统校验异常' : '正在同步状态'}</b><span>{status.write_block_reason}</span></div>}
+        {status.write_block_reason && status.state === 'syncing' && <div className="board-sync-banner" role="status"><b>正在同步状态</b><span>{status.write_block_reason}</span></div>}
         {(taskNotice || ep.storyboard_warning) && (
           <div
             className={`storyboard-error-details open ${(taskNotice?.severity ?? 'warning') === 'warning' ? 'warning' : 'error'}`}
@@ -1109,7 +1057,7 @@ export default function BoardPage() {
                   className={shot.id === selectedShot?.id ? 'active' : ''}
                   onClick={() => requestShotSelect(shot.id)}>
                   <span className="shot-nav-top"><span className="shot-nav-no">镜 {String(shot.shot_no).padStart(2, '0')}</span><span>{shot.duration_s}s</span></span>
-                  <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_angle || '平视'} · {shot.camera_move}</b><small>{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</small></span>
+                  <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_move}</b><small>{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</small></span>
                   <span className="shot-nav-badges">
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
@@ -1244,9 +1192,6 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
   const [detailTab, setDetailTab] = useState<'frames' | 'script'>('frames')
   const [deletedDialogue, setDeletedDialogue] = useState<{ value: Shot['dialogues'][number]; index: number } | null>(null)
   const [conflictOpen, setConflictOpen] = useState(false)
-  const [conflictImpact, setConflictImpact] = useState<SpokenConflictPreview | null>(null)
-  const [conflictImpactLoading, setConflictImpactLoading] = useState(false)
-  const [conflictImpactError, setConflictImpactError] = useState<string | null>(null)
   const [discardDraftId, setDiscardDraftId] = useState<string | null>(null)
   const [discardEditOpen, setDiscardEditOpen] = useState(false)
   const [reloadLatestOpen, setReloadLatestOpen] = useState(false)
@@ -1431,35 +1376,17 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
     setEdit({ ...edit, new_information_ids: values.includes(id) ? values.filter(item => item !== id) : [...values, id] })
   }
 
-  const previewConflictResolution = async (
-    choice: SpokenConflictPreview['choice'],
-  ) => {
-    setConflictImpactLoading(true)
-    setConflictImpactError(null)
+  const resolveConflict = async (choice: 'rebuild_timeline_from_dialogues' | 'rebuild_dialogues_from_timeline') => {
     try {
-      const preview = await api.post(
-        `/shots/${shot.id}/spoken-conflict-preview`,
-        { choice },
-      ) as SpokenConflictPreview
-      setConflictImpact(preview)
-    } catch (caught) {
-      setConflictImpactError((caught as Error).message)
-    } finally {
-      setConflictImpactLoading(false)
-    }
-  }
-
-  const resolveConflict = async () => {
-    if (!conflictImpact) return
-    const preview = conflictImpact
-    setConflictImpact(null)
-    try {
+      const preview = await api.post(`/shots/${shot.id}/spoken-conflict-preview`, { choice }) as {
+        preview_token: string; edit_session_token: string; baseline_content_hash: string
+      }
       await api.post(`/shots/${shot.id}/resolve-spoken-conflict`, {
-        choice: preview.choice, invalidate_media: true, preview_token: preview.preview_token,
+        choice, invalidate_media: true, preview_token: preview.preview_token,
         edit_session_token: preview.edit_session_token,
         baseline_content_hash: preview.baseline_content_hash,
       })
-      toast(preview.choice === 'rebuild_timeline_from_dialogues' ? '已按台词重建时间轴' : '已按时间轴重建台词')
+      toast(choice === 'rebuild_timeline_from_dialogues' ? '已按台词重建时间轴' : '已按时间轴重建台词')
       setConflictOpen(false); discard(); onChanged()
     } catch (caught) { toast((caught as Error).message, true) }
   }
@@ -1468,7 +1395,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
     <article className={`shot-strip ${edit ? 'editing' : 'reviewing'}`}>
       <header className="shot-head">
         <div className="shot-head-copy"><span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
-          <span className="meta">{current.duration_s}s · {current.shot_size} · {current.camera_angle || '平视'} · {current.camera_move} · {current.transition}</span>
+          <span className="meta">{current.duration_s}s · {current.shot_size} · {current.camera_move} · {current.transition}</span>
           <span className="meta shot-characters">{current.characters.join(' / ') || '缺角色（需修改）'}</span>
           {isStoryboardProblemShot(shot) && <span className="shot-badge status-needs_revision">需处理</span>}
           {shot.is_final && <span className="shot-badge gate">收尾镜</span>}
@@ -1495,11 +1422,9 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
 
       {conflictOpen && <div className="shot-conflict-panel" role="region" aria-label="口播冲突修复">
         <p>台词与高级时间轴分别发生了变化。选择前会先计算视频、成片与重新确认影响。</p>
-        <div className="shot-conflict-actions"><button className="btn small primary" onClick={() => void previewConflictResolution('rebuild_timeline_from_dialogues')}>以台词为准</button>
-          <button className="btn small" onClick={() => void previewConflictResolution('rebuild_dialogues_from_timeline')}>以时间轴为准</button>
-          <button className="btn small ghost" onClick={() => setConflictOpen(false)}>稍后处理</button></div>
+        <div className="shot-conflict-actions"><button className="btn small primary" onClick={() => void resolveConflict('rebuild_timeline_from_dialogues')}>以台词为准</button>
+          <button className="btn small" onClick={() => void resolveConflict('rebuild_dialogues_from_timeline')}>以时间轴为准</button><button className="btn small ghost" onClick={() => setConflictOpen(false)}>取消</button></div>
       </div>}
-
 
       {!!shot.qa_warnings?.length && <details className="shot-drafts"><summary>质量优化建议（{shot.qa_warnings.length}）</summary>
         <ul>{shot.qa_warnings.map((item, index) => <li key={`${item}-${index}`}>{storyboardGateIssueLabel(item)}</li>)}</ul>
@@ -1524,7 +1449,6 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
             <div className="shot-edit-grid">
               <label htmlFor={fieldId(shot.id, 'duration')}>时长<select id={fieldId(shot.id, 'duration')} value={edit.duration_s} onChange={event => setEdit({ ...edit, duration_s: Number(event.target.value) })}>{DURATIONS.map(value => <option key={value} value={value}>{value}s</option>)}</select><small>{edit.duration_s > 5 ? '保存后进入自动与规则审核，通过前不会发布' : '标准时长'}</small></label>
               <label htmlFor={fieldId(shot.id, 'size')}>景别<select id={fieldId(shot.id, 'size')} value={edit.shot_size} onChange={event => setEdit({ ...edit, shot_size: event.target.value })}>{SIZES.map(value => <option key={value}>{value}</option>)}</select></label>
-              <label htmlFor={fieldId(shot.id, 'angle')}>角度<input id={fieldId(shot.id, 'angle')} value={edit.camera_angle ?? ''} placeholder="平视 / 过肩 / 低角度 / 俯拍" onChange={event => setEdit({ ...edit, camera_angle: event.target.value })} /></label>
               <label htmlFor={fieldId(shot.id, 'move')}>运镜<select id={fieldId(shot.id, 'move')} value={edit.camera_move} onChange={event => setEdit({ ...edit, camera_move: event.target.value })}>{MOVES.map(value => <option key={value}>{value}</option>)}</select></label>
               <label htmlFor={fieldId(shot.id, 'transition')}>转场<select id={fieldId(shot.id, 'transition')} value={edit.transition} onChange={event => setEdit({ ...edit, transition: event.target.value })}>{TRANSITIONS.map(value => <option key={value}>{value}</option>)}</select></label>
             </div>
@@ -1533,9 +1457,6 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
               <label htmlFor={fieldId(shot.id, 'scene-name')}>场景图标签<input id={fieldId(shot.id, 'scene-name')} list={fieldId(shot.id, 'scene-name-options')} value={edit.scene_name ?? ''} required placeholder="选择或输入接近的场景名" onChange={event => setEdit({ ...edit, scene_name: event.target.value })} /><datalist id={fieldId(shot.id, 'scene-name-options')}>{sceneOptions.map(value => <option key={value} value={value} />)}</datalist><small>保存时可模糊匹配，命中后会归一成场景库规范名</small></label>
             </div>
             <label htmlFor={fieldId(shot.id, 'action')}>画面与动作<textarea id={fieldId(shot.id, 'action')} rows={3} value={edit.action_desc} required onChange={event => setEdit({ ...edit, action_desc: event.target.value })} /></label>
-            <label htmlFor={fieldId(shot.id, 'purpose')}>本镜作用<textarea id={fieldId(shot.id, 'purpose')} rows={2} value={edit.purpose ?? ''} onChange={event => setEdit({ ...edit, purpose: event.target.value })} /></label>
-            <label htmlFor={fieldId(shot.id, 'resulting-change')}>本镜结果变化<textarea id={fieldId(shot.id, 'resulting-change')} rows={2} value={edit.resulting_change ?? ''} onChange={event => setEdit({ ...edit, resulting_change: event.target.value })} /></label>
-            <label htmlFor={fieldId(shot.id, 'camera-motivation')}>摄影动机<textarea id={fieldId(shot.id, 'camera-motivation')} rows={2} value={edit.camera_motivation ?? ''} onChange={event => setEdit({ ...edit, camera_motivation: event.target.value })} /></label>
             <div className="shot-edit-grid frames"><label htmlFor={fieldId(shot.id, 'first')}>首帧画面<textarea id={fieldId(shot.id, 'first')} rows={2} value={edit.first_frame_desc} onChange={event => setEdit({ ...edit, first_frame_desc: event.target.value })} /></label>
               <label htmlFor={fieldId(shot.id, 'last')}>尾帧画面<textarea id={fieldId(shot.id, 'last')} rows={2} value={edit.last_frame_desc} onChange={event => setEdit({ ...edit, last_frame_desc: event.target.value })} /></label></div>
           </section>
@@ -1606,10 +1527,10 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
       ) : (
         <div className="shot-review-body">
           <section className="shot-overview"><div className="shot-visual-brief"><span className="shot-section-label">画面设计</span><h2>{current.scene_name || current.scene_setting}</h2>{current.scene_time && <small>时间：{current.scene_time}</small>}<p>{current.action_desc}</p></div>
-            <dl className="shot-specs"><div><dt>时长</dt><dd>{current.duration_s}s</dd></div><div><dt>景别</dt><dd>{current.shot_size}</dd></div><div><dt>角度</dt><dd>{current.camera_angle || '平视'}</dd></div><div><dt>运镜</dt><dd>{current.camera_move}</dd></div><div><dt>转场</dt><dd>{current.transition}</dd></div></dl></section>
+            <dl className="shot-specs"><div><dt>时长</dt><dd>{current.duration_s}s</dd></div><div><dt>景别</dt><dd>{current.shot_size}</dd></div><div><dt>运镜</dt><dd>{current.camera_move}</dd></div><div><dt>转场</dt><dd>{current.transition}</dd></div></dl></section>
           <div className="shot-frame-pair shot-continuity-chain" aria-label="镜头状态链"><div className="shot-frame-card"><b>进入状态</b><p>{current.state_in || current.first_frame_desc || '未设置'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>镜头动作</b><p>{current.primary_action || current.action_desc}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>离开状态</b><p>{current.state_out || current.last_frame_desc || '未设置'}</p></div></div>
           <section className="shot-spoken-panel"><header className="shot-context-head"><b>本镜台词</b><span>{currentChars} / {spokenLimit} 字</span></header>{overCapacity && <p className="shot-spoken-warn">口播已超出本镜容量</p>}{current.dialogues.length ? current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}<small>{line.emotion}</small></b><p>「{line.line}」</p></div>) : <p>本镜无台词</p>}</section>
-          <section className="shot-context-panel"><h3>镜头要素</h3><dl className="shot-context-grid"><div><dt>本镜作用</dt><dd>{current.purpose || '旧版镜头未单列'}</dd></div><div><dt>结果变化</dt><dd>{current.resulting_change || current.state_out || '未单列'}</dd></div><div><dt>摄影动机</dt><dd>{current.camera_motivation || '旧版镜头未单列'}</dd></div><div><dt>画面角色</dt><dd>{current.characters.join('、') || '无'}</dd></div><div><dt>声音角色</dt><dd>{current.audio_cast?.join('、') || '无'}</dd></div><div><dt>本镜新信息</dt><dd>{current.new_information_items?.map(item => item.content).join('；') || '无'}</dd></div></dl></section>
+          <section className="shot-context-panel"><h3>镜头要素</h3><dl className="shot-context-grid"><div><dt>画面角色</dt><dd>{current.characters.join('、') || '无'}</dd></div><div><dt>声音角色</dt><dd>{current.audio_cast?.join('、') || '无'}</dd></div><div><dt>本镜新信息</dt><dd>{current.new_information_items?.map(item => item.content).join('；') || '无'}</dd></div></dl></section>
           <div className="shot-detail-tabs" role="tablist" aria-label="镜头详情"><button id={`shot-detail-tab-${shot.id}-frames`} type="button" role="tab" aria-selected={detailTab === 'frames'} aria-controls={detailPanelId} tabIndex={detailTab === 'frames' ? 0 : -1} className={detailTab === 'frames' ? 'active' : ''} onClick={() => setDetailTab('frames')} onKeyDown={event => { if (event.key === 'ArrowRight' || event.key === 'End') { event.preventDefault(); focusDetailTab('script') } }}>起止画面</button><button id={`shot-detail-tab-${shot.id}-script`} type="button" role="tab" aria-selected={detailTab === 'script'} aria-controls={detailPanelId} tabIndex={detailTab === 'script' ? 0 : -1} className={detailTab === 'script' ? 'active' : ''} onClick={() => setDetailTab('script')} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'Home') { event.preventDefault(); focusDetailTab('frames') } }}>声音与原文</button></div>
           {detailTab === 'frames' ? <div id={detailPanelId} className="shot-frame-pair" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-frames`}><div className="shot-frame-card"><b>01 · 首帧</b><p>{current.first_frame_desc || '暂未描述'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>02 · 尾帧</b><p>{current.last_frame_desc || '暂未描述'}</p></div></div>
             : <div id={detailPanelId} className="shot-script-grid" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-script`}><div className="shot-script-copy"><b>原文依据（不送视频模型）</b><p>{current.source_excerpt || '暂无对应原文'}</p><small>{current.source_binding ? `已绑定第 ${current.source_binding.chapter_idx} 章原文片段` : '当前只保留原文内容，确认前会检查来源位置'}</small></div><div className="shot-audio-copy">{current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}</b><p>「{line.line}」</p></div>)}</div></div>}
@@ -1620,26 +1541,6 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
         impact={impact} loading={impactLoading} error={impactError} confirmLabel="批准影响并保存"
         knownEffects={impact ? [`重新校验：${((impact as unknown as { revalidation_shots?: number[] }).revalidation_shots ?? []).join('、') || '本镜与相邻镜'}`, '失败时只保留工作草稿，不覆盖发布版'] : []}
         onClose={() => { setImpact(null); setImpactError(null); setImpactLoading(false) }} onConfirm={() => void save()} />
-      <ImpactDialog
-        open={!!conflictImpact || conflictImpactLoading || !!conflictImpactError}
-        title={`解决镜 ${shot.shot_no} 的口播冲突`}
-        impact={conflictImpact}
-        loading={conflictImpactLoading}
-        error={conflictImpactError}
-        confirmLabel="批准影响并解决冲突"
-        knownEffects={[
-          conflictImpact?.choice === 'rebuild_timeline_from_dialogues'
-            ? '将以当前台词重建口播时间轴'
-            : '将以当前口播时间轴重建台词',
-          '关联媒体失效后需要重新生成，不会沿用旧视频',
-        ]}
-        onClose={() => {
-          setConflictImpact(null)
-          setConflictImpactError(null)
-          setConflictImpactLoading(false)
-        }}
-        onConfirm={() => void resolveConflict()}
-      />
       <Modal open={discardEditOpen} title={`放弃镜 ${shot.shot_no} 的未保存修改？`} onClose={() => setDiscardEditOpen(false)}
         actions={<><button className="btn" onClick={() => setDiscardEditOpen(false)}>继续编辑</button><button className="btn danger" onClick={() => {
           setDiscardEditOpen(false)

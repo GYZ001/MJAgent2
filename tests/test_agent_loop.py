@@ -61,46 +61,6 @@ def test_agent_loop_repairs_then_accepts() -> None:
     assert result.value.value == 2
 
 
-def test_uncommitted_accepted_candidate_records_evaluation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    loop = AgentLoop(
-        stage_key="storyboard_shot_1",
-        contract_key="storyboard",
-        goal="isolate one accepted shot candidate",
-        scope_type="storyboard_checkpoint",
-        scope_id="e1:1",
-        artifact_type="storyboard_shot",
-        policy=AgentLoopPolicy(commit_accepted_artifact=False),
-    )
-    recorded: list[tuple[str, str | None]] = []
-
-    monkeypatch.setattr(
-        repository,
-        "create_artifact",
-        lambda *_args, **_kwargs: {"id": "art-isolated"},
-    )
-    monkeypatch.setattr(
-        repository,
-        "create_evaluation",
-        lambda artifact_id, _evaluation, *, step_run_id=None: recorded.append(
-            (artifact_id, step_run_id)
-        ),
-    )
-
-    artifact_id = loop._record_candidate(
-        "step-isolated",
-        1,
-        '{"value": 2}',
-        Candidate(value=2),
-        [],
-        1.0,
-    )
-
-    assert artifact_id == "art-isolated"
-    assert recorded == [("art-isolated", "step-isolated")]
-
-
 def test_agent_loop_repairs_all_authority_blockers() -> None:
     outputs = ['{"value": 1}', '{"value": 2}']
 
@@ -171,64 +131,6 @@ def test_agent_loop_fails_closed_when_authority_blockers_are_exhausted() -> None
 
     with pytest.raises(AgentLoopFailure, match="authority_blockers_exhausted"):
         asyncio.run(loop.run(producer, evaluate))
-
-
-def test_baseline_only_hands_off_first_parseable_candidate() -> None:
-    calls = 0
-
-    async def producer(_iteration, *_args):
-        nonlocal calls
-        calls += 1
-        return '{"value": 1}'
-
-    def evaluate(raw: str):
-        value = Candidate.model_validate(json.loads(raw))
-        return value, [
-            Issue(
-                code="BUSINESS_RULE_FAILED",
-                severity=IssueSeverity.BLOCKER,
-                subject="episode:e1",
-                message="candidate needs local production repair",
-                repairable=True,
-            )
-        ]
-
-    loop = AgentLoop(
-        stage_key="screenplay",
-        contract_key="screenplay",
-        goal="persist the first parseable baseline",
-        scope_type="episode",
-        scope_id="e1",
-        artifact_type="episode_screenplay",
-        policy=AgentLoopPolicy(
-            max_iterations=2,
-            baseline_only=True,
-            repair_all_blockers=True,
-        ),
-    )
-
-    result = asyncio.run(loop.run(producer, evaluate))
-
-    assert calls == 1
-    assert result.status == "baseline"
-    assert result.exit_reason == "baseline_handoff"
-    assert result.iterations == 1
-    assert result.issues[0].code == "BUSINESS_RULE_FAILED"
-
-
-def test_issue_fingerprint_preserves_concrete_node_path() -> None:
-    from app.evaluations.issues import issues_from_messages
-
-    issues = issues_from_messages([
-        "dialogue_chains[2].turns[2] 纯文字 60 字，超过单镜容量",
-        "dialogue_chains[2].turns[4] 纯文字 63 字，超过单镜容量",
-        "dialogue_chains[3].turns 需包含 1~8 个连续话轮",
-        "dialogue_chains[4].turns 需包含 1~8 个连续话轮",
-        "[SOURCE_SPAN_EXACT_MISMATCH] SE-1 的 start/end 切片与逐字摘录不一致",
-        "[SOURCE_SPAN_EXACT_MISMATCH] SE-2 的 start/end 切片与逐字摘录不一致",
-    ], subject="screenplay")
-
-    assert len({issue.fingerprint for issue in issues}) == 6
 
 
 def test_agent_loop_keeps_repairing_when_structural_issue_changes() -> None:

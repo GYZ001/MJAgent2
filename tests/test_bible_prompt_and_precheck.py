@@ -6,8 +6,6 @@ import sqlite3
 from app.domain import common
 from app.refs import normalize_prompt_text, portrait_prompt
 from app.orchestration.engine import fingerprint
-from app.schemas import Bible, Character, World
-from app.validators import validate_bible
 
 
 def test_normalize_prompt_collapses_duplicate_punctuation() -> None:
@@ -20,51 +18,6 @@ def test_portrait_prompt_uses_normalization() -> None:
     text = portrait_prompt("国风水墨清透光影细腻晕染", "黑发少年。。玄色劲装，目光坚定，身形修长腰佩玉佩")
     assert "。。" not in text
     assert "国风水墨" in text
-
-
-def test_bible_rejects_identity_traits_hidden_by_normal_clothing() -> None:
-    bible = Bible(
-        characters=[Character(
-            name="角色甲",
-            role="主角",
-            appearance_canonical=(
-                "24岁女性，黑色长发，白色衬衫配深色半身裙，"
-                "身形修长，标志性特征是粉色乳头"
-            ),
-        )],
-        world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
-    )
-
-    assert any("常规完整着装、中性站姿下静态可见" in error for error in validate_bible(bible))
-
-
-def test_bible_rejects_behavior_and_subjective_personality_as_appearance() -> None:
-    bible = Bible(
-        characters=[Character(
-            name="角色甲",
-            role="反派",
-            appearance_canonical=(
-                "四十岁男性，短发，深色正装配白衬衫，身材微胖，"
-                "标志性特征是眼神猥琐，看人总带着色欲和算计感"
-            ),
-        )],
-        world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
-    )
-
-    assert any("常规完整着装、中性站姿下静态可见" in error for error in validate_bible(bible))
-
-
-def test_bible_accepts_compact_complete_production_identity() -> None:
-    bible = Bible(
-        characters=[Character(
-            name="角色甲",
-            role="反派",
-            appearance_canonical="三十岁男性，短发身材高大，常穿深色正装配黑皮鞋",
-        )],
-        world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
-    )
-
-    assert validate_bible(bible) == []
 
 
 def test_project_or_404_normalizes_sqlite_row_to_dict(monkeypatch) -> None:
@@ -161,11 +114,7 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     from app.schemas import Bible, Character, World
     import asyncio
 
-    seen = {}
-
     async def fake_loop(*_args, **_kwargs):
-        seen["allow_warning_candidate"] = _kwargs["loop"].policy.allow_warning_candidate
-        seen["repair_all_blockers"] = _kwargs["loop"].policy.repair_all_blockers
         return Bible(
             world=World(visual_style_canonical="模型自行写的画风"),
             characters=[
@@ -187,5 +136,3 @@ def test_generate_bible_forces_backend_visual_style_prompt(monkeypatch) -> None:
     assert result.world.visual_style_canonical == (
         "电影级真实质感，现实人物建模，自然光影，细节丰富，东方仙侠风。"
     )
-    assert seen["allow_warning_candidate"] is False
-    assert seen["repair_all_blockers"] is True

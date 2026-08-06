@@ -50,11 +50,7 @@ scripts/dev.sh stop       # 停止
 
 ```bash
 cd /Users/bytedance/Desktop/漫剧Agent2.0
-.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8230 \
-  --timeout-keep-alive 1 --timeout-graceful-shutdown 3 \
-  --reload --reload-dir app \
-  --reload-exclude '__pycache__' --reload-exclude '*.pyc' \
-  --reload-delay 2
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8230 --reload
 ```
 
 后端地址：`http://127.0.0.1:8230`
@@ -136,7 +132,6 @@ foreach ($p in $ports) {
 # uvicorn.exe 通常在用户级 Python 的 Scripts 目录下，按实际路径替换
 & 'C:\Users\<用户名>\AppData\Local\Programs\Python\Python310\Scripts\uvicorn.exe' `
     app.main:app --host 127.0.0.1 --port 8230 --reload `
-    --timeout-keep-alive 1 --timeout-graceful-shutdown 3 `
     --reload-dir app `
     --reload-exclude '__pycache__' --reload-exclude '*.pyc' `
     --reload-delay 2
@@ -154,9 +149,6 @@ foreach ($p in $ports) {
   - `__pycache__` 的 `.pyc` 在导入时生成，会引发**频繁误重载**。
 - **必须**用 `--reload-dir app` 把监视范围缩到 `app/`，并加 `--reload-exclude '__pycache__'`
   与 `--reload-exclude '*.pyc'` 排除编译缓存。`--reload-delay 2` 进一步抑制抖动。
-- **必须**给 reload 加 `--timeout-keep-alive 1 --timeout-graceful-shutdown 3`。前端 Vite 代理
-  和浏览器视频预览会保留 HTTP keep-alive/Range 连接；没有停机上限时，保存后端代码可能让旧
-  worker 无限停在 `Waiting for connections to close`，表现为端口还在但健康检查和 API 全部卡住。
 - 启动前可先清一遍 `app/` 下的 `__pycache__`：
   ```powershell
   Get-ChildItem -Path 'app' -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |

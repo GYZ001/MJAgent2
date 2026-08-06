@@ -85,31 +85,9 @@ def _row_has_blocking_issue(row: Any) -> bool:
         and (
             str(issue.get("severity") or "").lower() == "blocker"
             or bool(issue.get("must_fix"))
-            or bool((issue.get("evidence") or {}).get("must_fix"))
         )
         for issue in issues
     )
-
-
-def _evaluation_blocking_counts(rows: list[Any]) -> tuple[int, int]:
-    blockers = 0
-    must_fix = 0
-    for row in rows:
-        try:
-            issues = json.loads(row["issues_json"] or "[]")
-        except (TypeError, json.JSONDecodeError):
-            raise ValueError("完成凭证引用的 Evaluation issues_json 无法解析")
-        if not isinstance(issues, list):
-            raise ValueError("完成凭证引用的 Evaluation issues_json 不是数组")
-        for issue in issues:
-            if not isinstance(issue, dict):
-                raise ValueError("完成凭证引用的 Evaluation 含非法 Issue")
-            evidence = issue.get("evidence") or {}
-            if str(issue.get("severity") or "").lower() == "blocker":
-                blockers += 1
-            if bool(issue.get("must_fix")) or bool(evidence.get("must_fix")):
-                must_fix += 1
-    return blockers, must_fix
 
 
 def _is_passing_runtime_gate(row: Any) -> bool:
@@ -285,13 +263,6 @@ def _validate_narrative_certificate_authority(
         artifact=artifact,
     )
     if screenplay is None:
-        if kind == "screenplay":
-            from app.production.screenplay_authority import (
-                screenplay_contract_requires_narrative,
-            )
-
-            if screenplay_contract_requires_narrative(contract_version):
-                raise ValueError("当前剧本合同要求 narrative_plan，禁止签发 legacy 完成凭证")
         return False
 
     artifact_contract = str(artifact.get("contract_version") or "")
@@ -301,7 +272,7 @@ def _validate_narrative_certificate_authority(
         raise ValueError("叙事完成凭证的 qa_profile_version 与当前运行契约不匹配")
 
     if kind == "screenplay":
-        _required_exact_runtime_gate(
+        _required_exact_score_only(
             rows,
             evaluator_name=_SCREENPLAY_GATE_EVALUATOR,
             evaluator_version=qa_profile_version,
@@ -330,7 +301,7 @@ def issue_completion_certificate(
     must_fix_issues: int = 0,
     production_revision_id: str | None = None,
 ) -> CompletionCertificate:
-    """Issue a certificate only when its bound evaluations prove zero blockers."""
+    """签发完成凭证；QA 仅作同一 Artifact 的评分报告。"""
     if not artifact_id or not artifact_hash:
         raise ValueError("完成凭证必须绑定 artifact_id 与 artifact_hash")
 
@@ -347,6 +318,8 @@ def issue_completion_certificate(
     stored_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
     if stored_hash != artifact_hash:
         raise ValueError("artifact_hash 与存储内容不一致，拒绝签发凭证")
+    if int(blockers or 0) > 0 or int(must_fix_issues or 0) > 0:
+        raise ValueError("完成凭证不能带有 blocker 或 must-fix")
     evaluation_ids = list(evaluation_ids or [])
     rows = _load_evaluation_rows(evaluation_ids)
     by_id = {row["id"]: row for row in rows}
@@ -354,20 +327,9 @@ def issue_completion_certificate(
         raise ValueError("完成凭证引用了不存在的 Evaluation")
     if any(row["artifact_id"] != artifact_id for row in rows):
         raise ValueError("完成凭证引用了其他 Artifact 的 Evaluation")
-    derived_blockers, derived_must_fix = _evaluation_blocking_counts(rows)
-    if derived_blockers or derived_must_fix:
-        raise ValueError(
-            "完成凭证引用的 Evaluation 仍含 "
-            f"{derived_blockers} 个 blocker、{derived_must_fix} 个 must-fix"
-        )
-    if int(blockers or 0) != derived_blockers or int(must_fix_issues or 0) != derived_must_fix:
-        raise ValueError("完成凭证阻断计数必须由 Evaluation 精确派生")
-    blocking_roles = {"business_safety"}
-    if kind == "screenplay":
-        blocking_roles.add("runtime_gate")
     runtime_gates = [
         row for row in rows
-        if row["evaluation_role"] in blocking_roles
+        if row["evaluation_role"] == "business_safety"
     ]
     if any(
         not bool(row["hard_gate_passed"])
@@ -377,12 +339,6 @@ def issue_completion_certificate(
         raise ValueError("引用的 runtime gate 尚未通过，拒绝签发完成凭证")
     if any(_row_has_blocking_issue(row) for row in runtime_gates):
         raise ValueError("runtime gate 仍含 blocker 或 must-fix，拒绝签发完成凭证")
-    if kind == "screenplay":
-        _required_exact_runtime_gate(
-            rows,
-            evaluator_name=_SCREENPLAY_GATE_EVALUATOR,
-            evaluator_version=qa_profile_version,
-        )
 
     narrative_authority = _validate_narrative_certificate_authority(
         kind=kind,
@@ -416,8 +372,8 @@ def issue_completion_certificate(
         contract_version=contract_version,
         qa_profile_version=qa_profile_version,
         evaluation_ids=evaluation_ids,
-        blockers=derived_blockers,
-        must_fix_issues=derived_must_fix,
+        blockers=max(0, int(blockers or 0)),
+        must_fix_issues=max(0, int(must_fix_issues or 0)),
         issued_at=issued_at,
         production_revision_id=production_revision_id,
     )
@@ -524,7 +480,6 @@ def verify_completion_certificate(
     expected_scope_id: str | None = None,
     expected_production_revision_id: str | None = None,
     allow_consumed: bool = False,
-    allow_stale_artifact_for_revision: bool = False,
 ) -> CompletionCertificate:
     # The database row is authoritative even when the caller passes a model.
     # Otherwise a caller could construct a look-alike certificate object and
@@ -560,13 +515,10 @@ def verify_completion_certificate(
     art = evidence_repository.get_artifact(cert.artifact_id)
     if not art:
         raise ValueError("凭证绑定的 artifact 已不存在")
-    allowed_artifact_statuses = {"validated", "approved"}
-    if allow_stale_artifact_for_revision:
-        allowed_artifact_statuses.add("stale")
     if (
         art.get("scope_type") != "episode"
         or art.get("scope_id") != cert.scope_id
-        or art.get("status") not in allowed_artifact_statuses
+        or art.get("status") not in {"validated", "approved"}
     ):
         raise ValueError("凭证绑定的 artifact 范围或当前状态已失效")
     current_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
@@ -580,9 +532,6 @@ def verify_completion_certificate(
         raise ValueError("完成凭证引用的 Evaluation 已缺失")
     if any(row["artifact_id"] != cert.artifact_id for row in rows):
         raise ValueError("完成凭证的 Evaluation 与 Artifact 绑定已漂移")
-    derived_blockers, derived_must_fix = _evaluation_blocking_counts(rows)
-    if derived_blockers or derived_must_fix:
-        raise ValueError("完成凭证绑定的 Evaluation 仍含 blocker 或 must-fix")
     narrative_authority = _validate_narrative_certificate_authority(
         kind=cert.kind,
         scope_id=cert.scope_id,
@@ -592,12 +541,9 @@ def verify_completion_certificate(
         qa_profile_version=cert.qa_profile_version,
     )
     if narrative_authority:
-        blocking_roles = {"business_safety"}
-        if cert.kind == "screenplay":
-            blocking_roles.add("runtime_gate")
         runtime_gates = [
             row for row in rows
-            if row["evaluation_role"] in blocking_roles
+            if row["evaluation_role"] == "business_safety"
         ]
         if any(
             not bool(row["runtime_blocking"])

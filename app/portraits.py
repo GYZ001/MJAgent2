@@ -30,28 +30,22 @@ from app.character_policy import is_functional_extra
 from app.db import get_conn, get_setting, new_id, now, set_setting
 from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
-from app.errors import ContentGenerationError, code_ref
+from app.errors import code_ref
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.ingest import chapter_is_stub, chapter_titles_match
-from app.refs import (
-    PRODUCTION_APPEARANCE_MAX_CHARS,
-    PRODUCTION_APPEARANCE_MIN_CHARS,
-    _safe_name,
-    missing_production_appearance_dimensions,
-    portrait_appearance_anchor,
-    portrait_prompt,
-    production_appearance_anchor,
-)
-from app.schemas import Bible, Character, EpisodeScreenplay, extract_json
+from app.refs import _safe_name, portrait_appearance_anchor, portrait_prompt
+from app.schemas import Bible, Character, extract_json
 
 FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
-APPEARANCE_MIN = PRODUCTION_APPEARANCE_MIN_CHARS
-APPEARANCE_MAX = PRODUCTION_APPEARANCE_MAX_CHARS
+APPEARANCE_MIN = 30     # 外观锚点串下限（与 validate_bible 一致）
+APPEARANCE_MAX = 80     # 外观锚点串上限
 STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集号
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
-CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
+CAST_DISCOVERY_DRAFT_BUDGET = 14000
+CAST_DISCOVERY_FUTURE_BATCH_BUDGET = 45000
+CAST_DISCOVERY_FUTURE_BATCH_OVERLAP = 800
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -112,7 +106,6 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
 - 没有把握时一律判为未明显变化，避免无意义重绘。
 
 对 changed=true 的角色，给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
-- 外观锚点只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 同时给出：
 - change_dimensions：变化维度数组，取值仅限 hair/outfit/accessory/injury/age_stage/face/body_identity
 - persistence：persistent（跨集持续）/ episode（仅本集）/ shot_only（单镜临时，不应更新人物谱）
@@ -253,141 +246,6 @@ def _future_chapter_context(
     )
 
 
-def _draft_identity_projection(draft_text: str) -> str:
-    """Project only typed identity carriers from a screenplay draft."""
-    if not draft_text:
-        return ""
-    try:
-        script = EpisodeScreenplay.model_validate_json(draft_text)
-    except (TypeError, ValueError):
-        return json.dumps(
-            {"parse_status": "invalid", "identity_mentions": []},
-            ensure_ascii=False,
-        )
-
-    mentions: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def add(value: object, path: str) -> None:
-        text = str(value or "").strip()
-        key = (text, path)
-        if text and key not in seen:
-            seen.add(key)
-            mentions.append({"value": text, "path": path})
-
-    for scene_index, scene in enumerate(script.scene_outline or []):
-        for character in scene.characters or []:
-            add(character, f"scene_outline[{scene_index}].characters")
-    for chain_index, chain in enumerate(script.dialogue_chains or []):
-        for turn_index, turn in enumerate(chain.turns or []):
-            add(
-                turn.speaker,
-                f"dialogue_chains[{chain_index}].turns[{turn_index}].speaker",
-            )
-    for item_index, item in enumerate(script.information_ledger or []):
-        add(item.speaker_id, f"information_ledger[{item_index}].speaker_id")
-    for voice_index, voice in enumerate(script.voice_bible or []):
-        add(voice.speaker_id, f"voice_bible[{voice_index}].speaker_id")
-
-    from app.validators import screenplay_speaker_names
-
-    for speaker in screenplay_speaker_names(script.full_script_text or ""):
-        add(speaker, "full_script_text.speaker")
-
-    plan = script.narrative_plan
-    if plan is not None:
-        for contract_index, contract in enumerate(plan.identity_contracts or []):
-            add(
-                contract.identity_id,
-                f"narrative_plan.identity_contracts[{contract_index}].identity_id",
-            )
-            add(
-                contract.display_name,
-                f"narrative_plan.identity_contracts[{contract_index}].display_name",
-            )
-            for voice_id in contract.voice_ids or []:
-                add(
-                    voice_id,
-                    f"narrative_plan.identity_contracts[{contract_index}].voice_ids",
-                )
-        for state_index, state in enumerate(plan.character_states or []):
-            add(
-                state.character_id,
-                f"narrative_plan.character_states[{state_index}].character_id",
-            )
-        for belief_index, belief in enumerate(plan.character_beliefs or []):
-            add(
-                belief.character_id,
-                f"narrative_plan.character_beliefs[{belief_index}].character_id",
-            )
-        for scene_index, scene in enumerate(plan.scene_contracts or []):
-            add(
-                scene.point_of_view_character_id,
-                f"narrative_plan.scene_contracts[{scene_index}].point_of_view_character_id",
-            )
-
-    return json.dumps(
-        {"parse_status": "typed", "identity_mentions": mentions},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-
-
-def _future_identity_context(future_text: str, source_labels: list[str]) -> str:
-    """Return bounded future excerpts only where a current identity label occurs."""
-    blocks: list[str] = []
-    remaining = CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET
-    for source_label in dict.fromkeys(source_labels):
-        if remaining <= 0:
-            break
-        fragments = extract_character_fragments(
-            future_text,
-            source_label,
-            window=180,
-            budget=min(1200, remaining),
-        )
-        if not fragments:
-            continue
-        block = f"【当前称谓：{source_label}】\n{fragments}"
-        blocks.append(block)
-        remaining -= len(block)
-    return "\n\n".join(blocks)
-
-
-def _source_identity_contexts(source_text: str, *, budget: int) -> list[str]:
-    """Split the complete current source into bounded paragraph-preserving batches."""
-    text = str(source_text or "").strip()
-    if not text:
-        return ["（本集原文为空）"]
-    paragraphs = [part.strip() for part in re.split(r"\n+", text) if part.strip()]
-    chunks: list[str] = []
-    current: list[str] = []
-    current_chars = 0
-    for paragraph in paragraphs:
-        if len(paragraph) > budget:
-            if current:
-                chunks.append("\n".join(current))
-                current = []
-                current_chars = 0
-            start = 0
-            while start < len(paragraph):
-                end = min(len(paragraph), start + budget)
-                chunks.append(paragraph[start:end])
-                start = end
-            continue
-        added = len(paragraph) + (1 if current else 0)
-        if current and current_chars + added > budget:
-            chunks.append("\n".join(current))
-            current = [paragraph]
-            current_chars = len(paragraph)
-        else:
-            current.append(paragraph)
-            current_chars += added
-    if current:
-        chunks.append("\n".join(current))
-    return chunks or [text]
-
-
 async def discover_character_candidates(
     source_text: str,
     bible: Bible,
@@ -406,25 +264,62 @@ async def discover_character_candidates(
     known_names = [c.name for c in bible.characters if c.name]
     known = "、".join(known_names) or "（无）"
     current_haystack = f"{source_text or ''}\n{draft_text or ''}"
-    draft_projection = _draft_identity_projection(draft_text)
-    source_contexts = (
-        ["（Baseline 后增量审计：当前原文已在首次预检中处理，本次不重复发送）"]
-        if draft_text
-        else _source_identity_contexts(
-            source_text,
-            budget=CAST_DISCOVERY_SOURCE_BUDGET,
-        )
-    )
     seen: set[tuple[str, str, str]] = set()
     candidates: list[dict] = []
+    future_step = (
+        CAST_DISCOVERY_FUTURE_BATCH_BUDGET
+        - CAST_DISCOVERY_FUTURE_BATCH_OVERLAP
+    )
+    future_chunks = [
+        future_text[offset:offset + CAST_DISCOVERY_FUTURE_BATCH_BUDGET]
+        for offset in range(0, len(future_text), future_step)
+    ] or [""]
+    for batch_index, future_chunk in enumerate(future_chunks, start=1):
+        prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
+不要依赖服饰、性别、年龄或称谓后缀的固定词表。
 
-    def collect(raw: str, *, identity_haystack: str) -> None:
-        try:
-            obj = extract_json(raw, repair_unescaped_inner_quotes=True)
-        except ValueError as exc:
-            raise ContentGenerationError(
-                "人物身份模型返回了不可验证的非结构化结果，当前阶段已停止"
-            ) from exc
+当前人物谱已有角色：
+{known}
+
+本集原文：
+{(source_text or "")[:CAST_DISCOVERY_SOURCE_BUDGET]}
+
+剧本草稿（可能为空；若与原文冲突，以原文为准）：
+{(draft_text or "")[:CAST_DISCOVERY_DRAFT_BUDGET]}
+
+后续章节身份线索（{future_label or '无'}，批次 {batch_index}/{len(future_chunks)}）：
+{future_chunk or '（无）'}
+
+规则：
+1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
+2. 若当前文本或这批后续章节有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
+3. canonical_name 必须是文本明确给出的人名，或“当前人物谱已有角色”中的稳定名；姓氏加师兄/师姐、
+   长老等称谓、职位、外貌标签都不是真名（除非它已在当前人物谱中），这类情况必须判为 functional。
+4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
+5. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
+6. 不得输出只在后续章节出场、本集并未出场/开口的人；后文只能用于身份消歧。
+7. evidence 给本集依据；future_evidence 只给姓名同一性依据，不摘录后续剧情。
+
+只输出 JSON：
+{{"characters": [{{"source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
+        raw = await model_gateway.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=1200,
+            call_meta={
+                "stage": "discover_character_candidates",
+                "episode_no": episode_no,
+                "future_batch": batch_index,
+                "future_batches": len(future_chunks),
+                # Character discovery is deterministic for the same persisted
+                # screenplay operation.  A worker restart after the provider
+                # returned must reuse that response instead of paying for and
+                # waiting on the same multi-chapter audit again.
+                "reuse_successful_operation": True,
+            },
+        )
+        obj = extract_json(raw, repair_unescaped_inner_quotes=True)
+        identity_haystack = f"{current_haystack}\n{future_chunk}"
         for item in obj.get("characters") or []:
             if not isinstance(item, dict):
                 continue
@@ -471,109 +366,6 @@ async def discover_character_candidates(
                 "evidence": str(item.get("evidence") or "").strip()[:80],
                 "future_evidence": str(item.get("future_evidence") or "").strip()[:120],
             })
-
-    for current_batch, source_context in enumerate(source_contexts, start=1):
-        prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
-不要依赖服饰、性别、年龄或称谓后缀的固定词表。
-
-当前人物谱已有角色：
-{known}
-
-本集原文：
-{source_context}
-
-剧本草稿身份投影（只含类型合同中的身份字段，可能为空）：
-{draft_projection or '（无）'}
-
-规则：
-1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
-2. 若当前输入有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
-3. canonical_name 必须是文本明确给出的人名，或“当前人物谱已有角色”中的稳定名；姓氏加师兄/师姐、
-   长老等称谓、职位、外貌标签都不是真名（除非它已在当前人物谱中），这类情况必须判为 functional。
-4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
-5. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
-6. evidence 只描述身份依据，不复述与人物身份无关的剧情。
-
-只输出 JSON：
-{{"characters": [{{"source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
-
-        # #region debug-point E:character-discovery-request
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"phase":"current","sourceChars":len(source_text or ""),"sourceSentChars":len(source_context),"sourceBatch":current_batch,"sourceBatches":len(source_contexts),"draftChars":len(draft_text or ""),"draftProjectedChars":len(draft_projection),"futureChars":0,"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
-        raw = await model_gateway.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=2400,
-            call_meta={
-                "stage": "discover_character_candidates",
-                "episode_no": episode_no,
-                "discovery_phase": "current",
-                "source_batch": current_batch,
-                "source_batches": len(source_contexts),
-                "reuse_successful_operation": True,
-            },
-        )
-        # #region debug-point C:character-discovery-response
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"phase":"current","sourceBatch":current_batch,"sourceBatches":len(source_contexts),"rawChars":len(raw or ""),"startsWithJson":(raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
-        collect(raw, identity_haystack=current_haystack)
-
-    future_context = _future_identity_context(
-        future_text,
-        [item["source_label"] for item in candidates],
-    )
-    if future_context:
-        future_prompt = f"""任务：只为当前集已经发现的人物称谓做后续姓名消歧。
-
-当前人物谱已有角色：
-{known}
-
-当前集候选：
-{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}
-
-后续章节中命中这些称谓的局部窗口（{future_label or '后续章节'}）：
-{future_context}
-
-规则：
-1. 只输出当前集候选中 source_label 完全相同、且后续窗口明确证明稳定真名的项目。
-2. canonical_name 必须出现在后续窗口或当前人物谱中；有歧义就不输出。
-3. 不得新增只在后续章节出场的人，不得复述与身份无关的剧情。
-
-只输出 JSON：
-{{"characters": [{{"source_label": "当前称谓", "canonical_name": "稳定真名", "identity_kind": "named", "kind": "onscreen|mentioned", "evidence": "本集身份依据", "future_evidence": "同一性依据"}}]}}"""
-        # #region debug-point E:character-discovery-request
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"phase":"future_identity","sourceChars":len(source_text or ""),"sourceSentChars":0,"draftChars":len(draft_text or ""),"draftProjectedChars":0,"futureChars":len(future_context),"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
-        future_raw = await model_gateway.chat(
-            [{"role": "user", "content": future_prompt}],
-            temperature=0.1,
-            max_tokens=1600,
-            call_meta={
-                "stage": "discover_character_candidates",
-                "episode_no": episode_no,
-                "discovery_phase": "future_identity",
-                "reuse_successful_operation": True,
-            },
-        )
-        # #region debug-point C:character-discovery-response
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"phase":"future_identity","rawChars":len(future_raw or ""),"startsWithJson":(future_raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (future_raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
-        collect(
-            future_raw,
-            identity_haystack=f"{current_haystack}\n{future_context}",
-        )
 
     # 同一称谓在不同后文批次中可能先被保守判为 functional，后被真名证据命中。
     # 具名证据唯一时优先；出现两个不同真名时不猜，降级为一次性角色。
@@ -743,8 +535,6 @@ def _replace_narrative_plan_identity(
     plan,
     source_label: str,
     canonical_name: str,
-    *,
-    replace_display_text: bool = True,
 ) -> bool:
     """Atomically update every authoritative entity reference in one plan.
 
@@ -757,25 +547,23 @@ def _replace_narrative_plan_identity(
     before = plan.model_dump(mode="json")
 
     for contract in plan.identity_contracts:
-        if replace_display_text and contract.display_name == source_label:
+        if contract.display_name == source_label:
             contract.display_name = canonical_name
         contract.voice_ids = list(dict.fromkeys(
             canonical_name if voice_id == source_label else voice_id
             for voice_id in contract.voice_ids
         ))
-        if replace_display_text:
-            contract.evidence.rationale = _replace_resolved_label(
-                contract.evidence.rationale, source_label, canonical_name,
-            )
+        contract.evidence.rationale = _replace_resolved_label(
+            contract.evidence.rationale, source_label, canonical_name,
+        )
     for proposition in plan.propositions:
         proposition.entity_ids = list(dict.fromkeys(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in proposition.entity_ids
         ))
-        if replace_display_text:
-            proposition.canonical_statement = _replace_resolved_label(
-                proposition.canonical_statement, source_label, canonical_name,
-            )
+        proposition.canonical_statement = _replace_resolved_label(
+            proposition.canonical_statement, source_label, canonical_name,
+        )
     for fact in plan.state_facts:
         if fact.subject_id == source_label:
             fact.subject_id = canonical_name
@@ -787,19 +575,17 @@ def _replace_narrative_plan_identity(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in evidence.perceivable_by
         ))
-        if replace_display_text:
-            evidence.observable_claim = _replace_resolved_label(
-                evidence.observable_claim, source_label, canonical_name,
-            )
+        evidence.observable_claim = _replace_resolved_label(
+            evidence.observable_claim, source_label, canonical_name,
+        )
         evidence.competing_attention_ids = list(dict.fromkeys(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in evidence.competing_attention_ids
         ))
     for question in plan.dramatic_questions:
-        if replace_display_text:
-            question.question_text = _replace_resolved_label(
-                question.question_text, source_label, canonical_name,
-            )
+        question.question_text = _replace_resolved_label(
+            question.question_text, source_label, canonical_name,
+        )
     for action in plan.atomic_actions:
         action.actor_ids = list(dict.fromkeys(
             canonical_name if entity_id == source_label else entity_id
@@ -809,18 +595,17 @@ def _replace_narrative_plan_identity(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in action.target_ids
         ))
-        if replace_display_text:
-            for field in ("semantic_intent", "completion_condition", "decision_not_applicable_reason"):
-                value = getattr(action, field, None)
-                if isinstance(value, str):
-                    setattr(action, field, _replace_resolved_label(value, source_label, canonical_name))
-            for phase in action.temporal_phases:
-                phase.start_condition = _replace_resolved_label(
-                    phase.start_condition, source_label, canonical_name,
-                )
-                phase.end_condition = _replace_resolved_label(
-                    phase.end_condition, source_label, canonical_name,
-                )
+        for field in ("semantic_intent", "completion_condition", "decision_not_applicable_reason"):
+            value = getattr(action, field, None)
+            if isinstance(value, str):
+                setattr(action, field, _replace_resolved_label(value, source_label, canonical_name))
+        for phase in action.temporal_phases:
+            phase.start_condition = _replace_resolved_label(
+                phase.start_condition, source_label, canonical_name,
+            )
+            phase.end_condition = _replace_resolved_label(
+                phase.end_condition, source_label, canonical_name,
+            )
     for event in plan.events:
         event.character_goal_effects = _replace_identity_value(
             event.character_goal_effects, source_label, canonical_name,
@@ -834,18 +619,16 @@ def _replace_narrative_plan_identity(
         state.emotion = _replace_identity_value(
             state.emotion, source_label, canonical_name,
         )
-        if replace_display_text:
-            state.tactic = _replace_resolved_label(
-                state.tactic, source_label, canonical_name,
-            )
+        state.tactic = _replace_resolved_label(
+            state.tactic, source_label, canonical_name,
+        )
     for belief in plan.character_beliefs:
         if belief.character_id == source_label:
             belief.character_id = canonical_name
     for prior in plan.audience_priors:
-        if replace_display_text:
-            prior.audience_description = _replace_resolved_label(
-                prior.audience_description, source_label, canonical_name,
-            )
+        prior.audience_description = _replace_resolved_label(
+            prior.audience_description, source_label, canonical_name,
+        )
         prior.familiarity_assumptions = _replace_identity_value(
             prior.familiarity_assumptions, source_label, canonical_name,
         )
@@ -874,37 +657,34 @@ def _replace_narrative_plan_identity(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in intent.attention_target_ids
         ))
-        if replace_display_text:
-            intent.director_objective = _replace_resolved_label(
-                intent.director_objective, source_label, canonical_name,
-            )
-            intent.forbidden_misconceptions = [
-                _replace_resolved_label(value, source_label, canonical_name)
-                for value in intent.forbidden_misconceptions
-            ]
+        intent.director_objective = _replace_resolved_label(
+            intent.director_objective, source_label, canonical_name,
+        )
+        intent.forbidden_misconceptions = [
+            _replace_resolved_label(value, source_label, canonical_name)
+            for value in intent.forbidden_misconceptions
+        ]
     for scene in plan.scene_contracts:
         if scene.point_of_view_character_id == source_label:
             scene.point_of_view_character_id = canonical_name
         scene.relationship_deltas = _replace_identity_value(
             scene.relationship_deltas, source_label, canonical_name,
         )
-        if replace_display_text:
-            for field in (
-                "not_applicable_reason",
-                "alternative_dramatic_function",
-                "value_polarity_in",
-                "value_polarity_out",
-                "scene_button",
-            ):
-                value = getattr(scene, field, None)
-                if isinstance(value, str):
-                    setattr(scene, field, _replace_resolved_label(value, source_label, canonical_name))
+        for field in (
+            "not_applicable_reason",
+            "alternative_dramatic_function",
+            "value_polarity_in",
+            "value_polarity_out",
+            "scene_button",
+        ):
+            value = getattr(scene, field, None)
+            if isinstance(value, str):
+                setattr(scene, field, _replace_resolved_label(value, source_label, canonical_name))
     for arc in plan.arc_contracts:
-        if replace_display_text:
-            for field in ("not_applicable_reason", "alternative_dramatic_function"):
-                value = getattr(arc, field, None)
-                if isinstance(value, str):
-                    setattr(arc, field, _replace_resolved_label(value, source_label, canonical_name))
+        for field in ("not_applicable_reason", "alternative_dramatic_function"):
+            value = getattr(arc, field, None)
+            if isinstance(value, str):
+                setattr(arc, field, _replace_resolved_label(value, source_label, canonical_name))
         arc.pressure_curve = _replace_identity_value(
             arc.pressure_curve, source_label, canonical_name,
         )
@@ -931,7 +711,6 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
         canonical_name = str(item.get("canonical_name") or "").strip()
         if not source_label or not canonical_name or source_label == canonical_name:
             continue
-        replace_display_text = item.get("resolution") != "future_identity"
 
         changed = False
         for scene in getattr(screenplay, "scene_outline", None) or []:
@@ -941,29 +720,23 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                 for name in before
             ))
             changed = changed or scene.characters != before
-            if replace_display_text:
-                for field in ("story_function", "summary", "conflict", "turn"):
-                    value = getattr(scene, field, "") or ""
-                    replaced = _replace_resolved_label(value, source_label, canonical_name)
-                    if replaced != value:
-                        setattr(scene, field, replaced)
-                        changed = True
+            for field in ("story_function", "summary", "conflict", "turn"):
+                value = getattr(scene, field, "") or ""
+                replaced = _replace_resolved_label(value, source_label, canonical_name)
+                if replaced != value:
+                    setattr(scene, field, replaced)
+                    changed = True
 
-        if replace_display_text:
-            body = getattr(screenplay, "full_script_text", "") or ""
-            replaced_body = _replace_screenplay_body_label(body, source_label, canonical_name)
-            if replaced_body != body:
-                screenplay.full_script_text = replaced_body
-                changed = True
+        body = getattr(screenplay, "full_script_text", "") or ""
+        replaced_body = _replace_screenplay_body_label(body, source_label, canonical_name)
+        if replaced_body != body:
+            screenplay.full_script_text = replaced_body
+            changed = True
 
         spine = getattr(screenplay, "plot_spine", None)
         if spine is not None:
             for beat in spine.spine_beats or []:
-                for field in (
-                    ("who", "does", "turn")
-                    if replace_display_text
-                    else ("who",)
-                ):
+                for field in ("who", "does", "turn"):
                     value = getattr(beat, field, "") or ""
                     replaced = _replace_resolved_label(value, source_label, canonical_name)
                     if replaced != value:
@@ -977,24 +750,22 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                     changed = True
 
         for event in getattr(screenplay, "events", None) or []:
-            if replace_display_text:
-                for field in ("state_in", "trigger", "visible_change", "state_out", "adaptation_reason"):
-                    value = getattr(event, field, "") or ""
-                    replaced = _replace_resolved_label(value, source_label, canonical_name)
-                    if replaced != value:
-                        setattr(event, field, replaced)
-                        changed = True
+            for field in ("state_in", "trigger", "visible_change", "state_out", "adaptation_reason"):
+                value = getattr(event, field, "") or ""
+                replaced = _replace_resolved_label(value, source_label, canonical_name)
+                if replaced != value:
+                    setattr(event, field, replaced)
+                    changed = True
 
         for info in getattr(screenplay, "information_ledger", None) or []:
             if (info.speaker_id or "").strip() == source_label:
                 info.speaker_id = canonical_name
                 changed = True
-            if replace_display_text:
-                content = info.content or ""
-                replaced = _replace_resolved_label(content, source_label, canonical_name)
-                if replaced != content:
-                    info.content = replaced
-                    changed = True
+            content = info.content or ""
+            replaced = _replace_resolved_label(content, source_label, canonical_name)
+            if replaced != content:
+                info.content = replaced
+                changed = True
 
         for voice in getattr(screenplay, "voice_bible", None) or []:
             if (voice.speaker_id or "").strip() == source_label:
@@ -1010,32 +781,30 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
             getattr(screenplay, "narrative_plan", None),
             source_label,
             canonical_name,
-            replace_display_text=replace_display_text,
         ) or changed
 
-        if replace_display_text:
-            for field in (
-                "logline", "dramatic_question", "protagonist_goal", "obstacle", "stakes",
-                "emotional_curve", "ending_hook", "adaptation_direction", "opening", "development",
-                "conflict", "climax", "episode_premise",
-            ):
-                value = getattr(screenplay, field, "") or ""
-                replaced = _replace_resolved_label(value, source_label, canonical_name)
-                if replaced != value:
-                    setattr(screenplay, field, replaced)
-                    changed = True
-            for field in (
-                "key_lines", "key_plot_points", "character_state_changes",
-                "approved_adaptations", "forbidden_additions",
-            ):
-                values = list(getattr(screenplay, field, None) or [])
-                replaced_values = [
-                    _replace_resolved_label(value, source_label, canonical_name)
-                    for value in values
-                ]
-                if replaced_values != values:
-                    setattr(screenplay, field, replaced_values)
-                    changed = True
+        for field in (
+            "logline", "dramatic_question", "protagonist_goal", "obstacle", "stakes",
+            "emotional_curve", "ending_hook", "adaptation_direction", "opening", "development",
+            "conflict", "climax", "episode_premise",
+        ):
+            value = getattr(screenplay, field, "") or ""
+            replaced = _replace_resolved_label(value, source_label, canonical_name)
+            if replaced != value:
+                setattr(screenplay, field, replaced)
+                changed = True
+        for field in (
+            "key_lines", "key_plot_points", "character_state_changes",
+            "approved_adaptations", "forbidden_additions",
+        ):
+            values = list(getattr(screenplay, field, None) or [])
+            replaced_values = [
+                _replace_resolved_label(value, source_label, canonical_name)
+                for value in values
+            ]
+            if replaced_values != values:
+                setattr(screenplay, field, replaced_values)
+                changed = True
 
         if changed:
             changes.append({
@@ -1047,16 +816,13 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
 
 
 def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
-    """Normalize voice aliases and remove unreferenced non-identity entries.
+    """Replace an unbound model voice alias with one provable Bible identity.
 
     New prompts require Bible character names as speaker IDs.  This migration
     path handles existing working artifacts without guessing from initials or
     role labels: the alias must own ledger text that names exactly one Bible
     character, and that character must actually speak in the screenplay.
-    Ambiguous or referenced aliases remain untouched so the identity gate still
-    fails closed. Unbound entries that no spoken field references are dead
-    metadata, not identities, and are removed without inspecting their names or
-    role labels.
+    Ambiguous aliases remain untouched so the identity gate still fails closed.
     """
     plan = getattr(screenplay, "narrative_plan", None)
     if plan is None:
@@ -1066,24 +832,31 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
         for character in bible.characters
         if str(character.name or "").strip()
     }
+    if not bible_names:
+        return []
+
     explicitly_bound = {
         str(voice_id or "").strip()
         for contract in plan.identity_contracts
         for voice_id in contract.voice_ids
         if str(voice_id or "").strip()
     }
-    changes: list[dict] = []
-    from app.validators import screenplay_speaker_names
-
     dialogue_speakers = {
         str(turn.speaker or "").strip()
         for chain in (getattr(screenplay, "dialogue_chains", None) or [])
         for turn in (chain.turns or [])
         if str(turn.speaker or "").strip()
     }
+    from app.validators import screenplay_speaker_names
+
     dialogue_speakers.update(screenplay_speaker_names(
         getattr(screenplay, "full_script_text", "") or "",
     ))
+    existing_voice_ids = {
+        str(voice.speaker_id or "").strip()
+        for voice in (getattr(screenplay, "voice_bible", None) or [])
+        if str(voice.speaker_id or "").strip()
+    }
     dialogue_turns = [
         (
             str(turn.speaker or "").strip(),
@@ -1093,8 +866,24 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
         for turn in (chain.turns or [])
         if str(turn.speaker or "").strip() and str(turn.line or "").strip()
     ]
+    changes: list[dict] = []
 
-    def alias_candidate(ledger_items) -> str | None:
+    for voice in getattr(screenplay, "voice_bible", None) or []:
+        source_id = str(voice.speaker_id or "").strip()
+        if (
+            not source_id
+            or str(voice.role_type or "").strip() == "narrator"
+            or source_id in bible_names
+            or source_id in explicitly_bound
+        ):
+            continue
+        ledger_items = [
+            item
+            for item in (getattr(screenplay, "information_ledger", None) or [])
+            if str(item.speaker_id or "").strip() == source_id
+        ]
+        if not ledger_items:
+            continue
         ledger_text = "\n".join(
             f"{item.content or ''}\n{item.exact_text or ''}"
             for item in ledger_items
@@ -1133,119 +922,9 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             if len(mentioned_candidates) == 1
             else leading_candidates
         )
-        return next(iter(candidates)) if len(candidates) == 1 else None
-
-    voice_delivery_owners = {"spoken_dialogue", "offscreen_voice", "narration"}
-    non_voice_carriers: set[str] = set()
-    for voice in getattr(screenplay, "voice_bible", None) or []:
-        source_id = str(voice.speaker_id or "").strip()
-        if (
-            not source_id
-            or str(voice.role_type or "").strip() == "narrator"
-            or source_id in bible_names
-            or source_id in explicitly_bound
-        ):
+        if len(candidates) != 1:
             continue
-        ledger_items = [
-            item
-            for item in (getattr(screenplay, "information_ledger", None) or [])
-            if str(item.speaker_id or "").strip() == source_id
-        ]
-        if alias_candidate(ledger_items):
-            continue
-        if ledger_items and all(
-            str(item.delivery_owner or "").strip() not in voice_delivery_owners
-            for item in ledger_items
-        ):
-            non_voice_carriers.add(source_id)
-
-    if non_voice_carriers:
-        for item in getattr(screenplay, "information_ledger", None) or []:
-            if str(item.speaker_id or "").strip() in non_voice_carriers:
-                item.speaker_id = None
-        for chain in getattr(screenplay, "dialogue_chains", None) or []:
-            chain.turns = [
-                turn for turn in (chain.turns or [])
-                if str(turn.speaker or "").strip() not in non_voice_carriers
-            ]
-        screenplay.dialogue_chains = [
-            chain for chain in (getattr(screenplay, "dialogue_chains", None) or [])
-            if chain.turns
-        ]
-        retained_key_lines: list[str] = []
-        for line in getattr(screenplay, "key_lines", None) or []:
-            speaker, separator, _ = str(line or "").partition("：")
-            if not separator:
-                speaker, separator, _ = str(line or "").partition(":")
-            if separator and speaker.strip() in non_voice_carriers:
-                continue
-            retained_key_lines.append(line)
-        screenplay.key_lines = retained_key_lines
-        body = getattr(screenplay, "full_script_text", "") or ""
-        for source_id in sorted(non_voice_carriers):
-            body = re.sub(
-                rf"(?m)^(\s*){re.escape(source_id)}"
-                r"(?:[\(（][^\)）]{0,16}[\)）])?\s*[:：]\s*(.*)$",
-                lambda match: f"{match.group(1)}【{match.group(2).strip()}】",
-                body,
-            )
-        screenplay.full_script_text = body
-        screenplay.voice_bible = [
-            voice
-            for voice in (getattr(screenplay, "voice_bible", None) or [])
-            if str(voice.speaker_id or "").strip() not in non_voice_carriers
-        ]
-        non_voice_changes = [{
-            "source_label": source_id,
-            "canonical_name": "",
-            "resolution": "non_voice_carrier_removed",
-        } for source_id in sorted(non_voice_carriers)]
-    else:
-        non_voice_changes = []
-
-    dialogue_speakers = {
-        str(turn.speaker or "").strip()
-        for chain in (getattr(screenplay, "dialogue_chains", None) or [])
-        for turn in (chain.turns or [])
-        if str(turn.speaker or "").strip()
-    }
-    dialogue_speakers.update(screenplay_speaker_names(
-        getattr(screenplay, "full_script_text", "") or "",
-    ))
-    ledger_speakers = {
-        str(item.speaker_id or "").strip()
-        for item in (getattr(screenplay, "information_ledger", None) or [])
-        if str(item.speaker_id or "").strip()
-    }
-    referenced_speakers = dialogue_speakers | ledger_speakers
-    existing_voice_ids = {
-        str(voice.speaker_id or "").strip()
-        for voice in (getattr(screenplay, "voice_bible", None) or [])
-        if str(voice.speaker_id or "").strip()
-    }
-    unreferenced_voice_ids: set[str] = set()
-
-    for voice in getattr(screenplay, "voice_bible", None) or []:
-        source_id = str(voice.speaker_id or "").strip()
-        if (
-            not source_id
-            or str(voice.role_type or "").strip() == "narrator"
-            or source_id in bible_names
-            or source_id in explicitly_bound
-        ):
-            continue
-        ledger_items = [
-            item
-            for item in (getattr(screenplay, "information_ledger", None) or [])
-            if str(item.speaker_id or "").strip() == source_id
-        ]
-        if not ledger_items:
-            if source_id not in referenced_speakers:
-                unreferenced_voice_ids.add(source_id)
-            continue
-        canonical_name = alias_candidate(ledger_items)
-        if not canonical_name:
-            continue
+        canonical_name = next(iter(candidates))
         if canonical_name in existing_voice_ids:
             continue
 
@@ -1260,19 +939,6 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
             "resolution": "voice_alias_from_ledger",
         })
 
-    changes.extend(non_voice_changes)
-    if unreferenced_voice_ids:
-        screenplay.voice_bible = [
-            voice
-            for voice in (getattr(screenplay, "voice_bible", None) or [])
-            if str(voice.speaker_id or "").strip() not in unreferenced_voice_ids
-        ]
-        changes.extend({
-            "source_label": source_id,
-            "canonical_name": "",
-            "resolution": "unreferenced_voice_removed",
-        } for source_id in sorted(unreferenced_voice_ids))
-
     return changes
 
 
@@ -1286,7 +952,6 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
         canonical_name = str(item.get("canonical_name") or "").strip()
         if not source_label or not canonical_name or source_label == canonical_name:
             continue
-        preserves_current_display = item.get("resolution") == "future_identity"
         residual_paths: list[str] = []
         for scene in getattr(screenplay, "scene_outline", None) or []:
             if source_label in (scene.characters or []):
@@ -1305,7 +970,7 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
         speaker_pattern = re.compile(
             rf"(?m)^\s*{re.escape(source_label)}(?:[\(（][^\)）]{{0,16}}[\)）])?[:：]"
         )
-        if not preserves_current_display and speaker_pattern.search(body):
+        if speaker_pattern.search(body):
             residual_paths.append("full_script_text.speaker")
         plan = getattr(screenplay, "narrative_plan", None)
         if plan is not None:
@@ -1630,7 +1295,7 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
         "请判断该称谓是否值得单独建人物卡并定妆。"
     )
     decision_contract = (
-        f"- identity_card_required=true：固定输出 important=true，并完成 20~80 字"
+        f"- identity_card_required=true：固定输出 important=true，并完成 30~80 字"
         f" appearance_canonical；不得因只出现一次而拒绝建卡。"
         if require_identity_card else
         f"- important=true 仅当：「{name}」是【真正的新角色】，且在这段剧情里"
@@ -1651,7 +1316,6 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 判定口径：
 {decision_contract}
 - appearance_canonical 是"固定外观锚点串"：40~60 字，须含 性别年龄感/发型发色/服装款式与颜色/1 个标志性特征；只写视觉可见信息，不写性格。原著未写处按画风（{style}）合理补全并保持内部一致。
-- appearance_canonical 只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
 
 只输出一个 JSON 对象：
 {{"important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
@@ -1661,17 +1325,11 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
     )
     obj = extract_json(raw)
     important = bool(obj.get("important"))
-    appearance = production_appearance_anchor(
-        (obj.get("appearance_canonical") or "").strip()
-    )
+    appearance = (obj.get("appearance_canonical") or "").strip()
     if len(appearance) > APPEARANCE_MAX:
         appearance = appearance[:APPEARANCE_MAX]
     role = (obj.get("role") or "重要配角").strip() or "重要配角"
-    card_complete = (
-        APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX
-        and not missing_production_appearance_dimensions(appearance)
-        and bool(role)
-    )
+    card_complete = APPEARANCE_MIN <= len(appearance) <= APPEARANCE_MAX and bool(role)
     if important and not card_complete:
         important = False  # 外观太稀薄不足以稳定定妆 → 不建卡
     known_set = set(known_names)
@@ -1798,9 +1456,6 @@ async def ensure_character_card(
                 and APPEARANCE_MIN
                 <= len(str(verdict.get("appearance_canonical") or "").strip())
                 <= APPEARANCE_MAX
-                and not missing_production_appearance_dimensions(
-                    str(verdict.get("appearance_canonical") or "").strip()
-                )
             )
             if not verdict["important"] and not (
                 require_identity_card and card_complete
@@ -2130,11 +1785,7 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
 
         pack_status = "ready"
         if pack_supported:
-            from app.multiview import (
-                PACK_STATUS_FAILED,
-                ensure_character_multiview_pack,
-                pack_result_ok,
-            )
+            from app.multiview import ensure_character_multiview_pack, PACK_STATUS_READY
             try:
                 pack = await ensure_character_multiview_pack(
                     project_id=project_id,
@@ -2146,21 +1797,11 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
                     base_portrait_id=cur["id"],
                     primary_qa=qa,
                 )
-            except Exception:
-                conn.execute(
-                    "UPDATE character_portraits SET ep_end=?,pack_status=? WHERE id=?",
-                    (episode_no - 1, PACK_STATUS_FAILED, new_portrait_id),
-                )
-                conn.commit()
-                raise
-            if not pack_result_ok(pack):
-                conn.execute(
-                    "UPDATE character_portraits SET ep_end=?,pack_status=? WHERE id=?",
-                    (episode_no - 1, PACK_STATUS_FAILED, new_portrait_id),
-                )
-                conn.commit()
-                raise ContentGenerationError(f"角色多视角包结构不完整：{name}")
-            pack_status = "ready"
+            except Exception as exc:  # noqa: BLE001 - 主图已落盘，多视角耗尽后保底发布
+                pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
+            pack_status = pack.get("status") or "failed"
+            if pack_status != PACK_STATUS_READY and pack_status != "ready":
+                pack_status = "partial_fallback"
             # 原子切换：关闭旧区间，开放新区间
             conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
             persistence = (change_meta or {}).get("persistence") or "persistent"
@@ -2762,7 +2403,11 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
         return False
     data.setdefault("characters", []).append(char)
     payload = json.dumps(data, ensure_ascii=False)
-    next_artifact_id = None
+    conn.execute(
+        "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
+        (payload, project_id),
+    )
+    conn.commit()
     if artifact_supported:
         try:
             previous_id = row["bible_artifact_id"]
@@ -2771,42 +2416,25 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
                 scope_type="project",
                 scope_id=project_id,
                 status="approved",
-                trust_level="T2",
+                trust_level="T3",
                 content=data,
                 parent_artifact_ids=[previous_id] if previous_id else [],
                 contract_version="character-bible-1.0.0",
                 prompt_version="incremental-character-discovery-1.0.0",
                 model_snapshot={"operation": "incremental_add", "character_name": char.get("name")},
             ))
-            next_artifact_id = artifact["id"]
-        except Exception as exc:  # noqa: BLE001 - authority mutation must fail closed
+            conn.execute(
+                "UPDATE projects SET bible_artifact_id=? WHERE id=?",
+                (artifact["id"], project_id),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 -- card/version is authoritative even if lineage recording fails
             code_ref(
                 exc,
                 action="append_character_bible_artifact",
                 context={"project_id": project_id, "character_name": char.get("name")},
             )
-            return False
-    expected_version = int(row["bible_version"] or 0)
-    if artifact_supported:
-        cursor = conn.execute(
-            "UPDATE projects SET bible_json=?,bible_version=?,bible_artifact_id=? "
-            "WHERE id=? AND COALESCE(bible_version,0)=?",
-            (
-                payload,
-                expected_version + 1,
-                next_artifact_id,
-                project_id,
-                expected_version,
-            ),
-        )
-    else:
-        cursor = conn.execute(
-            "UPDATE projects SET bible_json=?,bible_version=? "
-            "WHERE id=? AND COALESCE(bible_version,0)=?",
-            (payload, expected_version + 1, project_id, expected_version),
-        )
-    conn.commit()
-    return cursor.rowcount == 1
+    return True
 
 
 async def _generate_discovered_character_portrait(
@@ -2841,6 +2469,7 @@ async def _generate_discovered_character_portrait(
         portrait_id = str(row["id"])
         image_path = str(row["image_path"] or "")
         candidate_appearance = str(row["appearance"] or appearance)
+        fallback_pack = False
         try:
             if pack_supported:
                 from app.multiview import ensure_character_multiview_pack, pack_result_ok
@@ -2848,24 +2477,27 @@ async def _generate_discovered_character_portrait(
                 existing_status = str(row["pack_status"] or "")
                 if existing_status == "ready":
                     pack = {"status": "ready", "portrait_id": portrait_id, "reused": True}
+                elif existing_status == "partial_fallback":
+                    pack = {
+                        "status": "partial_fallback",
+                        "portrait_id": portrait_id,
+                        "reused": True,
+                    }
                 else:
-                    pack = await ensure_character_multiview_pack(
-                        project_id=project_id,
-                        portrait_id=portrait_id,
-                        character_name=name,
-                        appearance=candidate_appearance,
-                        visual_style=style,
-                        ep_start=ep_start,
-                        base_portrait_id=row["base_portrait_id"],
-                        primary_qa=primary_qa,
-                    )
-                if not pack_result_ok(pack):
-                    conn.execute(
-                        "UPDATE character_portraits SET pack_status='failed' WHERE id=?",
-                        (portrait_id,),
-                    )
-                    conn.commit()
-                    raise ContentGenerationError(f"角色多视角包结构不完整：{name}")
+                    try:
+                        pack = await ensure_character_multiview_pack(
+                            project_id=project_id,
+                            portrait_id=portrait_id,
+                            character_name=name,
+                            appearance=candidate_appearance,
+                            visual_style=style,
+                            ep_start=ep_start,
+                            base_portrait_id=row["base_portrait_id"],
+                            primary_qa=primary_qa,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 主图已落盘，侧视角失败安全降级
+                        pack = {"status": "partial_fallback", "warning": str(exc)[:300]}
+                fallback_pack = not pack_result_ok(pack)
 
                 # 候选在多视角完成前只占本集闭区间。发布时再原子切换为开区间；
                 # 服务重启后重复执行本段仍更新同一 portrait_id，不会触发唯一键冲突。
@@ -2880,7 +2512,7 @@ async def _generate_discovered_character_portrait(
                         conn.execute("DELETE FROM character_portraits WHERE id=?", (current["id"],))
                 conn.execute(
                     "UPDATE character_portraits SET ep_end=NULL,pack_status=? WHERE id=?",
-                    ("ready", portrait_id),
+                    ("partial_fallback" if fallback_pack else "ready", portrait_id),
                 )
                 conn.commit()
 
@@ -2896,9 +2528,9 @@ async def _generate_discovered_character_portrait(
         return {
             "portrait_id": portrait_id,
             "image_path": image_path,
-            "pack_status": "ready",
+            "pack_status": "partial_fallback" if fallback_pack else "ready",
             "reused": not purge_on_failure,
-            "gate_retry_exhausted": False,
+            "gate_retry_exhausted": fallback_pack,
         }
 
     # 服务重启可能发生在主图和候选行已落盘、侧视角尚未完成之间。此时该行以

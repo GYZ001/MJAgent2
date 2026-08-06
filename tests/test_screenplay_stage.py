@@ -1,17 +1,15 @@
 import asyncio
 
 from app import stages
-from app.schemas import (Bible, Character, EpisodeScreenplay, InformationItem,
-                         KeyDialogueChain, KeyDialogueTurn, PlotSpine,
-                         PlotSpineBeat, ScriptScene, StoryEvent,
-                         VoiceCanonical, World)
+from app.schemas import (Bible, Character, EpisodeScreenplay, KeyDialogueChain,
+                         KeyDialogueTurn, PlotSpine, PlotSpineBeat,
+                         ScriptScene, World)
 from app.stages import _render_screenplay_source, generate_screenplay
 from app.validators import (
     normalize_screenplay_candidate,
     source_dialogue_fragments,
     validate_dialogue_chains,
     validate_screenplay,
-    validate_screenplay_spine_delivery,
 )
 
 
@@ -486,276 +484,6 @@ def test_dialogue_chain_normalization_excludes_narrator_from_key_lines() -> None
     assert normalized.key_lines == ["谷言：门开了。"]
 
 
-def test_dialogue_chain_normalization_removes_duplicate_evidence_action_as_speaker() -> None:
-    script = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text=(
-            "【场1】日 / 楼梯间\n"
-            "胡太太：一起去吃饭吧。\n"
-            "阿宾：好啊！\n"
-            "两人转身走出楼梯间：前往快餐店。"
-        ),
-        dialogue_chains=[
-            KeyDialogueChain(
-                chain_id="DC1",
-                topic="相约吃饭",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="胡太太",
-                        line="一起去吃饭吧。",
-                        source_text="一起去吃饭吧。",
-                    ),
-                    KeyDialogueTurn(
-                        speaker="两人转身走出楼梯间",
-                        line="前往快餐店。",
-                        source_text="一起去吃饭吧。",
-                    ),
-                    KeyDialogueTurn(
-                        speaker="阿宾",
-                        line="好啊！",
-                        source_text="好啊！",
-                    ),
-                ],
-            )
-        ],
-        voice_bible=[
-            VoiceCanonical(speaker_id="阿宾", voice_canonical="青年男声"),
-            VoiceCanonical(speaker_id="胡太太", voice_canonical="温柔女声"),
-        ],
-    )
-
-    normalized = normalize_screenplay_candidate(script)
-
-    assert [turn.speaker for turn in normalized.dialogue_chains[0].turns] == [
-        "胡太太",
-        "阿宾",
-    ]
-    assert [turn.speaker for turn in script.dialogue_chains[0].turns] == [
-        "胡太太",
-        "两人转身走出楼梯间",
-        "阿宾",
-    ]
-    assert "两人转身走出楼梯间，前往快餐店。" in normalized.full_script_text
-    assert "两人转身走出楼梯间：" not in normalized.full_script_text
-
-
-def test_dialogue_chain_normalization_removes_duplicate_evidence_fake_narration() -> None:
-    script = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text=(
-            "【场1】日 / 楼梯间\n"
-            "胡太太：一起去吃饭吧。\n"
-            "旁白：前往快餐店。\n"
-            "阿宾：好啊！"
-        ),
-        dialogue_chains=[
-            KeyDialogueChain(
-                chain_id="DC1",
-                topic="相约吃饭",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="胡太太",
-                        line="一起去吃饭吧。",
-                        source_text="一起去吃饭吧。",
-                    ),
-                    KeyDialogueTurn(
-                        speaker="旁白",
-                        line="前往快餐店。",
-                        source_text="一起去吃饭吧。",
-                    ),
-                    KeyDialogueTurn(
-                        speaker="阿宾",
-                        line="好啊！",
-                        source_text="好啊！",
-                    ),
-                ],
-            )
-        ],
-        voice_bible=[
-            VoiceCanonical(
-                speaker_id="旁白",
-                voice_canonical="中性旁白",
-                role_type="narrator",
-            ),
-            VoiceCanonical(speaker_id="阿宾", voice_canonical="青年男声"),
-            VoiceCanonical(speaker_id="胡太太", voice_canonical="温柔女声"),
-        ],
-    )
-
-    normalized = normalize_screenplay_candidate(script)
-
-    assert [turn.speaker for turn in normalized.dialogue_chains[0].turns] == [
-        "胡太太",
-        "阿宾",
-    ]
-    assert "旁白：前往快餐店。" not in normalized.full_script_text
-    assert "前往快餐店。" in normalized.full_script_text
-
-
-def test_dialogue_chain_normalization_merges_same_topic_continuation_response() -> None:
-    script = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text=(
-            "【场1】日 / 厨房\n"
-            "胡太太：帮我拿一下电炉好吗？\n"
-            "阿宾：没有看见电炉。\n"
-            "胡太太：那你下来扶梯。"
-        ),
-        dialogue_chains=[
-            KeyDialogueChain(
-                chain_id="DC1",
-                topic="厨房拿电炉",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="胡太太",
-                        line="帮我拿一下电炉好吗？",
-                        function="question",
-                        source_text="帮我拿一下电炉好吗？",
-                    )
-                ],
-            ),
-            KeyDialogueChain(
-                chain_id="DC2",
-                topic="厨房拿电炉（续）",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="阿宾",
-                        line="没有看见电炉。",
-                        function="response",
-                        source_text="没有看见电炉。",
-                    ),
-                    KeyDialogueTurn(
-                        speaker="胡太太",
-                        line="那你下来扶梯。",
-                        function="statement",
-                        source_text="那你下来扶梯。",
-                    ),
-                ],
-            ),
-        ],
-    )
-
-    normalized = normalize_screenplay_candidate(script)
-
-    assert len(normalized.dialogue_chains) == 1
-    assert [turn.speaker for turn in normalized.dialogue_chains[0].turns] == [
-        "胡太太",
-        "阿宾",
-        "胡太太",
-    ]
-
-
-def test_dialogue_chain_normalization_keeps_cross_scene_continuation_separate() -> None:
-    script = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text=(
-            "【场1】日 / 客厅\n"
-            "胡太太：帮我拿一下电炉好吗？\n"
-            "【场2】日 / 厨房\n"
-            "阿宾：没有看见电炉。\n"
-            "胡太太：那你下来扶梯。"
-        ),
-        dialogue_chains=[
-            KeyDialogueChain(
-                chain_id="DC1",
-                topic="厨房拿电炉",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="胡太太",
-                        line="帮我拿一下电炉好吗？",
-                        function="question",
-                        source_text="帮我拿一下电炉好吗？",
-                    )
-                ],
-            ),
-            KeyDialogueChain(
-                chain_id="DC2",
-                topic="厨房拿电炉（续）",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="阿宾",
-                        line="没有看见电炉。",
-                        function="response",
-                        source_text="没有看见电炉。",
-                    ),
-                    KeyDialogueTurn(
-                        speaker="胡太太",
-                        line="那你下来扶梯。",
-                        function="statement",
-                        source_text="那你下来扶梯。",
-                    ),
-                ],
-            ),
-        ],
-    )
-
-    normalized = normalize_screenplay_candidate(script)
-
-    assert len(normalized.dialogue_chains) == 2
-    assert normalized.dialogue_chains[1].turns[0].function == "statement"
-
-
-def test_ledger_normalization_resolves_composite_speaker_from_content() -> None:
-    script = EpisodeScreenplay(
-        episode_no=1,
-        events=[
-            StoryEvent(
-                event_id="E1",
-                visible_change="胡太太邀请阿宾一起吃饭。",
-                state_out="二人准备同行。",
-            )
-        ],
-        information_ledger=[
-            InformationItem(
-                info_id="I1",
-                event_id="E1",
-                content="胡太太今天放假，邀请阿宾一起去快餐店。",
-                delivery_owner="spoken_dialogue",
-                speaker_id="阿宾、胡太太",
-            )
-        ],
-        voice_bible=[
-            VoiceCanonical(speaker_id="阿宾", voice_canonical="青年男声"),
-            VoiceCanonical(speaker_id="胡太太", voice_canonical="温柔女声"),
-        ],
-    )
-
-    normalized = normalize_screenplay_candidate(script)
-
-    assert normalized.information_ledger[0].speaker_id == "胡太太"
-    assert script.information_ledger[0].speaker_id == "阿宾、胡太太"
-
-
-def test_ledger_normalization_keeps_ambiguous_composite_speaker_for_repair() -> None:
-    script = EpisodeScreenplay(
-        episode_no=1,
-        events=[
-            StoryEvent(
-                event_id="E1",
-                visible_change="二人完成问答。",
-                state_out="信息已经交付。",
-            )
-        ],
-        information_ledger=[
-            InformationItem(
-                info_id="I1",
-                event_id="E1",
-                content="二人通过问答确认了出行安排。",
-                delivery_owner="spoken_dialogue",
-                speaker_id="阿宾、胡太太",
-            )
-        ],
-        voice_bible=[
-            VoiceCanonical(speaker_id="阿宾", voice_canonical="青年男声"),
-            VoiceCanonical(speaker_id="胡太太", voice_canonical="温柔女声"),
-        ],
-    )
-
-    normalized = normalize_screenplay_candidate(script)
-
-    assert normalized.information_ledger[0].speaker_id == "阿宾、胡太太"
-
-
 def test_long_screenplay_source_retains_head_middle_dialogue_and_tail() -> None:
     source = (
         "开场事实" + ("甲" * 500)
@@ -930,7 +658,7 @@ def test_single_character_reply_with_placeholder_source_is_rejected() -> None:
     assert any("source_text 未在本集原文中找到" in error for error in errors), errors
 
 
-def test_dialogue_chain_allows_skipping_unadapted_earlier_source_utterance() -> None:
+def test_dialogue_chain_rejects_missing_first_source_utterance() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns = script.dialogue_chains[0].turns[1:]
     script.dialogue_chains[0].turns.append(KeyDialogueTurn(
@@ -945,13 +673,10 @@ def test_dialogue_chain_allows_skipping_unadapted_earlier_source_utterance() -> 
         source_text=source, require_dialogue_chains=True,
     )
 
-    assert not any(
-        "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配" in error
-        for error in errors
-    ), errors
+    assert any("原文开场第一句对白未作为 dialogue_chains[0].turns[0]" in error for error in errors), errors
 
 
-def test_dialogue_chain_rejects_first_adapted_turn_with_unrelated_source() -> None:
+def test_dialogue_chain_rejects_first_anchor_replaced_with_unrelated_line() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
     script.dialogue_chains[0].turns[0].line = "今天天气不错。"
     script.full_script_text = script.full_script_text.replace(
@@ -963,25 +688,7 @@ def test_dialogue_chain_rejects_first_adapted_turn_with_unrelated_source() -> No
         source_text=source, require_dialogue_chains=True,
     )
 
-    assert any(
-        "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配" in error
-        for error in errors
-    ), errors
-
-
-def test_dialogue_chain_does_not_bind_quoted_sound_before_adapted_dialogue() -> None:
-    script, source = _screenplay_with_source_dialogue_chain()
-    source = f"门外传来“砰、砰”的敲击声。\n{source}"
-
-    errors = validate_screenplay(
-        script, _bible(), expected_beats=5, episode_no=1,
-        source_text=source, require_dialogue_chains=True,
-    )
-
-    assert not any(
-        "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配" in error
-        for error in errors
-    ), errors
+    assert any("开场对白锚点被改写到失去原意" in error for error in errors), errors
 
 
 def test_dialogue_chain_accepts_digit_identifier_spoken_in_chinese() -> None:
@@ -1087,24 +794,18 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
         "cliffhanger": "收束",
         "synopsis": "测验结果引发回应",
         "required_dialogue_lines": ["只有三段？", "结果无误。"],
-        "authorized_source_chapters": {"chapter-1": source},
     }
 
     asyncio.run(generate_screenplay(episode, source, _bible()))
 
-    assert "【首条改编对白来源锚点·硬门禁】" in prompts[0]
-    assert "D001 是本集实际采用的第一条对白" in prompts[0]
-    assert "D001：斗之力，三段！" not in prompts[0]
+    assert "【原文开场对白锚点·硬门禁】" in prompts[0]
+    assert "D001：斗之力，三段！" in prompts[0]
     assert "【用户多选的必保留台词·按原文位置绑定·逐字硬门禁】" in prompts[0]
     assert "R001：只有三段？" in prompts[0]
     assert "R002：结果无误。" in prompts[0]
     assert '"dialogue_chains"' in prompts[0]
     assert "`key_lines` 由后端按 dialogue_chains.turns 确定性回填" in prompts[0]
-    assert "最终时长由完整剧情、对白容量、主线节拍和场次建立成本自动扩展，不设上限" in prompts[0]
-    assert "每组 dialogue_chain 最多 8 个连续话轮" in prompts[0]
-    assert "顶层必须输出 narrative_plan" in prompts[0]
-    assert "授权章节 ID：['chapter-1']" in prompts[0]
-    assert '"chapter_id":"chapter-1"' in prompts[0]
+    assert "对白话轮不设固定条数上限" in prompts[0]
 
 
 def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> None:
@@ -1131,14 +832,13 @@ def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> 
     ))
 
     policy = captured["policy"]
-    assert policy.max_iterations == 2
+    assert policy.max_iterations == 4
     assert policy.stall_rounds == 2
     assert policy.no_gain_rounds == 2
     assert policy.baseline_only is True
-    assert policy.repair_all_blockers is True
 
 
-def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> None:
+def test_screenplay_baseline_passes_authorized_source_chapters_to_narrative_validator(monkeypatch) -> None:
     captured = {}
 
     async def fake_loop(_stage, _stage_key, _prompt, _model, business_validate, **kwargs):
@@ -1147,12 +847,16 @@ def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> Non
         captured["errors"] = business_validate(script)
         return script
 
-    def fake_validate_screenplay(*_args, **kwargs):
-        captured["require_source_coverage"] = kwargs.get("require_source_coverage")
+    def fake_validate_narrative(_script, **kwargs):
+        captured["authorized_source_chapters"] = kwargs.get("authorized_source_chapters")
         return []
 
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
-    monkeypatch.setattr(stages, "validate_screenplay", fake_validate_screenplay)
+    monkeypatch.setattr(stages, "validate_screenplay", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "app.narrative.validate_screenplay_narrative",
+        fake_validate_narrative,
+    )
     episode = {
         "id": "ep-json-bootstrap",
         "episode_no": 9,
@@ -1168,11 +872,8 @@ def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> Non
         _prompt="输出剧本 JSON",
     ))
 
-    assert any(
-        error.startswith("[NARRATIVE_PLAN_REQUIRED]")
-        for error in captured["errors"]
-    )
-    assert captured["require_source_coverage"] is True
+    assert captured["errors"] == []
+    assert captured["authorized_source_chapters"] == {"1": "第一章正文"}
 
 
 def test_user_selected_dialogues_are_hard_gates() -> None:
@@ -1240,45 +941,6 @@ def test_screenplay_rejects_must_keep_spine_missing_from_full_script() -> None:
     assert any(
         "full_script_text 未交付" in error and "S01/谷言" in error
         for error in errors
-    )
-
-
-def test_screenplay_spine_delivery_accepts_source_bound_paraphrase() -> None:
-    script = _valid_rainy_script()
-    script.plot_spine = PlotSpine(
-        episode_premise="白洁面对婚姻和职业压力",
-        spine_beats=[
-            PlotSpineBeat(
-                beat_id="S03",
-                who="白洁",
-                does="晚上与丈夫王申谈论评职称，王申不以为然。两人行房，王申早泄，白洁性欲未满足。",
-                turn="白洁对婚姻生活产生不满，性欲被唤醒。",
-                purpose="展现白洁的婚姻状况和情绪缺口，为后续选择埋下伏笔。",
-                source_segment_ids=["SRC0003"],
-                must_keep=True,
-            )
-        ],
-        must_keep_ending="白洁的情绪缺口被建立",
-    )
-    script.source_coverage = [
-        {
-            "source_segment_id": "SRC0003",
-            "disposition": "deliver",
-            "beat_ids": ["S03"],
-        }
-    ]
-    script.full_script_text = "\n".join([
-        "【场1】夜 / 白洁家客厅",
-        "白洁和王申坐在餐桌前吃饭。",
-        "白洁：我评上职称就好了。",
-        "王申：你不可能评上的。",
-        "两人闷闷不乐上床。王申抚摸白洁，脱下她的内裤，插入。",
-        "很快王申就射了，趴在白洁身上不动。白洁推开他，擦下身，翻来覆去睡不着。",
-    ])
-
-    assert not validate_screenplay_spine_delivery(
-        script,
-        action_text=script.full_script_text,
     )
 
 

@@ -145,7 +145,7 @@ def test_text_requests_are_capped_by_active_model_output_limit(monkeypatch) -> N
     assert captured["meta"]["effective_max_tokens"] == 16384
 
 
-def test_text_requests_use_provider_output_capacity(monkeypatch) -> None:
+def test_text_requests_stay_near_32k_when_model_supports_more(monkeypatch) -> None:
     captured: dict = {}
 
     async def fake_post_json(client, url, payload, *, kind, model, retries=2,
@@ -176,6 +176,6 @@ def test_text_requests_use_provider_output_capacity(monkeypatch) -> None:
     assert asyncio.run(hiagent.chat(
         [{"role": "user", "content": "return json"}], max_tokens=65535,
     )) == "ok"
-    assert captured["payload"]["max_tokens"] == 49152
+    assert captured["payload"]["max_tokens"] == 32768
     assert captured["meta"]["model_max_output_tokens"] == 49152
-    assert captured["meta"]["runtime_output_limit_tokens"] == 49152
+    assert captured["meta"]["runtime_output_limit_tokens"] == 32768

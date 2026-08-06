@@ -559,20 +559,6 @@ CREATE TABLE IF NOT EXISTS storyboard_edit_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_storyboard_edit_sessions_shot
     ON storyboard_edit_sessions(shot_id, status, created_at);
-CREATE TABLE IF NOT EXISTS media_cleanup_outbox (
-    id TEXT PRIMARY KEY,
-    episode_id TEXT NOT NULL,
-    shot_id TEXT,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at REAL NOT NULL,
-    completed_at REAL,
-    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_media_cleanup_outbox_pending
-    ON media_cleanup_outbox(status, created_at);
 CREATE TABLE IF NOT EXISTS storyboard_source_bindings (
     shot_id TEXT PRIMARY KEY,
     chapter_id INTEGER NOT NULL,
@@ -1119,20 +1105,6 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
 
 # 增量迁移：已有库上加列（首次建表时 SCHEMA 已含则忽略报错）
 MIGRATIONS = (
-    """CREATE TABLE IF NOT EXISTS media_cleanup_outbox (
-           id TEXT PRIMARY KEY,
-           episode_id TEXT NOT NULL,
-           shot_id TEXT,
-           payload_json TEXT NOT NULL DEFAULT '{}',
-           status TEXT NOT NULL DEFAULT 'pending',
-           attempts INTEGER NOT NULL DEFAULT 0,
-           last_error TEXT,
-           created_at REAL NOT NULL,
-           completed_at REAL,
-           FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
-       )""",
-    "CREATE INDEX IF NOT EXISTS idx_media_cleanup_outbox_pending "
-    "ON media_cleanup_outbox(status, created_at)",
     "ALTER TABLE jobs ADD COLUMN after_shot_id TEXT",
     "ALTER TABLE jobs ADD COLUMN after_version_id TEXT",
     "ALTER TABLE jobs ADD COLUMN scene_kinds TEXT",
@@ -1180,7 +1152,6 @@ MIGRATIONS = (
     "ALTER TABLE projects ADD COLUMN scene_refs_status TEXT DEFAULT 'idle'",  # 场景图素材库生成任务状态
     "ALTER TABLE projects ADD COLUMN scene_refs_error TEXT",
     "ALTER TABLE projects ADD COLUMN scene_refs_target TEXT",
-    "ALTER TABLE projects ADD COLUMN scene_refs_batch_started_at REAL",
     "ALTER TABLE shots ADD COLUMN scene_name TEXT",  # 归一化命中的库内规范场景名（渲染期取场景库图复用）
     "ALTER TABLE shots ADD COLUMN scene_time TEXT DEFAULT ''",  # 独立时间标签，不参与场景图匹配
     "ALTER TABLE jobs ADD COLUMN run_id TEXT",
@@ -1542,28 +1513,6 @@ def _repair_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
     return report
 
 
-def _repair_invalid_provider_metadata(conn: sqlite3.Connection) -> None:
-    """Replace legacy character-truncated metadata with valid audit summaries."""
-    try:
-        rows = conn.execute(
-            "SELECT id,meta FROM provider_calls "
-            "WHERE meta IS NOT NULL AND json_valid(meta)=0"
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return
-    for row in rows:
-        raw = str(row["meta"] or "")
-        summary = {
-            "_legacy_invalid": True,
-            "_original_chars": len(raw),
-            "_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-        }
-        conn.execute(
-            "UPDATE provider_calls SET meta=? WHERE id=?",
-            (json.dumps(summary, ensure_ascii=False, sort_keys=True), row["id"]),
-        )
-
-
 def _prune_observability_logs(conn: sqlite3.Connection) -> None:
     """Bound diagnostic tables so routine monitoring cannot grow the DB forever."""
     def retention_days(key: str, fallback: int) -> int:
@@ -1803,7 +1752,6 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (f"_monitor_effective_{key}", key),
         )
-    _repair_invalid_provider_metadata(conn)
     _prune_observability_logs(conn)
     if reconcile_interrupted:
         # 只有持有运行时恢复锁的实例才能宣告旧调用中断。
@@ -1899,44 +1847,6 @@ def _dump_call_json(value: Any) -> str | None:
         return json.dumps(str(value), ensure_ascii=False)
 
 
-def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
-    """Serialize metadata as valid JSON even when the original payload is large."""
-    value = meta or {}
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    if len(raw) <= max_chars:
-        return raw
-    summary: dict[str, Any] = {
-        "_truncated": True,
-        "_original_chars": len(raw),
-        "_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-    }
-    projected_items: list[tuple[str, Any]] = []
-    for key in value:
-        item = value[key]
-        if isinstance(item, (str, int, float, bool)) or item is None:
-            projected: Any = item if not isinstance(item, str) or len(item) <= 160 else item[:157] + "..."
-        elif isinstance(item, (list, tuple, set)):
-            projected = {"type": type(item).__name__, "count": len(item)}
-        elif isinstance(item, dict):
-            projected = {"type": "dict", "keys": sorted(str(k) for k in item)[:20]}
-        else:
-            projected = {"type": type(item).__name__}
-        projected_items.append((str(key), projected))
-    projected_items.sort(
-        key=lambda pair: (
-            len(json.dumps(pair[1], ensure_ascii=False, default=str)),
-            pair[0],
-        )
-    )
-    for key, projected in projected_items:
-        candidate = {**summary, str(key): projected}
-        encoded = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
-        if len(encoded) > max_chars:
-            continue
-        summary[str(key)] = projected
-    return json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str)
-
-
 def provider_operation_id(kind: str, model: str, request_json: Any | None) -> str:
     """Stable business-operation fingerprint shared by retries and process restarts."""
     payload = _dump_call_json(request_json) or "null"
@@ -1997,7 +1907,7 @@ def _log_provider_call_inner(
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now(), kind, model, status, http_status, latency_ms,
              (error or "")[:500] or None, _dump_call_json(request_json),
-             _dump_call_json(response_json), _dump_meta_json(meta),
+             _dump_call_json(response_json), json.dumps(meta or {}, ensure_ascii=False)[:800],
              trace.run_id, trace.step_run_id, trace.trace_id),
         )
         conn.commit()
@@ -2016,7 +1926,7 @@ def _log_provider_call_inner(
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, status, http_status, latency_ms,
          (error or "")[:500] or None, _dump_call_json(request_json), _dump_call_json(response_json),
-         _dump_meta_json(meta), trace.run_id, trace.step_run_id, trace.trace_id,
+         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None),
     )
     if previous and status in {"OK", "SUCCEEDED", "SUCCESS"}:
@@ -2059,7 +1969,7 @@ def _start_provider_call_inner(
                 meta, run_id, step_run_id, trace_id
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-             _dump_meta_json(meta), trace.run_id, trace.step_run_id,
+             json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id,
              trace.trace_id),
         )
         conn.commit()
@@ -2078,7 +1988,7 @@ def _start_provider_call_inner(
             recovery_disposition
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-         _dump_meta_json(meta), trace.run_id, trace.step_run_id, trace.trace_id,
+         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None,
          "RETRYING_INTERRUPTED" if previous and previous["status"] == "INTERRUPTED" else None),
     )

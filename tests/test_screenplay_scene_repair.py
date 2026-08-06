@@ -243,13 +243,12 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
     assert resumed.checkpoint_json["phase"] == "SUCCEEDED"
     assert resumed.checkpoint_json["planner_version"] == screenplay_repair.SCREENPLAY_REPAIR_PLANNER_VERSION
     assert resumed.checkpoint_json["yield_reason"] is None
-    assert resumed.checkpoint_json.get("quality_issue_count", 0) == 0
-    assert result.scene_outline[0].story_function != script.scene_outline[0].story_function
-    assert len(result.scene_outline[0].story_function) >= 6
+    assert resumed.checkpoint_json["quality_issue_count"] == 1
+    assert result.scene_outline[0].story_function == script.scene_outline[0].story_function
 
 
 @pytest.mark.asyncio
-async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypatch):
+async def test_business_qa_issue_is_scored_without_patch_or_block(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
 
@@ -306,25 +305,26 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
         ),
     )
 
-    with pytest.raises(screenplay_repair.ScreenplayNarrativeGateError):
-        await screenplay_repair.run_screenplay_production(
-            episode_id="ep_scene",
-            episode={
-                "id": "ep_scene",
-                "project_id": "proj_scene",
-                "episode_no": 1,
-                "target_duration_s": 60,
-            },
-            source_text="原文",
-            bible=Bible(
-                characters=[],
-                world=World(visual_style_canonical="测试画风"),
-            ),
-            resume=True,
-        )
+    result = await screenplay_repair.run_screenplay_production(
+        episode_id="ep_scene",
+        episode={
+            "id": "ep_scene",
+            "project_id": "proj_scene",
+            "episode_no": 1,
+            "target_duration_s": 60,
+        },
+        source_text="原文",
+        bible=Bible(
+            characters=[],
+            world=World(visual_style_canonical="测试画风"),
+        ),
+        resume=True,
+    )
 
     resumed = screenplay_repair.get_production_revision(revision.id)
     assert resumed is not None
     assert resumed.working_artifact_id == artifact["id"]
-    assert resumed.checkpoint_json["phase"] == "WAITING_HUMAN"
-    assert published == []
+    assert resumed.checkpoint_json["phase"] == "SUCCEEDED"
+    assert resumed.checkpoint_json["quality_issue_count"] == 1
+    assert published == [artifact["id"]]
+    assert result.title == script.title

@@ -430,12 +430,7 @@ def test_offscreen_voice_keeps_listener_as_visual_subject() -> None:
         audio_cast=["乙"],
         dialogues=[
             Dialogue(
-                speaker="乙",
-                line="别回头。",
-                emotion="惊恐",
-                delivery="offscreen_voice",
-            )
-        ],
+    assert outline_key_line_speaker_errors(outline, screenplay)
     )
 
     assert dialogue_focus_subject(shot) is None

@@ -113,12 +113,8 @@ def _seed_project(conn: sqlite3.Connection) -> None:
            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             "s1", "e1", 1, 10, "中景", "固定", "室内",
-            json.dumps(["A"]), "A坐在桌前整理文件，将散开的纸张平码在桌面。",
-            "A坐到桌前，把散开的纸张逐页整理整齐。",
-            None, json.dumps([]), "硬切", 0,
-            "A坐在桌前，纸张散放在双手之间。",
-            "同一机位，A已经把纸张整齐平码在桌面。",
-            "approved",
+            json.dumps(["A"]), "A坐在桌前说话。", "A坐在桌前说话。",
+            None, json.dumps([]), "硬切", 0, "A坐下。", "A抬头。", "approved",
         ),
     )
     conn.commit()

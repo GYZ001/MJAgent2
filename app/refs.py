@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -57,106 +56,10 @@ def normalize_prompt_text(text: str) -> str:
     return "".join(kept).strip()
 
 
-_NON_PRODUCTION_APPEARANCE_RE = re.compile(
-    r"(?:乳头|乳晕|乳房|阴部|阴唇|阴蒂|阴毛|生殖器|下体|私处|"
-    r"隐私部位|裸体|裸露|赤裸|一丝不挂|内裤|胸罩|文胸)",
-    re.IGNORECASE,
-)
-_CLOTHING_HIDDEN_SKIN_MARK_RE = re.compile(
-    r"(?:腰侧|腰部|胸部|腹部|背部|肩部|手臂|上臂|(?:左|右)?臂|大腿|腿部|臀部|髋部|胯部)"
-    r"[^，,；;。]*(?:痣|胎记|纹身|疤痕|疤)",
-)
-_NON_STATIC_APPEARANCE_RE = re.compile(
-    r"(?:性格|气度|气场|气质|风情|女人味|书卷气|一举一动|"
-    r"看(?:向)?(?:女性|女人|他人)|看人|视线(?:落|停|扫|盯)|"
-    r"自带[^，,；;。]*(?:气场|气质|风情|女人味|书卷气)|"
-    r"眼神(?:躲闪|游移|贪婪|淫邪|迷离)|"
-    r"色欲|算计感|侵略感|迂腐|猥琐|含春|撩人|志在必得)",
-)
-_NON_NEUTRAL_CLOTHING_RE = re.compile(
-    r"(?:露肤|露腰|暴露|低领|深V|透视|镂空|吊带|超短|高开衩|丝袜|网袜|吊袜)",
-    re.IGNORECASE,
-)
-_SEXUALIZED_BODY_EMPHASIS_RE = re.compile(
-    r"(?:身材|体型|身体|曲线)[^，,；;。]*(?:丰满|丰腴|性感|凹凸|曲线)",
-    re.IGNORECASE,
-)
-_APPEARANCE_LIST_PREFIX_RE = re.compile(
-    r"^(?P<prefix>.*?标志性特征(?:是|为)?)(?P<items>.*)$",
-)
-_PORTRAIT_CLOTHING_CONTRACT = (
-    "常规角色设定图着装，服装面料不透明并完整覆盖身体，"
-    "重点呈现面部、发型、外层服装和可见配饰"
-)
-_PORTRAIT_PRIVACY_SAFE_STYLE = (
-    "人物面部与皮肤必须采用明显动画化比例和非照片级卡通渲染材质，"
-    "保持虚构角色辨识度但不得生成可误认成真人照片的写实人脸"
-)
-_PORTRAIT_OVERRIDE_LABEL_RE = re.compile(
-    r"^(?:(?:用户|角色)?最新)?(?:定妆|画像|角色)?(?:提示词|prompt)(?:为|是)?[:：\s-]*",
-    re.IGNORECASE,
-)
-_PORTRAIT_STYLE_ONLY_CLAUSE_RE = re.compile(
-    r"^(?:style|look|visual|画风|风格|写实(?:风|感)?|超写实(?:风)?|现实电影风|真人CG风|"
-    r"国漫(?:电影)?风|动漫(?:电影)?风|漫画(?:风格)?|卡通(?:风)?|插画(?:风)?|厚涂|"
-    r"水墨(?:风)?|二次元|赛博(?:写实风|风)?|CG(?:渲染|动画)?|3D(?:动漫)?CG(?:渲染)?|"
-    r"2D(?:动画)?(?:厚涂)?|真人(?:实拍|照片|摄影)?|照片写实|实拍摄影|摄影棚实拍|"
-    r"实景照片|非真人CG渲染|虚构数字角色|photoreal(?:istic)?|photo(?:-real)?(?:istic)?|"
-    r"photograph(?:ic)?|live[- ]?action|anime|manga|illustrat(?:ed|ion)|"
-    r"cel[- ]?shad(?:ed|ing)?|render(?:ed|ing)?)$",
-    re.IGNORECASE,
-)
-_PORTRAIT_OVERRIDE_APPEARANCE_ONLY_NOTE = (
-    "若最近一次用户编辑文案含与全局画风冲突的写实/真人/照片/摄影或其他风格描述，一律忽略；"
-    "该文案只允许补充发型、服装、体型、年龄与配饰等静态外观事实"
-)
-PRODUCTION_APPEARANCE_MIN_CHARS = 20
-PRODUCTION_APPEARANCE_MAX_CHARS = 80
-
-
-def contains_non_production_appearance(anchor: str) -> bool:
-    return bool(
-        _NON_PRODUCTION_APPEARANCE_RE.search(anchor or "")
-        or _CLOTHING_HIDDEN_SKIN_MARK_RE.search(anchor or "")
-        or _NON_STATIC_APPEARANCE_RE.search(anchor or "")
-        or _NON_NEUTRAL_CLOTHING_RE.search(anchor or "")
-        or _SEXUALIZED_BODY_EMPHASIS_RE.search(anchor or "")
-    )
-
-
-def production_appearance_anchor(anchor: str) -> str:
-    """Keep only identity traits that a normally clothed model sheet can prove."""
-    clauses = re.split(r"[，,；;。]+", normalize_prompt_text(anchor or ""))
-    kept: list[str] = []
-    for raw_clause in clauses:
-        clause = raw_clause.strip()
-        if not clause:
-            continue
-        if not contains_non_production_appearance(clause):
-            kept.append(clause)
-            continue
-        match = _APPEARANCE_LIST_PREFIX_RE.match(clause)
-        prefix = match.group("prefix") if match else ""
-        items_text = match.group("items") if match else clause
-        items = [
-            item.strip()
-            for item in re.split(r"(?:[、与和]|及(?!膝))+", items_text)
-            if item.strip() and not contains_non_production_appearance(item)
-        ]
-        if items:
-            kept.append(f"{prefix}{'、'.join(items)}")
-    return "，".join(kept).strip("， ")
-
-
-def missing_production_appearance_dimensions(anchor: str) -> list[str]:
-    safe = production_appearance_anchor(anchor)
-    missing = []
-    if not re.search(
-        r"(?:岁|成年|男性|女性|男子|女子|男人|女人|青年|中年|老年|少年|少女|老人|人影)",
         safe,
     ):
         missing.append("年龄性别")
-    if not re.search(r"(?:发|须|脸|面|眼|眉|肤|身形|身材|体型|高|矮|胖|瘦|形态|人影)", safe):
+    body = normalize_prompt_text(anchor or "")
         missing.append("外形")
     spectral = any(token in safe for token in ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "人影"))
     if not spectral and not re.search(r"(?:穿|衣|衫|裙|裤|鞋|装|袍|服|戴|配饰|手表|眼镜)", safe):
@@ -175,14 +78,12 @@ def visual_style_lock(visual_style: str) -> str:
     style = normalize_prompt_text(visual_style or "").strip()
     prefix = f"画风最高优先级：必须严格保持「{style}」，" if style else "画风最高优先级："
     return normalize_prompt_text(
-        prefix
         + "不得擅自切换成与该画风冲突的真人摄影、照片写实、live-action、"
           "实拍质感或其他渲染风格。整体必须保持统一的 CG/动画/漫画/插画类非真人渲染"
     )
 
 
 def character_visual_style_lock(visual_style: str) -> str:
-    return normalize_prompt_text(
         f"{visual_style_lock(visual_style)}。"
         "人物面部与皮肤必须采用明显动画化比例和非照片级卡通/CG 渲染材质，"
         "保持虚构数字角色质感，不得生成可误认成真人照片或真人实拍的脸和皮肤"
@@ -248,7 +149,7 @@ def portrait_prompt(visual_style: str, anchor: str) -> str:
             refinements.append("戒指完整清晰地置于画面底部中央，角色垂直悬浮在戒指正上方")
         if "戏谑" in body:
             refinements.append("嘴角微扬、眼神狡黠，明确表现戏谑，禁止严肃皱眉或中性表情")
-        return normalize_prompt_text(
+    fallback_text = normalize_prompt_text(fallback or "").strip()
             f"{style}。单角色全身概念定妆设定图：{body}。"
             + "；".join(refinements)
             + "。纯浅米色背景，全身与关联道具完整可见，主体四周保留安全边距。"
@@ -263,7 +164,7 @@ def portrait_prompt(visual_style: str, anchor: str) -> str:
         "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
     )
 
-
+    return text or fallback_text
 def _merge_generated_portraits(conn, project_id: str, characters) -> None:
     """Merge accepted portrait truth into the latest concurrent Bible snapshot.
 
@@ -273,7 +174,6 @@ def _merge_generated_portraits(conn, project_id: str, characters) -> None:
     and keyframe compilation on the previous outfit.
     """
     accepted = {
-        item.name: {
             "ref_image_path": item.ref_image_path,
             "appearance_canonical": item.appearance_canonical,
         }
@@ -331,7 +231,19 @@ def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
         return fallback_text
     for marker in _PORTRAIT_APPEARANCE_START_MARKERS:
         if marker in text:
-            text = text.split(marker, 1)[1].strip()
+                        # 补齐已尝试但未完成：复用现有主图，不能再次生成并覆盖付费产物。
+                        portrait_row = conn.execute(
+                            "SELECT id FROM character_portraits "
+                            "WHERE project_id=? AND character_name=? AND ep_start=1 "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (project_id, character.name),
+                        ).fetchone()
+                        if portrait_row:
+                            conn.execute(
+                                "UPDATE character_portraits SET pack_status='partial_fallback' WHERE id=?",
+                                (portrait_row["id"],),
+                            )
+                            conn.commit()
             break
     stop_positions = [text.find(marker) for marker in _PORTRAIT_APPEARANCE_STOP_MARKERS if marker in text]
     if stop_positions:
@@ -356,14 +268,10 @@ async def generate_refs(
     conn = get_conn()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     if not project or not project["bible_json"]:
-        raise ValueError("项目不存在或还没有角色圣经")
-    bible = Bible.model_validate(json.loads(project["bible_json"]))
-    style = bible.world.visual_style_canonical
-
-    selected = {str(name).strip() for name in (only_characters or []) if str(name).strip()}
-    targets = [
+            base_prompt = ((c.portrait_prompt_override or "").strip()
+                           or portrait_prompt(style, c.appearance_canonical))
         c for c in bible.characters
-        if ((not selected or c.name in selected) and (only_character is None or c.name == only_character))
+                base_prompt, c.appearance_canonical,
     ]
     if not targets:
         raise ValueError(f"角色不存在：{only_character or sorted(selected)}")
@@ -374,28 +282,16 @@ async def generate_refs(
 
     if resume:
         # A candidate is committed per character before the batch-level Bible merge.
-        # Rehydrate only complete packs. A process may stop after the front view
-        # was committed but before the side views finished; resume that pack
-        # instead of mistaking the partial row for a completed character.
-        from app.multiview import (
-            character_multiview_enabled,
-            complete_legacy_character_pack,
-            pack_result_ok,
-        )
-
-        committed: dict[str, str] = {}
-        for character in targets:
-            if fresh_after is None:
-                row = conn.execute(
-                    "SELECT image_path FROM character_portraits "
-                    "WHERE project_id=? AND character_name=? AND ep_start=1 "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (project_id, character.name),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT image_path FROM character_portraits "
-                    "WHERE project_id=? AND character_name=? AND ep_start=1 AND created_at>=? "
+                    item = await hiagent.generate_image(
+                        prompt,
+                        size=config.REF_IMAGE_SIZE,
+                        call_meta={
+                            "asset_kind": "portrait",
+                            "character_name": c.name,
+                            "episode_no": 1,
+                            "portrait_mode": "initial",
+                            "attempt": attempt,
+                        })
                     "ORDER BY created_at DESC LIMIT 1",
                     (project_id, character.name, fresh_after),
                 ).fetchone()
@@ -445,12 +341,15 @@ async def generate_refs(
             for attempt in range(1, 2):
                 portrait_id: str | None = None
                 path = str(Path(ref_path(project_id, c.name)).with_name(
-                    f"{_safe_name(c.name)}__{new_id('candidate')}.jpg"
-                ))
+                            conn.execute(
+                                "UPDATE character_portraits SET pack_status='partial_fallback' WHERE id=?",
+                                (portrait_id,),
                 prompt = base_prompt
+                            conn.commit()
                 try:
                     call_meta = {
                         "asset_kind": "portrait",
+                    # 主图技术可用即进入 Bible；多视角缺口作为风险和后续补齐输入。
                         "character_name": c.name,
                         "episode_no": 1,
                         "portrait_mode": "initial",
@@ -489,13 +388,12 @@ async def generate_refs(
                             "character_name": c.name,
                             "appearance": effective_appearance,
                             "prompt": prompt,
-                            "attempt": attempt,
-                        },
-                        parent_artifact_ids=(
+    # 单个角色的有界生成/补齐耗尽不得把已落盘的其他角色回滚，
+    # 也不得阻塞后续分镜。缺少的角色由文本外观锨点保底。
                             [project["bible_artifact_id"]] if project["bible_artifact_id"] else []
                         ),
-                        qa=qa,
-                    )
+        "gate_retry_exhausted": bool(failures),
+        "warnings": [f"{name}：{exc}" for name, exc in failures],
                     if artifact["status"] not in {"approved", "validated"}:
                         last_error = ContentGenerationError(
                             f"定妆照技术校验未通过：{c.name}"

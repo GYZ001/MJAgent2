@@ -5,7 +5,6 @@ import {
   deliveryReviewDisabledReason,
   deliveryStatusLabel,
   deliveryWarningLabel,
-  finalEditStatusLabel,
   formatDeliveryTime,
   nextCinemaTab,
   reconcileMixStatus,
@@ -79,19 +78,6 @@ describe('成片台交付文案', () => {
       .not.toMatch(/[A-Za-z]{3}/)
     expect(deliveryCheckLabel('每镜都有已采用且通过技术校验的视频'))
       .toBe('每镜都有已采用且可正常播放的视频')
-  })
-
-  it('区分快速阶段拼接和终剪失败降级', () => {
-    expect(finalEditStatusLabel({ ok: true }))
-      .toBe('当前成片已执行确定性文字、镜间转场与音轨衔接')
-    expect(finalEditStatusLabel({
-      ok: false,
-      mode: 'draft_concat',
-      skipped_final_edit: true,
-      decision_reason: 'partial_timeline_fast_preview',
-    })).toContain('快速阶段拼接')
-    expect(finalEditStatusLabel({ ok: false, fallback: 'draft_concat', error: 'ffmpeg failed' }))
-      .toContain('基础合成降级')
   })
 })
 

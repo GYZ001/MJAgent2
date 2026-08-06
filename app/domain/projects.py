@@ -648,14 +648,10 @@ def project_detail(
         counts = conn.execute(
             """SELECT COUNT(*) AS total,
                       SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
-                      SUM(CASE WHEN screenplay_status='queued' THEN 1 ELSE 0 END) AS screenplay_queued,
                       SUM(CASE WHEN screenplay_status='running' THEN 1 ELSE 0 END) AS screenplay_running,
                       SUM(CASE WHEN status='scripting' THEN 1 ELSE 0 END) AS scripting,
                       SUM(CASE WHEN screenplay_status IN ('pending','failed','repairing')
-                                OR (
-                                    screenplay_json IS NULL
-                                    AND screenplay_status NOT IN ('queued','running')
-                                ) THEN 1 ELSE 0 END) AS screenplay_todo,
+                                OR screenplay_json IS NULL THEN 1 ELSE 0 END) AS screenplay_todo,
                       SUM(CASE WHEN screenplay_status='ready'
                                 AND status IN ('planned','script_failed') THEN 1 ELSE 0 END) AS storyboard_ready
                FROM episodes WHERE project_id=?""",
@@ -664,7 +660,6 @@ def project_detail(
         p["episode_counts"] = {key: int(counts[key] or 0) for key in counts.keys()}
         p["episodes_busy"] = bool(
             p["plan_status"] == "running"
-            or p["episode_counts"]["screenplay_queued"]
             or p["episode_counts"]["screenplay_running"]
             or p["episode_counts"]["scripting"]
         )

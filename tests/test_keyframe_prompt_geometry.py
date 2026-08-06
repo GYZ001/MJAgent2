@@ -73,129 +73,6 @@ def test_provider_prompt_overrides_conflicting_front_view_and_scale() -> None:
     assert video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION in prompt
 
 
-def test_seeded_keyframe_omits_redundant_textual_character_appearance() -> None:
-    bible = _bible()
-    marker = "REDUNDANT_APPEARANCE_MARKER"
-    style_marker = "REDUNDANT_STYLE_MARKER"
-    bible.characters[0].appearance_canonical = marker
-    bible.world.visual_style_canonical = style_marker
-    shot = _contact_shot(
-        characters=["萧炎"],
-        characters_visible=["萧炎"],
-        last_frame_desc="萧炎右掌贴住石碑，萧薰儿留在画外。",
-    )
-
-    unseeded = video_modes.reference_generation_prompt(
-        shot,
-        bible,
-        "plot_key_frame",
-        1,
-    )
-    seeded = video_modes.reference_generation_prompt(
-        shot,
-        bible,
-        "plot_key_frame",
-        1,
-        identity_seeded=True,
-    )
-
-    assert marker in unseeded
-    assert style_marker in unseeded
-    assert marker not in seeded
-    assert style_marker not in seeded
-    assert "SEEDED KEYFRAME CONTRACT" in seeded
-    assert "萧炎" not in seeded
-    assert "萧薰儿" not in seeded
-    assert "Visible named identities, each exactly once: subject 1" in seeded
-    assert "subject 2留在画外" in seeded
-    assert "Reference images are authoritative for identity, outfit" in seeded
-    assert "clearly stylized anime facial proportions" in seeded
-    assert "cel-shaded CG skin and clothing materials" in seeded
-    assert "photograph or live-action" not in seeded
-    assert "MULTI-KEYFRAME IDENTITY LOCK" not in seeded
-
-
-def test_seeded_terminal_keyframe_compiles_typed_endpoint_without_free_prose() -> None:
-    shot = _contact_shot(
-        characters=["萧炎", "萧薰儿"],
-        characters_visible=["萧炎", "萧薰儿"],
-        last_frame_desc=(
-            "萧薰儿站到梯子顶端，上半身探向壁橱；"
-            "萧炎仍在下方扶住梯子。"
-        ),
-        continuity_state_out={
-            "characters": {
-                "萧炎": {
-                    "pose": "站在梯子旁",
-                    "facing": "朝向梯子",
-                    "left_hand": "扶住梯子左侧",
-                    "right_hand": "扶住梯子右侧",
-                },
-                "萧薰儿": {
-                    "pose": "站在梯子上层踏板",
-                    "facing": "朝向壁橱",
-                    "left_hand": "扶在壁橱边缘",
-                    "right_hand": "在壁橱内寻找物品",
-                },
-            },
-            "props": {
-                "ladder": {
-                    "canonical_name": "人字梯",
-                    "location": "壁橱下方",
-                    "form": "展开架稳",
-                    "visibility": "required",
-                    "required": True,
-                },
-            },
-        },
-    )
-
-    prompt = video_modes.reference_generation_prompt(
-        shot,
-        _bible(),
-        "plot_key_frame",
-        1,
-        content_override="FREEFORM_PROVIDER_DUPLICATE_MARKER",
-        identity_seeded=True,
-    )
-
-    assert "FREEFORM_PROVIDER_DUPLICATE_MARKER" not in prompt
-    assert "上半身探向" not in prompt
-    assert "Literal endpoint geometry" in prompt
-    assert "subject 1 endpoint:" in prompt
-    assert "subject 2 endpoint:" in prompt
-    assert "right hand=在壁橱内寻找物品" in prompt
-    assert "required prop: name=人字梯; location=壁橱下方; state=展开架稳" in prompt
-    assert prompt.count("Freeze exactly one final instant:") == 1
-
-
-def test_seeded_opening_beat_does_not_reuse_structured_closing_state() -> None:
-    shot = _contact_shot(
-        first_frame_desc="萧炎站在石碑前，右手尚未抬起。",
-        continuity_state_out={
-            "characters": {
-                "萧炎": {
-                    "pose": "STRUCTURED_CLOSING_MARKER",
-                },
-            },
-        },
-    )
-    opening = video_modes.narrative_keyframe_beats(shot, 2)[0]
-    beat_shot = video_modes._shot_for_keyframe_beat(shot, opening)
-
-    prompt = video_modes.reference_generation_prompt(
-        beat_shot,
-        _bible(),
-        "plot_key_frame",
-        1,
-        identity_seeded=True,
-    )
-
-    assert "STRUCTURED_CLOSING_MARKER" not in prompt
-    assert "right hand has not yet been raised" not in prompt
-    assert "右手尚未抬起" in prompt
-
-
 def test_keyframe_contract_fingerprint_changes_with_dialogue_emotion() -> None:
     winning = _contact_shot(dialogues=[{
         "speaker": "萧炎", "line": "我赢了", "emotion": "兴奋",
@@ -898,7 +775,7 @@ def test_keyframe_qa_hides_inactive_text_payload_and_explicitly_forbids_text(mon
     assert captured["output_schema"]["required_text_match"] == "N/A"
 
 
-def test_provider_boundary_keeps_contract_seeds_and_unique_history(monkeypatch, tmp_path) -> None:
+    assert "input image 1 = character '萧炎', profile" in prompts[0]
     prompts: list[str] = []
 
     async def fake_generate(prompt, seed_inputs, *, call_meta=None):

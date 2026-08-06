@@ -160,61 +160,6 @@ def _read_edit_report(final_path: Path) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _final_edit_mode() -> str:
-    import os
-
-    mode = (os.getenv("MANJU_FINAL_EDIT_MODE") or "auto").strip().lower()
-    if mode in {"always", "auto", "off"}:
-        return mode
-    if mode in {"1", "true", "yes", "on"}:
-        return "always"
-    if mode in {"0", "false", "no", "draft", "fast"}:
-        return "off"
-    return "auto"
-
-
-def _final_edit_decision(
-    conn,
-    episode_id: str,
-    piece_specs: list[tuple[int, str, float]],
-    skipped_shot_nos: list[int],
-) -> tuple[bool, str]:
-    """Return whether the expensive final-edit pass is worth running now."""
-    mode = _final_edit_mode()
-    if mode == "always":
-        return True, "forced_by_env"
-    if mode == "off":
-        return False, "disabled_by_env"
-    if skipped_shot_nos:
-        return False, "partial_timeline_fast_preview"
-
-    from app.continuity import required_text_strategy
-    from app.final_edit import shot_from_row, transition_spec
-
-    rows = conn.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (episode_id,),
-    ).fetchall()
-    shot_by_no = {int(row["shot_no"]): shot_from_row(row) for row in rows}
-    ordered_shots = [
-        shot_by_no[shot_no]
-        for shot_no, _path, _rate in piece_specs
-        if shot_no in shot_by_no
-    ]
-
-    for shot in ordered_shots:
-        required = shot.required_text
-        exact = (required.exact_text or "").strip() if required else ""
-        if exact and required_text_strategy(shot) == "deterministic_insert":
-            return True, "deterministic_text"
-
-    for previous, current in zip(ordered_shots, ordered_shots[1:]):
-        if current.shot_no == previous.shot_no + 1 and transition_spec(current.transition).edit_type != "cut":
-            return True, "enhanced_transition"
-
-    return False, "simple_timeline_fast_concat"
-
-
 def concatenate_episode(episode_id: str) -> dict:
     """把当前已有的真实模型视频按镜号拼接成 MP4。
 
@@ -303,7 +248,6 @@ def concatenate_episode(episode_id: str) -> dict:
     concat_timeout_s = min(1800.0, max(120.0, est_total_dur * 10.0 + 60.0))
 
     final_path = _final_video_path(ep["project_id"], ep["episode_no"])
-    started_at = time.perf_counter()
     common_result = {
         "shots": len(pieces),
         "ffmpeg_missing": False,
@@ -321,56 +265,42 @@ def concatenate_episode(episode_id: str) -> dict:
     # final-edit 是质量增强层，不是交付门禁。任何字体/滤镜/转场失败都回退到
     # 下方的传统硬拼，上一版成片仍在原子替换成功前保持可用。
     final_edit_failure: str | None = None
-    final_edit_enabled, final_edit_reason = _final_edit_decision(
-        conn,
-        episode_id,
-        piece_specs,
-        skipped_shot_nos,
-    )
-    final_edit_elapsed_s: float | None = None
-    if final_edit_enabled:
-        final_edit_started_at = time.perf_counter()
-        try:
-            from app.atomic_io import atomic_write_text
-            from app.final_edit import render_episode_final_edit
+    try:
+        from app.atomic_io import atomic_write_text
+        from app.final_edit import render_episode_final_edit
 
-            with tempfile.TemporaryDirectory() as edit_td:
-                edit_dir = _P(edit_td)
-                edited_video = edit_dir / "final-edit.mp4"
-                edit_report = render_episode_final_edit(
-                    conn,
-                    episode_id,
-                    piece_specs,
-                    edited_video,
-                    edit_dir,
-                )
-                edit_report["timeline"] = {
-                    "partial": bool(skipped_shot_nos),
-                    "shots_total": len(all_shot_nos),
-                    "included_shot_nos": piece_shot_nos,
-                    "skipped_shot_nos": skipped_shot_nos,
-                    "missing_model_shot_nos": missing_model_shot_nos,
-                }
-                edit_report["mode"] = "final_edit"
-                edit_report["decision_reason"] = final_edit_reason
-                edit_report["elapsed_s"] = round(time.perf_counter() - final_edit_started_at, 3)
-                atomic_copy(edited_video, final_path)
-            final_path.with_suffix(".stale").unlink(missing_ok=True)
-            report_path = _edit_report_path(final_path)
-            atomic_write_text(
-                report_path,
-                json.dumps(edit_report, ensure_ascii=False, indent=2),
+        with tempfile.TemporaryDirectory() as edit_td:
+            edit_dir = _P(edit_td)
+            edited_video = edit_dir / "final-edit.mp4"
+            edit_report = render_episode_final_edit(
+                conn,
+                episode_id,
+                piece_specs,
+                edited_video,
+                edit_dir,
             )
-            return {
-                "video_url": _versioned_final_url(final_path),
-                "total_duration_s": round(float(edit_report["total_duration_s"]), 1),
-                **common_result,
-                "elapsed_s": round(time.perf_counter() - started_at, 3),
-                "final_edit": edit_report,
+            edit_report["timeline"] = {
+                "partial": bool(skipped_shot_nos),
+                "shots_total": len(all_shot_nos),
+                "included_shot_nos": piece_shot_nos,
+                "skipped_shot_nos": skipped_shot_nos,
+                "missing_model_shot_nos": missing_model_shot_nos,
             }
-        except Exception as exc:  # noqa: BLE001 - 质量增强失败必须继续完整交付
-            final_edit_elapsed_s = time.perf_counter() - final_edit_started_at
-            final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
+            atomic_copy(edited_video, final_path)
+        final_path.with_suffix(".stale").unlink(missing_ok=True)
+        report_path = _edit_report_path(final_path)
+        atomic_write_text(
+            report_path,
+            json.dumps(edit_report, ensure_ascii=False, indent=2),
+        )
+        return {
+            "video_url": _versioned_final_url(final_path),
+            "total_duration_s": round(float(edit_report["total_duration_s"]), 1),
+            **common_result,
+            "final_edit": edit_report,
+        }
+    except Exception as exc:  # noqa: BLE001 - 质量增强失败必须继续完整交付
+        final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
 
     # 用 concat demuxer 优先无重编码直粘（画质无损）；但 -c copy 要求各片段编码参数
     # （像素格式/timebase/SAR/profile）完全一致，否则会失败或花屏。一旦失败，回退重编码兜底。
@@ -460,13 +390,8 @@ def concatenate_episode(episode_id: str) -> dict:
 
     fallback_edit_report = {
         "ok": False,
-        "mode": "draft_concat",
         "fallback": "draft_concat",
         "error": final_edit_failure,
-        "skipped_final_edit": not final_edit_enabled,
-        "decision_reason": final_edit_reason,
-        "final_edit_elapsed_s": round(final_edit_elapsed_s, 3) if final_edit_elapsed_s is not None else None,
-        "elapsed_s": round(time.perf_counter() - started_at, 3),
         "runtime_blocking": False,
         "timeline": {
             "partial": bool(skipped_shot_nos),
@@ -487,7 +412,6 @@ def concatenate_episode(episode_id: str) -> dict:
         "video_url": _versioned_final_url(final_path),
         "total_duration_s": round(total_dur, 1),
         **common_result,
-        "elapsed_s": round(time.perf_counter() - started_at, 3),
         "final_edit": fallback_edit_report,
     }
 

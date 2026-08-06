@@ -23,35 +23,7 @@ from app.multiview import (
     missing_required_views,
     normalize_appearance_change,
     pack_references_by_purpose,
-    gallery_fingerprint_material,
-    view_generation_operation_id,
 )
-
-
-def test_seeded_view_operation_survives_candidate_row_recreation() -> None:
-    first = view_generation_operation_id(
-        asset_kind="scene_view",
-        view_role="reverse_angle",
-        prompt="same prompt",
-        seed_inputs=["data:image/jpeg;base64,stable-seed"],
-        fallback_identity="scene-candidate-a",
-    )
-    recovered = view_generation_operation_id(
-        asset_kind="scene_view",
-        view_role="reverse_angle",
-        prompt="same prompt",
-        seed_inputs=["data:image/jpeg;base64,stable-seed"],
-        fallback_identity="scene-candidate-b",
-    )
-    changed_seed = view_generation_operation_id(
-        asset_kind="scene_view",
-        view_role="reverse_angle",
-        prompt="same prompt",
-        seed_inputs=["data:image/jpeg;base64,new-seed"],
-        fallback_identity="scene-candidate-b",
-    )
-
-    assert recovered == first
     assert changed_seed != first
 from app.video_modes import (
     default_reference_decision,
@@ -809,8 +781,8 @@ def test_contextual_identity_passes_text_contract_without_portrait_anchor(
         source_excerpt="云吞七号推门。",
         dialogues=[],
     )
-    bible = Bible(
-        characters=[],
+def test_refresh_portrait_pack_failure_switches_to_primary_fallback(monkeypatch, tmp_path) -> None:
+    """整包 QA 失败不得切换版本：临时段删除，旧开区间继续生效。"""
         world=World(visual_style_canonical="cinematic animation"),
     )
 
@@ -854,11 +826,11 @@ def test_shot_video_assets_stale_when_portrait_revision_changes() -> None:
             return _C()
 
     import app.multiview as mv
-
-    # patch episode portrait/scene lookups
-    original_portrait = mv.portrait_row_for_episode
-    original_scene = mv.scene_row_for_episode
-    mv.portrait_row_for_episode = lambda *a, **k: {"id": "portrait_new"}
+    result = asyncio.run(_refresh_portrait_on_drift(
+        "proj", "A", 12, "白发红袍", "anime", 1,
+        change_meta={"persistence": "persistent", "change_dimensions": ["hair", "outfit"]},
+    ))
+    assert result["pack_status"] == "partial_fallback"
     mv.scene_row_for_episode = lambda *a, **k: {"id": "scene_old"}
     try:
         assert _shot_adopted_assets_stale(_Conn(), shot_row, version_row) is True
@@ -866,10 +838,10 @@ def test_shot_video_assets_stale_when_portrait_revision_changes() -> None:
         assert _shot_adopted_assets_stale(_Conn(), shot_row, version_row) is False
     finally:
         mv.portrait_row_for_episode = original_portrait
-        mv.scene_row_for_episode = original_scene
+    assert old["ep_end"] == 11
 
-
-def test_shot_video_assets_stale_when_selected_view_is_redone() -> None:
+    assert new["ep_end"] is None
+    assert new["pack_status"] == "partial_fallback"
     from app.domain.storyboard_ops import _shot_adopted_assets_stale
     import app.multiview as mv
 
@@ -936,20 +908,20 @@ def test_clone_portrait_views_zero_cost_bind(tmp_path, monkeypatch) -> None:
 
     database = tmp_path / "reuse.db"
     monkeypatch.setattr(db, "DB_PATH", database)
-    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(db, "_local", threading.local())
-    db.init_db()
-    conn = db.get_conn()
-    img = tmp_path / "front.jpg"
+    result = asyncio.run(_refresh_portrait_on_drift(
+        "proj", "A", 12, "白发红袍", "anime", 1,
+        change_meta={"persistence": "persistent"},
+    ))
     img.write_bytes(b"x")
     side = tmp_path / "side.jpg"
     side.write_bytes(b"y")
     conn.execute("INSERT INTO projects(id, name, created_at) VALUES('proj','t',1)")
     conn.execute(
+    assert result and result["ep_start"] == 12
         """INSERT INTO character_portraits(
-               id, project_id, character_name, ep_start, ep_end, appearance, prompt,
+    assert rows[0]["id"] == "p_old" and rows[0]["ep_end"] == 11
                image_path, base_portrait_id, bible_version, artifact_id, pack_status,
-               group_qa_json, created_at
+    assert rows[1]["ep_start"] == 12 and rows[1]["ep_end"] is None
            ) VALUES('p_old','proj','A',1,5,'黑发','prompt',?,NULL,0,NULL,'ready',?,1)""",
         (str(img), json.dumps({"overall": 0.9})),
     )
