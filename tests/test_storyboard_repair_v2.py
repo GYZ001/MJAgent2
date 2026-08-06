@@ -1294,18 +1294,32 @@ def test_candidate_can_resolve_one_target_from_combined_spine_issue() -> None:
 
 
 @pytest.mark.parametrize(
-    "action, initial_size, expected_size",
+    "action, initial_size, expected_size, staging_tag",
     [
-        ("少年翻开手中名册，同时宣布下一位测试者的名字。", "特写", "近景"),
-        ("少年说完后转身穿过人群，走向广场出口。", "近景", "中景"),
+        (
+            "少年翻开手中名册，同时宣布下一位测试者的名字。",
+            "特写",
+            "近景",
+            "dialogue_action_prop_staging",
+        ),
+        (
+            "少年说完后转身穿过人群，走向广场出口。",
+            "近景",
+            "中景",
+            "dialogue_action_spatial_staging",
+        ),
     ],
 )
 def test_deterministic_action_dialogue_framing_candidate(
-    action: str, initial_size: str, expected_size: str,
+    action: str,
+    initial_size: str,
+    expected_size: str,
+    staging_tag: str,
 ) -> None:
     shot = _shot(2, action=action)
     shot.shot_size = initial_size
     shot.dialogues = [Dialogue(speaker="少年", line="下一位。", emotion="平静")]
+    shot.risk_tags = [staging_tag]
 
     candidate = _deterministic_dialogue_framing_candidate(shot)
 
@@ -1426,6 +1440,7 @@ def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repa
     shot = _shot(2, action="少年翻开手中名册，同时宣布下一位测试者的名字。")
     shot.shot_size = "特写"
     shot.dialogues = [Dialogue(speaker="少年", line="下一位。", emotion="平静")]
+    shot.risk_tags = ["dialogue_action_prop_staging"]
     conn.execute(
         "UPDATE shots SET shot_size=?,action_desc=?,dialogues=?,shot_contract_json=? WHERE id='s2'",
         (

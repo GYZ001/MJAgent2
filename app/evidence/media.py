@@ -527,7 +527,7 @@ def select_best_video_candidate(
         )
     else:
         reason = (
-            f"默认采用首个技术有效且完整片段合同通过的视频 v{best['version_no']}；"
+            f"默认采用首个技术有效视频 v{best['version_no']}（完整片段合同已通过）；"
             f"QA={best['score']:.3f}、质量问题={best['hard_failures']} 仅供复核，"
             "不触发重做或阻止采用。"
         )

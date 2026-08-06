@@ -446,7 +446,10 @@ def test_keyframe_qa_contract_checks_side_contact_height_and_target(monkeypatch)
     assert qa["rule_version"] == "keyframe_geometry_qa_v3"
 
 
-def test_independent_geometry_guard_overrides_false_high_height_score(monkeypatch) -> None:
+def test_independent_geometry_guard_overrides_false_high_height_score(
+    monkeypatch,
+    tmp_path,
+) -> None:
     calls: list[str] = []
 
     async def fake_vlm(_frames, expectation, call_meta=None):
@@ -479,15 +482,38 @@ def test_independent_geometry_guard_overrides_false_high_height_score(monkeypatc
             "outfit_match": 0.95,
             "hair_match": 0.95,
             "scene_match": 0.95,
+            "identity_contract": {
+                "characters": [
+                    {
+                        "name": name,
+                        "present": True,
+                        "gender_match": True,
+                        "identity_match": True,
+                        "outfit_match": True,
+                        "instance_count": 1,
+                    }
+                    for name in ("萧炎", "萧薰儿")
+                ],
+                "unexpected_recognizable_people": 0,
+            },
             "hard_failures": [],
             "issues": [],
         })
 
     monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
     monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
+    anchors = []
+    for name in ("萧炎", "萧薰儿"):
+        path = tmp_path / f"{name}.jpg"
+        path.write_bytes(b"anchor")
+        anchors.append({
+            "image_path": str(path),
+            "entity_type": "character",
+            "entity_name": name,
+        })
     shot = _contact_shot(characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"])
     qa = asyncio.run(review_keyframe_with_evidence(
-        "candidate", shot=shot, bible=_bible(), visual_anchors=[],
+        "candidate", shot=shot, bible=_bible(), visual_anchors=anchors,
     ))
 
     assert len(calls) == 2

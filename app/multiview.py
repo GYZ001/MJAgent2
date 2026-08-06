@@ -2432,9 +2432,15 @@ async def review_keyframe_with_evidence(
         for item in identity_by_name.values()
     )
     data["identity_contract_passed"] = identity_contract_passed
+    if not identity_contract_complete:
+        identity_issue = "身份合同或人物真值锚点不完整"
+        data["issues"] = [
+            *list(data.get("issues") or []),
+            identity_issue,
+        ]
 
     score_keys = list(KEYFRAME_SCORE_WEIGHTS.keys())
-    missing_required = not identity_contract_complete
+    missing_required = False
     for key in score_keys:
         val = data.get(key)
         if val is None or (isinstance(val, str) and val.upper() in {"N/A", "NA"}):
@@ -2487,8 +2493,6 @@ async def review_keyframe_with_evidence(
         data["overall"] = None
         data["qa_recovered"] = True
         issue = "缺少必需评分数"
-        if not identity_contract_complete:
-            issue += "：identity_contract"
         if missing_diagnostics:
             issue += "：" + ",".join(missing_diagnostics)
         data["issues"] = list(data.get("issues") or []) + [issue]

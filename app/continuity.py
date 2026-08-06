@@ -252,8 +252,8 @@ def dialogue_action_staging_kind(
 ) -> str:
     """返回对白镜必须保留的动作调度类型：spatial / prop / 空。
 
-    ``dialogue_focus_subject`` 会据此放弃“只拍脸”的派生构图，但仍保持一镜只有
-    一位画内说话人。显式 risk tag 供人工编辑/历史数据在词面未命中时强制保留动作。
+    ``dialogue_focus_subject`` 会据此放弃“只拍脸”的派生构图。动作类型来自
+    结构化状态差异或显式语义标签，不从动作词表猜测。
     """
     speakers = onscreen_dialogue_speakers(shot)
     if len(speakers) != 1:
@@ -263,7 +263,12 @@ def dialogue_action_staging_kind(
         for name in required_visual_action_characters(shot)
     ):
         return "spatial"
-    if "dialogue_action_staging" in (shot.risk_tags or []):
+    tags = set(shot.risk_tags or [])
+    if "dialogue_action_spatial_staging" in tags:
+        return "spatial"
+    if "dialogue_action_prop_staging" in tags:
+        return "prop"
+    if "dialogue_action_staging" in tags:
         return "spatial" if len(raw_characters_visible(shot)) > 1 else "prop"
     if narrative_authority:
         return ""
