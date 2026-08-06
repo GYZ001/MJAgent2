@@ -374,6 +374,12 @@ def issue_completion_certificate(
         raise ValueError("引用的 runtime gate 尚未通过，拒绝签发完成凭证")
     if any(_row_has_blocking_issue(row) for row in runtime_gates):
         raise ValueError("runtime gate 仍含 blocker 或 must-fix，拒绝签发完成凭证")
+    if kind == "screenplay":
+        _required_exact_runtime_gate(
+            rows,
+            evaluator_name=_SCREENPLAY_GATE_EVALUATOR,
+            evaluator_version=qa_profile_version,
+        )
 
     narrative_authority = _validate_narrative_certificate_authority(
         kind=kind,

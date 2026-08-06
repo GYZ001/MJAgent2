@@ -1626,3 +1626,308 @@ def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db)
     checkpoint = load_latest_checkpoint("e1")
     assert checkpoint.phase == "SUCCEEDED"
     assert checkpoint.outcome == "SUCCEEDED_READY_FOR_CONFIRM"
+
+
+def test_preview_consume_is_atomic_under_concurrent_submit(storyboard_db):
+    preview = workspace.create_preview("test_atomic", "e1", {"ok": True})
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def consume() -> None:
+        barrier.wait()
+        try:
+            workspace.require_preview(
+                preview["preview_token"],
+                "test_atomic",
+                "e1",
+                consume=True,
+            )
+            results.append("accepted")
+        except HTTPException as exc:
+            results.append(f"rejected:{exc.status_code}")
+        finally:
+            thread_conn = db.get_conn()
+            thread_conn.close()
+            db._local.conn = None
+
+    threads = [threading.Thread(target=consume) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(results) == ["accepted", "rejected:409"]
+
+
+def test_preview_fingerprint_covers_independent_shot_fields(storyboard_db):
+    preview = workspace.create_preview("test_full_fingerprint", "e1", {"ok": True})
+    storyboard_db.execute(
+        "UPDATE shots SET camera_move='横摇',scene_time='黄昏' WHERE id='s1'"
+    )
+    storyboard_db.commit()
+
+    with pytest.raises(HTTPException) as caught:
+        workspace.require_preview(
+            preview["preview_token"],
+            "test_full_fingerprint",
+            "e1",
+        )
+
+    assert caught.value.status_code == 409
+    assert "基线已变化" in str(caught.value.detail)
+
+
+def test_active_video_run_blocks_edit_and_structure(storyboard_db):
+    recorder = WorkflowRecorder.create(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="active-video-write-fence",
+    )
+    recorder.start()
+    storyboard_db.execute(
+        "UPDATE episodes SET status='generating',active_video_run_id=? WHERE id='e1'",
+        (recorder.run_id,),
+    )
+    storyboard_db.commit()
+
+    with pytest.raises(HTTPException) as edit_error:
+        workspace.create_edit_session("s1")
+    with pytest.raises(HTTPException) as structure_error:
+        api.preview_storyboard_structure(
+            "e1",
+            {"operation": "duplicate_after", "shot_id": "s1", "target_index": 0},
+        )
+
+    assert edit_error.value.status_code == 409
+    assert structure_error.value.status_code == 409
+    assert "视频任务" in str(edit_error.value.detail)
+    recorder.cancel("test cleanup")
+
+
+def test_shot_edit_rolls_back_projection_and_preview_when_evidence_fails(
+    storyboard_db,
+    monkeypatch,
+):
+    session = workspace.create_edit_session("s1")
+    changes = {"camera_move": "缓慢推近"}
+    preview = api.preview_shot_edit_impact(
+        "s1",
+        {
+            "edit_session_token": session["edit_session_token"],
+            "changes": changes,
+        },
+    )
+    before = dict(storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone())
+
+    def fail_evidence(*_args, **_kwargs):
+        raise RuntimeError("injected evidence failure")
+
+    monkeypatch.setattr(
+        repository,
+        "create_and_commit_artifact_in_transaction",
+        fail_evidence,
+    )
+    with pytest.raises(RuntimeError, match="injected evidence failure"):
+        asyncio.run(api.edit_shot("s1", {
+            **changes,
+            "expected_version": session["baseline_artifact_id"],
+            "edit_session_token": session["edit_session_token"],
+            "preview_token": preview["preview_token"],
+            "baseline_content_hash": session["baseline_content_hash"],
+        }))
+
+    assert dict(storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone()) == before
+    token = storyboard_db.execute(
+        "SELECT consumed_at FROM storyboard_action_previews WHERE token=?",
+        (preview["preview_token"],),
+    ).fetchone()
+    assert token["consumed_at"] is None
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) FROM media_cleanup_outbox"
+    ).fetchone()[0] == 0
+
+
+def test_structure_rolls_back_rows_cleanup_and_preview_when_evidence_fails(
+    storyboard_db,
+    monkeypatch,
+):
+    preview = api.preview_storyboard_structure(
+        "e1",
+        {"operation": "duplicate_after", "shot_id": "s1", "target_index": 0},
+    )
+    before = [
+        dict(row)
+        for row in storyboard_db.execute(
+            "SELECT * FROM shots WHERE episode_id='e1' ORDER BY shot_no"
+        ).fetchall()
+    ]
+
+    def fail_rebind(*_args, **_kwargs):
+        raise RuntimeError("injected structure evidence failure")
+
+    monkeypatch.setattr(api, "_ensure_current_storyboard_shot_artifacts", fail_rebind)
+    with pytest.raises(RuntimeError, match="injected structure evidence failure"):
+        api.apply_storyboard_structure("e1", {
+            "preview_token": preview["preview_token"],
+            "operation": "duplicate_after",
+            "shot_id": "s1",
+            "target_index": 0,
+            "new_final_shot_id": None,
+        })
+
+    after = [
+        dict(row)
+        for row in storyboard_db.execute(
+            "SELECT * FROM shots WHERE episode_id='e1' ORDER BY shot_no"
+        ).fetchall()
+    ]
+    assert after == before
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) FROM media_cleanup_outbox"
+    ).fetchone()[0] == 0
+    assert storyboard_db.execute(
+        "SELECT consumed_at FROM storyboard_action_previews WHERE token=?",
+        (preview["preview_token"],),
+    ).fetchone()["consumed_at"] is None
+
+
+def test_gate_evaluator_exception_is_system_error_not_repair_action(
+    storyboard_db,
+    monkeypatch,
+):
+    def fail_gate(*_args, **_kwargs):
+        raise RuntimeError("injected evaluator outage")
+
+    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", fail_gate)
+    status = api.episode_detail("e1", view="board")["storyboard_status"]
+
+    assert status["state"] == "syncing"
+    assert status["recommended_action"] == "refresh_status"
+    assert status["hard_gate_issues"] == []
+    assert "injected evaluator outage" in status["system_error"]
+    assert status["editable"] is False
+
+
+def test_confirmation_gate_failure_does_not_mutate_projection_or_leave_owner(
+    storyboard_db,
+    monkeypatch,
+):
+    preview = api.create_storyboard_confirmation_preview("e1")
+    before_episode = dict(
+        storyboard_db.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    )
+    before_shot = dict(
+        storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone()
+    )
+
+    def fail_gate(*_args, **_kwargs):
+        raise RuntimeError("injected submit gate failure")
+
+    monkeypatch.setattr(api, "evaluate_storyboard_for_confirmation", fail_gate)
+    with pytest.raises(RuntimeError, match="injected submit gate failure"):
+        api.confirm_episode_core("e1", preview_token=preview["preview_token"])
+
+    after_episode = dict(
+        storyboard_db.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    )
+    after_shot = dict(
+        storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone()
+    )
+    assert after_shot == before_shot
+    assert after_episode["status"] == before_episode["status"]
+    assert after_episode["target_duration_s"] == before_episode["target_duration_s"]
+    assert after_episode["storyboard_artifact_id"] == before_episode["storyboard_artifact_id"]
+    assert after_episode["active_storyboard_run_id"] is None
+
+
+def test_snapshot_versions_are_distinct_under_concurrent_state_changes(storyboard_db):
+    baseline = workspace.monotonic_snapshot_version("e1", "snapshot-baseline")
+    barrier = threading.Barrier(2)
+    versions: list[int] = []
+
+    def update_snapshot(fingerprint: str) -> None:
+        barrier.wait()
+        versions.append(
+            workspace.monotonic_snapshot_version("e1", fingerprint)
+        )
+        thread_conn = db.get_conn()
+        thread_conn.close()
+        db._local.conn = None
+
+    threads = [
+        threading.Thread(target=update_snapshot, args=("snapshot-a",)),
+        threading.Thread(target=update_snapshot, args=("snapshot-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(versions) == [baseline + 1, baseline + 2]
+
+
+def test_starting_owner_is_treated_as_live_and_not_replaced(
+    storyboard_db,
+    monkeypatch,
+):
+    owner = "starting:123:storyboard-test"
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (owner,),
+    )
+    storyboard_db.commit()
+
+    def unexpected_recorder(*_args, **_kwargs):
+        raise AssertionError("live starting owner must not be replaced")
+
+    monkeypatch.setattr(api, "_new_storyboard_recorder", unexpected_recorder)
+    with enter_handler():
+        result = asyncio.run(api.start_storyboard("e1"))
+
+    assert result["deduplicated"] is True
+    assert result["run_id"] == owner
+    assert storyboard_db.execute(
+        "SELECT active_storyboard_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()[0] == owner
+
+
+def test_media_cleanup_outbox_keeps_files_until_database_commit(
+    storyboard_db,
+    tmp_path,
+    monkeypatch,
+):
+    from app import artifacts
+
+    projects_root = tmp_path / "projects"
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", projects_root)
+    reference_dir = projects_root / "p1" / "episodes" / "1" / "shots" / "1" / "references"
+    reference_dir.mkdir(parents=True)
+    reference_file = reference_dir / "reference.png"
+    reference_file.write_bytes(b"reference")
+    video_file = tmp_path / "shot.mp4"
+    video_file.write_bytes(b"video")
+    storyboard_db.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('v-cleanup','s1',1,'prompt','idem','done',?,1)""",
+        (str(video_file),),
+    )
+    storyboard_db.commit()
+
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    assert reference_file.exists()
+    assert video_file.exists()
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) FROM shot_versions WHERE shot_id='s1'"
+    ).fetchone()[0] == 0
+    storyboard_db.commit()
+
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
+    assert not reference_file.exists()
+    assert not video_file.exists()
+    assert storyboard_db.execute(
+        "SELECT status FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()[0] == "completed"

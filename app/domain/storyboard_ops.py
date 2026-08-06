@@ -3243,7 +3243,13 @@ def _storyboard_status_snapshot(
         "system_error": gate_system_error,
         "feature_flags": feature_flags,
         "confirmed": confirmed,
-        "editable": bool(screenplay_ready and not running and not invalid and not feature_flags["safe_readonly"]),
+        "editable": bool(
+            screenplay_ready
+            and not running
+            and not invalid
+            and not gate_system_error
+            and not feature_flags["safe_readonly"]
+        ),
         "confirmable": bool(full_terminal and not feature_flags["safe_readonly"]),
         "recommended_action": action,
         "write_block_reason": (

@@ -332,6 +332,7 @@ async def test_batch_start_reports_partial_failure_without_stranding_episode(
         result = await api.start_screenplay_all("p1")
 
     assert result["started"] == 1
+    assert result["batch_run_id"].startswith("run_")
     assert result["retryable_failures"] == 1
     assert result["failed_to_start"][0]["episode_id"] == "e2"
     rows = {
@@ -345,3 +346,8 @@ async def test_batch_start_reports_partial_failure_without_stranding_episode(
     assert rows["e2"]["screenplay_status"] == "failed"
     assert rows["e2"]["active_screenplay_run_id"] is None
     assert recorders["e2"].cancelled is True
+    batch = conn.execute(
+        "SELECT workflow_type,scope_id,status FROM workflow_runs WHERE id=?",
+        (result["batch_run_id"],),
+    ).fetchone()
+    assert tuple(batch) == ("screenplay_batch", "p1", "RUNNING")

@@ -393,7 +393,7 @@ def storyboard_mutation_block_reason(conn, episode_id: str) -> str | None:
     active_statuses = tuple(sorted(evidence_repository.ACTIVE_RUN_STATUSES))
     marks = ",".join("?" for _ in active_statuses)
     row = conn.execute(
-        f"""SELECT 1 FROM workflow_runs
+        f"""SELECT workflow_type FROM workflow_runs
               WHERE scope_type='episode' AND scope_id=?
                 AND workflow_type IN ('storyboard','episode_video_completion')
                 AND status IN ({marks})
@@ -401,6 +401,8 @@ def storyboard_mutation_block_reason(conn, episode_id: str) -> str | None:
               LIMIT 1""",
         (episode_id, *active_statuses),
     ).fetchone()
+    if row and row["workflow_type"] == "episode_video_completion":
+        return "视频任务仍处于活动状态；请先在生成台停止任务并等待运行收口"
     if row or episode["active_storyboard_run_id"]:
         return "分镜任务仍处于活动状态；请先暂停并等待运行收口"
     if episode["active_video_run_id"] or episode["status"] == "generating":

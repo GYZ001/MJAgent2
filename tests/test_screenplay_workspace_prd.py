@@ -229,19 +229,19 @@ def test_target_duration_can_be_changed_before_generation_and_versions_constrain
     )
     conn.commit()
 
-    changed = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 70})
+    changed = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 1000})
     assert changed.status_code == 200
     assert changed.json()["previous_target_duration_s"] == 50
-    assert changed.json()["target_duration_s"] == 70
+    assert changed.json()["target_duration_s"] == 1000
     assert changed.json()["constraint_version"] == 1
     assert changed.json()["snapshot_version"] == 1
     row = conn.execute(
         "SELECT target_duration_s, screenplay_constraint_version, screenplay_snapshot_version "
         "FROM episodes WHERE id='e1'"
     ).fetchone()
-    assert tuple(row) == (70, 1, 1)
+    assert tuple(row) == (1000, 1, 1)
 
-    unchanged = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 70})
+    unchanged = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 1000})
     assert unchanged.status_code == 200
     assert unchanged.json()["unchanged"] is True
     row = conn.execute(

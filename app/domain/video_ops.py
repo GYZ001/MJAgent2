@@ -986,11 +986,7 @@ def _confirm_episode_core_impl(
         )
     confirmation_warnings = list(dict.fromkeys(evaluation.warnings))
     board = evaluation.board
-    if board.model_dump(mode="json") != original_board_payload:
-        raise ValueError(
-            "确认门禁检测到分镜仍需确定性归一化；本次未修改正式数据，"
-            "请返回分镜台继续修复后重新预览"
-        )
+    normalized_fields_changed = board.model_dump(mode="json") != original_board_payload
     compact_target = evaluation.compact_target
     est = evaluation.estimated_cost_cny
     shots = board.shots
@@ -1049,6 +1045,11 @@ def _confirm_episode_core_impl(
         )
     ):
         storyboard_artifact_id = _finalize_storyboard_evidence(episode_id, board)
+    if not narrative_authority and compact_target != int(ep["target_duration_s"] or 0):
+        conn.execute(
+            "UPDATE episodes SET target_duration_s=? WHERE id=?",
+            (compact_target, episode_id),
+        )
     if storyboard_artifact_id:
         art = conn.execute(
             "SELECT content_hash FROM artifacts WHERE id=?", (storyboard_artifact_id,)

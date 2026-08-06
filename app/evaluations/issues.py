@@ -151,11 +151,7 @@ def _canonical_issue_identity(code: str, message: str) -> tuple[str, str]:
     normalized = re.sub(r"\s+", " ", lowered).strip()
     if path:
         normalized = normalized.replace(path.lower(), "$path")
-    normalized = re.sub(
-        r"\b(?:当前|共|超过|至少|另有)\s*\d+(?:\.\d+)?",
-        lambda match: re.sub(r"\d+(?:\.\d+)?", "#", match.group(0)),
-        normalized,
-    )
+    normalized = re.sub(r"\d+(?:\.\d+)?", "#", normalized)
     rule_id = "message_" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
     return path, rule_id
 

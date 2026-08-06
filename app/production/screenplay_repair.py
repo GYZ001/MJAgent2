@@ -4666,11 +4666,13 @@ def _introduced_issue_messages(
     """Detect new validation slots while allowing one aggregate slot to shrink."""
     def slot(issue: Issue) -> tuple[str, str, str, str, str, str]:
         evidence = issue.evidence or {}
+        path = str(evidence.get("path") or evidence.get("span") or "")
+        collection_path = re.sub(r"\[\d+\]", "[]", path)
         return (
             issue.code,
             issue.subject,
             str(evidence.get("rule_id") or ""),
-            str(evidence.get("path") or evidence.get("span") or ""),
+            collection_path,
             str(evidence.get("stage") or ""),
             issue.severity.value,
         )

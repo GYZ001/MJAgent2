@@ -324,6 +324,10 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
         return []
 
     monkeypatch.setattr(screenplay_repair, "_llm_field_patch", no_llm_patch)
+    monkeypatch.setattr(
+        "app.portraits.screenplay_unknown_identity_errors",
+        lambda *_args, **_kwargs: [],
+    )
 
     def forbidden_publish(**_kwargs):
         raise AssertionError("人物身份 blocker 不得发布")
@@ -2292,6 +2296,10 @@ async def test_invalid_modern_narrative_graph_enters_patch_loop(monkeypatch):
         "run_screenplay_qa",
         reached_patch_loop,
     )
+    monkeypatch.setattr(
+        "app.portraits.screenplay_unknown_identity_errors",
+        lambda *_args, **_kwargs: [],
+    )
 
     with pytest.raises(RuntimeError, match="entered narrative patch loop"):
         await screenplay_repair.run_screenplay_production(
@@ -2455,7 +2463,7 @@ async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
     assert updated is not None
     derived = evidence_repository.get_artifact(updated.working_artifact_id)
     assert derived is not None
-    assert derived["version"] == artifact["version"]
+    assert derived["version"] == artifact["version"] + 1
 
 
 @pytest.mark.asyncio
@@ -2536,8 +2544,8 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
         art["id"],
         Evaluation(
             evaluator_type="deterministic",
-            evaluator_name="screenplay_qa",
-            evaluator_version="2",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version="screenplay-qa-1",
             status="passed",
             hard_gate_passed=True,
             evaluation_role="runtime_gate",
