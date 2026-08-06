@@ -19,7 +19,7 @@ from app.schemas import (
     extract_json,
 )
 
-REPAIR_DIAGNOSIS_VERSION = "narrative-repair-diagnosis.v1"
+REPAIR_DIAGNOSIS_VERSION = "narrative-repair-diagnosis.v2"
 
 OutlineExecutorOp = Literal[
     "replace_outline_shot",
@@ -396,6 +396,8 @@ async def diagnose_narrative_repair(
     screenplay: EpisodeScreenplay,
     board: Storyboard,
     outline: StoryboardOutline | None = None,
+    focus_shot_no: int | None = None,
+    validated_prefix_end: int = 0,
     max_attempts: int = 3,
 ) -> SemanticRepairDiagnosis:
     """Ask AI to compare general edit operations using semantic relations.
@@ -407,6 +409,15 @@ async def diagnose_narrative_repair(
     prompt = {
         "task": "诊断叙事缺口并比较多个最小修复候选；问题码只说明不变量，不代表修复动作",
         "context": _compact_context(issues, screenplay, board, outline),
+        "repair_focus": {
+            "focus_shot_no": focus_shot_no,
+            "validated_prefix_end": max(0, int(validated_prefix_end)),
+            "rule": (
+                "逐镜生成时，focus_shot_no 是当前失败候选；"
+                "大于 validated_prefix_end 的 outline.shots 是尚未生成的任务 brief，"
+                "其缺少最终 Shot 字段不代表整集已有同类错误"
+            ),
+        },
         "semantic_intent_contract": (
             "strategy 和 op 是开放语义意图，可根据当前关系自由命名；"
             "不得用 issue code 选定唯一修复"
@@ -459,6 +470,10 @@ async def diagnose_narrative_repair(
             "key_line_catalog 中的 KL* 是逐字必保留合同；只能在相邻镜间重分配，禁止删除、改写或遗漏，且顺序不变",
             "单镜时长必须为 5~10 秒；当必保留台词总字数超过 10 秒容量时，原镜压缩在数学上不可行，结构拆分具有可验证边际收益",
             "选中候选只能包含 1~3 个局部 outline_operations，不得借局部问题重写整集大纲",
+            (
+                "逐镜失败必须先只修 focus_shot_no；只有关系证据证明相邻镜也必须改变时，"
+                "才可扩到最多 3 个明确 shot_no，禁止批量 target、value 数组或改写全部未来 brief"
+            ),
             "删除/移动必须证明因果、状态、角色信念、观众路径与铺垫兑现不变量",
             "outline_operations 只能引用当前权威图的稳定 ID；新建/替换节点必须输出完整字段",
             "未预设的 strategy/op 必须绑定当前可用 executor；需要新执行器能力时不得猜测或降级",
@@ -656,6 +671,8 @@ async def route_narrative_issues(
             screenplay=screenplay,
             board=board,
             outline=outline,
+            focus_shot_no=next_shot_no,
+            validated_prefix_end=validated_prefix_end,
         )
         diagnosis_payload = diagnosis.router_payload(execution_verified=True)
     except Exception as exc:  # noqa: BLE001 - fail closed at semantic boundary

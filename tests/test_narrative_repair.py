@@ -146,6 +146,8 @@ async def test_model_diagnosis_compares_open_candidates_without_issue_code_routi
         issues=[issue],
         screenplay=_screenplay(),
         board=_board(),
+        focus_shot_no=1,
+        validated_prefix_end=0,
     )
 
     assert diagnosis.selected_strategy == "repair_current"
@@ -161,6 +163,8 @@ async def test_model_diagnosis_compares_open_candidates_without_issue_code_routi
         "move_outline_shot",
     }
     assert "开放语义意图" in captured["request"]["semantic_intent_contract"]
+    assert captured["request"]["repair_focus"]["focus_shot_no"] == 1
+    assert "未来 brief" in "\n".join(captured["request"]["hard_rules"])
     transition_contract = captured["request"][
         "boundary_state_transition_contract"
     ]
