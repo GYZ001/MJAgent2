@@ -8,7 +8,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
-from app import textmatch
+from app import config, textmatch
 from app.db import get_conn, get_setting, now
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue
@@ -51,7 +51,7 @@ from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX, OVERDETAIL_TERMS
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-15"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-16"
 NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
     "CHARACTER_IDENTITY_UNRESOLVED",
 })
@@ -4325,7 +4325,6 @@ def _dialogue_chain_replacement_is_local(
     source_text: str = "",
 ) -> bool:
     """Allow body selection, or source-grounded recovery of one empty chain."""
-    from app import config
     from app.production.screenplay_document import action_block_spoken_identity
     from app.spoken_contract import content_char_count
 
@@ -5321,6 +5320,21 @@ async def _llm_field_patch_once(
                 "to_index": "移动/插入位置，可省略",
             },
             "value": "replace 的新字段值或 create 的完整单节点",
+            "dialogue_chain_turns": {
+                "count": f"1~{DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮",
+                "speaker": "只能使用 voice_bible 或 identity_contracts 已声明的说话人",
+                "line": (
+                    f"非空且每轮纯文字不得超过 "
+                    f"{config.MAX_SPOKEN_CHARS_PER_SHOT} 字"
+                ),
+                "function": (
+                    "只能是 trigger|announcement|question|response|"
+                    "decision|statement"
+                ),
+                "source_text": (
+                    "每轮必填，且必须逐字连续存在于 authorized_source_excerpt"
+                ),
+            },
         },
         "output_contract": {
             "semantic_gap": "自由语义诊断；无法归类时仍需保留",
@@ -5351,6 +5365,12 @@ async def _llm_field_patch_once(
             "create/replace 一旦引入新 identity_id、display_name 或非旁白 voice ID，同一候选必须以局部操作创建或补齐完整 identity_contracts 节点及 voice_ids 连接；否则候选无效",
             "修复可以更正身份合同本身，但不得借修复器绕过已有角色圣经或已发布身份合同的 ID 权威",
             "来源证据必须逐字来自 authorized_source_excerpt",
+            (
+                "替换 dialogue_chain.turns 时，每个 line 的纯文字不得超过 "
+                f"{config.MAX_SPOKEN_CHARS_PER_SHOT} 字，"
+                "function 只能是 trigger|announcement|question|response|decision|statement；"
+                "禁止输出 narration、voiceover、explanation、apology、closing 等其他值"
+            ),
             "改写命题不得直接挂原文证据，角色/观众信念不得补入不可感知证据",
             "修复后仍会运行整图 DAG、状态、信念与观众路径全量复验",
         ],

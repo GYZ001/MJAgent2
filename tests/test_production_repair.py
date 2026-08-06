@@ -998,6 +998,55 @@ def test_document_projection_inserts_missing_chain_turn_next_to_sibling() -> Non
     assert projected_twice.full_script_text.count("苏禾：合闸。") == 1
 
 
+def test_document_projection_places_unmatched_turn_in_semantic_scene() -> None:
+    script = _minimal_script(
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="【场1】日 / 院内",
+                story_function="发现屋内异常",
+                characters=["钟成"],
+                summary="钟成在院内发现异常后准备进屋。",
+                conflict="屋内情况不明",
+                turn="钟成决定撬锁",
+                source_basis="钟成发现门锁。",
+            ),
+            ScriptScene(
+                scene_no=2,
+                scene_heading="【场2】日 / 钟成家中",
+                story_function="通过信件交付真相",
+                characters=["钟成"],
+                summary="钟成收到小晶的信并读完。",
+                conflict="钟成是否相信信中解释",
+                turn="信件改变钟成的决定",
+                source_basis="小晶写信解释离开的原因。",
+            ),
+        ],
+        full_script_text=(
+            "【场1】日 / 院内\n"
+            "钟成在门外想起小晶，却没有见到她。\n"
+            "【场2】日 / 钟成家中\n"
+            "钟成收到小晶的信，拆开后逐行阅读。"
+        ),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC2",
+            topic="小晶给钟成的信",
+            turns=[KeyDialogueTurn(
+                speaker="旁白",
+                line="五哥，我不是故意离开的，希望你不要恨我。",
+                function="statement",
+                source_text="五哥，我不是故意离开的，希望你不要恨我。",
+            )],
+        )],
+    )
+
+    projected = document_to_screenplay(screenplay_to_document(script))
+
+    scene_two = projected.full_script_text.index("【场2】")
+    letter_turn = projected.full_script_text.index("旁白：五哥")
+    assert letter_turn > scene_two
+
+
 def test_document_projection_removes_legacy_cross_scene_prefixed_duplicate() -> None:
     script = _minimal_script(
         scene_outline=[
@@ -3424,6 +3473,47 @@ async def test_semantic_patch_repairs_unescaped_inner_quotes(monkeypatch):
 
     assert result == []
     assert options["repair_unescaped_inner_quotes"] is True
+
+
+@pytest.mark.asyncio
+async def test_semantic_patch_prompt_declares_dialogue_turn_contract(monkeypatch):
+    import json
+
+    from app import config
+    from app.harness import model_gateway
+    from app.production import screenplay_repair
+
+    issue = structured_issue(
+        code="KEY_LINE_MISSING",
+        message="dialogue_chains[0].turns 需包含 1~8 个连续话轮",
+        subject="screenplay",
+        path="/dialogue_chains",
+        stage="screenplay",
+    )
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan(scope_id="ep_test"),
+    )
+    prompts: list[dict] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(json.loads(messages[1]["content"]))
+        return '{"candidate_plans":[]}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    result = await screenplay_repair._llm_field_patch_once(
+        issue,
+        script,
+        source_text="五哥，我不是故意离开的。",
+    )
+
+    assert result == []
+    contract = prompts[0]["operation_contract"]["dialogue_chain_turns"]
+    assert str(config.MAX_SPOKEN_CHARS_PER_SHOT) in contract["line"]
+    assert "response" in contract["function"]
+    assert "authorized_source_excerpt" in contract["source_text"]
+    rules = "\n".join(prompts[0]["rules"])
+    assert "禁止输出 narration" in rules
 
 
 def test_screenplay_narrative_gate_is_quality_error():
