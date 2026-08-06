@@ -1005,6 +1005,77 @@ def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
     ).last_issue_codes
 
 
+def test_dispatch_fences_model_rejection_and_unsettled_provider_handle(
+    memdb,
+    monkeypatch,
+) -> None:
+    from app import worker
+    from app.video_supervisor import ShotCoverageEntry, _collect_issues, _dispatch
+
+    eid, _ = _seed_episode(memdb, 2)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        worker,
+        "enqueue_shot",
+        lambda *_args, **_kwargs: calls.update(n=calls["n"] + 1),
+    )
+    rejected_shot = f"{eid}_shot_1"
+    memdb.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at,image_inputs
+           ) VALUES('v_rejected',?,1,'p','rejected','failed',1,?)""",
+        (rejected_shot, json.dumps({"supervisor_run_id": "run-current"})),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,error,
+               reason_code,provider_create_state,created_at,updated_at
+           ) VALUES(
+               'j_rejected','video',?,'v_rejected',?,'proj_int','failed',
+               'provider rejected','ANY_FUTURE_REJECTION','model_rejected',1,1
+           )""",
+        (rejected_shot, eid),
+    )
+    active_shot = f"{eid}_shot_2"
+    memdb.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at,
+               image_inputs,provider_task_id
+           ) VALUES('v_active',?,1,'p','active','waiting_provider',1,?,'task-live')""",
+        (active_shot, json.dumps({"supervisor_run_id": "run-current"})),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_create_state,created_at,updated_at
+           ) VALUES(
+               'j_active','video',?,'v_active',?,'proj_int','waiting_provider',
+               'accepted',1,1
+           )""",
+        (active_shot, eid),
+    )
+    memdb.commit()
+
+    assert _dispatch(
+        ShotCoverageEntry(shot_no=1, shot_id=rejected_shot, grade="C"),
+        episode_id=eid,
+        run_id="run-current",
+        first=False,
+    ) is False
+    assert _dispatch(
+        ShotCoverageEntry(shot_no=2, shot_id=active_shot, grade="C"),
+        episode_id=eid,
+        run_id="run-current",
+        first=False,
+    ) is False
+    issues = _collect_issues(
+        ShotCoverageEntry(shot_no=1, shot_id=rejected_shot, grade="C")
+    )
+    assert issues[0].code == "VIDEO_PROVIDER_MODEL_REJECTED"
+    assert issues[0].evidence["pause_state"] == "PAUSED_EXTERNAL"
+    assert calls["n"] == 0
+
+
 def test_fake_enqueue_paid_attempts_bounded(memdb, monkeypatch):
     """假 provider：每镜成功计费，总账不超 cap（模拟全失败前采纳预算墙）。"""
     from app import worker
