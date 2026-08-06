@@ -2443,7 +2443,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT,
         NARRATIVE_KEYFRAME_SLOT, resolve_shot_asset_dependencies, keyframe_seed_paths,
         library_anchor_assets_from_manifest, review_keyframe_with_evidence, keyframe_gate_passed,
-        keyframe_runtime_blocking_failures,
+        keyframe_identity_blocking_failures, keyframe_runtime_blocking_failures,
         narrative_keyframe_required, complete_legacy_character_pack, complete_legacy_scene_pack,
         assert_manifest_allows_production, manifest_revisions_match, pack_result_ok,
         character_multiview_enabled, scene_multiview_enabled,
@@ -3384,11 +3384,32 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             return None
 
     eligible_by_slot: dict[str, list[tuple[int, ReferenceImageAsset]]] = {}
+    identity_blocked_by_slot: dict[str, list[dict[str, Any]]] = {}
     for slot_key in active_candidate_slots:
         pairs = candidate_pool.get(slot_key, [])
-        # 所有已落盘、技术可读的候选都可进入最终择优。结构/几何 QA 只决定
-        # 风险标记和排序；三张均有问题时仍保留其中最佳一张。
-        eligible_by_slot[slot_key] = list(pairs)
+        is_keyframe_slot = (
+            is_narrative_keyframe_slot(slot_key)
+            or candidate_ref_types.get(slot_key) == "plot_key_frame"
+        )
+        eligible_by_slot[slot_key] = [
+            pair for pair in pairs
+            if (
+                not is_keyframe_slot
+                or not keyframe_identity_blocking_failures(pair[1].qa or {})
+            )
+        ]
+        identity_blocked = [
+            {
+                "candidate_no": candidate_no,
+                "hard_failures": sorted(
+                    keyframe_identity_blocking_failures(asset.qa or {})
+                ),
+            }
+            for candidate_no, asset in pairs
+            if keyframe_identity_blocking_failures(asset.qa or {})
+        ]
+        if identity_blocked:
+            identity_blocked_by_slot[slot_key] = identity_blocked
         structural = [
             {
                 "candidate_no": candidate_no,
@@ -3403,12 +3424,96 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     existing_meta["reference_slots"] = slot_state
 
     all_cleanup_errors: list[str] = []
+    required_identity_names = set(
+        _keyframe_character_anchors(
+            shot,
+            bible,
+            screenplay=screenplay,
+        )
+    )
+    anchored_identity_names = {
+        str(asset.entity_name or "").strip()
+        for asset in video_anchor_assets
+        if (asset.entity_type or asset.type) == "character"
+        and str(asset.entity_name or "").strip()
+    }
     for slot_key in sorted(active_candidate_slots):
         slot_cleanup_errors: list[str] = []
         all_pairs = candidate_pool.get(slot_key, [])
         pairs = eligible_by_slot.get(slot_key, all_pairs)
         if not all_pairs:
             _checkpoint_candidates(slot_key, "technical_failed")
+            continue
+        if not pairs and identity_blocked_by_slot.get(slot_key):
+            final_records: list[dict[str, Any]] = []
+            for candidate_no, asset in all_pairs:
+                asset.selectedForSeedance = False
+                asset.deleted = True
+                asset.rejectReason = "identity_integrity_failed"
+                asset.purposes = [
+                    purpose for purpose in (asset.purposes or [])
+                    if purpose != PURPOSE_VIDEO_INPUT
+                ]
+                delete_failed = False
+                if asset.path:
+                    try:
+                        Path(asset.path).unlink(missing_ok=True)
+                    except OSError as exc:
+                        delete_failed = True
+                        message = f"{slot_key} candidate {candidate_no}: {exc}"
+                        slot_cleanup_errors.append(message)
+                        all_cleanup_errors.append(message)
+                final_records.append(_candidate_record(
+                    slot_key,
+                    candidate_no,
+                    asset,
+                    include_path=delete_failed,
+                    status="cleanup_pending" if delete_failed else "identity_rejected_deleted",
+                ))
+                if rejection_details is not None:
+                    rejection_details.append({
+                        "type": asset.type,
+                        "source": asset.source,
+                        "reason": "identity_integrity_failed",
+                        "candidate_no": candidate_no,
+                        "hard_failures": sorted(
+                            keyframe_identity_blocking_failures(asset.qa or {})
+                        ),
+                    })
+            slot_state[slot_key] = {
+                **(slot_state.get(slot_key) or {}),
+                "status": (
+                    "identity_gate_cleanup_pending"
+                    if slot_cleanup_errors
+                    else "identity_gate_failed"
+                ),
+                "gate_retry_exhausted": True,
+                "gate_warnings": identity_blocked_by_slot[slot_key],
+                "candidate_target": candidate_targets.get(slot_key, len(final_records)),
+                "candidate_count": len(final_records),
+                "candidates": final_records,
+                "winner_candidate_no": None,
+                "path": None,
+                "qa": None,
+                "quality_score": None,
+            }
+            if required_identity_names.issubset(anchored_identity_names):
+                fallback_slots = {
+                    str(item)
+                    for item in (
+                        existing_meta.get("keyframe_structural_fallback_slots") or []
+                    )
+                    if str(item)
+                }
+                fallback_slots.add(slot_key)
+                existing_meta["keyframe_fallback_mode"] = (
+                    KEYFRAME_STRUCTURAL_FALLBACK_MODE
+                )
+                existing_meta["keyframe_structural_fallback_slots"] = sorted(
+                    fallback_slots
+                )
+            existing_meta["reference_slots"] = slot_state
+            _publish_progress()
             continue
         prior = slot_state.get(slot_key) or {}
         frozen_winner_no = int(prior.get("winner_candidate_no") or 0)

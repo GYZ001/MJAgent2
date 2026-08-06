@@ -6,20 +6,35 @@ from typing import Any
 from app.db import get_setting
 from app.harness.types import Issue, IssueSeverity
 
-DEFAULT_FATAL_FAILURE_TYPES = ("character_duplicate", "text_error")
+IDENTITY_INTEGRITY_FAILURE_TYPES = frozenset({
+    "wrong_identity",
+    "character_duplicate",
+    "wrong_outfit",
+})
+IDENTITY_INTEGRITY_ISSUE_CODES = frozenset({
+    "VIDEO_QA_WRONG_IDENTITY",
+    "VIDEO_QA_CHARACTER_DUPLICATE",
+    "VIDEO_QA_WRONG_OUTFIT",
+})
+DEFAULT_FATAL_FAILURE_TYPES = (
+    "character_duplicate",
+    "wrong_identity",
+    "wrong_outfit",
+    "text_error",
+)
 VIDEO_QUALITY_REVIEW_THRESHOLD = 0.6
 
 # QA / classify 失败码 → Issue code。内容问题保持 WARNING，仅用于评分和排序。
 _QA_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
-    "character_duplicate": ("VIDEO_QA_CHARACTER_DUPLICATE", IssueSeverity.WARNING),
+    "character_duplicate": ("VIDEO_QA_CHARACTER_DUPLICATE", IssueSeverity.BLOCKER),
     "text_error": ("VIDEO_QA_TEXT_ARTIFACT", IssueSeverity.WARNING),
     "state_mismatch": ("VIDEO_QA_STATE_MISMATCH", IssueSeverity.WARNING),
     "story_repeat": ("VIDEO_QA_STORY_REPEAT", IssueSeverity.WARNING),
     "future_leak": ("VIDEO_QA_FUTURE_LEAK", IssueSeverity.WARNING),
     "wrong_dialogue": ("VIDEO_QA_WRONG_DIALOGUE", IssueSeverity.WARNING),
     "needs_crop": ("VIDEO_QA_NEEDS_CROP", IssueSeverity.WARNING),
-    "wrong_identity": ("VIDEO_QA_WRONG_IDENTITY", IssueSeverity.WARNING),
-    "wrong_outfit": ("VIDEO_QA_WRONG_OUTFIT", IssueSeverity.WARNING),
+    "wrong_identity": ("VIDEO_QA_WRONG_IDENTITY", IssueSeverity.BLOCKER),
+    "wrong_outfit": ("VIDEO_QA_WRONG_OUTFIT", IssueSeverity.BLOCKER),
     "subject_occlusion": ("VIDEO_QA_SUBJECT_OCCLUSION", IssueSeverity.WARNING),
     "action_missing": ("VIDEO_QA_ACTION_MISSING", IssueSeverity.WARNING),
     "prop_identity_mismatch": ("VIDEO_QA_PROP_IDENTITY", IssueSeverity.WARNING),
@@ -54,7 +69,7 @@ def is_fatal_failure_code(code: str) -> bool:
 def is_fatal(issue: Issue) -> bool:
     """非 QA Issue 是否属于需要停止自动处理的致命类。"""
     if issue.code.startswith("VIDEO_QA_"):
-        return False
+        return issue.code in IDENTITY_INTEGRITY_ISSUE_CODES
     rule = str((issue.evidence or {}).get("rule_id") or "")
     return bool(rule and rule in fatal_failure_types())
 
@@ -137,7 +152,11 @@ def issues_from_qa(
             shot_id=shot_id,
             message=f"视频 QA 质量风险：{ft}",
             shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id=ft,
-            repair_hint="仅供人工复核；不得触发重做、拒绝采用或阻止交付",
+            repair_hint=(
+                "角色身份完整性失败：禁止自动采用；按人物真值锚点定向重试"
+                if ft in IDENTITY_INTEGRITY_FAILURE_TYPES
+                else "仅供人工复核；不得触发重做、拒绝采用或阻止交付"
+            ),
         ))
 
     if qa.get("qa_recovered"):

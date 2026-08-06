@@ -19,6 +19,7 @@ from app.multiview import (
     build_reference_manifest,
     compute_weighted_overall,
     keyframe_gate_passed,
+    keyframe_seed_paths,
     missing_required_views,
     normalize_appearance_change,
     pack_references_by_purpose,
@@ -247,6 +248,50 @@ def test_keyframe_gate_and_weighted_overall() -> None:
     assert keyframe_gate_passed({
         **qa, "overall": 0.99, "hard_failures": ["relative_scale_mismatch"],
     }) is True
+    assert keyframe_gate_passed({
+        **qa, "overall": 0.99, "hard_failures": ["wrong_identity"],
+    }) is False
+
+
+def test_keyframe_seed_paths_use_one_view_per_identity_and_no_partial_cast(
+    tmp_path,
+) -> None:
+    front = tmp_path / "front.jpg"
+    profile = tmp_path / "profile.jpg"
+    scene = tmp_path / "scene.jpg"
+    for path in (front, profile, scene):
+        path.write_bytes(b"image")
+    complete = {
+        "characters": [{
+            "name": "A",
+            "role_kind": "canonical",
+            "selected_views": [
+                {"view_role": "profile", "image_path": str(profile)},
+                {"view_role": "front_full", "image_path": str(front)},
+            ],
+        }],
+        "scene": {
+            "selected_views": [{
+                "view_role": "establishing",
+                "image_path": str(scene),
+            }],
+        },
+    }
+
+    assert keyframe_seed_paths(complete) == [str(front), str(scene)]
+
+    partial = {
+        **complete,
+        "characters": [
+            *complete["characters"],
+            {
+                "name": "B",
+                "role_kind": "contextual",
+                "selected_views": [],
+            },
+        ],
+    }
+    assert keyframe_seed_paths(partial) == [str(scene)]
 
 
 def test_normalize_appearance_change_blocks_identity_by_default() -> None:

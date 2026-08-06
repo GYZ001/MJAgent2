@@ -359,6 +359,41 @@ def test_prop_dialogue_prompt_does_not_visualize_unreferenced_listener_state() -
     assert "character_identity:乙" not in prompt
 
 
+def test_action_staging_recovers_typed_visible_partner_from_continuity_state() -> None:
+    shot = _shot(
+        shot_size="全景",
+        characters=["甲", "乙"],
+        characters_visible=["甲"],
+        action_desc="甲打开门侧身让开，乙迈步进入房间。",
+        first_frame_desc="甲站在门内，乙站在门外准备进入。",
+        last_frame_desc="甲仍扶着门，乙已经迈入房间。",
+        primary_action="甲开门迎接乙进入房间。",
+        risk_tags=["dialogue_action_staging"],
+        continuity_state_in={
+            "characters": {
+                "甲": {"visibility": "visible", "pose": "扶门"},
+                "乙": {"visibility": "visible", "pose": "站在门外"},
+            },
+        },
+        continuity_state_out={
+            "characters": {
+                "甲": {"visibility": "visible", "pose": "侧身让开"},
+                "乙": {"visibility": "visible", "pose": "迈入房间"},
+            },
+        },
+    )
+
+    assert dialogue_focus_subject(shot) is None
+    assert effective_characters_visible(shot) == ["甲", "乙"]
+
+    prompt = compile_prompt(shot, _bible(), with_refs=True)
+
+    assert "character_identity:甲" in prompt
+    assert "character_identity:乙" in prompt
+    assert "画外乙" not in prompt
+    assert "可辨识画面人物仅限：甲" not in prompt
+
+
 def test_visible_cast_projection_is_inactive_when_visual_states_match_cast() -> None:
     shot = _shot()
 

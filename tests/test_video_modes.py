@@ -655,6 +655,7 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
         ReferenceImageAsset(
             id="late", url="data:image/jpeg;base64,bGF0ZQ==", type="plot_key_frame",
             source="seedream_generated", selectedForSeedance=True, slot_key="narrative_keyframe",
+            relatedCharacterIds=["A"],
             keyframe_index=2, keyframe_total=2, keyframe_time_ratio=1.0,
             keyframe_target_desc="closing target",
         ),
@@ -665,12 +666,14 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
         ReferenceImageAsset(
             id="early", url="data:image/jpeg;base64,ZWFybHk=", type="plot_key_frame",
             source="seedream_generated", selectedForSeedance=True, slot_key="narrative_keyframe_01",
+            relatedCharacterIds=["A"],
             keyframe_index=1, keyframe_total=2, keyframe_time_ratio=0.0,
             keyframe_target_desc="opening target",
         ),
         ReferenceImageAsset(
             id="character", url="data:image/jpeg;base64,Y2hhcg==", type="character",
             source="asset_library", selectedForSeedance=True,
+            entity_name="A", relatedCharacterIds=["A"],
         ),
     ]
 
@@ -683,6 +686,10 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
     assert "Reference image 3: use as scene" in note
     assert "Reference image 4: use as character" in note
     assert "chronological waypoints of ONE continuous shot" in note
+    assert "[SUBJECT DEFINITIONS | HIGHEST PRIORITY]" in note
+    assert "定义为「A」" in note
+    assert "是同一个且仅一个人物" in note
+    assert "禁止中途变性、换脸、换人" in note
 
 
 def test_continuity_assembly_does_not_restore_discarded_candidates(monkeypatch, tmp_path) -> None:
@@ -1161,6 +1168,127 @@ def test_keyframe_best_of_three_all_unverified_keeps_first_deterministically(mon
         "reference_images": [asset.public_dict() for asset in assets],
     })
     assert video_inputs == [(hiagent.data_url_from_file(str(generated_paths[0])), "reference_image")]
+
+
+def test_all_identity_bad_keyframes_are_deleted_and_fall_back_to_truth_anchors(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _patch_reference_build_unit(monkeypatch)
+    import app.multiview as mv
+
+    character_path = tmp_path / "character.jpg"
+    scene_path = tmp_path / "scene.jpg"
+    character_path.write_bytes(b"character")
+    scene_path.write_bytes(b"scene")
+    manifest = {
+        "episode_no": 1,
+        "shot_id": "s",
+        "characters": [{
+            "name": "A",
+            "role_kind": "canonical",
+            "asset_required": True,
+            "look_revision_id": "portrait-a",
+            "selected_views": [{
+                "id": "view-a",
+                "view_role": "front_full",
+                "image_path": str(character_path),
+                "purposes": ["keyframe_seed", "qa_anchor"],
+            }],
+        }],
+        "scene": {
+            "name": "room",
+            "scene_revision_id": "scene-room",
+            "selected_views": [{
+                "id": "scene-view",
+                "view_role": "establishing",
+                "image_path": str(scene_path),
+                "purposes": ["keyframe_seed", "qa_anchor"],
+            }],
+        },
+        "keyframe_slot": "narrative_keyframe",
+        "input_fingerprint": "identity-gate",
+    }
+    monkeypatch.setattr(mv, "resolve_shot_asset_dependencies", lambda **_k: manifest)
+    monkeypatch.setattr(mv, "library_anchor_assets_from_manifest", lambda _m: [
+        {
+            "entity_type": "character",
+            "entity_name": "A",
+            "library_revision_id": "portrait-a",
+            "library_view_id": "view-a",
+            "view_role": "front_full",
+            "image_path": str(character_path),
+            "purposes": ["keyframe_seed", "qa_anchor"],
+            "type": "character",
+            "source": "asset_library",
+        },
+        {
+            "entity_type": "scene",
+            "entity_name": "room",
+            "library_revision_id": "scene-room",
+            "library_view_id": "scene-view",
+            "view_role": "establishing",
+            "image_path": str(scene_path),
+            "purposes": ["keyframe_seed", "qa_anchor"],
+            "type": "scene",
+            "source": "asset_library",
+        },
+    ])
+    monkeypatch.setattr(
+        mv,
+        "keyframe_seed_paths",
+        lambda _m: [str(character_path), str(scene_path)],
+    )
+    generated_paths: list[Path] = []
+
+    async def generate_candidate(*, ref_type, **_kwargs):
+        path = tmp_path / f"identity-bad-{len(generated_paths) + 1}.jpg"
+        path.write_bytes(b"identity-bad")
+        generated_paths.append(path)
+        return ReferenceImageAsset(
+            id=f"bad-{len(generated_paths)}",
+            url="u",
+            path=str(path),
+            type=ref_type,
+            source="seedream_generated",
+        )
+
+    async def reject_identity(*_args, **_kwargs):
+        return {
+            **_passing_reference_qa(),
+            "overall": 0.9,
+            "hard_failures": ["wrong_identity"],
+            "issues": ["A was replaced by an unrelated person"],
+        }
+
+    monkeypatch.setattr(video_modes, "_generate_one_reference", generate_candidate)
+    monkeypatch.setattr(mv, "review_keyframe_with_evidence", reject_identity)
+    meta: dict = {}
+
+    assets = asyncio.run(video_modes.build_reference_assets(
+        conn=None,
+        project_id="p",
+        episode_no=1,
+        episode_id="e",
+        shot_id="s",
+        shot=_shot(characters=["A"], characters_visible=["A"]),
+        bible=_bible(),
+        decision=video_modes.default_reference_decision(),
+        existing_meta=meta,
+    ))
+
+    assert all(not path.exists() for path in generated_paths)
+    assert not any(
+        asset.type == "plot_key_frame" and asset.selectedForSeedance
+        for asset in assets
+    )
+    assert {
+        asset.entity_type for asset in assets if asset.selectedForSeedance
+    } == {"character", "scene"}
+    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "identity_gate_failed"
+    assert meta["keyframe_fallback_mode"] == video_modes.KEYFRAME_STRUCTURAL_FALLBACK_MODE
+    assert meta["keyframe_structural_fallback_slots"] == ["narrative_keyframe"]
+    assert meta["narrative_keyframe_missing"] is False
 
 
 def test_keyframe_three_qa_pending_candidates_resume_without_paid_regeneration(monkeypatch, tmp_path) -> None:
@@ -2342,7 +2470,7 @@ def test_high_absolute_mild_consistency_must_keep() -> None:
     assert asset.rejectReason is None
 
 
-def test_multiple_high_score_character_refs_all_selected() -> None:
+def test_multiple_high_score_character_refs_keep_one_truth_anchor_with_keyframe() -> None:
     """多张含人物高分图全部 selected；装箱只取 Top-N，不改 selected。"""
     assets = [
         ReferenceImageAsset(
@@ -2366,12 +2494,12 @@ def test_multiple_high_score_character_refs_all_selected() -> None:
     for r in refs:
         r["selectedForSeedance"] = True
     packed = video_modes.pack_reference_images_for_seedance(refs, max_images=8)
-    # 关键帧已承载 A 的身份；定妆照留在画廊，但不得作为第二张 A 主体图进入供应商请求。
-    assert [ref["id"] for ref in packed] == ["g1"]
+    # 剧情关键帧与一张干净人物真值图共同绑定到同一身份。
+    assert [ref["id"] for ref in packed] == ["g1", "c1"]
     assert all(r["selectedForSeedance"] for r in refs)
 
 
-def test_seedance_provider_inputs_remove_character_anchor_covered_by_keyframe() -> None:
+def test_seedance_provider_inputs_keep_character_truth_anchor_with_keyframe() -> None:
     refs = [
         {
             "id": "character-a", "url": "data:image/jpeg;base64,YQ==", "type": "character",
@@ -2395,12 +2523,11 @@ def test_seedance_provider_inputs_remove_character_anchor_covered_by_keyframe() 
 
     assert inputs == [
         ("data:image/jpeg;base64,aw==", "reference_image"),
+        ("data:image/jpeg;base64,YQ==", "reference_image"),
         ("data:image/jpeg;base64,cw==", "reference_image"),
     ]
-    assert refs[0]["selectedForSeedance"] is False
-    assert "video_input" not in refs[0]["purposes"]
-    assert refs[0]["rejectReason"] is None
-    assert refs[0]["selection_reason"] == "身份已由剧情关键帧承载，避免同一人物双重注入"
+    assert refs[0]["selectedForSeedance"] is True
+    assert "video_input" in refs[0]["purposes"]
     assert refs[1]["selectedForSeedance"] is True
     assert refs[2]["selectedForSeedance"] is True
 

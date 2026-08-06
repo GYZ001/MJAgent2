@@ -154,7 +154,7 @@ def required_visual_action_characters(shot: Shot) -> list[str]:
         )
         if str(value or "").strip()
     )
-    candidates = list(shot.characters or [])
+    candidates: list[str] = []
     for state in (shot.continuity_state_in, shot.continuity_state_out):
         for name, character in (state.characters or {}).items():
             visibility = (

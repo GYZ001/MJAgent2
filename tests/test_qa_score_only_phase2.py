@@ -84,7 +84,7 @@ def test_scene_primary_usable_ignores_failed_qa(tmp_path: Path) -> None:
     assert scene_primary_is_usable(row, views) is True
 
 
-def test_video_qa_issues_are_warnings_not_blockers() -> None:
+def test_video_identity_qa_blocks_auto_adoption_while_text_remains_warning() -> None:
     issues = issues_from_qa(
         {
             "overall": 0.2,
@@ -97,7 +97,9 @@ def test_video_qa_issues_are_warnings_not_blockers() -> None:
     )
     qa_issues = [i for i in issues if i.code.startswith("VIDEO_QA_")]
     assert qa_issues
-    assert all(i.severity == IssueSeverity.WARNING for i in qa_issues)
+    by_code = {issue.code: issue for issue in qa_issues}
+    assert by_code["VIDEO_QA_CHARACTER_DUPLICATE"].severity == IssueSeverity.BLOCKER
+    assert by_code["VIDEO_QA_TEXT_ARTIFACT"].severity == IssueSeverity.WARNING
 
 
 def test_repair_router_turns_qa_issue_into_directed_retry() -> None:
@@ -109,8 +111,9 @@ def test_repair_router_turns_qa_issue_into_directed_retry() -> None:
             message="分身",
         ),
     ])
-    assert plan.is_paid is False
-    assert plan.strategy == "handoff_human"
+    assert plan.is_paid is True
+    assert plan.level == "L2"
+    assert plan.strategy == "retake_directed"
     assert plan.pause_state is None
 
 
