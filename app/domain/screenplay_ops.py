@@ -1729,10 +1729,23 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
         instance = normalize_screenplay_candidate(instance)
         project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(project)
+    contract_row = (
+        conn.execute(
+            "SELECT contract_version FROM artifacts WHERE id=?",
+            (current_version,),
+        ).fetchone()
+        if current_version
+        else None
+    )
     qa_episode = {
         **ep,
         "required_dialogue_lines": _screenplay_required_dialogues(ep),
         "character_resolutions": resolutions,
+        "screenplay_contract_version": (
+            contract_row["contract_version"]
+            if contract_row and contract_row["contract_version"]
+            else get_contract("screenplay").version
+        ),
     }
     issues, evaluation = run_screenplay_qa(
         instance,
@@ -2051,8 +2064,11 @@ async def start_screenplay_all(project_id: str):
     selected = [
         r for r in rows
         if (
-            not r["screenplay_json"]
-            or r["screenplay_status"] in ("pending", "failed", "repairing")
+            r["screenplay_status"] in ("pending", "failed", "repairing")
+            or (
+                not r["screenplay_json"]
+                and r["screenplay_status"] not in {"queued", "running"}
+            )
             or (
                 r["screenplay_status"] in {"queued", "running"}
                 and not task_registry.active("screenplay", r["id"])
@@ -2409,6 +2425,13 @@ async def edit_screenplay(episode_id: str, body: dict):
             "message": "剧本流程正在运行；请先停止并等待任务退出，再发布人工草稿",
             "run_id": ep.get("active_screenplay_run_id"),
         })
+    if ep.get("status") == "scripting" and not task_registry.active(
+        "storyboard", episode_id
+    ):
+        raise HTTPException(
+            409,
+            "分镜状态显示运行中但找不到对应 worker；未发布草稿也未清空下游",
+        )
     current_version = ep.get("screenplay_artifact_id") or ""
     if expected_version is not None and str(expected_version) != str(current_version):
         current_script = _load_screenplay(ep)
@@ -2561,7 +2584,7 @@ async def edit_screenplay(episode_id: str, body: dict):
             mark_first_evaluation,
         )
 
-        contract_version = get_contract("screenplay").version
+        contract_version = str(qa_episode["screenplay_contract_version"])
         from app.production.screenplay_authority import screenplay_authority_fingerprint
 
         revision = ensure_production_revision(

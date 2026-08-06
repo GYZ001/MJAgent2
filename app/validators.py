@@ -2356,8 +2356,14 @@ def validate_screenplay_source_coverage(
             "deliver/merge/context/duplicate，禁止静默删戏"
         ]
     expected = {segment.segment_id for segment in segments}
+    segments_by_id = {segment.segment_id: segment for segment in segments}
     beat_ids = {
         str(beat.beat_id or "").strip()
+        for beat in ((script.plot_spine.spine_beats if script.plot_spine else []) or [])
+        if str(beat.beat_id or "").strip()
+    }
+    beats_by_id = {
+        str(beat.beat_id or "").strip(): beat
         for beat in ((script.plot_spine.spine_beats if script.plot_spine else []) or [])
         if str(beat.beat_id or "").strip()
     }
@@ -2378,6 +2384,7 @@ def validate_screenplay_source_coverage(
         raw_beat_ids = (
             decision.get("beat_ids", []) if isinstance(decision, dict) else decision.beat_ids
         )
+        raw_beat_ids = list(raw_beat_ids or [])
         unknown_beats = sorted(set(raw_beat_ids or []) - beat_ids)
         if unknown_beats:
             errors.append(
@@ -2389,6 +2396,27 @@ def validate_screenplay_source_coverage(
         duplicate_of = (
             decision.get("duplicate_of") if isinstance(decision, dict) else decision.duplicate_of
         )
+        reason = (
+            decision.get("reason", "") if isinstance(decision, dict) else decision.reason
+        )
+        if disposition in {"deliver", "merge"}:
+            if not raw_beat_ids:
+                errors.append(
+                    f"[SOURCE_COVERAGE_LINK_MISSING] source_coverage[{index}] "
+                    f"{segment_id} 标记为 {disposition}，但没有绑定 beat_ids"
+                )
+            for beat_id in raw_beat_ids:
+                beat = beats_by_id.get(str(beat_id))
+                if beat is not None and segment_id not in set(beat.source_segment_ids or []):
+                    errors.append(
+                        f"[SOURCE_COVERAGE_LINK_MISMATCH] source_coverage[{index}] "
+                        f"{segment_id} 引用 {beat_id}，但该 beat 未反向引用此原文段"
+                    )
+        if disposition == "context" and len(str(reason or "").strip()) < 8:
+            errors.append(
+                f"[SOURCE_CONTEXT_UNLOCATED] source_coverage[{index}] {segment_id} "
+                "标记为 context 时必须说明它在场景、关系、因果或环境中的具体保留位置"
+            )
         if (
             disposition == "duplicate"
             and duplicate_of not in expected
@@ -2396,6 +2424,28 @@ def validate_screenplay_source_coverage(
             errors.append(
                 f"source_coverage[{index}].duplicate_of={duplicate_of} 不属于当前原文"
             )
+        elif disposition == "duplicate":
+            source_segment = segments_by_id.get(segment_id)
+            target_segment = segments_by_id.get(str(duplicate_of))
+            if (
+                source_segment is not None
+                and target_segment is not None
+                and segment_id == duplicate_of
+            ):
+                errors.append(
+                    f"[SOURCE_DUPLICATE_INVALID] source_coverage[{index}] "
+                    f"{segment_id} 不能声明自己重复自己"
+                )
+            elif source_segment is not None and target_segment is not None:
+                similarity = min(
+                    _bigram_coverage(source_segment.text, target_segment.text),
+                    _bigram_coverage(target_segment.text, source_segment.text),
+                )
+                if similarity < 0.55:
+                    errors.append(
+                        f"[SOURCE_DUPLICATE_UNPROVEN] source_coverage[{index}] "
+                        f"{segment_id} 与 {duplicate_of} 缺少可核验的重复关系"
+                    )
     missing = sorted(expected - seen)
     if missing:
         shown = "、".join(missing[:20])

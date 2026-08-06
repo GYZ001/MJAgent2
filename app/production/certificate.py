@@ -330,7 +330,7 @@ def issue_completion_certificate(
     must_fix_issues: int = 0,
     production_revision_id: str | None = None,
 ) -> CompletionCertificate:
-    """签发完成凭证；QA 仅作同一 Artifact 的评分报告。"""
+    """Issue a certificate only when its bound evaluations prove zero blockers."""
     if not artifact_id or not artifact_hash:
         raise ValueError("完成凭证必须绑定 artifact_id 与 artifact_hash")
 
@@ -571,6 +571,9 @@ def verify_completion_certificate(
         raise ValueError("完成凭证引用的 Evaluation 已缺失")
     if any(row["artifact_id"] != cert.artifact_id for row in rows):
         raise ValueError("完成凭证的 Evaluation 与 Artifact 绑定已漂移")
+    derived_blockers, derived_must_fix = _evaluation_blocking_counts(rows)
+    if derived_blockers or derived_must_fix:
+        raise ValueError("完成凭证绑定的 Evaluation 仍含 blocker 或 must-fix")
     narrative_authority = _validate_narrative_certificate_authority(
         kind=cert.kind,
         scope_id=cert.scope_id,
@@ -582,7 +585,7 @@ def verify_completion_certificate(
     if narrative_authority:
         runtime_gates = [
             row for row in rows
-            if row["evaluation_role"] == "business_safety"
+            if row["evaluation_role"] in {"runtime_gate", "business_safety"}
         ]
         if any(
             not bool(row["runtime_blocking"])

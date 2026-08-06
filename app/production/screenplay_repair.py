@@ -331,7 +331,10 @@ def run_screenplay_qa(
         screenplay_authority_fingerprint,
     )
 
-    contract_version = get_contract("screenplay").version
+    contract_version = str(
+        episode.get("screenplay_contract_version")
+        or get_contract("screenplay").version
+    )
     authority_error = ""
     try:
         authority_input_fingerprint = screenplay_authority_fingerprint(

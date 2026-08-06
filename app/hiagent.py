@@ -786,10 +786,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
     selected_model = model or active_model("text", provider)
     token_limits = active_model_token_limits(provider, selected_model, get_setting)
     requested_max_tokens = max(1, int(max_tokens))
-    runtime_output_limit = min(
-        DEFAULT_MAX_OUTPUT_TOKENS,
-        int(token_limits["max_output_tokens"]),
-    )
+    runtime_output_limit = int(token_limits["max_output_tokens"])
     max_tokens = min(requested_max_tokens, runtime_output_limit)
     call_meta = {
         **(call_meta or {}),

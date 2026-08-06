@@ -652,7 +652,10 @@ def project_detail(
                       SUM(CASE WHEN screenplay_status='running' THEN 1 ELSE 0 END) AS screenplay_running,
                       SUM(CASE WHEN status='scripting' THEN 1 ELSE 0 END) AS scripting,
                       SUM(CASE WHEN screenplay_status IN ('pending','failed','repairing')
-                                OR screenplay_json IS NULL THEN 1 ELSE 0 END) AS screenplay_todo,
+                                OR (
+                                    screenplay_json IS NULL
+                                    AND screenplay_status NOT IN ('queued','running')
+                                ) THEN 1 ELSE 0 END) AS screenplay_todo,
                       SUM(CASE WHEN screenplay_status='ready'
                                 AND status IN ('planned','script_failed') THEN 1 ELSE 0 END) AS storyboard_ready
                FROM episodes WHERE project_id=?""",

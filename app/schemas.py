@@ -861,6 +861,50 @@ def normalize_screenplay_json_shape(obj: dict) -> tuple[dict, list[str]]:
                 normalized_plan["action_relation_audits"] = normalized_audits
                 normalized["narrative_plan"] = normalized_plan
 
+        current_plan = normalized.get("narrative_plan")
+        audience_states = (
+            current_plan.get("audience_states")
+            if isinstance(current_plan, dict)
+            else None
+        )
+        if isinstance(audience_states, list):
+            normalized_states: list[object] = []
+            states_changed = False
+            for state_index, state in enumerate(audience_states):
+                if not isinstance(state, dict):
+                    normalized_states.append(state)
+                    continue
+                working_memory = state.get("working_memory")
+                if not isinstance(working_memory, list):
+                    normalized_states.append(state)
+                    continue
+                normalized_memory: list[object] = []
+                state_changed = False
+                for memory_index, memory in enumerate(working_memory):
+                    if isinstance(memory, str) and memory.strip():
+                        normalized_memory.append({
+                            "proposition_id": memory.strip(),
+                            "retention_confidence": 1.0,
+                        })
+                        changes.append(
+                            "narrative_plan.audience_states"
+                            f"[{state_index}].working_memory[{memory_index}]"
+                        )
+                        state_changed = True
+                    else:
+                        normalized_memory.append(memory)
+                if state_changed:
+                    normalized_state = dict(state)
+                    normalized_state["working_memory"] = normalized_memory
+                    normalized_states.append(normalized_state)
+                    states_changed = True
+                else:
+                    normalized_states.append(state)
+            if states_changed:
+                normalized_plan = dict(current_plan)
+                normalized_plan["audience_states"] = normalized_states
+                normalized["narrative_plan"] = normalized_plan
+
     return normalized, changes
 
 
