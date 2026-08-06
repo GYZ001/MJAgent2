@@ -310,11 +310,9 @@ def _published_authority_input_fingerprint(
     if not isinstance(constraints, dict):
         return current_fingerprint
     current_target = constraints.get("target_duration_s")
-    legal_targets = list(range(
-        config.EPISODE_TARGET_MIN_S,
-        config.EPISODE_TARGET_MAX_S + 1,
-        config.EPISODE_TARGET_STEP_S,
-    ))
+    # Historical contamination only affected the former bounded UI choices.
+    # Current production duration is unbounded and is never brute-forced here.
+    legal_targets = list(config.EPISODE_TARGET_CHOICES)
     if current_target not in legal_targets:
         return current_fingerprint
     matches: list[str] = []

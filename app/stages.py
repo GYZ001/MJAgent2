@@ -2175,6 +2175,7 @@ async def generate_screenplay_baseline(
         scope_type="episode",
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
         artifact_type="episode_screenplay",
+        prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
         policy=AgentLoopPolicy(
             max_iterations=structural_bootstrap_iterations,
             stall_rounds=min(2, structural_bootstrap_iterations),

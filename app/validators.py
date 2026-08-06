@@ -380,7 +380,7 @@ def validate_storyboard(
     if target_duration_s % beat_unit != 0:
         errors.append(
             f"目标时长 {target_duration_s}s 不是 {beat_unit}s 的整数倍；"
-            f"节拍单元按 5s 换算要求目标取 {'/'.join(str(x) for x in config.EPISODE_TARGET_CHOICES)}s")
+            f"节拍单元按 {beat_unit}s 换算，目标时长不设上限")
     # 镜头数量和整集总时长不设产品上限；完整覆盖剧本是唯一收束条件。
 
     scene_last_seen: dict[str, int] = {}
@@ -1665,9 +1665,14 @@ def validate_dialogue_chains(
         tag = f"dialogue_chains[{chain_index}]"
         chain_id = (chain.chain_id or "").strip().upper()
         if not re.fullmatch(r"DC\d{1,3}", chain_id):
-            errors.append(f"{tag}.chain_id 必须使用 DC1、DC2 这类稳定编号")
+            errors.append(
+                f"[DIALOGUE_CHAIN_ID_INVALID] {tag}.chain_id "
+                "必须使用 DC1、DC2 这类稳定编号"
+            )
         elif chain_id in chain_ids:
-            errors.append(f"{tag}.chain_id=「{chain_id}」重复")
+            errors.append(
+                f"[DIALOGUE_CHAIN_ID_INVALID] {tag}.chain_id=「{chain_id}」重复"
+            )
         else:
             chain_ids.add(chain_id)
         if len((chain.topic or "").strip()) < 4:
@@ -1676,7 +1681,8 @@ def validate_dialogue_chains(
         total_turns += len(turns)
         if not 1 <= len(turns) <= DIALOGUE_CHAIN_TURNS_HARD_MAX:
             errors.append(
-                f"{tag}.turns 需包含 1~{DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮"
+                f"[DIALOGUE_CHAIN_LENGTH_INVALID] {tag}.turns "
+                f"需包含 1~{DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮"
             )
             continue
         if turns and (turns[0].function or "").strip() == "response":
@@ -1705,7 +1711,7 @@ def validate_dialogue_chains(
                 )
             if function not in _DIALOGUE_TURN_FUNCTIONS:
                 errors.append(
-                    f"{turn_tag}.function=「{function}」非法；只能是 "
+                    f"[DIALOGUE_FUNCTION_INVALID] {turn_tag}.function=「{function}」非法；只能是 "
                     "trigger|announcement|question|response|decision|statement"
                 )
             if function in _DIALOGUE_RESPONSE_FUNCTIONS and (
@@ -1721,7 +1727,10 @@ def validate_dialogue_chains(
                     _longest_run_ratio(source_line, source_text) < KEY_LINE_PRESENT_RATIO
                     and _bigram_coverage(source_line, source_text) < KEY_LINE_BIGRAM_COVERAGE
                 ):
-                    errors.append(f"{turn_tag}.source_text 未在本集原文中找到：{source_line}")
+                    errors.append(
+                        f"[SOURCE_EVIDENCE_MISMATCH] {turn_tag}.source_text "
+                        f"未在本集原文中找到：{source_line}"
+                    )
             candidates = _matching_text_indices(line, full_texts)
             # A short character-address line can fuzzily match an earlier,
             # unrelated utterance that merely contains the same name.  Prefer
@@ -1794,6 +1803,7 @@ def validate_dialogue_chains(
         ) < KEY_LINE_BIGRAM_COVERAGE
     ):
         errors.append(
+            "[SOURCE_EVIDENCE_MISMATCH] "
             "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配："
             f"原文证据「{first_chain_source}」→台词「{first_chain_line}」；"
             "D001 必须引用语义支持首条改编对白的原文话语，"
@@ -2613,7 +2623,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         if len((scene.turn or "").strip()) < 4:
             errors.append(f"{tag}.turn 过短；请说明本场交给下一场的状态变化")
         if len((scene.source_basis or "").strip()) < 8:
-            errors.append(f"{tag}.source_basis 过短；请保留本场原文依据")
+                errors.append(
+                    f"[SCENE_SOURCE_BASIS_INVALID] {tag}.source_basis "
+                    "过短；请保留本场原文依据"
+                )
         if script.source_coverage:
             if len((scene.entry_state or "").strip()) < 6:
                 errors.append(f"{tag}.entry_state 过短；请写清人物位置、目标和关键道具")

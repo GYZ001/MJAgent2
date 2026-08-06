@@ -315,12 +315,20 @@ def update_episode_target_duration(
         target = int(numeric_target) if numeric_target.is_integer() else -1
     except (TypeError, ValueError, OverflowError):
         target = -1
-    allowed = list(config.EPISODE_TARGET_CHOICES)
-    if target not in allowed:
+    suggested = list(config.EPISODE_TARGET_CHOICES)
+    if (
+        target < config.EPISODE_TARGET_MIN_S
+        or target % config.EPISODE_TARGET_STEP_S != 0
+    ):
         raise HTTPException(422, {
             "code": "invalid_episode_target_duration",
-            "message": f"目标时长只能选择 {allowed[0]}–{allowed[-1]} 秒，按 {config.EPISODE_TARGET_STEP_S} 秒递增",
-            "allowed_choices": allowed,
+            "message": (
+                f"目标时长至少为 {config.EPISODE_TARGET_MIN_S} 秒，"
+                f"按 {config.EPISODE_TARGET_STEP_S} 秒递增；不设上限"
+            ),
+            "minimum_s": config.EPISODE_TARGET_MIN_S,
+            "step_s": config.EPISODE_TARGET_STEP_S,
+            "suggested_choices": suggested,
         })
 
     ep = dict(_episode_or_404(episode_id))
@@ -331,7 +339,7 @@ def update_episode_target_duration(
             "unchanged": True,
             "episode_id": episode_id,
             "target_duration_s": current,
-            "allowed_choices": allowed,
+            "suggested_choices": suggested,
             "constraint_version": int(ep.get("screenplay_constraint_version") or 0),
         }
 
@@ -393,7 +401,7 @@ def update_episode_target_duration(
         "episode_id": episode_id,
         "previous_target_duration_s": current,
         "target_duration_s": target,
-        "allowed_choices": allowed,
+        "suggested_choices": suggested,
         "constraint_version": int(saved.get("screenplay_constraint_version") or 0),
         "snapshot_version": int(saved.get("screenplay_snapshot_version") or 0),
     }

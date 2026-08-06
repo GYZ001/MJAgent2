@@ -13,7 +13,6 @@ import { formatBookTitle } from '../lib/bookTitle'
 import { storyboardTaskNotice } from '../lib/productionNotices'
 
 const PAGE_SIZE = 15
-const TARGET_DURATION_CHOICES = [40, 50, 60, 70, 80, 90] as const
 type BatchAction = 'replan' | 'screenplay' | 'storyboard'
 
 export function canScanPortraitGaps(
@@ -412,9 +411,12 @@ export default function EpisodesPage() {
                 <span>源章 {ep.source_chapters[0]}–{ep.source_chapters[ep.source_chapters.length - 1]}</span>
                 <span className="episode-target-inline" title={targetDurationReason || '整集节奏预算，包含对白、动作、反应和转场'}>
                   目标
-                  <select
+                  <input
+                    type="number"
+                    min={40}
+                    step={10}
                     aria-label={`第${ep.episode_no}集目标时长${targetDurationReason ? `，暂不可修改：${targetDurationReason}` : ''}`}
-                    title={targetDurationReason || '选择整集节奏预算'}
+                    title={targetDurationReason || '输入最低节奏参考；系统会按完整剧情自动向上扩展'}
                     value={ep.target_duration_s}
                     disabled={busy || !targetDurationEditable}
                     onChange={event => {
@@ -424,9 +426,7 @@ export default function EpisodesPage() {
                         `第${ep.episode_no}集目标时长已调整为 ${target} 秒`,
                       )
                     }}
-                  >
-                    {TARGET_DURATION_CHOICES.map(value => <option key={value} value={value}>{value}s</option>)}
-                  </select>
+                  />
                 </span>
                 <span>已耗 ¥{ep.cost_cny.toFixed(1)}</span>
               </div>

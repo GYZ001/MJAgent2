@@ -97,6 +97,12 @@ def is_storyboard_confirmation_blocker(message_or_issue: str | Issue) -> bool:
 
 
 _FIELD_ERROR_RE = re.compile(r"^字段\s+([^：:]+)[：:]\s*(.+)$", re.I)
+_INDEXED_PATH_RE = re.compile(
+    r"\b([a-z_][a-z0-9_]*(?:\[\d+\])"
+    r"(?:\.[a-z_][a-z0-9_]*(?:\[\d+\])?)*)",
+    re.I,
+)
+_SCENE_INDEX_RE = re.compile(r"\b(scene_outline)\s*第\s*(\d+)\s*场", re.I)
 
 
 def _canonical_issue_identity(code: str, message: str) -> tuple[str, str]:
@@ -132,9 +138,26 @@ def _canonical_issue_identity(code: str, message: str) -> tuple[str, str]:
     if "json 根节点不是对象" in lowered:
         return "$", "json_root_type"
 
-    # Remove volatile numeric literals while retaining the actual rule text.
-    template = re.sub(r"\d+(?:\.\d+)?", "#", re.sub(r"\s+", " ", lowered)).strip()
-    return "", "message_" + hashlib.sha256(template.encode("utf-8")).hexdigest()[:12]
+    indexed = _INDEXED_PATH_RE.search(message)
+    scene_index = _SCENE_INDEX_RE.search(message)
+    path = ""
+    if indexed:
+        path = indexed.group(1)
+    elif scene_index:
+        path = f"{scene_index.group(1)}[{max(0, int(scene_index.group(2)) - 1)}]"
+
+    # Keep the concrete path as issue identity, while normalizing volatile
+    # counts in the rule text. Distinct nodes must never share repair history.
+    normalized = re.sub(r"\s+", " ", lowered).strip()
+    if path:
+        normalized = normalized.replace(path.lower(), "$path")
+    normalized = re.sub(
+        r"\b(?:当前|共|超过|至少|另有)\s*\d+(?:\.\d+)?",
+        lambda match: re.sub(r"\d+(?:\.\d+)?", "#", match.group(0)),
+        normalized,
+    )
+    rule_id = "message_" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    return path, rule_id
 
 
 def issues_from_messages(

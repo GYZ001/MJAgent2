@@ -34,7 +34,7 @@ _CONTRACTS: dict[str, StageContract] = {
     ),
     "screenplay": StageContract(
         key="screenplay",
-        version="3.0.0",
+        version="4.0.0",
         input_types=["novel_source", "character_bible", "episode_mapping"],
         output_type="episode_screenplay",
         invariants=[

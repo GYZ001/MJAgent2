@@ -65,7 +65,6 @@ const moveItem = <T,>(items: T[], index: number, direction: -1 | 1): T[] => {
 }
 
 const stableKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`
-const TARGET_DURATION_CHOICES = [40, 50, 60, 70, 80, 90] as const
 const SCREENPLAY_IDENTITY_ERROR_CODES = new Set([
   'screenplay_character_discovery_failed',
   'screenplay_character_identity_unresolved',
@@ -161,15 +160,15 @@ export default function ScriptPage() {
   )
   const targetDuration = ep?.target_duration_s ?? 50
   const performanceReserve = targetDuration - selectedSeconds
-  const suggestedTargetDuration = TARGET_DURATION_CHOICES.find(
-    value => value >= selectedSeconds / 0.8,
+  const suggestedTargetDuration = Math.max(
+    40,
+    Math.ceil((selectedSeconds / 0.8) / 10) * 10,
   )
   const averageSeconds = occurrences.length
     ? occurrences.reduce((sum, item) => sum + item.estimated_seconds, 0) / occurrences.length
     : 2.5
   const dynamicLimit = Math.max(1, Math.floor(targetDuration * 0.8 / Math.max(averageSeconds, 0.5)))
   const effectiveLimit = Math.max(dynamicLimit, requiredOccurrenceIds.length)
-  const hardBudgetExceeded = selectedSeconds > targetDuration
   const allDialogueSelected = occurrences.length > 0 && occurrences.every(item => selectedSet.has(item.id))
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running'
@@ -401,7 +400,7 @@ export default function ScriptPage() {
   }
 
   const openScreenplayPreview = async () => {
-    if (!ep || hardBudgetExceeded || canResumeFlow) return
+    if (!ep || canResumeFlow) return
     setBusy(true)
     try {
       const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {
@@ -603,9 +602,7 @@ export default function ScriptPage() {
   }
   const screenplayGenerateDisabledReason = busy
     ? '正在处理上一项操作'
-    : hardBudgetExceeded
-      ? '所选对白估算已超出本集目标时长，请减少选择或提高目标时长'
-      : ''
+    : ''
   const publishDisabledReason = busy
     ? '正在处理上一项操作'
     : totalErrors > 0
@@ -792,15 +789,16 @@ export default function ScriptPage() {
               </div>
               <div className="target-duration-actions">
                 <label>
-                  <select
+                  <input
+                    type="number"
+                    min={40}
+                    step={10}
                     aria-label="本集目标时长"
                     value={targetDurationDraft}
                     disabled={Boolean(targetDurationDisabledReason)}
-                    title={targetDurationDisabledReason || '选择整集对白、动作、反应和转场的节奏预算'}
+                    title={targetDurationDisabledReason || '输入最低节奏参考；系统会按完整剧情自动向上扩展'}
                     onChange={event => setTargetDurationDraft(Number(event.target.value))}
-                  >
-                    {TARGET_DURATION_CHOICES.map(value => <option key={value} value={value}>{value} 秒</option>)}
-                  </select>
+                  />
                 </label>
                 <button
                   type="button"
@@ -814,7 +812,7 @@ export default function ScriptPage() {
                 >应用目标</button>
               </div>
             </div>
-            <div className={`dialogue-budget ${hardBudgetExceeded ? 'hard' : selectedSeconds > targetDuration * 0.8 ? 'soft' : 'ok'}`}>
+            <div className={`dialogue-budget ${selectedSeconds > targetDuration * 0.8 ? 'soft' : 'ok'}`}>
               <b>时长预算参考：约 {dynamicLimit} 处</b>
               <span>
                 这不是对白条数上限；当前选择按口播时长折算约可容纳 {effectiveLimit} 处，所选对白后
@@ -822,8 +820,8 @@ export default function ScriptPage() {
               </span>
               <small>
                 口径：约 4.2 字/秒；通常建议至少留出 20% 给动作、反应和转场。
-                {selectedSeconds > targetDuration * 0.8 && suggestedTargetDuration
-                  ? ` 按此余量建议选择 ${suggestedTargetDuration} 秒。`
+                {selectedSeconds > targetDuration * 0.8
+                  ? ` 当前选择至少需要约 ${suggestedTargetDuration} 秒；生成后还会按完整剧情自动扩展。`
                   : ''}
               </small>
             </div>
@@ -846,9 +844,9 @@ export default function ScriptPage() {
               ))}
               {!occurrences.length && <div className="screenplay-dialogue-empty">本集原文未识别到显式台词，可直接首次生成剧本。</div>}
             </div>
-            {hardBudgetExceeded && (
-              <div className="screenplay-dialogue-warning hard">
-                对白估算已超出整集节奏预算 {Math.abs(targetDuration - selectedSeconds).toFixed(1)}s；请减少选择、拆分对话组，或在上方提高目标时长后再生成。
+            {performanceReserve < 0 && (
+              <div className="screenplay-dialogue-warning">
+                当前对白已超过最低节奏参考 {Math.abs(performanceReserve).toFixed(1)}s；系统会自动扩展整集时长，不会因此删减剧情或台词。
               </div>
             )}
           </div>

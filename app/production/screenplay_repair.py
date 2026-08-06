@@ -3900,7 +3900,8 @@ async def run_screenplay_production(
             script,
             minimum_s=current_target,
         )
-        if required_target > current_target:
+        duration_expanded = required_target > current_target
+        if duration_expanded:
             conn.execute(
                 "UPDATE episodes SET target_duration_s=?,"
                 "screenplay_snapshot_version=screenplay_snapshot_version+1 "
@@ -3939,6 +3940,17 @@ async def run_screenplay_production(
         from app.validators import normalize_screenplay_candidate
         script = normalize_screenplay_candidate(script)
         payload = screenplay_artifact_payload(script)
+        candidate_parent_ids: list[str] = []
+        if run_id:
+            candidate_row = conn.execute(
+                "SELECT output_artifact_id FROM step_runs "
+                "WHERE run_id=? AND step_key='screenplay.iteration' "
+                "AND output_artifact_id IS NOT NULL "
+                "ORDER BY started_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if candidate_row and candidate_row["output_artifact_id"]:
+                candidate_parent_ids.append(candidate_row["output_artifact_id"])
         baseline_art = evidence_repository.create_artifact(
             EvidenceArtifact(
                 type="screenplay_document",
@@ -3947,6 +3959,7 @@ async def run_screenplay_production(
                 status="candidate",
                 trust_level="T1",
                 content=payload,
+                parent_artifact_ids=candidate_parent_ids,
                 contract_version=contract.version,
             )
         )
@@ -3955,6 +3968,20 @@ async def run_screenplay_production(
             baseline_artifact_id=baseline_art["id"],
             working_artifact_id=baseline_art["id"],
         )
+        if duration_expanded:
+            input_fp = screenplay_authority_fingerprint(
+                episode_id,
+                conn=conn,
+                source_text=source_text,
+                bible=bible,
+                contract_version=contract.version,
+                qa_profile_version="screenplay-qa-gate-2",
+            )
+            rev = rebind_input_fingerprint(
+                rev.id,
+                input_fingerprint=input_fp,
+                expected_working_artifact_id=baseline_art["id"],
+            )
         baseline_created_this_activation = True
         checkpoint = {
             **checkpoint,
