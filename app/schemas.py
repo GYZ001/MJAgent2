@@ -146,6 +146,9 @@ class ScriptScene(BaseModel):
     conflict: str = ""
     turn: str = ""
     source_basis: str = ""
+    entry_state: str = ""
+    exit_state: str = ""
+    context_requirements: list[str] = Field(default_factory=list)
 
 
 class StoryEvent(BaseModel):
@@ -193,6 +196,8 @@ class PlotSpineBeat(BaseModel):
     does: str = ""
     turn: str = ""
     must_keep: bool = True
+    source_segment_ids: list[str] = Field(default_factory=list)
+    purpose: str = ""
     # VAL-422 §4.4.3：可选绑定信息原子/关键台词；跨镜聚合校验时按这些 ID 核对交付。
     information_ids: list[str] = Field(default_factory=list)
     key_line_ids: list[str] = Field(default_factory=list)
@@ -205,6 +210,28 @@ class PlotSpine(BaseModel):
     spine_beats: list[PlotSpineBeat] = Field(default_factory=list)
     must_keep_ending: str = ""
     drop_list: list[str] = Field(default_factory=list)
+
+
+class SourceCoverageDecision(BaseModel):
+    """One explicit disposition for a deterministically indexed source segment."""
+
+    source_segment_id: str
+    disposition: Literal["deliver", "merge", "context", "duplicate"]
+    beat_ids: list[str] = Field(default_factory=list)
+    duplicate_of: str | None = None
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_disposition(self) -> "SourceCoverageDecision":
+        if not self.source_segment_id.strip():
+            raise ValueError("source_segment_id 不能为空")
+        if self.disposition in {"deliver", "merge"} and not self.beat_ids:
+            raise ValueError("deliver/merge 必须绑定至少一个 beat_id")
+        if self.disposition == "duplicate" and not (self.duplicate_of or "").strip():
+            raise ValueError("duplicate 必须指向 duplicate_of")
+        if self.disposition in {"context", "duplicate"} and len(self.reason.strip()) < 4:
+            raise ValueError("context/duplicate 必须说明保留方式或重复依据")
+        return self
 
 
 class KeyDialogueTurn(BaseModel):
@@ -685,6 +712,7 @@ class EpisodeScreenplay(BaseModel):
     dialogue_chains: list[KeyDialogueChain] = Field(default_factory=list)
     key_plot_points: list[str] = Field(default_factory=list)  # 与 spine 对齐的局势变化
     plot_spine: PlotSpine | None = None
+    source_coverage: list[SourceCoverageDecision] = Field(default_factory=list)
     scene_outline: list[ScriptScene] = Field(default_factory=list)
     full_script_text: str = ""
     character_state_changes: list[str] = Field(default_factory=list)
@@ -962,6 +990,11 @@ class Shot(BaseModel):
     camera_angle: str = ""
     spatial_anchor: str = ""
     is_final: bool = False
+    context_requirement_ids: list[str] = Field(default_factory=list)
+    resulting_change: str = ""
+    camera_motivation: str = ""
+    repeat_of_shot_id: str | None = None
+    repeat_gain: str = ""
     # Narrative task.  A reaction/establishing/processing shot may have no
     # primary action, but it must still own a non-empty evidence contribution.
     shot_id: str = ""
@@ -1022,6 +1055,15 @@ class StoryboardOutlineShot(BaseModel):
     duration_s: int | None = None
     characters_visible: list[str] = Field(default_factory=list)
     audio_cast: list[str] = Field(default_factory=list)
+    purpose: str = ""
+    context_requirement_ids: list[str] = Field(default_factory=list)
+    resulting_change: str = ""
+    camera_size: str = ""
+    camera_angle: str = ""
+    camera_movement: str = ""
+    camera_motivation: str = ""
+    repeat_of_shot_id: str | None = None
+    repeat_gain: str = ""
     shot_id: str = ""
     scene_id: str = ""
     event_ids: list[str] = Field(default_factory=list)
@@ -1054,8 +1096,33 @@ class StoryboardOutline(BaseModel):
 
     episode_no: int
     shots: list[StoryboardOutlineShot] = Field(default_factory=list)
+    scene_contexts: list["StoryboardSceneContext"] = Field(default_factory=list)
     readability_windows: list[ReadabilityWindow] = Field(default_factory=list)
     cognitive_bridge_plans: list["CognitiveBridgePlan"] = Field(default_factory=list)
+
+
+class StoryboardContextRequirement(BaseModel):
+    requirement_id: str
+    description: str
+    required_before_shot_no: int | None = None
+
+
+class StoryboardSceneContext(BaseModel):
+    scene_id: str
+    scene_no: int
+    scene_name: str = ""
+    scene_time: str = ""
+    entry_state: str
+    exit_state: str
+    transition_from_previous: str = ""
+    spatial_axis: str = ""
+    context_requirements: list[StoryboardContextRequirement] = Field(default_factory=list)
+
+
+class StoryboardScenePack(BaseModel):
+    episode_no: int
+    scene_id: str
+    shots: list[Shot] = Field(default_factory=list)
 
 
 class BoundaryStateTransition(BaseModel):

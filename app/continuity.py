@@ -1637,6 +1637,11 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
         "camera_angle": shot.camera_angle,
         "spatial_anchor": shot.spatial_anchor,
         "is_final": bool(shot.is_final),
+        "context_requirement_ids": list(shot.context_requirement_ids or []),
+        "resulting_change": shot.resulting_change,
+        "camera_motivation": shot.camera_motivation,
+        "repeat_of_shot_id": shot.repeat_of_shot_id,
+        "repeat_gain": shot.repeat_gain,
         # 纯叙事任务同样属于镜头的权威合同。它们只存在内存模型会导致
         # 服务重启、人工编辑或修复投影后丢失观众状态与证据所有权。
         "shot_id": shot.shot_id,
@@ -1675,6 +1680,7 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
         "story_event_id", "purpose", "state_in", "primary_action", "emotion_beat",
         "state_out", "observed_state_out", "continuity_mode", "prompt_contract_version",
         "camera_angle", "spatial_anchor", "spoken_contract_status",
+        "resulting_change", "camera_motivation", "repeat_gain",
     ):
         if data.get(key) not in (None, ""):
             setattr(shot, key, data[key])
@@ -1689,12 +1695,16 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
         "planned_state_out_fact_ids", "completed_before_action_ids",
         "completed_before_action_phase_ids",
         "reserved_future_event_ids", "readability_window_ids",
+        "context_requirement_ids",
     ):
         if key in data and data[key] is not None:
             setattr(shot, key, list(data[key] or []))
     for key in ("shot_id", "scene_id"):
         if key in data and data[key] is not None:
             setattr(shot, key, str(data[key]))
+    if "repeat_of_shot_id" in data:
+        value = data["repeat_of_shot_id"]
+        shot.repeat_of_shot_id = str(value) if value not in (None, "") else None
     if "primary_action_id" in data:
         value = data["primary_action_id"]
         shot.primary_action_id = str(value) if value not in (None, "") else None

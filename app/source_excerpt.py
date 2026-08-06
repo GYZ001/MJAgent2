@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+import re
 
 
 _PUNCTUATION_EQUIVALENTS = str.maketrans({
@@ -33,6 +34,71 @@ class AlignedExcerpt:
     end_offset: int
     match_chars: int
     exact: bool
+
+
+@dataclass(frozen=True)
+class SourceSegment:
+    segment_id: str
+    text: str
+    start_offset: int
+    end_offset: int
+
+
+def index_source_segments(
+    source: str,
+    *,
+    max_chars: int = 900,
+) -> list[SourceSegment]:
+    """Create stable, exhaustive source units without asking the model for offsets."""
+    raw = source or ""
+    if not raw.strip():
+        return []
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\Z)", raw, flags=re.S):
+        start, end = match.span()
+        text = raw[start:end].strip()
+        if not text:
+            continue
+        left = raw.find(text, start, end)
+        spans.append((left, left + len(text)))
+
+    chunks: list[tuple[int, int]] = []
+    for start, end in spans:
+        cursor = start
+        while end - cursor > max_chars:
+            window_end = min(end, cursor + max_chars)
+            cut = max(
+                raw.rfind(mark, cursor + max_chars // 2, window_end)
+                for mark in ("。", "！", "？", "\n")
+            )
+            if cut < cursor:
+                cut = window_end
+            else:
+                cut += 1
+            chunks.append((cursor, cut))
+            cursor = cut
+            while cursor < end and raw[cursor].isspace():
+                cursor += 1
+        if cursor < end:
+            chunks.append((cursor, end))
+
+    return [
+        SourceSegment(
+            segment_id=f"SRC{index:04d}",
+            text=raw[start:end].strip(),
+            start_offset=start,
+            end_offset=end,
+        )
+        for index, (start, end) in enumerate(chunks, start=1)
+        if raw[start:end].strip()
+    ]
+
+
+def render_indexed_source(source: str, *, max_chars: int = 900) -> str:
+    return "\n\n".join(
+        f"【{segment.segment_id}】\n{segment.text}"
+        for segment in index_source_segments(source, max_chars=max_chars)
+    )
 
 
 def _alignment_view(text: str) -> tuple[str, list[int]]:

@@ -7,26 +7,27 @@ from __future__ import annotations
 
 import re
 
-# 单集仅保留防失控的技术硬上限；剧情完整覆盖优先，不设软预算。
-SHOT_HARD_MAX = 20
+# 镜头数量由剧情交付和场景上下文决定，不设产品软/硬上限。
+# ``None`` is retained as an explicit compatibility marker for older callers.
+SHOT_HARD_MAX: int | None = None
 
-SPINE_BEATS_MIN = 5
-SPINE_BEATS_MAX = 12
-DROP_LIST_MIN = 2
+SPINE_BEATS_MIN = 1
+SPINE_BEATS_MAX: int | None = None
+DROP_LIST_MIN = 0
 
 KEY_LINES_MIN = 3
 # 对白数量不设固定上限；整集预算由口播时长和单链技术熔断共同约束。
 DIALOGUE_CHAIN_TURNS_HARD_MAX = 8
-KEY_PLOT_POINTS_MIN = 4
-KEY_PLOT_POINTS_MAX = 8
+KEY_PLOT_POINTS_MIN = 1
+KEY_PLOT_POINTS_MAX: int | None = None
 
 # action_desc：单主动作、可读大形体，禁止写细堆砌
 ACTION_DESC_HARD_MIN = 18
 ACTION_DESC_TARGET_MIN = 25
 ACTION_DESC_TARGET_MAX = 55
 
-SCENE_OUTLINE_MIN = 3
-SCENE_OUTLINE_MAX = 5
+SCENE_OUTLINE_MIN = 1
+SCENE_OUTLINE_MAX: int | None = None
 
 # 超纲词表（命中 → 校验失败；修复方向是删细节，不是补细）
 OVERDETAIL_TERMS: tuple[str, ...] = (
@@ -115,14 +116,9 @@ def strip_overdetail_terms(text: str) -> str:
 
 
 def shot_count_budget_errors(n_shots: int, *, context: str = "分镜") -> list[str]:
-    """Only reject a runaway shot count beyond the technical safety ceiling."""
-    errors: list[str] = []
-    if n_shots > SHOT_HARD_MAX:
-        errors.append(
-            f"{context}共 {n_shots} 镜，超过硬上限 {SHOT_HARD_MAX}；"
-            f"请检查是否出现重复生成，并压回 {SHOT_HARD_MAX} 镜以内"
-        )
-    return errors
+    """Shot count is never a content gate; duplicate/function gates stop runaway work."""
+    _ = (n_shots, context)
+    return []
 
 
 # 单镜默认时长：主线压缩后优先 5s；>5 仅当口播/动作确实放不下，且进入 AI 审核标记。
