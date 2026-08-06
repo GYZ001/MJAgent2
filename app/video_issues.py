@@ -206,9 +206,30 @@ def issues_from_job_failure(
     err = str(_get(job, "error") or _get(version, "error") or "")
     status = str(_get(job, "status") or "")
     stage = str(_get(job, "pipeline_stage") or "")
+    reason_code = str(_get(job, "reason_code") or "")
+    provider_create_state = str(_get(job, "provider_create_state") or "")
     lower = err.lower()
 
     out: list[Issue] = []
+    if provider_create_state == "model_rejected":
+        out.append(_mk(
+            "VIDEO_PROVIDER_MODEL_REJECTED",
+            IssueSeverity.BLOCKER,
+            shot_id=sid,
+            message=err or "视频模型明确拒绝本次输入",
+            shot_no=shot_no,
+            version_id=vid,
+            job_id=jid,
+            rule_id="model_rejected",
+            repairable=False,
+            extra={
+                "provider_reason_code": reason_code,
+                "provider_create_state": provider_create_state,
+                "pause_state": "PAUSED_EXTERNAL",
+            },
+        ))
+        return out
+
     if status == "paused_budget" or "预算" in err:
         out.append(_mk(
             "VIDEO_BUDGET_EXHAUSTED", IssueSeverity.BLOCKER,

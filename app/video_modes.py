@@ -39,7 +39,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v17"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v18"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3

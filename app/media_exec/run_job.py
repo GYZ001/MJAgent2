@@ -3554,7 +3554,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             )
         if reason_code:
             conn.execute(
-                "UPDATE jobs SET reason_code=?,reason_text=? WHERE id=?",
+                """UPDATE jobs
+                      SET reason_code=?,reason_text=?,
+                          provider_create_state='model_rejected'
+                    WHERE id=?""",
                 (reason_code, public, job_id),
             )
         conn.commit()

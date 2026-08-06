@@ -925,6 +925,34 @@ def keyframe_visual_contract(
             if name not in bible_names and is_collective_role(name)
         ]
     individual_characters = [name for name in visible_characters if name not in collective_roles]
+    identity_verification: dict[str, dict[str, object]] = {}
+    for name in individual_characters:
+        if identity_resolver is not None:
+            identity = identity_resolver.resolve(name, usage="visual")
+            identity_verification[name] = {
+                "mode": (
+                    "visual_anchor"
+                    if identity.requires_asset
+                    else "text_contract"
+                ),
+                "visual_policy": identity.visual_policy,
+                "visual_canonical": identity.visual_anchor(),
+            }
+        else:
+            character = next(
+                (
+                    item for item in (bible.characters if bible is not None else [])
+                    if item.name == name
+                ),
+                None,
+            )
+            identity_verification[name] = {
+                "mode": "visual_anchor" if character is not None else "text_contract",
+                "visual_policy": "canonical" if character is not None else "contextual",
+                "visual_canonical": (
+                    character.appearance_canonical if character is not None else ""
+                ),
+            }
     target_keyframe_desc, target_source = _narrative_keyframe_target_with_source(shot)
     target_contact_phase = contact_action_phase(target_keyframe_desc)
     # 多时序关键帧中，接触镜的开场/反应帧本身可能已不含“接触”词面，
@@ -1019,6 +1047,7 @@ def keyframe_visual_contract(
         "height_difference_evidence": height_difference_evidence,
         "visible_characters": visible_characters,
         "individual_visible_characters": individual_characters,
+        "identity_verification": identity_verification,
         "collective_visible_roles": collective_roles,
         "dialogue_focus_subject": dialogue_focus,
         "dialogue_closeup_required": bool(dialogue_focus),

@@ -2283,6 +2283,7 @@ async def review_keyframe_with_evidence(
             "camera_angle": contract.get("camera_angle"),
             "visible_characters": list(contract.get("visible_characters") or []),
             "individual_visible_characters": list(contract.get("individual_visible_characters") or []),
+            "identity_verification": dict(contract.get("identity_verification") or {}),
             "collective_visible_roles": list(contract.get("collective_visible_roles") or []),
             "anonymous_background_allowed": bool(contract.get("anonymous_background_allowed")),
             "collective_presence_required": bool(contract.get("collective_presence_required")),
@@ -2333,7 +2334,26 @@ async def review_keyframe_with_evidence(
                         "name": str(name),
                         "present": True,
                         "gender_match": True,
-                        "identity_match": True,
+                        "identity_match": (
+                            True
+                            if (
+                                (contract.get("identity_verification") or {})
+                                .get(str(name), {})
+                                .get("mode")
+                                == "visual_anchor"
+                            )
+                            else "N/A"
+                        ),
+                        "text_contract_match": (
+                            True
+                            if (
+                                (contract.get("identity_verification") or {})
+                                .get(str(name), {})
+                                .get("mode")
+                                == "text_contract"
+                            )
+                            else "N/A"
+                        ),
                         "outfit_match": True,
                         "instance_count": 1,
                     }
@@ -2390,13 +2410,22 @@ async def review_keyframe_with_evidence(
         for name in (contract.get("individual_visible_characters") or [])
         if str(name).strip()
     ]
+    identity_verification = dict(contract.get("identity_verification") or {})
+    visual_anchor_identities = {
+        name
+        for name in expected_identities
+        if (
+            (identity_verification.get(name) or {}).get("mode")
+            == "visual_anchor"
+        )
+    }
     available_identity_anchors = {
         str(item.get("entity") or "").strip()
         for item in manifest_entries
         if item.get("role") == "character_anchor"
         and str(item.get("entity") or "").strip()
     }
-    identity_anchors_complete = set(expected_identities).issubset(
+    identity_anchors_complete = visual_anchor_identities.issubset(
         available_identity_anchors
     )
     identity_payload = data.get("identity_contract")
@@ -2426,10 +2455,14 @@ async def review_keyframe_with_evidence(
     identity_contract_passed = identity_contract_complete and all(
         item.get("present") is True
         and item.get("gender_match") is True
-        and item.get("identity_match") is True
         and item.get("outfit_match") is True
         and item.get("instance_count") == 1
-        for item in identity_by_name.values()
+        and (
+            item.get("identity_match") is True
+            if name in visual_anchor_identities
+            else item.get("text_contract_match") is True
+        )
+        for name, item in identity_by_name.items()
     )
     data["identity_contract_passed"] = identity_contract_passed
     if not identity_contract_complete:

@@ -211,6 +211,27 @@ def route(
             is_paid=level != "L0",
         )
 
+    non_repairable = [issue for issue in normalized if not issue.repairable]
+    if non_repairable:
+        codes = [issue.code for issue in non_repairable]
+        pause_state = next(
+            (
+                str((issue.evidence or {}).get("pause_state"))
+                for issue in non_repairable
+                if (issue.evidence or {}).get("pause_state")
+            ),
+            "WAITING_HUMAN",
+        )
+        return VideoRepairPlan(
+            level="L6",
+            strategy="handoff_human",
+            issue_codes=codes,
+            fingerprint=non_repairable[0].fingerprint,
+            reason="外部终态或不可自动修复问题，禁止付费重试",
+            pause_state=pause_state,
+            is_paid=False,
+        )
+
     preferred = max(
         (preferred_level_for_code(c) for c in codes),
         key=LEVEL_ORDER.index,
