@@ -42,4 +42,57 @@
 | E | Confirmed | Character discovery multiplied one audit into three 55k-67k character prompts by repeating source/draft across future batches. |
 
 ## Verification Conclusion
-- Pending pre-fix and post-fix comparison.
+- The post-fix identity prompt is smaller and the Baseline artifact is now persisted
+  before any post-Baseline identity call.
+- The first ten-episode verification did not reach that boundary. Episodes 1 and 2
+  failed inside the Baseline Agent Loop after two full-document calls; episodes 3-10
+  were cancelled by the fail-fast reproduction procedure.
+- That run loaded `baseline_only=false`. The source was changed to
+  `baseline_only=true` while the backend process was still running, without changing
+  contract version `3.0.0`; therefore runtime and source evidence must not be mixed.
+
+## Deep Audit Evidence
+- Contract contradiction: the prompt says dialogue chains have no fixed turn limit,
+  while deterministic validation blocks chains outside 1-8 turns.
+- Duration contradiction: episodes 1-10 all target 50 seconds while source size ranges
+  from 2,645 to 35,378 characters; source length is explicitly ignored when deriving
+  the target, while the prompt forbids dropping any effective source event.
+- Contract v3 generation does not include `narrative_plan` in the output prompt.
+  All four observed v3 candidates have `narrative_plan=null`, although new production
+  is documented as requiring the typed narrative authority.
+- Missing `narrative_plan` selects the legacy score-only path. In the restarted
+  `baseline_only=true` verification, episode 2 published Artifact
+  `art_108085370e92` as approved T2 with Evaluation `eval_fb05aba66945` reporting
+  `blocker_count=3`, `must_fix_count=3`, score 70, and `verdict=quality_risk`.
+  Certificate `cert_cfeb5f1a6f4e` nevertheless records blockers=0 and
+  must_fix_issues=0.
+- The three published blockers are a 49-character single-shot dialogue,
+  an invalid dialogue chain length, and one undelivered must-keep spine beat.
+- Repair regression is hidden: episode 1 iteration 2 degraded from a T1 candidate
+  to T0 due to an invalid `source_coverage[100].disposition`, but the final error
+  reported only blockers from the previous parseable candidate.
+- Issue identity collisions are confirmed. Two distinct dialogue capacity issues and
+  two distinct chain-length issues share the same `(code, path, rule_id)` because
+  numeric indexes are removed from legacy message fingerprints.
+- Batch cancellation is not atomic. Sequential cancel-and-wait releases queue slots
+  one at a time, causing episodes 5-10 to start provider requests immediately before
+  they are cancelled.
+- Queue state is process-local. Queued workflow runs remain `CREATED` while episode
+  rows are projected as `running`; there is no durable batch or queued state.
+- Character discovery scans only the first 18,000 source characters. Episode 10 has
+  35,385 characters, so current-episode identity coverage is incomplete by design.
+- Future identity resolution rewrites current screenplay display labels and body text
+  to future canonical names, conflating stable internal identity with audience-visible
+  reveal state.
+- Provider metadata is not reliably queryable: 993 of 6,008 rows currently contain
+  invalid JSON because serialized metadata is truncated by character count.
+
+## Current Assessment
+- The original content-policy refusal and durability defect are confirmed but are not
+  the deepest blockers.
+- The current highest-severity defect is fail-open publication: omitting
+  `narrative_plan` downgrades new contract-v3 output into the legacy score-only path,
+  allowing blocker-bearing artifacts to receive completion certificates.
+- Verification remains open. A ten-episode terminal-success run is not sufficient;
+  every published episode must also prove zero production blockers and a correctly
+  bound narrative authority.
