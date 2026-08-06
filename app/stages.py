@@ -13,7 +13,7 @@ import math
 import re
 from typing import Any, Callable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import config, hiagent
 from app.character_policy import functional_extra_policy_text
@@ -24,7 +24,7 @@ from app.db import get_setting, log_provider_call
 from app.evaluations.issues import issues_from_messages
 from app.harness import model_gateway
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
-from app.schemas import (Bible, CAMERA_MOVES, EMOTIONS, EpisodeScreenplay,
+from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenplay,
                          SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline,
                          StoryboardOutlineShot, StoryboardSceneContext,
                          StoryboardContextRequirement, StoryboardScenePack,
@@ -96,6 +96,35 @@ class StoryboardShotDraft(BaseModel):
     episode_no: int
     shot: Shot
     is_final: bool = False
+
+
+class DirectedSceneShotDraft(BaseModel):
+    shot_no: int
+    purpose: str
+    context_requirement_ids: list[str] = Field(default_factory=list)
+    resulting_change: str
+    readability_focus: str
+    duration_s: int
+    shot_size: str
+    camera_angle: str
+    camera_move: str
+    camera_motivation: str
+    characters: list[str]
+    action_desc: str
+    first_frame_desc: str
+    last_frame_desc: str
+    source_excerpt: str
+    dialogues: list[Dialogue] = Field(default_factory=list)
+    transition: str = "硬切"
+    spatial_anchor: str = ""
+    repeat_of_shot_id: str | None = None
+    repeat_gain: str = ""
+
+
+class DirectedScenePackDraft(BaseModel):
+    episode_no: int
+    scene_id: str
+    shots: list[DirectedSceneShotDraft]
 
 
 _SHOT_NULLABLE_TEXT_FIELDS = frozenset({
@@ -2118,15 +2147,6 @@ async def generate_screenplay_baseline(
         return await generate_screenplay(episode, source_text, bible, prev_ending=prev_ending)
 
     no_episode_hook = bool(_no_episode_hook)
-    raw_authorized_source_chapters = episode.get("authorized_source_chapters") or {}
-    authorized_source_chapters = (
-        {
-            str(chapter_id): str(chapter_text)
-            for chapter_id, chapter_text in raw_authorized_source_chapters.items()
-            if str(chapter_id).strip() and str(chapter_text).strip()
-        }
-        if isinstance(raw_authorized_source_chapters, dict) else {}
-    )
     # Baseline-only 禁止对已成形剧本做第二次整版 QA 重写，但首轮若连
     # Pydantic 候选都没有产生（JSON/结构错误），必须允许受限的结构修复。
     # 一旦出现首个可解析候选，baseline_only 会立即交给局部 Patch。
@@ -2169,28 +2189,13 @@ async def generate_screenplay_baseline(
             require_dialogue_chains=True,
             required_dialogue_lines=episode.get("required_dialogue_lines") or [],
             validate_narrative=False,
+            require_source_coverage=True,
         )
         errors.extend(screenplay_character_resolution_errors(
             s,
             resolutions,
         ))
         errors.extend(adaptation_hook_errors(s, episode))
-        # New productions must carry one authoritative narrative graph.  Keep
-        # this import local so legacy tooling that imports ``stages`` without
-        # executing the screenplay stage does not create an import cycle.
-        from app.narrative import validate_screenplay_narrative
-        errors.extend(validate_screenplay_narrative(
-            s,
-            require=True,
-            source_text=source_text,
-            expected_scope_id=str(
-                episode.get("id") or f"episode-{episode['episode_no']}"
-            ),
-            authorized_source_chapters=(
-                authorized_source_chapters
-                if authorized_source_chapters else None
-            ),
-        ))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()
             explicit_no_hook = ending in {"无", "无钩子", "无集级钩子", "（无）"} or ending.startswith("无集级")
@@ -2940,12 +2945,241 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     return list(dict.fromkeys(errors))
 
 
+async def _generate_episode_director_outline(
+    episode: dict,
+    source_text: str,
+    bible: Bible,
+    prev_ending: str,
+    screenplay: EpisodeScreenplay,
+) -> StoryboardOutline:
+    """Plan the whole episode once; detailed shots are generated per scene."""
+    key_content_block = _storyboard_key_content_block(screenplay)
+    scene_library_block = _scene_library_block(bible, screenplay)
+    scene_block = "\n".join(
+        (
+            f"场{scene.scene_no}｜{scene.scene_heading}｜功能：{scene.story_function}｜"
+            f"人物：{'、'.join(scene.characters)}｜冲突：{scene.conflict or '无'}｜"
+            f"入场：{scene.entry_state}｜离场：{scene.exit_state}｜"
+            f"需建立：{'；'.join(scene.context_requirements)}｜摘要：{scene.summary}"
+        )
+        for scene in screenplay.scene_outline
+    )
+    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》制定整集导演规划。
+
+这是全局导演层，不是详细画面生成。镜头数量不设软上限或硬上限；由完整剧情交付、场景上下文、
+动作可读性、情绪可读性和必要转场共同决定。50 镜或更多都允许，但每一镜必须有不可替代的作用。
+
+【每场上下文合同】
+1. scene_contexts 必须逐场覆盖剧本 scene_outline，scene_id 使用 SC001、SC002 连续编号。
+2. 每场填写 entry_state、exit_state、transition_from_previous、spatial_axis。
+3. context_requirements 把剧本的上下文要求改成稳定 ID（如 CTX-SC001-01）。
+4. 新时空通常在前 1~3 镜建立时间、地点、空间轴线、人物位置和关键道具；若上一场已经通过
+   动作、声音、视线或道具连续承接，可以只做必要的空间重定位，禁止机械重复远景。
+5. required_before_shot_no 指向首次依赖该上下文的镜号，交付镜必须更早或同镜完成。
+
+【每镜作用】
+- purpose：明确本镜为什么存在，是推进事件、建立上下文、动作阶段、人物反应、情绪转折、
+  证据揭示、空间重定位还是因果转场；不要只写“推进剧情”。
+- resulting_change：写本镜结束后剧情、人物、情绪、空间或观众理解的实际变化。
+- 每镜必须交付 spine_beat_ids、key_line_ids、information_ids 或 context_requirement_ids 中至少一类。
+- 相同剧情与相同结果不得重复；有意重复必须填写 repeat_of_shot_id 和 repeat_gain，
+  说明新增视角、反应、验证或兑现价值。
+
+【摄影三元组】
+- 每镜都规划 camera_size、camera_angle、camera_movement、camera_motivation。
+- context：优先让空间、轴线和人物关系可读。
+- action：动作段至少安排一镜中景/全景/远景配合跟随或横摇，完整看清动作路径、主体和作用对象。
+- emotion：关键情绪转折至少安排一镜近景/特写配合固定或推近，让面部与姿态可读。
+- dialogue：依据人物位置使用单人近景、双人镜、过肩或正反打，保持视线和轴线。
+- evidence：给关键物件、结果或文字独立注意时间。
+- transition：运动只服务动作、声音、视线、道具或因果承接，不能掩盖换人换装换景。
+
+【拆镜原则】
+- 单镜只演一个连续主动作或一个明确观看任务。
+- 动作阶段、说话人变化、注意目标变化、空间关系变化、结果反应需要时均可拆镜。
+- 不得为控制总时长合并不同动作，不得为了形式变化制造无作用空镜。
+- duration_s 取 5~10 秒整数；总时长由所有有效镜头求和，不反向裁剪剧情。
+
+完整剧本：
+{screenplay.full_script_text}
+
+场次合同：
+{scene_block}
+
+{key_content_block}
+{scene_library_block}
+
+上一集结尾：{prev_ending or '（本集为第一集）'}
+本集结尾：{screenplay.ending_hook}
+
+输出 JSON：
+{{
+  "episode_no": {episode['episode_no']},
+  "scene_contexts": [{{
+    "scene_id": "SC001", "scene_no": 1, "scene_name": str, "scene_time": str,
+    "entry_state": str, "exit_state": str, "transition_from_previous": str,
+    "spatial_axis": str,
+    "context_requirements": [{{
+      "requirement_id": "CTX-SC001-01", "description": str,
+      "required_before_shot_no": int
+    }}]
+  }}],
+  "shots": [{{
+    "shot_no": 1, "shot_id": "SH0001", "scene_id": "SC001",
+    "scene_time": str, "scene_name": str, "beat": str, "covers": str,
+    "purpose": str, "context_requirement_ids": ["CTX-SC001-01"],
+    "resulting_change": str,
+    "readability_focus": "context|action|emotion|dialogue|evidence|transition",
+    "camera_size": "远景|全景|中景|近景|特写",
+    "camera_angle": str,
+    "camera_movement": "固定|推近|拉远|横摇|跟随",
+    "camera_motivation": str,
+    "state_in": str, "primary_action": str, "state_out": str,
+    "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change",
+    "story_event_id": "E1", "spine_beat_ids": ["S01"],
+    "key_line_ids": [], "information_ids": [], "duration_s": 5,
+    "characters_visible": [], "audio_cast": [],
+    "repeat_of_shot_id": null, "repeat_gain": ""
+  }}]
+}}"""
+
+    def _validate(outline: StoryboardOutline) -> list[str]:
+        errors = validate_storyboard_outline(
+            outline,
+            screenplay,
+            int(episode.get("target_duration_s") or 0),
+            bible=bible,
+        )
+        contexts = outline.scene_contexts or []
+        expected_scene_nos = list(range(1, len(screenplay.scene_outline) + 1))
+        actual_scene_nos = [context.scene_no for context in contexts]
+        if actual_scene_nos != expected_scene_nos:
+            errors.append(
+                f"scene_contexts.scene_no 必须为 {expected_scene_nos}，当前 {actual_scene_nos}"
+            )
+        context_ids: set[str] = set()
+        scene_ids: set[str] = set()
+        for context in contexts:
+            if not context.scene_id.strip() or context.scene_id in scene_ids:
+                errors.append(f"scene_contexts 含空或重复 scene_id：{context.scene_id!r}")
+            scene_ids.add(context.scene_id)
+            if len(context.entry_state.strip()) < 6 or len(context.exit_state.strip()) < 6:
+                errors.append(f"{context.scene_id} 缺少可执行的 entry_state/exit_state")
+            if not context.context_requirements:
+                errors.append(f"{context.scene_id} 没有 context_requirements")
+            for requirement in context.context_requirements:
+                if (
+                    not requirement.requirement_id.strip()
+                    or requirement.requirement_id in context_ids
+                ):
+                    errors.append(
+                        f"上下文 requirement_id 为空或重复：{requirement.requirement_id!r}"
+                    )
+                context_ids.add(requirement.requirement_id)
+        delivered_context_ids: set[str] = set()
+        planned_spine_ids: set[str] = set()
+        valid_focuses = {
+            "context", "action", "emotion", "dialogue", "evidence", "transition",
+        }
+        for shot in outline.shots:
+            if shot.scene_id not in scene_ids:
+                errors.append(f"大纲第 {shot.shot_no} 镜 scene_id={shot.scene_id} 不存在")
+            if len(shot.purpose.strip()) < 6:
+                errors.append(f"大纲第 {shot.shot_no} 镜 purpose 过短")
+            if len(shot.resulting_change.strip()) < 4:
+                errors.append(f"大纲第 {shot.shot_no} 镜 resulting_change 过短")
+            if shot.readability_focus not in valid_focuses:
+                errors.append(
+                    f"大纲第 {shot.shot_no} 镜 readability_focus 非法：{shot.readability_focus!r}"
+                )
+            if shot.camera_size not in SHOT_SIZES:
+                errors.append(f"大纲第 {shot.shot_no} 镜 camera_size 非法")
+            if not shot.camera_angle.strip():
+                errors.append(f"大纲第 {shot.shot_no} 镜 camera_angle 为空")
+            if shot.camera_movement not in CAMERA_MOVES:
+                errors.append(f"大纲第 {shot.shot_no} 镜 camera_movement 非法")
+            if len(shot.camera_motivation.strip()) < 6:
+                errors.append(f"大纲第 {shot.shot_no} 镜 camera_motivation 过短")
+            unknown_context = set(shot.context_requirement_ids) - context_ids
+            if unknown_context:
+                errors.append(
+                    f"大纲第 {shot.shot_no} 镜引用未知上下文：{sorted(unknown_context)}"
+                )
+            delivered_context_ids.update(shot.context_requirement_ids)
+            planned_spine_ids.update(
+                str(value).strip().upper() for value in shot.spine_beat_ids
+            )
+            if not (
+                shot.spine_beat_ids
+                or shot.key_line_ids
+                or shot.information_ids
+                or shot.context_requirement_ids
+            ):
+                errors.append(
+                    f"大纲第 {shot.shot_no} 镜没有任何剧情或上下文交付项"
+                )
+        missing_context = sorted(context_ids - delivered_context_ids)
+        if missing_context:
+            errors.append(f"导演规划未安排上下文要求：{missing_context}")
+        required_spine = {
+            str(beat.beat_id).strip().upper()
+            for beat in (
+                screenplay.plot_spine.spine_beats
+                if screenplay.plot_spine else []
+            )
+            if beat.must_keep and str(beat.beat_id).strip()
+        }
+        missing_spine = sorted(required_spine - planned_spine_ids)
+        if missing_spine:
+            errors.append(f"导演规划未安排 must_keep 主线节拍：{missing_spine}")
+        return list(dict.fromkeys(errors))
+
+    loop = AgentLoop(
+        stage_key="storyboard_outline",
+        contract_key="storyboard",
+        goal=f"规划第 {episode['episode_no']} 集完整导演镜头与场景上下文",
+        scope_type="episode",
+        scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
+        artifact_type="storyboard_outline",
+        policy=AgentLoopPolicy(
+            max_iterations=2,
+            stall_rounds=2,
+            min_quality_gain=0.03,
+            no_gain_rounds=2,
+            allow_warning_candidate=False,
+            repair_all_blockers=True,
+        ),
+    )
+    outline = await _run_with_agent_loop(
+        "整集导演规划",
+        "storyboard_outline",
+        prompt,
+        StoryboardOutline,
+        _validate,
+        loop=loop,
+        temperature=0.6,
+        max_tokens=config.STORYBOARD_OUTLINE_MAX_TOKENS,
+        repair_user_prompt_limit=None,
+        repair_candidate_limit=None,
+        prefill={"episode_no": episode["episode_no"]},
+    )
+    return outline
+
+
 async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bible,
                                       prev_ending: str, screenplay: EpisodeScreenplay) -> StoryboardOutline:
     """先出整集分镜大纲（一次 LLM 调用）：把完整剧本铺成有序的 N 条镜头节拍，先定全局节奏。
     逐镜填充阶段据此让每镜知道"我该推进到剧情的哪个位置"，避免多镜停留同一情绪导致推进缓慢。"""
     if not (screenplay.full_script_text or "").strip():
         raise StageError("分镜大纲", ["请先生成完整剧本，再规划分镜大纲"])
+    if screenplay.narrative_plan is None:
+        return await _generate_episode_director_outline(
+            episode,
+            source_text,
+            bible,
+            prev_ending,
+            screenplay,
+        )
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
     key_content_block = _storyboard_key_content_block(screenplay)
@@ -3398,6 +3632,301 @@ def _outline_brief(outline: StoryboardOutline | None, shot_no: int):
     if outline and 1 <= shot_no <= len(outline.shots):
         return outline.shots[shot_no - 1]
     return None
+
+
+def _hydrate_directed_scene_pack(
+    draft: DirectedScenePackDraft,
+    *,
+    outline: StoryboardOutline,
+    source_text: str,
+    screenplay: EpisodeScreenplay,
+) -> StoryboardScenePack:
+    briefs = {
+        int(item.shot_no): item
+        for item in outline.shots
+        if item.scene_id == draft.scene_id
+    }
+    shots: list[Shot] = []
+    last_global_shot_no = len(outline.shots)
+    for item in draft.shots:
+        brief = briefs[int(item.shot_no)]
+        shot = Shot(
+            shot_no=int(item.shot_no),
+            shot_id=brief.shot_id or f"SH{int(item.shot_no):04d}",
+            scene_id=brief.scene_id,
+            duration_s=int(item.duration_s),
+            shot_size=item.shot_size,
+            camera_angle=item.camera_angle,
+            camera_move=item.camera_move,
+            camera_motivation=item.camera_motivation,
+            scene_time=brief.scene_time,
+            scene_name=brief.scene_name,
+            scene_setting=brief.scene_setting,
+            characters=list(item.characters),
+            characters_visible=list(item.characters),
+            action_desc=item.action_desc,
+            first_frame_desc=item.first_frame_desc,
+            last_frame_desc=item.last_frame_desc,
+            source_excerpt=item.source_excerpt,
+            narration="",
+            dialogues=list(item.dialogues),
+            transition=item.transition,
+            story_event_id=brief.story_event_id,
+            purpose=item.purpose,
+            spine_beat_ids=list(brief.spine_beat_ids),
+            key_line_ids=list(brief.key_line_ids),
+            information_ids=list(brief.information_ids),
+            new_information_ids=list(brief.information_ids),
+            state_in=brief.state_in,
+            primary_action=brief.primary_action,
+            emotion_beat=brief.emotion_beat,
+            state_out=brief.state_out,
+            continuity_mode=brief.continuity_mode,
+            audio_cast=list(brief.audio_cast),
+            spatial_anchor=item.spatial_anchor,
+            is_final=int(item.shot_no) == last_global_shot_no,
+            context_requirement_ids=list(item.context_requirement_ids),
+            resulting_change=item.resulting_change,
+            readability_focus=item.readability_focus,
+            repeat_of_shot_id=item.repeat_of_shot_id,
+            repeat_gain=item.repeat_gain,
+            prompt_contract_version="director_scene_pack_v1",
+        )
+        aligned = align_storyboard_source_evidence(
+            shot,
+            source_text,
+            screenplay=screenplay,
+        )
+        if aligned is not None:
+            shot.source_excerpt = aligned.excerpt
+        ensure_audio_timeline(shot, screenplay.voice_bible)
+        shots.append(shot)
+    return StoryboardScenePack(
+        episode_no=draft.episode_no,
+        scene_id=draft.scene_id,
+        shots=shots,
+    )
+
+
+async def generate_storyboard_scene_pack(
+    episode: dict,
+    source_text: str,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+    outline: StoryboardOutline,
+    scene_context: StoryboardSceneContext,
+) -> StoryboardScenePack:
+    """Generate one complete scene in one model call; scenes may run in parallel."""
+    briefs = [
+        item for item in outline.shots
+        if item.scene_id == scene_context.scene_id
+    ]
+    if not briefs:
+        raise StageError(
+            "场景分镜",
+            [f"{scene_context.scene_id} 没有导演规划镜头"],
+        )
+    shot_nos = [int(item.shot_no) for item in briefs]
+    hints = [
+        scene_context.scene_name,
+        scene_context.scene_time,
+        *[item.beat for item in briefs],
+        *[item.covers for item in briefs],
+    ]
+    screenplay_window = _relevant_text_windows(
+        screenplay.full_script_text,
+        hints,
+        max_chars=8000,
+    )
+    source_window = _relevant_text_windows(
+        source_text,
+        hints,
+        max_chars=6000,
+    )
+    prompt = f"""任务：按导演规划一次性生成 {scene_context.scene_id} 的完整场景分镜包。
+
+本场镜号必须精确为 {shot_nos}，数量不得增删；导演规划已经决定了完整剧情覆盖和拆镜边界。
+你负责把每个规划任务写成可直接送入视频模型的详细镜头。
+
+场景上下文：
+{json.dumps(scene_context.model_dump(mode='json'), ensure_ascii=False, indent=2)}
+
+本场导演规划：
+{json.dumps([item.model_dump(mode='json') for item in briefs], ensure_ascii=False, indent=2)}
+
+相关剧本：
+{screenplay_window}
+
+本场可引用原文：
+{source_window}
+
+人物谱与统一画风：
+{bible.model_dump_json()}
+
+导演规则：
+1. 每镜只完成规划中的一个连续动作或观看任务，不得改写 purpose、交付项和结果方向。
+2. 每镜必须输出景别 shot_size、角度 camera_angle、运动 camera_move，并用 camera_motivation
+   解释三者如何服务上下文、动作、情绪、对白、证据或转场。
+3. readability_focus=action 时，场内至少一镜用中景/全景/远景配合跟随或横摇，
+   完整展示动作路径、主体和作用对象。
+4. readability_focus=emotion 时，场内至少一镜用近景/特写配合固定或推近，
+   让情绪变化可读，不依赖微表情堆砌。
+5. 场景上下文要求必须在依赖动作前通过 context_requirement_ids 交付。
+6. first_frame_desc 与 last_frame_desc 保持同机位、同场景、同构图，只推进本镜动作。
+7. 相邻镜承接人物位置、视线、道具和动作结果；人物不得凭空出现、消失或换装。
+8. source_excerpt 必须逐字复制上方原文中的连续片段，至少 {SOURCE_EXCERPT_MIN_CHARS} 字。
+9. 不得写旁白；对白只放 dialogues。说话人变化按导演规划拆镜。
+10. 相同画面或动作只有产生新反应、验证、视角或兑现时才能重复，并填写 repeat_gain。
+
+输出 JSON：
+{{
+  "episode_no": {episode['episode_no']},
+  "scene_id": "{scene_context.scene_id}",
+  "shots": [{{
+    "shot_no": {shot_nos[0]},
+    "purpose": str,
+    "context_requirement_ids": [],
+    "resulting_change": str,
+    "readability_focus": "context|action|emotion|dialogue|evidence|transition",
+    "duration_s": 5,
+    "shot_size": "远景|全景|中景|近景|特写",
+    "camera_angle": str,
+    "camera_move": "固定|推近|拉远|横摇|跟随",
+    "camera_motivation": str,
+    "characters": [str],
+    "action_desc": str,
+    "first_frame_desc": str,
+    "last_frame_desc": str,
+    "source_excerpt": str,
+    "dialogues": [{{"speaker": str, "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定",
+                   "delivery": "spoken_dialogue|offscreen_voice"}}],
+    "transition": "硬切|叠化|淡出淡入|黑场|闪黑|闪白|甩镜|遮挡转场|匹配剪辑|声音延续+叠化|声音先行+淡入",
+    "spatial_anchor": str,
+    "repeat_of_shot_id": null,
+    "repeat_gain": ""
+  }}]
+}}"""
+
+    def _validate(draft: DirectedScenePackDraft) -> list[str]:
+        errors: list[str] = []
+        if draft.episode_no != episode["episode_no"]:
+            errors.append(
+                f"episode_no={draft.episode_no}，必须等于 {episode['episode_no']}"
+            )
+        if draft.scene_id != scene_context.scene_id:
+            errors.append(
+                f"scene_id={draft.scene_id}，必须等于 {scene_context.scene_id}"
+            )
+        actual_nos = [int(item.shot_no) for item in draft.shots]
+        if actual_nos != shot_nos:
+            errors.append(f"场景镜号必须精确为 {shot_nos}，当前 {actual_nos}")
+            return errors
+        briefs_by_no = {int(item.shot_no): item for item in briefs}
+        for item in draft.shots:
+            brief = briefs_by_no[int(item.shot_no)]
+            tag = f"shot_no={item.shot_no}"
+            if item.duration_s not in config.ALLOWED_DURATIONS:
+                errors.append(f"{tag}.duration_s 必须为 5~10 秒整数")
+            if item.shot_size not in SHOT_SIZES:
+                errors.append(f"{tag}.shot_size 非法")
+            if item.camera_move not in CAMERA_MOVES:
+                errors.append(f"{tag}.camera_move 非法")
+            if not item.camera_angle.strip():
+                errors.append(f"{tag}.camera_angle 为空")
+            if len(item.camera_motivation.strip()) < 6:
+                errors.append(f"{tag}.camera_motivation 过短")
+            if len(item.purpose.strip()) < 6:
+                errors.append(f"{tag}.purpose 过短")
+            if len(item.resulting_change.strip()) < 4:
+                errors.append(f"{tag}.resulting_change 过短")
+            if item.readability_focus != brief.readability_focus:
+                errors.append(
+                    f"{tag}.readability_focus 必须保持导演规划值 {brief.readability_focus}"
+                )
+            if set(item.context_requirement_ids) != set(
+                brief.context_requirement_ids
+            ):
+                errors.append(
+                    f"{tag}.context_requirement_ids 必须等于导演规划 "
+                    f"{brief.context_requirement_ids}"
+                )
+            if len(item.action_desc.strip()) < ACTION_DESC_HARD_MIN:
+                errors.append(f"{tag}.action_desc 过短")
+            aligned = align_source_excerpt(
+                item.source_excerpt,
+                source_text,
+                min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
+            )
+            if aligned is None:
+                errors.append(f"{tag}.source_excerpt 无法对齐本集原文")
+        if not errors:
+            pack = _hydrate_directed_scene_pack(
+                draft,
+                outline=outline,
+                source_text=source_text,
+                screenplay=screenplay,
+            )
+            temporary = Storyboard(
+                episode_no=episode["episode_no"],
+                shots=[
+                    shot.model_copy(update={"shot_no": index})
+                    for index, shot in enumerate(pack.shots, start=1)
+                ],
+            )
+            errors.extend(
+                error
+                for error in validate_storyboard(
+                    temporary,
+                    bible,
+                    int(episode.get("target_duration_s") or 0),
+                    screenplay=screenplay,
+                )
+                if not error.startswith("shot_no 必须")
+            )
+        return list(dict.fromkeys(errors))
+
+    loop = AgentLoop(
+        stage_key=f"storyboard_scene_{scene_context.scene_no}",
+        contract_key="storyboard",
+        goal=f"生成 {scene_context.scene_id} 完整场景分镜包",
+        scope_type="storyboard_scene",
+        scope_id=f"{episode.get('id') or episode['episode_no']}:{scene_context.scene_id}",
+        artifact_type="storyboard_scene_pack",
+        policy=AgentLoopPolicy(
+            max_iterations=2,
+            stall_rounds=2,
+            min_quality_gain=0.03,
+            no_gain_rounds=2,
+            allow_warning_candidate=False,
+            repair_all_blockers=True,
+        ),
+    )
+    draft = await _run_with_agent_loop(
+        "场景分镜",
+        "storyboard_scene_pack",
+        prompt,
+        DirectedScenePackDraft,
+        _validate,
+        loop=loop,
+        temperature=0.7,
+        max_tokens=config.STORYBOARD_OUTLINE_MAX_TOKENS,
+        repair_user_prompt_limit=None,
+        repair_candidate_limit=None,
+        prefill={
+            "episode_no": episode["episode_no"],
+            "scene_id": scene_context.scene_id,
+        },
+    )
+    pack = _hydrate_directed_scene_pack(
+        draft,
+        outline=outline,
+        source_text=source_text,
+        screenplay=screenplay,
+    )
+    artifact_id = getattr(draft, "evidence_artifact_id", None)
+    for shot in pack.shots:
+        object.__setattr__(shot, "evidence_artifact_id", artifact_id)
+    return pack
 
 
 def _split_text_by_content_budget(text: str, budget: int) -> list[str]:

@@ -320,7 +320,10 @@ def run_screenplay_qa(
     from app import config
     from app.narrative import validate_screenplay_narrative
     from app.stages import adaptation_hook_errors
-    from app.validators import validate_screenplay
+    from app.validators import (
+        validate_screenplay,
+        validate_screenplay_source_coverage,
+    )
     from app.harness.contracts import get_contract
     from app.production.screenplay_authority import (
         SCREENPLAY_QA_PROFILE_VERSION,
@@ -404,8 +407,8 @@ def run_screenplay_qa(
             )
         except ValueError:
             authorized_source_chapters = None
-    messages.extend(
-        validate_screenplay_narrative(
+    if script.narrative_plan is not None:
+        messages.extend(validate_screenplay_narrative(
             script,
             require=True,
             source_text=source_text,
@@ -417,8 +420,12 @@ def run_screenplay_qa(
                 else None
             ),
             authorized_source_chapters=authorized_source_chapters,
-        )
-    )
+        ))
+    else:
+        messages.extend(validate_screenplay_source_coverage(
+            script,
+            source_text,
+        ))
     from app.portraits import (
         screenplay_character_resolution_errors,
         screenplay_unknown_identity_errors,

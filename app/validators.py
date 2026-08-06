@@ -2807,12 +2807,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if not script.information_ledger:
         errors.append("information_ledger 不能为空；必须为观众需要获得的剧情信息建立中文交付台账")
     ledger = script.information_ledger or []
-    ledger_cap = max(SPINE_BEATS_MIN * 2, (spine_n or len(script.events or [])) * 2)
-    if spine_n and len(ledger) > ledger_cap:
-        errors.append(
-            f"information_ledger 共 {len(ledger)} 条，超过主线容量上限 {ledger_cap}"
-            f"（≤ spine_beats×2）；请只登记主线信息，禁止为气氛声拆 info"
-        )
     for i, item in enumerate(ledger):
         tag = f"information_ledger[{i}]"
         info_id = (item.info_id or "").strip()

@@ -31,11 +31,13 @@ from app.schemas import (
     Storyboard,
     StoryboardOutline,
     StoryboardOutlineShot,
+    StoryboardScenePack,
     extract_json,
 )
 from app.stages import (
     StageError,
     StoryboardShotDraft,
+    generate_storyboard_scene_pack,
     generate_storyboard_next_shot,
     generate_storyboard_outline,
     normalize_storyboard_shot_candidate,
@@ -70,7 +72,7 @@ _PHASE_LABELS: dict[str, str] = {
     "PREFLIGHT": "前置资产预检",
     "PLANNING_OUTLINE": "规划分镜大纲",
     "VALIDATING_OUTLINE": "校验分镜大纲",
-    "GENERATING_SHOTS": "逐镜生成",
+    "GENERATING_SHOTS": "按场景批量生成",
     "VALIDATING_EPISODE": "整集校验",
     "REPAIRING": "定向修复",
     "SUCCEEDED": "已完成",
@@ -105,6 +107,7 @@ class SupervisorCheckpoint(BaseModel):
     input_versions: dict[str, str | None] = Field(default_factory=dict)
     last_repair: dict[str, Any] | None = None
     repair_candidate_shots: list[dict[str, Any]] = Field(default_factory=list)
+    scene_pack_candidates: dict[str, dict[str, Any]] = Field(default_factory=dict)
     legacy_repair_audit: dict[str, Any] = Field(default_factory=dict)
     outcome: str | None = None  # SUCCEEDED_READY_FOR_CONFIRM
 
@@ -546,7 +549,8 @@ def _storyboard_generation_is_complete(
         return True
     if completed and completed[-1].is_final and planned_total <= 0:
         return True
-    return count >= max_shots
+    _ = max_shots
+    return False
 
 
 def _repair_candidate_made_progress(
