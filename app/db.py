@@ -559,6 +559,20 @@ CREATE TABLE IF NOT EXISTS storyboard_edit_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_storyboard_edit_sessions_shot
     ON storyboard_edit_sessions(shot_id, status, created_at);
+CREATE TABLE IF NOT EXISTS media_cleanup_outbox (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    shot_id TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at REAL NOT NULL,
+    completed_at REAL,
+    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_cleanup_outbox_pending
+    ON media_cleanup_outbox(status, created_at);
 CREATE TABLE IF NOT EXISTS storyboard_source_bindings (
     shot_id TEXT PRIMARY KEY,
     chapter_id INTEGER NOT NULL,
@@ -1105,6 +1119,20 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
 
 # 增量迁移：已有库上加列（首次建表时 SCHEMA 已含则忽略报错）
 MIGRATIONS = (
+    """CREATE TABLE IF NOT EXISTS media_cleanup_outbox (
+           id TEXT PRIMARY KEY,
+           episode_id TEXT NOT NULL,
+           shot_id TEXT,
+           payload_json TEXT NOT NULL DEFAULT '{}',
+           status TEXT NOT NULL DEFAULT 'pending',
+           attempts INTEGER NOT NULL DEFAULT 0,
+           last_error TEXT,
+           created_at REAL NOT NULL,
+           completed_at REAL,
+           FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_media_cleanup_outbox_pending "
+    "ON media_cleanup_outbox(status, created_at)",
     "ALTER TABLE jobs ADD COLUMN after_shot_id TEXT",
     "ALTER TABLE jobs ADD COLUMN after_version_id TEXT",
     "ALTER TABLE jobs ADD COLUMN scene_kinds TEXT",

@@ -1099,7 +1099,9 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
     assert "R002：结果无误。" in prompts[0]
     assert '"dialogue_chains"' in prompts[0]
     assert "`key_lines` 由后端按 dialogue_chains.turns 确定性回填" in prompts[0]
-    assert "对白话轮不设固定条数上限" in prompts[0]
+    assert "最终时长由完整剧情、对白容量、主线节拍和场次建立成本自动扩展，不设上限" in prompts[0]
+    assert "每组 dialogue_chain 最多 8 个连续话轮" in prompts[0]
+    assert "顶层必须输出 narrative_plan" in prompts[0]
 
 
 def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> None:
@@ -1133,7 +1135,7 @@ def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> 
     assert policy.repair_all_blockers is True
 
 
-def test_screenplay_baseline_requires_source_coverage_without_narrative_graph(monkeypatch) -> None:
+def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> None:
     captured = {}
 
     async def fake_loop(_stage, _stage_key, _prompt, _model, business_validate, **kwargs):
@@ -1163,7 +1165,10 @@ def test_screenplay_baseline_requires_source_coverage_without_narrative_graph(mo
         _prompt="输出剧本 JSON",
     ))
 
-    assert captured["errors"] == []
+    assert any(
+        error.startswith("[NARRATIVE_PLAN_REQUIRED]")
+        for error in captured["errors"]
+    )
     assert captured["require_source_coverage"] is True
 
 

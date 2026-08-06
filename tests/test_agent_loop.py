@@ -216,6 +216,19 @@ def test_baseline_only_hands_off_first_parseable_candidate() -> None:
     assert result.issues[0].code == "BUSINESS_RULE_FAILED"
 
 
+def test_issue_fingerprint_preserves_concrete_node_path() -> None:
+    from app.evaluations.issues import issues_from_messages
+
+    issues = issues_from_messages([
+        "dialogue_chains[2].turns[2] 纯文字 60 字，超过单镜容量",
+        "dialogue_chains[2].turns[4] 纯文字 63 字，超过单镜容量",
+        "dialogue_chains[3].turns 需包含 1~8 个连续话轮",
+        "dialogue_chains[4].turns 需包含 1~8 个连续话轮",
+    ], subject="screenplay")
+
+    assert len({issue.fingerprint for issue in issues}) == 4
+
+
 def test_agent_loop_keeps_repairing_when_structural_issue_changes() -> None:
     """Regression for ERR-20260725-c8bb0d.
 

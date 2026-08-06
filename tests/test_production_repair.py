@@ -195,7 +195,7 @@ def test_unpublished_revision_metadata_only_fills_blank_values() -> None:
         )
 
 
-def test_screenplay_qa_is_read_only_and_nonblocking() -> None:
+def test_screenplay_qa_is_read_only_and_blocks_production_issues() -> None:
     from app.production.screenplay_repair import run_screenplay_qa
 
     script = _minimal_script()
@@ -214,13 +214,14 @@ def test_screenplay_qa_is_read_only_and_nonblocking() -> None:
 
     assert script.model_dump_json() == before
     assert issues
-    assert evaluation.status == "warning"
-    assert evaluation.evaluation_role == "score_only"
-    assert evaluation.runtime_blocking is False
-    assert evaluation.retry_eligible is False
+    assert evaluation.status == "failed"
+    assert evaluation.evaluation_role == "runtime_gate"
+    assert evaluation.runtime_blocking is True
+    assert evaluation.hard_gate_passed is False
+    assert evaluation.retry_eligible is True
 
 
-def test_unresolved_character_identity_is_reported_without_qa_blocking() -> None:
+def test_unresolved_character_identity_is_reported_by_runtime_gate() -> None:
     from app.production.screenplay_repair import (
         non_waivable_screenplay_issues,
         run_screenplay_qa,
@@ -242,7 +243,7 @@ def test_unresolved_character_identity_is_reported_without_qa_blocking() -> None
     )
     # 无真实 Bible 的历史占位流程不开身份门禁。
     assert non_waivable_screenplay_issues(issues) == []
-    assert evaluation.runtime_blocking is False
+    assert evaluation.runtime_blocking is True
 
     issues, evaluation = run_screenplay_qa(
         script,
@@ -263,9 +264,9 @@ def test_unresolved_character_identity_is_reported_without_qa_blocking() -> None
     )
     hard = non_waivable_screenplay_issues(issues)
     assert hard and all(issue.code == "CHARACTER_IDENTITY_UNRESOLVED" for issue in hard)
-    assert evaluation.evaluation_role == "score_only"
-    assert evaluation.runtime_blocking is False
-    assert evaluation.retry_eligible is False
+    assert evaluation.evaluation_role == "runtime_gate"
+    assert evaluation.runtime_blocking is True
+    assert evaluation.retry_eligible is True
 
 
 @pytest.mark.asyncio
@@ -331,7 +332,7 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
 
     with pytest.raises(
         screenplay_repair.ScreenplayIdentityGateError,
-        match="缺少可确定的人物身份上下文",
+        match="人物身份预检未通过",
     ):
         await screenplay_repair.run_screenplay_production(
             episode_id="ep_p",
@@ -2151,7 +2152,7 @@ async def test_post_baseline_identity_failure_keeps_single_durable_baseline(
 
 
 @pytest.mark.asyncio
-async def test_score_only_qa_does_not_plan_or_apply_patch(monkeypatch):
+async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
     from app.production.patch import PatchOperation, PatchResult
@@ -2230,29 +2231,29 @@ async def test_score_only_qa_does_not_plan_or_apply_patch(monkeypatch):
         lambda **_kwargs: {"artifact_id": artifact["id"], "status": "ready"},
     )
 
-    result = await screenplay_repair.run_screenplay_production(
-        episode_id="ep_p",
-        episode={
-            "id": "ep_p",
-            "project_id": "proj_p",
-            "episode_no": 1,
-            "target_duration_s": 50,
-        },
-        source_text="原文",
-        bible=Bible(
-            characters=[],
-            world=World(visual_style_canonical="测试画风"),
-        ),
-        resume=True,
-    )
+    with pytest.raises(screenplay_repair.ScreenplayNarrativeGateError):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode={
+                "id": "ep_p",
+                "project_id": "proj_p",
+                "episode_no": 1,
+                "target_duration_s": 50,
+            },
+            source_text="原文",
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试画风"),
+            ),
+            resume=True,
+        )
 
-    assert result is not None
-    assert attempts == 0
-    assert planned == 0
+    assert attempts > 0
+    assert planned > 0
     completed = screenplay_repair.get_production_revision(revision.id)
     assert completed is not None
     assert completed.working_artifact_id == artifact["id"]
-    assert completed.checkpoint_json["phase"] == "SUCCEEDED"
+    assert completed.checkpoint_json["phase"] == "WAITING_HUMAN"
 
 
 @pytest.mark.asyncio
@@ -2454,7 +2455,7 @@ async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
     assert updated is not None
     derived = evidence_repository.get_artifact(updated.working_artifact_id)
     assert derived is not None
-    assert derived["version"] == artifact["version"] + 1
+    assert derived["version"] == artifact["version"]
 
 
 @pytest.mark.asyncio
@@ -2567,6 +2568,54 @@ def test_certificate_binds_hash_and_rejects_mismatch(monkeypatch):
         cert,
         allow_stale_artifact_for_revision=True,
     )
+
+
+def test_certificate_derives_blockers_from_evaluation() -> None:
+    from app.evidence import repository as evidence_repository
+
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content={"screenplay_metadata": {"episode_no": 1}},
+        contract_version="2.0.0",
+    ))
+    issue = structured_issue(
+        code="SPINE_MISSING",
+        message="主线节拍未交付",
+        subject="screenplay",
+        path="/plot_spine",
+        rule_id="spine_delivery",
+        stage="screenplay",
+    )
+    evaluation = evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version="screenplay-qa-gate-2",
+            status="failed",
+            hard_gate_passed=False,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
+            issues=[issue],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="仍含 1 个 blocker"):
+        issue_completion_certificate(
+            kind="screenplay",
+            scope_id="ep_p",
+            artifact_id=artifact["id"],
+            artifact_hash=artifact["content_hash"],
+            contract_version="2.0.0",
+            qa_profile_version="screenplay-qa-gate-2",
+            evaluation_ids=[evaluation["id"]],
+            blockers=0,
+            must_fix_issues=0,
+        )
 
 
 def test_repair_router_no_longer_emits_redo_or_replan():

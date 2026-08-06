@@ -506,7 +506,7 @@ async def discover_character_candidates(
         raw = await model_gateway.chat(
             [{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=1200,
+            max_tokens=2400,
             call_meta={
                 "stage": "discover_character_candidates",
                 "episode_no": episode_no,
@@ -556,7 +556,7 @@ async def discover_character_candidates(
         future_raw = await model_gateway.chat(
             [{"role": "user", "content": future_prompt}],
             temperature=0.1,
-            max_tokens=800,
+            max_tokens=1600,
             call_meta={
                 "stage": "discover_character_candidates",
                 "episode_no": episode_no,

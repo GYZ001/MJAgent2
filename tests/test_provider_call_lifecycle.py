@@ -391,7 +391,13 @@ def test_successful_text_operation_can_be_reused_after_local_state_conflict(
         "temperature": 0.7,
         "max_tokens": 1024,
     }
-    call_id = db.start_provider_call("chat", "text-model", request_json=payload)
+    operation_id = db.provider_operation_id("chat", "text-model", payload)
+    call_id = db.start_provider_call(
+        "chat",
+        "text-model",
+        meta={"operation_id": operation_id},
+        request_json=payload,
+    )
     db.finish_provider_call(
         call_id,
         "OK",
@@ -404,7 +410,10 @@ def test_successful_text_operation_can_be_reused_after_local_state_conflict(
         "chat", "text-model", payload, {},
     )
     cached = hiagent._cached_successful_provider_response(
-        "chat", "text-model", payload, {"reuse_successful_operation": True},
+        "chat", "text-model", payload, {
+            "reuse_successful_operation": True,
+            "operation_id": operation_id,
+        },
     )
 
     assert ignored_without_opt_in is None
@@ -427,10 +436,14 @@ def test_success_cache_requires_matching_contract_version(tmp_path, monkeypatch)
         "temperature": 0.7,
         "max_tokens": 1024,
     }
+    operation_id = db.provider_operation_id("chat", "text-model", payload)
     call_id = db.start_provider_call(
         "chat",
         "text-model",
-        meta={"contract_version": "2.1.2"},
+        meta={
+            "contract_version": "2.1.2",
+            "operation_id": operation_id,
+        },
         request_json=payload,
     )
     db.finish_provider_call(
@@ -445,13 +458,21 @@ def test_success_cache_requires_matching_contract_version(tmp_path, monkeypatch)
         "chat",
         "text-model",
         payload,
-        {"reuse_successful_operation": True, "contract_version": "2.1.3"},
+        {
+            "reuse_successful_operation": True,
+            "contract_version": "2.1.3",
+            "operation_id": operation_id,
+        },
     )
     matching = hiagent._cached_successful_provider_response(
         "chat",
         "text-model",
         payload,
-        {"reuse_successful_operation": True, "contract_version": "2.1.2"},
+        {
+            "reuse_successful_operation": True,
+            "contract_version": "2.1.2",
+            "operation_id": operation_id,
+        },
     )
 
     assert stale is None

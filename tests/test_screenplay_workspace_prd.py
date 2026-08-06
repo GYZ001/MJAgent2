@@ -255,7 +255,8 @@ def test_target_duration_rejects_unknown_step_and_published_episode(client) -> N
 
     invalid = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 55})
     assert invalid.status_code == 422
-    assert invalid.json()["detail"]["allowed_choices"] == [40, 50, 60, 70, 80, 90]
+    assert invalid.json()["detail"]["minimum_s"] == 40
+    assert invalid.json()["detail"]["step_s"] == 10
     fractional = client.put("/api/episodes/e1/target-duration", json={"target_duration_s": 70.9})
     assert fractional.status_code == 422
 
@@ -379,29 +380,24 @@ def test_manual_publish_turns_identity_model_failure_into_retriable_screenplay_e
     ).fetchone()["c"] == 1
 
 
-def test_qa_failed_manual_draft_publishes_with_score_only_warnings() -> None:
+def test_qa_failed_manual_draft_never_publishes() -> None:
     _seed_episode(with_artifact=True)
     changed = _valid_script()
     changed.stakes = ""
     conn = db.get_conn()
 
-    with enter_handler():
-        result = asyncio.run(api.edit_screenplay("e1", {
+    with enter_handler(), pytest.raises(HTTPException) as caught:
+        asyncio.run(api.edit_screenplay("e1", {
             "screenplay": changed.model_dump(mode="json"),
             "expected_version": "art_sp_old",
         }))
-    assert result["saved"] is True
-    assert result["gate_retry_exhausted"] is True
-    assert result["qa_warnings"]
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "screenplay_qa_failed"
     published = conn.execute(
         "SELECT screenplay_artifact_id,screenplay_status FROM episodes WHERE id='e1'"
     ).fetchone()
-    assert published["screenplay_artifact_id"] != "art_sp_old"
+    assert published["screenplay_artifact_id"] == "art_sp_old"
     assert published["screenplay_status"] == "ready"
-    artifact = conn.execute(
-        "SELECT type,status FROM artifacts WHERE id=?", (result["artifact_id"],)
-    ).fetchone()
-    assert tuple(artifact) == ("screenplay_document", "approved")
 
 
 def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(
@@ -457,6 +453,7 @@ def test_manual_screenplay_edit_uses_model_identity_resolution_before_publish(mo
         "青衣人放下一封信后离开。雨水顺着玻璃滑下",
         1,
     )
+    changed.full_script_text += "\n门外再次响起更重的敲门声。"
 
     async def fake_chat(_messages, **_kwargs):
         return json.dumps({"characters": [{
@@ -497,6 +494,7 @@ def test_unchanged_legacy_screenplay_is_canonicalized_before_noop_return(monkeyp
         "青衣人放下一封信后离开。雨水顺着玻璃滑下",
         1,
     )
+    legacy.full_script_text += "\n门外再次响起更重的敲门声。"
     conn = db.get_conn()
     conn.execute(
         "UPDATE episodes SET screenplay_json=? WHERE id='e1'",

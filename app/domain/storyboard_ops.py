@@ -1968,6 +1968,8 @@ def _storyboard_generation_is_live(ep: dict) -> bool:
         run_id = None
     if not run_id:
         return False
+    if str(run_id).startswith("starting:"):
+        return True
     from app.evidence import repository
     run = repository.get_run(run_id)
     return bool(run and run.get("status") in {"CREATED", "RUNNING"})
@@ -2006,23 +2008,30 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
         "script_error": ep["script_error"],
         "active_storyboard_run_id": ep["active_storyboard_run_id"],
     }
+    start_claim = f"starting:{int(now())}:{new_id('storyboard')}"
     cursor = conn.execute(
-        "UPDATE episodes SET status='scripting', script_error=NULL, active_storyboard_run_id=NULL "
-        "WHERE id=? AND screenplay_publish_fence=0",
-        (episode_id,),
+        """UPDATE episodes
+              SET status='scripting', script_error=NULL, active_storyboard_run_id=?
+            WHERE id=? AND screenplay_publish_fence=0
+              AND active_storyboard_run_id IS ?""",
+        (start_claim, episode_id, previous["active_storyboard_run_id"]),
     )
     if cursor.rowcount != 1:
         conn.rollback()
-        raise HTTPException(409, "剧本发布栅栏已生效，未启动分镜")
+        raise HTTPException(409, "分镜状态已被其他请求抢占，请刷新后查看当前任务")
     conn.commit()
     recorder = None
     coro = None
     try:
         recorder = _new_storyboard_recorder(episode_id)
-        conn.execute(
-            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
+        owned = conn.execute(
+            "UPDATE episodes SET active_storyboard_run_id=? "
+            "WHERE id=? AND active_storyboard_run_id=?",
+            (recorder.run_id, episode_id, start_claim),
         )
+        if owned.rowcount != 1:
+            conn.rollback()
+            raise RuntimeError("分镜启动所有权已变化")
         conn.commit()
         coro = _storyboard_guarded_recorded(
             episode_id,
@@ -2037,13 +2046,17 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
     except Exception as exc:
         if coro is not None:
             coro.close()
+        current_owner = recorder.run_id if recorder is not None else start_claim
         conn.execute(
-            "UPDATE episodes SET status=?, script_error=?, active_storyboard_run_id=? WHERE id=?",
+            """UPDATE episodes
+                  SET status=?, script_error=?, active_storyboard_run_id=?
+                WHERE id=? AND active_storyboard_run_id=?""",
             (
                 previous["status"],
                 previous["script_error"],
                 previous["active_storyboard_run_id"],
                 episode_id,
+                current_owner,
             ),
         )
         conn.commit()
@@ -2137,13 +2150,17 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         "script_error": ep["script_error"],
         "active_storyboard_run_id": ep["active_storyboard_run_id"],
     }
+    start_claim = f"starting:{int(now())}:{new_id('storyboard')}"
     cursor = conn.execute(
-        "UPDATE episodes SET status='scripting', script_error=NULL "
-        "WHERE id=? AND screenplay_publish_fence=0", (episode_id,)
+        """UPDATE episodes
+              SET status='scripting', script_error=NULL, active_storyboard_run_id=?
+            WHERE id=? AND screenplay_publish_fence=0
+              AND active_storyboard_run_id IS ?""",
+        (start_claim, episode_id, previous["active_storyboard_run_id"]),
     )
     if cursor.rowcount != 1:
         conn.rollback()
-        raise HTTPException(409, "剧本发布栅栏已生效，未继续分镜")
+        raise HTTPException(409, "分镜状态已被其他请求抢占，请刷新后查看当前任务")
     conn.commit()
     recorder = None
     coro = None
@@ -2154,10 +2171,14 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             parent_run_id=parent["id"] if parent else None,
         )
         # 任务注册前持久化指针，避免 Run 已启动但页面无法轮询或控制。
-        conn.execute(
-            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
+        owned = conn.execute(
+            "UPDATE episodes SET active_storyboard_run_id=? "
+            "WHERE id=? AND active_storyboard_run_id=?",
+            (recorder.run_id, episode_id, start_claim),
         )
+        if owned.rowcount != 1:
+            conn.rollback()
+            raise RuntimeError("分镜续跑所有权已变化")
         conn.commit()
         coro = _storyboard_guarded_recorded(
             episode_id,
@@ -2181,11 +2202,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
                 previous["status"],
                 previous["script_error"],
                 episode_id,
-                (
-                    recorder.run_id
-                    if recorder is not None
-                    else previous["active_storyboard_run_id"]
-                ),
+                recorder.run_id if recorder is not None else start_claim,
             ),
         )
         conn.commit()
@@ -3390,13 +3407,14 @@ def _structure_operation_plan(episode_id: str, body: dict) -> dict:
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         raise HTTPException(404, "剧集不存在")
+    from app.storyboard_workspace import assert_storyboard_mutation_allowed
+
+    assert_storyboard_mutation_allowed(conn, episode_id)
     screenplay_context = _resolve_storyboard_mutation_screenplay(conn, episode_id)
     if screenplay_context.narrative_authority_required:
         _raise_narrative_semantic_mutation_required(
             operation=str(body.get("operation") or "structure_edit"),
         )
-    if ep["status"] == "scripting":
-        raise HTTPException(409, "分镜运行中不能调整镜头结构，请先暂停")
     rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
     ).fetchall()

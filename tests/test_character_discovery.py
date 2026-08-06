@@ -1219,6 +1219,51 @@ def test_voice_normalization_projects_non_voice_delivery_out_of_speaker_fields()
     }]
 
 
+def test_source_identity_contexts_cover_complete_long_source() -> None:
+    source = "甲" * 19 + "\n\n" + "乙" * 17
+
+    chunks = portraits._source_identity_contexts(source, budget=10)
+
+    assert len(chunks) == 4
+    assert "".join(chunks) == source.replace("\n", "")
+
+
+def test_future_identity_keeps_current_display_label() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        scene_outline=[ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】夜 / 山门",
+            story_function="神秘来客阻路",
+            characters=["青衣人"],
+            summary="青衣人挡在门前，没有公开姓名。",
+            source_basis="原文只称青衣人。",
+        )],
+        full_script_text="【场1】夜 / 山门\n青衣人挡在门前。\n青衣人：止步。",
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="阻路",
+            turns=[KeyDialogueTurn(
+                speaker="青衣人",
+                line="止步。",
+                source_text="止步。",
+            )],
+        )],
+    )
+
+    portraits.apply_screenplay_character_resolutions(script, [{
+        "source_label": "青衣人",
+        "canonical_name": "丁力",
+        "resolution": "future_identity",
+    }])
+
+    assert script.scene_outline[0].characters == ["丁力"]
+    assert script.dialogue_chains[0].turns[0].speaker == "丁力"
+    assert "青衣人挡在门前" in script.full_script_text
+    assert "青衣人：止步" in script.full_script_text
+    assert "丁力" not in script.scene_outline[0].summary
+
+
 def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generation(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "late-episode-character.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)

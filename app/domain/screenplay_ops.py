@@ -734,9 +734,13 @@ async def _screenplay_task(
             load_screenplay_character_resolutions(conn, episode_id),
             preflight_result.get("resolutions") or [],
         )
-        if preflight_result.get("added"):
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-            bible = _project_bible_or_placeholder(p)
+        # Other episodes can add a character while this run is in discovery.
+        # Always bind generation to the latest persisted Bible authority.
+        p = conn.execute(
+            "SELECT * FROM projects WHERE id=?",
+            (ep["project_id"],),
+        ).fetchone()
+        bible = _project_bible_or_placeholder(p)
         from app.portraits import (
             bible_with_pending_characters_for_text,
             bible_with_provisional_characters,

@@ -23,8 +23,10 @@ from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.errors import ContentGenerationError, code_ref
 from app.db import get_conn, new_id, now
+from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
+from app.harness.types import EvidenceArtifact
 from app.refs import _safe_name, scene_visual_style_lock
 from app.scene_contract import split_legacy_scene_setting
 from app.schemas import Bible, Scene, extract_json
@@ -1662,6 +1664,48 @@ async def assess_new_scene(label: str, context: str, *, style: str,
     }
 
 
+def _commit_scene_bible_mutation(
+    conn,
+    project_id: str,
+    data: dict,
+    *,
+    operation: str,
+    scene_name: str,
+) -> bool:
+    row = conn.execute(
+        "SELECT bible_version,bible_artifact_id FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
+    if not row:
+        return False
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_bible",
+        scope_type="project",
+        scope_id=project_id,
+        status="approved",
+        trust_level="T2",
+        content=data,
+        parent_artifact_ids=[row["bible_artifact_id"]] if row["bible_artifact_id"] else [],
+        contract_version="character-bible-1.0.0",
+        prompt_version="reactive-scene-bible-1.0.0",
+        model_snapshot={"operation": operation, "scene_name": scene_name},
+    ))
+    expected_version = int(row["bible_version"] or 0)
+    cursor = conn.execute(
+        "UPDATE projects SET bible_json=?,bible_version=?,bible_artifact_id=? "
+        "WHERE id=? AND COALESCE(bible_version,0)=?",
+        (
+            json.dumps(data, ensure_ascii=False),
+            expected_version + 1,
+            artifact["id"],
+            project_id,
+            expected_version,
+        ),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
 def _append_scene_to_bible(conn, project_id: str, scene: dict) -> bool:
     """把 AI 已确认的新场景追加进 bible，并推进版本；内部处理不产生人工待审。"""
     row = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -1673,12 +1717,13 @@ def _append_scene_to_bible(conn, project_id: str, scene: dict) -> bool:
     normalized = Scene.model_validate(scene).model_dump(mode="json")
     data.setdefault("scenes", []).append(normalized)
     Bible.model_validate(data)
-    conn.execute(
-        "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
-        (json.dumps(data, ensure_ascii=False), project_id),
+    return _commit_scene_bible_mutation(
+        conn,
+        project_id,
+        data,
+        operation="incremental_scene_add",
+        scene_name=str(scene.get("name") or ""),
     )
-    conn.commit()
-    return True
 
 
 def _append_scene_alias(conn, project_id: str, scene_name: str, alias: str) -> bool:
@@ -1698,12 +1743,13 @@ def _append_scene_alias(conn, project_id: str, scene_name: str, alias: str) -> b
         aliases.append(alias)
         scene["aliases"] = aliases
         Bible.model_validate(data)
-        conn.execute(
-            "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
-            (json.dumps(data, ensure_ascii=False), project_id),
+        return _commit_scene_bible_mutation(
+            conn,
+            project_id,
+            data,
+            operation="incremental_scene_alias",
+            scene_name=scene_name,
         )
-        conn.commit()
-        return True
     return False
 
 
