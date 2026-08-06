@@ -595,6 +595,7 @@ def _review_asset_qualification(conn, episode_id: str) -> dict[str, Any]:
                   s.adopted_version_id
              FROM shot_versions v JOIN shots s ON s.id=v.shot_id
             WHERE s.episode_id=?
+              AND v.status!='cleared'
             ORDER BY v.shot_id, v.version_no DESC""",
         (episode_id,),
     ).fetchall()

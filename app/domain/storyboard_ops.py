@@ -3693,7 +3693,9 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                            THEN 1 ELSE 0 END AS delivery_fallback,
                       CASE WHEN length(image_inputs) <= ? THEN image_inputs END AS image_inputs,
                       CASE WHEN length(image_inputs) > ? THEN 1 ELSE 0 END AS image_inputs_omitted
-               FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
+               FROM shot_versions
+               WHERE shot_id=? AND status!='cleared'
+               ORDER BY version_no DESC""",
             (_MAX_PUBLIC_IMAGE_INPUT_CHARS, _MAX_PUBLIC_IMAGE_INPUT_CHARS, shot_id),
         ).fetchall()
     else:
@@ -3705,7 +3707,9 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                       CASE WHEN status='rejected_static_fallback'
                            THEN 1 ELSE 0 END AS delivery_fallback,
                       NULL AS image_inputs
-               FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
+               FROM shot_versions
+               WHERE shot_id=? AND status!='cleared'
+               ORDER BY version_no DESC""",
             (shot_id,),
         ).fetchall()
     versions = [

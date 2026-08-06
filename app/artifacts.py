@@ -73,6 +73,24 @@ def _delete_version_files(video_path: str | None) -> None:
             pass
 
 
+def _delete_shot_boundary_assets(conn, shot_id: str) -> int:
+    """Delete durable first/last-frame records and their local files."""
+    rows = conn.execute(
+        "SELECT path FROM video_boundary_assets WHERE shot_id=?",
+        (shot_id,),
+    ).fetchall()
+    for row in rows:
+        path = str(row["path"] or "").strip()
+        if not path:
+            continue
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    conn.execute("DELETE FROM video_boundary_assets WHERE shot_id=?", (shot_id,))
+    return len(rows)
+
+
 def _purge_shots(
     conn,
     shots: list[dict],
@@ -85,6 +103,7 @@ def _purge_shots(
     affected_eps: set[str] = set()
     for s in shots:
         affected_eps.add(s["episode_id"])
+        _delete_shot_boundary_assets(conn, s["id"])
         versions = conn.execute(
             "SELECT id, video_path FROM shot_versions WHERE shot_id=?", (s["id"],)).fetchall()
         for v in versions:

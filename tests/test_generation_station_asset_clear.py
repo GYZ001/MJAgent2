@@ -120,9 +120,12 @@ def test_resource_clear_removes_video_images_and_reference_indexes(tmp_path, mon
     refs.mkdir(parents=True)
     ref_path = refs / "keyframe.png"
     scene_path = shot_dir / "scene.png"
+    boundary_path = shot_dir / "boundaries" / "first.jpg"
+    boundary_path.parent.mkdir(parents=True)
     video_path = shot_dir / "v1.mp4"
     ref_path.write_bytes(b"ref")
     scene_path.write_bytes(b"scene")
+    boundary_path.write_bytes(b"boundary")
     video_path.write_bytes(b"video")
     conn.execute(
         """INSERT INTO shot_versions(
@@ -151,6 +154,16 @@ def test_resource_clear_removes_video_images_and_reference_indexes(tmp_path, mon
                id,kind,shot_id,version_id,episode_id,project_id,status,created_at,updated_at
            ) VALUES('j','video','s','v1','e','p','succeeded',0,0)"""
     )
+    conn.execute(
+        """INSERT INTO video_boundary_assets(
+               id,episode_video_plan_id,shot_plan_id,shot_id,role,source,path,
+               qa_status,qa_json,fingerprint,created_at
+           ) VALUES(
+               'boundary','historical-plan','historical-shot-plan','s',
+               'first_frame','STATIC_BOUNDARY_ASSET',?,'passed','{}','fp',0
+           )""",
+        (str(boundary_path),),
+    )
     conn.commit()
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", root)
@@ -162,7 +175,11 @@ def test_resource_clear_removes_video_images_and_reference_indexes(tmp_path, mon
     assert not video_path.exists()
     assert not ref_path.exists()
     assert not scene_path.exists()
-    for table in ("shot_versions", "shot_scenes", "reference_sets", "reference_assets", "jobs"):
+    assert not boundary_path.exists()
+    for table in (
+        "shot_versions", "shot_scenes", "reference_sets", "reference_assets",
+        "video_boundary_assets", "jobs",
+    ):
         assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
     shot = conn.execute(
         "SELECT adopted_version_id,approved_scene_id,mode_plan FROM shots WHERE id='s'"
@@ -245,6 +262,9 @@ def test_episode_resource_clear_supersedes_active_video_plan(
     assert conn.execute(
         "SELECT status FROM shot_versions WHERE id='version-audit'"
     ).fetchone()[0] == "cleared"
+    from app.api import _public_shot_versions
+
+    assert _public_shot_versions(conn, "s", include_inputs=True) == []
     assert conn.execute(
         "SELECT COUNT(*) FROM video_generation_attempts WHERE id='attempt-audit'"
     ).fetchone()[0] == 1
