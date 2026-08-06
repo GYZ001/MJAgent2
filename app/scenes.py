@@ -25,7 +25,7 @@ from app.errors import ContentGenerationError, code_ref
 from app.db import get_conn, new_id, now
 from app.evidence.media import record_reference_asset
 from app.harness import model_gateway
-from app.refs import _safe_name
+from app.refs import _safe_name, scene_visual_style_lock
 from app.scene_contract import split_legacy_scene_setting
 from app.schemas import Bible, Scene, extract_json
 from app.validators import match_scene_name
@@ -327,12 +327,7 @@ def scene_ref_prompt(
         if scene_name.strip()
         else ""
     )
-    style_constraint = (
-        f"画风最高优先级：必须严格保持「{visual_style.strip()}」，"
-        "不得擅自切换成与该画风冲突的真人摄影、照片写实、3D CG 或其他渲染风格。"
-        if visual_style.strip()
-        else ""
-    )
+    style_constraint = scene_visual_style_lock(visual_style) if visual_style.strip() else ""
     generation_canonical = scene_generation_canonical(scene_name, scene_canonical)
     functional_constraints = scene_name_visual_constraints(scene_name, generation_canonical)
     return normalize_scene_prompt(

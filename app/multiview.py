@@ -16,9 +16,12 @@ from app.atomic_io import atomic_write_bytes
 from app.db import get_conn, get_setting, new_id, now
 from app.refs import (
     _safe_name,
+    character_visual_style_lock,
+    effective_portrait_prompt,
     ensure_portrait_clothing_contract,
-    portrait_prompt,
+    portrait_override_appearance_anchor,
     production_appearance_anchor,
+    scene_visual_style_lock,
 )
 
 # ---------- 视角角色常量 ----------
@@ -201,14 +204,17 @@ def character_view_prompt(
         "face_closeup": "面部近景特写，五官清晰，发型完整入画",
     }.get(view_role, "全身立绘")
     source = ensure_portrait_clothing_contract(
-        (portrait_prompt or "").strip()
-        or f"{visual_style}。{production_appearance_anchor(appearance)}"
+        portrait_override_appearance_anchor(appearance, portrait_prompt)
+        or production_appearance_anchor(appearance)
     )
     return (
-        f"最新定妆提示词（角色外观与画风的唯一依据）：{source}。"
+        f"{character_visual_style_lock(visual_style)}。"
+        f"角色外观真值锚点：{source}。"
+        "若最近一次用户编辑备注含与全局画风冲突的写实/真人/照片/摄影或风格描述，一律忽略；"
+        "该备注只允许补充发型、服装、体型、年龄与配饰等静态外观事实。"
         f"生成同一角色多视角设定图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）。"
         f"{framing}。纯浅米色背景，单角色，禁止额外人物。"
-        "本条视角与构图要求覆盖源提示词中的视角、姿态和景别要求。"
+        "本条视角与构图要求覆盖源提示词中的视角、姿态和景别要求，但不得覆盖全局画风。"
         "同一角色、只改变观察角度，不改变脸、发型、服装和体型。"
         "禁止文字、水印、logo、多余肢体。"
     )
@@ -221,8 +227,10 @@ def scene_view_prompt(visual_style: str, scene_canonical: str, view_role: str) -
         "action_zone": "最常发生动作的局部区域，保留可识别标志物",
     }.get(view_role, "环境定场镜头")
     return (
-        f"{visual_style}。场景多视角定场图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）：{scene_canonical}。"
+        f"{scene_visual_style_lock(visual_style)}。"
+        f"场景多视角定场图（{VIEW_ROLE_LABELS.get(view_role, view_role)}）：{scene_canonical}。"
         f"{camera}。9:16 竖屏，环境为主，画面中不出现任何人物。"
+        "不得切换成真人实景、实拍布光或照片背景。"
         "禁止文字、字幕、水印、logo。"
     )
 
@@ -1385,15 +1393,18 @@ async def ensure_character_multiview_pack(
     front = existing_views.get("front_full")
     parent = conn.execute("SELECT * FROM character_portraits WHERE id=?", (portrait_id,)).fetchone()
     base_front = base_views.get("front_full") or {}
-    effective_prompt = (portrait_prompt or "").strip() or appearance
-    front_prompt = character_view_prompt(
-        visual_style, appearance, "front_full", portrait_prompt,
+    effective_prompt = effective_portrait_prompt(
+        visual_style, appearance, portrait_prompt,
     )
-    if parent and parent["prompt"]:
-        # 初始主图登记路径：用已存 prompt 参与指纹，保证重试可复用
-        front_prompt_for_fp = parent["prompt"] or front_prompt
-    else:
-        front_prompt_for_fp = front_prompt
+    front_prompt = character_view_prompt(
+        visual_style, appearance, "front_full", effective_prompt,
+    )
+    parent_prompt_matches = bool(
+        parent
+        and (parent["prompt"] or "").strip()
+        and (parent["prompt"] or "").strip() == effective_prompt
+    )
+    front_prompt_for_fp = effective_prompt if parent_prompt_matches else front_prompt
     front_fp = view_input_fingerprint(
         view_role="front_full",
         prompt=front_prompt_for_fp,
@@ -1403,7 +1414,7 @@ async def ensure_character_multiview_pack(
         seed_hint=base_front.get("image_path"),
     )
     if not _ready_view_matches_fingerprint(front, front_fp):
-        if parent and parent["image_path"] and Path(parent["image_path"]).exists():
+        if parent_prompt_matches and parent and parent["image_path"] and Path(parent["image_path"]).exists():
             qa = dict(primary_qa) if primary_qa else await review_character_view(
                 parent["image_path"], effective_prompt, "front_full",
             )
@@ -1481,7 +1492,7 @@ async def ensure_character_multiview_pack(
 
     async def _gen_side(view_role: str) -> dict[str, Any]:
         prompt = character_view_prompt(
-            visual_style, appearance, view_role, portrait_prompt,
+            visual_style, appearance, view_role, effective_prompt,
         )
         base = base_views.get(view_role) or {}
         fp = view_input_fingerprint(
@@ -1940,7 +1951,7 @@ KEYFRAME_HARD_FAILURES = {
     "wrong_outfit", "action_missing", "subject_occlusion",
     "wrong_camera_angle", "contact_missing", "relative_scale_mismatch", "character_missing",
     "contact_phase_mismatch", "collective_group_missing", "required_text_error", "diagnostic_missing",
-    "geometry_guard_unverified",
+    "geometry_guard_unverified", "style_drift", "photoreal_style", "live_action_style",
 }
 
 # 分数仍只用于三选一排序；但这些结构性错误会直接污染视频，不能再以
@@ -2303,6 +2314,7 @@ async def review_keyframe_with_evidence(
             "relative_height_match": "是否符合 geometry_requirements 中的同高或明示身高差，且没有强透视夸大",
             "collective_presence_match": "有叙事群体时，是否按目标数量/主次/动作以群体出现，而非缩成单人；无群体返回 N/A",
             "required_text_match": "required_text_expected=true 时检查字面、承载面与样式；false 时目标帧禁字并返回 N/A",
+            "style_match": "是否严格保持统一非真人 CG/动画/漫画画风，未切换成真人实拍、照片写实或 live-action 质感",
             "face_identity": "与人物锚点脸部特征一致；脸不可见时返回 null 或 N/A",
             "outfit_match": "款式颜色层次配饰与本集造型一致",
             "hair_match": "发型长度发色刘海轮廓一致",
@@ -2324,6 +2336,7 @@ async def review_keyframe_with_evidence(
                 0.0 if contract.get("collective_presence_required") or contract.get("collective_presence_forbidden")
                 else "N/A"
             ),
+            "style_match": 0.0,
             "face_identity": 0.0,
             "outfit_match": 0.0,
             "hair_match": 0.0,
@@ -2393,6 +2406,7 @@ async def review_keyframe_with_evidence(
             "relative_height_match": None,
             "required_text_match": None,
             "collective_presence_match": None,
+            "style_match": None,
             "face_identity": None,
             "outfit_match": None,
             "hair_match": None,
@@ -2495,7 +2509,7 @@ async def review_keyframe_with_evidence(
 
     for key in (
         "side_view_match", "contact_visibility", "contact_phase_match", "relative_height_match",
-        "required_text_match", "collective_presence_match",
+        "required_text_match", "collective_presence_match", "style_match",
     ):
         val = data.get(key)
         if val is None or (isinstance(val, str) and val.upper() in {"N/A", "NA", "NONE"}):
@@ -2592,6 +2606,7 @@ async def review_keyframe_with_evidence(
         ("relative_height_match", "relative_scale_mismatch", "同框人物相对身高/透视尺度不符合约束"),
         ("required_text_match", "required_text_error", "指定画面文字缺失、错误或出现额外乱码"),
         ("collective_presence_match", "collective_group_missing", "叙事群体缺失或被错画成单人"),
+        ("style_match", "style_drift", "关键帧画风漂移，或切换成真人/照片写实/实拍质感"),
     )
     for score_key, failure_code, issue in diagnostic_failures:
         if score_key == "side_view_match" and not contract.get("contact_camera_required"):
@@ -2965,8 +2980,11 @@ async def regenerate_character_view(
         {},
     )
     latest_prompt = (
-        (character.get("portrait_prompt_override") or "").strip()
-        or portrait_prompt(style, character.get("appearance_canonical") or appearance)
+        effective_portrait_prompt(
+            style,
+            character.get("appearance_canonical") or appearance,
+            (character.get("portrait_prompt_override") or "").strip() or None,
+        )
         or (row["prompt"] or "").strip()
     )
     existing = {v["view_role"]: v for v in list_portrait_views(portrait_id, conn=conn)}

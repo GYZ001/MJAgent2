@@ -532,7 +532,7 @@ def project_detail(
     p.pop("bible_json", None)
     if p["bible"]:
         from app.config import PROJECTS_DIR
-        from app.refs import portrait_prompt
+        from app.refs import effective_portrait_prompt
         style = p["bible"].get("world", {}).get("visual_style_canonical", "")
         import os
         for c in p["bible"].get("characters", []):
@@ -544,8 +544,8 @@ def project_detail(
             else:
                 c["ref_image_url"] = None
             override = (c.get("portrait_prompt_override") or "").strip()
-            c["portrait_prompt_effective"] = override or portrait_prompt(
-                style, c.get("appearance_canonical", "")
+            c["portrait_prompt_effective"] = effective_portrait_prompt(
+                style, c.get("appearance_canonical", ""), override or None,
             )
         # 场景图素材库：为每个规范场景挂上落盘图 url + QA + 有效生成词，供「场景图」菜单页展示。
         from app.scenes import scene_ref_prompt

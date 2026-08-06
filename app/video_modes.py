@@ -14,6 +14,7 @@ from typing import Any, Callable
 from app import config, hiagent
 from app.atomic_io import atomic_write_bytes
 from app.harness import model_gateway
+from app.refs import visual_style_lock
 from app.db import get_setting, new_id
 from app.errors import code_ref
 from app.hiagent import ProviderError
@@ -184,10 +185,48 @@ _SCORE_ONLY_REJECT_REASONS = {
     "quality_below_threshold_score_only",
     "cross_keyframe_identity_invariance_unverified",
 }
+_STRUCTURAL_REFERENCE_HARD_FAILURES = frozenset({
+    "style_drift",
+    "photoreal_style",
+    "live_action_style",
+})
+_STYLE_STRUCTURAL_REJECT_REASON = "style_drift_structural"
 
 
 def _is_score_only_reject_reason(reason: str | None) -> bool:
     return bool(reason) and reason in _SCORE_ONLY_REJECT_REASONS
+
+
+def _normalize_reference_hard_failure(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    if (
+        ("style" in normalized and "drift" in normalized)
+        or any(token in text for token in ("风格漂移", "画风漂移", "风格不符", "画风不符"))
+    ):
+        return "style_drift"
+    if (
+        "photoreal" in normalized
+        or "photo_real" in normalized
+        or any(token in text for token in ("照片写实", "写真质感", "真实照片", "真人照片"))
+    ):
+        return "photoreal_style"
+    if (
+        "live_action" in normalized
+        or "liveaction" in normalized
+        or any(token in text for token in ("真人实拍", "真人摄影", "真人风", "实拍质感", "live-action"))
+    ):
+        return "live_action_style"
+    return text
+
+
+def _reference_structural_reject_reason(asset: ReferenceImageAsset) -> str | None:
+    hard_failures = set(_hard_failures_of(asset))
+    if hard_failures & _STRUCTURAL_REFERENCE_HARD_FAILURES:
+        return _STYLE_STRUCTURAL_REJECT_REASON
+    return None
 
 
 def _clamp01(value: float) -> float:
@@ -260,7 +299,11 @@ def _hard_failures_of(asset: ReferenceImageAsset) -> list[Any]:
     qa = asset.qa or {}
     raw = qa.get("hard_failures")
     if isinstance(raw, list) and raw:
-        items = [str(x) for x in raw if str(x).strip()]
+        items = [
+            normalized
+            for x in raw
+            if (normalized := _normalize_reference_hard_failure(x)) is not None
+        ]
     else:
         issues = qa.get("issues") or []
         if not isinstance(issues, list):
@@ -269,6 +312,10 @@ def _hard_failures_of(asset: ReferenceImageAsset) -> list[Any]:
         markers = ("broken", "畸形", "extra limb", "多余肢体", "severe_anatomy",
                    "wrong_identity", "duplicate_character", "action_missing")
         items = [x for x in issues if any(m in str(x).lower() for m in markers)]
+        for issue in issues:
+            normalized = _normalize_reference_hard_failure(issue)
+            if normalized in _STRUCTURAL_REFERENCE_HARD_FAILURES:
+                items.append(normalized)
     from app.multiview import watermark_qa_mode
     if watermark_qa_mode() == "ignore_unless_occluding":
         cleaned = []
@@ -278,9 +325,15 @@ def _hard_failures_of(asset: ReferenceImageAsset) -> list[Any]:
                 if "occlusion" in s or "遮挡" in s or "subject_occlusion" in s:
                     cleaned.append("subject_occlusion")
                 continue
-            cleaned.append(item)
+            normalized = _normalize_reference_hard_failure(item)
+            if normalized:
+                cleaned.append(normalized)
         return cleaned
-    return items
+    return [
+        normalized
+        for item in items
+        if (normalized := _normalize_reference_hard_failure(item)) is not None
+    ]
 
 
 def recompose_asset_score(asset: ReferenceImageAsset, *, consistency: float | None = None,
@@ -305,11 +358,17 @@ def recompose_asset_score(asset: ReferenceImageAsset, *, consistency: float | No
 
 
 def apply_keep_gate(asset: ReferenceImageAsset, *, threshold: float | None = None) -> bool:
-    """Score-only：QA 分数不再淘汰参考图（PRD QA-SO #24）。
+    """低分仍走 score-only；结构性画风漂移必须硬拒绝。
 
-    阈值仅用于标记 ``rejectReason`` 供展示/排序，资产仍可选入 Seedance。
+    阈值仅用于标记低分 ``rejectReason`` 供展示/排序，资产仍可选入 Seedance；
+    但真人/照片写实/画风漂移属于结构性错误，必须从视频输入里移除。
     """
     del threshold
+    structural_reason = _reference_structural_reject_reason(asset)
+    if structural_reason:
+        asset.selectedForSeedance = False
+        asset.rejectReason = structural_reason
+        return False
     asset.selectedForSeedance = True
     score = asset.qualityScore
     thr = quality_threshold()
@@ -1445,6 +1504,7 @@ def reference_generation_prompt(
             f"Reference type: {ref_type}. Shot {shot.shot_no}. Scene: {shot.scene_setting}. "
             f"Single narrative keyframe target: {contract['target_keyframe_desc']}."
         )
+    style_contract = visual_style_lock(bible.world.visual_style_canonical)
     if identity_seeded and ref_type == "plot_key_frame":
         contract = _keyframe_contract(shot, bible, screenplay=screenplay)
         target = _seeded_structured_endpoint(
@@ -1542,12 +1602,13 @@ def reference_generation_prompt(
         + (
             "locked by the provided reference images. "
             if identity_seeded
-            else f"{bible.world.visual_style_canonical}. "
+            else f"{bible.world.visual_style_canonical}. Style lock: {style_contract}. "
         )
     )
     if ref_type != "plot_key_frame":
         return (
             common
+            + "Keep the image fully non-live-action and non-photorealistic; never switch to a real-person photo look. "
             + "No text, no subtitles, no watermark, no logo, no extra limbs, no motion blur. 9:16 portrait. "
             "The image must be suitable as a Seedance 2.0 reference image."
         )
@@ -1583,8 +1644,10 @@ async def review_reference_image(
         "checks": [
             "character consistency", "clothing consistency", "hair consistency", "core props",
             "scene match", "no broken anatomy", "no wrong text", "no watermark",
+            "style consistency with the episode canon", "not photoreal or live-action",
             "suitable as Seedance reference image",
         ],
+        "hard_failures_enum": ["style_drift", "photoreal_style", "live_action_style"],
         "output_schema": {
             "character_match": 0.0,
             "costume_match": 0.0,
@@ -1592,8 +1655,10 @@ async def review_reference_image(
             "prop_match": 0.0,
             "scene_match": 0.0,
             "clean_frame": 0.0,
+            "style_match": 0.0,
             "seedance_reference_fit": 0.0,
             "overall": 0.0,
+            "hard_failures": [],
             "issues": [],
         },
     }
@@ -1612,10 +1677,35 @@ async def review_reference_image(
             data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
         except (TypeError, ValueError):
             data[key] = 0.0
+    style_match = data.get("style_match")
+    if style_match is None or (isinstance(style_match, str) and style_match.upper() in {"N/A", "NA", "NONE"}):
+        data["style_match"] = None
+    else:
+        try:
+            data["style_match"] = max(0.0, min(1.0, float(style_match)))
+        except (TypeError, ValueError):
+            data["style_match"] = None
     if not data.get("overall"):
-        data["overall"] = round(sum(float(data.get(k, 0)) for k in keys) / len(keys), 3)
+        overall_keys = list(keys)
+        if data.get("style_match") is not None:
+            overall_keys.append("style_match")
+        data["overall"] = round(sum(float(data.get(k, 0)) for k in overall_keys) / len(overall_keys), 3)
     if not isinstance(data.get("issues"), list):
         data["issues"] = [str(data.get("issues"))]
+    raw_hard_failures = data.get("hard_failures")
+    if not isinstance(raw_hard_failures, list):
+        raw_hard_failures = [raw_hard_failures] if raw_hard_failures else []
+    data["hard_failures"] = [
+        normalized
+        for item in raw_hard_failures
+        if (normalized := _normalize_reference_hard_failure(item)) is not None
+    ]
+    if data.get("style_match") is not None and float(data["style_match"]) < 0.7:
+        if "style_drift" not in data["hard_failures"]:
+            data["hard_failures"].append("style_drift")
+        style_issue = "画风漂移，或出现真人/照片写实/实拍质感"
+        if style_issue not in data["issues"]:
+            data["issues"].append(style_issue)
     return data
 
 

@@ -3,6 +3,7 @@ import sqlite3
 
 from app.refs import (
     _merge_generated_portraits,
+    effective_portrait_prompt,
     portrait_appearance_anchor,
     portrait_prompt,
     production_appearance_anchor,
@@ -81,7 +82,20 @@ def test_production_anchor_removes_sexualized_body_and_hosiery_emphasis() -> Non
     )
 
 
-def test_multiview_prompt_uses_latest_edited_portrait_prompt() -> None:
+def test_effective_portrait_prompt_keeps_canonical_style_when_override_mentions_realism() -> None:
+    prompt = effective_portrait_prompt(
+        "国漫电影风",
+        "黑发少女，月白长裙",
+        "用户最新定妆提示词：银发少女，红色机甲，赛博写实风",
+    )
+
+    assert "国漫电影风" in prompt
+    assert "红色机甲" in prompt
+    assert "赛博写实风" not in prompt
+    assert "静态外观事实" in prompt
+
+
+def test_multiview_prompt_uses_latest_edited_portrait_prompt_without_overriding_style() -> None:
     prompt = character_view_prompt(
         "旧画风",
         "旧外观锚点",
@@ -89,10 +103,12 @@ def test_multiview_prompt_uses_latest_edited_portrait_prompt() -> None:
         "用户最新定妆提示词：银发少女，红色机甲，赛博写实风",
     )
 
-    assert "用户最新定妆提示词：银发少女，红色机甲，赛博写实风" in prompt
-    assert "旧画风" not in prompt
+    assert "旧画风" in prompt
     assert "旧外观锚点" not in prompt
+    assert "红色机甲" in prompt
+    assert "赛博写实风" not in prompt
     assert "3/4" in prompt
+    assert "画风最高优先级" in prompt
     assert "视角与构图要求覆盖源提示词" in prompt
 
 

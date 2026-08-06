@@ -650,7 +650,9 @@ def test_failed_character_view_redo_preserves_ready_pack(tmp_path, monkeypatch) 
     assert current["input_fingerprint"] != "old-profile"
     assert "latest silver hair and red armor" in generated_prompts[0]
     assert "black hair" not in generated_prompts[0]
-    assert review_anchors == ["latest silver hair and red armor"]
+    assert len(review_anchors) == 1
+    assert "anime" in review_anchors[0]
+    assert "latest silver hair and red armor" in review_anchors[0]
     qa = json.loads(current["qa_json"])
     assert qa["overall"] == 0.2
     assert qa["runtime_blocking"] is False

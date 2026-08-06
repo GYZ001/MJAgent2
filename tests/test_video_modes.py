@@ -2481,6 +2481,18 @@ def test_high_absolute_mild_consistency_must_keep() -> None:
     assert asset.rejectReason is None
 
 
+def test_structural_style_drift_is_rejected_even_with_high_score() -> None:
+    asset = ReferenceImageAsset(
+        id="g2", url="u", type="plot_key_frame", source="seedream_generated",
+        path="/tmp/g2.jpg", qualityScore=0.95,
+        qa={"overall": 0.95, "absolute_quality": 0.95, "hard_failures": ["style_drift"]},
+    )
+
+    assert video_modes.apply_keep_gate(asset) is False
+    assert asset.selectedForSeedance is False
+    assert asset.rejectReason == "style_drift_structural"
+
+
 def test_multiple_high_score_character_refs_keep_one_truth_anchor_with_keyframe() -> None:
     """多张含人物高分图全部 selected；装箱只取 Top-N，不改 selected。"""
     assets = [
