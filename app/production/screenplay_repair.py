@@ -3847,6 +3847,7 @@ async def run_screenplay_production(
         raise ScreenplayNarrativeGateError(message)
 
     # ---- Baseline（仅一次）----
+    baseline_created_this_activation = False
     if not rev.baseline_done:
         assert_baseline_allowed(rev, command="screenplay.generate", episode_id=episode_id)
         save_checkpoint(rev.id, {
@@ -3864,58 +3865,16 @@ async def run_screenplay_production(
         script = await generate_screenplay_baseline(
             episode, source_text, bible, prev_ending=prev_ending,
         )
-        # 即使模型在正文中沿用了“绿袍男子/大汉”，也要在
-        # Baseline 落库与 QA 之前按预检结果原子性改成真名或路人编号。
+        # 先应用首次预检已有决议并持久化 Baseline。任何后续人物增量调用
+        # 都必须发生在这个耐久边界之后，避免外部失败迫使完整剧本重生。
         from app.portraits import (
             apply_screenplay_character_resolutions,
             normalize_screenplay_voice_ids,
-            screenplay_unknown_identity_errors,
         )
         apply_screenplay_character_resolutions(
             script,
             episode.get("character_resolutions") or [],
         )
-        normalize_screenplay_voice_ids(script, bible)
-        # 增量人物只在本地身份门禁仍发现缺口时调用模型。角色已由首次预检、
-        # Bible 和 typed contract 覆盖时，避免重复发送整份原文与剧本草稿。
-        draft_identity_errors = screenplay_unknown_identity_errors(script, bible)
-        # #region debug-point B:post-baseline-identity-gate
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"B","location":"app/production/screenplay_repair.py:post_baseline_identity_gate","msg":"[DEBUG] Post-baseline identity gate","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"resolutionCount":len(episode.get("character_resolutions") or []),"identityErrorCount":len(draft_identity_errors),"scriptChars":len(script.model_dump_json())},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
-        if draft_identity_errors:
-            draft_audit = await ensure_source_characters_incremental(
-                episode_id, source_text, draft_text=script.model_dump_json(),
-            )
-        else:
-            draft_audit = {
-                "added": [],
-                "resolutions": [],
-                "skipped": "static_identity_contract_complete",
-            }
-            if run_id:
-                evidence_repository.append_event(
-                    run_id,
-                    "CHARACTER_DISCOVERY_DRAFT_AUDIT_SKIPPED",
-                    "info",
-                    "Baseline 身份合同已静态闭合，跳过生成后人物模型审计",
-                    payload={"episode_id": episode_id},
-                )
-        from app.portraits import merge_screenplay_character_resolutions
-        episode["character_resolutions"] = merge_screenplay_character_resolutions(
-            episode.get("character_resolutions") or [],
-            draft_audit.get("resolutions") or [],
-        )
-        apply_screenplay_character_resolutions(script, episode["character_resolutions"])
-        if draft_audit.get("added"):
-            # 重新加载 bible，仅 patch 受影响的 speaker/voice（最小）
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
-            from app.domain.common import _project_bible_or_placeholder
-            bible = _project_bible_or_placeholder(p)
-        from app.portraits import bible_with_provisional_characters
-        bible = bible_with_provisional_characters(bible, draft_audit)
         normalize_screenplay_voice_ids(script, bible)
         _normalize_screenplay_narrative_graph(
             script,
@@ -3941,9 +3900,18 @@ async def run_screenplay_production(
             baseline_artifact_id=baseline_art["id"],
             working_artifact_id=baseline_art["id"],
         )
+        baseline_created_this_activation = True
+        checkpoint = {
+            **checkpoint,
+            "phase": "IDENTITY_AUDIT",
+            "activation_no": activation_no,
+            "working_artifact_id": baseline_art["id"],
+            "yield_reason": None,
+        }
+        save_checkpoint(rev.id, checkpoint)
         # #region debug-point D:baseline-persisted
         try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"D","location":"app/production/screenplay_repair.py:baseline_persisted","msg":"[DEBUG] Production baseline persisted","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"baselineArtifactId":rev.baseline_artifact_id,"workingArtifactId":rev.working_artifact_id},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"D","location":"app/production/screenplay_repair.py:baseline_persisted","msg":"[DEBUG] Production baseline persisted","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"baselineArtifactId":rev.baseline_artifact_id,"workingArtifactId":rev.working_artifact_id},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
         except Exception:
             pass
         # #endregion
@@ -3965,13 +3933,145 @@ async def run_screenplay_production(
     elif not rev.working_artifact_id:
         raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
 
+    # ---- Baseline 后身份收口（可恢复，不消耗第二次完整生成）----
+    rev = get_production_revision(rev.id)  # type: ignore[assignment]
+    assert rev and rev.working_artifact_id
+    working_id = rev.working_artifact_id
+    working_artifact = evidence_repository.get_artifact(working_id)
+    assert working_artifact
+    working_hash = (
+        working_artifact.get("content_hash")
+        or evidence_repository.content_hash(working_artifact.get("content"))
+    )
+    working_script = load_screenplay_from_artifact(working_id)
+    identity_audit_required = (
+        baseline_created_this_activation
+        or checkpoint.get("phase") == "IDENTITY_AUDIT"
+    )
+    from app.portraits import (
+        apply_screenplay_character_resolutions,
+        bible_with_provisional_characters,
+        merge_screenplay_character_resolutions,
+        normalize_screenplay_voice_ids,
+        screenplay_unknown_identity_errors,
+    )
+
+    identity_normalization_changes: list[dict] = []
+    draft_identity_errors: list[str] = []
+    if identity_audit_required:
+        identity_normalization_changes = apply_screenplay_character_resolutions(
+            working_script,
+            episode.get("character_resolutions") or [],
+        )
+        identity_normalization_changes.extend(
+            normalize_screenplay_voice_ids(working_script, bible)
+        )
+        draft_identity_errors = screenplay_unknown_identity_errors(
+            working_script,
+            bible,
+        )
+    # #region debug-point B:post-baseline-identity-gate
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"B","location":"app/production/screenplay_repair.py:post_baseline_identity_gate","msg":"[DEBUG] Post-baseline identity gate","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"resolutionCount":len(episode.get("character_resolutions") or []),"identityErrorCount":len(draft_identity_errors),"scriptChars":len(working_script.model_dump_json())},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
+    if draft_identity_errors:
+        draft_audit = await ensure_source_characters_incremental(
+            episode_id,
+            source_text,
+            draft_text=working_script.model_dump_json(),
+        )
+        episode["character_resolutions"] = merge_screenplay_character_resolutions(
+            episode.get("character_resolutions") or [],
+            draft_audit.get("resolutions") or [],
+        )
+        identity_normalization_changes.extend(
+            apply_screenplay_character_resolutions(
+                working_script,
+                episode["character_resolutions"],
+            )
+        )
+        if draft_audit.get("added"):
+            project = conn.execute(
+                "SELECT * FROM projects WHERE id=?",
+                (episode["project_id"],),
+            ).fetchone()
+            from app.domain.common import _project_bible_or_placeholder
+
+            bible = _project_bible_or_placeholder(project)
+        bible = bible_with_provisional_characters(bible, draft_audit)
+        identity_normalization_changes.extend(
+            normalize_screenplay_voice_ids(working_script, bible)
+        )
+    elif run_id:
+        evidence_repository.append_event(
+            run_id,
+            "CHARACTER_DISCOVERY_DRAFT_AUDIT_SKIPPED",
+            "info",
+            "Baseline 身份合同已静态闭合，跳过生成后人物模型审计",
+            payload={"episode_id": episode_id},
+        )
+
+    if identity_normalization_changes:
+        identity_normalization_changes.extend(
+            _normalize_screenplay_narrative_graph(
+                working_script,
+                authorized_source_chapters=episode.get(
+                    "authorized_source_chapters"
+                ),
+            )
+        )
+    normalized_payload = screenplay_artifact_payload(working_script)
+    normalized_hash = evidence_repository.content_hash(normalized_payload)
+    if identity_normalization_changes and normalized_hash != working_hash:
+        normalized_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_document",
+                scope_type="episode",
+                scope_id=episode_id,
+                status="candidate",
+                trust_level="T1",
+                content=normalized_payload,
+                parent_artifact_ids=[working_id],
+                contract_version=rev.contract_version or contract.version,
+            )
+        )
+        update_working_artifact(
+            rev.id,
+            normalized_artifact["id"],
+            expected_hash=working_hash,
+        )
+        rev = get_production_revision(rev.id)  # type: ignore[assignment]
+        assert rev
+        working_id = normalized_artifact["id"]
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "SCREENPLAY_IDENTITY_NORMALIZATION_APPLIED",
+                "info",
+                "已从耐久 Baseline 派生身份规范化工作副本",
+                payload={
+                    "before_artifact_id": working_artifact["id"],
+                    "after_artifact_id": working_id,
+                },
+            )
+    if identity_audit_required:
+        checkpoint = {
+            **checkpoint,
+            "phase": "STRUCTURE_VALIDATION",
+            "activation_no": activation_no,
+            "working_artifact_id": working_id,
+            "yield_reason": None,
+        }
+        save_checkpoint(rev.id, checkpoint)
+
     # Quality remains score-only, but a typed narrative graph is consumed as a
     # hard contract by storyboard generation. Publishing a structurally broken
     # graph here only moves the same blocker downstream, where shot repair
     # cannot safely rewrite screenplay authority. Legacy scripts without a
     # narrative plan keep the score-only fast path; modern invalid graphs enter
     # the bounded local Patch loop below.
-    working_script = load_screenplay_from_artifact(rev.working_artifact_id)
     narrative_contract_errors: list[str] = []
     if working_script.narrative_plan is not None:
         from app.narrative import validate_screenplay_narrative

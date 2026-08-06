@@ -580,13 +580,27 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
     conn.commit()
     _patch_settings(monkeypatch, conn)
 
+    prompts: list[str] = []
+
     async def fake_chat(_messages, **_kwargs):
         prompt = _messages[0]["content"]
+        prompts.append(prompt)
+        phase = _kwargs["call_meta"]["discovery_phase"]
+        if phase == "current":
+            assert "绿袍男子摘下斗笠" not in prompt
+            return json.dumps({
+                "characters": [{
+                    "source_label": "绿袍男子",
+                    "canonical_name": "",
+                    "identity_kind": "functional",
+                    "kind": "onscreen",
+                    "evidence": "绿袍男子拦路呵斥",
+                    "future_evidence": "",
+                }],
+            }, ensure_ascii=False)
         assert "绿袍男子摘下斗笠" in prompt
         assert "丁力再次现身" in prompt
         assert "超出十章" not in prompt
-        assert "姓氏加师兄/师姐" in prompt
-        assert "这类情况必须判为 functional" in prompt
         return json.dumps({
             "characters": [{
                 "source_label": "绿袍男子",
@@ -621,6 +635,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
     ))
 
     assert ensured == ["丁力"]
+    assert len(prompts) == 2
     assert result["future_context_label"] == "第 31-40 章（仅姓名消歧）"
     assert result["resolutions"] == [{
         "source_label": "绿袍男子",
@@ -643,7 +658,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     )
     future_text = (
         "前批章节暂无身份线索。"
-        + "甲" * portraits.CAST_DISCOVERY_FUTURE_BATCH_BUDGET
+        + "甲" * (portraits.CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET * 2)
         + "青衣人摘下面具，萧炎这才认出他就是丁力。"
     )
     prompts: list[str] = []
@@ -651,7 +666,8 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     async def fake_chat(messages, **_kwargs):
         prompt = messages[0]["content"]
         prompts.append(prompt)
-        if "他就是丁力" in prompt:
+        if _kwargs["call_meta"]["discovery_phase"] == "future_identity":
+            assert "前批章节暂无身份线索" not in prompt
             return json.dumps({"characters": [{
                 "source_label": "青衣人",
                 "canonical_name": "丁力",
@@ -678,7 +694,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
         future_label="第 31-40 章",
     ))
 
-    assert len(prompts) >= 2
+    assert len(prompts) == 2
     assert "他就是丁力" in prompts[-1]
     assert [(item["source_label"], item["name"], item["identity_kind"]) for item in candidates] == [
         ("青衣人", "丁力", "named"),
@@ -829,6 +845,55 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
         "萧炎来到山门。", bible, 21, draft_text=draft,
     ))
 
+    assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [
+        ("紫甲女子", "functional"),
+    ]
+
+
+def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="萧炎", role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
+        )],
+    )
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompt = messages[0]["content"]
+        prompts.append(prompt)
+        assert _kwargs["call_meta"]["discovery_phase"] == "current"
+        assert "SOURCE_BODY_MARKER" not in prompt
+        assert "SCRIPT_ACTION_MARKER" not in prompt
+        assert "紫甲女子" in prompt
+        return json.dumps({"characters": [{
+            "source_label": "紫甲女子",
+            "canonical_name": "",
+            "identity_kind": "functional",
+            "kind": "onscreen",
+            "evidence": "类型合同中的场次人物",
+            "future_evidence": "",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    draft = EpisodeScreenplay(
+        episode_no=21,
+        scene_outline=[ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】日 / 山门",
+            story_function="SCRIPT_ACTION_MARKER",
+            characters=["萧炎", "紫甲女子"],
+            summary="SCRIPT_ACTION_MARKER",
+        )],
+        full_script_text="【场1】日 / 山门\nSCRIPT_ACTION_MARKER",
+    ).model_dump_json()
+
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "SOURCE_BODY_MARKER", bible, 21, draft_text=draft,
+    ))
+
+    assert len(prompts) == 1
     assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [
         ("紫甲女子", "functional"),
     ]

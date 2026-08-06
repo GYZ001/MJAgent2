@@ -2069,6 +2069,88 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
 
 
 @pytest.mark.asyncio
+async def test_post_baseline_identity_failure_keeps_single_durable_baseline(
+    monkeypatch,
+):
+    from app import stages
+    from app.production import screenplay_authority, screenplay_repair
+    from app.production.revision import get_active_production_revision
+
+    generated = _minimal_script(stakes="失败将失去资格")
+    calls = {"baseline": 0, "audit": 0}
+
+    async def generate_once(*_args, **_kwargs):
+        calls["baseline"] += 1
+        if calls["baseline"] > 1:
+            raise AssertionError("identity audit retry must not regenerate baseline")
+        return generated
+
+    async def failing_identity_audit(*_args, **_kwargs):
+        calls["audit"] += 1
+        revision = get_active_production_revision("ep_p", "screenplay")
+        assert revision is not None
+        assert revision.baseline_generation_count == 1
+        assert revision.baseline_artifact_id
+        assert revision.working_artifact_id == revision.baseline_artifact_id
+        raise RuntimeError("identity provider rejected")
+
+    monkeypatch.setattr(stages, "generate_screenplay_baseline", generate_once)
+    monkeypatch.setattr(
+        screenplay_authority,
+        "screenplay_authority_fingerprint",
+        lambda *_args, **_kwargs: "authority-test",
+    )
+    monkeypatch.setattr(
+        screenplay_repair,
+        "ensure_source_characters_incremental",
+        failing_identity_audit,
+    )
+    episode = {
+        "id": "ep_p",
+        "project_id": "proj_p",
+        "episode_no": 1,
+        "target_duration_s": 50,
+        "character_resolutions": [],
+    }
+    bible = Bible(
+        characters=[Character(
+            name="已知角色",
+            role="主角",
+            appearance_canonical="成年男性，黑色短发，深色外套，身形挺拔，神情坚定",
+        )],
+        world=World(visual_style_canonical="测试画风"),
+    )
+
+    with pytest.raises(RuntimeError, match="identity provider rejected"):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode=dict(episode),
+            source_text="原文",
+            bible=bible,
+            resume=True,
+        )
+
+    revision = get_active_production_revision("ep_p", "screenplay")
+    assert revision is not None
+    assert revision.baseline_generation_count == 1
+    assert revision.baseline_artifact_id == revision.working_artifact_id
+
+    with pytest.raises(RuntimeError, match="identity provider rejected"):
+        await screenplay_repair.run_screenplay_production(
+            episode_id="ep_p",
+            episode=dict(episode),
+            source_text="原文",
+            bible=bible,
+            resume=True,
+        )
+
+    resumed = get_active_production_revision("ep_p", "screenplay")
+    assert resumed is not None
+    assert resumed.baseline_generation_count == 1
+    assert calls == {"baseline": 1, "audit": 2}
+
+
+@pytest.mark.asyncio
 async def test_score_only_qa_does_not_plan_or_apply_patch(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
