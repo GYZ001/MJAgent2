@@ -68,6 +68,14 @@
   must_fix_issues=0.
 - The three published blockers are a 49-character single-shot dialogue,
   an invalid dialogue chain length, and one undelivered must-keep spine beat.
+- Episode 1 reproduced the same fail-open publication after the backend restart:
+  Artifact `art_665550c32bad` was published as ready with score 20,
+  `blocker_count=8`, and `must_fix_count=8`; certificate
+  `cert_9124a9fb1b3f` still records blockers=0 and must_fix_issues=0.
+- That approved 50-second episode contains 21 spine beats, 9 scenes, 46 dialogue
+  turns, 883 spoken characters, and 2,038 action-text characters. At the system's
+  own 36 spoken characters per 10 seconds limit, dialogue alone requires roughly
+  245 seconds before any action or scene establishment time.
 - Repair regression is hidden: episode 1 iteration 2 degraded from a T1 candidate
   to T0 due to an invalid `source_coverage[100].disposition`, but the final error
   reported only blockers from the previous parseable candidate.
