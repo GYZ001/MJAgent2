@@ -2049,7 +2049,9 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 
 【对白与人物】
 - dialogue_chains 按真实发生顺序保留完整问答、宣布、反应和决定链。
+- 对白话轮不设固定条数上限；按剧情语义链和后续单镜口播容量拆分。
 - source_text 必须逐字引用本集原文，不得写占位说明。
+- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型不得另选孤立金句。
 - key_lines 由 dialogue_chains 派生并真实写入 full_script_text 的“角色名：台词”行。
 - scene_outline.characters 和所有说话人只能使用人物谱准确姓名（{bible_names_inline}）
   或人物预检已解析的功能性身份；禁止新造具名角色。
@@ -2149,10 +2151,7 @@ async def generate_screenplay_baseline(
     # Baseline-only 禁止对已成形剧本做第二次整版 QA 重写，但首轮若连
     # Pydantic 候选都没有产生（JSON/结构错误），必须允许受限的结构修复。
     # 一旦出现首个可解析候选，baseline_only 会立即交给局部 Patch。
-    structural_bootstrap_iterations = min(
-        max(int(get_setting("max_repair_attempts") or 4), 1),
-        4,
-    )
+    structural_bootstrap_iterations = 2
     loop = AgentLoop(
         stage_key="screenplay",
         contract_key="screenplay",
@@ -2166,7 +2165,8 @@ async def generate_screenplay_baseline(
             min_quality_gain=0.03,
             no_gain_rounds=2,
             allow_warning_candidate=False,
-            baseline_only=True,
+            baseline_only=False,
+            repair_all_blockers=True,
         ),
     )
 

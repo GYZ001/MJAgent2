@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import asyncio
+
+from app import stages
+from app.production.screenplay_document import (
+    document_to_screenplay,
+    screenplay_to_document,
+)
+from app.schemas import (
+    Bible,
+    Character,
+    EpisodeScreenplay,
+    PlotSpine,
+    PlotSpineBeat,
+    Shot,
+    Storyboard,
+    StoryboardContextRequirement,
+    StoryboardOutline,
+    StoryboardOutlineShot,
+    StoryboardSceneContext,
+    World,
+)
+from app.validators import (
+    validate_screenplay_source_coverage,
+    validate_storyboard_direction_contract,
+)
+
+
+def _shot(
+    shot_no: int,
+    *,
+    focus: str,
+    size: str,
+    move: str,
+    context_ids: list[str] | None = None,
+) -> Shot:
+    return Shot(
+        shot_no=shot_no,
+        shot_id=f"SH{shot_no:04d}",
+        scene_id="SC001",
+        duration_s=5,
+        shot_size=size,
+        camera_angle="平视侧面角度",
+        camera_move=move,
+        camera_motivation="让本镜主体、空间关系和戏剧变化清楚可读",
+        scene_time="夜",
+        scene_name="咖啡厅",
+        characters=["谷言"],
+        characters_visible=["谷言"],
+        action_desc="谷言从桌边起身走向门口，在门前停下观察门外动静。",
+        first_frame_desc="谷言坐在咖啡厅桌边，门位于画面右侧。",
+        last_frame_desc="同一机位，谷言走到右侧门前停下。",
+        source_excerpt="谷言从桌边起身，快步走到门口停下。",
+        purpose="建立空间并推进谷言对门外危险的确认",
+        resulting_change={
+            "context": "观众明确咖啡厅、谷言和门的空间关系",
+            "action": "谷言从等待转为主动走向门口确认危险",
+            "emotion": "谷言确认危险后由迟疑转为警觉",
+        }[focus],
+        readability_focus=focus,
+        context_requirement_ids=list(context_ids or []),
+        spine_beat_ids=["S01"],
+        prompt_contract_version="director_scene_pack_v1",
+    )
+
+
+def _outline() -> StoryboardOutline:
+    briefs = [
+        StoryboardOutlineShot(
+            shot_no=index,
+            shot_id=f"SH{index:04d}",
+            scene_id="SC001",
+            beat=f"第{index}镜承担独立剧情作用",
+            purpose="承担本镜独立的导演和剧情交付作用",
+            context_requirement_ids=["CTX-SC001-01"] if index == 1 else [],
+            resulting_change=f"第{index}镜结束后状态发生变化",
+            readability_focus=focus,
+            camera_size=size,
+            camera_angle="平视侧面角度",
+            camera_movement=move,
+            camera_motivation="让空间、动作或情绪变化清楚可读",
+            spine_beat_ids=["S01"],
+        )
+        for index, (focus, size, move) in enumerate(
+            [
+                ("context", "全景", "固定"),
+                ("action", "中景", "跟随"),
+                ("emotion", "近景", "固定"),
+            ],
+            start=1,
+        )
+    ]
+    return StoryboardOutline(
+        episode_no=1,
+        shots=briefs,
+        scene_contexts=[
+            StoryboardSceneContext(
+                scene_id="SC001",
+                scene_no=1,
+                scene_name="咖啡厅",
+                scene_time="夜",
+                entry_state="谷言坐在桌边等待，门位于右侧",
+                exit_state="谷言走到门前确认危险逼近",
+                transition_from_previous="雨声延续进入咖啡厅",
+                spatial_axis="桌、门与谷言保持同一横向轴线",
+                context_requirements=[
+                    StoryboardContextRequirement(
+                        requirement_id="CTX-SC001-01",
+                        description="建立咖啡厅、谷言与门的空间关系",
+                        required_before_shot_no=2,
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def test_source_coverage_is_exhaustive_and_round_trips() -> None:
+    source = "第一段发生关键事件。\n\n第二段补充人物关系。"
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        plot_spine=PlotSpine(
+            episode_premise="谷言必须确认门外危险",
+            spine_beats=[
+                PlotSpineBeat(
+                    beat_id="S01",
+                    who="谷言",
+                    does="走到门前确认危险",
+                    turn="等待转为行动",
+                    source_segment_ids=["SRC0001", "SRC0002"],
+                )
+            ],
+            must_keep_ending="谷言确认危险已经来到门外",
+        ),
+        source_coverage=[
+            {
+                "source_segment_id": "SRC0001",
+                "disposition": "deliver",
+                "beat_ids": ["S01"],
+            },
+            {
+                "source_segment_id": "SRC0002",
+                "disposition": "context",
+                "reason": "作为人物关系和行动动机保留",
+            },
+        ],
+    )
+
+    assert validate_screenplay_source_coverage(screenplay, source) == []
+    restored = document_to_screenplay(screenplay_to_document(screenplay))
+    assert [item.source_segment_id for item in restored.source_coverage] == [
+        "SRC0001",
+        "SRC0002",
+    ]
+
+    screenplay.source_coverage.pop()
+    errors = validate_screenplay_source_coverage(screenplay, source)
+    assert any("SRC0002" in error and "漏掉" in error for error in errors)
+
+
+def test_direction_contract_requires_context_and_camera_readability() -> None:
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            _shot(1, focus="context", size="全景", move="固定", context_ids=["CTX-SC001-01"]),
+            _shot(2, focus="action", size="中景", move="跟随"),
+            _shot(3, focus="emotion", size="近景", move="固定"),
+        ],
+    )
+
+    assert validate_storyboard_direction_contract(board, _outline()) == []
+
+    board.shots[1].camera_angle = ""
+    board.shots[2].shot_size = "全景"
+    errors = validate_storyboard_direction_contract(board, _outline())
+    assert any("camera_angle" in error for error in errors)
+    assert any("情绪转折" in error for error in errors)
+
+
+def test_scene_pack_hydrates_director_fields_without_per_shot_calls(monkeypatch) -> None:
+    outline = _outline()
+    context = outline.scene_contexts[0]
+    bible = Bible(
+        characters=[
+            Character(
+                name="谷言",
+                role="主角",
+                appearance_canonical="二十八岁男性，黑色短发，深灰西装，佩戴银色手表",
+            )
+        ],
+        world=World(visual_style_canonical="都市国漫厚涂风，统一电影光影"),
+    )
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="【场1】夜 / 咖啡厅\n谷言从桌边起身，快步走到门口停下。",
+    )
+    source = "谷言从桌边起身，快步走到门口停下。"
+
+    async def fake_loop(*_args, **_kwargs):
+        return stages.DirectedScenePackDraft(
+            episode_no=1,
+            scene_id="SC001",
+            shots=[
+                stages.DirectedSceneShotDraft(
+                    shot_no=brief.shot_no,
+                    purpose=brief.purpose,
+                    context_requirement_ids=brief.context_requirement_ids,
+                    resulting_change=brief.resulting_change,
+                    readability_focus=brief.readability_focus,
+                    duration_s=5,
+                    shot_size=brief.camera_size,
+                    camera_angle=brief.camera_angle,
+                    camera_move=brief.camera_movement,
+                    camera_motivation=brief.camera_motivation,
+                    characters=["谷言"],
+                    action_desc="谷言从桌边起身走向门口，在门前停下观察外面。",
+                    first_frame_desc="谷言位于咖啡厅桌边，门在画面右侧。",
+                    last_frame_desc="同一机位，谷言走到右侧门前停下。",
+                    source_excerpt=source,
+                )
+                for brief in outline.shots
+            ],
+        )
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    pack = asyncio.run(stages.generate_storyboard_scene_pack(
+        {"id": "e1", "episode_no": 1, "target_duration_s": 50},
+        source,
+        bible,
+        screenplay,
+        outline,
+        context,
+    ))
+
+    assert [shot.shot_no for shot in pack.shots] == [1, 2, 3]
+    assert pack.shots[1].camera_move == "跟随"
+    assert pack.shots[1].camera_angle == "平视侧面角度"
+    assert pack.shots[1].prompt_contract_version == "director_scene_pack_v1"

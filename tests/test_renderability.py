@@ -1,6 +1,5 @@
 """Renderability First 合同单测。"""
 from app.renderability import (
-    SHOT_HARD_MAX,
     find_overdetail_hits,
     overdetail_errors,
     overdetail_issue_is_active,
@@ -42,14 +41,13 @@ def test_retired_shot_size_repair_issue_is_inactive() -> None:
 def test_shot_count_budget() -> None:
     assert shot_count_budget_errors(12) == []
     assert shot_count_budget_errors(18) == []
-    hard = shot_count_budget_errors(SHOT_HARD_MAX + 1)
-    assert any("硬上限" in e for e in hard)
+    assert shot_count_budget_errors(500) == []
 
 
-def test_storyboard_shot_count_range_is_renderability_budget() -> None:
+def test_storyboard_shot_count_range_has_no_product_ceiling() -> None:
     lo, hi = storyboard_shot_count_range(50)
     assert lo == 1
-    assert hi == SHOT_HARD_MAX
+    assert hi > 1_000_000
 
 
 def test_validate_plot_spine_requires_beats_and_drops() -> None:

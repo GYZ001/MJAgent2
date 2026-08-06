@@ -1125,13 +1125,14 @@ def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> 
     ))
 
     policy = captured["policy"]
-    assert policy.max_iterations == 4
+    assert policy.max_iterations == 2
     assert policy.stall_rounds == 2
     assert policy.no_gain_rounds == 2
-    assert policy.baseline_only is True
+    assert policy.baseline_only is False
+    assert policy.repair_all_blockers is True
 
 
-def test_screenplay_baseline_passes_authorized_source_chapters_to_narrative_validator(monkeypatch) -> None:
+def test_screenplay_baseline_requires_source_coverage_without_narrative_graph(monkeypatch) -> None:
     captured = {}
 
     async def fake_loop(_stage, _stage_key, _prompt, _model, business_validate, **kwargs):
@@ -1140,16 +1141,12 @@ def test_screenplay_baseline_passes_authorized_source_chapters_to_narrative_vali
         captured["errors"] = business_validate(script)
         return script
 
-    def fake_validate_narrative(_script, **kwargs):
-        captured["authorized_source_chapters"] = kwargs.get("authorized_source_chapters")
+    def fake_validate_screenplay(*_args, **kwargs):
+        captured["require_source_coverage"] = kwargs.get("require_source_coverage")
         return []
 
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
-    monkeypatch.setattr(stages, "validate_screenplay", lambda *args, **kwargs: [])
-    monkeypatch.setattr(
-        "app.narrative.validate_screenplay_narrative",
-        fake_validate_narrative,
-    )
+    monkeypatch.setattr(stages, "validate_screenplay", fake_validate_screenplay)
     episode = {
         "id": "ep-json-bootstrap",
         "episode_no": 9,
@@ -1166,7 +1163,7 @@ def test_screenplay_baseline_passes_authorized_source_chapters_to_narrative_vali
     ))
 
     assert captured["errors"] == []
-    assert captured["authorized_source_chapters"] == {"1": "第一章正文"}
+    assert captured["require_source_coverage"] is True
 
 
 def test_user_selected_dialogues_are_hard_gates() -> None:
