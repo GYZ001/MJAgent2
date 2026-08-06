@@ -36,6 +36,7 @@ from app.video_supervisor import (
     reconcile_stale_video_supervisors,
     recover_video_completion_runs,
     rebuild_coverage_ledger,
+    run_video_completion_resilient,
     save_checkpoint,
 )
 
@@ -141,6 +142,97 @@ def _add_succeeded_version(
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (vid, shot_id))
     conn.commit()
     return vid
+
+
+def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    memdb.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,cost_cny,
+               provider_task_id,image_inputs,created_at
+           ) VALUES(
+               'cleared-old',?,1,'old','old-key','cleared',12,
+               'old-provider','{"provider_paid_attempts":3}',1
+           )""",
+        (shot_id,),
+    )
+    memdb.commit()
+
+    entry = rebuild_coverage_ledger(eid).entries[0]
+
+    assert entry.best_version_id is None
+    assert entry.attempts_paid == 0
+    assert entry.attempts_dispatched == 0
+    assert entry.never_attempted is True
+    assert entry.cost_spent_cny == 0
+
+
+@pytest.mark.asyncio
+async def test_fresh_control_plane_recovery_never_loads_previous_run_checkpoint(
+    monkeypatch,
+) -> None:
+    import app.observability.metrics as metrics
+    import app.video_supervisor as supervisor
+
+    old = VideoSupervisorCheckpoint(
+        episode_id="e",
+        run_id="run-old",
+        phase="OBSERVING",
+        started_at=1,
+        shot_state={"1": {"attempts_paid": 5}},
+        budget={"spent_cny": 99},
+    )
+    saved: list[VideoSupervisorCheckpoint] = []
+    calls = 0
+
+    async def run_once(_episode_id, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("fresh run failed before first checkpoint")
+        assert kwargs["resume"] is True
+        return saved[-1]
+
+    monkeypatch.setattr(supervisor, "run_video_completion_supervisor", run_once)
+    monkeypatch.setattr(
+        supervisor,
+        "load_latest_checkpoint",
+        lambda _episode_id: saved[-1] if saved else old,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "save_checkpoint",
+        lambda cp, **_kwargs: saved.append(cp.model_copy(deep=True)) or "checkpoint",
+    )
+    monkeypatch.setattr(supervisor.evidence_repository, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(metrics, "inc", lambda *a, **k: None)
+    monkeypatch.setattr(supervisor.asyncio, "sleep", lambda _seconds: _immediate())
+
+    async def execute():
+        return await run_video_completion_resilient(
+            "e",
+            run_id="run-new",
+            resume=False,
+            wall_clock_cap_s=60,
+        )
+
+    async def _noop():
+        return None
+
+    async def _run_with_sleep_patch():
+        return await execute()
+
+    # ``asyncio.sleep`` must remain awaitable under the deterministic patch.
+    async def _immediate():
+        await _noop()
+
+    result = await _run_with_sleep_patch()
+
+    assert result.run_id == "run-new"
+    assert result.shot_state == {}
+    assert result.budget == {}
+    assert saved[0].run_id == "run-new"
 
 
 def test_coverage_ledger_counts_provider_attempts_inside_one_version(memdb):

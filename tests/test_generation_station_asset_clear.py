@@ -240,6 +240,15 @@ def test_episode_resource_clear_supersedes_active_video_plan(
                'FIRST_LAST_FRAME_MODE','FIRST_LAST_FRAME_MODE',0,'{}',0
            )"""
     )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_json,content_hash,created_at
+           ) VALUES(
+               'old-checkpoint','video_supervisor_checkpoint','episode','e',1,
+               'validated','T2','{}','hash',0
+           )"""
+    )
     conn.commit()
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(
@@ -271,3 +280,10 @@ def test_episode_resource_clear_supersedes_active_video_plan(
     assert conn.execute(
         "SELECT COUNT(*) FROM video_mode_qa_results WHERE id='qa-audit'"
     ).fetchone()[0] == 1
+    checkpoint = conn.execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id='old-checkpoint'"
+    ).fetchone()
+    assert tuple(checkpoint) == (
+        "superseded",
+        "用户已清空本集生成资源",
+    )

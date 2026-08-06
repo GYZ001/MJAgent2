@@ -715,6 +715,11 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
         )
     if stage_key == "storyboard" or stage_key.startswith("storyboard_shot_"):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
+    if stage == "episode_video_mode_plan":
+        return max(
+            config.TIMEOUT_CHAT_READ,
+            config.TIMEOUT_CHAT_VIDEO_PLAN_READ,
+        )
     if (
         "baseline" in stage
         or stage == "screenplay_narrative_patch"
