@@ -20,10 +20,12 @@ const CONTINUITY_MODES: Record<string, string> = {
 }
 
 const EDITABLE_FIELDS: Array<keyof Shot> = [
-  'duration_s', 'shot_size', 'camera_move', 'scene_time', 'scene_name', 'characters', 'action_desc',
+  'duration_s', 'shot_size', 'camera_angle', 'camera_move', 'scene_time', 'scene_name', 'characters', 'action_desc',
   'first_frame_desc', 'last_frame_desc', 'dialogues', 'transition', 'continuity_from_prev',
   'continuity_mode', 'state_in', 'primary_action', 'state_out', 'characters_visible',
   'audio_cast', 'new_information_ids', 'spine_beat_ids', 'key_line_ids',
+  'purpose', 'resulting_change', 'readability_focus', 'camera_motivation',
+  'repeat_of_shot_id', 'repeat_gain',
 ]
 
 type EditSession = {
@@ -1100,7 +1102,7 @@ export default function BoardPage() {
                   className={shot.id === selectedShot?.id ? 'active' : ''}
                   onClick={() => requestShotSelect(shot.id)}>
                   <span className="shot-nav-top"><span className="shot-nav-no">镜 {String(shot.shot_no).padStart(2, '0')}</span><span>{shot.duration_s}s</span></span>
-                  <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_move}</b><small>{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</small></span>
+                  <span className="shot-nav-main"><b>{shot.shot_size} · {shot.camera_angle || '平视'} · {shot.camera_move}</b><small>{shot.scene_time ? `${shot.scene_time} · ` : ''}{shot.scene_name || shot.scene_setting}</small></span>
                   <span className="shot-nav-badges">
                     {checkpoint && <i className={checkpoint.className} title={checkpoint.title}>{checkpoint.label}</i>}
                     {isStoryboardProblemShot(shot) && <i className="problem">需处理</i>}
@@ -1438,7 +1440,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
     <article className={`shot-strip ${edit ? 'editing' : 'reviewing'}`}>
       <header className="shot-head">
         <div className="shot-head-copy"><span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
-          <span className="meta">{current.duration_s}s · {current.shot_size} · {current.camera_move} · {current.transition}</span>
+          <span className="meta">{current.duration_s}s · {current.shot_size} · {current.camera_angle || '平视'} · {current.camera_move} · {current.transition}</span>
           <span className="meta shot-characters">{current.characters.join(' / ') || '缺角色（需修改）'}</span>
           {isStoryboardProblemShot(shot) && <span className="shot-badge status-needs_revision">需处理</span>}
           {shot.is_final && <span className="shot-badge gate">收尾镜</span>}
@@ -1492,6 +1494,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
             <div className="shot-edit-grid">
               <label htmlFor={fieldId(shot.id, 'duration')}>时长<select id={fieldId(shot.id, 'duration')} value={edit.duration_s} onChange={event => setEdit({ ...edit, duration_s: Number(event.target.value) })}>{DURATIONS.map(value => <option key={value} value={value}>{value}s</option>)}</select><small>{edit.duration_s > 5 ? '保存后进入自动与规则审核，通过前不会发布' : '标准时长'}</small></label>
               <label htmlFor={fieldId(shot.id, 'size')}>景别<select id={fieldId(shot.id, 'size')} value={edit.shot_size} onChange={event => setEdit({ ...edit, shot_size: event.target.value })}>{SIZES.map(value => <option key={value}>{value}</option>)}</select></label>
+              <label htmlFor={fieldId(shot.id, 'angle')}>角度<input id={fieldId(shot.id, 'angle')} value={edit.camera_angle ?? ''} placeholder="平视 / 过肩 / 低角度 / 俯拍" onChange={event => setEdit({ ...edit, camera_angle: event.target.value })} /></label>
               <label htmlFor={fieldId(shot.id, 'move')}>运镜<select id={fieldId(shot.id, 'move')} value={edit.camera_move} onChange={event => setEdit({ ...edit, camera_move: event.target.value })}>{MOVES.map(value => <option key={value}>{value}</option>)}</select></label>
               <label htmlFor={fieldId(shot.id, 'transition')}>转场<select id={fieldId(shot.id, 'transition')} value={edit.transition} onChange={event => setEdit({ ...edit, transition: event.target.value })}>{TRANSITIONS.map(value => <option key={value}>{value}</option>)}</select></label>
             </div>
@@ -1500,6 +1503,9 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
               <label htmlFor={fieldId(shot.id, 'scene-name')}>场景图标签<input id={fieldId(shot.id, 'scene-name')} list={fieldId(shot.id, 'scene-name-options')} value={edit.scene_name ?? ''} required placeholder="选择或输入接近的场景名" onChange={event => setEdit({ ...edit, scene_name: event.target.value })} /><datalist id={fieldId(shot.id, 'scene-name-options')}>{sceneOptions.map(value => <option key={value} value={value} />)}</datalist><small>保存时可模糊匹配，命中后会归一成场景库规范名</small></label>
             </div>
             <label htmlFor={fieldId(shot.id, 'action')}>画面与动作<textarea id={fieldId(shot.id, 'action')} rows={3} value={edit.action_desc} required onChange={event => setEdit({ ...edit, action_desc: event.target.value })} /></label>
+            <label htmlFor={fieldId(shot.id, 'purpose')}>本镜作用<textarea id={fieldId(shot.id, 'purpose')} rows={2} value={edit.purpose ?? ''} onChange={event => setEdit({ ...edit, purpose: event.target.value })} /></label>
+            <label htmlFor={fieldId(shot.id, 'resulting-change')}>本镜结果变化<textarea id={fieldId(shot.id, 'resulting-change')} rows={2} value={edit.resulting_change ?? ''} onChange={event => setEdit({ ...edit, resulting_change: event.target.value })} /></label>
+            <label htmlFor={fieldId(shot.id, 'camera-motivation')}>摄影动机<textarea id={fieldId(shot.id, 'camera-motivation')} rows={2} value={edit.camera_motivation ?? ''} onChange={event => setEdit({ ...edit, camera_motivation: event.target.value })} /></label>
             <div className="shot-edit-grid frames"><label htmlFor={fieldId(shot.id, 'first')}>首帧画面<textarea id={fieldId(shot.id, 'first')} rows={2} value={edit.first_frame_desc} onChange={event => setEdit({ ...edit, first_frame_desc: event.target.value })} /></label>
               <label htmlFor={fieldId(shot.id, 'last')}>尾帧画面<textarea id={fieldId(shot.id, 'last')} rows={2} value={edit.last_frame_desc} onChange={event => setEdit({ ...edit, last_frame_desc: event.target.value })} /></label></div>
           </section>
@@ -1570,10 +1576,10 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
       ) : (
         <div className="shot-review-body">
           <section className="shot-overview"><div className="shot-visual-brief"><span className="shot-section-label">画面设计</span><h2>{current.scene_name || current.scene_setting}</h2>{current.scene_time && <small>时间：{current.scene_time}</small>}<p>{current.action_desc}</p></div>
-            <dl className="shot-specs"><div><dt>时长</dt><dd>{current.duration_s}s</dd></div><div><dt>景别</dt><dd>{current.shot_size}</dd></div><div><dt>运镜</dt><dd>{current.camera_move}</dd></div><div><dt>转场</dt><dd>{current.transition}</dd></div></dl></section>
+            <dl className="shot-specs"><div><dt>时长</dt><dd>{current.duration_s}s</dd></div><div><dt>景别</dt><dd>{current.shot_size}</dd></div><div><dt>角度</dt><dd>{current.camera_angle || '平视'}</dd></div><div><dt>运镜</dt><dd>{current.camera_move}</dd></div><div><dt>转场</dt><dd>{current.transition}</dd></div></dl></section>
           <div className="shot-frame-pair shot-continuity-chain" aria-label="镜头状态链"><div className="shot-frame-card"><b>进入状态</b><p>{current.state_in || current.first_frame_desc || '未设置'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>镜头动作</b><p>{current.primary_action || current.action_desc}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>离开状态</b><p>{current.state_out || current.last_frame_desc || '未设置'}</p></div></div>
           <section className="shot-spoken-panel"><header className="shot-context-head"><b>本镜台词</b><span>{currentChars} / {spokenLimit} 字</span></header>{overCapacity && <p className="shot-spoken-warn">口播已超出本镜容量</p>}{current.dialogues.length ? current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}<small>{line.emotion}</small></b><p>「{line.line}」</p></div>) : <p>本镜无台词</p>}</section>
-          <section className="shot-context-panel"><h3>镜头要素</h3><dl className="shot-context-grid"><div><dt>画面角色</dt><dd>{current.characters.join('、') || '无'}</dd></div><div><dt>声音角色</dt><dd>{current.audio_cast?.join('、') || '无'}</dd></div><div><dt>本镜新信息</dt><dd>{current.new_information_items?.map(item => item.content).join('；') || '无'}</dd></div></dl></section>
+          <section className="shot-context-panel"><h3>镜头要素</h3><dl className="shot-context-grid"><div><dt>本镜作用</dt><dd>{current.purpose || '旧版镜头未单列'}</dd></div><div><dt>结果变化</dt><dd>{current.resulting_change || current.state_out || '未单列'}</dd></div><div><dt>摄影动机</dt><dd>{current.camera_motivation || '旧版镜头未单列'}</dd></div><div><dt>画面角色</dt><dd>{current.characters.join('、') || '无'}</dd></div><div><dt>声音角色</dt><dd>{current.audio_cast?.join('、') || '无'}</dd></div><div><dt>本镜新信息</dt><dd>{current.new_information_items?.map(item => item.content).join('；') || '无'}</dd></div></dl></section>
           <div className="shot-detail-tabs" role="tablist" aria-label="镜头详情"><button id={`shot-detail-tab-${shot.id}-frames`} type="button" role="tab" aria-selected={detailTab === 'frames'} aria-controls={detailPanelId} tabIndex={detailTab === 'frames' ? 0 : -1} className={detailTab === 'frames' ? 'active' : ''} onClick={() => setDetailTab('frames')} onKeyDown={event => { if (event.key === 'ArrowRight' || event.key === 'End') { event.preventDefault(); focusDetailTab('script') } }}>起止画面</button><button id={`shot-detail-tab-${shot.id}-script`} type="button" role="tab" aria-selected={detailTab === 'script'} aria-controls={detailPanelId} tabIndex={detailTab === 'script' ? 0 : -1} className={detailTab === 'script' ? 'active' : ''} onClick={() => setDetailTab('script')} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'Home') { event.preventDefault(); focusDetailTab('frames') } }}>声音与原文</button></div>
           {detailTab === 'frames' ? <div id={detailPanelId} className="shot-frame-pair" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-frames`}><div className="shot-frame-card"><b>01 · 首帧</b><p>{current.first_frame_desc || '暂未描述'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>02 · 尾帧</b><p>{current.last_frame_desc || '暂未描述'}</p></div></div>
             : <div id={detailPanelId} className="shot-script-grid" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-script`}><div className="shot-script-copy"><b>原文依据（不送视频模型）</b><p>{current.source_excerpt || '暂无对应原文'}</p><small>{current.source_binding ? `已绑定第 ${current.source_binding.chapter_idx} 章原文片段` : '当前只保留原文内容，确认前会检查来源位置'}</small></div><div className="shot-audio-copy">{current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}</b><p>「{line.line}」</p></div>)}</div></div>}

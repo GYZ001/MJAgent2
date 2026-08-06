@@ -2372,6 +2372,7 @@ async def cancel_storyboard(episode_id: str, body: dict | None = Body(None)):
             "message": "任务已自然结束或此前已停止；当前状态保持不变",
         }
     await task_registry.cancel_and_wait("storyboard", episode_id)
+    await task_registry.cancel_and_wait("storyboard_assets", episode_id)
     from app.storyboard_workspace import finalize_storyboard_cancellation
     return finalize_storyboard_cancellation(
         episode_id,

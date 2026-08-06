@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app import errors
-from app.db import get_conn
+from app.db import get_conn, get_setting
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
@@ -2402,9 +2402,18 @@ async def run_storyboard_supervisor(
                 and context.scene_id not in cp.scene_pack_candidates
             ]
             if pending_contexts:
-                generated = await asyncio.gather(
-                    *[
-                        generate_storyboard_scene_pack(
+                try:
+                    scene_parallelism = max(
+                        1,
+                        int(get_setting("storyboard_concurrency") or 2),
+                    )
+                except (TypeError, ValueError):
+                    scene_parallelism = 2
+                scene_gate = asyncio.Semaphore(scene_parallelism)
+
+                async def _generate_scene(context):
+                    async with scene_gate:
+                        return await generate_storyboard_scene_pack(
                             ep_data,
                             source_text,
                             bible,
@@ -2412,6 +2421,10 @@ async def run_storyboard_supervisor(
                             outline,
                             context,
                         )
+
+                generated = await asyncio.gather(
+                    *[
+                        _generate_scene(context)
                         for context in pending_contexts
                     ],
                     return_exceptions=True,
@@ -3026,8 +3039,12 @@ async def run_storyboard_supervisor(
         synced = (
             int(ep_data["target_duration_s"] or 0)
             if narrative_authority
-            else _compact_episode_target(
-                actual_total or ep_data["target_duration_s"]
+            else (
+                actual_total
+                if outline is not None and outline.scene_contexts
+                else _compact_episode_target(
+                    actual_total or ep_data["target_duration_s"]
+                )
             )
         )
         _assert_storyboard_write_authorized(

@@ -1215,7 +1215,7 @@ function ScreenplayEditor({
 
       {section === 'scenes' && (
         <div className="card screenplay-editor-section">
-          <div className="structured-section-head"><b>场次结构</b><span>每个字段独立存储；正文中的 | 只是普通字符。</span><button className="btn small" type="button" onClick={() => updateScript({ scene_outline: [...scenes, { scene_no: scenes.length + 1, scene_heading: '', story_function: '', summary: '', conflict: '', turn: '', source_basis: '', characters: [] }] })}>新增场次</button></div>
+          <div className="structured-section-head"><b>场次结构</b><span>每个字段独立存储；正文中的 | 只是普通字符。</span><button className="btn small" type="button" onClick={() => updateScript({ scene_outline: [...scenes, { scene_no: scenes.length + 1, scene_heading: '', story_function: '', summary: '', conflict: '', turn: '', source_basis: '', entry_state: '', exit_state: '', context_requirements: [], characters: [] }] })}>新增场次</button></div>
           <div className="structured-list">
             {scenes.map((scene, index) => (
               <article className="structured-row" key={`${scene.scene_no}-${index}`}>
@@ -1330,6 +1330,9 @@ function SceneFields({ scene, update }: { scene: ScriptScene; update: (patch: Pa
       <label className="wide">本场内容<textarea rows={3} value={scene.summary} onChange={event => update({ summary: event.target.value })} /></label>
       <label>冲突<textarea rows={2} value={scene.conflict ?? ''} onChange={event => update({ conflict: event.target.value })} /></label>
       <label>转折 / 交接<textarea rows={2} value={scene.turn ?? ''} onChange={event => update({ turn: event.target.value })} /></label>
+      <label className="wide">入场状态<textarea rows={2} value={scene.entry_state ?? ''} onChange={event => update({ entry_state: event.target.value })} /></label>
+      <label className="wide">离场状态<textarea rows={2} value={scene.exit_state ?? ''} onChange={event => update({ exit_state: event.target.value })} /></label>
+      <label className="wide">必须建立的上下文（每行一项）<textarea rows={3} value={(scene.context_requirements ?? []).join('\n')} onChange={event => update({ context_requirements: event.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} /></label>
       <label className="wide">原文依据<textarea rows={2} value={scene.source_basis ?? ''} onChange={event => update({ source_basis: event.target.value })} /></label>
       <label className="wide">角色（顿号或逗号分隔）<input value={(scene.characters ?? []).join('、')} onChange={event => update({ characters: event.target.value.split(/[、,，/]/).map(value => value.trim()).filter(Boolean) })} /></label>
     </div>
@@ -1376,6 +1379,13 @@ function ScreenplayReader({
           </details>
         </section>
       )}
+      {!!script.source_coverage?.length && (
+        <><div className="workspace-gap" /><section className="card">
+          <details><summary><b>原文交付覆盖</b><span>{script.source_coverage.length} 个原文段均有明确去向</span></summary>
+            <div className="shot-body"><ul className="key-list">{script.source_coverage.map(item => <li key={item.source_segment_id}><code>{item.source_segment_id}</code> · {item.disposition} · {item.beat_ids?.join('、') || item.duplicate_of || item.reason || '作为上下文保留'}</li>)}</ul></div>
+          </details>
+        </section></>
+      )}
       <div className="workspace-gap" />
       <section className="card script-editor">
         <div className="kv full"><b>标题</b>{script.title || epTitle}</div>
@@ -1399,7 +1409,7 @@ function ScreenplayReader({
         <div className="kv full"><b>原文依据</b>{script.source_basis}</div>
       </section>
 
-      {!!script.scene_outline?.length && <><div className="workspace-gap" /><section className="card"><details open><summary><b>场次结构</b><span>可跳转到正文对应场次</span></summary><div className="scene-outline-grid">{script.scene_outline.map(scene => <article key={scene.scene_no} className="scene-outline-card"><div className="scene-outline-head"><span className="sn">场{scene.scene_no}</span><span className="meta">{scene.scene_heading}</span><button className="btn small ghost" onClick={() => { setExpanded(true); setSearch(scene.scene_heading); window.setTimeout(() => manuscriptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0) }}>跳转正文</button></div><div className="scene-outline-body"><div className="kv full"><b>本场功能</b>{scene.story_function}</div><div className="kv full"><b>本场内容</b>{scene.summary}</div>{scene.conflict && <div className="kv"><b>冲突</b>{scene.conflict}</div>}{scene.turn && <div className="kv"><b>转折 / 交接</b>{scene.turn}</div>}{scene.source_basis && <div className="kv full"><b>原文依据</b>{scene.source_basis}</div>}</div></article>)}</div></details></section></>}
+      {!!script.scene_outline?.length && <><div className="workspace-gap" /><section className="card"><details open><summary><b>场次结构</b><span>可跳转到正文对应场次</span></summary><div className="scene-outline-grid">{script.scene_outline.map(scene => <article key={scene.scene_no} className="scene-outline-card"><div className="scene-outline-head"><span className="sn">场{scene.scene_no}</span><span className="meta">{scene.scene_heading}</span><button className="btn small ghost" onClick={() => { setExpanded(true); setSearch(scene.scene_heading); window.setTimeout(() => manuscriptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0) }}>跳转正文</button></div><div className="scene-outline-body"><div className="kv full"><b>本场功能</b>{scene.story_function}</div><div className="kv full"><b>本场内容</b>{scene.summary}</div>{scene.entry_state && <div className="kv full"><b>入场状态</b>{scene.entry_state}</div>}{scene.context_requirements?.length ? <div className="kv full"><b>上下文要求</b>{scene.context_requirements.join('；')}</div> : null}{scene.exit_state && <div className="kv full"><b>离场状态</b>{scene.exit_state}</div>}{scene.conflict && <div className="kv"><b>冲突</b>{scene.conflict}</div>}{scene.turn && <div className="kv"><b>转折 / 交接</b>{scene.turn}</div>}{scene.source_basis && <div className="kv full"><b>原文依据</b>{scene.source_basis}</div>}</div></article>)}</div></details></section></>}
 
       {structureItems.length > 0 && <><div className="workspace-gap" /><section className="card auxiliary-structure"><details><summary><b>辅助结构</b><span>与主线 / 场次重复的内容默认折叠</span></summary><div className="shot-body">{structureItems.map(([label, value]) => <div key={label} className="kv full"><b>{label}</b>{value}</div>)}</div></details></section></>}
     </>

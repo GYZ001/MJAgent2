@@ -1082,6 +1082,9 @@ export interface ScriptScene {
   conflict?: string;
   turn?: string;
   source_basis?: string;
+  entry_state?: string;
+  exit_state?: string;
+  context_requirements?: string[];
 }
 
 export interface PlotSpineBeat {
@@ -1090,6 +1093,8 @@ export interface PlotSpineBeat {
   does?: string;
   turn?: string;
   must_keep?: boolean;
+  source_segment_ids?: string[];
+  purpose?: string;
 }
 
 export interface PlotSpine {
@@ -1135,6 +1140,13 @@ export interface EpisodeScreenplay {
   dialogue_chains?: KeyDialogueChain[];
   key_plot_points?: string[];
   plot_spine?: PlotSpine | null;
+  source_coverage?: {
+    source_segment_id: string;
+    disposition: "deliver" | "merge" | "context" | "duplicate";
+    beat_ids: string[];
+    duplicate_of?: string | null;
+    reason?: string;
+  }[];
   scene_outline?: ScriptScene[];
   full_script_text?: string;
   character_state_changes?: string[];
@@ -1623,6 +1635,7 @@ export interface Shot {
   shot_no: number;
   duration_s: number;
   shot_size: string;
+  camera_angle?: string;
   camera_move: string;
   scene_time: string;
   scene_name: string;
@@ -1646,6 +1659,12 @@ export interface Shot {
   adopted_version_id: string | null;
   story_event_id?: string;
   purpose?: string;
+  context_requirement_ids?: string[];
+  resulting_change?: string;
+  readability_focus?: "context" | "action" | "emotion" | "dialogue" | "evidence" | "transition" | string;
+  camera_motivation?: string;
+  repeat_of_shot_id?: string | null;
+  repeat_gain?: string;
   new_information_ids?: string[];
   new_information_items?: {
     info_id: string;
