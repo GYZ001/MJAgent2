@@ -342,7 +342,24 @@ def ensure_production_revision(
     if resume:
         existing = get_active_production_revision(episode_id, kind)
         if existing:
-            return existing
+            requested = {
+                "input_fingerprint": input_fingerprint,
+                "contract_version": contract_version,
+                "qa_profile_version": qa_profile_version,
+            }
+            conflicts = [
+                field
+                for field, value in requested.items()
+                if value
+                and str(getattr(existing, field) or "")
+                and str(getattr(existing, field) or "") != str(value)
+            ]
+            if not conflicts:
+                return existing
+            # A revision freezes its production contract. Reusing it after a
+            # contract/input upgrade would resume obsolete repair logic. The
+            # immutable artifacts remain attached to the superseded revision.
+            resume = False
 
     # 归档旧 active
     stamp = now()

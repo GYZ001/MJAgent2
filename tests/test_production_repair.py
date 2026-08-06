@@ -97,6 +97,34 @@ def _minimal_script(**overrides) -> EpisodeScreenplay:
     return EpisodeScreenplay(**data)
 
 
+def test_contract_upgrade_supersedes_active_revision_instead_of_resuming_old_loop() -> None:
+    old = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        input_fingerprint="source-v1",
+        contract_version="2.0.0",
+        qa_profile_version="qa-v1",
+        resume=False,
+    )
+
+    new = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        input_fingerprint="source-v1",
+        contract_version="3.0.0",
+        qa_profile_version="qa-v1",
+        resume=True,
+    )
+
+    assert new.id != old.id
+    assert new.contract_version == "3.0.0"
+    old_row = db.get_conn().execute(
+        "SELECT status FROM production_revisions WHERE id=?",
+        (old.id,),
+    ).fetchone()
+    assert old_row["status"] == "superseded"
+
+
 def test_revision_authority_rebind_requires_current_working_artifact() -> None:
     from app.evidence import repository as evidence_repository
 
