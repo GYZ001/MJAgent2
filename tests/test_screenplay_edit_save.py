@@ -152,6 +152,7 @@ def test_edit_screenplay_does_not_500_on_row_get(client: TestClient) -> None:
     script = _valid_script()
     # 模拟前端轻微编辑后保存（ScriptPage PUT /episodes/{id}/screenplay）
     script.logline = "谷言在雨夜等来失踪旧友，真相逼近门槛。（已改）"
+    script.full_script_text += "\n门外再次响起更重的敲门声。"
     resp = client.put(
         "/api/episodes/e1/screenplay",
         json={"screenplay": script.model_dump(mode="json")},

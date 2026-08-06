@@ -1841,6 +1841,38 @@ def test_confirmation_gate_failure_does_not_mutate_projection_or_leave_owner(
     assert after_episode["active_storyboard_run_id"] is None
 
 
+def test_confirmation_evidence_failure_does_not_commit_normalized_projection(
+    storyboard_db,
+    monkeypatch,
+):
+    preview = api.create_storyboard_confirmation_preview("e1")
+    before_episode = dict(
+        storyboard_db.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    )
+    before_shot = dict(
+        storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone()
+    )
+
+    def fail_evidence(*_args, **_kwargs):
+        raise RuntimeError("injected confirmation evidence failure")
+
+    monkeypatch.setattr(api, "_finalize_storyboard_evidence", fail_evidence)
+    with pytest.raises(RuntimeError, match="injected confirmation evidence failure"):
+        api.confirm_episode_core("e1", preview_token=preview["preview_token"])
+
+    after_episode = dict(
+        storyboard_db.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
+    )
+    after_shot = dict(
+        storyboard_db.execute("SELECT * FROM shots WHERE id='s1'").fetchone()
+    )
+    assert after_shot == before_shot
+    assert after_episode["status"] == before_episode["status"]
+    assert after_episode["target_duration_s"] == before_episode["target_duration_s"]
+    assert after_episode["storyboard_artifact_id"] == before_episode["storyboard_artifact_id"]
+    assert after_episode["active_storyboard_run_id"] is None
+
+
 def test_snapshot_versions_are_distinct_under_concurrent_state_changes(storyboard_db):
     baseline = workspace.monotonic_snapshot_version("e1", "snapshot-baseline")
     barrier = threading.Barrier(2)

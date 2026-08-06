@@ -362,9 +362,12 @@ def issue_completion_certificate(
         )
     if int(blockers or 0) != derived_blockers or int(must_fix_issues or 0) != derived_must_fix:
         raise ValueError("完成凭证阻断计数必须由 Evaluation 精确派生")
+    blocking_roles = {"business_safety"}
+    if kind == "screenplay":
+        blocking_roles.add("runtime_gate")
     runtime_gates = [
         row for row in rows
-        if row["evaluation_role"] in {"runtime_gate", "business_safety"}
+        if row["evaluation_role"] in blocking_roles
     ]
     if any(
         not bool(row["hard_gate_passed"])
@@ -589,9 +592,12 @@ def verify_completion_certificate(
         qa_profile_version=cert.qa_profile_version,
     )
     if narrative_authority:
+        blocking_roles = {"business_safety"}
+        if cert.kind == "screenplay":
+            blocking_roles.add("runtime_gate")
         runtime_gates = [
             row for row in rows
-            if row["evaluation_role"] in {"runtime_gate", "business_safety"}
+            if row["evaluation_role"] in blocking_roles
         ]
         if any(
             not bool(row["runtime_blocking"])

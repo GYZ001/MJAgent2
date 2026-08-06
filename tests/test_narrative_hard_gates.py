@@ -738,6 +738,11 @@ def test_character_resolution_atomically_rewrites_the_narrative_graph() -> None:
     assert source_evidence_before == [
         item.model_dump(mode="json") for item in plan.source_evidence
     ]
-    assert source_id not in json.dumps(plan.model_dump(mode="json"), ensure_ascii=False)
-    assert canonical_id in json.dumps(plan.model_dump(mode="json"), ensure_ascii=False)
+    payload = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False)
+    assert source_id in payload
+    assert canonical_id in payload
+    assert plan.atomic_actions[-1].actor_ids == [canonical_id]
+    assert plan.character_states[-1].character_id == canonical_id
+    assert source_id in screenplay.full_script_text
+    assert canonical_id not in screenplay.full_script_text
     assert validate_screenplay_narrative(screenplay, require=True) == []
