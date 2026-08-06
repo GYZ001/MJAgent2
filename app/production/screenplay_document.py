@@ -176,8 +176,13 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
         )
         for block in rederived.scene_blocks
     ]
-    key_lines = _key_lines_from_chains(rederived.dialogue_chains)
     full_text = render_full_script_text(rederived)
+    from app.validators import key_lines_in_story_order
+
+    key_lines = key_lines_in_story_order(
+        _key_lines_from_chains(rederived.dialogue_chains),
+        full_text,
+    )
     return EpisodeScreenplay(
         episode_no=meta.episode_no,
         id=meta.id,
