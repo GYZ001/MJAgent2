@@ -3489,11 +3489,7 @@ def _complete_screenplay_from_working_artifact(
     checkpoint: dict[str, Any],
     activation_no: int,
 ) -> EpisodeScreenplay:
-    """Validate structure, record score-only QA, then publish atomically.
-
-    Quality observations never trigger Patch or block publication. Only
-    deterministic identity/context failures stop this stage.
-    """
+    """Validate every production gate and publish only a zero-blocker artifact."""
     from app.harness.contracts import get_contract
     from app.portraits import (
         apply_screenplay_character_resolutions,

@@ -178,4 +178,4 @@ def test_text_requests_use_provider_output_capacity(monkeypatch) -> None:
     )) == "ok"
     assert captured["payload"]["max_tokens"] == 49152
     assert captured["meta"]["model_max_output_tokens"] == 49152
-    assert captured["meta"]["runtime_output_limit_tokens"] == 32768
+    assert captured["meta"]["runtime_output_limit_tokens"] == 49152

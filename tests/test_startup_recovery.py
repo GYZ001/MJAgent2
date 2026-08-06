@@ -530,8 +530,12 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "scene_references", "scene_history_review", "episode_mapping",
         "screenplay", "storyboard", "video_completion", "project_video_completion", "delivery",
     ]
-    assert {key: value for key, value in report.items() if key != "recovery_meta"} == {
-        "media": 1, "abandoned_partial_files_removed": 2, "character_bible": 1,
+    assert {
+        key: value for key, value in report.items()
+        if key not in {"recovery_meta", "media_cleanup_outbox"}
+    } == {
+        "media": 1,
+        "abandoned_partial_files_removed": 2, "character_bible": 1,
         "rejected_media_purged": {"artifacts": 2, "records": 3, "files": 2},
         "character_references": 1, "portrait_view_redo": 1, "scene_references": 1,
         "scene_history_review": 1,

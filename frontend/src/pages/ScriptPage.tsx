@@ -712,7 +712,7 @@ export default function ScriptPage() {
                 {ep.screenplay_production.quality_issue_count
                   ? ` · ${ep.screenplay_production.quality_issue_count} 项评审风险`
                   : ' · 未发现评审风险'}
-                <small>评分仅供评审，不影响结构完整剧本发布</small>
+                <small>生产门禁问题会阻断发布并进入局部修复；零 blocker 后才可交付</small>
               </p>
             )}
           </>

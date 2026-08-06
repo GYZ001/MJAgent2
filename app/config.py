@@ -239,7 +239,7 @@ DEFAULT_SETTINGS = {
     "spoken_contract_audit_mode": "enforce",  # audit_only | enforce
     "spine_structured_hard_gate": "true",     # false 时 LEGACY_COVERAGE_UNCERTAIN 降为 warning
     "max_repair_attempts": "8",  # LLM 输出校验失败的最大修复重试次数（含首次）；模型不可用不走此重试
-    "screenplay_qa_pass_score": "80",  # 剧本 QA 只评估；低于此分由独立 Repair 修复后复验
+    "screenplay_qa_pass_score": "80",  # 剧本生产门禁；低于此分或存在 blocker 时由 Repair 修复后复验
     "model_route": "hiagent",           # 文本/质检模型路由：hiagent（火山）| openrouter
     # 职责分配必须落到明确 Model ID；init_db 以 INSERT OR IGNORE 补齐旧库。
     # provider 仍沿用 active_provider 的旧版 model_route 兼容逻辑，避免覆盖历史路由。
