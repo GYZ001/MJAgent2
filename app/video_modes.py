@@ -39,7 +39,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v16"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v17"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -2443,7 +2443,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         PURPOSE_KEYFRAME_SEED, PURPOSE_QA_ANCHOR, PURPOSE_VIDEO_INPUT,
         NARRATIVE_KEYFRAME_SLOT, resolve_shot_asset_dependencies, keyframe_seed_paths,
         library_anchor_assets_from_manifest, review_keyframe_with_evidence, keyframe_gate_passed,
-        keyframe_identity_blocking_failures, keyframe_runtime_blocking_failures,
+        keyframe_runtime_blocking_failures,
         narrative_keyframe_required, complete_legacy_character_pack, complete_legacy_scene_pack,
         assert_manifest_allows_production, manifest_revisions_match, pack_result_ok,
         character_multiview_enabled, scene_multiview_enabled,
@@ -3384,7 +3384,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             return None
 
     eligible_by_slot: dict[str, list[tuple[int, ReferenceImageAsset]]] = {}
-    identity_blocked_by_slot: dict[str, list[dict[str, Any]]] = {}
+    contract_blocked_by_slot: dict[str, list[dict[str, Any]]] = {}
     for slot_key in active_candidate_slots:
         pairs = candidate_pool.get(slot_key, [])
         is_keyframe_slot = (
@@ -3395,21 +3395,21 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             pair for pair in pairs
             if (
                 not is_keyframe_slot
-                or not keyframe_identity_blocking_failures(pair[1].qa or {})
+                or keyframe_gate_passed(pair[1].qa or {})
             )
         ]
-        identity_blocked = [
+        contract_blocked = [
             {
                 "candidate_no": candidate_no,
-                "hard_failures": sorted(
-                    keyframe_identity_blocking_failures(asset.qa or {})
+                "identity_contract_passed": bool(
+                    (asset.qa or {}).get("identity_contract_passed")
                 ),
             }
             for candidate_no, asset in pairs
-            if keyframe_identity_blocking_failures(asset.qa or {})
+            if not keyframe_gate_passed(asset.qa or {})
         ]
-        if identity_blocked:
-            identity_blocked_by_slot[slot_key] = identity_blocked
+        if contract_blocked:
+            contract_blocked_by_slot[slot_key] = contract_blocked
         structural = [
             {
                 "candidate_no": candidate_no,
@@ -3444,12 +3444,12 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
         if not all_pairs:
             _checkpoint_candidates(slot_key, "technical_failed")
             continue
-        if not pairs and identity_blocked_by_slot.get(slot_key):
+        if not pairs and contract_blocked_by_slot.get(slot_key):
             final_records: list[dict[str, Any]] = []
             for candidate_no, asset in all_pairs:
                 asset.selectedForSeedance = False
                 asset.deleted = True
-                asset.rejectReason = "identity_integrity_failed"
+                asset.rejectReason = "identity_contract_failed"
                 asset.purposes = [
                     purpose for purpose in (asset.purposes or [])
                     if purpose != PURPOSE_VIDEO_INPUT
@@ -3468,27 +3468,25 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                     candidate_no,
                     asset,
                     include_path=delete_failed,
-                    status="cleanup_pending" if delete_failed else "identity_rejected_deleted",
+                    status="cleanup_pending" if delete_failed else "contract_rejected_deleted",
                 ))
                 if rejection_details is not None:
                     rejection_details.append({
                         "type": asset.type,
                         "source": asset.source,
-                        "reason": "identity_integrity_failed",
+                        "reason": "identity_contract_failed",
                         "candidate_no": candidate_no,
-                        "hard_failures": sorted(
-                            keyframe_identity_blocking_failures(asset.qa or {})
-                        ),
+                        "identity_contract_passed": False,
                     })
             slot_state[slot_key] = {
                 **(slot_state.get(slot_key) or {}),
                 "status": (
-                    "identity_gate_cleanup_pending"
+                    "contract_gate_cleanup_pending"
                     if slot_cleanup_errors
-                    else "identity_gate_failed"
+                    else "contract_gate_failed"
                 ),
                 "gate_retry_exhausted": True,
-                "gate_warnings": identity_blocked_by_slot[slot_key],
+                "gate_warnings": contract_blocked_by_slot[slot_key],
                 "candidate_target": candidate_targets.get(slot_key, len(final_records)),
                 "candidate_count": len(final_records),
                 "candidates": final_records,

@@ -80,13 +80,11 @@ _IMPLICIT_SPEECH_RE = re.compile(
 # 表情表演误判成动作调度镜。
 _DIALOGUE_SPATIAL_STAGING_RE = re.compile(
     r"走(?:向|到|过|进|出|开)|穿过|转身|离开|退(?:到|向|开)|上前|跑(?:向|到|出|进)|"
-    r"快步|缓步|迈步|起身|站起|坐下|躺下|倒下|跪下|俯身|侧身|弯腰|"
-    r"绕过|移步|追上|进入|退出"
+    r"快步|缓步|迈步|起身|站起|坐下|跪下|绕过|移步|追上|进入|退出"
 )
 _DIALOGUE_PROP_STAGING_RE = re.compile(
     r"翻开|合拢|拿起|放下|举起|抬手|伸手|收回手|触碰|触摸|按住|按上|贴上|"
-    r"握住|递出|递给|接过|拔出|推开|拉开|打开|关闭|关掉|拉上|脱下|穿上|"
-    r"指向|挥击|敲击|端起|拾起"
+    r"握住|递出|递给|接过|拔出|推开|拉开|打开|关闭|指向|挥击|敲击|端起|拾起"
 )
 
 
@@ -271,8 +269,14 @@ def dialogue_action_staging_kind(
     ``dialogue_focus_subject`` 会据此放弃“只拍脸”的派生构图，但仍保持一镜只有
     一位画内说话人。显式 risk tag 供人工编辑/历史数据在词面未命中时强制保留动作。
     """
-    if len(onscreen_dialogue_speakers(shot)) != 1:
+    speakers = onscreen_dialogue_speakers(shot)
+    if len(speakers) != 1:
         return ""
+    if any(
+        name != speakers[0]
+        for name in required_visual_action_characters(shot)
+    ):
+        return "semantic"
     if narrative_authority:
         return "semantic" if "dialogue_action_staging" in (shot.risk_tags or []) else ""
     visual_text = "；".join(

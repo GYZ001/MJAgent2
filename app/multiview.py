@@ -1946,13 +1946,6 @@ KEYFRAME_HARD_FAILURES = {
 # 分数仍只用于三选一排序；但这些结构性错误会直接污染视频，不能再以
 # “三张里相对最好”为理由放行。
 KEYFRAME_RUNTIME_BLOCKING_FAILURES = frozenset(KEYFRAME_HARD_FAILURES)
-KEYFRAME_IDENTITY_BLOCKING_FAILURES = frozenset({
-    "wrong_identity",
-    "character_missing",
-    "duplicate_character",
-    "collective_group_missing",
-    "cross_keyframe_identity_invariance_unverified",
-})
 
 
 def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) -> float | None:
@@ -1981,14 +1974,17 @@ def keyframe_runtime_blocking_failures(qa: dict[str, Any]) -> set[str]:
     return failures & KEYFRAME_RUNTIME_BLOCKING_FAILURES
 
 
-def keyframe_identity_blocking_failures(qa: dict[str, Any]) -> set[str]:
-    failures = {str(item) for item in (qa.get("hard_failures") or [])}
-    return failures & KEYFRAME_IDENTITY_BLOCKING_FAILURES
-
-
 def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
-    """Identity integrity is fail-closed; other visual findings remain score-only."""
-    return not keyframe_identity_blocking_failures(qa)
+    """Use the typed identity contract, never a failure-code allow/deny list."""
+    if "identity_contract_passed" in qa:
+        return qa.get("identity_contract_passed") is True
+    # Compatibility for test fixtures and historical scored rows. New v17
+    # keyframes always carry ``identity_contract_passed``.
+    return bool(
+        qa.get("status") == "scored"
+        and not qa.get("qa_recovered")
+        and qa.get("face_identity") is not None
+    )
 
 
 async def review_keyframe_geometry_guard(
@@ -2127,6 +2123,8 @@ async def review_keyframe_with_evidence(
             screenplay=screenplay,
         )
         qa.setdefault("status", "scored")
+        qa["identity_contract_passed"] = False
+        qa["identity_contract_unverified_reason"] = "visual_evidence_qa_disabled"
         return qa
 
     frames = [candidate_b64]
@@ -2329,6 +2327,22 @@ async def review_keyframe_with_evidence(
             "outfit_match": 0.0,
             "hair_match": 0.0,
             "scene_match": 0.0,
+            "identity_contract": {
+                "characters": [
+                    {
+                        "name": str(name),
+                        "present": True,
+                        "gender_match": True,
+                        "identity_match": True,
+                        "outfit_match": True,
+                        "instance_count": 1,
+                    }
+                    for name in (
+                        contract.get("individual_visible_characters") or []
+                    )
+                ],
+                "unexpected_recognizable_people": 0,
+            },
             "overall": 0.0,
             "hard_failures": [],
             "issues": [],
@@ -2363,6 +2377,7 @@ async def review_keyframe_with_evidence(
             "outfit_match": None,
             "hair_match": None,
             "scene_match": None,
+            "identity_contract_passed": False,
             "hard_failures": [],
             "issues": [f"关键帧 QA 未完成：{type(exc).__name__}"],
             "qa_recovered": True,
@@ -2370,8 +2385,56 @@ async def review_keyframe_with_evidence(
             "rule_version": "keyframe_geometry_qa_v3",
         }
 
+    expected_identities = [
+        str(name).strip()
+        for name in (contract.get("individual_visible_characters") or [])
+        if str(name).strip()
+    ]
+    available_identity_anchors = {
+        str(item.get("entity") or "").strip()
+        for item in manifest_entries
+        if item.get("role") == "character_anchor"
+        and str(item.get("entity") or "").strip()
+    }
+    identity_anchors_complete = set(expected_identities).issubset(
+        available_identity_anchors
+    )
+    identity_payload = data.get("identity_contract")
+    identity_rows = (
+        identity_payload.get("characters")
+        if isinstance(identity_payload, dict)
+        and isinstance(identity_payload.get("characters"), list)
+        else []
+    )
+    identity_by_name = {
+        str(item.get("name") or "").strip(): item
+        for item in identity_rows
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    try:
+        unexpected_people = int(
+            identity_payload.get("unexpected_recognizable_people", -1)
+        ) if isinstance(identity_payload, dict) else -1
+    except (TypeError, ValueError):
+        unexpected_people = -1
+    identity_contract_complete = (
+        isinstance(identity_payload, dict)
+        and identity_anchors_complete
+        and set(identity_by_name) == set(expected_identities)
+        and unexpected_people == 0
+    )
+    identity_contract_passed = identity_contract_complete and all(
+        item.get("present") is True
+        and item.get("gender_match") is True
+        and item.get("identity_match") is True
+        and item.get("outfit_match") is True
+        and item.get("instance_count") == 1
+        for item in identity_by_name.values()
+    )
+    data["identity_contract_passed"] = identity_contract_passed
+
     score_keys = list(KEYFRAME_SCORE_WEIGHTS.keys())
-    missing_required = False
+    missing_required = not identity_contract_complete
     for key in score_keys:
         val = data.get(key)
         if val is None or (isinstance(val, str) and val.upper() in {"N/A", "NA"}):
@@ -2424,6 +2487,8 @@ async def review_keyframe_with_evidence(
         data["overall"] = None
         data["qa_recovered"] = True
         issue = "缺少必需评分数"
+        if not identity_contract_complete:
+            issue += "：identity_contract"
         if missing_diagnostics:
             issue += "：" + ",".join(missing_diagnostics)
         data["issues"] = list(data.get("issues") or []) + [issue]

@@ -46,16 +46,19 @@ def test_keyframe_gate_ignores_low_scores() -> None:
         "face_identity": 0.1,
         "hard_failures": ["watermark"],
         "status": "failed",
+        "identity_contract_passed": True,
     }) is True
     assert keyframe_gate_passed({
         "overall": None,
         "status": "unverified",
         "hard_failures": ["watermark"],
-    }) is True
+        "identity_contract_passed": False,
+    }) is False
     assert keyframe_gate_passed({
         "overall": 0.95,
         "status": "scored",
         "hard_failures": ["relative_scale_mismatch"],
+        "identity_contract_passed": True,
     }) is True
 
 
@@ -84,13 +87,14 @@ def test_scene_primary_usable_ignores_failed_qa(tmp_path: Path) -> None:
     assert scene_primary_is_usable(row, views) is True
 
 
-def test_video_identity_qa_blocks_auto_adoption_while_text_remains_warning() -> None:
+def test_video_clip_contract_blocks_auto_adoption_without_failure_code_list() -> None:
     issues = issues_from_qa(
         {
             "overall": 0.2,
             "hard_failures": ["character_duplicate", "text_error"],
             "failure_types": ["character_duplicate", "text_error"],
             "issues": ["分身", "乱码文字"],
+            "whole_clip_usable": False,
         },
         {"passed": True, "issues": []},
         shot_id="s1",
@@ -98,22 +102,24 @@ def test_video_identity_qa_blocks_auto_adoption_while_text_remains_warning() -> 
     qa_issues = [i for i in issues if i.code.startswith("VIDEO_QA_")]
     assert qa_issues
     by_code = {issue.code: issue for issue in qa_issues}
-    assert by_code["VIDEO_QA_CHARACTER_DUPLICATE"].severity == IssueSeverity.BLOCKER
+    assert by_code["VIDEO_QA_CHARACTER_DUPLICATE"].severity == IssueSeverity.WARNING
     assert by_code["VIDEO_QA_TEXT_ARTIFACT"].severity == IssueSeverity.WARNING
+    assert by_code["VIDEO_QA_CLIP_CONTRACT_FAILED"].severity == IssueSeverity.BLOCKER
 
 
-def test_repair_router_turns_qa_issue_into_directed_retry() -> None:
+def test_repair_router_uses_generic_clip_contract_failure() -> None:
     plan = route_video_repair([
         Issue(
-            code="VIDEO_QA_CHARACTER_DUPLICATE",
-            severity=IssueSeverity.WARNING,
+            code="VIDEO_QA_CLIP_CONTRACT_FAILED",
+            severity=IssueSeverity.BLOCKER,
             subject="s1",
-            message="分身",
+            message="完整片段生产合同未通过",
+            evidence={"rule_id": "whole_clip_usable"},
         ),
     ])
     assert plan.is_paid is True
-    assert plan.level == "L2"
-    assert plan.strategy == "retake_directed"
+    assert plan.level == "L1"
+    assert plan.strategy == "retake_same_input"
     assert plan.pause_state is None
 
 
@@ -242,13 +248,22 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
             json.dumps({
                 "overall": 0.95,
                 "failure_types": ["wrong_identity"],
+                "whole_clip_usable": False,
             }),
             "{}",
         ),
     )
     conn.execute(
         "INSERT INTO shot_versions VALUES('good','s',2,'succeeded',?,?,NULL,?)",
-        (technical, json.dumps({"overall": 0.7, "failure_types": []}), "{}"),
+        (
+            technical,
+            json.dumps({
+                "overall": 0.7,
+                "failure_types": [],
+                "whole_clip_usable": True,
+            }),
+            "{}",
+        ),
     )
     conn.commit()
     monkeypatch.setattr(media, "get_conn", lambda: conn)

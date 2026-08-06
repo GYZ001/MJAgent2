@@ -306,11 +306,7 @@ def grade_shot_video(
 
     可传入已加载的 technical/qa，或 shot_id（读采用版/最佳成功版）。
     """
-    from app.video_issues import (
-        IDENTITY_INTEGRITY_FAILURE_TYPES,
-        fatal_failure_types,
-        is_fatal_failure_code,
-    )
+    from app.video_issues import fatal_failure_types, is_fatal_failure_code
 
     conn = get_conn()
     row = dict(version_row) if version_row is not None else None
@@ -364,25 +360,20 @@ def grade_shot_video(
     threshold = VIDEO_QUALITY_REVIEW_THRESHOLD
 
     hard_failures = classify_video_hard_failures(qa, technical=technical) if technical or qa else []
-    identity_failures = sorted(
-        set(hard_failures) & IDENTITY_INTEGRITY_FAILURE_TYPES
-    )
     fatal = [f for f in hard_failures if is_fatal_failure_code(f)]
     non_fatal = [f for f in hard_failures if f not in fatal]
     score = _qa_overall(qa)
     qa_recovered = bool(qa.get("qa_recovered"))
+    whole_clip_usable = qa.get("whole_clip_usable")
     passed = bool(technical.get("passed"))
     version_id = (row or {}).get("id") if row else None
 
     fallback_reason: str | None = None
     if not passed:
         grade = "C"
-    elif identity_failures:
+    elif whole_clip_usable is False:
         grade = "C"
-        fallback_reason = (
-            "角色身份完整性失败，禁止自动采用："
-            + ",".join(identity_failures)
-        )
+        fallback_reason = "完整片段生产合同未通过，禁止自动采用"
     elif fatal:
         grade = "B"
         fallback_reason = "存在高风险质量问题：" + ",".join(fatal)
@@ -416,7 +407,7 @@ def grade_shot_video(
         "technical_passed": passed,
         "hard_failures": hard_failures,
         "fatal_failures": fatal,
-        "identity_integrity_failures": identity_failures,
+        "whole_clip_usable": whole_clip_usable,
         "qa_overall": score,
         "threshold": threshold,
         "qa_recovered": qa_recovered,
@@ -461,14 +452,8 @@ def video_candidate_selection_score(
 def select_best_video_candidate(
     shot_id: str, *, force_best: bool = False
 ) -> dict[str, Any] | None:
-    """Adopt the first technically valid, identity-safe video.
-
-    Content scores remain advisory, but wrong/duplicated/gender-drifted
-    characters can never be an automatic fallback. ``force_best`` cannot
-    override that identity fence.
-    """
+    """Adopt the first technically valid video that passes the clip contract."""
     del force_best
-    from app.video_issues import IDENTITY_INTEGRITY_FAILURE_TYPES
 
     conn = get_conn()
     rows = conn.execute(
@@ -494,7 +479,7 @@ def select_best_video_candidate(
         qa = json.loads(row["qa_json"] or "{}")
         score = _qa_overall(qa)
         hard_failures = classify_video_hard_failures(qa, technical=technical)
-        if set(hard_failures) & IDENTITY_INTEGRITY_FAILURE_TYPES:
+        if qa.get("whole_clip_usable") is False:
             continue
         entry = {
             "id": row["id"],
@@ -542,7 +527,7 @@ def select_best_video_candidate(
         )
     else:
         reason = (
-            f"默认采用首个技术有效视频 v{best['version_no']}（角色身份完整性已通过）；"
+            f"默认采用首个技术有效且完整片段合同通过的视频 v{best['version_no']}；"
             f"QA={best['score']:.3f}、质量问题={best['hard_failures']} 仅供复核，"
             "不触发重做或阻止采用。"
         )

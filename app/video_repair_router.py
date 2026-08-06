@@ -35,9 +35,6 @@ _PREFERRED_LEVEL: dict[str, RepairLevel] = {
     "VIDEO_DURATION_CONTRACT": "L1",
     "VIDEO_REFERENCE_UNAVAILABLE": "L3",
     "VIDEO_CHAIN_ANCHOR_BLOCKED": "L3",
-    "VIDEO_QA_CHARACTER_DUPLICATE": "L2",
-    "VIDEO_QA_WRONG_IDENTITY": "L2",
-    "VIDEO_QA_WRONG_OUTFIT": "L2",
     "VIDEO_PROVIDER_SAFETY": "L4",
     "VIDEO_PROVIDER_COPYRIGHT": "L4",
     "VIDEO_PREFLIGHT_BLOCKED": "L5",
@@ -174,24 +171,20 @@ def route(
         elif isinstance(item, dict):
             normalized.append(Issue.model_validate(item))
 
-    identity_repair_codes = {
-        "VIDEO_QA_CHARACTER_DUPLICATE",
-        "VIDEO_QA_WRONG_IDENTITY",
-        "VIDEO_QA_WRONG_OUTFIT",
-    }
-    identity_repairs = [
+    contract_failures = [
         issue for issue in normalized
-        if issue.code in identity_repair_codes
+        if str(issue.code).startswith("VIDEO_QA_")
+        and issue.severity == IssueSeverity.BLOCKER
     ]
     score_only = [
         issue for issue in normalized
         if str(issue.code).startswith("VIDEO_QA_")
-        and issue.code not in identity_repair_codes
+        and issue.severity != IssueSeverity.BLOCKER
     ]
     normalized = [
         issue for issue in normalized
         if not str(issue.code).startswith("VIDEO_QA_")
-    ] + identity_repairs
+    ] + contract_failures
     if score_only and not normalized:
         codes = [issue.code for issue in score_only]
         return VideoRepairPlan(

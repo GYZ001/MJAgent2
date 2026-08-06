@@ -240,16 +240,29 @@ def test_keyframe_gate_and_weighted_overall() -> None:
         "scene_match": 0.10,
     })
     assert overall is not None and overall >= 0.8
-    qa = {**scores, "overall": overall, "hard_failures": [], "status": "scored"}
+    qa = {
+        **scores,
+        "overall": overall,
+        "hard_failures": [],
+        "status": "scored",
+        "identity_contract_passed": True,
+    }
     assert keyframe_gate_passed(qa) is True
-    bad = {**qa, "overall": None, "status": "unverified", "hard_failures": ["watermark"]}
-    # 普通分数、水印与结构问题都只作重试/评分依据。
-    assert keyframe_gate_passed(bad) is True
+    bad = {
+        **qa,
+        "overall": None,
+        "status": "unverified",
+        "identity_contract_passed": False,
+        "hard_failures": ["watermark"],
+    }
+    # QA 未完成时身份合同不可验证，必须 fail closed。
+    assert keyframe_gate_passed(bad) is False
     assert keyframe_gate_passed({
         **qa, "overall": 0.99, "hard_failures": ["relative_scale_mismatch"],
     }) is True
     assert keyframe_gate_passed({
-        **qa, "overall": 0.99, "hard_failures": ["wrong_identity"],
+        **qa, "overall": 0.99, "identity_contract_passed": False,
+        "hard_failures": ["unknown_future_identity_diagnostic"],
     }) is False
 
 
@@ -667,6 +680,17 @@ def test_keyframe_qa_receives_library_visual_anchors(monkeypatch, tmp_path) -> N
         return json.dumps({
             "overall": 0.9, "action_match": 0.9, "body_proportion": 0.9,
             "face_identity": 0.9, "outfit_match": 0.9, "hair_match": 0.9, "scene_match": 0.9,
+            "identity_contract": {
+                "characters": [{
+                    "name": "A",
+                    "present": True,
+                    "gender_match": True,
+                    "identity_match": True,
+                    "outfit_match": True,
+                    "instance_count": 1,
+                }],
+                "unexpected_recognizable_people": 0,
+            },
             "hard_failures": [], "issues": [],
         })
 

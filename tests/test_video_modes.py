@@ -94,7 +94,8 @@ def _passing_reference_qa() -> dict:
         "status": "scored", "overall": 0.95, "absolute_quality": 0.95,
         "action_match": 0.95, "body_proportion": 0.95,
         "face_identity": 0.95, "outfit_match": 0.95, "hair_match": 0.95,
-        "scene_match": 0.95, "hard_failures": [], "issues": [],
+        "scene_match": 0.95, "identity_contract_passed": True,
+        "hard_failures": [], "issues": [],
     }
 
 
@@ -1258,6 +1259,7 @@ def test_all_identity_bad_keyframes_are_deleted_and_fall_back_to_truth_anchors(
         return {
             **_passing_reference_qa(),
             "overall": 0.9,
+            "identity_contract_passed": False,
             "hard_failures": ["wrong_identity"],
             "issues": ["A was replaced by an unrelated person"],
         }

@@ -55,10 +55,14 @@ def test_grade_shot_video_a_b_c():
 
     fatal = grade_shot_video(
         technical={"passed": True},
-        qa={"overall": 0.95, "failure_types": ["character_duplicate"]},
+        qa={
+            "overall": 0.95,
+            "failure_types": ["unknown_future_identity_diagnostic"],
+            "whole_clip_usable": False,
+        },
     )
     assert fatal["grade"] == "C"
-    assert fatal["identity_integrity_failures"] == ["character_duplicate"]
+    assert fatal["whole_clip_usable"] is False
 
     degraded = grade_shot_video(
         technical={"passed": True},
