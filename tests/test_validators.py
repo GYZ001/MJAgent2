@@ -237,10 +237,11 @@ def test_normalize_action_desc_keeps_real_words() -> None:
 
 
 def test_storyboard_count_range_is_not_derived_from_target_duration() -> None:
-    """镜数不再设软预算，仅保留与目标时长无关的技术硬上限。"""
-    from app.renderability import SHOT_HARD_MAX
+    """镜数不再由目标时长或固定产品上限裁剪。"""
     for target in (40, 50, 70, 90):
-        assert storyboard_shot_count_range(target) == (1, SHOT_HARD_MAX)
+        lower, upper = storyboard_shot_count_range(target)
+        assert lower == 1
+        assert upper > 1_000_000
 
 
 # ---------- 分镜防丢失：关键内容保留校验 ----------

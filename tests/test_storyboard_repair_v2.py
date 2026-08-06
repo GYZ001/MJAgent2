@@ -31,6 +31,9 @@ from app.schemas import (
     Storyboard,
     StoryboardOutline,
     StoryboardOutlineShot,
+    StoryboardContextRequirement,
+    StoryboardSceneContext,
+    StoryboardScenePack,
     World,
 )
 from app.source_excerpt import align_source_excerpt
@@ -165,6 +168,167 @@ def _current_board(conn) -> Storyboard:
         "SELECT * FROM shots WHERE episode_id='e1' ORDER BY shot_no"
     ).fetchall()
     return _board_from_shot_rows(rows, 1)
+
+
+def test_supervisor_generates_and_commits_scene_packs(
+    repair_db,
+    monkeypatch,
+) -> None:
+    conn, _screenplay = repair_db
+    conn.execute("DELETE FROM shots WHERE episode_id='e1'")
+    bible = Bible(
+        characters=[Character(
+            name="少年",
+            role="主角",
+            appearance_canonical="十六岁黑发少年，蓝色长衫，身形清瘦，目光坚定",
+        )],
+        world=World(
+            era="古代",
+            genre="剧情",
+            visual_style_canonical="国风动画电影感，稳定统一光影",
+        ),
+    )
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='p1'",
+        (bible.model_dump_json(),),
+    )
+    conn.commit()
+    contexts = [
+        StoryboardSceneContext(
+            scene_id="SC001",
+            scene_no=1,
+            scene_name="广场",
+            scene_time="日",
+            entry_state="少年站在广场入口观察石碑",
+            exit_state="少年走到石碑前确认结果",
+            spatial_axis="入口、少年和石碑保持同一横向轴线",
+            context_requirements=[
+                StoryboardContextRequirement(
+                    requirement_id="CTX-SC001-01",
+                    description="建立广场入口、少年与石碑的位置关系",
+                    required_before_shot_no=2,
+                )
+            ],
+        )
+    ]
+    focuses = [
+        ("context", "全景", "固定", ["CTX-SC001-01"]),
+        ("action", "中景", "跟随", []),
+        ("emotion", "近景", "固定", []),
+    ]
+    outcomes = [
+        "观众明确广场入口、少年和石碑的空间关系",
+        "少年从入口走到石碑前并完成主要动作",
+        "少年看清结果后由期待转为警觉和克制",
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        scene_contexts=contexts,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=index,
+                shot_id=f"SH{index:04d}",
+                scene_id="SC001",
+                scene_time="日",
+                scene_name="广场",
+                beat=f"少年完成第{index}个独立剧情任务",
+                purpose=f"第{index}镜承担独立剧情与导演作用",
+                context_requirement_ids=context_ids,
+                resulting_change=outcomes[index - 1],
+                readability_focus=focus,
+                camera_size=size,
+                camera_angle="平视侧面角度",
+                camera_movement=move,
+                camera_motivation="让本镜的空间、动作或情绪清楚可读",
+                state_in="少年位于上一个动作结束位置",
+                primary_action=f"少年完成第{index}步动作",
+                state_out=f"少年完成第{index}步动作后停下",
+                continuity_mode="same_scene_cut",
+                duration_s=5,
+                characters_visible=["少年"],
+            )
+            for index, (focus, size, move, context_ids) in enumerate(
+                focuses,
+                start=1,
+            )
+        ],
+    )
+    pack = StoryboardScenePack(
+        episode_no=1,
+        scene_id="SC001",
+        shots=[
+            _shot(index).model_copy(update={
+                "shot_id": f"SH{index:04d}",
+                "scene_id": "SC001",
+                "scene_name": "广场",
+                "scene_time": "日",
+                "shot_size": size,
+                "camera_angle": "平视侧面角度",
+                "camera_move": move,
+                "camera_motivation": "让本镜的空间、动作或情绪清楚可读",
+                "purpose": f"第{index}镜承担独立剧情与导演作用",
+                "context_requirement_ids": context_ids,
+                "resulting_change": outcomes[index - 1],
+                "readability_focus": focus,
+                "prompt_contract_version": "director_scene_pack_v1",
+                "is_final": index == 3,
+            })
+            for index, (focus, size, move, context_ids) in enumerate(
+                focuses,
+                start=1,
+            )
+        ],
+    )
+
+    async def fake_outline(*_args, **_kwargs):
+        return outline
+
+    calls: list[str] = []
+
+    async def fake_scene_pack(*_args, **_kwargs):
+        calls.append(_args[-1].scene_id)
+        return pack
+
+    def passed_evaluation(_ep, board, *_args, **_kwargs):
+        return SimpleNamespace(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+        )
+
+    import app.domain.storyboard_ops as storyboard_ops
+    import app.domain.video_ops as video_ops
+    import app.storyboard_supervisor as supervisor_module
+
+    monkeypatch.setattr(supervisor_module, "generate_storyboard_outline", fake_outline)
+    monkeypatch.setattr(supervisor_module, "generate_storyboard_scene_pack", fake_scene_pack)
+    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", passed_evaluation)
+    monkeypatch.setattr(
+        storyboard_ops,
+        "_finalize_storyboard_evidence",
+        lambda *_args, **_kwargs: "art-final",
+    )
+
+    checkpoint = asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=False,
+        preflight_done=True,
+    ))
+
+    assert checkpoint.phase == "SUCCEEDED"
+    assert calls == ["SC001"]
+    rows = conn.execute(
+        "SELECT shot_no,shot_size,camera_move,shot_contract_json "
+        "FROM shots WHERE episode_id='e1' ORDER BY shot_no"
+    ).fetchall()
+    assert [row["shot_no"] for row in rows] == [1, 2, 3]
+    assert rows[1]["shot_size"] == "中景"
+    assert rows[1]["camera_move"] == "跟随"
+    contract = json.loads(rows[1]["shot_contract_json"])
+    assert contract["camera_angle"] == "平视侧面角度"
+    assert contract["purpose"].startswith("第2镜")
 
 
 def test_resume_atomically_cleans_legacy_ghost_contract_before_gate(
