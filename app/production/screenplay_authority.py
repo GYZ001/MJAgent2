@@ -206,6 +206,19 @@ def screenplay_authority_material(
         ):
             raise ValueError("Bible Artifact 的类型、作用域或状态无效")
         bible_hash = _verified_artifact_hash(bible_artifact, label="Bible Artifact")
+        if bible is not None:
+            expected_bible_hash = evidence_repository.content_hash(
+                bible.model_dump(mode="json")
+            )
+        else:
+            raw_bible = _episode_value(project, "bible_json", "") if project else ""
+            try:
+                expected_bible = json.loads(raw_bible) if raw_bible else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                expected_bible = {"invalid_raw": str(raw_bible or "")}
+            expected_bible_hash = evidence_repository.content_hash(expected_bible)
+        if expected_bible_hash != bible_hash:
+            raise ValueError("Bible JSON、Artifact 与本次运行快照不一致")
     elif bible is not None:
         bible_hash = evidence_repository.content_hash(bible.model_dump(mode="json"))
     else:
@@ -460,6 +473,15 @@ def resolve_downstream_screenplay(
                 artifact_screenplay = load_screenplay_from_artifact(artifact_id)
             except Exception as exc:
                 raise ValueError(f"已发布剧本 Artifact 无法解析：{exc}") from exc
+            if (
+                screenplay_contract_requires_narrative(
+                    str(artifact.get("contract_version") or "")
+                )
+                and artifact_screenplay.narrative_plan is None
+            ):
+                raise ValueError(
+                    "已发布剧本合同要求 narrative_plan，但 Artifact 缺失该权威图"
+                )
             published_requires_narrative = artifact_screenplay.narrative_plan is not None
 
     immutable_required = bool(

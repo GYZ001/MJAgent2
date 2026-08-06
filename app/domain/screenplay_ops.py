@@ -845,6 +845,13 @@ def _new_screenplay_recorder(
     trigger_type: str = "manual",
     parent_run_id: str | None = None,
 ) -> WorkflowRecorder:
+    from app import config
+    from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
+    from app.stages import (
+        SCREENPLAY_BASELINE_PROMPT_VERSION,
+        SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS,
+    )
+
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
@@ -867,9 +874,20 @@ def _new_screenplay_recorder(
         trigger_type=trigger_type,
         policy_snapshot={
             "contract": f"screenplay@{get_contract('screenplay').version}",
-            "max_iterations": min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
+            "max_iterations": SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS,
             "stall_rounds": 2,
             "min_quality_gain": 0.03,
+            "baseline_only": True,
+            "repair_activation_patch_limit": 12,
+            "repair_activation_pass_limit": 32,
+        },
+        config_snapshot={
+            "pipeline_version": "screenplay-pipeline-4.0.0",
+            "prompt_version": SCREENPLAY_BASELINE_PROMPT_VERSION,
+            "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
+            "model": config.MODEL_TEXT,
+            "text_generation_concurrency": get_setting("storyboard_concurrency") or "2",
+            "duration_policy": "content_derived_unbounded",
         },
         parent_run_id=parent_run_id,
     )

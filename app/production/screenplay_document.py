@@ -480,6 +480,11 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
         id(node)
         for _block, node in matches.values()
     }
+    authoritative_by_line: dict[str, list[DialogueTurnNode]] = {}
+    for _block, node in matches.values():
+        line = _dialogue_identity(node.line)
+        if line:
+            authoritative_by_line.setdefault(line, []).append(node)
     for block in doc.scene_blocks:
         seen: set[tuple[str, str]] = set()
         deduped: list[DialogueTurnNode] = []
@@ -488,6 +493,19 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
                 _dialogue_identity(node.speaker),
                 _dialogue_identity(node.line),
             )
+            if id(node) not in authoritative_nodes and identity[1]:
+                covered_by = {
+                    id(authoritative)
+                    for line, authoritative_turns in authoritative_by_line.items()
+                    if len(line) >= 4 and identity[1].startswith(line)
+                    for authoritative in authoritative_turns
+                }
+                if len(covered_by) == 1:
+                    # The prose parser can mistake a performance cue such as
+                    # "角色不耐烦地说：" for a new speaker, then preserve the
+                    # same authoritative line plus trailing action as another
+                    # turn. The typed chain owns the spoken content.
+                    continue
             if (
                 all(identity)
                 and identity in seen

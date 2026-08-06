@@ -354,6 +354,40 @@ def _future_identity_context(future_text: str, source_labels: list[str]) -> str:
     return "\n\n".join(blocks)
 
 
+def _source_identity_contexts(source_text: str, *, budget: int) -> list[str]:
+    """Split the complete current source into bounded paragraph-preserving batches."""
+    text = str(source_text or "").strip()
+    if not text:
+        return ["（本集原文为空）"]
+    paragraphs = [part.strip() for part in re.split(r"\n+", text) if part.strip()]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for paragraph in paragraphs:
+        if len(paragraph) > budget:
+            if current:
+                chunks.append("\n".join(current))
+                current = []
+                current_chars = 0
+            start = 0
+            while start < len(paragraph):
+                end = min(len(paragraph), start + budget)
+                chunks.append(paragraph[start:end])
+                start = end
+            continue
+        added = len(paragraph) + (1 if current else 0)
+        if current and current_chars + added > budget:
+            chunks.append("\n".join(current))
+            current = [paragraph]
+            current_chars = len(paragraph)
+        else:
+            current.append(paragraph)
+            current_chars += added
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [text]
+
+
 async def discover_character_candidates(
     source_text: str,
     bible: Bible,
@@ -373,10 +407,13 @@ async def discover_character_candidates(
     known = "、".join(known_names) or "（无）"
     current_haystack = f"{source_text or ''}\n{draft_text or ''}"
     draft_projection = _draft_identity_projection(draft_text)
-    source_context = (
-        "（Baseline 后增量审计：当前原文已在首次预检中处理，本次不重复发送）"
+    source_contexts = (
+        ["（Baseline 后增量审计：当前原文已在首次预检中处理，本次不重复发送）"]
         if draft_text
-        else (source_text or "")[:CAST_DISCOVERY_SOURCE_BUDGET]
+        else _source_identity_contexts(
+            source_text,
+            budget=CAST_DISCOVERY_SOURCE_BUDGET,
+        )
     )
     seen: set[tuple[str, str, str]] = set()
     candidates: list[dict] = []
@@ -430,7 +467,8 @@ async def discover_character_candidates(
                 "future_evidence": str(item.get("future_evidence") or "").strip()[:120],
             })
 
-    prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
+    for current_batch, source_context in enumerate(source_contexts, start=1):
+        prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
 不要依赖服饰、性别、年龄或称谓后缀的固定词表。
 
 当前人物谱已有角色：
@@ -454,30 +492,32 @@ async def discover_character_candidates(
 只输出 JSON：
 {{"characters": [{{"source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
 
-    # #region debug-point E:character-discovery-request
-    try:
-        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"phase":"current","sourceChars":len(source_text or ""),"sourceSentChars":len(source_context),"draftChars":len(draft_text or ""),"draftProjectedChars":len(draft_projection),"futureChars":0,"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-    except Exception:
-        pass
-    # #endregion
-    raw = await model_gateway.chat(
-        [{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=1200,
-        call_meta={
-            "stage": "discover_character_candidates",
-            "episode_no": episode_no,
-            "discovery_phase": "current",
-            "reuse_successful_operation": True,
-        },
-    )
-    # #region debug-point C:character-discovery-response
-    try:
-        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"phase":"current","rawChars":len(raw or ""),"startsWithJson":(raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-    except Exception:
-        pass
-    # #endregion
-    collect(raw, identity_haystack=current_haystack)
+        # #region debug-point E:character-discovery-request
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"phase":"current","sourceChars":len(source_text or ""),"sourceSentChars":len(source_context),"sourceBatch":current_batch,"sourceBatches":len(source_contexts),"draftChars":len(draft_text or ""),"draftProjectedChars":len(draft_projection),"futureChars":0,"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
+        raw = await model_gateway.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=1200,
+            call_meta={
+                "stage": "discover_character_candidates",
+                "episode_no": episode_no,
+                "discovery_phase": "current",
+                "source_batch": current_batch,
+                "source_batches": len(source_contexts),
+                "reuse_successful_operation": True,
+            },
+        )
+        # #region debug-point C:character-discovery-response
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"phase":"current","sourceBatch":current_batch,"sourceBatches":len(source_contexts),"rawChars":len(raw or ""),"startsWithJson":(raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
+        collect(raw, identity_haystack=current_haystack)
 
     future_context = _future_identity_context(
         future_text,
@@ -698,6 +738,8 @@ def _replace_narrative_plan_identity(
     plan,
     source_label: str,
     canonical_name: str,
+    *,
+    replace_display_text: bool = True,
 ) -> bool:
     """Atomically update every authoritative entity reference in one plan.
 
@@ -710,23 +752,25 @@ def _replace_narrative_plan_identity(
     before = plan.model_dump(mode="json")
 
     for contract in plan.identity_contracts:
-        if contract.display_name == source_label:
+        if replace_display_text and contract.display_name == source_label:
             contract.display_name = canonical_name
         contract.voice_ids = list(dict.fromkeys(
             canonical_name if voice_id == source_label else voice_id
             for voice_id in contract.voice_ids
         ))
-        contract.evidence.rationale = _replace_resolved_label(
-            contract.evidence.rationale, source_label, canonical_name,
-        )
+        if replace_display_text:
+            contract.evidence.rationale = _replace_resolved_label(
+                contract.evidence.rationale, source_label, canonical_name,
+            )
     for proposition in plan.propositions:
         proposition.entity_ids = list(dict.fromkeys(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in proposition.entity_ids
         ))
-        proposition.canonical_statement = _replace_resolved_label(
-            proposition.canonical_statement, source_label, canonical_name,
-        )
+        if replace_display_text:
+            proposition.canonical_statement = _replace_resolved_label(
+                proposition.canonical_statement, source_label, canonical_name,
+            )
     for fact in plan.state_facts:
         if fact.subject_id == source_label:
             fact.subject_id = canonical_name
@@ -738,17 +782,19 @@ def _replace_narrative_plan_identity(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in evidence.perceivable_by
         ))
-        evidence.observable_claim = _replace_resolved_label(
-            evidence.observable_claim, source_label, canonical_name,
-        )
+        if replace_display_text:
+            evidence.observable_claim = _replace_resolved_label(
+                evidence.observable_claim, source_label, canonical_name,
+            )
         evidence.competing_attention_ids = list(dict.fromkeys(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in evidence.competing_attention_ids
         ))
     for question in plan.dramatic_questions:
-        question.question_text = _replace_resolved_label(
-            question.question_text, source_label, canonical_name,
-        )
+        if replace_display_text:
+            question.question_text = _replace_resolved_label(
+                question.question_text, source_label, canonical_name,
+            )
     for action in plan.atomic_actions:
         action.actor_ids = list(dict.fromkeys(
             canonical_name if entity_id == source_label else entity_id
@@ -758,17 +804,18 @@ def _replace_narrative_plan_identity(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in action.target_ids
         ))
-        for field in ("semantic_intent", "completion_condition", "decision_not_applicable_reason"):
-            value = getattr(action, field, None)
-            if isinstance(value, str):
-                setattr(action, field, _replace_resolved_label(value, source_label, canonical_name))
-        for phase in action.temporal_phases:
-            phase.start_condition = _replace_resolved_label(
-                phase.start_condition, source_label, canonical_name,
-            )
-            phase.end_condition = _replace_resolved_label(
-                phase.end_condition, source_label, canonical_name,
-            )
+        if replace_display_text:
+            for field in ("semantic_intent", "completion_condition", "decision_not_applicable_reason"):
+                value = getattr(action, field, None)
+                if isinstance(value, str):
+                    setattr(action, field, _replace_resolved_label(value, source_label, canonical_name))
+            for phase in action.temporal_phases:
+                phase.start_condition = _replace_resolved_label(
+                    phase.start_condition, source_label, canonical_name,
+                )
+                phase.end_condition = _replace_resolved_label(
+                    phase.end_condition, source_label, canonical_name,
+                )
     for event in plan.events:
         event.character_goal_effects = _replace_identity_value(
             event.character_goal_effects, source_label, canonical_name,
@@ -782,16 +829,18 @@ def _replace_narrative_plan_identity(
         state.emotion = _replace_identity_value(
             state.emotion, source_label, canonical_name,
         )
-        state.tactic = _replace_resolved_label(
-            state.tactic, source_label, canonical_name,
-        )
+        if replace_display_text:
+            state.tactic = _replace_resolved_label(
+                state.tactic, source_label, canonical_name,
+            )
     for belief in plan.character_beliefs:
         if belief.character_id == source_label:
             belief.character_id = canonical_name
     for prior in plan.audience_priors:
-        prior.audience_description = _replace_resolved_label(
-            prior.audience_description, source_label, canonical_name,
-        )
+        if replace_display_text:
+            prior.audience_description = _replace_resolved_label(
+                prior.audience_description, source_label, canonical_name,
+            )
         prior.familiarity_assumptions = _replace_identity_value(
             prior.familiarity_assumptions, source_label, canonical_name,
         )
@@ -820,34 +869,37 @@ def _replace_narrative_plan_identity(
             canonical_name if entity_id == source_label else entity_id
             for entity_id in intent.attention_target_ids
         ))
-        intent.director_objective = _replace_resolved_label(
-            intent.director_objective, source_label, canonical_name,
-        )
-        intent.forbidden_misconceptions = [
-            _replace_resolved_label(value, source_label, canonical_name)
-            for value in intent.forbidden_misconceptions
-        ]
+        if replace_display_text:
+            intent.director_objective = _replace_resolved_label(
+                intent.director_objective, source_label, canonical_name,
+            )
+            intent.forbidden_misconceptions = [
+                _replace_resolved_label(value, source_label, canonical_name)
+                for value in intent.forbidden_misconceptions
+            ]
     for scene in plan.scene_contracts:
         if scene.point_of_view_character_id == source_label:
             scene.point_of_view_character_id = canonical_name
         scene.relationship_deltas = _replace_identity_value(
             scene.relationship_deltas, source_label, canonical_name,
         )
-        for field in (
-            "not_applicable_reason",
-            "alternative_dramatic_function",
-            "value_polarity_in",
-            "value_polarity_out",
-            "scene_button",
-        ):
-            value = getattr(scene, field, None)
-            if isinstance(value, str):
-                setattr(scene, field, _replace_resolved_label(value, source_label, canonical_name))
+        if replace_display_text:
+            for field in (
+                "not_applicable_reason",
+                "alternative_dramatic_function",
+                "value_polarity_in",
+                "value_polarity_out",
+                "scene_button",
+            ):
+                value = getattr(scene, field, None)
+                if isinstance(value, str):
+                    setattr(scene, field, _replace_resolved_label(value, source_label, canonical_name))
     for arc in plan.arc_contracts:
-        for field in ("not_applicable_reason", "alternative_dramatic_function"):
-            value = getattr(arc, field, None)
-            if isinstance(value, str):
-                setattr(arc, field, _replace_resolved_label(value, source_label, canonical_name))
+        if replace_display_text:
+            for field in ("not_applicable_reason", "alternative_dramatic_function"):
+                value = getattr(arc, field, None)
+                if isinstance(value, str):
+                    setattr(arc, field, _replace_resolved_label(value, source_label, canonical_name))
         arc.pressure_curve = _replace_identity_value(
             arc.pressure_curve, source_label, canonical_name,
         )
@@ -874,6 +926,7 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
         canonical_name = str(item.get("canonical_name") or "").strip()
         if not source_label or not canonical_name or source_label == canonical_name:
             continue
+        replace_display_text = item.get("resolution") != "future_identity"
 
         changed = False
         for scene in getattr(screenplay, "scene_outline", None) or []:
@@ -883,23 +936,29 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                 for name in before
             ))
             changed = changed or scene.characters != before
-            for field in ("story_function", "summary", "conflict", "turn"):
-                value = getattr(scene, field, "") or ""
-                replaced = _replace_resolved_label(value, source_label, canonical_name)
-                if replaced != value:
-                    setattr(scene, field, replaced)
-                    changed = True
+            if replace_display_text:
+                for field in ("story_function", "summary", "conflict", "turn"):
+                    value = getattr(scene, field, "") or ""
+                    replaced = _replace_resolved_label(value, source_label, canonical_name)
+                    if replaced != value:
+                        setattr(scene, field, replaced)
+                        changed = True
 
-        body = getattr(screenplay, "full_script_text", "") or ""
-        replaced_body = _replace_screenplay_body_label(body, source_label, canonical_name)
-        if replaced_body != body:
-            screenplay.full_script_text = replaced_body
-            changed = True
+        if replace_display_text:
+            body = getattr(screenplay, "full_script_text", "") or ""
+            replaced_body = _replace_screenplay_body_label(body, source_label, canonical_name)
+            if replaced_body != body:
+                screenplay.full_script_text = replaced_body
+                changed = True
 
         spine = getattr(screenplay, "plot_spine", None)
         if spine is not None:
             for beat in spine.spine_beats or []:
-                for field in ("who", "does", "turn"):
+                for field in (
+                    ("who", "does", "turn")
+                    if replace_display_text
+                    else ("who",)
+                ):
                     value = getattr(beat, field, "") or ""
                     replaced = _replace_resolved_label(value, source_label, canonical_name)
                     if replaced != value:
@@ -913,22 +972,24 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                     changed = True
 
         for event in getattr(screenplay, "events", None) or []:
-            for field in ("state_in", "trigger", "visible_change", "state_out", "adaptation_reason"):
-                value = getattr(event, field, "") or ""
-                replaced = _replace_resolved_label(value, source_label, canonical_name)
-                if replaced != value:
-                    setattr(event, field, replaced)
-                    changed = True
+            if replace_display_text:
+                for field in ("state_in", "trigger", "visible_change", "state_out", "adaptation_reason"):
+                    value = getattr(event, field, "") or ""
+                    replaced = _replace_resolved_label(value, source_label, canonical_name)
+                    if replaced != value:
+                        setattr(event, field, replaced)
+                        changed = True
 
         for info in getattr(screenplay, "information_ledger", None) or []:
             if (info.speaker_id or "").strip() == source_label:
                 info.speaker_id = canonical_name
                 changed = True
-            content = info.content or ""
-            replaced = _replace_resolved_label(content, source_label, canonical_name)
-            if replaced != content:
-                info.content = replaced
-                changed = True
+            if replace_display_text:
+                content = info.content or ""
+                replaced = _replace_resolved_label(content, source_label, canonical_name)
+                if replaced != content:
+                    info.content = replaced
+                    changed = True
 
         for voice in getattr(screenplay, "voice_bible", None) or []:
             if (voice.speaker_id or "").strip() == source_label:
@@ -944,30 +1005,32 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
             getattr(screenplay, "narrative_plan", None),
             source_label,
             canonical_name,
+            replace_display_text=replace_display_text,
         ) or changed
 
-        for field in (
-            "logline", "dramatic_question", "protagonist_goal", "obstacle", "stakes",
-            "emotional_curve", "ending_hook", "adaptation_direction", "opening", "development",
-            "conflict", "climax", "episode_premise",
-        ):
-            value = getattr(screenplay, field, "") or ""
-            replaced = _replace_resolved_label(value, source_label, canonical_name)
-            if replaced != value:
-                setattr(screenplay, field, replaced)
-                changed = True
-        for field in (
-            "key_lines", "key_plot_points", "character_state_changes",
-            "approved_adaptations", "forbidden_additions",
-        ):
-            values = list(getattr(screenplay, field, None) or [])
-            replaced_values = [
-                _replace_resolved_label(value, source_label, canonical_name)
-                for value in values
-            ]
-            if replaced_values != values:
-                setattr(screenplay, field, replaced_values)
-                changed = True
+        if replace_display_text:
+            for field in (
+                "logline", "dramatic_question", "protagonist_goal", "obstacle", "stakes",
+                "emotional_curve", "ending_hook", "adaptation_direction", "opening", "development",
+                "conflict", "climax", "episode_premise",
+            ):
+                value = getattr(screenplay, field, "") or ""
+                replaced = _replace_resolved_label(value, source_label, canonical_name)
+                if replaced != value:
+                    setattr(screenplay, field, replaced)
+                    changed = True
+            for field in (
+                "key_lines", "key_plot_points", "character_state_changes",
+                "approved_adaptations", "forbidden_additions",
+            ):
+                values = list(getattr(screenplay, field, None) or [])
+                replaced_values = [
+                    _replace_resolved_label(value, source_label, canonical_name)
+                    for value in values
+                ]
+                if replaced_values != values:
+                    setattr(screenplay, field, replaced_values)
+                    changed = True
 
         if changed:
             changes.append({
@@ -1218,6 +1281,7 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
         canonical_name = str(item.get("canonical_name") or "").strip()
         if not source_label or not canonical_name or source_label == canonical_name:
             continue
+        preserves_current_display = item.get("resolution") == "future_identity"
         residual_paths: list[str] = []
         for scene in getattr(screenplay, "scene_outline", None) or []:
             if source_label in (scene.characters or []):
@@ -1236,7 +1300,7 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
         speaker_pattern = re.compile(
             rf"(?m)^\s*{re.escape(source_label)}(?:[\(（][^\)）]{{0,16}}[\)）])?[:：]"
         )
-        if speaker_pattern.search(body):
+        if not preserves_current_display and speaker_pattern.search(body):
             residual_paths.append("full_script_text.speaker")
         plan = getattr(screenplay, "narrative_plan", None)
         if plan is not None:
@@ -2693,11 +2757,7 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
         return False
     data.setdefault("characters", []).append(char)
     payload = json.dumps(data, ensure_ascii=False)
-    conn.execute(
-        "UPDATE projects SET bible_json=?, bible_version=COALESCE(bible_version,0)+1 WHERE id=?",
-        (payload, project_id),
-    )
-    conn.commit()
+    next_artifact_id = None
     if artifact_supported:
         try:
             previous_id = row["bible_artifact_id"]
@@ -2706,25 +2766,42 @@ def _append_character_to_bible(conn, project_id: str, char: dict) -> bool:
                 scope_type="project",
                 scope_id=project_id,
                 status="approved",
-                trust_level="T3",
+                trust_level="T2",
                 content=data,
                 parent_artifact_ids=[previous_id] if previous_id else [],
                 contract_version="character-bible-1.0.0",
                 prompt_version="incremental-character-discovery-1.0.0",
                 model_snapshot={"operation": "incremental_add", "character_name": char.get("name")},
             ))
-            conn.execute(
-                "UPDATE projects SET bible_artifact_id=? WHERE id=?",
-                (artifact["id"], project_id),
-            )
-            conn.commit()
-        except Exception as exc:  # noqa: BLE001 -- card/version is authoritative even if lineage recording fails
+            next_artifact_id = artifact["id"]
+        except Exception as exc:  # noqa: BLE001 - authority mutation must fail closed
             code_ref(
                 exc,
                 action="append_character_bible_artifact",
                 context={"project_id": project_id, "character_name": char.get("name")},
             )
-    return True
+            return False
+    expected_version = int(row["bible_version"] or 0)
+    if artifact_supported:
+        cursor = conn.execute(
+            "UPDATE projects SET bible_json=?,bible_version=?,bible_artifact_id=? "
+            "WHERE id=? AND COALESCE(bible_version,0)=?",
+            (
+                payload,
+                expected_version + 1,
+                next_artifact_id,
+                project_id,
+                expected_version,
+            ),
+        )
+    else:
+        cursor = conn.execute(
+            "UPDATE projects SET bible_json=?,bible_version=? "
+            "WHERE id=? AND COALESCE(bible_version,0)=?",
+            (payload, expected_version + 1, project_id, expected_version),
+        )
+    conn.commit()
+    return cursor.rowcount == 1
 
 
 async def _generate_discovered_character_portrait(
