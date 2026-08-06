@@ -21,6 +21,76 @@ def normalize_split_action_owner_completions(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
 ) -> list[dict[str, Any]]:
+    """Repair terminal action shots created after an event's dialogue splits."""
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return []
+
+    dialogue_event_ids = {
+        event_id
+        for shot in outline.shots
+        if shot.key_line_ids
+        for event_id in (
+            list(shot.event_ids)
+            or ([shot.story_event_id] if shot.story_event_id else [])
+        )
+    }
+    actions = {
+        action.action_id: action
+        for action in plan.atomic_actions
+    }
+    changes: list[dict[str, Any]] = []
+    for shot in outline.shots:
+        event_ids = (
+            list(shot.event_ids)
+            or ([shot.story_event_id] if shot.story_event_id else [])
+        )
+        if (
+            not shot.primary_action_id
+            or shot.key_line_ids
+            or shot.audio_cast
+            or not dialogue_event_ids.intersection(event_ids)
+        ):
+            continue
+        action_ids = [
+            shot.primary_action_id,
+            *shot.supporting_action_ids,
+        ]
+        completion_parts = [
+            str(action.completion_condition or "").strip()
+            for action_id in action_ids
+            for action in [actions.get(action_id)]
+            if action is not None
+            and str(action.completion_condition or "").strip()
+        ]
+        completion = "；".join(dict.fromkeys(completion_parts))
+        if not completion:
+            continue
+        for field, value in (
+            ("state_in", ""),
+            ("primary_action", completion),
+            ("state_out", completion),
+            ("beat", completion),
+            ("covers", completion),
+        ):
+            current = getattr(shot, field)
+            if current == value:
+                continue
+            setattr(shot, field, value)
+            changes.append({
+                "shot_no": shot.shot_no,
+                "field": field,
+                "from": current,
+                "to": value,
+                "reason": "split_event_action_completion",
+            })
+    return changes
+
+
+def normalize_narrative_storyboard_outline(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, Any]]:
     """Project graph-owned fields while preserving model-authored directing text.
 
     The model chooses the visible beat, scene presentation and legacy delivery
@@ -227,10 +297,20 @@ def normalize_split_action_owner_completions(
                 if state.audience_prior_id == path.audience_prior_id
             ]
             deadline_groups: list[list[Any]] = []
-            for index, delta in enumerate(ordered):
+            for delta in ordered:
+                if (
+                    not deadline_groups
+                    or deadline_groups[-1][0].deadline_event_id
+                    != delta.deadline_event_id
+                ):
+                    deadline_groups.append([])
+                deadline_groups[-1].append(delta)
+            current_state_id = path.audience_state_in_id
+            for group_index, group in enumerate(deadline_groups):
+                destination = path.audience_state_out_target_id
                 if group_index + 1 < len(deadline_groups):
-                if index + 1 < len(ordered):
-                    next_delta = ordered[index + 1]
+                    next_group = deadline_groups[group_index + 1]
+                    candidates = [
                         state.audience_state_id
                         for state in prior_states
                         if (
@@ -240,27 +320,42 @@ def normalize_split_action_owner_completions(
                                 path.audience_state_out_target_id,
                             }
                             and all(
-                            and _target_state_fragment_matches(
-                                delta,
-                                delta.to_state,
-                                state,
+                                _target_state_fragment_matches(
+                                    delta,
+                                    delta.to_state,
+                                    state,
+                                )
+                                for delta in group
+                            )
                             and all(
-                            and _target_state_fragment_matches(
-                                next_delta,
-                                next_delta.from_state,
-                                state,
+                                _target_state_fragment_matches(
+                                    next_delta,
+                                    next_delta.from_state,
+                                    state,
+                                )
+                                for next_delta in next_group
+                            )
                         )
                     ]
                     # Some authority graphs intentionally expose only the
-                    if len(candidates) != 1:
-                        return []
-                    destination = candidates[0]
-                delta_paths[delta.target_delta_id] = (
-                    path.audience_prior_id,
-                    delta,
-                    destination,
-                )
-                delta_destinations[delta.target_delta_id] = destination
+                    # initial and final audience snapshots. In that case the
+                    # delta ledger still records this deadline's contribution,
+                    # while the coarse snapshot ID remains unchanged until a
+                    # declared later state is reached.
+                    destination = (
+                        candidates[0]
+                        if len(candidates) == 1
+                        else current_state_id
+                    )
+                for delta in group:
+                    delta_paths[delta.target_delta_id] = (
+                        path.audience_prior_id,
+                        delta,
+                        destination,
+                    )
+                    delta_destinations[delta.target_delta_id] = destination
+                current_state_id = destination
+
     deltas_by_event: defaultdict[str, list[str]] = defaultdict(list)
     for delta_id, (_prior_id, delta, _destination) in delta_paths.items():
         deltas_by_event[delta.deadline_event_id].append(delta_id)
@@ -302,8 +397,9 @@ def normalize_split_action_owner_completions(
         current_group: list[str] = []
         current_chars = 0
         current_speaker = ""
+        for key_id in event_key_ids:
             speaker, line, _chain_id = key_line_meta[key_id]
-            _speaker, line, _chain_id = key_line_meta[key_id]
+            line_chars = len(
                 "".join(
                     character
                     for character in line
@@ -313,14 +409,18 @@ def normalize_split_action_owner_completions(
             if (
                 current_group
                 and (
-                and current_chars + line_chars
-                > config.MAX_SPOKEN_CHARS_PER_SHOT
+                    speaker != current_speaker
+                    or current_chars + line_chars
+                    > config.MAX_SPOKEN_CHARS_PER_SHOT
+                )
+            ):
                 dialogue_groups.append(current_group)
                 current_group = []
                 current_chars = 0
             current_group.append(key_id)
             current_chars += line_chars
             current_speaker = speaker
+        if current_group:
             dialogue_groups.append(current_group)
 
         action_s = sum(
@@ -746,3 +846,6 @@ def normalize_split_action_owner_completions(
         normalize_split_action_owner_completions(
             outline,
             screenplay,
+        )
+    )
+    return changes

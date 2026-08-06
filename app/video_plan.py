@@ -36,6 +36,7 @@ class VideoInputIntent(str, Enum):
 class AssetSource(str, Enum):
     ASSET_REVISION = "ASSET_REVISION"
     STATIC_BOUNDARY_ASSET = "STATIC_BOUNDARY_ASSET"
+    PREVIOUS_STATIC_TAIL = "PREVIOUS_STATIC_TAIL"
     PREVIOUS_ADOPTED_TAIL = "PREVIOUS_ADOPTED_TAIL"
     PREVIOUS_ADOPTED_VIDEO = "PREVIOUS_ADOPTED_VIDEO"
 
@@ -108,6 +109,31 @@ class ShotRelations(BaseModel):
         "no_action",
         "unknown",
     ] = "unknown"
+
+
+SHOT_RELATION_ENUM_CONTRACT: dict[str, list[str]] = {
+    "temporal": ["same_moment", "elapsed", "jump", "new_domain", "unknown"],
+    "spatial": ["same_space", "adjacent_space", "new_space", "unknown"],
+    "edit": [
+        "continuous_take",
+        "match_cut",
+        "angle_cut",
+        "reaction_cut",
+        "reverse_angle",
+        "insert_cut",
+        "montage",
+        "scene_cut",
+        "unknown",
+    ],
+    "action": [
+        "continues_same_action",
+        "starts_new_action",
+        "shows_result",
+        "observes_result",
+        "no_action",
+        "unknown",
+    ],
+}
 
 
 class ShotVideoGenerationPlan(BaseModel):
@@ -209,7 +235,7 @@ _RELATION_ALIASES: dict[str, dict[str, str]] = {
 def normalize_ai_shot_plan_candidate(
     value: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Normalize planner enum synonyms without changing its selected mode."""
+    """Canonicalize redundant planner fields without changing its selected mode."""
     normalized = dict(value)
     changes: list[dict[str, Any]] = []
     relations = normalized.get("relations")
@@ -227,16 +253,51 @@ def normalize_ai_shot_plan_candidate(
                 "from": current,
                 "to": replacement,
             })
+        domain_changed = bool(
+            relations.get("temporal") == "new_domain"
+            or relations.get("spatial") == "new_space"
+            or relations.get("edit") == "scene_cut"
+        )
+        if (
+            domain_changed
+            and normalized.get("mode")
+            != VideoGenerationMode.REFERENCE_IMAGE_MODE.value
+        ):
+            previous_mode = normalized.get("mode")
+            normalized.update({
+                "mode": VideoGenerationMode.REFERENCE_IMAGE_MODE.value,
+                "video_input_intent": None,
+                "depends_on_shot_id": None,
+                "required_assets": [],
+                "state_dependency": "none",
+                "motion_dependency": "none",
+            })
+            reason_codes = list(normalized.get("reason_codes") or [])
+            if "SCENE_DOMAIN_CHANGED" not in reason_codes:
+                reason_codes.append("SCENE_DOMAIN_CHANGED")
+            normalized["reason_codes"] = reason_codes
+            changes.append({
+                "field": "mode",
+                "from": previous_mode,
+                "to": VideoGenerationMode.REFERENCE_IMAGE_MODE.value,
+                "reason": "scene_domain_requires_recomposition",
+            })
     if normalized.get("mode") == VideoGenerationMode.REFERENCE_IMAGE_MODE.value:
         assets = normalized.get("required_assets")
         if isinstance(assets, list):
+            versioned_reference_roles = {
+                "identity_reference",
+                "scene_reference",
+                "prop_reference",
+                "style_reference",
+            }
             kept = [
                 item
                 for item in assets
-                if not (
+                if (
                     isinstance(item, dict)
-                    and item.get("role") == "reference_image"
-                    and item.get("source") == AssetSource.STATIC_BOUNDARY_ASSET.value
+                    and item.get("role") in versioned_reference_roles
+                    and item.get("source") == AssetSource.ASSET_REVISION.value
                 )
             ]
             if kept != assets:
@@ -245,9 +306,172 @@ def normalize_ai_shot_plan_candidate(
                     "field": "required_assets",
                     "reason": "generic_reference_resolved_at_execution",
                 })
+    if normalized.get("mode") == VideoGenerationMode.FIRST_LAST_FRAME_MODE.value:
+        assets = normalized.get("required_assets")
+        first_frame = next((
+            item for item in assets
+            if isinstance(item, dict) and item.get("role") == "first_frame"
+        ), None) if isinstance(assets, list) else None
+        desired_dependency: str | None
+        if (
+            first_frame
+            and first_frame.get("source") == AssetSource.PREVIOUS_ADOPTED_TAIL.value
+            and first_frame.get("source_shot_id")
+        ):
+            desired_dependency = str(first_frame["source_shot_id"])
+        elif (
+            first_frame
+            and first_frame.get("source") in {
+                AssetSource.STATIC_BOUNDARY_ASSET.value,
+                AssetSource.PREVIOUS_STATIC_TAIL.value,
+            }
+        ):
+            desired_dependency = None
+        else:
+            desired_dependency = normalized.get("depends_on_shot_id")
+        if normalized.get("depends_on_shot_id") != desired_dependency:
+            changes.append({
+                "field": "depends_on_shot_id",
+                "from": normalized.get("depends_on_shot_id"),
+                "to": desired_dependency,
+                "reason": "derived_from_first_frame_source",
+            })
+            normalized["depends_on_shot_id"] = desired_dependency
+    fallback_order = normalized.get("fallback_order")
+    if fallback_order:
+        normalized["fallback_order"] = []
+        changes.append({
+            "field": "fallback_order",
+            "from": fallback_order,
+            "to": [],
+            "reason": "automatic_mode_fallback_disabled",
+        })
     return normalized, changes
 
 
+def _is_scene_entry(
+    *,
+    index: int,
+    item: ShotVideoGenerationPlan,
+    previous: ShotVideoGenerationPlan | None,
+    scene_identity_by_shot_id: dict[str, str],
+) -> bool:
+    if index == 0 or previous is None:
+        return True
+    current_scene = scene_identity_by_shot_id.get(item.shot_id, "").strip()
+    previous_scene = scene_identity_by_shot_id.get(previous.shot_id, "").strip()
+    if current_scene and previous_scene:
+        return current_scene != previous_scene
+    return bool(
+        item.relations.temporal == "new_domain"
+        or item.relations.spatial == "new_space"
+        or item.relations.edit == "scene_cut"
+    )
+
+
+def _scene_identity(row: Any) -> str:
+    """Keep location and time separate in storage, but joint for cut continuity."""
+    scene_name = str(_row_value(row, "scene_name", "") or "").strip()
+    scene_time = str(_row_value(row, "scene_time", "") or "").strip()
+    if not scene_name and not scene_time:
+        return ""
+    return _json([scene_name, scene_time])
+
+
+def apply_scene_boundary_strategy(
+    shots: list[ShotVideoGenerationPlan],
+    *,
+    scene_identity_by_shot_id: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Turn scene relations into a deterministic shared-boundary execution plan."""
+    changes: list[dict[str, Any]] = []
+    ordered = sorted(shots, key=lambda item: item.shot_no)
+    scene_offset = -1
+    previous: ShotVideoGenerationPlan | None = None
+    scene_identities = scene_identity_by_shot_id or {}
+    for index, item in enumerate(ordered):
+        scene_entry = _is_scene_entry(
+            index=index,
+            item=item,
+            previous=previous,
+            scene_identity_by_shot_id=scene_identities,
+        )
+        if scene_entry:
+            scene_offset = 0
+            previous_mode = item.mode
+            item.mode = VideoGenerationMode.REFERENCE_IMAGE_MODE
+            item.planned_mode = item.mode
+            item.video_input_intent = None
+            item.depends_on_shot_id = None
+            item.state_dependency = "none"
+            item.motion_dependency = "none"
+            item.required_assets = [
+                asset for asset in item.required_assets
+                if asset.role in {
+                    "identity_reference",
+                    "scene_reference",
+                    "prop_reference",
+                    "style_reference",
+                }
+            ]
+            reason_code = (
+                "FIRST_SHOT_NO_PREDECESSOR"
+                if index == 0 else "SCENE_ENTRY_REFERENCE_IMAGE"
+            )
+            if reason_code not in item.reason_codes:
+                item.reason_codes.append(reason_code)
+            if previous_mode != item.mode:
+                changes.append({
+                    "shot_id": item.shot_id,
+                    "field": "mode",
+                    "from": previous_mode.value,
+                    "to": item.mode.value,
+                    "reason": "scene_entry_requires_reference_image",
+                })
+            previous = item
+            continue
+
+        if previous is None:
+            continue
+        scene_offset += 1
+        previous_mode = item.mode
+        item.mode = VideoGenerationMode.FIRST_LAST_FRAME_MODE
+        item.planned_mode = item.mode
+        item.video_input_intent = None
+        first_source = (
+            AssetSource.PREVIOUS_ADOPTED_TAIL
+            if scene_offset == 1
+            else AssetSource.PREVIOUS_STATIC_TAIL
+        )
+        item.depends_on_shot_id = (
+            previous.shot_id
+            if first_source == AssetSource.PREVIOUS_ADOPTED_TAIL
+            else None
+        )
+        item.required_assets = [
+            PlanAssetRequirement(
+                role="first_frame",
+                source=first_source,
+                source_shot_id=previous.shot_id,
+            ),
+            PlanAssetRequirement(
+                role="last_frame",
+                source=AssetSource.STATIC_BOUNDARY_ASSET,
+            ),
+        ]
+        reason_code = (
+            "SCENE_SECOND_SHOT_ACTUAL_TAIL"
+            if scene_offset == 1 else "PREVIOUS_STATIC_TAIL_REUSED"
+        )
+        if reason_code not in item.reason_codes:
+            item.reason_codes.append(reason_code)
+        if (
+            previous_mode != item.mode
+            or first_source == AssetSource.PREVIOUS_STATIC_TAIL
+        ):
+            changes.append({
+                "shot_id": item.shot_id,
+                "field": "mode_and_boundary_source",
                 "from": previous_mode.value,
                 "to": item.mode.value,
                 "first_frame_source": first_source.value,
@@ -731,6 +955,74 @@ def validate_episode_plan(
         issues.append({
             "code": "SHOT_COVERAGE_INCOMPLETE",
             "missing_shot_ids": sorted(expected - seen),
+            "extra_shot_ids": sorted(seen - expected),
+        })
+    normalized.sort(key=lambda item: item.shot_no)
+    plan.shots = normalized
+    if normalized and normalized[0].mode != VideoGenerationMode.REFERENCE_IMAGE_MODE:
+        issues.append({"code": "FIRST_SHOT_NO_PREDECESSOR", "shot_id": normalized[0].shot_id})
+    if normalized and normalized[0].depends_on_shot_id:
+        issues.append({"code": "FIRST_SHOT_HAS_DEPENDENCY", "shot_id": normalized[0].shot_id})
+
+    scene_offset = -1
+    previous_item: ShotVideoGenerationPlan | None = None
+    scene_identity_by_shot_id = {
+        shot_id: _scene_identity(row)
+        for shot_id, row in by_id.items()
+    }
+    for index, item in enumerate(normalized):
+        scene_entry = _is_scene_entry(
+            index=index,
+            item=item,
+            previous=previous_item,
+            scene_identity_by_shot_id=scene_identity_by_shot_id,
+        )
+        if scene_entry:
+            scene_offset = 0
+            if item.mode != VideoGenerationMode.REFERENCE_IMAGE_MODE:
+                issues.append({
+                    "code": "SCENE_ENTRY_MODE_MISMATCH",
+                    "shot_id": item.shot_id,
+                    "expected_mode": VideoGenerationMode.REFERENCE_IMAGE_MODE.value,
+                })
+            previous_item = item
+            continue
+        scene_offset += 1
+        if item.mode != VideoGenerationMode.FIRST_LAST_FRAME_MODE:
+            issues.append({
+                "code": "IN_SCENE_MODE_MISMATCH",
+                "shot_id": item.shot_id,
+                "expected_mode": VideoGenerationMode.FIRST_LAST_FRAME_MODE.value,
+            })
+            previous_item = item
+            continue
+        first = next(
+            (asset for asset in item.required_assets if asset.role == "first_frame"),
+            None,
+        )
+        expected_source = (
+            AssetSource.PREVIOUS_ADOPTED_TAIL
+            if scene_offset == 1 else AssetSource.PREVIOUS_STATIC_TAIL
+        )
+        if first is None or first.source != expected_source:
+            issues.append({
+                "code": "SCENE_BOUNDARY_SOURCE_MISMATCH",
+                "shot_id": item.shot_id,
+                "expected_source": expected_source.value,
+            })
+        if (
+            first is not None
+            and previous_item is not None
+            and first.source_shot_id != previous_item.shot_id
+        ):
+            issues.append({
+                "code": "SCENE_BOUNDARY_PREVIOUS_SHOT_MISMATCH",
+                "shot_id": item.shot_id,
+                "expected_source_shot_id": previous_item.shot_id,
+            })
+        expected_dependency = (
+            previous_item.shot_id
+            if scene_offset == 1 and previous_item is not None else None
         )
         if item.depends_on_shot_id != expected_dependency:
             issues.append({
@@ -799,6 +1091,7 @@ def validate_episode_plan(
                 issues.append({"code": "REFERENCE_ASSET_REVISION_MISSING", "shot_id": item.shot_id})
         elif item.mode == VideoGenerationMode.FIRST_LAST_FRAME_MODE:
             if item.video_input_intent is not None:
+                issues.append({"code": "FIRST_LAST_HAS_VIDEO_INTENT", "shot_id": item.shot_id})
             if roles.count("first_frame") != 1 or roles.count("last_frame") != 1:
                 issues.append({"code": "FIRST_LAST_FRAME_MISSING", "shot_id": item.shot_id})
             if any("reference" in role or role.endswith("_video") for role in roles):
@@ -809,9 +1102,31 @@ def validate_episode_plan(
                 AssetSource.STATIC_BOUNDARY_ASSET,
                 AssetSource.PREVIOUS_STATIC_TAIL,
                 AssetSource.PREVIOUS_ADOPTED_TAIL,
+            }:
                 issues.append({"code": "FIRST_FRAME_SOURCE_INVALID", "shot_id": item.shot_id})
             if last and last.source != AssetSource.STATIC_BOUNDARY_ASSET:
                 issues.append({"code": "LAST_FRAME_SOURCE_INVALID", "shot_id": item.shot_id})
+            needs_upstream = bool(first and first.source == AssetSource.PREVIOUS_ADOPTED_TAIL)
+            if needs_upstream != bool(item.depends_on_shot_id):
+                issues.append({"code": "FIRST_FRAME_DEPENDENCY_MISMATCH", "shot_id": item.shot_id})
+            if (
+                first and first.source_shot_id
+                and first.source == AssetSource.PREVIOUS_ADOPTED_TAIL
+                and first.source_shot_id != item.depends_on_shot_id
+            ):
+                issues.append({"code": "FIRST_FRAME_SOURCE_SHOT_MISMATCH", "shot_id": item.shot_id})
+            if (
+                first
+                and first.source == AssetSource.PREVIOUS_STATIC_TAIL
+                and not first.source_shot_id
+            ):
+                issues.append({"code": "STATIC_TAIL_SOURCE_SHOT_MISSING", "shot_id": item.shot_id})
+            if (
+                first
+                and first.source == AssetSource.PREVIOUS_STATIC_TAIL
+                and first.source_shot_id
+            ):
+                source_row = by_id.get(first.source_shot_id)
                 if (
                     source_row is None
                     or int(source_row["shot_no"]) != int(row["shot_no"]) - 1
@@ -828,10 +1143,11 @@ def validate_episode_plan(
                 issues.append({"code": "VIDEO_INPUT_ROLE_CONFLICT", "shot_id": item.shot_id})
             video_asset = item.required_assets[0] if len(item.required_assets) == 1 else None
             if (
-        if len(set(item.fallback_order)) != len(item.fallback_order) or item.mode in item.fallback_order:
-            issues.append({"code": "FALLBACK_CYCLE", "shot_id": item.shot_id})
-        if any(not capability_allows(snapshot, fallback) for fallback in item.fallback_order):
-            issues.append({"code": "FALLBACK_CAPABILITY_UNVERIFIED", "shot_id": item.shot_id})
+                video_asset
+                and video_asset.source != AssetSource.PREVIOUS_ADOPTED_VIDEO
+            ):
+                issues.append({"code": "VIDEO_INPUT_SOURCE_INVALID", "shot_id": item.shot_id})
+            if (
                 video_asset and video_asset.source_shot_id
                 and video_asset.source_shot_id != item.depends_on_shot_id
             ):
@@ -1194,26 +1510,35 @@ async def generate_episode_plan(
             snapshot,
             release_manifest=release_manifest,
         )
+        publish_plan(plan, conn=db)
         db.commit()
         return plan
     capability_payload = snapshot.model_dump(mode="json")
     prompt_payload = {
         "task": "plan_episode_video_generation_modes",
-        "VIDEO_INPUT_MODE。第一镜固定 REFERENCE_IMAGE_MODE。关系判断只基于时空、剪辑、动作阶段、"
+        "source_storyboard_revision_id": revision_id,
+        "storyboard_release_manifest": release_manifest,
         "capability_snapshot": capability_payload,
-        "同场景反打/反应/插入/新动作默认重新构图。VIDEO_INPUT_MODE 必须给 intent；"
+        "relation_enum_contract": SHOT_RELATION_ENUM_CONTRACT,
         "shots": shot_payload,
     }
-        "first_frame 若来自上一镜实际尾帧，source=PREVIOUS_ADOPTED_TAIL 并填写 depends_on_shot_id，"
-        "否则 source=STATIC_BOUNDARY_ASSET 且无需依赖。VIDEO_INPUT_MODE 唯一 required asset 是"
+    system = (
+        "你是视频生产工具层规划器，只能引用输入中的 shot/database_shot ID，不得改写剧情、"
+        "新增/删除/调换镜头。为整集每镜选择 REFERENCE_IMAGE_MODE、FIRST_LAST_FRAME_MODE 或 "
+        "VIDEO_INPUT_MODE。每个连续场景的首镜固定 REFERENCE_IMAGE_MODE，场景内其余镜头固定 "
         "FIRST_LAST_FRAME_MODE。关系判断只基于时空、剪辑、动作阶段、"
+        "状态依赖和运动依赖，禁止按人物名、地点名、题材、打斗词或动作词表决定模式。"
+        "new_domain、new_space 或 scene_cut 表示新场景首镜。VIDEO_INPUT_MODE 必须给 intent；"
         "CONTINUE_PREVIOUS_TAKE 只有 capability 明确准入才可选。"
         "FIRST_LAST_FRAME_MODE 必须各给一个 first_frame/last_frame requirement；"
         "场景内第二镜的 first_frame 来自场景首镜实际尾帧，source=PREVIOUS_ADOPTED_TAIL 并填写 "
         "depends_on_shot_id；场景内第三镜起复用上一镜预生成静态尾帧，"
         "source=PREVIOUS_STATIC_TAIL、填写 source_shot_id 且 depends_on_shot_id=null。"
         "每个首尾帧镜头的 last_frame 都是 STATIC_BOUNDARY_ASSET。VIDEO_INPUT_MODE 唯一 required asset 是"
-        "\"relations\":{\"temporal\":\"...\",\"spatial\":\"...\",\"edit\":\"...\",\"action\":\"...\"},"
+        "previous_adopted_video/source=PREVIOUS_ADOPTED_VIDEO。参考图模式不得依赖上一镜视频。"
+        "fallback_order 必须为空数组；任一模式失败时保持原模式失败，不得改用其他模式。"
+        "relations 四个字段必须逐字使用 relation_enum_contract 对应数组中的枚举值，禁止自造同义词。"
+        "只输出 JSON，不要 Markdown。"
     )
     user = (
         _json(prompt_payload)
@@ -1351,21 +1676,44 @@ async def generate_episode_plan(
         for asset in shot_plans[-1].required_assets:
             if (
                 asset.source == AssetSource.ASSET_REVISION
-    first = min(shot_plans, key=lambda item: item.shot_no, default=None)
-    if first is not None:
-        first.mode = VideoGenerationMode.REFERENCE_IMAGE_MODE
-        first.planned_mode = VideoGenerationMode.REFERENCE_IMAGE_MODE
-        first.video_input_intent = None
-        first.depends_on_shot_id = None
-        first.required_assets = [
-            asset for asset in first.required_assets
-            if asset.role in {
-                "identity_reference", "scene_reference",
-                "prop_reference", "style_reference",
-            }
-        ]
-        if "FIRST_SHOT_NO_PREDECESSOR" not in first.reason_codes:
-            first.reason_codes.append("FIRST_SHOT_NO_PREDECESSOR")
+                and asset.asset_revision_id not in allowed_revisions
+            ):
+                ai_reference_issues.append({
+                    "code": "UNKNOWN_ASSET_REVISION_ID",
+                    "shot_id": shot_id,
+                    "asset_revision_id": asset.asset_revision_id,
+                })
+    if ai_reference_issues:
+        raise VideoPlanValidationError(ai_reference_issues)
+    planner_shot_numbers = {
+        str(identifier): int(payload["shot_no"])
+        for payload in shot_payload
+        for identifier in (
+            payload.get("shot_id"),
+            payload.get("database_shot_id"),
+        )
+        if identifier
+    }
+    for item in shot_plans:
+        if item.shot_id in planner_shot_numbers:
+            item.shot_no = planner_shot_numbers[item.shot_id]
+    planner_scene_identities = {
+        str(identifier): _scene_identity(row)
+        for payload, row in zip(shot_payload, rows)
+        for identifier in (
+            payload.get("shot_id"),
+            payload.get("database_shot_id"),
+        )
+        if identifier
+    }
+    boundary_changes = apply_scene_boundary_strategy(
+        shot_plans,
+        scene_identity_by_shot_id=planner_scene_identities,
+    )
+    if boundary_changes:
+        log_provider_call(
+            "episode_video_boundary_strategy",
+            active_model,
             "NORMALIZED",
             None,
             0,
@@ -1977,115 +2325,6 @@ def create_local_replan_revision(
     manifest = current_storyboard_release_manifest(str(shot["episode_id"]), conn=db)
     validate_episode_plan(
         replacement,
-def create_fallback_plan_revision(
-    shot_plan_id: str,
-    *,
-    reason: str,
-    conn=None,
-) -> ShotVideoGenerationPlan | None:
-    """Publish the next finite fallback as a new auditable plan revision."""
-    db = conn or get_conn()
-    source = db.execute(
-        """SELECT ep.episode_id,sp.max_attempts
-           FROM shot_video_generation_plans sp
-           JOIN episode_video_generation_plans ep ON ep.id=sp.episode_video_plan_id
-           WHERE sp.id=? AND ep.status='valid'""",
-        (shot_plan_id,),
-    ).fetchone()
-    if not source:
-        return None
-    attempts = int(db.execute(
-        "SELECT COUNT(*) c FROM video_generation_attempts WHERE shot_plan_id=?",
-        (shot_plan_id,),
-    ).fetchone()["c"])
-    if attempts >= int(source["max_attempts"] or 1):
-        return None
-    current = load_latest_plan(source["episode_id"], conn=db)
-    if not current or not verify_episode_plan_is_current(current, conn=db):
-        return None
-    target = next((item for item in current.shots if item.shot_plan_id == shot_plan_id), None)
-    if not target or not target.fallback_order:
-        return None
-    fallback = target.fallback_order[0]
-    if fallback == VideoGenerationMode.VIDEO_INPUT_MODE:
-        # A video fallback also needs a separately planned semantic intent.
-        return None
-    next_revision = int(db.execute(
-        "SELECT COALESCE(MAX(plan_revision),0)+1 n FROM episode_video_generation_plans WHERE episode_id=?",
-        (source["episode_id"],),
-    ).fetchone()["n"])
-    replacement = current.model_copy(deep=True)
-    replacement.episode_video_plan_id = new_id("evp")
-    replacement.plan_revision = next_revision
-    replacement.status = "draft"
-    replacement.created_at = now()
-    replacement.blockers = []
-    replacement.planner_prompt_fingerprint = _hash({
-        "fallback_from_plan": current.episode_video_plan_id,
-        "shot_plan_id": shot_plan_id,
-        "reason": reason,
-    })
-    replacement_target = None
-    for item in replacement.shots:
-        old_id = item.shot_plan_id
-        item.shot_plan_id = new_id("svp")
-        item.episode_video_plan_id = replacement.episode_video_plan_id
-        item.plan_revision = next_revision
-        if old_id != shot_plan_id:
-            continue
-        replacement_target = item
-        original = item.mode
-        item.mode = fallback
-        item.planned_mode = fallback
-        item.actual_mode = None
-        item.degraded_from_mode = original
-        item.degraded_to_mode = fallback
-        item.degraded_reason = reason[:1000]
-        item.reason_codes = [*item.reason_codes, "PLANNED_FALLBACK_APPLIED"]
-        item.fallback_order = item.fallback_order[1:]
-        item.video_input_intent = None
-        item.status = "degraded"
-        if fallback == VideoGenerationMode.REFERENCE_IMAGE_MODE:
-            item.depends_on_shot_id = None
-            item.state_dependency = "none"
-            item.motion_dependency = "none"
-            item.required_assets = []
-        elif fallback == VideoGenerationMode.FIRST_LAST_FRAME_MODE:
-            item.depends_on_shot_id = None
-            item.state_dependency = "start_and_end"
-            item.motion_dependency = "none"
-            item.required_assets = [
-                PlanAssetRequirement(
-                    role="first_frame",
-                    source=AssetSource.STATIC_BOUNDARY_ASSET,
-                ),
-                PlanAssetRequirement(
-                    role="last_frame",
-                    source=AssetSource.STATIC_BOUNDARY_ASSET,
-                ),
-            ]
-    snapshot = capability_snapshot_by_id(replacement.capability_snapshot_id, conn=db)
-    rows = db.execute(
-        "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
-        (source["episode_id"],),
-    ).fetchall()
-    if not snapshot or replacement_target is None:
-        return None
-    try:
-        manifest = current_storyboard_release_manifest(str(source["episode_id"]), conn=db)
-        validate_episode_plan(
-            replacement,
-            list(rows),
-            snapshot,
-            release_manifest=manifest,
-        )
-    except VideoPlanValidationError:
-        return None
-    publish_plan(replacement, conn=db)
-    db.commit()
-    return replacement_target
-
-
         list(rows),
         snapshot,
         release_manifest=manifest,
@@ -2516,7 +2755,6 @@ class ProviderMediaPublicationService:
                 relative = path.relative_to(projects_root)
             else:
                 from app.config import PROJECTS_DIR
-    "create_fallback_plan_revision",
                 try:
                     relative = path.relative_to(PROJECTS_DIR.resolve())
                 except ValueError as exc:

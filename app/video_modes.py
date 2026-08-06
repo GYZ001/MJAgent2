@@ -4123,7 +4123,7 @@ def _suppress_character_anchors_covered_by_keyframes(refs: list[dict[str, Any]])
             ref.get("deleted")
             or not ref.get("selectedForSeedance")
             or ref.get("type") != "character"
-        " Use the provided reference images as follows: "
+            or not (_reference_identity_names(ref) & carried_identities)
         ):
             continue
         ref["selectedForSeedance"] = False
@@ -4144,9 +4144,9 @@ def pack_reference_images_for_seedance(
     """必需用途优先装箱；分数只在同类候选内排序。关键帧不会被高分定妆照挤掉。"""
     from app.multiview import pack_references_by_purpose
     usable = []
-            # 参考图/关键帧重试耗尽后的最终降级：Seedance 支持纯文本 content。
-            # 返回空列表表示继续提交，而不是把已经发生的付费工作判失败。
-            return []
+    seen_inputs: set[str] = set()
+    for r in refs:
+        # ``purposes`` describes what an asset was generated for and is retained
         # on rejected candidates for audit.  Only the explicit selection flag is
         # authoritative for the current provider request.
         if r.get("selectedForSeedance") and not r.get("deleted"):
@@ -4155,7 +4155,9 @@ def pack_reference_images_for_seedance(
                 or r.get("image_path")
                 or r.get("url")
                 or r.get("id")
-            return []
+                or ""
+            )
+            if key and key in seen_inputs:
                 continue
             if key:
                 seen_inputs.add(key)
@@ -4163,7 +4165,9 @@ def pack_reference_images_for_seedance(
     if not usable:
         return []
     # 最后一道污染防线：同一逻辑 slot 若被历史/手工 meta 误标了多个 winner，
-            return []
+    # 仍只取 QA 最高的一张；不同时序 slot 必须全部保留。无 slot 的旧数据视为同一组。
+    def _score(ref: dict[str, Any]) -> tuple[float, int]:
+        value = ref.get("qualityScore")
         if value is None and isinstance(ref.get("qa"), dict):
             value = ref["qa"].get("overall")
         try:

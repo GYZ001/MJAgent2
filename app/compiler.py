@@ -16,6 +16,7 @@ from app.character_policy import (
 )
 from app.renderability import strip_overdetail_terms
 from app.schemas import Bible, EpisodeScreenplay, Shot
+from app.spoken_contract import SPOKEN_DELIVERIES
 
 # 全知视角的结尾悬念钩旁白（"可他不知道…/殊不知…/然而…"）念在台词【之后】；
 # 其余旁白（情境画外音、人物内心OS、人群声）都是先给情境、人物再开口反应，必须念在台词【之前】。
@@ -110,9 +111,7 @@ def _shot_character_contract_names(shot: Shot) -> list[str]:
     names: list[str] = [
         *((name or "").strip() for name in (shot.characters or [])),
         *((name or "").strip() for name in (shot.characters_visible or [])),
-        *((name or "").strip() for name in (shot.audio_cast or [])),
-        *((dialogue.speaker or "").strip() for dialogue in (shot.dialogues or [])),
-        *((item.speaker_id or "").strip() for item in (shot.audio_timeline or [])),
+        *_shot_voice_contract_names(shot),
     ]
     for role in shot.reference_roles or []:
         prefix, separator, name = str(role or "").partition(":")
@@ -134,10 +133,14 @@ def _shot_visual_contract_names(shot: Shot) -> list[str]:
 
 
 def _shot_voice_contract_names(shot: Shot) -> list[str]:
+    """Return actual spoken identities, excluding non-person ambient sources."""
     names = [
-        *((name or "").strip() for name in (shot.audio_cast or [])),
         *((dialogue.speaker or "").strip() for dialogue in (shot.dialogues or [])),
-        *((item.speaker_id or "").strip() for item in (shot.audio_timeline or [])),
+        *(
+            (item.speaker_id or "").strip()
+            for item in (shot.audio_timeline or [])
+            if item.type in SPOKEN_DELIVERIES
+        ),
     ]
     return list(dict.fromkeys(name for name in names if name))
 
@@ -1070,11 +1073,13 @@ def _compile_text_policy(shot: Shot) -> str:
     required = getattr(shot, "required_text", None)
     if required is not None and (getattr(required, "exact_text", None) or "").strip():
         exact = required.exact_text.strip()
+        surface = (required.surface or "画面指定表面").strip()
         strategy = required_text_strategy(shot)
         if strategy == "audio_only":
             return (
                 f"只通过对白/画外音交付「{exact}」的信息；{surface}上不出现可读文字。"
                 "画面中禁止字幕、标志、水印或乱码。"
+            )
         if strategy == "deterministic_insert":
             return (
                 f"只生成无字、干净的「{surface}」与人物表演；不得尝试拼写「{exact}」。"
@@ -1093,13 +1098,24 @@ def _compile_text_policy(shot: Shot) -> str:
     return "画面中不出现任何文字、字幕、标志或水印。"
 
 
-    lines.append("所有对白和必要声音必须由本条视频直接生成并在片段结束前完整结束；只生成指定说话人和指定台词。")
+def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
+    from app.continuity import ensure_audio_timeline
+    ensure_audio_timeline(shot, voice_bible)
+    lines: list[str] = []
+    has_spoken_content = False
+    for item in shot.audio_timeline:
+        span = f"{item.start_s:g}–{item.end_s:g} 秒"
+        if item.type == "ambient_sound":
+            lines.append(f"{span}：{item.text or '自然环境声'}")
+            continue
         has_spoken_content = True
         speaker = item.speaker_id or "未知"
         voice = (item.voice_canonical or "").strip()
         voice_bit = f"，声音特征：{voice}" if voice else ""
         lip = "需要对口型" if item.lip_sync else "不在画面中或无需口型"
-                             collective_names: set[str] | None = None) -> str:
+        emotion = item.emotion or "平静"
+        if item.type == "narration":
+            lines.append(
                 f"{span}：旁白用独立叙述者嗓音念「{item.text}」{voice_bit}；不对口型，不要让画面人物说这段。"
             )
         elif item.type == "offscreen_voice":
@@ -1108,6 +1124,24 @@ def _compile_text_policy(shot: Shot) -> str:
                 "保持该角色声音身份，不得改成通用旁白。"
             )
         else:
+            lines.append(
+                f"{span}：画面中的{speaker}以{emotion}语气开口说「{item.text}」{voice_bit}；{lip}。"
+            )
+    if has_spoken_content:
+        lines.append(
+            "所有对白和必要声音必须由本条视频直接生成并在片段结束前完整结束；"
+            "只生成指定说话人和指定台词。"
+        )
+    else:
+        lines.append(
+            "本镜没有任何指定台词、画外音或旁白；所有人物全程闭口，不做说话口型，"
+            "不得自行补充问候、应答、语气词或任何可辨识人声。"
+        )
+    return "\n".join(lines)
+
+
+def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: bool,
+                             chained: bool, individual_names: set[str] | None = None,
                              collective_names: set[str] | None = None,
                              video_generation_mode: str | None = None,
                              first_frame_source: str | None = None) -> str:
@@ -1136,7 +1170,8 @@ def _compile_text_policy(shot: Shot) -> str:
         lines.append(
             "禁止把首尾图叠在一起，禁止溶图、换脸、人物融合、凭空消失、瞬移、硬切或中途切场景。"
         )
-                                  collective_names: set[str] | None = None) -> str:
+        return "\n".join(lines)
+    if uses_previous_tail_frame(continuity_mode) and (chained or "start_state_reference" in roles):
         lines.append(
             "参考图 A 是上一镜真实结束帧，也是本视频 0.0 秒的强制起始状态。"
             "保持其中人物数量、身份、服装、位置、朝向、手势、道具状态和光线；"
@@ -1168,16 +1203,33 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
                                   first_last_boundary: bool = False) -> str:
     from app.continuity import (
         dialogue_focus_subject,
-        parts.append(f"画面可见角色仅限：{'、'.join(visible)}")
+        effective_characters_visible,
+        required_text_strategy,
+        uses_previous_tail_frame,
+    )
+    parts = [
+        "不要重演前序剧情",
+        "不要提前表演下一镜内容",
         (
             f"除「{(shot.required_text.exact_text or '').strip()}」外不要出现任何其他文字"
-        parts.extend([
-            f"对白镜头只允许「{focus_subject}」一人入画",
-            "听者、其他说话人和人群全部留在画外，不得出现肩膀、背影、倒影或模糊人脸",
-            "不要双人同框、多人站桩或群像构图",
-        ])
-    if not uses_previous_tail_frame(continuity_mode):
+            if required_text_strategy(shot) == "embedded_prop"
+            else "不要生成字幕、乱码、可读道具字样或水印"
+        ),
+        "不要出现镜头内未指定的人物",
+        "不要复制人物或生成分身",
+    ]
+    for item in shot.do_not_repeat or []:
+        text = (item or "").strip()
+        # do_not_repeat may still contain historical internal IDs.  They are
+        # useful for ledger deduplication but meaningless to Seedance, so only
+        # forward resolved natural-language constraints.
+        if text and re.search(r"[\u3400-\u9fff]", text):
+            parts.append(f"不要重复：{text}")
     for tag in shot.risk_tags or []:
+        if tag == "crowd_consistency":
+            parts.append("人群数量与朝向保持稳定，不要随机增减人脸")
+        elif tag == "offscreen_voice":
+            parts.append("画外说话人不要入画，也不要用旁白腔替代")
     visible = effective_characters_visible(shot)
     if visible:
         if first_last_boundary:
@@ -1206,6 +1258,37 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
     if first_last_boundary:
         parts.append(
             "不得忽略或重画首帧；不得用溶图、变形、换脸、人物融合、瞬移或硬切伪造首尾帧过渡"
+        )
+    contact_phase = shot_contact_phase(shot)
+    if contact_phase == "established":
+        parts.append("已接触动作禁止正面摆拍、禁止手悬空或接触点留缝")
+    elif contact_phase == "approach":
+        parts.append("接近/未命中动作禁止正面摆拍；保留清晰间距，禁止提前改成已碰触")
+    elif contact_phase == "separated":
+        parts.append("松开/分离动作禁止正面摆拍；保留已分开的清晰间距，禁止重新画成已接触")
+    bible_names = {c.name for c in bible.characters} if bible is not None else set()
+    individual_visible = [
+        name for name in visible
+        if (
+            name not in collective_names
+            if collective_names is not None
+            else name in bible_names or not is_collective_role(name)
+        )
+    ]
+    if len(individual_visible) >= 2 and not has_explicit_height_difference(shot, bible):
+        parts.append("禁止同框人物随意一高一低或眼线错位")
+    if extra_negative:
+        parts.extend(x.strip() for x in extra_negative if x and x.strip())
+    # 保留关键安全负面词（精简，避免与条件文字策略冲突）
+    parts.append(
+        "避免真人实拍、畸形手、肢体错位、面部崩坏、角色换装漂移、动作瞬移、头部突然放大或幼态大头、"
+        "画风突变、满屏光效遮挡面部"
+    )
+    return "；".join(dict.fromkeys(parts))
+
+
+def _first_last_boundary_path(
+    *,
     duration_s: int,
     first_frame_source: str | None,
     relation_edit: str | None,
@@ -1221,7 +1304,12 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         return f"{value:.2f}".rstrip("0").rstrip(".")
 
     camera_move = "连续跟随主体的轨道移动、横摇、推拉与弧形重构运镜"
-                   aspect_ratio: str = "9:16") -> str:
+    source_label = {
+        "PREVIOUS_ADOPTED_TAIL": "上一镜真实尾帧",
+        "PREVIOUS_STATIC_TAIL": "上一镜静态尾帧",
+        "STATIC_BOUNDARY_ASSET": "本镜静态首帧",
+    }.get(first_frame_source or "", "输入首帧")
+    path = (
         f"{source_label}就是 0.0 秒画面，输入尾帧就是 {_time(duration)} 秒画面；"
         "两个端点都不可重画。\n"
         f"0.0–{_time(departure_end)} 秒：从首帧原构图平滑起步，先建立同一场景的三维方位，"
@@ -1231,6 +1319,7 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         "摄影机轨迹和人物合理位移越充分；差距越小，自动减小运镜幅度，禁止无意义晃动。\n"
         f"{_time(settle_start)}–{_time(duration)} 秒：摄影机平滑减速，动作完成并精确重构到"
         "输入尾帧的机位、景别、人物位置、朝向和道具状态，结尾稳定停留。\n"
+        f"剪辑关系={edit}，动作关系={action}。只允许用同一物理空间内连续可解释的摄影机运动、"
         "遮挡关系、视差和人物正常出入画连接端点；运镜不能掩盖换人、换装、换景或身份漂移。"
         "若端点人物身份或场景并非同一连续世界，不得用溶图、变形、复制、瞬移或硬切伪造过渡。"
     )
@@ -1259,9 +1348,13 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    boundary_relation_action: str | None = None,
                    boundary_start_state: str | None = None) -> str:
     """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
+    from app.continuity import (
         dialogue_action_staging_kind,
         dialogue_focus_subject,
         derive_continuity_mode,
+        effective_characters_visible,
+        effective_primary_action,
+        effective_state_in,
         ensure_audio_timeline,
         implicit_speech_without_dialogue_errors,
         planned_state_out,
@@ -1292,11 +1385,15 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     if mode not in {"action_continuation", "same_scene_cut", "reaction_cut",
                     "reverse_angle", "insert_detail", "scene_change"}:
         mode = derive_continuity_mode(shot)
-    if uses_previous_tail_frame(mode) and (prev_state_out or "").strip():
+    first_last_boundary = video_generation_mode == "FIRST_LAST_FRAME_MODE"
+    shot.continuity_mode = mode
+    shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
     ensure_audio_timeline(shot, voice_bible)
     implicit_speech_errors = implicit_speech_without_dialogue_errors(shot)
     if implicit_speech_errors:
         raise CompileError("；".join(implicit_speech_errors))
+    if identity_resolver is not None:
+        # ``ensure_audio_timeline`` may deterministically materialise entries
         # that were absent on the input shot; validate the final provider cast.
         for name in _shot_voice_contract_names(shot):
             identity_resolver.resolve(name, usage="voice")
@@ -1314,7 +1411,16 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         ))
     else:
         collective_names = None
+        individual_names = set(bible_map)
+        known_identity_tokens = list(bible_map)
+    shot.reference_roles = reference_role_plan(
+        shot,
+        continuity_mode=mode,
+        individual_names=individual_names,
+        collective_names=collective_names,
     )
+
+    shot_dur = clip_duration(shot)
     state_in = effective_state_in(shot)
     if first_last_boundary and (boundary_start_state or "").strip():
         state_in = boundary_start_state.strip()
@@ -1333,7 +1439,15 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         primary,
         full_action,
         visible_cast_block,
-    )
+    ) = project_visual_contract_to_visible_cast(
+        shot,
+        state_in=state_in,
+        state_out=state_out,
+        primary_action=primary,
+        full_action=full_action,
+        visible_names=visible_names,
+        bible_names=known_identity_tokens,
+        continuity_mode=mode,
     )
     if first_last_boundary and (boundary_start_state or "").strip():
         # 0 秒画面由真实首帧控制。可见角色投影只约束当前动作，不得把上游
@@ -1343,8 +1457,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             visible_cast_block += (
                 "以上当前动作可见名单从首帧边界运镜完成后生效；"
                 "输入首帧已有边界人物必须先原样保留，再通过连续运镜自然出画。"
+            )
     if not state_in or not primary or not state_out:
-            f"。竖屏单人对白构图：只拍「{dialogue_focus}」一人的面部、上半身与自然口型，"
+        raise CompileError(
+            f"镜头 {shot.shot_no} 缺少 state_in/primary_action/state_out，无法编译最小完备提示词"
         )
 
     style = (visual_style or bible.world.visual_style_canonical or "写实国风玄幻动画").strip()
@@ -1423,6 +1539,8 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             anchors.append(f"{name}：{collective_role_anchor(name)}")
         else:
             anchors.append(f"{name}：{functional_extra_anchor(name)}")
+    character_anchor = "；".join(anchors[:4]) if anchors else "保持人物身份服装一致"
+    scene_anchor, scene_geometry, _ = _scene_geometry_contract(shot, bible)
     prop_anchor = ""
     if shot.required_text and (shot.required_text.surface or "").strip():
         prop_anchor = f"文字承载面：{shot.required_text.surface.strip()}"
@@ -1442,10 +1560,16 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         target = f"，为切换到「{next_scene.strip()}」留出视觉出口" if next_scene and next_scene.strip() else ""
         transition_bits.append(
             f"最终编辑会以「{_clean_transition(outgoing_transition)}」将本镜连到下一镜{target}；"
-        action_block += (
-            f"。对白构图以「{dialogue_focus}」为唯一可见主体；"
-            "原动作中提到的听者、围观者和其他角色均视为画外关系，不得画入镜头"
+            "末尾保留约0.3秒稳定动作结果，不自行生成渐变、闪光或叠化，"
+            "不把下一场景拍进本镜。"
         )
+
+    post_text_note = "最终编辑只负责镜间转场、音量归一化"
+    if required_text_strategy(shot) == "deterministic_insert":
+        post_text_note += "与精确文字插入"
+    post_text_note += "；不得依赖后期补齐剧情动作、配音或关键音效。"
+    format_block = (
+        f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 的完整可直接采用视频。"
         f"{post_text_note}"
         "全程不要任何背景音乐或 BGM；声音只保留指定人声与必要环境音。"
     )
@@ -1469,6 +1593,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     if full_action and full_action != primary:
         action_block += f"。完整可见执行：{full_action}"
     action_block += (
+        "。必须从起始状态连续拍到结束状态，按描述顺序完整呈现每个明示的大形体动作和道具状态变化；"
         "不得只拍站立说话、口型或表情变化来替代动作"
     )
     if transition_bits:
@@ -1481,6 +1606,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             )
         else:
             action_block += (
+                f"。对白构图以「{dialogue_focus}」为唯一可见主体；"
                 "原动作中提到的听者、围观者和其他角色均视为画外关系，不得画入镜头"
             )
     elif dialogue_staging:

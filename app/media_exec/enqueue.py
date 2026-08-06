@@ -1454,6 +1454,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                        preflight_job_id: str | None = None,
                        preflight_repair: dict[str, Any] | None = None) -> dict:
     """为镜头创建参考图模式视频版本并入队。
+    critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
     幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。"""
     from app.compiler import CompileError, compile_prompt
     from app.continuity import (
@@ -1518,6 +1519,22 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         decision = video_modes.dict_to_decision(
             shot_plan.model_dump(mode="json")
         )
+    else:
+        decision = (
+            _decision_from_mode_plan(shot_row)
+            or video_modes.default_reference_decision()
+        )
+        if decision.mode != video_modes.REFERENCE_IMAGE_MODE:
+            decision = video_modes.default_reference_decision()
+
+    first_frame_requirement = None
+    first_frame_source = None
+    boundary_source_shot_id = None
+    if shot_plan is not None and shot_plan.mode.value == video_modes.FIRST_LAST_FRAME_MODE:
+        first_frame_requirement = next(
+            (
+                item
+                for item in shot_plan.required_assets
                 if item.role == "first_frame"
             ),
             None,
@@ -1545,10 +1562,49 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         prev_row = conn.execute(
             "SELECT * FROM shots WHERE id=? AND episode_id=?",
             (dependency_id, shot_row["episode_id"]),
-    prev_shot = _load_shot_model(prev_row) if prev_row else None
+        ).fetchone()
+        if prev_row is None and shot_plan is not None:
+            raise ValueError("视频计划引用的前序镜头不存在或不属于本集")
+    if prev_row is None and shot_plan is None and int(shot_row["shot_no"]) > 1:
+        prev_row = conn.execute(
+            "SELECT * FROM shots WHERE episode_id=? AND shot_no<? ORDER BY shot_no DESC LIMIT 1",
+            (shot_row["episode_id"], int(shot_row["shot_no"])),
+        ).fetchone()
+    boundary_prev_row = None
+    if boundary_source_shot_id:
         boundary_prev_row = conn.execute(
             "SELECT * FROM shots WHERE id=? AND episode_id=?",
+            (boundary_source_shot_id, shot_row["episode_id"]),
+        ).fetchone()
+        if boundary_prev_row is None:
+            raise ValueError("视频计划的首帧来源镜头不存在或不属于本集")
+    prompt_prev_row = boundary_prev_row or prev_row
+    prev_shot = _load_shot_model(prompt_prev_row) if prompt_prev_row else None
+    continuity_mode = derive_continuity_mode(shot, prev_shot)
+    shot.continuity_mode = continuity_mode
+    shot.continuity_from_prev = uses_previous_tail_frame(continuity_mode)
+    if continuity_mode != "scene_change":
+        shot.transition = "硬切"
+    boundary_relation_edit = (
+        shot_plan.relations.edit if shot_plan is not None else None
+    )
+    boundary_relation_action = (
+        shot_plan.relations.action if shot_plan is not None else None
+    )
+    boundary_relation_reason = "planned_relation"
+    if first_frame_requirement is not None:
+        (
+            boundary_relation_edit,
             boundary_relation_action,
+            boundary_relation_reason,
+        ) = resolve_first_last_boundary_relation(
+            shot,
+            prev_shot,
+            planned_edit=boundary_relation_edit,
+            planned_action=boundary_relation_action,
+        )
+    prev_state_out = effective_state_out(prev_shot) if prev_shot else None
+    boundary_start_state = None
     if boundary_prev_row is not None and prev_shot is not None:
         if first_frame_source == "PREVIOUS_STATIC_TAIL":
             boundary_start_state = (
@@ -1602,7 +1658,14 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                                   from_scene=False,
                                   chained=bool(chain_after_shot_id),
                                   critique=critique, prev_tail_action=None,
-                                  screenplay=screenplay))
+                                  with_last_frame=False,
+                                  incoming_transition=incoming_transition,
+                                  outgoing_transition=outgoing_transition["transition"] if outgoing_transition else None,
+                                  next_scene=outgoing_transition["next_scene"] if outgoing_transition else None,
+                                  next_first_frame_desc=outgoing_transition["next_first_frame_desc"] if outgoing_transition else None,
+                                  continuity_mode=continuity_mode,
+                                  prev_state_out=prompt_prev_state_out,
+                                  voice_bible=screenplay.voice_bible,
                                   screenplay=screenplay,
                                   video_generation_mode=(
                                       shot_plan.mode.value if shot_plan is not None else decision.mode
@@ -1712,6 +1775,17 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "after_shot_id": chain_after_shot_id,
         "after_version_id": chain_after_version_id,
         "after_shot_no": None,
+        "continuity_mode": continuity_mode,
+        "prev_state_out": prompt_prev_state_out,
+        "incoming_transition": incoming_transition,
+        "outgoing_transition": outgoing_transition,
+        "auto_retake_count": max(0, int(auto_retake_count)),
+        "supervisor_run_id": supervisor_run_id,
+        "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
+        "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
+        "boundary_prompt_contract": {
+            "video_generation_mode": (
+                shot_plan.mode.value if shot_plan is not None else decision.mode
             ),
             "first_frame_source": first_frame_source,
             "source_shot_id": boundary_source_shot_id,
@@ -1773,15 +1847,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             image_meta["reference_gallery_revision"] = reference_gallery["revision"]
         if reference_gallery["edited"]:
             image_meta["reference_gallery_edited"] = True
-    # 补齐模式：优先读视频 grant 的 budget_cap_cny
-    budget_limit = float(get_setting("episode_cost_limit_cny") or 100)
-    try:
-        from app.completion_grant import active_video_grant_budget_cap
-        grant_cap = active_video_grant_budget_cap(ep["id"])
-        if grant_cap is not None:
-            budget_limit = float(grant_cap)
-    except Exception:  # noqa: BLE001
-        pass
+        if reference_gallery.get("contract_override"):
             image_meta["reference_gallery_contract_override"] = True
     conn.execute(
         "INSERT INTO shot_versions(id, shot_id, version_no, prompt_text, idem_key, status, created_at, image_inputs) "
@@ -1823,10 +1889,9 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                 chain_after_shot_id, chain_after_version_id, run_id,
                 supervisor_run_id, step_run_id,
             ))
-    estimate = (
-        shot_cost_cny(shot.duration_s)
-        + config.IMAGE_PRICE_PER_UNIT * video_modes.estimated_keyframe_generation_count()
-    )
+    try:
+        from app.media_pipeline import stages as media_stages
+        from app.media_pipeline.stage_state import set_pipeline_stage
         set_pipeline_stage(job_id, media_stages.STAGE_JOB_QUEUED, conn=conn)
     except Exception:  # noqa: BLE001
         pass
