@@ -1211,6 +1211,32 @@ def _dispatch(
     ).fetchone()
     if not current_shot or current_shot["adopted_version_id"]:
         return False
+    execution_rows = conn.execute(
+        """SELECT j.status,j.provider_create_state,v.provider_task_id,v.image_inputs
+             FROM jobs j
+             LEFT JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.shot_id=? AND j.episode_id=? AND j.kind='video'
+              AND (v.status IS NULL OR v.status!='cleared')
+            ORDER BY j.created_at DESC""",
+        (entry.shot_id, episode_id),
+    ).fetchall()
+    for execution in execution_rows:
+        try:
+            execution_meta = json.loads(execution["image_inputs"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            execution_meta = {}
+        if run_id and execution_meta.get("supervisor_run_id") != run_id:
+            continue
+        if execution["provider_create_state"] == "model_rejected":
+            return False
+        if (
+            execution["status"] in ACTIVE_JOB_STATUSES
+            and (
+                execution["provider_task_id"]
+                or execution["provider_create_state"] in {"submitting", "accepted"}
+            )
+        ):
+            return False
 
     if run_id:
         ep = conn.execute(
@@ -1392,6 +1418,27 @@ def _collect_issues(entry: ShotCoverageEntry) -> list[Issue]:
                 qa, technical, shot_id=entry.shot_id,
                 version_id=row["id"], shot_no=entry.shot_no,
             ))
+    if not issues:
+        failed = conn.execute(
+            """SELECT * FROM jobs
+               WHERE shot_id=? AND kind='video'
+                 AND status IN ('failed','paused_budget','waiting_human')
+               ORDER BY created_at DESC LIMIT 1""",
+            (entry.shot_id,),
+        ).fetchone()
+        if failed:
+            failed_version = None
+            if failed["version_id"]:
+                failed_version = conn.execute(
+                    "SELECT * FROM shot_versions WHERE id=?",
+                    (failed["version_id"],),
+                ).fetchone()
+            issues = issues_from_job_failure(
+                dict(failed),
+                dict(failed_version) if failed_version else None,
+                shot_id=entry.shot_id,
+                shot_no=entry.shot_no,
+            )
     if not issues and entry.last_issue_codes:
         issues = [
             Issue(
