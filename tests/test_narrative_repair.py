@@ -9,6 +9,7 @@ from app.narrative_repair import (
     SemanticCandidateAssessment,
     SemanticOutlineOperation,
     SemanticRepairDiagnosis,
+    _focus_operation_errors,
     diagnose_narrative_repair,
     route_narrative_issues,
     validate_semantic_diagnosis,
@@ -172,7 +173,50 @@ async def test_model_diagnosis_compares_open_candidates_without_issue_code_routi
     assert "action_phase_handoff" in transition_contract["basis_type"]
     hard_rules = "\n".join(captured["request"]["hard_rules"])
     assert "不得输出 from_fact_id" in hard_rules
+    assert "source_fact_id 与 target_fact_id 相同" in hard_rules
     assert captured["meta"]["stage_key"] == "semantic_repair_planner"
+
+
+def test_focus_operation_errors_reject_remote_future_shot() -> None:
+    replacement = StoryboardOutlineShot.model_validate(
+        _settled_followup_shot().model_dump(mode="json")
+    )
+    selected = SemanticCandidateAssessment(
+        strategy="repair_current_and_remote",
+        expected_narrative_gain=0.9,
+        destructive_cost=0.2,
+        satisfies_gap_test=True,
+        passes_marginal_gain_test=True,
+        preserves_invariants=True,
+        outline_operations=[
+            SemanticOutlineOperation(
+                op="repair-focus",
+                executor="replace_outline_shot",
+                target={"shot_no": 6},
+                value=replacement.model_copy(update={"shot_no": 6}),
+            ),
+            SemanticOutlineOperation(
+                op="repair-remote",
+                executor="replace_outline_shot",
+                target={"shot_no": 9},
+                value=replacement.model_copy(update={"shot_no": 9}),
+            ),
+        ],
+    )
+    diagnosis = SemanticRepairDiagnosis(
+        diagnosis_id="NRD-focus",
+        semantic_gap="The current shot needs a local repair.",
+        candidate_assessments=[
+            _assessment("repair_current", gain=0.2, cost=0.1),
+            selected,
+        ],
+        selected_strategy=selected.strategy,
+        selection_reason="The model incorrectly included a remote future shot.",
+    )
+
+    errors = _focus_operation_errors(diagnosis, focus_shot_no=6)
+
+    assert any("禁止跨到远端镜头：[9]" in error for error in errors)
 
 
 @pytest.mark.asyncio
