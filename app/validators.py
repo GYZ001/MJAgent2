@@ -2354,7 +2354,10 @@ def validate_screenplay_source_coverage(
     seen: set[str] = set()
     errors: list[str] = []
     for index, decision in enumerate(script.source_coverage):
-        segment_id = decision.source_segment_id.strip()
+        segment_id = str(
+            (decision.get("source_segment_id") if isinstance(decision, dict) else decision.source_segment_id)
+            or ""
+        ).strip()
         if segment_id not in expected:
             errors.append(
                 f"source_coverage[{index}].source_segment_id={segment_id} 不属于当前原文"
@@ -2362,17 +2365,26 @@ def validate_screenplay_source_coverage(
         if segment_id in seen:
             errors.append(f"source_coverage 中 {segment_id} 重复")
         seen.add(segment_id)
-        unknown_beats = sorted(set(decision.beat_ids) - beat_ids)
+        raw_beat_ids = (
+            decision.get("beat_ids", []) if isinstance(decision, dict) else decision.beat_ids
+        )
+        unknown_beats = sorted(set(raw_beat_ids or []) - beat_ids)
         if unknown_beats:
             errors.append(
                 f"source_coverage[{index}] 引用了不存在的 beat_ids：{unknown_beats}"
             )
+        disposition = (
+            decision.get("disposition") if isinstance(decision, dict) else decision.disposition
+        )
+        duplicate_of = (
+            decision.get("duplicate_of") if isinstance(decision, dict) else decision.duplicate_of
+        )
         if (
-            decision.disposition == "duplicate"
-            and decision.duplicate_of not in expected
+            disposition == "duplicate"
+            and duplicate_of not in expected
         ):
             errors.append(
-                f"source_coverage[{index}].duplicate_of={decision.duplicate_of} 不属于当前原文"
+                f"source_coverage[{index}].duplicate_of={duplicate_of} 不属于当前原文"
             )
     missing = sorted(expected - seen)
     if missing:
@@ -2428,18 +2440,34 @@ def validate_screenplay_spine_delivery(
         if beat.source_segment_ids:
             linked = [
                 decision for decision in (script.source_coverage or [])
-                if decision.source_segment_id in set(beat.source_segment_ids)
+                if str(
+                    (decision.get("source_segment_id") if isinstance(decision, dict) else decision.source_segment_id)
+                    or ""
+                ) in set(beat.source_segment_ids)
                 and (
-                    (beat.beat_id or "") in decision.beat_ids
-                    or decision.disposition in {"deliver", "merge"}
+                    (beat.beat_id or "") in (
+                        (decision.get("beat_ids", []) if isinstance(decision, dict) else decision.beat_ids)
+                        or []
+                    )
+                    or (
+                        (decision.get("disposition") if isinstance(decision, dict) else decision.disposition)
+                        in {"deliver", "merge"}
+                    )
                 )
             ]
             if linked:
                 who = (beat.who or "").strip()
                 who_hit = not who or who in full_delivery_text
-                does_hit = not _claim_clearly_absent(beat.does or "", full_delivery_text)
-                turn_hit = not _claim_clearly_absent(beat.turn or "", full_delivery_text)
-                if who_hit and (does_hit or turn_hit):
+                weak_hits = [
+                    text
+                    for text in (beat.does, beat.turn, beat.purpose)
+                    if str(text or "").strip()
+                    and (
+                        _longest_run_ratio(str(text), full_delivery_text) >= 0.12
+                        or _bigram_coverage(str(text), full_delivery_text) >= 0.08
+                    )
+                ]
+                if who_hit and weak_hits:
                     return True
         return False
 

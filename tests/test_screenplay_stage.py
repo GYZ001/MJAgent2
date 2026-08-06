@@ -11,6 +11,7 @@ from app.validators import (
     source_dialogue_fragments,
     validate_dialogue_chains,
     validate_screenplay,
+    validate_screenplay_spine_delivery,
 )
 
 
@@ -1231,6 +1232,45 @@ def test_screenplay_rejects_must_keep_spine_missing_from_full_script() -> None:
     assert any(
         "full_script_text 未交付" in error and "S01/谷言" in error
         for error in errors
+    )
+
+
+def test_screenplay_spine_delivery_accepts_source_bound_paraphrase() -> None:
+    script = _valid_rainy_script()
+    script.plot_spine = PlotSpine(
+        episode_premise="白洁面对婚姻和职业压力",
+        spine_beats=[
+            PlotSpineBeat(
+                beat_id="S03",
+                who="白洁",
+                does="晚上与丈夫王申谈论评职称，王申不以为然。两人行房，王申早泄，白洁性欲未满足。",
+                turn="白洁对婚姻生活产生不满，性欲被唤醒。",
+                purpose="展现白洁的婚姻状况和情绪缺口，为后续选择埋下伏笔。",
+                source_segment_ids=["SRC0003"],
+                must_keep=True,
+            )
+        ],
+        must_keep_ending="白洁的情绪缺口被建立",
+    )
+    script.source_coverage = [
+        {
+            "source_segment_id": "SRC0003",
+            "disposition": "deliver",
+            "beat_ids": ["S03"],
+        }
+    ]
+    script.full_script_text = "\n".join([
+        "【场1】夜 / 白洁家客厅",
+        "白洁和王申坐在餐桌前吃饭。",
+        "白洁：我评上职称就好了。",
+        "王申：你不可能评上的。",
+        "两人闷闷不乐上床。王申抚摸白洁，脱下她的内裤，插入。",
+        "很快王申就射了，趴在白洁身上不动。白洁推开他，擦下身，翻来覆去睡不着。",
+    ])
+
+    assert not validate_screenplay_spine_delivery(
+        script,
+        action_text=script.full_script_text,
     )
 
 
