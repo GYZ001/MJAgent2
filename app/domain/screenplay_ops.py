@@ -902,7 +902,7 @@ def _new_screenplay_recorder(
     trigger_type: str = "manual",
     parent_run_id: str | None = None,
 ) -> WorkflowRecorder:
-    from app import config
+    from app import hiagent
     from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
     from app.stages import (
         SCREENPLAY_BASELINE_PROMPT_VERSION,
@@ -917,6 +917,8 @@ def _new_screenplay_recorder(
         "SELECT bible_version FROM projects WHERE id=?", (ep["project_id"],)
     ).fetchone()
     source_text = _episode_source_text(conn, ep)
+    active_text_provider = hiagent.active_provider("text")
+    active_text_model = hiagent.active_model("text", provider=active_text_provider)
     return WorkflowRecorder.create(
         workflow_type="screenplay",
         scope_type="episode",
@@ -942,7 +944,8 @@ def _new_screenplay_recorder(
             "pipeline_version": "screenplay-pipeline-4.0.0",
             "prompt_version": SCREENPLAY_BASELINE_PROMPT_VERSION,
             "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
-            "model": config.MODEL_TEXT,
+            "provider": active_text_provider,
+            "model": active_text_model,
             "text_generation_concurrency": (
                 get_setting("text_generation_concurrency")
                 or get_setting("storyboard_concurrency")

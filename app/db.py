@@ -1910,7 +1910,8 @@ def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
         "_original_chars": len(raw),
         "_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
     }
-    for key in sorted(value):
+    projected_items: list[tuple[str, Any]] = []
+    for key in value:
         item = value[key]
         if isinstance(item, (str, int, float, bool)) or item is None:
             projected: Any = item if not isinstance(item, str) or len(item) <= 160 else item[:157] + "..."
@@ -1920,6 +1921,14 @@ def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
             projected = {"type": "dict", "keys": sorted(str(k) for k in item)[:20]}
         else:
             projected = {"type": type(item).__name__}
+        projected_items.append((str(key), projected))
+    projected_items.sort(
+        key=lambda pair: (
+            len(json.dumps(pair[1], ensure_ascii=False, default=str)),
+            pair[0],
+        )
+    )
+    for key, projected in projected_items:
         candidate = {**summary, str(key): projected}
         encoded = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
         if len(encoded) > max_chars:
