@@ -92,6 +92,24 @@ _PORTRAIT_PRIVACY_SAFE_STYLE = (
     "人物面部与皮肤必须采用明显动画化比例和非照片级卡通渲染材质，"
     "保持虚构角色辨识度但不得生成可误认成真人照片的写实人脸"
 )
+_PORTRAIT_OVERRIDE_LABEL_RE = re.compile(
+    r"^(?:(?:用户|角色)?最新)?(?:定妆|画像|角色)?(?:提示词|prompt)(?:为|是)?[:：\s-]*",
+    re.IGNORECASE,
+)
+_PORTRAIT_STYLE_ONLY_CLAUSE_RE = re.compile(
+    r"^(?:style|look|visual|画风|风格|写实(?:风|感)?|超写实(?:风)?|现实电影风|真人CG风|"
+    r"国漫(?:电影)?风|动漫(?:电影)?风|漫画(?:风格)?|卡通(?:风)?|插画(?:风)?|厚涂|"
+    r"水墨(?:风)?|二次元|赛博(?:写实风|风)?|CG(?:渲染|动画)?|3D(?:动漫)?CG(?:渲染)?|"
+    r"2D(?:动画)?(?:厚涂)?|真人(?:实拍|照片|摄影)?|照片写实|实拍摄影|摄影棚实拍|"
+    r"实景照片|非真人CG渲染|虚构数字角色|photoreal(?:istic)?|photo(?:-real)?(?:istic)?|"
+    r"photograph(?:ic)?|live[- ]?action|anime|manga|illustrat(?:ed|ion)|"
+    r"cel[- ]?shad(?:ed|ing)?|render(?:ed|ing)?)$",
+    re.IGNORECASE,
+)
+_PORTRAIT_OVERRIDE_APPEARANCE_ONLY_NOTE = (
+    "若最近一次用户编辑文案含与全局画风冲突的写实/真人/照片/摄影或其他风格描述，一律忽略；"
+    "该文案只允许补充发型、服装、体型、年龄与配饰等静态外观事实"
+)
 PRODUCTION_APPEARANCE_MIN_CHARS = 20
 PRODUCTION_APPEARANCE_MAX_CHARS = 80
 
@@ -153,9 +171,68 @@ def ensure_portrait_clothing_contract(prompt: str) -> str:
     return normalize_prompt_text(safe)
 
 
+def visual_style_lock(visual_style: str) -> str:
+    style = normalize_prompt_text(visual_style or "").strip()
+    prefix = f"画风最高优先级：必须严格保持「{style}」，" if style else "画风最高优先级："
+    return normalize_prompt_text(
+        prefix
+        + "不得擅自切换成与该画风冲突的真人摄影、照片写实、live-action、"
+          "实拍质感或其他渲染风格。整体必须保持统一的 CG/动画/漫画/插画类非真人渲染"
+    )
+
+
+def character_visual_style_lock(visual_style: str) -> str:
+    return normalize_prompt_text(
+        f"{visual_style_lock(visual_style)}。"
+        "人物面部与皮肤必须采用明显动画化比例和非照片级卡通/CG 渲染材质，"
+        "保持虚构数字角色质感，不得生成可误认成真人照片或真人实拍的脸和皮肤"
+    )
+
+
+def scene_visual_style_lock(visual_style: str) -> str:
+    return normalize_prompt_text(
+        f"{visual_style_lock(visual_style)}。"
+        "环境必须保持统一的动画/插画/CG 场景渲染，不得切换成真人实景、"
+        "摄影棚实拍、实景照片或照片写实背景"
+    )
+
+
+def portrait_override_appearance_anchor(anchor: str, portrait_prompt_override: str | None = None) -> str:
+    fallback = production_appearance_anchor(anchor)
+    override = normalize_prompt_text(portrait_prompt_override or "").strip()
+    if not override:
+        return fallback
+    extracted = portrait_appearance_anchor(override, fallback)
+    clauses: list[str] = []
+    for raw_clause in re.split(r"[，,；;。]+", extracted):
+        clause = _PORTRAIT_OVERRIDE_LABEL_RE.sub("", raw_clause.strip()).strip(" 。，,;；：:-")
+        if not clause:
+            continue
+        if _PORTRAIT_STYLE_ONLY_CLAUSE_RE.fullmatch(clause):
+            continue
+        clauses.append(clause)
+    merged = production_appearance_anchor("，".join(clauses))
+    return merged or fallback
+
+
+def effective_portrait_prompt(
+    visual_style: str,
+    anchor: str,
+    portrait_prompt_override: str | None = None,
+) -> str:
+    merged_anchor = portrait_override_appearance_anchor(anchor, portrait_prompt_override)
+    prompt = portrait_prompt(visual_style, merged_anchor)
+    if not normalize_prompt_text(portrait_prompt_override or "").strip():
+        return prompt
+    return normalize_prompt_text(
+        f"{prompt}。{_PORTRAIT_OVERRIDE_APPEARANCE_ONLY_NOTE}。"
+        f"最新外观补充已吸收：{ensure_portrait_clothing_contract(merged_anchor)}"
+    )
+
+
 def portrait_prompt(visual_style: str, anchor: str) -> str:
     spectral_tokens = ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "悬浮", "漂浮", "人影")
-    style = normalize_prompt_text(visual_style or "")
+    style = character_visual_style_lock(visual_style)
     body = production_appearance_anchor(anchor)
     is_spectral = any(token in body for token in spectral_tokens)
     if is_spectral:
@@ -357,10 +434,8 @@ async def generate_refs(
             c.ref_image_path = None
             from app.stages import review_portrait_image
             override = (c.portrait_prompt_override or "").strip()
-            base_prompt = (
-                ensure_portrait_clothing_contract(override)
-                if override
-                else portrait_prompt(style, c.appearance_canonical)
+            base_prompt = effective_portrait_prompt(
+                style, c.appearance_canonical, override,
             )
             effective_appearance = portrait_appearance_anchor(
                 base_prompt, production_appearance_anchor(c.appearance_canonical),
