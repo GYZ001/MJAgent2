@@ -1404,7 +1404,13 @@ async def ensure_character_multiview_pack(
         and (parent["prompt"] or "").strip()
         and (parent["prompt"] or "").strip() == effective_prompt
     )
-    front_prompt_for_fp = effective_prompt if parent_prompt_matches else front_prompt
+    use_parent_primary = bool(
+        parent
+        and parent["image_path"]
+        and Path(parent["image_path"]).exists()
+        and (parent_prompt_matches or primary_qa is not None)
+    )
+    front_prompt_for_fp = effective_prompt if use_parent_primary else front_prompt
     front_fp = view_input_fingerprint(
         view_role="front_full",
         prompt=front_prompt_for_fp,
@@ -1413,8 +1419,17 @@ async def ensure_character_multiview_pack(
         base_view_id=base_front.get("id"),
         seed_hint=base_front.get("image_path"),
     )
-    if not _ready_view_matches_fingerprint(front, front_fp):
-        if parent_prompt_matches and parent and parent["image_path"] and Path(parent["image_path"]).exists():
+    front_is_authoritative = bool(
+        front
+        and front.get("status") == "ready"
+        and front.get("image_path")
+        and Path(str(front["image_path"])).exists()
+    )
+    if not (
+        _ready_view_matches_fingerprint(front, front_fp)
+        or front_is_authoritative
+    ):
+        if use_parent_primary:
             qa = dict(primary_qa) if primary_qa else await review_character_view(
                 parent["image_path"], effective_prompt, "front_full",
             )

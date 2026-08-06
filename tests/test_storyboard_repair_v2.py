@@ -175,6 +175,7 @@ def test_supervisor_generates_and_commits_scene_packs(
     monkeypatch,
 ) -> None:
     conn, _screenplay = repair_db
+    request_control("e1", "clear")
     conn.execute("DELETE FROM shots WHERE episode_id='e1'")
     bible = Bible(
         characters=[Character(

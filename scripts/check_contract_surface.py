@@ -16,8 +16,9 @@ REQUIRED = {
     "app/harness/contracts.py": [
         "one chapter maps to exactly one episode",
         "the model selects each shot duration as an integer from 5 through 10 seconds",
-        "sequential generation emits exactly one singular shot per iteration",
-        "single-shot output tokens are bounded independently",
+        "shot count has no product ceiling",
+        "detailed shots are generated and checkpointed as complete scene packs",
+        "every shot has a motivated shot-size, camera-angle, and camera-movement triple",
         "functional extras use deterministic generic labels",
     ],
     "app/compiler.py": ["shot.duration_s not in config.ALLOWED_DURATIONS", "--dur {shot_dur}"],
@@ -26,17 +27,18 @@ REQUIRED = {
         "spoken_chars_from_shot(shot)",
     ],
     "app/stages.py": [
-        "由模型按动作与口播选择最短可用时长",
-        "禁止输出 shots 数组",
-        "功能性路人合同",
-        "max_tokens=config.STORYBOARD_SHOT_MAX_TOKENS",
+        "镜头数量不设软上限或硬上限",
+        "generate_storyboard_scene_pack",
+        "camera_motivation",
+        "context_requirement_ids",
     ],
     "docs/PROMPT_SPEC.md": [
         "确定性剧集映射（非 Agent 阶段）",
         "duration_s 全部为 5~10 秒整数",
-        "只允许单数 `shot`",
-        "功能性路人合同",
-        "单镜输出 token 上限",
+        "镜头数量不设产品上限",
+        "按场景批量生成",
+        "景别 + 角度 + 运动",
+        "上下文建立窗口",
     ],
 }
 FORBIDDEN = {
@@ -80,7 +82,10 @@ def main() -> None:
         )
     if errors:
         raise SystemExit("Contract surface drift:\n- " + "\n- ".join(errors))
-    print("Contract surface OK: one chapter/episode, model-selected 5-10s shots, AgentLoop-only text stages.")
+    print(
+        "Contract surface OK: one chapter/episode, complete source coverage, "
+        "unbounded scene-packed 5-10s shots, motivated camera triples."
+    )
 
 
 if __name__ == "__main__":
