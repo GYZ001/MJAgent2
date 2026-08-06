@@ -39,7 +39,7 @@ REFERENCE_IMAGE_TYPES = {
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
 # 编辑的旧关键帧不得继续污染新视频版本。
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v15"
+KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v16"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
 _DEFAULT_KEYFRAME_CANDIDATE_COUNT = 3
@@ -4025,19 +4025,10 @@ def pack_reference_images_for_seedance(
                 chosen.append(ref)
         timeline_winners = chosen
     timeline_winners.sort(key=_timeline_order)
-    # 供应商只看到一组无实体 ID 的 reference_image。剧情关键帧已经包含某人物时，
-    # 再发送同一人物的全身定妆照会被解释成第二个画面主体；装箱时确定性去掉该冗余锚点。
-    timeline_identities = set().union(
-        *(_reference_identity_names(ref) for ref in timeline_winners),
-    ) if timeline_winners else set()
-    if timeline_identities:
-        non_keyframes = [
-            ref for ref in non_keyframes
-            if not (
-                ref.get("type") == "character"
-                and (_reference_identity_names(ref) & timeline_identities)
-            )
-        ]
+    # Keep one explicit character-library anchor per identity even when a
+    # narrative keyframe also contains that person. Seedance 2.0 can bind both
+    # images to one named subject when the prompt declares the mapping; the
+    # clean library image is the identity truth if the scene keyframe drifts.
     usable = non_keyframes + timeline_winners
     limit = max_images if max_images is not None else max_reference_images()
     distinct_character_identities = {
@@ -4084,10 +4075,19 @@ REFERENCE_SINGLE_INSTANCE_NOTE = (
 REFERENCE_PROMPT_NOTE_MARKER = " Use the provided reference images as follows: "
 
 
-def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageAsset]) -> str:
+def append_reference_prompt_notes_from_dicts(
+    prompt_text: str,
+    packed_refs: list[dict[str, Any]],
+) -> str:
+    """Bind each provider image to stable Seedance subject labels.
+
+    Seedance 2.0's official guidance requires explicit ``image N -> subject``
+    definitions and stable reuse of those subject labels. Asset IDs alone are
+    not understood by the model.
+    """
     lines = []
-    # 注释必须与 build_seedance_image_inputs 使用同一装箱结果，否则 Reference N 会指向错图。
-    packed_refs = pack_reference_images_for_seedance([asset.public_dict() for asset in assets])
+    subject_images: dict[str, list[int]] = {}
+    definitions: list[str] = []
     timeline_count = sum(1 for ref in packed_refs if ref.get("type") == "plot_key_frame")
     for idx, ref in enumerate(packed_refs, 1):
         label = {
@@ -4099,7 +4099,30 @@ def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageA
             "plot_key_frame": "plot key frame",
         }.get(str(ref.get("type") or "reference"), str(ref.get("type") or "reference"))
         source = str(ref.get("source") or "pipeline").replace("_", " ")
-        related = [str(name) for name in (ref.get("relatedCharacterIds") or []) if str(name)]
+        related = [
+            str(name).strip()
+            for name in (
+                ref.get("relatedCharacterIds")
+                or ref.get("related_character_ids")
+                or []
+            )
+            if str(name).strip()
+        ]
+        entity_name = str(ref.get("entity_name") or "").strip()
+        if ref.get("type") == "character" and entity_name and entity_name not in related:
+            related.append(entity_name)
+        for name in related:
+            subject_images.setdefault(name, []).append(idx)
+        if ref.get("type") == "character" and related:
+            definitions.append(
+                f"将 Reference image {idx} 中的唯一人物定义为「{related[0]}」；"
+                "该图是其脸、性别、年龄感、发型、体型和服装的身份真值。"
+            )
+        elif ref.get("type") == "plot_key_frame" and related:
+            definitions.append(
+                f"Reference image {idx} 的画面人物必须且仅能解释为：{'、'.join(related)}；"
+                "不得把其中任何人改成其他性别、其他身份或额外人物。"
+            )
         chars = f"; related characters: {', '.join(related)}" if related else ""
         timeline = ""
         if ref.get("type") == "plot_key_frame":
@@ -4122,6 +4145,19 @@ def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageA
         lines.append(f"Reference image {idx}: use as {label}; source: {source}{chars}{timeline}.")
     if not lines:
         return prompt_text
+    for name, indexes in subject_images.items():
+        if len(indexes) > 1:
+            definitions.append(
+                f"Reference images {', '.join(str(index) for index in indexes)} 中的「{name}」"
+                "是同一个且仅一个人物，不是多个相似人物；全程保持该身份不变。"
+            )
+    binding = (
+        "[SUBJECT DEFINITIONS | HIGHEST PRIORITY]\n"
+        + "".join(definitions)
+        + "后续动作每次提及角色都严格沿用上述唯一角色名与参考图绑定；"
+        "角色的性别、年龄感、脸、发型、体型和服装是不可变化的不变量，"
+        "禁止中途变性、换脸、换人、身份合并或由无关人物替代。"
+    )
     sequence_note = ""
     if timeline_count > 1:
         sequence_note = (
@@ -4136,7 +4172,26 @@ def append_reference_prompt_notes(prompt_text: str, assets: list[ReferenceImageA
         + sequence_note
         + REFERENCE_SINGLE_INSTANCE_NOTE
     )
+    if "[FORMAT]\n" in prompt_text:
+        prompt_text = prompt_text.replace(
+            "[FORMAT]\n",
+            f"[FORMAT]\n{binding}\n\n",
+            1,
+        )
+    else:
+        prompt_text = f"{binding}\n\n{prompt_text}"
     return prompt_text + note
+
+
+def append_reference_prompt_notes(
+    prompt_text: str,
+    assets: list[ReferenceImageAsset],
+) -> str:
+    # Notes and provider inputs must use the exact same packed order.
+    packed_refs = pack_reference_images_for_seedance(
+        [asset.public_dict() for asset in assets],
+    )
+    return append_reference_prompt_notes_from_dicts(prompt_text, packed_refs)
 
 
 def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
@@ -4155,8 +4210,6 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             raise ProviderError(
                 "REFERENCE_IMAGE_MODE 缺少通过门禁的 reference_image，禁止纯文本提交"
             )
-        # 同步更新冻结 meta，使“视频实际输入”界面与真正发送给供应商的图片一致。
-        _suppress_character_anchors_covered_by_keyframes(refs)
         # 使用中的图按综合分 Top-N 装箱；截断不改 selected，高分未入选仍留在画廊。
         sequence = meta.get("keyframe_sequence") or {}
         beats = sequence.get("beats") if isinstance(sequence, dict) else None

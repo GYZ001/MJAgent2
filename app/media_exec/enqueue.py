@@ -638,25 +638,15 @@ def _load_reference_gallery(conn, shot_row) -> dict | None:
 
 
 def _append_reference_notes_from_dicts(prompt_text: str, refs: list[dict]) -> str:
-    lines: list[str] = []
     # Reused galleries must describe the exact provider pack, not every image
-    # retained for keyframe generation/QA.  In particular, when a plot keyframe
-    # already carries character A, the provider pack suppresses A's portrait to
-    # avoid instantiating the same identity twice.  Keeping the old numbering
-    # here would make the prompt claim three inputs while Seedance receives two.
+    # retained for keyframe generation/QA.
     packed_refs = video_modes.pack_reference_images_for_seedance(
         _usable_reference_dicts({"reference_images": refs}),
     )
-    for idx, ref in enumerate(packed_refs, start=1):
-        label = ref.get("type") or "reference"
-        source = str(ref.get("source") or "unknown").replace("_", " ")
-        chars = f"; related characters: {', '.join(ref.get('relatedCharacterIds') or [])}" if ref.get("relatedCharacterIds") else ""
-        lines.append(f"Reference image {idx}: use as {label}; source: {source}{chars}.")
-    if not lines:
-        return prompt_text
-    note = (" Use the provided reference images as follows: " + " ".join(lines)
-            + video_modes.REFERENCE_SINGLE_INSTANCE_NOTE)
-    return prompt_text if note in prompt_text else prompt_text + note
+    return video_modes.append_reference_prompt_notes_from_dicts(
+        prompt_text,
+        packed_refs,
+    )
 
 
 def scene_generation_kinds(shot_row, requested: list[str] | None = None) -> list[str]:

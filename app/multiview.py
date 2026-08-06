@@ -547,6 +547,19 @@ def resolve_shot_asset_dependencies(
         selected = resolve_views_for_roles(
             views, wanted, fallback_roles=CHARACTER_REQUIRED_VIEWS,
         )
+        if len(selected) > 1:
+            identity_role_priority = {
+                "front_full": 0,
+                "three_quarter": 1,
+                "face_closeup": 2,
+                "profile": 3,
+            }
+            selected = [min(
+                selected,
+                key=lambda view: identity_role_priority.get(
+                    str(view.get("view_role") or ""), 9,
+                ),
+            )]
         characters_out.append({
             "name": name,
             "identity_id": identity.identity_id if identity is not None else name,
@@ -822,11 +835,55 @@ def library_anchor_assets_from_manifest(manifest: dict[str, Any]) -> list[dict[s
 
 
 def keyframe_seed_paths(manifest: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    for anchor in library_anchor_assets_from_manifest(manifest):
-        if PURPOSE_KEYFRAME_SEED in (anchor.get("purposes") or []):
-            paths.append(anchor["image_path"])
-    return paths
+    """Use one strong identity image per person and one scene image.
+
+    Seedance/Seedream can interpret multiple angles of the same person as
+    different subjects. If any visible individual lacks an identity image,
+    omit all partial character seeds so the available person's gender/face
+    cannot bleed into the unanchored role. The deterministic text contract and
+    QA gate still enforce the full cast.
+    """
+    characters = [
+        item for item in (manifest.get("characters") or [])
+        if str(item.get("role_kind") or "") not in {"collective", "functional"}
+    ]
+    role_priority = {
+        "front_full": 0,
+        "three_quarter": 1,
+        "face_closeup": 2,
+        "profile": 3,
+    }
+    character_paths: list[str] = []
+    complete_character_coverage = bool(characters)
+    for character in characters:
+        views = [
+            view for view in (character.get("selected_views") or [])
+            if view.get("image_path") and Path(str(view["image_path"])).is_file()
+        ]
+        if not views:
+            complete_character_coverage = False
+            break
+        preferred = min(
+            views,
+            key=lambda view: role_priority.get(str(view.get("view_role") or ""), 9),
+        )
+        character_paths.append(str(preferred["image_path"]))
+    if not complete_character_coverage:
+        character_paths = []
+
+    scene_paths: list[str] = []
+    scene = manifest.get("scene") or {}
+    scene_views = [
+        view for view in (scene.get("selected_views") or [])
+        if view.get("image_path") and Path(str(view["image_path"])).is_file()
+    ]
+    if scene_views:
+        preferred_scene = next(
+            (view for view in scene_views if view.get("view_role") == "establishing"),
+            scene_views[0],
+        )
+        scene_paths.append(str(preferred_scene["image_path"]))
+    return list(dict.fromkeys([*character_paths, *scene_paths]))
 
 
 # ---------- 外观变化合同 ----------
@@ -1889,6 +1946,13 @@ KEYFRAME_HARD_FAILURES = {
 # 分数仍只用于三选一排序；但这些结构性错误会直接污染视频，不能再以
 # “三张里相对最好”为理由放行。
 KEYFRAME_RUNTIME_BLOCKING_FAILURES = frozenset(KEYFRAME_HARD_FAILURES)
+KEYFRAME_IDENTITY_BLOCKING_FAILURES = frozenset({
+    "wrong_identity",
+    "character_missing",
+    "duplicate_character",
+    "collective_group_missing",
+    "cross_keyframe_identity_invariance_unverified",
+})
 
 
 def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) -> float | None:
@@ -1917,10 +1981,14 @@ def keyframe_runtime_blocking_failures(qa: dict[str, Any]) -> set[str]:
     return failures & KEYFRAME_RUNTIME_BLOCKING_FAILURES
 
 
+def keyframe_identity_blocking_failures(qa: dict[str, Any]) -> set[str]:
+    failures = {str(item) for item in (qa.get("hard_failures") or [])}
+    return failures & KEYFRAME_IDENTITY_BLOCKING_FAILURES
+
+
 def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
-    """关键帧 QA 只评分；结构问题可参与重试/择优，但不拥有失败权。"""
-    del qa
-    return True
+    """Identity integrity is fail-closed; other visual findings remain score-only."""
+    return not keyframe_identity_blocking_failures(qa)
 
 
 async def review_keyframe_geometry_guard(

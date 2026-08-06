@@ -118,6 +118,63 @@ def raw_characters_visible(shot: Shot) -> list[str]:
     ]
 
 
+def _character_mentioned_as_visible(name: str, text: str) -> bool:
+    """Whether a visual clause requires ``name`` instead of an offscreen relation."""
+    for clause in re.split(r"[，。；！？]", text or ""):
+        if name not in clause:
+            continue
+        if any(
+            marker in clause
+            for marker in (
+                f"画外{name}", f"画面外{name}", f"镜外{name}", f"{name}画外",
+                f"{name}不入画", f"{name}留在画外",
+            )
+        ):
+            continue
+        return True
+    return False
+
+
+def required_visual_action_characters(shot: Shot) -> list[str]:
+    """Recover visible action participants from typed start/end states.
+
+    ``characters_visible`` may be narrowed to the dialogue speaker upstream.
+    That is valid for a pure close-up, but not when the same shot explicitly
+    shows another person entering, receiving an object, collapsing, or staying
+    in frame. Typed continuity state is the authoritative evidence for those
+    action participants.
+    """
+    visual_text = "。".join(
+        str(value or "").strip()
+        for value in (
+            shot.primary_action,
+            shot.action_desc,
+            shot.first_frame_desc,
+            shot.last_frame_desc,
+        )
+        if str(value or "").strip()
+    )
+    candidates = list(shot.characters or [])
+    for state in (shot.continuity_state_in, shot.continuity_state_out):
+        for name, character in (state.characters or {}).items():
+            visibility = (
+                character.get("visibility")
+                if isinstance(character, dict)
+                else getattr(character, "visibility", "")
+            )
+            if str(visibility or "").strip().lower() in {
+                "hidden", "offscreen", "not_visible", "画外", "不可见",
+            }:
+                continue
+            candidates.append(name)
+    return list(dict.fromkeys(
+        str(name).strip()
+        for name in candidates
+        if str(name).strip()
+        and _character_mentioned_as_visible(str(name).strip(), visual_text)
+    ))
+
+
 def onscreen_dialogue_speakers(shot: Shot) -> list[str]:
     """按口播顺序返回需要画内对口型的说话人。"""
     speakers: list[str] = []
@@ -340,7 +397,12 @@ def effective_primary_action(shot: Shot) -> str:
 
 def effective_characters_visible(shot: Shot) -> list[str]:
     focus = dialogue_focus_subject(shot)
-    return [focus] if focus else raw_characters_visible(shot)
+    if focus:
+        return [focus]
+    return list(dict.fromkeys([
+        *raw_characters_visible(shot),
+        *required_visual_action_characters(shot),
+    ]))
 
 
 def effective_audio_cast(shot: Shot) -> list[str]:
