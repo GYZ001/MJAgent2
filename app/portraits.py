@@ -43,7 +43,7 @@ from app.refs import (
     portrait_prompt,
     production_appearance_anchor,
 )
-from app.schemas import Bible, Character, extract_json
+from app.schemas import Bible, Character, EpisodeScreenplay, extract_json
 
 FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
@@ -51,9 +51,7 @@ APPEARANCE_MIN = PRODUCTION_APPEARANCE_MIN_CHARS
 APPEARANCE_MAX = PRODUCTION_APPEARANCE_MAX_CHARS
 STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集号
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
-CAST_DISCOVERY_DRAFT_BUDGET = 14000
-CAST_DISCOVERY_FUTURE_BATCH_BUDGET = 45000
-CAST_DISCOVERY_FUTURE_BATCH_OVERLAP = 800
+CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -255,6 +253,107 @@ def _future_chapter_context(
     )
 
 
+def _draft_identity_projection(draft_text: str) -> str:
+    """Project only typed identity carriers from a screenplay draft."""
+    if not draft_text:
+        return ""
+    try:
+        script = EpisodeScreenplay.model_validate_json(draft_text)
+    except (TypeError, ValueError):
+        return json.dumps(
+            {"parse_status": "invalid", "identity_mentions": []},
+            ensure_ascii=False,
+        )
+
+    mentions: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(value: object, path: str) -> None:
+        text = str(value or "").strip()
+        key = (text, path)
+        if text and key not in seen:
+            seen.add(key)
+            mentions.append({"value": text, "path": path})
+
+    for scene_index, scene in enumerate(script.scene_outline or []):
+        for character in scene.characters or []:
+            add(character, f"scene_outline[{scene_index}].characters")
+    for chain_index, chain in enumerate(script.dialogue_chains or []):
+        for turn_index, turn in enumerate(chain.turns or []):
+            add(
+                turn.speaker,
+                f"dialogue_chains[{chain_index}].turns[{turn_index}].speaker",
+            )
+    for item_index, item in enumerate(script.information_ledger or []):
+        add(item.speaker_id, f"information_ledger[{item_index}].speaker_id")
+    for voice_index, voice in enumerate(script.voice_bible or []):
+        add(voice.speaker_id, f"voice_bible[{voice_index}].speaker_id")
+
+    from app.validators import screenplay_speaker_names
+
+    for speaker in screenplay_speaker_names(script.full_script_text or ""):
+        add(speaker, "full_script_text.speaker")
+
+    plan = script.narrative_plan
+    if plan is not None:
+        for contract_index, contract in enumerate(plan.identity_contracts or []):
+            add(
+                contract.identity_id,
+                f"narrative_plan.identity_contracts[{contract_index}].identity_id",
+            )
+            add(
+                contract.display_name,
+                f"narrative_plan.identity_contracts[{contract_index}].display_name",
+            )
+            for voice_id in contract.voice_ids or []:
+                add(
+                    voice_id,
+                    f"narrative_plan.identity_contracts[{contract_index}].voice_ids",
+                )
+        for state_index, state in enumerate(plan.character_states or []):
+            add(
+                state.character_id,
+                f"narrative_plan.character_states[{state_index}].character_id",
+            )
+        for belief_index, belief in enumerate(plan.character_beliefs or []):
+            add(
+                belief.character_id,
+                f"narrative_plan.character_beliefs[{belief_index}].character_id",
+            )
+        for scene_index, scene in enumerate(plan.scene_contracts or []):
+            add(
+                scene.point_of_view_character_id,
+                f"narrative_plan.scene_contracts[{scene_index}].point_of_view_character_id",
+            )
+
+    return json.dumps(
+        {"parse_status": "typed", "identity_mentions": mentions},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _future_identity_context(future_text: str, source_labels: list[str]) -> str:
+    """Return bounded future excerpts only where a current identity label occurs."""
+    blocks: list[str] = []
+    remaining = CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET
+    for source_label in dict.fromkeys(source_labels):
+        if remaining <= 0:
+            break
+        fragments = extract_character_fragments(
+            future_text,
+            source_label,
+            window=180,
+            budget=min(1200, remaining),
+        )
+        if not fragments:
+            continue
+        block = f"【当前称谓：{source_label}】\n{fragments}"
+        blocks.append(block)
+        remaining -= len(block)
+    return "\n\n".join(blocks)
+
+
 async def discover_character_candidates(
     source_text: str,
     bible: Bible,
@@ -273,74 +372,17 @@ async def discover_character_candidates(
     known_names = [c.name for c in bible.characters if c.name]
     known = "、".join(known_names) or "（无）"
     current_haystack = f"{source_text or ''}\n{draft_text or ''}"
+    draft_projection = _draft_identity_projection(draft_text)
+    source_context = (
+        "（Baseline 后增量审计：当前原文已在首次预检中处理，本次不重复发送）"
+        if draft_text
+        else (source_text or "")[:CAST_DISCOVERY_SOURCE_BUDGET]
+    )
     seen: set[tuple[str, str, str]] = set()
     candidates: list[dict] = []
-    future_step = (
-        CAST_DISCOVERY_FUTURE_BATCH_BUDGET
-        - CAST_DISCOVERY_FUTURE_BATCH_OVERLAP
-    )
-    future_chunks = [
-        future_text[offset:offset + CAST_DISCOVERY_FUTURE_BATCH_BUDGET]
-        for offset in range(0, len(future_text), future_step)
-    ] or [""]
-    for batch_index, future_chunk in enumerate(future_chunks, start=1):
-        # #region debug-point E:character-discovery-request
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"batchIndex":batch_index,"batchCount":len(future_chunks),"sourceChars":len(source_text or ""),"sourceSentChars":min(len(source_text or ""),CAST_DISCOVERY_SOURCE_BUDGET),"draftChars":len(draft_text or ""),"draftSentChars":min(len(draft_text or ""),CAST_DISCOVERY_DRAFT_BUDGET),"futureChars":len(future_chunk or ""),"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
-        prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
-不要依赖服饰、性别、年龄或称谓后缀的固定词表。
 
-当前人物谱已有角色：
-{known}
-
-本集原文：
-{(source_text or "")[:CAST_DISCOVERY_SOURCE_BUDGET]}
-
-剧本草稿（可能为空；若与原文冲突，以原文为准）：
-{(draft_text or "")[:CAST_DISCOVERY_DRAFT_BUDGET]}
-
-后续章节身份线索（{future_label or '无'}，批次 {batch_index}/{len(future_chunks)}）：
-{future_chunk or '（无）'}
-
-规则：
-1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
-2. 若当前文本或这批后续章节有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
-3. canonical_name 必须是文本明确给出的人名，或“当前人物谱已有角色”中的稳定名；姓氏加师兄/师姐、
-   长老等称谓、职位、外貌标签都不是真名（除非它已在当前人物谱中），这类情况必须判为 functional。
-4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
-5. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
-6. 不得输出只在后续章节出场、本集并未出场/开口的人；后文只能用于身份消歧。
-7. evidence 给本集依据；future_evidence 只给姓名同一性依据，不摘录后续剧情。
-
-只输出 JSON：
-{{"characters": [{{"source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
-        raw = await model_gateway.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=1200,
-            call_meta={
-                "stage": "discover_character_candidates",
-                "episode_no": episode_no,
-                "future_batch": batch_index,
-                "future_batches": len(future_chunks),
-                # Character discovery is deterministic for the same persisted
-                # screenplay operation.  A worker restart after the provider
-                # returned must reuse that response instead of paying for and
-                # waiting on the same multi-chapter audit again.
-                "reuse_successful_operation": True,
-            },
-        )
-        # #region debug-point C:character-discovery-response
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"batchIndex":batch_index,"rawChars":len(raw or ""),"startsWithJson":(raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
+    def collect(raw: str, *, identity_haystack: str) -> None:
         obj = extract_json(raw, repair_unescaped_inner_quotes=True)
-        identity_haystack = f"{current_haystack}\n{future_chunk}"
         for item in obj.get("characters") or []:
             if not isinstance(item, dict):
                 continue
@@ -387,6 +429,106 @@ async def discover_character_candidates(
                 "evidence": str(item.get("evidence") or "").strip()[:80],
                 "future_evidence": str(item.get("future_evidence") or "").strip()[:120],
             })
+
+    prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
+不要依赖服饰、性别、年龄或称谓后缀的固定词表。
+
+当前人物谱已有角色：
+{known}
+
+本集原文：
+{source_context}
+
+剧本草稿身份投影（只含类型合同中的身份字段，可能为空）：
+{draft_projection or '（无）'}
+
+规则：
+1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
+2. 若当前输入有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
+3. canonical_name 必须是文本明确给出的人名，或“当前人物谱已有角色”中的稳定名；姓氏加师兄/师姐、
+   长老等称谓、职位、外貌标签都不是真名（除非它已在当前人物谱中），这类情况必须判为 functional。
+4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
+5. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
+6. evidence 只描述身份依据，不复述与人物身份无关的剧情。
+
+只输出 JSON：
+{{"characters": [{{"source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
+
+    # #region debug-point E:character-discovery-request
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"phase":"current","sourceChars":len(source_text or ""),"sourceSentChars":len(source_context),"draftChars":len(draft_text or ""),"draftProjectedChars":len(draft_projection),"futureChars":0,"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
+    raw = await model_gateway.chat(
+        [{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=1200,
+        call_meta={
+            "stage": "discover_character_candidates",
+            "episode_no": episode_no,
+            "discovery_phase": "current",
+            "reuse_successful_operation": True,
+        },
+    )
+    # #region debug-point C:character-discovery-response
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"phase":"current","rawChars":len(raw or ""),"startsWithJson":(raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
+    collect(raw, identity_haystack=current_haystack)
+
+    future_context = _future_identity_context(
+        future_text,
+        [item["source_label"] for item in candidates],
+    )
+    if future_context:
+        future_prompt = f"""任务：只为当前集已经发现的人物称谓做后续姓名消歧。
+
+当前人物谱已有角色：
+{known}
+
+当前集候选：
+{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}
+
+后续章节中命中这些称谓的局部窗口（{future_label or '后续章节'}）：
+{future_context}
+
+规则：
+1. 只输出当前集候选中 source_label 完全相同、且后续窗口明确证明稳定真名的项目。
+2. canonical_name 必须出现在后续窗口或当前人物谱中；有歧义就不输出。
+3. 不得新增只在后续章节出场的人，不得复述与身份无关的剧情。
+
+只输出 JSON：
+{{"characters": [{{"source_label": "当前称谓", "canonical_name": "稳定真名", "identity_kind": "named", "kind": "onscreen|mentioned", "evidence": "本集身份依据", "future_evidence": "同一性依据"}}]}}"""
+        # #region debug-point E:character-discovery-request
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"phase":"future_identity","sourceChars":len(source_text or ""),"sourceSentChars":0,"draftChars":len(draft_text or ""),"draftProjectedChars":0,"futureChars":len(future_context),"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
+        future_raw = await model_gateway.chat(
+            [{"role": "user", "content": future_prompt}],
+            temperature=0.1,
+            max_tokens=800,
+            call_meta={
+                "stage": "discover_character_candidates",
+                "episode_no": episode_no,
+                "discovery_phase": "future_identity",
+                "reuse_successful_operation": True,
+            },
+        )
+        # #region debug-point C:character-discovery-response
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"phase":"future_identity","rawChars":len(future_raw or ""),"startsWithJson":(future_raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (future_raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
+        collect(
+            future_raw,
+            identity_haystack=f"{current_haystack}\n{future_context}",
+        )
 
     # 同一称谓在不同后文批次中可能先被保守判为 functional，后被真名证据命中。
     # 具名证据唯一时优先；出现两个不同真名时不猜，降级为一次性角色。

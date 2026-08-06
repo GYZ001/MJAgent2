@@ -1,7 +1,7 @@
 # Debug Session: ten-episode-script-failure
 - **Status**: [OPEN]
 - **Issue**: Script generation reaches baseline QA and then fails; the first ten episodes must succeed in one concurrent batch without sample-specific exceptions.
-- **Debug Server**: Pending startup
+- **Debug Server**: http://127.0.0.1:7777/event
 - **Log File**: .dbg/trae-debug-log-ten-episode-script-failure.ndjson
 
 ## Reproduction Steps
@@ -20,10 +20,26 @@
 | E | Concurrent model calls hit rate, timeout, or context limits | Medium | Low | Provider error/status indicates 429, timeout, or token/context overflow | Pending |
 
 ## Instrumentation Design
-- Pending global call-chain analysis.
+- `app/domain/screenplay_ops.py`: record discovery entry/result/error shape.
+- `app/portraits.py`: record each discovery request size and response shape without content.
+- `app/production/screenplay_repair.py`: record post-baseline unresolved identity count and durable baseline state.
 
 ## Log Evidence
-- Pending pre-fix reproduction.
+- Historical error `ERR-20260806-21b6fb`: the provider returned a non-JSON content-policy refusal during character discovery; `extract_json` raised `ValueError`.
+- Historical error `ERR-20260806-95dbe2`: post-baseline incremental character discovery wrapped that refusal as `StageError`, causing the screenplay run to fail before `mark_baseline_generated`.
+- Pre-fix NDJSON line 1: post-baseline discovery received 7,912 source characters and a 32,718-character draft.
+- Pre-fix NDJSON lines 2, 4, and 6: one identity audit sent three requests, each repeating 7,912 source characters and 14,000 draft characters plus 33,008-45,000 future-chapter characters.
+- Pre-fix NDJSON lines 3, 5, and 7: the same path can also return valid JSON, proving the failure is non-deterministic provider safety behavior coupled to an oversized input surface.
+- Pre-fix NDJSON line 8: the successful retry produced 8 candidates and 4 general spelling-variant identity resolutions.
+
+## Hypothesis Status
+| ID | Status | Evidence |
+|----|--------|----------|
+| A | Rejected | The screenplay candidate was structurally parseable; failure occurred in a later character discovery call. |
+| B | Rejected for this failure | No cross-episode artifact or revision overwrite was observed. |
+| C | Confirmed | The failing response was refusal prose, not JSON; parser error obscured the response class. |
+| D | Confirmed as a durability defect | Revision remained at `baseline_generation_count=0` because external discovery ran before production baseline persistence. |
+| E | Confirmed | Character discovery multiplied one audit into three 55k-67k character prompts by repeating source/draft across future batches. |
 
 ## Verification Conclusion
 - Pending pre-fix and post-fix comparison.
