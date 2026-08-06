@@ -1455,6 +1455,7 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                 )
                 or (
                     speaker == "旁白"
+                    and speaker not in allowed_speakers
                     and not source_contains_line
                 )
             ):

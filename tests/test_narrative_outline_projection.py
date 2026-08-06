@@ -28,11 +28,13 @@ from app.schemas import (
     StoryboardOutline,
     StoryboardOutlineShot,
     TargetDelta,
+    VoiceCanonical,
 )
 from app.spoken_contract import content_char_count
 from app.validators import (
     outline_key_line_speaker_errors,
     validate_dialogue_chains,
+    normalize_screenplay_dialogue_chains,
 )
 from tests.test_narrative_continuity import _board, _screenplay
 
@@ -108,6 +110,43 @@ def test_narrative_outline_projects_graph_owned_fields_deterministically() -> No
         complete=True,
         expected_scope_id="episode-generic",
     ) == []
+
+
+def test_declared_narrator_capacity_splits_keep_shared_source_evidence() -> None:
+    source = (
+        "我知道你现在一定很瞧不起我，可我有什么办法，"
+        "你也知道连你都保护不了我，我一个女孩子又能怎么样？"
+    )
+    screenplay = _screenplay()
+    screenplay.voice_bible = [
+        VoiceCanonical(
+            speaker_id="旁白",
+            role_type="narrator",
+            voice_canonical="calm letter reading",
+        ),
+    ]
+    screenplay.dialogue_chains = [
+        KeyDialogueChain(
+            chain_id="DC-NARRATOR",
+            topic="A source-grounded letter",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="旁白",
+                    line="我知道你现在一定很瞧不起我，可我有什么办法，",
+                    source_text=source,
+                ),
+                KeyDialogueTurn(
+                    speaker="旁白",
+                    line="你也知道连你都保护不了我，我一个女孩子又能怎么样？",
+                    source_text=source,
+                ),
+            ],
+        ),
+    ]
+
+    normalize_screenplay_dialogue_chains(screenplay)
+
+    assert len(screenplay.dialogue_chains[0].turns) == 2
 
 
 def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
