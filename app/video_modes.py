@@ -1286,6 +1286,92 @@ def reference_gallery_matches_keyframe_contract(
         and bool(fallback_slots)
     )
     has_keyframe = any(
+        str(ref.get("type") or "") == "plot_key_frame"
+        and not ref.get("deleted")
+        and bool(ref.get("selectedForSeedance"))
+        and _technically_usable(ref)
+        for ref in refs
+    )
+    if not has_keyframe:
+        from app.multiview import narrative_keyframe_required
+
+        if not structural_fallback:
+            return not narrative_keyframe_required()
+        # 结构硬伤候选已全部物理删除时，允许画廊只保留固定人物/场景锚点。
+        # 仍要求至少有一张可用默认锚点，避免将空画廊伪装成合法降级。
+        if not any(ref.get("type") in {"character", "scene"} for ref in selected_refs):
+            return False
+    sequence = meta.get("keyframe_sequence")
+    selected_keyframes = [
+        ref for ref in selected_refs
+        if ref.get("type") == "plot_key_frame" and _technically_usable(ref)
+    ]
+    if len(selected_keyframes) > _MAX_TIMELINE_KEYFRAMES:
+        return False
+    if isinstance(sequence, dict) and isinstance(sequence.get("beats"), list):
+        beats = [beat for beat in sequence["beats"] if isinstance(beat, dict)]
+        if not (1 <= len(beats) <= _MAX_TIMELINE_KEYFRAMES):
+            return False
+        keyframe_plan = sequence.get("keyframe_plan") or {}
+        try:
+            duration_s = float(keyframe_plan.get("duration_s"))
+        except (TypeError, ValueError):
+            duration_s = None
+        if duration_s is not None and duration_s <= _SHORT_SHOT_MAX_SECONDS and len(selected_keyframes) > 1:
+            return False
+        expected_slots = {
+            str(beat.get("slot_key") or "")
+            for beat in beats
+            if str(beat.get("slot_key") or "")
+        }
+        selected_slots = {
+            str(ref.get("slot_key") or "")
+            for ref in selected_refs
+            if ref.get("type") == "plot_key_frame" and _technically_usable(ref)
+        }
+        if structural_fallback and not fallback_slots.issubset(expected_slots):
+            return False
+        required_slots = expected_slots - fallback_slots if structural_fallback else expected_slots
+        if required_slots and not required_slots.issubset(selected_slots):
+            return False
+        if len(selected_slots) > _MAX_TIMELINE_KEYFRAMES:
+            return False
+    if meta.get("reference_gallery_contract_override"):
+        return True
+    if str(meta.get("keyframe_prompt_contract_version") or "") != KEYFRAME_PROMPT_CONTRACT_VERSION:
+        return False
+    if expected_fingerprint:
+        frozen_fingerprint = str(meta.get("keyframe_contract_fingerprint") or "").strip()
+        if not frozen_fingerprint:
+            frozen_fingerprint = next(
+                (
+                    str(ref.get("keyframe_contract_fingerprint") or "").strip()
+                    for ref in refs
+                    if ref.get("type") == "plot_key_frame" and ref.get("keyframe_contract_fingerprint")
+                ),
+                "",
+            )
+        return frozen_fingerprint == expected_fingerprint
+    return True
+
+
+def _seeded_structured_endpoint(
+    shot: Shot,
+    contract: dict[str, object],
+    provider_aliases: dict[str, str],
+) -> str:
+    """Compile a seeded endpoint from typed state instead of free narrative prose."""
+
+    phase = next(
+        (
+            str(tag).split(":", 1)[1]
+            for tag in (shot.risk_tags or [])
+            if str(tag).startswith("timeline_keyframe_phase:")
+        ),
+        "",
+    )
+    if phase and phase not in {"decisive", "closing"}:
+        return ""
     if not phase and str(contract.get("target_source") or "") not in {
         "last_frame_desc",
         "state_out",
@@ -1294,23 +1380,152 @@ def reference_gallery_matches_keyframe_contract(
 
     def provider_text(value: object) -> str:
         normalized = str(value or "").strip()
+        for name in sorted(provider_aliases, key=len, reverse=True):
             normalized = normalized.replace(name, provider_aliases[name])
         return normalized
-    anchor_text = "; ".join(f"{name}: {appearance}" for name, appearance in anchors.items())
+
+    state = shot.continuity_state_out
+    character_states = getattr(state, "characters", {}) or {}
+    visible = [
+        str(name).strip()
+        for name in (contract.get("visible_characters") or [])
+        if str(name).strip()
+    ]
+    character_parts: list[str] = []
+    for name in visible:
+        item = character_states.get(name)
+        if item is None:
+            continue
+        details = [
+            f"{label}={provider_text(getattr(item, field, ''))}"
+            for label, field in (
+                ("pose", "pose"),
+                ("facing", "facing"),
+                ("left hand", "left_hand"),
+                ("right hand", "right_hand"),
+            )
+            if provider_text(getattr(item, field, ""))
+        ]
+        if details:
+            character_parts.append(
+                f"{provider_aliases.get(name, name)} endpoint: " + "; ".join(details)
+            )
+    if visible and not character_parts:
+        return ""
+
+    prop_parts: list[str] = []
     for item in (getattr(state, "props", {}) or {}).values():
         if not bool(getattr(item, "required", False)) and (
             str(getattr(item, "visibility", "") or "") != "required"
-        body = content_override.strip()[:_KEYFRAME_LLM_PROMPT_MAX_CHARS]
+        ):
+            continue
+        details = [
             f"{label}={provider_text(getattr(item, field, ''))}"
             for label, field in (
-        body = (
+                ("name", "canonical_name"),
                 ("location", "location"),
                 ("state", "form"),
             )
             if provider_text(getattr(item, field, ""))
+        ]
+        if details:
+            prop_parts.append("required prop: " + "; ".join(details))
+
+    parts = [*character_parts, *prop_parts]
+    if not parts:
+        return ""
+    return (
+        "Literal endpoint geometry for the scripted practical action: "
+        + ". ".join(parts)
+        + ". Show only these visible states and do not infer unlisted interaction."
+    )
+
+
+def reference_generation_prompt(
+    shot: Shot,
+    bible: Bible,
+    ref_type: str,
+    index: int,
+    *,
+    content_override: str | None = None,
+    screenplay: EpisodeScreenplay | None = None,
+    identity_seeded: bool = False,
+) -> str:
+    anchors = _keyframe_character_anchors(shot, bible, screenplay=screenplay)
+    provider_names = list(dict.fromkeys([
+        *anchors,
+        *[
+            str(character.name).strip()
+            for character in bible.characters
+            if str(character.name).strip()
+        ],
+    ]))
+    provider_aliases = (
+        {
+            name: f"subject {position}"
+            for position, name in enumerate(provider_names, start=1)
+        }
+        if identity_seeded else {}
+    )
+
+    def provider_text(value: str) -> str:
+        normalized = str(value or "")
+        for name in sorted(provider_aliases, key=len, reverse=True):
+            normalized = normalized.replace(name, provider_aliases[name])
+        return normalized
+
+    anchor_text = "; ".join(
+        (
+            f"{provider_aliases.get(name, name)}: identity, face, body build, "
+            "and outfit are locked by "
+            "the provided reference images"
+        )
+        if identity_seeded else f"{name}: {appearance}"
+        for name, appearance in anchors.items()
+    )
+    # content_override：LLM 按剧本写的内容提示词。它只能补充美术细节，不能覆盖下方
+    # 确定性构图合同。最终合同在截断后追加，避免第二人物/接触点被截掉。
+    if content_override:
+        body = provider_text(
+            content_override.strip()[:_KEYFRAME_LLM_PROMPT_MAX_CHARS]
+        )
+    else:
+        contract = _keyframe_contract(shot, bible, screenplay=screenplay)
+        body = provider_text(
+            f"Create one clean 9:16 anime-drama reference image for Seedance. "
+            f"Reference type: {ref_type}. Shot {shot.shot_no}. Scene: {shot.scene_setting}. "
+            f"Single narrative keyframe target: {contract['target_keyframe_desc']}."
+        )
+    style_contract = visual_style_lock(bible.world.visual_style_canonical)
+    if identity_seeded and ref_type == "plot_key_frame":
+        contract = _keyframe_contract(shot, bible, screenplay=screenplay)
+        target = _seeded_structured_endpoint(
+            shot,
+            contract,
+            provider_aliases,
+        ) or provider_text(str(
+            contract.get("target_keyframe_desc")
+            or shot.last_frame_desc
+            or shot.action_desc
+        ).strip())
+        camera_angle = str(contract.get("camera_angle") or "eye-level").strip()
+        visible = [
+            provider_aliases.get(str(name).strip(), str(name).strip())
+            for name in (contract.get("visible_characters") or [])
+            if str(name).strip()
+        ]
+        scene_canonical = provider_text(
+            str(contract.get("scene_canonical") or "").strip()
+        )
+        scene_landmarks = [
             str(item).strip()
             for item in (contract.get("scene_landmarks") or [])
-        f"Episode style: {bible.world.visual_style_canonical}. "
+            if str(item).strip()
+        ]
+        dialogue_focus = str(
+            contract.get("dialogue_focus_subject") or ""
+        ).strip()
+        dialogue_focus = provider_aliases.get(dialogue_focus, dialogue_focus)
         compact_contract = [
             "Create one clean 9:16 portrait narrative keyframe.",
             "SEEDED KEYFRAME CONTRACT:",
@@ -1397,31 +1612,13 @@ def reference_gallery_matches_keyframe_contract(
 
 async def review_reference_image(
     image_b64: str,
-    """带 i2i 种子生成参考图；仅在图片输入明确不可用时才降级为纯文生图。
-
-    429/5xx/读超时等瞬时错误必须保留人物/场景种子交给上层重试，不能静默产出
-    一张失去身份锚点的“成功”关键帧。上传写超时可去种子快速降级，因为原样重传
-    大图只会继续占满上行。
-    """
-    try:
-        return await hiagent.generate_image(
-            prompt, size=config.REF_IMAGE_SIZE, image_inputs=seed_inputs or None, call_meta=call_meta)
-    except ProviderError as exc:
-        if not seed_inputs:
-            raise
-        detail = f"{exc} {getattr(exc, 'raw', '')}".lower()
-        unsupported_markers = (
-            "unsupported image", "image input is not supported", "reference image is not supported",
-            "does not support image", "unsupported_image", "invalid image input", "image edit not supported",
-            "不支持图片输入", "不支持参考图", "不支持图生图",
-        )
-        seedless_fallback_allowed = (
-            getattr(exc, "timeout_phase", None) == "write"
-            or any(marker in detail for marker in unsupported_markers)
-        )
-        if not seedless_fallback_allowed:
-            raise
-        return await hiagent.generate_image(prompt, size=config.REF_IMAGE_SIZE, call_meta=call_meta)
+    *,
+    shot: Shot,
+    bible: Bible,
+    ref_type: str,
+    screenplay: EpisodeScreenplay | None = None,
+) -> dict[str, Any]:
+    anchors = [
         f"{name}: {anchor}"
         for name, anchor in _keyframe_character_anchors(
             shot, bible, screenplay=screenplay,
@@ -1565,11 +1762,32 @@ async def review_reference_consistency(*, candidates: list[ReferenceImageAsset],
     expectation = (
         f"You are a reference-image CONSISTENCY reviewer for ONE anime-drama shot. I send {k + n} images "
         f"in order. The FIRST {k} are ANCHOR images = ground truth for each character's face/hairstyle/outfit/build "
+        f"and for the scene environment/lighting. The NEXT {n} are CANDIDATE reference images for the SAME "
         f"shot, numbered 1..{n} in the order sent (after the anchors). For EACH candidate, judge whether the "
         "SAME character(s) keep an IDENTICAL face, hairstyle, body build, clothing design/colors/accessories, "
         "standing height and relative height ratio. Compare candidates directly with EACH OTHER as well as with "
         "the anchors: different crops or camera distance must never be mistaken for a height change. Also verify "
-        prompt += " " + extra_instruction.strip()
+        "that art style / lighting / environment stay consistent. Pose, expression, gesture and camera framing are "
+        "ALLOWED to differ — do NOT penalize those. "
+        f"Character appearance reference (text): {char_txt or '(none)'}. "
+        f"Scripted relative-height policy: {geometry.get('relative_height_policy') or 'natural fixed scale'}. "
+        f"Explicit height evidence: {geometry.get('height_difference_evidence') or []}. "
+        f"Art style: {bible.world.visual_style_canonical}. "
+        'Output exactly one JSON object: {"candidates":[{"n":<1-based int>,"consistency":<0..1>,'
+        '"drift":[<any of "costume","hair","face","body_build","height_ratio","style","environment">],'
+        '"issues":[<short strings>]}],"overall":<0..1>}. consistency=1 means the protected character '
+        "attributes are identical. Report even a subtle costume, face, build, or height-ratio change explicitly."
+    )
+    frames = anchor_b64 + [b for _, b in cand_pairs]
+    try:
+        raw = await hiagent.vlm_check(
+            frames, expectation,
+            call_meta={
+                "initiator_label": "参考图一致性质检",
+                "shot_no": shot.shot_no,
+                "candidate_count": len(cand_pairs),
+                "anchor_count": len(anchor_b64),
+            })
         data = extract_json(raw)
     except Exception as exc:  # noqa: BLE001 VLM/解析失败不可观测地伪造成满分
         return {
@@ -3855,6 +4073,7 @@ def _finalize_reference_selection(
     """Score-only：全部技术有效参考图保留；按分数排序，低分只记展示标记（PRD QA-SO #24）。"""
     del rejected_out, rejection_details
     if not assets:
+        return []
     _apply_redundancy_penalties(assets)
     for asset in assets:
         apply_keep_gate(asset)
