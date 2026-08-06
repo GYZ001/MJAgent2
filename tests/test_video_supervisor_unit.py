@@ -57,7 +57,8 @@ def test_grade_shot_video_a_b_c():
         technical={"passed": True},
         qa={"overall": 0.95, "failure_types": ["character_duplicate"]},
     )
-    assert fatal["grade"] == "B"
+    assert fatal["grade"] == "C"
+    assert fatal["identity_integrity_failures"] == ["character_duplicate"]
 
     degraded = grade_shot_video(
         technical={"passed": True},
@@ -69,9 +70,16 @@ def test_grade_shot_video_a_b_c():
 
 def test_fatal_failure_types_default():
     assert is_fatal_failure_code("character_duplicate")
+    assert is_fatal_failure_code("wrong_identity")
+    assert is_fatal_failure_code("wrong_outfit")
     assert is_fatal_failure_code("text_error")
     assert not is_fatal_failure_code("state_mismatch")
-    assert set(DEFAULT_FATAL_FAILURE_TYPES) == {"character_duplicate", "text_error"}
+    assert set(DEFAULT_FATAL_FAILURE_TYPES) == {
+        "character_duplicate",
+        "wrong_identity",
+        "wrong_outfit",
+        "text_error",
+    }
 
 
 def test_issues_from_qa_and_job_and_enqueue():
@@ -100,7 +108,7 @@ def test_issues_from_qa_and_job_and_enqueue():
         shot_no=6,
     )
     assert enq[0].code == "VIDEO_PREFLIGHT_BLOCKED"
-    assert not is_fatal(Issue(
+    assert is_fatal(Issue(
         code="VIDEO_QA_CHARACTER_DUPLICATE",
         severity=IssueSeverity.BLOCKER,
         subject="s",

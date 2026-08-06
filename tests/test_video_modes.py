@@ -1177,6 +1177,7 @@ def test_all_identity_bad_keyframes_are_deleted_and_fall_back_to_truth_anchors(
     _patch_reference_build_unit(monkeypatch)
     import app.multiview as mv
 
+    monkeypatch.setattr(video_modes, "max_reference_images", lambda: 9)
     character_path = tmp_path / "character.jpg"
     scene_path = tmp_path / "scene.jpg"
     character_path.write_bytes(b"character")
@@ -2523,8 +2524,8 @@ def test_seedance_provider_inputs_keep_character_truth_anchor_with_keyframe() ->
 
     assert inputs == [
         ("data:image/jpeg;base64,aw==", "reference_image"),
-        ("data:image/jpeg;base64,YQ==", "reference_image"),
         ("data:image/jpeg;base64,cw==", "reference_image"),
+        ("data:image/jpeg;base64,YQ==", "reference_image"),
     ]
     assert refs[0]["selectedForSeedance"] is True
     assert "video_input" in refs[0]["purposes"]

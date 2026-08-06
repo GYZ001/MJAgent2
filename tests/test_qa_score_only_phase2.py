@@ -215,3 +215,58 @@ def test_select_best_immediately_adopts_first_technical_candidate(monkeypatch) -
     assert forced is not None
     assert forced["version_id"] == "low"
     assert forced["fallback"] is True
+
+
+def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
+    monkeypatch,
+) -> None:
+    import json
+    import sqlite3
+
+    from app.evidence import media
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+      CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
+      CREATE TABLE shots(id TEXT PRIMARY KEY,episode_id TEXT,adopted_version_id TEXT);
+      CREATE TABLE shot_versions(id TEXT PRIMARY KEY,shot_id TEXT,version_no INTEGER,status TEXT,
+        technical_validation_json TEXT,qa_json TEXT,adoption_reason TEXT,image_inputs TEXT);
+      INSERT INTO shots VALUES('s','e',NULL);
+    """)
+    technical = json.dumps({"passed": True})
+    conn.execute(
+        "INSERT INTO shot_versions VALUES('bad','s',1,'succeeded',?,?,NULL,?)",
+        (
+            technical,
+            json.dumps({
+                "overall": 0.95,
+                "failure_types": ["wrong_identity"],
+            }),
+            "{}",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO shot_versions VALUES('good','s',2,'succeeded',?,?,NULL,?)",
+        (technical, json.dumps({"overall": 0.7, "failure_types": []}), "{}"),
+    )
+    conn.commit()
+    monkeypatch.setattr(media, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        media,
+        "grade_shot_video",
+        lambda *a, **k: {"grade": "B"},
+    )
+    monkeypatch.setattr(
+        media,
+        "merge_observed_state_out_into_shot_contract",
+        lambda *a, **k: None,
+    )
+
+    selected = select_best_video_candidate("s", force_best=True)
+
+    assert selected is not None
+    assert selected["version_id"] == "good"
+    assert conn.execute(
+        "SELECT adopted_version_id FROM shots WHERE id='s'",
+    ).fetchone()[0] == "good"

@@ -392,10 +392,11 @@ def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
         "SELECT prompt_text FROM shot_versions WHERE id=?",
         (rerolled["version_id"],),
     ).fetchone()["prompt_text"]
-    assert "Reference image 1: use as plot_key_frame" in rerolled_prompt
+    assert "Reference image 1: use as plot key frame" in rerolled_prompt
     assert "Reference image 2: use as scene" in rerolled_prompt
-    assert "use as character" not in rerolled_prompt
-    assert "Reference image 3:" not in rerolled_prompt
+    assert "Reference image 3: use as character" in rerolled_prompt
+    assert "定义为「A」" in rerolled_prompt
+    assert "禁止中途变性、换脸、换人" in rerolled_prompt
 
 
 def test_legacy_keyframe_gallery_is_not_reused_after_prompt_contract_upgrade(monkeypatch) -> None:
