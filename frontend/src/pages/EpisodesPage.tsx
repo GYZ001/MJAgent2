@@ -70,11 +70,13 @@ export default function EpisodesPage() {
   const counts = p?.episode_counts
   const totalEpisodes = counts?.total ?? p?.episodes_total ?? eps.length
   const screenplayTodoCount = counts?.screenplay_todo ?? eps.filter(e => ['pending', 'failed', 'repairing'].includes(e.screenplay_status)).length
+  const screenplayQueuedCount = counts?.screenplay_queued ?? eps.filter(e => e.screenplay_status === 'queued').length
   const screenplayRunningCount = counts?.screenplay_running ?? eps.filter(e => e.screenplay_status === 'running').length
+  const screenplayActiveCount = screenplayQueuedCount + screenplayRunningCount
   const storyboardReadyCount = counts?.storyboard_ready ?? eps.filter(e => e.screenplay_status === 'ready' && ['planned', 'script_failed'].includes(e.status)).length
   const scriptingCount = counts?.scripting ?? eps.filter(e => e.status === 'scripting').length
   const planTimer = useTaskTimer(`project.${projectId}.plan`, p?.plan_status === 'running')
-  const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayRunningCount > 0)
+  const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayActiveCount > 0)
   const storyboardAllTimer = useTaskTimer(`project.${projectId}.storyboard-all`, scriptingCount > 0)
   const [sbMetrics, setSbMetrics] = useState<{
     active_storyboard_runs: number
@@ -287,7 +289,7 @@ export default function EpisodesPage() {
       <section className="episode-overview">
         <div><span>全部分集</span><b>{totalEpisodes}</b><small>每章一集</small></div>
         <div><span>待写剧本</span><b>{screenplayTodoCount}</b><small>可批量生成</small></div>
-        <div><span>制作进行中</span><b>{screenplayRunningCount + scriptingCount}</b><small>剧本 / 分镜</small></div>
+        <div><span>制作进行中</span><b>{screenplayActiveCount + scriptingCount}</b><small>剧本 / 分镜</small></div>
         <div><span>已成片</span><b>{counts?.done ?? eps.filter(ep => ep.status === 'done').length}</b><small>可进入交付</small></div>
       </section>
 
@@ -326,9 +328,9 @@ export default function EpisodesPage() {
                 : `生成待办分镜，共 ${pendingCount} 集`} disabled={busy || p.plan_status === 'running' || pendingCount === 0}
                 title={p.plan_status === 'running' ? '需等待分集规划完成' : pendingCount === 0 ? '当前没有剧本已就绪的待生成分镜' : busy ? '正在处理上一项操作' : ''}
                 onClick={() => setBatchConfirm('storyboard')}>生成待办分镜（{pendingCount} 集）</button>
-              {screenplayRunningCount > 0 && (
+              {screenplayActiveCount > 0 && (
                 <button className="btn ghost danger" disabled={busy}
-                  aria-label={busy ? '停止批量剧本，暂不可用：正在处理上一项操作' : `停止批量剧本，共 ${screenplayRunningCount} 集正在运行`}
+                  aria-label={busy ? '停止批量剧本，暂不可用：正在处理上一项操作' : `停止批量剧本，共 ${screenplayActiveCount} 集在运行或排队`}
                   onClick={() => setBatchStopConfirm(true)}>
                   停止批量剧本
                 </button>
@@ -339,6 +341,7 @@ export default function EpisodesPage() {
         <div className="episode-active-tasks">
           {p.plan_status === 'running' && <span className="stamp gold">分集中（依据原文规划，篇幅长时需数分钟）</span>}
           {screenplayRunningCount > 0 && <span className="stamp gold">剧本中（{screenplayRunningCount} 集）</span>}
+          {screenplayQueuedCount > 0 && <span className="stamp blue">剧本排队（{screenplayQueuedCount} 集）</span>}
           {scriptingCount > 0 && <span className="stamp gold">分镜中（{scriptingCount} 集）</span>}
           {sbMetrics && (sbMetrics.active_storyboard_runs > 0 || sbMetrics.waiting_human > 0 || sbMetrics.paused > 0 || sbMetrics.repairing > 0) && (
             <span className="stamp grey">
@@ -435,7 +438,7 @@ export default function EpisodesPage() {
                 <EpisodeStatusStamp status={ep.status} issue={storyboardNotice?.message} />
               </div>
               <div className="episode-pipeline" aria-label="制作进度">
-                <span className={ep.screenplay_status === 'ready' ? 'done' : ep.screenplay_status === 'running' ? 'active' : ''}>剧本</span>
+                <span className={ep.screenplay_status === 'ready' ? 'done' : ['queued', 'running'].includes(ep.screenplay_status) ? 'active' : ''}>剧本</span>
                 <i /><span className={['scripted','confirmed','generating','done'].includes(ep.status) ? 'done' : ep.status === 'scripting' ? 'active' : ''}>分镜</span>
                 <i /><span className={['confirmed','generating','done'].includes(ep.status) ? 'done' : ''}>视频</span>
                 <i /><span className={ep.status === 'done' ? 'done' : ''}>成片</span>
@@ -565,7 +568,7 @@ export default function EpisodesPage() {
       {batchStopConfirm && (
         <DecisionDialog
           title="停止批量剧本生成？"
-          summary={`当前有 ${screenplayRunningCount} 集剧本正在生成或修复`}
+          summary={`当前有 ${screenplayRunningCount} 集正在生成，${screenplayQueuedCount} 集排队`}
           message="系统会逐集取消仍在运行的任务，并把每集恢复到可重新生成或继续修复的状态；已完成剧本不会删除。"
           details={[
             '已写入的工作副本和已发布剧本会保留',

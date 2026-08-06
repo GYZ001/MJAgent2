@@ -2214,6 +2214,7 @@ export interface Project {
   episode_counts?: {
     total: number;
     done: number;
+    screenplay_queued: number;
     screenplay_running: number;
     scripting: number;
     screenplay_todo: number;

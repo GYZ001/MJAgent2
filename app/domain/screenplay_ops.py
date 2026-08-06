@@ -217,6 +217,12 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
         code, message, action = "screenplay_cancelling", "正在取消剧本任务，等待 worker 退出", "view_cancel_progress"
     elif bool(ep.get("screenplay_publish_fence")):
         code, message, action = "save_stopping_downstream", "正在安全停止下游任务", "view_save_progress"
+    elif screenplay_active and screenplay_status == "queued":
+        code, message, action = (
+            "screenplay_queued",
+            "剧本任务排队中，尚未占用模型生成槽位",
+            "stop_screenplay",
+        )
     elif screenplay_active:
         operation = production.get("operation") or "baseline"
         code = "baseline_running" if operation == "baseline" else "finalize_running"
@@ -1389,7 +1395,7 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     _require_harness_engine(ep["project_id"])
     if ep["status"] == "scripting":
         raise HTTPException(409, "分镜正在生成中，不能同时重写剧本")
-    if ep["screenplay_status"] in {"running", "repairing"} and _screenplay_task_active(episode_id):
+    if ep["screenplay_status"] in {"queued", "running", "repairing"} and _screenplay_task_active(episode_id):
         return {
             "status": ep["screenplay_status"],
             "run_id": ep["active_screenplay_run_id"],
@@ -1459,10 +1465,10 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             episode_id,
             recorder,
             project_id=ep["project_id"],
-            status="running",
+            status="queued",
             message=(
                 "从 working Artifact 继续结构校验、评分与发布"
-                if resume_existing else None
+                if resume_existing else "剧本任务已排队，等待文本生成槽位"
             ),
         )
     except Exception as exc:
@@ -1472,7 +1478,7 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             "action": "retry_resume" if resume_existing else "retry_generate",
         }) from exc
     return {
-        "status": "running",
+        "status": "queued",
         "run_id": recorder.run_id,
         "mode": "finalize" if resume_existing else "baseline",
     }
@@ -1569,7 +1575,7 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         raise HTTPException(409, "分镜正在生成中，不能同时修复剧本")
     if _screenplay_task_active(episode_id):
         return {
-            "status": "running",
+            "status": ep["screenplay_status"],
             "run_id": ep["active_screenplay_run_id"],
             "mode": "finalize",
             "deduplicated": True,
@@ -1595,8 +1601,8 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             episode_id,
             recorder,
             project_id=ep["project_id"],
-            status="running",
-            message="从 working Artifact 继续结构校验、评分与发布",
+            status="queued",
+            message="剧本续修已排队，等待文本生成槽位",
         )
     except Exception as exc:
         raise HTTPException(503, {
@@ -1605,7 +1611,7 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             "action": "retry_resume",
         }) from exc
     return {
-        "status": "running",
+        "status": "queued",
         "run_id": recorder.run_id,
         "revision_id": rev.id,
         "mode": "finalize",
@@ -1914,19 +1920,94 @@ async def delete_screenplay(episode_id: str):
     }
 
 
+def _refresh_screenplay_batch_run(batch_run_id: str) -> None:
+    from app.orchestration.state_machine import StateConflict, transition_run
+
+    conn = get_conn()
+    parent = conn.execute(
+        "SELECT status FROM workflow_runs WHERE id=? AND workflow_type='screenplay_batch'",
+        (batch_run_id,),
+    ).fetchone()
+    if not parent or parent["status"] != "RUNNING":
+        return
+    rows = conn.execute(
+        "SELECT status FROM workflow_runs WHERE parent_run_id=? "
+        "AND workflow_type='screenplay'",
+        (batch_run_id,),
+    ).fetchall()
+    if not rows:
+        return
+    statuses = [row["status"] for row in rows]
+    terminal = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"}
+    if any(status not in terminal for status in statuses):
+        return
+    failures = sum(status in {"PARTIAL", "FAILED", "CANCELLED"} for status in statuses)
+    target = "SUCCEEDED" if failures == 0 else "PARTIAL"
+    reason = (
+        f"批量剧本全部完成，共 {len(statuses)} 集"
+        if failures == 0
+        else f"批量剧本已收口，共 {len(statuses)} 集，{failures} 集未成功"
+    )
+    try:
+        transition_run(
+            batch_run_id,
+            "RUNNING",
+            target,
+            reason,
+            failure_code="PARTIAL_RESULT" if failures else None,
+        )
+    except StateConflict:
+        return
+    evidence_repository.append_event(
+        batch_run_id,
+        "BATCH_FINISHED",
+        "info" if failures == 0 else "warning",
+        reason,
+        payload={"children": len(statuses), "unsuccessful": failures},
+    )
+
+
 async def _screenplay_guarded(
     episode_id: str,
     recorder: WorkflowRecorder,
     *,
     priority: int = 0,
+    batch_run_id: str | None = None,
 ):
     from app.generation_concurrency import run_with_generation_slot
 
-    await run_with_generation_slot(
-        "screenplay",
-        lambda: _recorded_screenplay_task(episode_id, recorder),
-        priority=priority,
-    )
+    async def activate() -> EpisodeScreenplay | None:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='running',"
+            "screenplay_error=COALESCE(screenplay_error, ?),screenplay_updated_at=? "
+            "WHERE id=? AND active_screenplay_run_id=? "
+            "AND screenplay_status IN ('queued','running','repairing')",
+            ("正在生成人物上下文与首版剧本", now(), episode_id, recorder.run_id),
+        )
+        conn.commit()
+        return await _recorded_screenplay_task(episode_id, recorder)
+
+    try:
+        await run_with_generation_slot(
+            "screenplay",
+            activate,
+            priority=priority,
+        )
+    except asyncio.CancelledError:
+        row = get_conn().execute(
+            "SELECT status FROM workflow_runs WHERE id=?",
+            (recorder.run_id,),
+        ).fetchone()
+        if row and row["status"] == "CREATED":
+            try:
+                recorder.cancel("排队中的剧本任务已取消")
+            except StateConflict:
+                pass
+        raise
+    finally:
+        if batch_run_id:
+            _refresh_screenplay_batch_run(batch_run_id)
 
 
 @router.post("/projects/{project_id}/screenplay-all")
@@ -1947,17 +2028,40 @@ async def start_screenplay_all(project_id: str):
         if (
             not r["screenplay_json"]
             or r["screenplay_status"] in ("pending", "failed", "repairing")
-            or (r["screenplay_status"] == "running" and not task_registry.active("screenplay", r["id"]))
+            or (
+                r["screenplay_status"] in {"queued", "running"}
+                and not task_registry.active("screenplay", r["id"])
+            )
         )
         and r["screenplay_status"] != "ready"
     ]
     if not selected:
         raise HTTPException(409, "没有待生成剧本的剧集")
+    selected_ids = [row["id"] for row in selected]
+    batch_recorder = WorkflowRecorder.create(
+        workflow_type="screenplay_batch",
+        scope_type="project",
+        scope_id=project_id,
+        input_fingerprint=fingerprint(
+            project_id,
+            selected_ids,
+            get_contract("screenplay").version,
+        ),
+        requested_by="user",
+        trigger_type="batch",
+        policy_snapshot={
+            "contract": f"screenplay@{get_contract('screenplay').version}",
+            "selected_episode_ids": selected_ids,
+            "queue_policy": "priority_fifo",
+            "cancel_policy": "cancel_all_then_wait",
+        },
+    )
+    batch_recorder.start()
     run_ids: list[str] = []
     failed_to_start: list[dict] = []
     for row in selected:
         eid = row["id"]
-        if row["screenplay_status"] == "running" and not _screenplay_task_active(eid):
+        if row["screenplay_status"] in {"queued", "running"} and not _screenplay_task_active(eid):
             conn.execute(
                 "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, "
                 "active_screenplay_run_id=NULL, screenplay_updated_at=? WHERE id=?",
@@ -1972,21 +2076,22 @@ async def start_screenplay_all(project_id: str):
             recorder = _new_screenplay_recorder(
                 eid,
                 trigger_type="batch_resume" if is_resume else "batch",
-                parent_run_id=row["active_screenplay_run_id"] if is_resume else None,
+                parent_run_id=batch_recorder.run_id,
             )
             _spawn_screenplay_activation(
                 eid,
                 recorder,
                 project_id=project_id,
-                status="running",
+                status="queued",
                 message=(
                     "批量任务已从工作副本继续结构校验、评分与发布"
-                    if is_resume else None
+                    if is_resume else "批量剧本已排队，等待文本生成槽位"
                 ),
                 task_factory=lambda eid=eid, recorder=recorder: _screenplay_guarded(
                     eid,
                     recorder,
                     priority=PRIORITY_BATCH,
+                    batch_run_id=batch_recorder.run_id,
                 ),
             )
             run_ids.append(recorder.run_id)
@@ -2002,6 +2107,7 @@ async def start_screenplay_all(project_id: str):
                 "retryable": True,
             })
     if not run_ids:
+        batch_recorder.fail(RuntimeError("批量剧本任务均未能进入持久化队列"))
         raise HTTPException(503, {
             "code": "SCREENPLAY_BATCH_START_FAILED",
             "message": "批量剧本任务均未能启动，各集原状态已保留，可直接重试",
@@ -2009,6 +2115,7 @@ async def start_screenplay_all(project_id: str):
         })
     return {
         "started": len(run_ids),
+        "batch_run_id": batch_recorder.run_id,
         "run_ids": run_ids,
         "failed_to_start": failed_to_start,
         "retryable_failures": len(failed_to_start),
@@ -2025,20 +2132,25 @@ async def cancel_screenplay_all(project_id: str):
     _project_or_404(project_id)
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, screenplay_json FROM episodes WHERE project_id=? AND screenplay_status IN ('running','repairing')",
+        "SELECT id, screenplay_json FROM episodes "
+        "WHERE project_id=? AND screenplay_status IN ('queued','running','repairing')",
         (project_id,)).fetchall()
-    stopped = 0
+    episode_ids = [row["id"] for row in rows]
+    stopped = await task_registry.cancel_many_and_wait(
+        "screenplay",
+        episode_ids,
+    )
     for r in rows:
         eid = r["id"]
-        await task_registry.cancel_and_wait("screenplay", eid)
         full = conn.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
         fallback = _screenplay_fallback_status(full)
         conn.execute(
-            "UPDATE episodes SET screenplay_status=?, screenplay_error=NULL, screenplay_updated_at=? WHERE id=?",
-            (fallback, now(), eid))
-        stopped += 1
+            "UPDATE episodes SET screenplay_status=?,screenplay_error=NULL,"
+            "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+            (fallback, now(), eid),
+        )
     conn.commit()
-    return {"stopped": stopped}
+    return {"stopped": stopped, "matched": len(rows)}
 
 
 @router.post("/episodes/{episode_id}/screenplay/cancel")
@@ -2074,7 +2186,7 @@ async def cancel_screenplay(episode_id: str):
             "requested_at": ep.get("screenplay_updated_at"),
             "deduplicated": True,
         }
-    if ep["screenplay_status"] not in {"running", "repairing"} or not _screenplay_task_active(episode_id):
+    if ep["screenplay_status"] not in {"queued", "running", "repairing"} or not _screenplay_task_active(episode_id):
         raise HTTPException(409, "当前没有正在进行的剧本任务")
     conn = get_conn()
     requested_at = now()

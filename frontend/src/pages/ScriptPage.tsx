@@ -143,7 +143,8 @@ export default function ScriptPage() {
 
   const screenplayTimer = useTaskTimer(
     `episode.${episodeId}.screenplay`,
-    ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running',
+    ep?.screenplay_production?.task_active
+      ?? ['queued', 'running'].includes(ep?.screenplay_status ?? ''),
   )
 
   const occurrences = ep?.source_dialogue_occurrences ?? []
@@ -171,7 +172,8 @@ export default function ScriptPage() {
   const effectiveLimit = Math.max(dynamicLimit, requiredOccurrenceIds.length)
   const allDialogueSelected = occurrences.length > 0 && occurrences.every(item => selectedSet.has(item.id))
 
-  const screenplayTaskActive = ep?.screenplay_production?.task_active ?? ep?.screenplay_status === 'running'
+  const screenplayTaskActive = ep?.screenplay_production?.task_active
+    ?? ['queued', 'running'].includes(ep?.screenplay_status ?? '')
   const canResumeFlow = ep?.screenplay_production?.can_resume_repair
     ?? ep?.screenplay_status === 'repairing'
   const script = draft ?? ep?.screenplay ?? null
