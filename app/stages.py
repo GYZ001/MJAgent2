@@ -708,6 +708,42 @@ def _render_error_history(
     return "\n".join(blocks)
 
 
+def _preserve_omitted_storyboard_repair_fields(
+    previous_raw: str,
+    repair_raw: str,
+) -> tuple[str, list[str]]:
+    """Apply a full-object repair as a patch for fields the model omitted."""
+    try:
+        previous = extract_json(previous_raw)
+        repaired = extract_json(repair_raw)
+    except ValueError:
+        return repair_raw, []
+    if not isinstance(previous, dict) or not isinstance(repaired, dict):
+        return repair_raw, []
+    previous_shot = previous.get("shot")
+    repaired_shot = repaired.get("shot")
+    if not isinstance(previous_shot, dict) or not isinstance(repaired_shot, dict):
+        return repair_raw, []
+
+    merged = deepcopy(repaired)
+    merged_shot = merged["shot"]
+    preserved: list[str] = []
+    for key, value in previous_shot.items():
+        if key not in merged_shot:
+            merged_shot[key] = deepcopy(value)
+            preserved.append(f"shot.{key}")
+    for key in ("episode_no", "is_final"):
+        if key not in merged and key in previous:
+            merged[key] = deepcopy(previous[key])
+            preserved.append(key)
+    if not preserved:
+        return repair_raw, []
+    return (
+        json.dumps(merged, ensure_ascii=False, separators=(",", ":")),
+        preserved,
+    )
+
+
 async def _run_with_agent_loop(
     stage: str,
     stage_key: str,
@@ -806,7 +842,7 @@ async def _run_with_agent_loop(
                 else ""
             )
         )
-        return await model_gateway.chat(
+        repaired_raw = await model_gateway.chat(
             [{"role": "system", "content": SYSTEM_PREFIX}, {"role": "user", "content": repair_prompt}],
             temperature=repair_temp,
             max_tokens=max_tokens,
@@ -820,6 +856,28 @@ async def _run_with_agent_loop(
                 "latest_errors": [issue.message for issue in latest_issues[:10]],
             },
         )
+        if model_cls is StoryboardShotDraft and previous_raw:
+            repaired_raw, preserved_fields = (
+                _preserve_omitted_storyboard_repair_fields(
+                    previous_raw,
+                    repaired_raw,
+                )
+            )
+            if preserved_fields:
+                log_provider_call(
+                    "storyboard_repair_field_preservation",
+                    config.MODEL_TEXT,
+                    "MERGED",
+                    None,
+                    0,
+                    meta={
+                        "stage": stage,
+                        "iteration_no": iteration_no,
+                        "preserved_fields": preserved_fields,
+                        "reason": "repair_response_omitted_previous_field",
+                    },
+                )
+        return repaired_raw
 
     def evaluator(raw: str):
         try:

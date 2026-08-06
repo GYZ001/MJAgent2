@@ -42,6 +42,46 @@ def _dialogue_loop() -> AgentLoop[StoryboardShotDraft]:
     )
 
 
+def test_storyboard_repair_preserves_only_omitted_top_level_shot_fields() -> None:
+    previous = json.dumps({
+        "episode_no": 2,
+        "is_final": False,
+        "shot": {
+            "shot_no": 6,
+            "source_excerpt": "旧的无效来源",
+            "first_frame_desc": "首帧保持",
+            "last_frame_desc": "尾帧保持",
+            "narration": "应被清空",
+            "continuity_state_in": {"scene": {"axis_id": "AXIS-1"}},
+        },
+    }, ensure_ascii=False)
+    repaired = json.dumps({
+        "episode_no": 2,
+        "is_final": False,
+        "shot": {
+            "shot_no": 6,
+            "source_excerpt": "新的有效来源",
+            "narration": "",
+            "continuity_state_in": {"scene": {}},
+        },
+    }, ensure_ascii=False)
+
+    merged_raw, preserved = (
+        stages._preserve_omitted_storyboard_repair_fields(
+            previous,
+            repaired,
+        )
+    )
+    merged = json.loads(merged_raw)
+
+    assert merged["shot"]["source_excerpt"] == "新的有效来源"
+    assert merged["shot"]["narration"] == ""
+    assert merged["shot"]["first_frame_desc"] == "首帧保持"
+    assert merged["shot"]["last_frame_desc"] == "尾帧保持"
+    assert merged["shot"]["continuity_state_in"] == {"scene": {}}
+    assert preserved == ["shot.first_frame_desc", "shot.last_frame_desc"]
+
+
 def test_storyboard_candidate_normalizes_nullable_contract_fields() -> None:
     candidate = {
         "episode_no": 99,
