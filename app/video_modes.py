@@ -751,6 +751,16 @@ def _keyframe_character_anchors(
     return anchors
 
 
+def required_visual_anchor_names(manifest: dict[str, Any]) -> set[str]:
+    """Return only identities whose typed contract requires a truth image."""
+    return {
+        str(character.get("name") or "").strip()
+        for character in (manifest.get("characters") or [])
+        if character.get("asset_required", True)
+        and str(character.get("name") or "").strip()
+    }
+
+
 def _keyframe_contract(
     shot: Shot,
     bible: Bible | None,
@@ -3424,13 +3434,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
     existing_meta["reference_slots"] = slot_state
 
     all_cleanup_errors: list[str] = []
-    required_identity_names = set(
-        _keyframe_character_anchors(
-            shot,
-            bible,
-            screenplay=screenplay,
-        )
-    )
+    required_identity_names = required_visual_anchor_names(manifest)
     anchored_identity_names = {
         str(asset.entity_name or "").strip()
         for asset in video_anchor_assets

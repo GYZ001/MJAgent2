@@ -99,6 +99,19 @@ def _passing_reference_qa() -> dict:
     }
 
 
+def test_required_visual_anchors_exclude_contextual_text_identities() -> None:
+    assert video_modes.required_visual_anchor_names({
+        "characters": [
+            {"name": "高义", "asset_required": True},
+            {"name": "王芬", "asset_required": False},
+        ],
+    }) == {"高义"}
+    # Historical manifests have no typed field and remain fail-closed.
+    assert video_modes.required_visual_anchor_names({
+        "characters": [{"name": "历史角色"}],
+    }) == {"历史角色"}
+
+
 def test_selector_always_uses_reference_mode(monkeypatch) -> None:
     """The removed mode switch cannot reactivate an obsolete video path."""
     _fake_settings(monkeypatch)
