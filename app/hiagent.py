@@ -675,7 +675,7 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
     """封装推理模型的降级重试逻辑：若首轮因推理过长导致 content 为空，则关闭推理重试一次。"""
     data = _cached_successful_provider_response(kind, model, payload, call_meta)
     if data is None:
-        data = await _post_json(
+        data = await _plain_chat_request(
             client, url, payload, kind=kind, model=model,
             headers=headers, key_name=key_name, meta=call_meta,
         )
@@ -727,6 +727,46 @@ def _chat_read_timeout_s(call_meta: dict | None) -> float:
     ):
         return max(config.TIMEOUT_CHAT_READ, config.TIMEOUT_CHAT_BASELINE_READ)
     return config.TIMEOUT_CHAT_READ
+
+
+def _plain_chat_streaming_enabled(call_meta: dict | None) -> bool:
+    """业务文本长请求优先流式读取，避免代理等待完整响应时断开空闲连接。"""
+    return bool((call_meta or {}).get("gateway") == "execution_harness")
+
+
+async def _plain_chat_request(
+    client: httpx.AsyncClient,
+    url: str,
+    payload: dict,
+    *,
+    kind: str,
+    model: str,
+    headers: dict | None,
+    key_name: str,
+    meta: dict | None,
+) -> dict:
+    if _plain_chat_streaming_enabled(meta):
+        return await _stream_or_fallback(
+            client,
+            url,
+            payload,
+            kind=kind,
+            model=model,
+            headers=headers,
+            key_name=key_name,
+            meta=meta,
+            on_token=lambda _kind, _text: None,
+        )
+    return await _post_json(
+        client,
+        url,
+        payload,
+        kind=kind,
+        model=model,
+        headers=headers,
+        key_name=key_name,
+        meta=meta,
+    )
 
 
 async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
@@ -804,9 +844,16 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                 "chat", custom_model, payload, call_meta,
             )
             if data is None:
-                data = await _post_json(client, f"{base_url}/chat/completions", payload,
-                                        kind="chat", model=custom_model, headers=headers,
-                                        key_name=f"model:{custom_model}", meta=call_meta)
+                data = await _plain_chat_request(
+                    client,
+                    f"{base_url}/chat/completions",
+                    payload,
+                    kind="chat",
+                    model=custom_model,
+                    headers=headers,
+                    key_name=f"model:{custom_model}",
+                    meta=call_meta,
+                )
             content = _chat_content(data, label="custom chat")
         else:
             model = selected_model
@@ -814,9 +861,16 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             data = _cached_successful_provider_response("chat", model, payload, call_meta)
             if data is None:
-                data = await _post_json(client, f"{base_url}/chat/completions", payload,
-                                        kind="chat", model=model, headers=model_headers,
-                                        key_name=f"model:{model}", meta=call_meta)
+                data = await _plain_chat_request(
+                    client,
+                    f"{base_url}/chat/completions",
+                    payload,
+                    kind="chat",
+                    model=model,
+                    headers=model_headers,
+                    key_name=f"model:{model}",
+                    meta=call_meta,
+                )
             content = _chat_content(data, label="chat")
 
     if not content or not content.strip():
