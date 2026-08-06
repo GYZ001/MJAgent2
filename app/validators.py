@@ -47,7 +47,7 @@ from app.spoken_contract import (
     validate_spoken_contract,
 )
 from app.schemas import (Bible, EpisodeScreenplay, InformationItem,
-                         KeyDialogueChain, NarrativeContinuityPlan, Shot,
+                         KeyDialogueChain, NarrativeContinuityPlan, PlotSpineBeat, Shot,
                          Storyboard, StoryboardOutline, StoryEvent, SHOT_SIZES,
                          CAMERA_MOVES, TRANSITIONS, CONTINUITY_MODES,
                          DELIVERY_OWNERS)
@@ -2396,8 +2396,57 @@ def validate_screenplay_spine_delivery(
         return []
     dialogue_turns = _script_dialogue_turns(script.full_script_text or "")
     missing: list[str] = []
+    all_spoken = "".join(spoken for _scene_no, _speaker, spoken in dialogue_turns)
+    full_delivery_text = action_text + "\n" + all_spoken
+
+    def _beat_is_substantially_delivered(beat: PlotSpineBeat) -> bool:
+        """Use broad semantic evidence for long beat summaries.
+
+        ``beat.does`` is authored by the same model and can be phrased more
+        narrowly or more explicitly than the screenplay body.  The gate should
+        catch real omissions, not require near-verbatim repetition of the
+        planning sentence.  We therefore combine subject presence, whole-beat
+        lexical coverage, and source-coverage linkage before falling back to
+        per-clause checks.
+        """
+        parts = [
+            beat.who or "",
+            beat.does or "",
+            beat.turn or "",
+            beat.purpose or "",
+        ]
+        claim = "。".join(part for part in parts if str(part).strip())
+        if not claim.strip():
+            return False
+        # Whole-beat coverage tolerates paraphrase better than requiring every
+        # comma-separated clause to independently pass.
+        if (
+            _longest_run_ratio(claim, full_delivery_text) >= 0.22
+            or _bigram_coverage(claim, full_delivery_text) >= 0.18
+        ):
+            return True
+        if beat.source_segment_ids:
+            linked = [
+                decision for decision in (script.source_coverage or [])
+                if decision.source_segment_id in set(beat.source_segment_ids)
+                and (
+                    (beat.beat_id or "") in decision.beat_ids
+                    or decision.disposition in {"deliver", "merge"}
+                )
+            ]
+            if linked:
+                who = (beat.who or "").strip()
+                who_hit = not who or who in full_delivery_text
+                does_hit = not _claim_clearly_absent(beat.does or "", full_delivery_text)
+                turn_hit = not _claim_clearly_absent(beat.turn or "", full_delivery_text)
+                if who_hit and (does_hit or turn_hit):
+                    return True
+        return False
+
     for beat in spine.spine_beats:
         if not beat.must_keep:
+            continue
+        if _beat_is_substantially_delivered(beat):
             continue
         visible_clauses, spoken_clauses, receptive_clauses = (
             _spine_delivery_clauses(beat.does or "")
@@ -2407,7 +2456,6 @@ def validate_screenplay_spine_delivery(
             if _claim_clearly_absent(clause, action_text)
         ]
         speaker = (beat.who or "").strip()
-        all_spoken = "".join(spoken for _scene_no, _speaker, spoken in dialogue_turns)
         spoken_by_owner = "".join(
             spoken for _scene_no, actual_speaker, spoken in dialogue_turns
             if (

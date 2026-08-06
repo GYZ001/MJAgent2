@@ -2035,6 +2035,10 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 【完整剧情骨架】
 - plot_spine.spine_beats 数量不设上限，按原文顺序覆盖所有有效剧情单元。
 - 每条 beat 写 beat_id、who、does、turn、purpose、source_segment_ids、must_keep。
+- `does` 只写一个可拍的核心动作或可听交付，尽量 8~24 字；动机、心理、结果和后果写入
+  `turn` 或 `purpose`。不要把“看到→心生邪念→安排后续事件”这类多段因果塞进同一个 does。
+- 每条 must_keep beat 必须在 full_script_text 的动作段或对白行中用同一主体真实演出，
+  不能只出现在 plot_spine、source_coverage、scene_outline 或摘要里。
 - plot_spine.drop_list 可以为空；只允许记录 source_coverage 中已证明的 duplicate 内容。
 - must_keep_ending 必须与本章真实结局一致，禁止发明下一章剧情。
 - key_plot_points 数量不设上限，必须覆盖所有会改变局势、关系、目标或观众理解的节点。
