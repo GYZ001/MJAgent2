@@ -958,8 +958,6 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
             phase = "opening"
             target = start
             source = "first_frame_desc_or_state_in"
-            )
-            source = "derived_setup"
             slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
         elif ratio < 0.45:
             phase = "onset"
@@ -989,7 +987,10 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
             phase = "closing"
             target = ending
             source = "last_frame_desc_or_state_out"
-        update["risk_tags"] = _dedupe_str([*(shot.risk_tags or []), "timeline_contact_side_axis"])
+            slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
+        beats.append({
+            "slot_key": slot_key,
+            "beat_index": beat_index,
             "beat_total": count,
             "time_ratio": round(ratio, 4),
             "time_s": round(float(shot.duration_s or 0) * ratio, 3),

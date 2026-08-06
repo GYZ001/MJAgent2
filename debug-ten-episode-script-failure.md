@@ -149,4 +149,18 @@
   `run_0bdd4646c751` (episode 1) and `run_1a4643a470eb` (episode 2).
 - Durable Batch Run: `run_253043b9a14d`.
 - Queue evidence: two episodes are `running`; later episodes are explicitly `queued`.
-- Terminal Baseline/Repair/certificate evidence is pending.
+- Episode 2 persisted Baseline `art_f34ddd706df9` with
+  `baseline_generation_count=1`, `narrative_plan=object`, and model-candidate parent
+  `art_9a92bf1d3934`. Its duration expanded from 50 to 170 seconds.
+- Episode 2 did not publish with open gates. Run `run_1a4643a470eb` ended `PARTIAL`
+  and preserved a working Artifact after deterministic/local repairs.
+- Episode 1 received a provider policy-refusal response during structural bootstrap.
+  Run `run_86ffa0c06bf6` ended `FAILED`; no screenplay certificate or ready projection
+  was created.
+- Batch `run_253043b9a14d` was cancelled atomically with all 28 children recorded as
+  `CANCELLED`; no cancellation cascade started the remaining children.
+- The next Prompt contains actual authorized chapter IDs (for example `6675` and `2`)
+  and contains no `current-source-chapter` placeholder.
+- Runtime provider metadata has zero invalid JSON rows.
+- A subsequent episode-2 Baseline is still running; long model generation is allowed
+  by the unbounded duration policy and has not been reported as success.
