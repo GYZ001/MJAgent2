@@ -372,6 +372,10 @@ def test_previous_static_tail_is_reused_without_pair_semantic_qa(
     assert meta["boundary_pair_qa"]["semantic_pair_review_performed"] is False
     assert meta["boundary_pair_qa"]["tail_conditioned_on_first_frame"] is False
     assert meta["boundary_pair_qa"]["tail_prefetched_before_first_frame"] is True
+    assert meta["boundary_pair_qa"]["camera_bridge_contract"] == (
+        "continuous_endpoint_bridge_v2"
+    )
+    assert meta["camera_bridge_contract"] == "continuous_endpoint_bridge_v2"
     assert meta["boundary_pair_qa"]["shared_boundary_contract"] == (
         "shared_static_tail_v3"
     )

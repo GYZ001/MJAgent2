@@ -178,7 +178,12 @@ def test_first_last_prompt_uses_real_boundary_contract_and_moving_camera() -> No
     assert "first_frame 是上一镜已冻结的静态尾帧" in prompt
     assert "[FIRST-LAST CONTINUOUS PATH]" in prompt
     assert "林风独自站在山门左侧" in prompt
-    assert "平稳横摇并小幅弧形绕拍" in prompt
+    assert "0.0–1.1 秒" in prompt
+    assert "1.1–3.9 秒" in prompt
+    assert "3.9–5 秒" in prompt
+    assert "连续跟随主体的轨道移动、横摇、推拉与弧形重构运镜" in prompt
+    assert "端点构图差距越大" in prompt
+    assert "运镜不能掩盖换人、换装、换景或身份漂移" in prompt
     assert "不要沿用上一镜完整构图或主体尾帧姿势" not in prompt
 
 

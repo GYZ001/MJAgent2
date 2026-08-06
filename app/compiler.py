@@ -1267,24 +1267,32 @@ def _first_last_boundary_path(
 ) -> tuple[str, str]:
     edit = (relation_edit or "unknown").strip()
     action = (relation_action or "unknown").strip()
-    camera_move = {
-        "reverse_angle": "平稳横摇并小幅弧形绕拍",
-        "reaction_cut": "平稳横摇转向反应主体",
-        "angle_cut": "平稳横摇或小幅弧移完成构图调整",
-        "insert_cut": "平稳推近到细节构图",
-        "match_cut": "沿匹配方向平稳移动",
-        "continuous_take": "保持连续机位运动",
-    }.get(edit, "采用最短路径的平稳横摇或小幅弧移")
+    duration = max(1.0, float(duration_s))
+    departure_end = duration * 0.22
+    settle_start = duration * 0.78
+
+    def _time(value: float) -> str:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+
+    camera_move = "连续跟随主体的轨道移动、横摇、推拉与弧形重构运镜"
     source_label = {
         "PREVIOUS_ADOPTED_TAIL": "上一镜真实尾帧",
         "PREVIOUS_STATIC_TAIL": "上一镜静态尾帧",
         "STATIC_BOUNDARY_ASSET": "本镜静态首帧",
     }.get(first_frame_source or "", "输入首帧")
     path = (
-        f"{source_label}就是 0.0 秒画面，输入尾帧就是 {duration_s}.0 秒画面。"
-        f"剪辑关系={edit}，动作关系={action}；使用“{camera_move}”和符合物理规律的人物动作，"
-        "沿连续可解释路径从首帧准确到达尾帧。构图变化必须由镜头运动或人物正常出入画完成，"
-        "不得把两个定格直接融合、渐变换脸、复制人物、瞬移或硬切。"
+        f"{source_label}就是 0.0 秒画面，输入尾帧就是 {_time(duration)} 秒画面；"
+        "两个端点都不可重画。\n"
+        f"0.0–{_time(departure_end)} 秒：从首帧原构图平滑起步，先建立同一场景的三维方位，"
+        "摄影机缓慢加速，人物只开始当前动作，不得跳位。\n"
+        f"{_time(departure_end)}–{_time(settle_start)} 秒：完整执行主动作，同时使用"
+        f"{camera_move}消化景别、角度、主体位置和背景透视差异。端点构图差距越大，"
+        "摄影机轨迹和人物合理位移越充分；差距越小，自动减小运镜幅度，禁止无意义晃动。\n"
+        f"{_time(settle_start)}–{_time(duration)} 秒：摄影机平滑减速，动作完成并精确重构到"
+        "输入尾帧的机位、景别、人物位置、朝向和道具状态，结尾稳定停留。\n"
+        f"剪辑关系={edit}，动作关系={action}。只允许用同一物理空间内连续可解释的摄影机运动、"
+        "遮挡关系、视差和人物正常出入画连接端点；运镜不能掩盖换人、换装、换景或身份漂移。"
+        "若端点人物身份或场景并非同一连续世界，不得用溶图、变形、复制、瞬移或硬切伪造过渡。"
     )
     return path, camera_move
 

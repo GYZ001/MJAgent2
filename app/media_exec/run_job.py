@@ -2474,6 +2474,7 @@ async def _prepare_first_last_mode_inputs(
         "first_frame_source": first_req.source.value,
         "last_frame_source": last_req.source.value,
         "shared_boundary_contract": "shared_static_tail_v3",
+        "camera_bridge_contract": "continuous_endpoint_bridge_v2",
         "tail_conditioned_on_first_frame": False,
         "tail_prefetched_before_first_frame": True,
         "first_frame_sha256": first_fingerprint,
@@ -2486,6 +2487,7 @@ async def _prepare_first_last_mode_inputs(
     meta.pop("video_input_url", None)
     meta["boundary_frame_dimensions"] = list(first_size)
     meta["boundary_pair_qa"] = boundary_contract
+    meta["camera_bridge_contract"] = "continuous_endpoint_bridge_v2"
     meta["reference_generation_complete"] = True
     meta["video_input_manifest_frozen"] = True
     meta["plan_status"] = "ready"
