@@ -162,6 +162,22 @@ describe('shotVideoState', () => {
     expect(compactShotStage(waiting)).toBe('等待上一镜静态尾帧')
   })
 
+  it('首帧依赖未满足前明确展示本镜尾帧预生成', () => {
+    const prefetching = shot({
+      video_status: 'generating',
+      pipeline: {
+        task_accepted: true,
+        pipeline_status: 'running',
+        pipeline_stage: 'reference_generate',
+        reason_code: 'PREFETCHING_STATIC_TAIL',
+        candidate_count: 0,
+        retake_count: 0,
+      },
+    })
+
+    expect(compactShotStage(prefetching)).toBe('预生成本镜静态尾帧')
+  })
+
   it('兼容旧响应时仍按同一五态规则归并', () => {
     expect(shotVideoState(shot({})).phase).toBe('pending_generation')
     expect(shotVideoState(shot({

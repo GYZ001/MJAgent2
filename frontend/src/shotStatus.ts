@@ -139,6 +139,9 @@ export function compactShotStage(shot: Shot): string {
   if (pipeline?.reason_code === 'WAITING_STATIC_BOUNDARY_ASSET') {
     return '等待上一镜静态尾帧'
   }
+  if (pipeline?.reason_code === 'PREFETCHING_STATIC_TAIL') {
+    return '预生成本镜静态尾帧'
+  }
   const dependsOnUpstream = Boolean(
     shot.mode_plan?.depends_on_shot_id
     || shot.versions?.some(

@@ -2157,8 +2157,8 @@ async def _prepare_first_last_mode_inputs(
 
     set_pipeline_stage(
         job["id"], media_stages.STAGE_REFERENCE_GENERATE,
-        reason_code="PREPARING_BOUNDARY_FRAMES",
-        reason_text="正在按真实首帧生成连续尾帧",
+        reason_code="PREFETCHING_STATIC_TAIL",
+        reason_text="正在预生成可供下一镜复用的静态尾帧",
         conn=conn,
     )
     conn.commit()
@@ -2289,6 +2289,26 @@ async def _prepare_first_last_mode_inputs(
                 },
             )
         elif requirement.source == AssetSource.STATIC_BOUNDARY_ASSET:
+            if role == "last_frame":
+                boundary_instruction = (
+                    "STATIC TAIL PREFETCH: render only this shot's contracted final "
+                    "state. This immutable image is also the next shot's exact first "
+                    "frame when a next shot exists. Preserve every named identity, "
+                    "outfit, environment, fixed landmark, screen direction, and scale "
+                    "from the supplied character/scene truth anchors. Do not blend "
+                    "endpoints, morph faces, merge people, teleport, hard-cut, or add "
+                    "uncontracted people. The current shot's dynamic first frame may "
+                    "not be available yet; do not wait for it or invent a start pose. "
+                    f"Edit relation: {relation_edit}; "
+                    f"action relation: {relation_action}."
+                )
+            else:
+                boundary_instruction = (
+                    "STATIC FIRST BOUNDARY: render only the contracted starting state "
+                    "for this shot. Preserve every named identity, outfit, environment, "
+                    "fixed landmark, screen direction, and scale from the supplied "
+                    "character/scene truth anchors. Do not render the final action state."
+                )
             asset = await video_modes._generate_one_reference(
                 project_id=job["project_id"],
                 episode_no=ep["episode_no"],
@@ -2298,17 +2318,7 @@ async def _prepare_first_last_mode_inputs(
                 index=index + pair_attempt - 1,
                 content_override=description,
                 seed_inputs=seed_inputs,
-                extra_instruction=(
-                    "FIRST/LAST CONTINUITY ENDPOINT: reference image 1 is the exact "
-                    "first-frame boundary for this shot. Render only the contracted "
-                    "final state reached after one physically continuous take. Preserve "
-                    "identity, outfit, environment, fixed landmarks, screen direction, "
-                    "and scale from that boundary while allowing the scripted action and "
-                    "camera relation to progress. Do not blend endpoints, morph faces, "
-                    "merge people, teleport, hard-cut, or copy the start pose. "
-                    f"Edit relation: {relation_edit}; "
-                    f"action relation: {relation_action}."
-                ),
+                extra_instruction=boundary_instruction,
                 skip_inline_qa=False,
                 screenplay=screenplay,
             )
@@ -2336,22 +2346,11 @@ async def _prepare_first_last_mode_inputs(
         conn.commit()
         return str(asset.path)
 
+    # The tail is an independently frozen narrative boundary. Generate it before
+    # resolving the dynamic first-frame dependency so the next shot can consume
+    # it even while this shot is still waiting for an adopted/static upstream.
     tail_attempt_limit = max(1, min(3, int(shot_plan.max_attempts or 1)))
-    first_path = await _resolve(
-        "first_frame",
-        first_req,
-        shot_model.first_frame_desc,
-        901,
-        pair_attempt=1,
-        seed_inputs=boundary_seed_inputs,
-    )
-    first_bytes = Path(first_path).read_bytes()
-    first_fingerprint = hashlib.sha256(first_bytes).hexdigest()
-    first_seed = hiagent.data_url_from_file(first_path)
-    tail_seed_inputs = list(dict.fromkeys([
-        first_seed,
-        *boundary_seed_inputs[:3],
-    ]))
+    tail_seed_inputs = list(dict.fromkeys(boundary_seed_inputs[:4]))
     last_path = ""
     first_size = (0, 0)
     last_repair_error = ""
@@ -2364,7 +2363,6 @@ async def _prepare_first_last_mode_inputs(
                 902,
                 pair_attempt=tail_attempt,
                 seed_inputs=tail_seed_inputs,
-                pair_start_fingerprint=first_fingerprint,
             )
         except VideoInputRepairRequired as exc:
             last_repair_error = str(exc)
@@ -2390,6 +2388,27 @@ async def _prepare_first_last_mode_inputs(
             f"已在 FIRST_LAST_FRAME_MODE 内修复 {tail_attempt_limit} 次，"
             "未更改生成模式"
         )
+
+    meta["last_frame_path"] = last_path
+    meta["boundary_tail_prefetched"] = True
+    meta["boundary_tail_prefetched_at"] = now()
+    meta["reference_generation_complete"] = False
+    _set_version(
+        version["id"],
+        image_inputs=json.dumps(meta, ensure_ascii=False),
+    )
+    conn.commit()
+
+    first_path = await _resolve(
+        "first_frame",
+        first_req,
+        shot_model.first_frame_desc,
+        901,
+        pair_attempt=1,
+        seed_inputs=boundary_seed_inputs,
+    )
+    first_bytes = Path(first_path).read_bytes()
+    first_fingerprint = hashlib.sha256(first_bytes).hexdigest()
 
     while True:
         try:
@@ -2429,7 +2448,6 @@ async def _prepare_first_last_mode_inputs(
                 902,
                 pair_attempt=tail_attempt,
                 seed_inputs=tail_seed_inputs,
-                pair_start_fingerprint=first_fingerprint,
             )
     for role, path in (
         ("first_frame", first_path),
@@ -2456,7 +2474,8 @@ async def _prepare_first_last_mode_inputs(
         "first_frame_source": first_req.source.value,
         "last_frame_source": last_req.source.value,
         "shared_boundary_contract": "shared_static_tail_v3",
-        "tail_conditioned_on_first_frame": True,
+        "tail_conditioned_on_first_frame": False,
+        "tail_prefetched_before_first_frame": True,
         "first_frame_sha256": first_fingerprint,
         "relation_edit": relation_edit,
         "relation_action": relation_action,

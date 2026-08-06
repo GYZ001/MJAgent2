@@ -193,6 +193,7 @@ def _first_last_runtime_fixture(
     )
     persisted_roles: list[str] = []
     generated_seed_inputs: list[list[str]] = []
+    boundary_cache: dict[tuple[str, str], dict[str, str]] = {}
     tail = tmp_path / "tail.jpg"
 
     async def generate_tail(**kwargs):
@@ -214,11 +215,24 @@ def _first_last_runtime_fixture(
     )
     monkeypatch.setattr(worker, "_load_shot_model", lambda _row: shot_model)
     monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker, "_load_boundary_asset", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_load_boundary_asset",
+        lambda _conn, _plan_id, role, fingerprint: boundary_cache.get(
+            (role, fingerprint)
+        ),
+    )
+
+    def persist_boundary(_conn, **kwargs):
+        persisted_roles.append(kwargs["role"])
+        boundary_cache[(kwargs["role"], kwargs["fingerprint"])] = {
+            "path": kwargs["path"],
+        }
+
     monkeypatch.setattr(
         worker,
         "_persist_boundary_asset",
-        lambda _conn, **kwargs: persisted_roles.append(kwargs["role"]),
+        persist_boundary,
     )
     monkeypatch.setattr(worker, "_set_version", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -250,7 +264,7 @@ def _first_last_runtime_fixture(
     return conn, plan, persisted_roles, generated_seed_inputs
 
 
-def test_scene_second_shot_waits_before_generating_unconditioned_tail(
+def test_scene_second_shot_prefetches_tail_before_waiting_for_first_frame(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -272,8 +286,46 @@ def test_scene_second_shot_waits_before_generating_unconditioned_tail(
             lease_owner="lease",
         ))
 
-    assert persisted_roles == []
-    assert generated_seed_inputs == []
+    with pytest.raises(worker._ContinuityWait):
+        asyncio.run(worker._prepare_first_last_mode_inputs(
+            conn,
+            {"id": "j", "project_id": "p", "episode_id": "e", "shot_id": "s2"},
+            {"id": "v"},
+            {"shot_no": 2},
+            {"episode_no": 1},
+            {},
+            "prompt",
+            lease_owner="lease",
+        ))
+
+    assert persisted_roles == ["last_frame"]
+    assert generated_seed_inputs == [[]]
+
+
+def test_static_tail_chain_prefetches_current_tail_before_upstream_exists(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn, _plan, persisted_roles, generated_seed_inputs = _first_last_runtime_fixture(
+        tmp_path,
+        monkeypatch,
+        first_source=AssetSource.PREVIOUS_STATIC_TAIL,
+    )
+
+    with pytest.raises(worker._ContinuityWait, match="等待上一镜预生成静态尾帧"):
+        asyncio.run(worker._prepare_first_last_mode_inputs(
+            conn,
+            {"id": "j", "project_id": "p", "episode_id": "e", "shot_id": "s2"},
+            {"id": "v"},
+            {"shot_no": 2},
+            {"episode_no": 1},
+            {},
+            "prompt",
+            lease_owner="lease",
+        ))
+
+    assert persisted_roles == ["last_frame"]
+    assert generated_seed_inputs == [[]]
 
 
 def test_previous_static_tail_is_reused_without_pair_semantic_qa(
@@ -315,11 +367,11 @@ def test_previous_static_tail_is_reused_without_pair_semantic_qa(
         lease_owner="lease",
     ))
 
-    assert persisted_roles == ["first_frame", "last_frame"]
-    assert generated_seed_inputs
-    assert generated_seed_inputs[0][0].startswith("data:image/")
+    assert persisted_roles == ["last_frame", "first_frame"]
+    assert generated_seed_inputs == [[]]
     assert meta["boundary_pair_qa"]["semantic_pair_review_performed"] is False
-    assert meta["boundary_pair_qa"]["tail_conditioned_on_first_frame"] is True
+    assert meta["boundary_pair_qa"]["tail_conditioned_on_first_frame"] is False
+    assert meta["boundary_pair_qa"]["tail_prefetched_before_first_frame"] is True
     assert meta["boundary_pair_qa"]["shared_boundary_contract"] == (
         "shared_static_tail_v3"
     )
