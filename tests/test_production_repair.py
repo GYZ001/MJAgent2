@@ -1502,6 +1502,82 @@ async def test_narrative_screenplay_uses_deterministic_document_patch_first(
     assert operations[0].op == "split_dialogue_chain_by_scene"
 
 
+@pytest.mark.asyncio
+async def test_source_span_exact_mismatch_uses_deterministic_patch(
+    monkeypatch,
+) -> None:
+    from app.narrative import (
+        normalize_source_evidence_text,
+        validate_screenplay_narrative,
+    )
+    from app.production import screenplay_repair
+    from app.production.patch import apply_patch_operation_to_document
+
+    chapter = "前文。高义让白洁送总结。后文。"
+    excerpt = "高义让白洁送总结。"
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "source_evidence": [{
+                "source_evidence_id": "SE-1",
+                "source_span": {"chapter_id": "1", "start": 0, "end": 2},
+                "verbatim_excerpt": excerpt,
+            }],
+        }),
+    )
+    issue = structured_issue(
+        code="SOURCE_SPAN_EXACT_MISMATCH",
+        message=(
+            "[SOURCE_SPAN_EXACT_MISMATCH] SE-1 的 start/end "
+            "切片与逐字摘录不一致"
+        ),
+        subject="screenplay",
+        path="/source_span_exact_mismatch",
+        stage="screenplay",
+    )
+
+    async def forbidden_semantic_planner(*_args, **_kwargs):
+        raise AssertionError("source_span 精确错位应由本地文本定位修复")
+
+    monkeypatch.setattr(
+        screenplay_repair,
+        "_llm_field_patch",
+        forbidden_semantic_planner,
+    )
+
+    operations = await screenplay_repair._plan_screenplay_repair_operations(
+        issue,
+        script,
+        source_text=chapter,
+        strategy_history={},
+    )
+
+    assert len(operations) == 1
+    assert screenplay_repair._patch_strategy_key(operations) == "fix_source_span_SE-1"
+    assert operations[0].op == "replace_field"
+    assert operations[0].path == "source_span"
+
+    patched, _touched = apply_patch_operation_to_document(
+        screenplay_to_document(script),
+        operations[0],
+    )
+    result = document_to_screenplay(patched)
+    evidence = result.narrative_plan.source_evidence[0]
+    raw_slice = chapter[evidence.source_span.start:evidence.source_span.end]
+    assert normalize_source_evidence_text(raw_slice) == (
+        normalize_source_evidence_text(excerpt)
+    )
+    errors = validate_screenplay_narrative(
+        result,
+        require=True,
+        expected_scope_id="ep_p",
+        source_text=chapter,
+    )
+    assert not any(
+        "SOURCE_SPAN_EXACT_MISMATCH" in error for error in errors
+    )
+
+
 def test_decision_chain_patch_is_derived_from_unique_perceivable_evidence():
     from app.production.patch import _create_node
     from app.production.screenplay_document import screenplay_to_document

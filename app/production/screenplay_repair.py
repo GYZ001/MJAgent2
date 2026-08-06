@@ -73,6 +73,9 @@ _DIALOGUE_SOURCE_MISMATCH_RE = re.compile(
     r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\.source_text\s+"
     r"(?:未在本集原文中找到|与改编台词语义不匹配)"
 )
+_SOURCE_SPAN_EXACT_MISMATCH_RE = re.compile(
+    r"\[SOURCE_SPAN_EXACT_MISMATCH\]\s+([^\s.。:：]+)"
+)
 _SOURCE_SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?")
 _SOURCE_EVIDENCE_STOP_CHARS = set(
     "的一了是在有和与把被就都还又只这那个人我们你他她它说问答"
@@ -148,6 +151,15 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
             f"fix_dialogue_function_{op.target.get('chain_id')}_"
             f"{op.target.get('turn_index')}"
         )
+    if (
+        kind == "narrative_node"
+        and str((op.target or {}).get("collection") or "") == "source_evidence"
+        and op.path in {"source_span", "verbatim_excerpt"}
+    ):
+        return str(
+            (op.target or {}).get("strategy")
+            or f"fix_source_span_{(op.target or {}).get('id') or 'unknown'}"
+        )
     if kind == "narrative_node":
         return (
             f"{op.op}:{(op.target or {}).get('id') or 'unknown'}:"
@@ -169,6 +181,86 @@ def _strategy_attempt_count(entries: list[str]) -> int:
         1 for entry in entries
         if entry and not entry.startswith(("fail:", "exhausted"))
     )
+
+
+def _source_evidence_contexts(script: EpisodeScreenplay) -> dict[str, list[str]]:
+    plan = script.narrative_plan
+    if plan is None:
+        return {}
+    contexts: dict[str, list[str]] = {}
+    for proposition in plan.propositions or []:
+        statement = str(proposition.canonical_statement or "").strip()
+        if not statement:
+            continue
+        for evidence_id in proposition.direct_source_evidence_ids or []:
+            contexts.setdefault(str(evidence_id), []).append(statement)
+    return contexts
+
+
+def _source_span_issue_evidence_id(issue: Issue) -> str:
+    match = _SOURCE_SPAN_EXACT_MISMATCH_RE.search(issue.message or "")
+    return match.group(1).strip() if match else ""
+
+
+def _plan_source_span_patch(
+    issue: Issue,
+    script: EpisodeScreenplay,
+    *,
+    source_text: str,
+    tried: list[str],
+) -> list[PatchOperation]:
+    if script.narrative_plan is None or not source_text:
+        return []
+    evidence_id = _source_span_issue_evidence_id(issue)
+    if not evidence_id:
+        return []
+    strategy = f"fix_source_span_{evidence_id}"
+    if _strategy_was_tried(tried, strategy):
+        return []
+    evidence = next(
+        (
+            item for item in script.narrative_plan.source_evidence
+            if item.source_evidence_id == evidence_id
+        ),
+        None,
+    )
+    if evidence is None:
+        return []
+    contexts = _source_evidence_contexts(script)
+    resolved = _source_evidence_span(
+        source_text,
+        evidence.verbatim_excerpt,
+        context=" ".join(contexts.get(evidence_id, [])),
+    )
+    if resolved is None:
+        return []
+    start, end, expanded_excerpt = resolved
+    target = {
+        "kind": "narrative_node",
+        "collection": "source_evidence",
+        "id": evidence_id,
+        "strategy": strategy,
+    }
+    operations: list[PatchOperation] = []
+    if (
+        expanded_excerpt is not None
+        and expanded_excerpt != evidence.verbatim_excerpt
+    ):
+        operations.append(PatchOperation(
+            op="replace_field",
+            path="verbatim_excerpt",
+            value=expanded_excerpt,
+            target=target,
+        ))
+    current_span = evidence.source_span.model_dump(mode="json")
+    if current_span.get("start") != start or current_span.get("end") != end:
+        operations.append(PatchOperation(
+            op="replace_field",
+            path="source_span",
+            value={**current_span, "start": start, "end": end},
+            target=target,
+        ))
+    return operations
 
 
 def _best_scene_for_spine_beat(
@@ -426,6 +518,16 @@ def plan_screenplay_patch(
     related = list((issue.evidence or {}).get("related_node_ids") or [])
 
     ops: list[PatchOperation] = []
+
+    if code == "SOURCE_SPAN_EXACT_MISMATCH":
+        ops = _plan_source_span_patch(
+            issue,
+            script,
+            source_text=source_text,
+            tried=tried,
+        )
+        if ops:
+            return ops
 
     if code == "SPINE_MISSING" and script.plot_spine is not None:
         referenced_ids = {
