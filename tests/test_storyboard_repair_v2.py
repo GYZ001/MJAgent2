@@ -1251,7 +1251,7 @@ def test_candidate_partial_progress_rejects_new_hard_gate_regression() -> None:
     ) is False
 
 
-def test_candidate_accepts_newly_exposed_gate_outside_repair_window() -> None:
+def test_candidate_rejects_new_gate_outside_repair_window() -> None:
     assert _repair_candidate_made_progress(
         mode="replace",
         candidate_passed=False,
@@ -1259,7 +1259,7 @@ def test_candidate_accepts_newly_exposed_gate_outside_repair_window() -> None:
         after_messages=["镜头 10 声音身份未绑定"],
         window_start=8,
         window_end=8,
-    ) is True
+    ) is False
 
 
 def test_candidate_without_any_resolved_target_is_not_progress() -> None:
@@ -1348,6 +1348,30 @@ def test_deterministic_missing_spoken_candidate_uses_published_dialogue_clause()
     assert candidate.audio_timeline[0].type == "spoken_dialogue"
     assert candidate.audio_timeline[0].speaker_id == "老师"
     assert shot.dialogues == []
+
+
+def test_deterministic_missing_spoken_candidate_rejects_weak_text_overlap() -> None:
+    shot = _shot(2, action="老师走入教室并放下课本。")
+    shot.primary_action = "老师走入教室"
+    shot.characters = ["老师"]
+    shot.characters_visible = ["老师"]
+    shot.first_frame_desc = "老师站在门口。"
+    shot.last_frame_desc = "老师把书放到桌上。"
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="老师走入教室。",
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="无关安排",
+            turns=[KeyDialogueTurn(
+                speaker="老师",
+                line="今晚山门关闭后，你去库房清点法器。",
+                source_text="今晚山门关闭后，你去库房清点法器。",
+            )],
+        )],
+    )
+
+    assert _deterministic_missing_spoken_candidate(shot, screenplay) is None
 
 
 def test_deterministic_ambient_audio_cast_candidate_removes_identity_claim() -> None:

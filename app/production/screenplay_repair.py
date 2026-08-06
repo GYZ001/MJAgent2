@@ -4370,7 +4370,7 @@ def _introduced_issue_messages(
         return (
             issue.code,
             issue.subject,
-            issue.rule_id,
+            str(issue.rule_id or ""),
             str(evidence.get("path") or evidence.get("span") or ""),
             str(evidence.get("stage") or ""),
             issue.severity.value,

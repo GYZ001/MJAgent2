@@ -13,6 +13,7 @@ from app.video_plan import (
     ShotVideoGenerationPlan,
     VideoGenerationMode,
     VideoPlanValidationError,
+    _scene_identity,
     active_plan_is_current,
     apply_scene_boundary_strategy,
     assert_video_provider_submission_authority,
@@ -370,6 +371,42 @@ def test_published_scene_identity_overrides_ai_boundary_drift() -> None:
     ]
 
 
+def test_same_location_with_different_time_is_a_new_scene_entry() -> None:
+    shots = [
+        ShotVideoGenerationPlan(
+            source_storyboard_revision_id="rev",
+            shot_id=f"shot-{number}",
+            published_shot_id=f"shot-{number}",
+            shot_no=number,
+            mode=VideoGenerationMode.FIRST_LAST_FRAME_MODE,
+            relations={"spatial": "same_space", "edit": "angle_cut"},
+            confidence=1,
+            capability_snapshot_id="cap",
+        )
+        for number in (1, 2)
+    ]
+
+    apply_scene_boundary_strategy(
+        shots,
+        scene_identity_by_shot_id={
+            "shot-1": _scene_identity({
+                "scene_name": "广场",
+                "scene_time": "白天",
+            }),
+            "shot-2": _scene_identity({
+                "scene_name": "广场",
+                "scene_time": "夜晚",
+            }),
+        },
+    )
+
+    assert [item.mode for item in shots] == [
+        VideoGenerationMode.REFERENCE_IMAGE_MODE,
+        VideoGenerationMode.REFERENCE_IMAGE_MODE,
+    ]
+    assert shots[1].depends_on_shot_id is None
+
+
 def test_first_adoption_binds_dependency_and_changed_adoption_stales_descendant() -> None:
     conn = _conn()
     conn.execute(
@@ -528,7 +565,10 @@ def test_missing_projection_with_durable_screenplay_pointer_cannot_use_legacy_ma
         current_storyboard_release_manifest("e", conn=conn)
 
 
-def test_local_replan_changes_only_target_contract_identity(monkeypatch) -> None:
+def test_local_replan_changes_only_target_contract_identity(
+    monkeypatch,
+    tmp_path,
+) -> None:
     conn = _conn()
     monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
     monkeypatch.setattr(
@@ -536,6 +576,20 @@ def test_local_replan_changes_only_target_contract_identity(monkeypatch) -> None
         "active_model",
         lambda _kind, _provider=None: "model",
     )
+    boundary_path = tmp_path / "s1-tail.jpg"
+    boundary_path.write_bytes(b"tail")
+    conn.execute(
+        """INSERT INTO video_boundary_assets(
+               id,episode_video_plan_id,shot_plan_id,shot_id,role,source,
+               path,sha256,mime,width,height,qa_status,qa_json,fingerprint,created_at
+           ) VALUES(
+               'boundary-s1','evp-1','svp-1','s1','last_frame',
+               'STATIC_BOUNDARY_ASSET',?,'sha','image/jpeg',1,1,
+               'passed','{}','fp',0
+           )""",
+        (str(boundary_path),),
+    )
+    conn.commit()
 
     replacement = create_local_replan_revision(
         "s2",
@@ -569,6 +623,17 @@ def test_local_replan_changes_only_target_contract_identity(monkeypatch) -> None
     assert meta["shot_plan_id"] == unchanged.shot_plan_id
     assert meta["submitted_shot_plan_id"] == "svp-1"
     assert meta["equivalent_plan_rebound"] is True
+    copied_boundary = conn.execute(
+        """SELECT episode_video_plan_id,shot_plan_id,path
+             FROM video_boundary_assets
+            WHERE shot_plan_id=? AND role='last_frame'""",
+        (unchanged.shot_plan_id,),
+    ).fetchone()
+    assert dict(copied_boundary) == {
+        "episode_video_plan_id": replacement.episode_video_plan_id,
+        "shot_plan_id": unchanged.shot_plan_id,
+        "path": str(boundary_path),
+    }
 
 
 def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -> None:
@@ -661,6 +726,7 @@ def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -
 
 def test_recovery_keeps_older_task_stale_when_shot_has_usable_candidate(
     monkeypatch,
+    tmp_path,
 ) -> None:
     conn = _conn()
     monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
@@ -671,6 +737,12 @@ def test_recovery_keeps_older_task_stale_when_shot_has_usable_candidate(
     )
     create_local_replan_revision("s2", reason="target_only_replan", conn=conn)
     assert active_plan_is_current("svp-1", conn=conn) is True
+    candidate_path = tmp_path / "usable.mp4"
+    candidate_path.write_bytes(b"video")
+    conn.execute(
+        "UPDATE shot_versions SET video_path=? WHERE id='v1'",
+        (str(candidate_path),),
+    )
     meta = json.dumps({
         "mode": "REFERENCE_IMAGE_MODE",
         "planned_mode": "REFERENCE_IMAGE_MODE",

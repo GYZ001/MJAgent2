@@ -348,14 +348,17 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
         # A newer/other usable candidate already satisfies this shot. Recovering
         # an older paid task would only create an extra candidate and could race
         # the default adoption path, so keep that task quarantined as stale.
-        existing_candidate = conn.execute(
-            """SELECT 1 FROM shot_versions
+        candidate_rows = conn.execute(
+            """SELECT video_path FROM shot_versions
                 WHERE shot_id=? AND id!=? AND status='succeeded'
                   AND video_path IS NOT NULL AND video_path!=''
-                LIMIT 1""",
+                ORDER BY version_no DESC""",
             (row["shot_id"], row["version_id"]),
-        ).fetchone()
-        if existing_candidate:
+        ).fetchall()
+        if any(
+            Path(str(candidate["video_path"])).is_file()
+            for candidate in candidate_rows
+        ):
             continue
         try:
             meta = json.loads(row["image_inputs"] or "{}")

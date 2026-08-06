@@ -558,7 +558,7 @@ def _repair_candidate_made_progress(
     window_start: int | None = None,
     window_end: int | None = None,
 ) -> bool:
-    """Accept monotonic partial repair so independent issues converge in turn."""
+    """Accept only monotonic partial repair so independent issues converge."""
     if candidate_passed or mode == "append":
         return True
     before = _repair_message_atoms(before_messages)
@@ -571,19 +571,7 @@ def _repair_candidate_made_progress(
         return False
     if not introduced:
         return True
-    if window_start is None or window_end is None:
-        return False
-    changed_window = set(range(window_start, window_end + 1))
-    for _code, target in introduced:
-        if not target.startswith("shot:"):
-            return False
-        try:
-            shot_no = int(target.partition(":")[2])
-        except ValueError:
-            return False
-        if shot_no in changed_window:
-            return False
-    return True
+    return False
 
 
 def _repair_message_atoms(messages: list[str]) -> set[tuple[str, str]]:
@@ -680,6 +668,8 @@ def _deterministic_missing_spoken_candidate(
     from app.schemas import Dialogue
     from app.spoken_contract import max_speech_chars
     from app.textmatch import (
+        KEY_LINE_BIGRAM_COVERAGE,
+        KEY_LINE_PRESENT_RATIO,
         atomize_claim,
         bigram_coverage,
         condense,
@@ -746,12 +736,13 @@ def _deterministic_missing_spoken_candidate(
                 content_chars = len(condense(clause))
                 if not 4 <= content_chars <= capacity:
                     continue
-                score = max(
-                    longest_run_ratio(clause, context),
-                    bigram_coverage(clause, context),
-                    bigram_coverage(context, clause),
-                )
-                if score > 0:
+                run_score = longest_run_ratio(clause, context)
+                bigram_score = bigram_coverage(clause, context)
+                score = max(run_score, bigram_score)
+                if (
+                    run_score >= KEY_LINE_PRESENT_RATIO
+                    or bigram_score >= KEY_LINE_BIGRAM_COVERAGE
+                ):
                     ranked.append((score, -content_chars, speaker, clause))
     if not ranked:
         return None
@@ -2120,7 +2111,7 @@ async def run_storyboard_supervisor(
             authority_board,
         )
         shots = list(authority_board.shots)
-        if authority_repairs:
+        if authority_repairs and not published_storyboard_authority:
             for repair in authority_repairs:
                 index = int(repair["shot_no"]) - 1
                 _write_shot_fields(
@@ -2160,7 +2151,7 @@ async def run_storyboard_supervisor(
                 bible,
                 screenplay,
             )
-            if identity_repairs:
+            if identity_repairs and not published_storyboard_authority:
                 for row, shot in zip(prefix_rows, shots):
                     _write_shot_fields(
                         conn,

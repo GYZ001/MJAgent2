@@ -194,17 +194,31 @@ supports_return_last_frame = false
 - 不需要继承上一镜完整的运动轨迹；
 - 起止状态比中间自由度更重要。
 
-工具合同：
+工具合同按首帧来源区分。场景内第二镜消费首镜采用视频的真实尾帧，因此有视频执行依赖：
 
 ```json
 {
   "mode": "FIRST_LAST_FRAME_MODE",
   "image_inputs": [
-    {"role": "first_frame", "boundary_asset_revision_id": "ba_*"},
+    {"role": "first_frame", "source": "PREVIOUS_ADOPTED_TAIL", "source_shot_id": "SH-1", "boundary_asset_revision_id": "ba_*"},
     {"role": "last_frame", "boundary_asset_revision_id": "ba_*"}
   ],
   "video_input": null,
-  "depends_on_shot_id": "SH-*"
+  "depends_on_shot_id": "SH-1"
+}
+```
+
+场景内第三镜起只消费上一镜预生成的静态尾帧，不加入视频执行依赖：
+
+```json
+{
+  "mode": "FIRST_LAST_FRAME_MODE",
+  "image_inputs": [
+    {"role": "first_frame", "source": "PREVIOUS_STATIC_TAIL", "source_shot_id": "SH-2", "boundary_asset_revision_id": "ba_*"},
+    {"role": "last_frame", "boundary_asset_revision_id": "ba_*"}
+  ],
+  "video_input": null,
+  "depends_on_shot_id": null
 }
 ```
 

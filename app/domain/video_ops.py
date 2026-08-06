@@ -3565,6 +3565,7 @@ def stale_assets_preview(episode_id: str):
     ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
     from app.domain.storyboard_ops import _shot_video_is_stale, _shot_adopted_assets_stale
+    from app.video_cost_model import initial_shot_generation_cost
     rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
@@ -3604,7 +3605,9 @@ def stale_assets_preview(episode_id: str):
             "reason_labels": [reason_labels.get(reason, "未知陈旧原因") for reason in reasons],
             "storyboard_artifact_id": shot.get("storyboard_artifact_id"),
             "current_storyboard_artifact_id": ep.get("storyboard_artifact_id"),
-            "estimated_cost_cny": shot_cost_cny(float(shot.get("duration_s") or 0)),
+            "estimated_cost_cny": initial_shot_generation_cost(
+                float(shot.get("duration_s") or 0)
+            ),
             "hint": "参考资产或分镜已更新，本镜采用版可能使用旧证据链",
         })
     qualification = _review_upstream_snapshot(episode_id)

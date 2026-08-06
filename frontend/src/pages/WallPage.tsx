@@ -120,6 +120,14 @@ export function shouldCommitShotDetail(
   return requestSequence === latestSequence && requestedShotId === selectedShotId
 }
 
+export function shouldPersistReviewWallPosition(
+  initializedPositionKey: string | null,
+  currentPositionKey: string,
+  selectedShotId: string | null,
+) {
+  return initializedPositionKey === currentPositionKey && Boolean(selectedShotId)
+}
+
 export function describeShotUpdate(previous: Shot, next: Shot): string | null {
   const contentFields: Array<keyof Shot> = ['source_excerpt', 'action_desc', 'narration', 'dialogues', 'prompt_preview']
   const changedContent = contentFields.some(field => JSON.stringify(previous[field]) !== JSON.stringify(next[field]))
@@ -422,6 +430,7 @@ export default function WallPage() {
   const shots = ep?.shots ?? EMPTY_SHOTS
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
   const [selectionReady, setSelectionReady] = useState(false)
+  const [selectionPositionKey, setSelectionPositionKey] = useState<string | null>(null)
   const [tombstoneShotId, setTombstoneShotId] = useState<string | null>(null)
   const [reviewTab, setReviewTab] = useState<ReviewTab>('text')
   const [detail, setDetail] = useState<DetailState>({ status: 'idle' })
@@ -532,7 +541,12 @@ export default function WallPage() {
   }, [contextError, loadContext])
 
   useEffect(() => {
-    if (!episodeId || selectionReady || loading || !ep) return
+    if (
+      !episodeId
+      || loading
+      || !ep
+      || (selectionReady && selectionPositionKey === positionKey)
+    ) return
     let saved: { shotId?: string; tab?: ReviewTab } | null = null
     try { saved = JSON.parse(localStorage.getItem(positionKey) || 'null') } catch { saved = null }
     let redirected: { episodeId?: string; shotId?: string } | null = null
@@ -544,14 +558,19 @@ export default function WallPage() {
     setSelectedShotId(resolved.selectedShotId)
     setTombstoneShotId(resolved.tombstoneShotId)
     if (redirected?.episodeId === episodeId) sessionStorage.removeItem('manju:select_shot')
+    setSelectionPositionKey(positionKey)
     setSelectionReady(true)
-  }, [ep, episodeId, loading, positionKey, selectionReady, shots])
+  }, [ep, episodeId, loading, positionKey, selectionPositionKey, selectionReady, shots])
 
   const selectedSummary = shots.find(shot => shot.id === selectedShotId) || null
   const selectedDetailRefreshKey = shotDetailRefreshKey(selectedSummary)
 
   useEffect(() => {
-    if (!selectionReady || !selectedShotId) {
+    if (
+      !selectionReady
+      || selectionPositionKey !== positionKey
+      || !selectedShotId
+    ) {
       setDetail(current => current.status === 'idle' ? current : { status: 'idle' })
       return
     }
@@ -562,12 +581,26 @@ export default function WallPage() {
     }
     setTombstoneShotId(null)
     void loadDetail(selectedShotId)
-  }, [loadDetail, selectedDetailRefreshKey, selectedShotId, selectionReady])
+  }, [
+    loadDetail,
+    positionKey,
+    selectedDetailRefreshKey,
+    selectedShotId,
+    selectionPositionKey,
+    selectionReady,
+  ])
 
   useEffect(() => {
-    if (!selectionReady || !selectedShotId) return
+    if (
+      !selectionReady
+      || !shouldPersistReviewWallPosition(
+        selectionPositionKey,
+        positionKey,
+        selectedShotId,
+      )
+    ) return
     localStorage.setItem(positionKey, JSON.stringify({ shotId: selectedShotId, tab: reviewTab }))
-  }, [positionKey, reviewTab, selectedShotId, selectionReady])
+  }, [positionKey, reviewTab, selectedShotId, selectionPositionKey, selectionReady])
 
   const selectShot = useCallback((shotId: string) => {
     setContentUpdate(null)

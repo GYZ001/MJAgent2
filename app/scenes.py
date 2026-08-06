@@ -1915,10 +1915,24 @@ async def _ensure_reactive_scene_image(
                             raise hiagent.ProviderError(
                                 f"场景多视角资产包结构不完整：{scene.name}"
                             )
-                    except Exception:
-                        from app.rejected_media import purge_scene_reference
-
-                        purge_scene_reference(conn, broken["id"])
+                    except Exception as exc:
+                        conn.execute(
+                            """UPDATE scene_references
+                                  SET pack_status='failed',group_qa_json=?
+                                WHERE id=?""",
+                            (
+                                json.dumps(
+                                    {
+                                        "status": "failed",
+                                        "error": str(exc),
+                                        "recovery": "resume_missing_views",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                broken["id"],
+                            ),
+                        )
+                        conn.commit()
                         raise
                     _update_bible_scene_canonical(
                         conn,
@@ -1970,11 +1984,26 @@ async def _ensure_reactive_scene_image(
                     raise hiagent.ProviderError(
                         f"场景多视角资产包结构不完整：{scene.name}"
                     )
-        except Exception:
+        except Exception as exc:
             failed = _open_scene_ref(conn, project_id, scene.name)
             if failed:
-                from app.rejected_media import purge_scene_reference
-                purge_scene_reference(conn, failed["id"])
+                conn.execute(
+                    """UPDATE scene_references
+                          SET pack_status='failed',group_qa_json=?
+                        WHERE id=?""",
+                    (
+                        json.dumps(
+                            {
+                                "status": "failed",
+                                "error": str(exc),
+                                "recovery": "resume_missing_views",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        failed["id"],
+                    ),
+                )
+                conn.commit()
             raise
         return {"image_path": image_path, "reused": False, "pack_status": "ready"}
 

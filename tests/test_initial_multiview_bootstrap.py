@@ -956,3 +956,8 @@ def test_stale_assets_preview_accepts_sqlite_episode_rows(asset_db, monkeypatch)
     result = api.stale_assets_preview("ep_wall")
     assert result["stale_count"] == 1
     assert result["shots"][0]["reasons"] == ["storyboard_artifact"]
+    from app.video_cost_model import initial_shot_generation_cost
+
+    assert result["shots"][0]["estimated_cost_cny"] == (
+        initial_shot_generation_cost(5)
+    )

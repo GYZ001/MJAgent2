@@ -369,6 +369,15 @@ def _is_scene_entry(
     )
 
 
+def _scene_identity(row: Any) -> str:
+    """Keep location and time separate in storage, but joint for cut continuity."""
+    scene_name = str(_row_value(row, "scene_name", "") or "").strip()
+    scene_time = str(_row_value(row, "scene_time", "") or "").strip()
+    if not scene_name and not scene_time:
+        return ""
+    return _json([scene_name, scene_time])
+
+
 def apply_scene_boundary_strategy(
     shots: list[ShotVideoGenerationPlan],
     *,
@@ -958,7 +967,7 @@ def validate_episode_plan(
     scene_offset = -1
     previous_item: ShotVideoGenerationPlan | None = None
     scene_identity_by_shot_id = {
-        shot_id: str(_row_value(row, "scene_name", "") or "").strip()
+        shot_id: _scene_identity(row)
         for shot_id, row in by_id.items()
     }
     for index, item in enumerate(normalized):
@@ -1689,7 +1698,7 @@ async def generate_episode_plan(
         if item.shot_id in planner_shot_numbers:
             item.shot_no = planner_shot_numbers[item.shot_id]
     planner_scene_identities = {
-        str(identifier): str(_row_value(row, "scene_name", "") or "").strip()
+        str(identifier): _scene_identity(row)
         for payload, row in zip(shot_payload, rows)
         for identifier in (
             payload.get("shot_id"),
@@ -2321,6 +2330,52 @@ def create_local_replan_revision(
         release_manifest=manifest,
     )
     publish_plan(replacement, conn=db)
+    current_by_shot_id = {item.shot_id: item for item in current.shots}
+    for item in replacement.shots:
+        if item.shot_id == shot_id:
+            continue
+        previous = current_by_shot_id.get(item.shot_id)
+        if previous is None:
+            continue
+        boundary_rows = db.execute(
+            """SELECT * FROM video_boundary_assets
+               WHERE shot_plan_id=? AND qa_status='passed'
+               ORDER BY created_at""",
+            (previous.shot_plan_id,),
+        ).fetchall()
+        for boundary in boundary_rows:
+            path = str(boundary["path"] or "")
+            if not path or not Path(path).is_file():
+                continue
+            db.execute(
+                """INSERT OR IGNORE INTO video_boundary_assets(
+                       id,episode_video_plan_id,shot_plan_id,shot_id,role,source,
+                       source_revision_id,source_shot_id,source_adopted_version_id,
+                       path,url,sha256,mime,width,height,qa_status,qa_json,
+                       fingerprint,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    new_id("vba"),
+                    replacement.episode_video_plan_id,
+                    item.shot_plan_id,
+                    item.shot_id,
+                    boundary["role"],
+                    boundary["source"],
+                    boundary["source_revision_id"],
+                    boundary["source_shot_id"],
+                    boundary["source_adopted_version_id"],
+                    path,
+                    boundary["url"],
+                    boundary["sha256"],
+                    boundary["mime"],
+                    boundary["width"],
+                    boundary["height"],
+                    boundary["qa_status"],
+                    boundary["qa_json"],
+                    boundary["fingerprint"],
+                    now(),
+                ),
+            )
     db.commit()
     return replacement
 

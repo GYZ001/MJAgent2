@@ -25,6 +25,7 @@ import {
   shotHasPausedGeneration,
   shotMaterialLibraryKind,
   shouldCommitShotDetail,
+  shouldPersistReviewWallPosition,
   videoCandidateNote,
   videoPlaybackRate,
   videoGenerationConfirmLabel,
@@ -327,6 +328,16 @@ describe('生成台对象稳定性', () => {
       .toBe('manju:review-wall:p1:e1:board-v1')
     expect(reviewWallPositionKey('p1', 'e1', 'board-v2'))
       .toBe('manju:review-wall:p1:e1:board-v2')
+    expect(shouldPersistReviewWallPosition(
+      'manju:review-wall:p1:e1:board-v1',
+      'manju:review-wall:p1:e1:board-v2',
+      'old-shot',
+    )).toBe(false)
+    expect(shouldPersistReviewWallPosition(
+      'manju:review-wall:p1:e1:board-v2',
+      'manju:review-wall:p1:e1:board-v2',
+      'new-shot',
+    )).toBe(true)
   })
 
   it('丢弃乱序返回的旧镜头详情', () => {

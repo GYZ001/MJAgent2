@@ -68,13 +68,14 @@ class LeaseLost(RuntimeError):
 
 def episode_video_budget_limit(episode_id: str) -> float:
     """Resolve the user-approved episode cap before the static safety default."""
-    limit = float(get_setting("episode_cost_limit_cny") or 100)
+    static_limit = float(get_setting("episode_cost_limit_cny") or 100)
+    authority_limit: float | None = None
     try:
         from app.completion_grant import episode_video_budget_snapshot
 
         authority = episode_video_budget_snapshot(episode_id)
         if authority is not None:
-            limit = max(limit, float(authority["cap_cny"]))
+            authority_limit = float(authority["cap_cny"])
     except Exception:  # noqa: BLE001 - legacy databases retain static cap
         pass
     try:
@@ -82,9 +83,9 @@ def episode_video_budget_limit(episode_id: str) -> float:
 
         grant_cap = active_video_grant_budget_cap(episode_id)
         if grant_cap is not None:
-            limit = max(limit, float(grant_cap))
+            return float(grant_cap)
     except Exception:  # noqa: BLE001
         pass
-    return limit
+    return authority_limit if authority_limit is not None else static_limit
 
 __all__ = [name for name in globals() if not name.startswith("__")]

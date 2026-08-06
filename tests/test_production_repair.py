@@ -660,6 +660,13 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
         path.audience_prior_id
         for path in script.narrative_plan.scene_contracts[0].audience_state_paths
     } == {"AP1", "AP2"}
+    ap2_scene_path = next(
+        path
+        for path in script.narrative_plan.scene_contracts[0].audience_state_paths
+        if path.audience_prior_id == "AP2"
+    )
+    assert ap2_scene_path.audience_state_in_id == "AS2"
+    assert ap2_scene_path.audience_state_out_target_id == "AS2"
     assert {change["kind"] for change in changes} >= {
         "event_action_fact_refs",
         "belief_stance",
@@ -3532,11 +3539,19 @@ def test_candidate_issue_diff_allows_aggregate_error_to_shrink() -> None:
         message="缺失 2 条主线节拍",
         subject="screenplay",
         path="/plot_spine",
-        rule_id="message_after",
+        rule_id="message_before",
         stage="screenplay",
     )]
 
     assert _introduced_issue_messages(baseline, reduced) == []
+    assert _introduced_issue_messages(baseline, [structured_issue(
+        code="SPINE_MISSING",
+        message="另一条规则的新错误",
+        subject="screenplay",
+        path="/plot_spine",
+        rule_id="message_after",
+        stage="screenplay",
+    )]) == ["另一条规则的新错误"]
     assert _introduced_issue_messages(baseline, [
         *reduced,
         structured_issue(
