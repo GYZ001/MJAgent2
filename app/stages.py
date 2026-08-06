@@ -2169,7 +2169,7 @@ async def generate_screenplay_baseline(
             min_quality_gain=0.03,
             no_gain_rounds=2,
             allow_warning_candidate=False,
-            baseline_only=False,
+            baseline_only=True,
             repair_all_blockers=True,
         ),
     )

@@ -173,6 +173,49 @@ def test_agent_loop_fails_closed_when_authority_blockers_are_exhausted() -> None
         asyncio.run(loop.run(producer, evaluate))
 
 
+def test_baseline_only_hands_off_first_parseable_candidate() -> None:
+    calls = 0
+
+    async def producer(_iteration, *_args):
+        nonlocal calls
+        calls += 1
+        return '{"value": 1}'
+
+    def evaluate(raw: str):
+        value = Candidate.model_validate(json.loads(raw))
+        return value, [
+            Issue(
+                code="BUSINESS_RULE_FAILED",
+                severity=IssueSeverity.BLOCKER,
+                subject="episode:e1",
+                message="candidate needs local production repair",
+                repairable=True,
+            )
+        ]
+
+    loop = AgentLoop(
+        stage_key="screenplay",
+        contract_key="screenplay",
+        goal="persist the first parseable baseline",
+        scope_type="episode",
+        scope_id="e1",
+        artifact_type="episode_screenplay",
+        policy=AgentLoopPolicy(
+            max_iterations=2,
+            baseline_only=True,
+            repair_all_blockers=True,
+        ),
+    )
+
+    result = asyncio.run(loop.run(producer, evaluate))
+
+    assert calls == 1
+    assert result.status == "baseline"
+    assert result.exit_reason == "baseline_handoff"
+    assert result.iterations == 1
+    assert result.issues[0].code == "BUSINESS_RULE_FAILED"
+
+
 def test_agent_loop_keeps_repairing_when_structural_issue_changes() -> None:
     """Regression for ERR-20260725-c8bb0d.
 

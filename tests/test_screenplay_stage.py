@@ -1129,7 +1129,7 @@ def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> 
     assert policy.max_iterations == 2
     assert policy.stall_rounds == 2
     assert policy.no_gain_rounds == 2
-    assert policy.baseline_only is False
+    assert policy.baseline_only is True
     assert policy.repair_all_blockers is True
 
 
