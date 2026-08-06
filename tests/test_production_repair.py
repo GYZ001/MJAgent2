@@ -900,6 +900,55 @@ def test_dialogue_chain_replacement_only_selects_existing_body_turns() -> None:
     assert "我们都在这里" in normalized["source_text"]
 
 
+def test_empty_dialogue_chain_accepts_only_bounded_source_grounded_turns() -> None:
+    from app.production.screenplay_repair import _dialogue_chain_replacement_is_local
+
+    source = "五哥，我不是故意离开的。希望你不要恨我。"
+    document = screenplay_to_document(_minimal_script(
+        voice_bible=[{
+            "speaker_id": "旁白",
+            "voice_canonical": "中性平稳的读信语气",
+            "role_type": "narrator",
+        }],
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC2",
+            topic="信件说明",
+            turns=[],
+        )],
+    ))
+    turns = [{
+        "speaker": "旁白",
+        "line": "五哥，我不是故意离开的。",
+        "function": "statement",
+        "source_text": "五哥，我不是故意离开的。",
+    }]
+
+    assert _dialogue_chain_replacement_is_local(
+        document,
+        chain_id="DC2",
+        turns=turns,
+        source_text=source,
+    )
+    assert not _dialogue_chain_replacement_is_local(
+        document,
+        chain_id="DC2",
+        turns=[{**turns[0], "speaker": "未声明人物"}],
+        source_text=source,
+    )
+    assert not _dialogue_chain_replacement_is_local(
+        document,
+        chain_id="DC2",
+        turns=[{**turns[0], "line": "甲" * 37}],
+        source_text=source,
+    )
+    assert not _dialogue_chain_replacement_is_local(
+        document,
+        chain_id="DC2",
+        turns=[{**turns[0], "source_text": "原文中不存在"}],
+        source_text=source,
+    )
+
+
 def test_document_projection_inserts_missing_chain_turn_next_to_sibling() -> None:
     script = _minimal_script(
         scene_outline=[

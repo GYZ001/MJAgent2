@@ -4322,9 +4322,12 @@ def _dialogue_chain_replacement_is_local(
     *,
     chain_id: str,
     turns: Any,
+    source_text: str = "",
 ) -> bool:
-    """Allow chain repair only by selecting existing body dialogue without deletion."""
+    """Allow body selection, or source-grounded recovery of one empty chain."""
+    from app import config
     from app.production.screenplay_document import action_block_spoken_identity
+    from app.spoken_contract import content_char_count
 
     if (
         not isinstance(turns, list)
@@ -4352,6 +4355,53 @@ def _dialogue_chain_replacement_is_local(
     )
     if current_chain is None:
         return False
+    if not current_chain.turns:
+        declared_speakers = {
+            str(voice.speaker_id or "").strip()
+            for voice in document.voice_bible
+            if str(voice.speaker_id or "").strip()
+        }
+        plan = getattr(document, "narrative_plan", None)
+        for identity in getattr(plan, "identity_contracts", []) if plan else []:
+            declared_speakers.update({
+                str(identity.identity_id or "").strip(),
+                str(identity.display_name or "").strip(),
+                *(
+                    str(voice_id or "").strip()
+                    for voice_id in (identity.voice_ids or [])
+                ),
+            })
+        allowed_functions = {
+            "trigger",
+            "announcement",
+            "question",
+            "response",
+            "decision",
+            "statement",
+        }
+        candidate_turns: list[tuple[str, str]] = []
+        for turn in turns:
+            if not isinstance(turn, dict):
+                return False
+            speaker = str(turn.get("speaker") or "").strip()
+            line = str(turn.get("line") or "").strip()
+            function = str(turn.get("function") or "").strip()
+            evidence = str(turn.get("source_text") or "").strip()
+            if (
+                not speaker
+                or speaker not in declared_speakers
+                or not line
+                or content_char_count(line) > config.MAX_SPOKEN_CHARS_PER_SHOT
+                or function not in allowed_functions
+                or len(textmatch.condense(evidence)) < 2
+                or not source_text
+                or evidence not in source_text
+                or not _source_references_are_grounded(turn, source_text)
+            ):
+                return False
+            candidate_turns.append((speaker, line))
+        return len(candidate_turns) == len(set(candidate_turns))
+
     current_turns = {
         ((turn.speaker or "").strip(), (turn.line or "").strip())
         for turn in current_chain.turns
@@ -5128,6 +5178,7 @@ def _preflight_document_candidate(
                             working,
                             chain_id=chain_id,
                             turns=operation.value,
+                            source_text=source_text,
                         )
                     ):
                         valid = False
@@ -5524,6 +5575,7 @@ async def _llm_field_patch_once(
                     document,
                     chain_id=chain_id,
                     turns=operation.value,
+                    source_text=source_text,
                 ):
                     continue
                 target = {
