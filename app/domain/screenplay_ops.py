@@ -583,6 +583,12 @@ async def _screenplay_character_discovery(
     )
 
     try:
+        # #region debug-point A:character-discovery-entry
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"A","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:entry","msg":"[DEBUG] Character discovery entry","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"sourceChars":len(source_text or ""),"draftChars":len(draft_text or ""),"bibleCharacters":len(bible.characters)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         result = await ensure_cards_for_text(
             ep["project_id"],
             ep["episode_no"],
@@ -594,6 +600,12 @@ async def _screenplay_character_discovery(
     except StageError:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转成剧本阶段可恢复诊断
+        # #region debug-point C:character-discovery-exception
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"C","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:exception","msg":"[DEBUG] Character discovery failed","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"draftPresent":bool(draft_text),"errorType":type(exc).__name__,"errorChars":len(str(exc))},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         from app.errors import code_ref
 
         public = code_ref(
@@ -605,6 +617,12 @@ async def _screenplay_character_discovery(
             "新人物发现",
             [f"人物身份模型暂未完成本集预检，请在剧本阶段重试（{public}）"],
         ) from exc
+    # #region debug-point B:character-discovery-result
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"B","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:result","msg":"[DEBUG] Character discovery result","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"draftPresent":bool(draft_text),"candidateCount":len(result.get("candidates") or []),"resolutionCount":len(result.get("resolutions") or []),"addedCount":len(result.get("added") or []),"errorCount":len(result.get("errors") or [])},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
     if result.get("errors"):
         raise StageError("新人物发现", list(result["errors"]))
     result["resolutions"] = persist_screenplay_character_resolutions(

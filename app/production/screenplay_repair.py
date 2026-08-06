@@ -3879,6 +3879,12 @@ async def run_screenplay_production(
         # 增量人物只在本地身份门禁仍发现缺口时调用模型。角色已由首次预检、
         # Bible 和 typed contract 覆盖时，避免重复发送整份原文与剧本草稿。
         draft_identity_errors = screenplay_unknown_identity_errors(script, bible)
+        # #region debug-point B:post-baseline-identity-gate
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"B","location":"app/production/screenplay_repair.py:post_baseline_identity_gate","msg":"[DEBUG] Post-baseline identity gate","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"resolutionCount":len(episode.get("character_resolutions") or []),"identityErrorCount":len(draft_identity_errors),"scriptChars":len(script.model_dump_json())},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         if draft_identity_errors:
             draft_audit = await ensure_source_characters_incremental(
                 episode_id, source_text, draft_text=script.model_dump_json(),
@@ -3935,6 +3941,12 @@ async def run_screenplay_production(
             baseline_artifact_id=baseline_art["id"],
             working_artifact_id=baseline_art["id"],
         )
+        # #region debug-point D:baseline-persisted
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"D","location":"app/production/screenplay_repair.py:baseline_persisted","msg":"[DEBUG] Production baseline persisted","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"baselineArtifactId":rev.baseline_artifact_id,"workingArtifactId":rev.working_artifact_id},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         record_baseline_generation(
             kind="screenplay", episode_id=episode_id, revision_id=rev.id,
         )

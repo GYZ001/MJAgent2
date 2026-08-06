@@ -284,6 +284,12 @@ async def discover_character_candidates(
         for offset in range(0, len(future_text), future_step)
     ] or [""]
     for batch_index, future_chunk in enumerate(future_chunks, start=1):
+        # #region debug-point E:character-discovery-request
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"E","location":"app/portraits.py:discover_character_candidates:request","msg":"[DEBUG] Character discovery request shape","data":{"episodeNo":episode_no,"batchIndex":batch_index,"batchCount":len(future_chunks),"sourceChars":len(source_text or ""),"sourceSentChars":min(len(source_text or ""),CAST_DISCOVERY_SOURCE_BUDGET),"draftChars":len(draft_text or ""),"draftSentChars":min(len(draft_text or ""),CAST_DISCOVERY_DRAFT_BUDGET),"futureChars":len(future_chunk or ""),"knownCharacters":len(known_names)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         prompt = f"""任务：为第 {episode_no} 集做人物身份增量预检。请用语义和上下文判断，
 不要依赖服饰、性别、年龄或称谓后缀的固定词表。
 
@@ -327,6 +333,12 @@ async def discover_character_candidates(
                 "reuse_successful_operation": True,
             },
         )
+        # #region debug-point C:character-discovery-response
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"pre-fix","hypothesisId":"C","location":"app/portraits.py:discover_character_candidates:response","msg":"[DEBUG] Character discovery response shape","data":{"episodeNo":episode_no,"batchIndex":batch_index,"rawChars":len(raw or ""),"startsWithJson":(raw or "").lstrip().startswith(("{","[")),"containsJsonObject":"{" in (raw or "")},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         obj = extract_json(raw, repair_unescaped_inner_quotes=True)
         identity_haystack = f"{current_haystack}\n{future_chunk}"
         for item in obj.get("characters") or []:
