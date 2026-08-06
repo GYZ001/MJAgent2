@@ -419,7 +419,12 @@ async def discover_character_candidates(
     candidates: list[dict] = []
 
     def collect(raw: str, *, identity_haystack: str) -> None:
-        obj = extract_json(raw, repair_unescaped_inner_quotes=True)
+        try:
+            obj = extract_json(raw, repair_unescaped_inner_quotes=True)
+        except ValueError as exc:
+            raise ContentGenerationError(
+                "人物身份模型返回了不可验证的非结构化结果，当前阶段已停止"
+            ) from exc
         for item in obj.get("characters") or []:
             if not isinstance(item, dict):
                 continue

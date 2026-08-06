@@ -459,7 +459,7 @@ def recover_screenplay_tasks() -> int:
         """SELECT e.*
              FROM episodes e
             WHERE (
-                    e.screenplay_status='running'
+                    e.screenplay_status IN ('queued','running')
                     AND COALESCE(e.screenplay_error, '') NOT LIKE 'CANCELLING:%'
                     AND NOT EXISTS(
                         SELECT 1 FROM workflow_runs cancelled
@@ -483,6 +483,17 @@ def recover_screenplay_tasks() -> int:
         episode_id = row["id"]
         if _screenplay_task_active(episode_id):
             continue
+        orphan_run = conn.execute(
+            "SELECT status FROM workflow_runs WHERE id=?",
+            (row["active_screenplay_run_id"],),
+        ).fetchone()
+        if orphan_run and orphan_run["status"] == "CREATED":
+            try:
+                WorkflowRecorder(row["active_screenplay_run_id"]).cancel(
+                    "服务重启前尚在排队，已由恢复运行接管"
+                )
+            except StateConflict:
+                pass
         from app.production.revision import get_active_production_revision
 
         revision = get_active_production_revision(episode_id, "screenplay")
@@ -513,25 +524,39 @@ def recover_screenplay_tasks() -> int:
             "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
             (episode_id,),
         ).fetchone()
+        batch_parent = conn.execute(
+            "SELECT parent.id,parent.status FROM workflow_runs child "
+            "JOIN workflow_runs parent ON parent.id=child.parent_run_id "
+            "WHERE child.id=? AND parent.workflow_type='screenplay_batch' "
+            "AND parent.status IN ('RUNNING','PAUSED_EXTERNAL')",
+            (row["active_screenplay_run_id"],),
+        ).fetchone()
+        batch_run_id = batch_parent["id"] if batch_parent else None
+        if batch_parent and batch_parent["status"] == "PAUSED_EXTERNAL":
+            try:
+                WorkflowRecorder(batch_run_id).start()
+            except StateConflict:
+                pass
         recorder = None
         try:
             recorder = _new_screenplay_recorder(
                 episode_id,
                 requested_by="recovery",
                 trigger_type="resume",
-                parent_run_id=parent["id"] if parent else None,
+                parent_run_id=batch_run_id or (parent["id"] if parent else None),
             )
             _spawn_screenplay_activation(
                 episode_id,
                 recorder,
                 project_id=row["project_id"],
-                status=row["screenplay_status"],
-                message=row["screenplay_error"],
+                status="queued",
+                message="恢复任务已排队，等待文本生成槽位",
                 preserve_started_at=True,
-                task_factory=lambda episode_id=episode_id, recorder=recorder: _screenplay_guarded(
+                task_factory=lambda episode_id=episode_id, recorder=recorder, batch_run_id=batch_run_id: _screenplay_guarded(
                     episode_id,
                     recorder,
                     priority=PRIORITY_RECOVERY,
+                    batch_run_id=batch_run_id,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - recover remaining episodes independently
@@ -2150,7 +2175,23 @@ async def cancel_screenplay_all(project_id: str):
             (fallback, now(), eid),
         )
     conn.commit()
-    return {"stopped": stopped, "matched": len(rows)}
+    batch_rows = conn.execute(
+        "SELECT id FROM workflow_runs WHERE workflow_type='screenplay_batch' "
+        "AND scope_type='project' AND scope_id=? AND status='RUNNING'",
+        (project_id,),
+    ).fetchall()
+    cancelled_batches = 0
+    for batch in batch_rows:
+        try:
+            WorkflowRecorder(batch["id"]).cancel("用户停止批量剧本")
+            cancelled_batches += 1
+        except StateConflict:
+            continue
+    return {
+        "stopped": stopped,
+        "matched": len(rows),
+        "cancelled_batches": cancelled_batches,
+    }
 
 
 @router.post("/episodes/{episode_id}/screenplay/cancel")

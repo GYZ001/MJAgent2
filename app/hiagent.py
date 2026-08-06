@@ -59,6 +59,13 @@ def _cached_successful_provider_response(
     """恢复时复用同一幂等 operation 的成功响应，避免成功结果因状态竞态丢失。"""
     if not bool((meta or {}).get("reuse_successful_operation")):
         return None
+    if not (
+        str((meta or {}).get("operation_id") or "").strip()
+        or str((meta or {}).get("semantic_attempt_id") or "").strip()
+    ):
+        # A byte-identical prompt is not proof of semantic success. Reuse is
+        # allowed only when the caller names a durable business operation.
+        return None
     # A caller may provide a durable semantic operation id.  This is required
     # for repair workflows: the same semantic attempt must be recoverable after
     # a process crash, while a *new* repair attempt must never reuse an older

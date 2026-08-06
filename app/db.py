@@ -1848,6 +1848,35 @@ def _dump_call_json(value: Any) -> str | None:
         return json.dumps(str(value), ensure_ascii=False)
 
 
+def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
+    """Serialize metadata as valid JSON even when the original payload is large."""
+    value = meta or {}
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    if len(raw) <= max_chars:
+        return raw
+    summary: dict[str, Any] = {
+        "_truncated": True,
+        "_original_chars": len(raw),
+        "_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+    }
+    for key in sorted(value):
+        item = value[key]
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            projected: Any = item if not isinstance(item, str) or len(item) <= 160 else item[:157] + "..."
+        elif isinstance(item, (list, tuple, set)):
+            projected = {"type": type(item).__name__, "count": len(item)}
+        elif isinstance(item, dict):
+            projected = {"type": "dict", "keys": sorted(str(k) for k in item)[:20]}
+        else:
+            projected = {"type": type(item).__name__}
+        candidate = {**summary, str(key): projected}
+        encoded = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
+        if len(encoded) > max_chars:
+            continue
+        summary[str(key)] = projected
+    return json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def provider_operation_id(kind: str, model: str, request_json: Any | None) -> str:
     """Stable business-operation fingerprint shared by retries and process restarts."""
     payload = _dump_call_json(request_json) or "null"
@@ -1908,7 +1937,7 @@ def _log_provider_call_inner(
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now(), kind, model, status, http_status, latency_ms,
              (error or "")[:500] or None, _dump_call_json(request_json),
-             _dump_call_json(response_json), json.dumps(meta or {}, ensure_ascii=False)[:800],
+             _dump_call_json(response_json), _dump_meta_json(meta),
              trace.run_id, trace.step_run_id, trace.trace_id),
         )
         conn.commit()
@@ -1927,7 +1956,7 @@ def _log_provider_call_inner(
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, status, http_status, latency_ms,
          (error or "")[:500] or None, _dump_call_json(request_json), _dump_call_json(response_json),
-         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id,
+         _dump_meta_json(meta), trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None),
     )
     if previous and status in {"OK", "SUCCEEDED", "SUCCESS"}:
@@ -1970,7 +1999,7 @@ def _start_provider_call_inner(
                 meta, run_id, step_run_id, trace_id
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-             json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id,
+             _dump_meta_json(meta), trace.run_id, trace.step_run_id,
              trace.trace_id),
         )
         conn.commit()
@@ -1989,7 +2018,7 @@ def _start_provider_call_inner(
             recovery_disposition
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-         json.dumps(meta or {}, ensure_ascii=False)[:800], trace.run_id, trace.step_run_id, trace.trace_id,
+         _dump_meta_json(meta), trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None,
          "RETRYING_INTERRUPTED" if previous and previous["status"] == "INTERRUPTED" else None),
     )
