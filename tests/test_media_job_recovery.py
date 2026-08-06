@@ -610,6 +610,82 @@ def test_manual_retry_rejects_terminal_provider_failure(monkeypatch) -> None:
     assert rejected.value.detail["retryability"]["action"] == "create_new_version"
 
 
+def test_manual_retry_resumes_video_input_repair_waiting_human(
+    monkeypatch,
+) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)")
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('e1','p1',1,'confirmed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
+           VALUES('s1','e1',1,5)"""
+    )
+    conn.execute(
+        """INSERT INTO provider_video_capability_snapshots(
+               id,provider,model,capabilities_json,probe_time,probe_result,
+               technical_success,created_at
+           ) VALUES('cap','provider','model','{}',1,'succeeded',1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO episode_video_generation_plans(
+               id,episode_id,plan_revision,source_storyboard_revision_id,
+               capability_snapshot_id,status,created_at
+           ) VALUES('evp','e1',1,'board','cap','valid',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shot_video_generation_plans(
+               id,episode_video_plan_id,shot_id,shot_no,planned_mode,
+               capability_snapshot_id,status,created_at,updated_at
+           ) VALUES(
+               'svp','evp','s1',1,'FIRST_LAST_FRAME_MODE','cap',
+               'waiting_asset',1,1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
+           ) VALUES(
+               'v1','s1',1,'p','i','waiting_human',
+               '{"shot_plan_id":"svp"}',1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               reason_code,created_at,updated_at
+           ) VALUES(
+               'j1','video','s1','v1','e1','p1','waiting_human',
+               'FIRST_LAST_FRAME_REPAIR_REQUIRED',1,1
+           )"""
+    )
+    conn.commit()
+    for module in (system_api, monitoring):
+        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "episode_video_budget_limit", lambda _episode_id: 100)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    result = system_api.retry_job("j1")
+
+    assert result["job"]["status"] == "queued"
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v1'"
+    ).fetchone()["status"] == "queued"
+    assert conn.execute(
+        "SELECT status FROM shot_video_generation_plans WHERE id='svp'"
+    ).fetchone()["status"] == "planned"
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone()["status"] == "reserved"
+
+
 def test_episode_leaves_generating_when_no_video_job_is_active(monkeypatch) -> None:
     conn = _conn()
     conn.execute(

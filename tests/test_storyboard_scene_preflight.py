@@ -5,6 +5,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from app import db, scenes
 from app.schemas import (
     Bible,
@@ -393,6 +395,57 @@ def test_reactive_scene_recovery_resumes_missing_views_without_regenerating_main
         "SELECT COUNT(*) AS n FROM scene_references "
         "WHERE project_id='p1' AND scene_name='蛇人族大殿' AND ep_start=209"
     ).fetchone()["n"] == 1
+
+
+def test_reactive_scene_pack_failure_preserves_paid_main_image(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    bible = _bible("蛇人族大殿")
+    _fresh_project(tmp_path, monkeypatch, bible)
+    image_path = tmp_path / "existing-main.jpg"
+    image_path.write_bytes(b"existing-scene")
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO scene_references(
+               id,project_id,scene_name,ep_start,scene_canonical,prompt,image_path,
+               qa_json,bible_version,created_at,pack_status
+           ) VALUES(
+               'scene-existing','p1','蛇人族大殿',209,?,'prompt',?,'{}',1,?,'failed'
+           )""",
+        (bible.scenes[0].scene_canonical, str(image_path), db.now()),
+    )
+    conn.commit()
+
+    async def fail_pack(*_args, **_kwargs):
+        raise RuntimeError("side view provider unavailable")
+
+    monkeypatch.setattr(
+        "app.multiview.scene_multiview_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "app.multiview.complete_legacy_scene_pack",
+        fail_pack,
+    )
+
+    with pytest.raises(RuntimeError, match="side view provider unavailable"):
+        asyncio.run(scenes._ensure_reactive_scene_image(
+            "p1",
+            bible.scenes[0],
+            episode_no=209,
+            style=bible.world.visual_style_canonical,
+            bible_version=1,
+        ))
+
+    saved = conn.execute(
+        "SELECT image_path,pack_status FROM scene_references WHERE id='scene-existing'"
+    ).fetchone()
+    assert dict(saved) == {
+        "image_path": str(image_path),
+        "pack_status": "failed",
+    }
+    assert image_path.is_file()
 
 
 def test_new_screenplay_scene_is_ai_adopted_and_hidden_from_human_queue(tmp_path, monkeypatch) -> None:

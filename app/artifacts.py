@@ -73,7 +73,12 @@ def _delete_version_files(video_path: str | None) -> None:
             pass
 
 
-def _purge_shots(conn, shots: list[dict]) -> tuple[int, set[str]]:
+def _purge_shots(
+    conn,
+    shots: list[dict],
+    *,
+    preserve_video_audit: bool = False,
+) -> tuple[int, set[str]]:
     """删除给定镜头的全部版本、关键帧、任务与采用标记。
     返回 (删除版本数, 受影响剧集 id 集合)。"""
     versions_removed = 0
@@ -91,7 +96,16 @@ def _purge_shots(conn, shots: list[dict]) -> tuple[int, set[str]]:
                     Path(sc["image_path"]).unlink()
                 except OSError:
                     pass
-        conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (s["id"],))
+        if preserve_video_audit:
+            conn.execute(
+                """UPDATE shot_versions
+                      SET status='cleared',video_path=NULL,
+                          error='用户已清空本集生成资源'
+                    WHERE shot_id=?""",
+                (s["id"],),
+            )
+        else:
+            conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (s["id"],))
         conn.execute("DELETE FROM shot_scenes WHERE shot_id=?", (s["id"],))
         conn.execute("DELETE FROM jobs WHERE shot_id=?", (s["id"],))
         conn.execute(
@@ -510,7 +524,11 @@ def clear_episode_artifacts(episode_id: str) -> dict:
                   AND status IN ('draft','valid','blocked','stale')""",
             (episode_id,),
         )
-        versions, affected_eps = _purge_shots(conn, shots)
+        versions, affected_eps = _purge_shots(
+            conn,
+            shots,
+            preserve_video_audit=True,
+        )
         _rollback_episodes(conn, affected_eps or {episode_id})
         conn.commit()
     except Exception:

@@ -418,8 +418,12 @@ def _focus_operation_errors(
     errors: list[str] = []
     targeted: set[int] = set()
     for operation in selected.outline_operations:
-        executable_op = operation.executable_op()
-        target = operation.execution_target(executable_op)
+        try:
+            executable_op = operation.executable_op()
+            target = operation.execution_target(executable_op)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
         if outline is None:
             if operation.target.shot_no is not None:
                 targeted.add(int(operation.target.shot_no))

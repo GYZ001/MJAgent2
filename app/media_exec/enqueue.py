@@ -344,6 +344,7 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
         (episode_id,),
     ).fetchall()
     recovered = []
+    budget_blocked = []
     for row in rows:
         # A newer/other usable candidate already satisfies this shot. Recovering
         # an older paid task would only create an extra candidate and could race
@@ -377,6 +378,22 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
             meta.get("actual_mode") or meta.get("mode") or meta.get("planned_mode") or ""
         )
         if actual_mode != current.mode.value:
+            continue
+        reservation = conn.execute(
+            "SELECT amount_cny FROM budget_reservations WHERE job_id=?",
+            (row["job_id"],),
+        ).fetchone()
+        reservation_amount = float(
+            reservation["amount_cny"] if reservation else 0
+        )
+        if not media_scheduler.reserve_budget(
+            row["job_id"],
+            episode_id,
+            reservation_amount,
+            episode_video_budget_limit(episode_id),
+            conn=conn,
+        ):
+            budget_blocked.append(dict(row))
             continue
 
         meta.update({
@@ -424,12 +441,6 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
             (actual_mode, now(), current.shot_plan_id),
         )
         conn.execute(
-            """UPDATE budget_reservations
-                  SET status='reserved',settled_at=NULL,actual_cost_cny=NULL
-                WHERE job_id=? AND status='released'""",
-            (row["job_id"],),
-        )
-        conn.execute(
             """UPDATE jobs
                   SET reserved_cost_cny=COALESCE(
                       (SELECT amount_cny FROM budget_reservations WHERE job_id=?),0
@@ -438,6 +449,7 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
             (row["job_id"], row["job_id"]),
         )
         recovered.append(dict(row))
+        conn.commit()
     if recovered:
         conn.execute(
             "UPDATE episodes SET status='generating' WHERE id=?",
@@ -457,6 +469,9 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
         "recovered_jobs": len(recovered),
         "job_ids": [row["job_id"] for row in recovered],
         "provider_task_ids": [row["provider_task_id"] for row in recovered],
+        "budget_blocked_job_ids": [
+            row["job_id"] for row in budget_blocked
+        ],
         "provider_create_calls": 0,
     }
 

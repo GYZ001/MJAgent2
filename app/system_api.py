@@ -1392,7 +1392,7 @@ def retry_job(job_id: str, body: dict | None = None):
     request = body or {}
     conn = get_conn()
     row = conn.execute(
-        """SELECT j.*, v.provider_task_id, s.duration_s
+        """SELECT j.*, v.provider_task_id, v.image_inputs, s.duration_s
              FROM jobs j
              LEFT JOIN shot_versions v ON v.id=j.version_id
              LEFT JOIN shots s ON s.id=j.shot_id
@@ -1402,9 +1402,18 @@ def retry_job(job_id: str, body: dict | None = None):
     if not row:
         raise HTTPException(404, "媒体任务不存在")
     item = dict(row)
+    input_repair_codes = {
+        "FIRST_LAST_FRAME_REPAIR_REQUIRED",
+        "REFERENCE_IMAGE_REPAIR_REQUIRED",
+        "VIDEO_INPUT_REPAIR_REQUIRED",
+    }
+    waiting_input_repair = (
+        item["status"] == "waiting_human"
+        and item.get("reason_code") in input_repair_codes
+    )
     if item["status"] not in {
         "failed", "cancelled", "paused", "paused_external", "paused_budget", "waiting_retry",
-    }:
+    } and not waiting_input_repair:
         raise HTTPException(409, detail={
             "code": "JOB_STATE_CONFLICT", "message": f"当前状态 {item['status']} 不支持重试",
             "current_status": item["status"],
@@ -1514,15 +1523,17 @@ def retry_job(job_id: str, body: dict | None = None):
                     "code": "JOB_RETRY_CONTEXT_MISSING",
                     "message": "任务缺少分集上下文，不能安全重新提交",
                 })
-            from app.compiler import shot_cost_cny
+            from app.video_cost_model import initial_shot_generation_cost
             estimate = float(item.get("reserved_cost_cny") or 0)
             if estimate <= 0:
-                estimate = shot_cost_cny(float(item.get("duration_s") or 5))
+                estimate = initial_shot_generation_cost(
+                    float(item.get("duration_s") or 5)
+                )
             if not worker.media_scheduler.reserve_budget(
                 job_id,
                 item["episode_id"],
                 estimate,
-                float(get_setting("episode_cost_limit_cny") or 100),
+                worker.episode_video_budget_limit(item["episode_id"]),
                 conn=conn,
             ):
                 raise HTTPException(409, detail={
@@ -1549,15 +1560,17 @@ def retry_job(job_id: str, body: dict | None = None):
                     "code": "JOB_RETRY_CONTEXT_MISSING",
                     "message": "任务缺少分集上下文，不能安全重新提交",
                 })
-            from app.compiler import shot_cost_cny
+            from app.video_cost_model import initial_shot_generation_cost
             estimate = float(item.get("reserved_cost_cny") or 0)
             if estimate <= 0:
-                estimate = shot_cost_cny(float(item.get("duration_s") or 5))
+                estimate = initial_shot_generation_cost(
+                    float(item.get("duration_s") or 5)
+                )
             if not worker.media_scheduler.reserve_budget(
                 job_id,
                 item["episode_id"],
                 estimate,
-                float(get_setting("episode_cost_limit_cny") or 100),
+                worker.episode_video_budget_limit(item["episode_id"]),
                 conn=conn,
             ):
                 raise HTTPException(409, detail={
@@ -1593,6 +1606,24 @@ def retry_job(job_id: str, body: dict | None = None):
         if cursor.rowcount != 1:
             conn.rollback()
             raise HTTPException(409, "任务已被其他操作更新")
+        if waiting_input_repair and item.get("version_id"):
+            conn.execute(
+                """UPDATE shot_versions SET status='queued',error=NULL
+                   WHERE id=? AND status='waiting_human'""",
+                (item["version_id"],),
+            )
+            try:
+                metadata = json.loads(item.get("image_inputs") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            shot_plan_id = str(metadata.get("shot_plan_id") or "")
+            if shot_plan_id:
+                conn.execute(
+                    """UPDATE shot_video_generation_plans
+                          SET status='planned',updated_at=?
+                        WHERE id=? AND status='waiting_asset'""",
+                    (time.time(), shot_plan_id),
+                )
         conn.commit()
         dispatch_deferred = False
         try:

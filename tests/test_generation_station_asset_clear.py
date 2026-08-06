@@ -200,6 +200,29 @@ def test_episode_resource_clear_supersedes_active_video_plan(
         "UPDATE shots SET mode_plan=? WHERE id='s'",
         (json.dumps({"mode": "FIRST_LAST_FRAME_MODE"}),),
     )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('version-audit','s',1,'prompt','idem','failed',NULL,0)"""
+    )
+    conn.execute(
+        """INSERT INTO video_generation_attempts(
+               id,shot_plan_id,version_id,attempt_no,planned_mode,actual_mode,
+               status,created_at,updated_at
+           ) VALUES(
+               'attempt-audit','shot-plan','version-audit',1,
+               'FIRST_LAST_FRAME_MODE','FIRST_LAST_FRAME_MODE','failed',0,0
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO video_mode_qa_results(
+               id,shot_plan_id,version_id,planned_mode,actual_mode,
+               technical_success,result_json,created_at
+           ) VALUES(
+               'qa-audit','shot-plan','version-audit',
+               'FIRST_LAST_FRAME_MODE','FIRST_LAST_FRAME_MODE',0,'{}',0
+           )"""
+    )
     conn.commit()
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(
@@ -219,3 +242,12 @@ def test_episode_resource_clear_supersedes_active_video_plan(
     assert conn.execute(
         "SELECT mode_plan FROM shots WHERE id='s'"
     ).fetchone()[0] is None
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='version-audit'"
+    ).fetchone()[0] == "cleared"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM video_generation_attempts WHERE id='attempt-audit'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM video_mode_qa_results WHERE id='qa-audit'"
+    ).fetchone()[0] == 1
