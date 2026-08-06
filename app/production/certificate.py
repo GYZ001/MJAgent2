@@ -85,9 +85,31 @@ def _row_has_blocking_issue(row: Any) -> bool:
         and (
             str(issue.get("severity") or "").lower() == "blocker"
             or bool(issue.get("must_fix"))
+            or bool((issue.get("evidence") or {}).get("must_fix"))
         )
         for issue in issues
     )
+
+
+def _evaluation_blocking_counts(rows: list[Any]) -> tuple[int, int]:
+    blockers = 0
+    must_fix = 0
+    for row in rows:
+        try:
+            issues = json.loads(row["issues_json"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("完成凭证引用的 Evaluation issues_json 无法解析")
+        if not isinstance(issues, list):
+            raise ValueError("完成凭证引用的 Evaluation issues_json 不是数组")
+        for issue in issues:
+            if not isinstance(issue, dict):
+                raise ValueError("完成凭证引用的 Evaluation 含非法 Issue")
+            evidence = issue.get("evidence") or {}
+            if str(issue.get("severity") or "").lower() == "blocker":
+                blockers += 1
+            if bool(issue.get("must_fix")) or bool(evidence.get("must_fix")):
+                must_fix += 1
+    return blockers, must_fix
 
 
 def _is_passing_runtime_gate(row: Any) -> bool:
@@ -263,6 +285,13 @@ def _validate_narrative_certificate_authority(
         artifact=artifact,
     )
     if screenplay is None:
+        if kind == "screenplay":
+            from app.production.screenplay_authority import (
+                screenplay_contract_requires_narrative,
+            )
+
+            if screenplay_contract_requires_narrative(contract_version):
+                raise ValueError("当前剧本合同要求 narrative_plan，禁止签发 legacy 完成凭证")
         return False
 
     artifact_contract = str(artifact.get("contract_version") or "")
@@ -272,7 +301,7 @@ def _validate_narrative_certificate_authority(
         raise ValueError("叙事完成凭证的 qa_profile_version 与当前运行契约不匹配")
 
     if kind == "screenplay":
-        _required_exact_score_only(
+        _required_exact_runtime_gate(
             rows,
             evaluator_name=_SCREENPLAY_GATE_EVALUATOR,
             evaluator_version=qa_profile_version,
@@ -318,8 +347,6 @@ def issue_completion_certificate(
     stored_hash = art.get("content_hash") or evidence_repository.content_hash(art.get("content"))
     if stored_hash != artifact_hash:
         raise ValueError("artifact_hash 与存储内容不一致，拒绝签发凭证")
-    if int(blockers or 0) > 0 or int(must_fix_issues or 0) > 0:
-        raise ValueError("完成凭证不能带有 blocker 或 must-fix")
     evaluation_ids = list(evaluation_ids or [])
     rows = _load_evaluation_rows(evaluation_ids)
     by_id = {row["id"]: row for row in rows}
@@ -327,9 +354,17 @@ def issue_completion_certificate(
         raise ValueError("完成凭证引用了不存在的 Evaluation")
     if any(row["artifact_id"] != artifact_id for row in rows):
         raise ValueError("完成凭证引用了其他 Artifact 的 Evaluation")
+    derived_blockers, derived_must_fix = _evaluation_blocking_counts(rows)
+    if derived_blockers or derived_must_fix:
+        raise ValueError(
+            "完成凭证引用的 Evaluation 仍含 "
+            f"{derived_blockers} 个 blocker、{derived_must_fix} 个 must-fix"
+        )
+    if int(blockers or 0) != derived_blockers or int(must_fix_issues or 0) != derived_must_fix:
+        raise ValueError("完成凭证阻断计数必须由 Evaluation 精确派生")
     runtime_gates = [
         row for row in rows
-        if row["evaluation_role"] == "business_safety"
+        if row["evaluation_role"] in {"runtime_gate", "business_safety"}
     ]
     if any(
         not bool(row["hard_gate_passed"])
@@ -372,8 +407,8 @@ def issue_completion_certificate(
         contract_version=contract_version,
         qa_profile_version=qa_profile_version,
         evaluation_ids=evaluation_ids,
-        blockers=max(0, int(blockers or 0)),
-        must_fix_issues=max(0, int(must_fix_issues or 0)),
+        blockers=derived_blockers,
+        must_fix_issues=derived_must_fix,
         issued_at=issued_at,
         production_revision_id=production_revision_id,
     )

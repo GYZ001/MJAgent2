@@ -173,13 +173,13 @@ VIDEO_DURATION_MAX_S = 10
 DEFAULT_VIDEO_DURATION_S = VIDEO_DURATION_MIN_S
 ALLOWED_DURATIONS = frozenset(range(VIDEO_DURATION_MIN_S, VIDEO_DURATION_MAX_S + 1))
 EPISODE_TARGET_MIN_S = 40
-EPISODE_TARGET_MAX_S = 90   # 放宽上限给模型更大质量保证空间：内容密/高潮集可取更长时长，简单集仍可短
+EPISODE_TARGET_MAX_S = None  # 整集时长不设产品上限；完整剧情与容量估算决定最终值
 EPISODE_TARGET_DEFAULT_S = 50
-EPISODE_TARGET_STEP_S = 10  # 分集规划字段仅保留为节奏参考；主线压缩后按 spine 下调
+EPISODE_TARGET_STEP_S = 10  # 用户输入是最低节奏参考；生成后只允许按实际容量向上扩展
 # 仅用于防止异常模型无限循环的技术熔断，不是产品镜头数上限。
 STORYBOARD_MAX_SHOTS = 1_000_000
-# 集目标时长合法取值：[MIN, MAX] 内 STEP 的整数倍（当前 40/50/60/70/80/90）。prompt 与校验统一引用，避免各处硬编码漂移。
-EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, EPISODE_TARGET_MAX_S + 1, EPISODE_TARGET_STEP_S))
+# 常用建议值仅供 UI 快捷输入，不构成合法值上限。
+EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, 181, EPISODE_TARGET_STEP_S))
 # 口播预算（纯文字、不计标点）：5 秒 18 字，10 秒 36 字。
 # 超过 10 秒所能承载的口播仍必须拆镜，不能靠延长 duration_s 合并不同节拍。
 SPOKEN_CHARS_PER_5_SECONDS = 18

@@ -327,16 +327,18 @@ def run_screenplay_qa(
     from app.harness.contracts import get_contract
     from app.production.screenplay_authority import (
         SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_contract_requires_narrative,
         screenplay_authority_fingerprint,
     )
 
+    contract_version = get_contract("screenplay").version
     authority_error = ""
     try:
         authority_input_fingerprint = screenplay_authority_fingerprint(
             str(episode.get("id") or ""),
             source_text=source_text,
             bible=bible,
-            contract_version=get_contract("screenplay").version,
+            contract_version=contract_version,
             qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         )
     except ValueError as exc:
@@ -357,7 +359,7 @@ def run_screenplay_qa(
                         "required_dialogue_occurrences", "character_resolutions",
                     )
                 },
-                "contract_version": get_contract("screenplay").version,
+                "contract_version": contract_version,
                 "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
             }
             authority_input_fingerprint = hashlib.sha256(
@@ -407,6 +409,7 @@ def run_screenplay_qa(
             )
         except ValueError:
             authorized_source_chapters = None
+    requires_narrative = screenplay_contract_requires_narrative(contract_version)
     if script.narrative_plan is not None:
         messages.extend(validate_screenplay_narrative(
             script,
@@ -421,6 +424,11 @@ def run_screenplay_qa(
             ),
             authorized_source_chapters=authorized_source_chapters,
         ))
+    elif requires_narrative:
+        messages.append(
+            "[NARRATIVE_PLAN_REQUIRED] 当前剧本合同要求 narrative_plan；"
+            "缺失时禁止按 legacy 路径发布"
+        )
     else:
         messages.extend(validate_screenplay_source_coverage(
             script,
@@ -476,21 +484,19 @@ def run_screenplay_qa(
         and must_fix_count(issues) == 0
         and score >= pass_score
     )
-    status = "passed" if quality_passed else "warning"
-    evaluation_role = "score_only"
-    runtime_blocking = False
+    status = "passed" if quality_passed else "failed"
+    evaluation_role = "runtime_gate"
+    runtime_blocking = True
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
         evaluator_version="screenplay-qa-gate-2",
         status=status,
-        # Compatibility readers still inspect hard_gate_passed. Score-only
-        # findings never revoke runtime eligibility.
-        hard_gate_passed=True,
+        hard_gate_passed=quality_passed,
         evaluation_role=evaluation_role,
         score_status="scored",
         runtime_blocking=runtime_blocking,
-        retry_eligible=False,
+        retry_eligible=not quality_passed,
         score=score,
         issues=issues,
         evidence={
@@ -3617,6 +3623,25 @@ def _complete_screenplay_from_working_artifact(
             revision_id,
             evaluation_id or f"eval-{working_id}",
         )
+    if issues or not can_issue_certificate(issues):
+        message = _gate_failure_message(issues, failed_issue=_choose_issue(issues))
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
+            "screenplay_updated_at=? WHERE id=?",
+            (message, now(), episode_id),
+        )
+        conn.commit()
+        save_checkpoint(revision_id, {
+            **checkpoint,
+            "phase": "WAITING_HUMAN",
+            "activation_no": activation_no,
+            "working_artifact_id": working_id,
+            "open_issue_ids": [issue.fingerprint for issue in issues],
+            "quality_issue_count": len(issues),
+            "quality_score": evaluation.score,
+            "yield_reason": "production_gate_failed_before_publish",
+        })
+        raise ScreenplayNarrativeGateError(message)
 
     contract_version = get_contract("screenplay").version
     current_fingerprint = screenplay_authority_fingerprint(
@@ -3865,6 +3890,36 @@ async def run_screenplay_production(
         script = await generate_screenplay_baseline(
             episode, source_text, bible, prev_ending=prev_ending,
         )
+        from app.renderability import screenplay_required_duration_s
+
+        current_target = int(
+            episode.get("target_duration_s")
+            or config.EPISODE_TARGET_DEFAULT_S
+        )
+        required_target = screenplay_required_duration_s(
+            script,
+            minimum_s=current_target,
+        )
+        if required_target > current_target:
+            conn.execute(
+                "UPDATE episodes SET target_duration_s=?,"
+                "screenplay_snapshot_version=screenplay_snapshot_version+1 "
+                "WHERE id=?",
+                (required_target, episode_id),
+            )
+            conn.commit()
+            episode["target_duration_s"] = required_target
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "SCREENPLAY_DURATION_EXPANDED",
+                    "info",
+                    "已按完整剧情与口播容量自动扩展整集时长",
+                    payload={
+                        "previous_target_s": current_target,
+                        "required_target_s": required_target,
+                    },
+                )
         # 先应用首次预检已有决议并持久化 Baseline。任何后续人物增量调用
         # 都必须发生在这个耐久边界之后，避免外部失败迫使完整剧本重生。
         from app.portraits import (
@@ -4066,24 +4121,18 @@ async def run_screenplay_production(
         }
         save_checkpoint(rev.id, checkpoint)
 
-    # Quality remains score-only, but a typed narrative graph is consumed as a
-    # hard contract by storyboard generation. Publishing a structurally broken
-    # graph here only moves the same blocker downstream, where shot repair
-    # cannot safely rewrite screenplay authority. Legacy scripts without a
-    # narrative plan keep the score-only fast path; modern invalid graphs enter
-    # the bounded local Patch loop below.
-    narrative_contract_errors: list[str] = []
-    if working_script.narrative_plan is not None:
-        from app.narrative import validate_screenplay_narrative
-
-        narrative_contract_errors = validate_screenplay_narrative(
-            working_script,
-            require=True,
-            source_text=source_text,
-            expected_scope_id=episode_id,
-            authorized_source_chapters=episode.get("authorized_source_chapters"),
-        )
-    if not narrative_contract_errors:
+    # Every production blocker enters the same bounded local Patch loop. New
+    # contracts cannot omit narrative_plan to fall into a score-only legacy
+    # path, and document/renderability blockers cannot be deferred downstream.
+    initial_issues, _initial_evaluation = run_screenplay_qa(
+        working_script,
+        bible=bible,
+        source_text=source_text,
+        episode=episode,
+        artifact_id=working_id,
+        artifact_hash=working_hash,
+    )
+    if not initial_issues:
         return _complete_screenplay_from_working_artifact(
             episode_id=episode_id,
             episode=episode,
@@ -4098,7 +4147,7 @@ async def run_screenplay_production(
         "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
         "screenplay_updated_at=? WHERE id=?",
         (
-            f"叙事合同有 {len(narrative_contract_errors)} 项结构错误，正在局部修复",
+            f"剧本有 {len(initial_issues)} 项生产门禁问题，正在局部修复",
             now(),
             episode_id,
         ),

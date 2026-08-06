@@ -16,6 +16,16 @@ from app.schemas import Bible, EpisodeScreenplay
 SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-2"
 
 
+def screenplay_contract_requires_narrative(contract_version: str | None) -> bool:
+    """Return whether this contract generation requires typed narrative authority."""
+    raw = str(contract_version or "").strip()
+    try:
+        major = int(raw.split(".", 1)[0])
+    except (TypeError, ValueError):
+        return False
+    return major >= 3
+
+
 def _json(value: Any) -> str:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"),

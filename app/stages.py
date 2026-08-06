@@ -60,6 +60,7 @@ from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
     ACTION_DESC_TARGET_MIN,
+    DIALOGUE_CHAIN_TURNS_HARD_MAX,
     PREFERRED_SHOT_DURATION_S,
     SHOT_HARD_MAX,
     renderability_prompt_block,
@@ -78,6 +79,9 @@ SYSTEM_PREFIX = (
     "输出规则：只输出一个 JSON 对象，无 Markdown 围栏，无解释文字；字符串内部的英文双引号必须写成 JSON 转义形式。\n"
     "所有内容使用简体中文。"
 )
+
+SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-baseline-4.0.0"
+SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS = 2
 
 
 class StageError(Exception):
@@ -2016,9 +2020,13 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
             else f"剧本结尾必须落到本集尾钩：{episode_cliffhanger}"
         )
     )
+    scope_id = str(episode.get("id") or f"episode-{episode['episode_no']}")
+    narrative_plan_block = _narrative_plan_prompt_block(scope_id)
+    narrative_plan_schema = _narrative_plan_schema_example(scope_id)
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》改写一份完整、连续、可导演的生产剧本。
 
-核心目标不是压缩镜头数，而是完整交付剧情。目标时长 {episode['target_duration_s']} 秒仅作节奏参考；
+核心目标不是压缩镜头数，而是完整交付剧情。当前 {episode['target_duration_s']} 秒只是最低节奏参考，
+最终时长由完整剧情、对白容量、主线节拍和场次建立成本自动扩展，不设上限；
 不得为了时长、场次数或未来镜头数删除有效事件、对白、人物反应、因果桥梁和场景上下文。
 只有能指出重复来源的内容才允许合并；任何原文段都不得静默消失。
 
@@ -2053,7 +2061,8 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 
 【对白与人物】
 - dialogue_chains 按真实发生顺序保留完整问答、宣布、反应和决定链。
-- 对白话轮不设固定条数上限；按剧情语义链和后续单镜口播容量拆分。
+- 每组 dialogue_chain 最多 {DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮；更长互动必须按自然语义转折拆成多组，
+  但不得删除、概括或重排原文对白。
 - source_text 必须逐字引用本集原文，不得写占位说明。
 - `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型不得另选孤立金句。
 - key_lines 由 dialogue_chains 派生并真实写入 full_script_text 的“角色名：台词”行。
@@ -2071,6 +2080,8 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - information_ledger 只登记真正需要观众获得的信息，不设数量上限，不为气氛重复建项。
 - voice_bible 只收录实际说话身份，Bible 角色的 speaker_id 必须逐字使用人物谱姓名。
 - 原文没有的新增事件必须 adaptation_addition=true、写 adaptation_reason，且 approved=false。
+
+{narrative_plan_block}
 
 硬性规则：
 1. episode_no={episode['episode_no']}，mode=full_script。
@@ -2128,7 +2139,8 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 "speaker_id": null, "exact_text": null, "reinforcement_allowed": false, "status": "unassigned"}}],
 "voice_bible": [{{"speaker_id": str, "voice_canonical": str, "language": "普通话",
 "role_type": "named_character|functional_character|narrator"}}],
-"approved_adaptations": [str], "forbidden_additions": [str]}}"""
+"approved_adaptations": [str], "forbidden_additions": [str],
+"narrative_plan": {narrative_plan_schema}}}"""
     # Production Repair：完整生成只允许一次；QA 后禁止“重新输出完整 JSON”。
     return await generate_screenplay_baseline(
         episode, source_text, bible, prev_ending=prev_ending, _prompt=prompt,
@@ -2155,7 +2167,7 @@ async def generate_screenplay_baseline(
     # Baseline-only 禁止对已成形剧本做第二次整版 QA 重写，但首轮若连
     # Pydantic 候选都没有产生（JSON/结构错误），必须允许受限的结构修复。
     # 一旦出现首个可解析候选，baseline_only 会立即交给局部 Patch。
-    structural_bootstrap_iterations = 2
+    structural_bootstrap_iterations = SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS
     loop = AgentLoop(
         stage_key="screenplay",
         contract_key="screenplay",
@@ -2191,9 +2203,14 @@ async def generate_screenplay_baseline(
             episode_no=episode["episode_no"], source_text=source_text,
             require_dialogue_chains=True,
             required_dialogue_lines=episode.get("required_dialogue_lines") or [],
-            validate_narrative=False,
+            validate_narrative=True,
             require_source_coverage=True,
         )
+        if s.narrative_plan is None:
+            errors.append(
+                "[NARRATIVE_PLAN_REQUIRED] 新生成剧本必须包含 narrative_plan；"
+                "legacy 兼容仅允许读取历史已发布产物，不得用于新生产"
+            )
         errors.extend(screenplay_character_resolution_errors(
             s,
             resolutions,
