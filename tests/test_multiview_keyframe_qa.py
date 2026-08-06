@@ -728,6 +728,103 @@ def test_keyframe_qa_receives_library_visual_anchors(monkeypatch, tmp_path) -> N
     assert qa.get("status") == "scored" or qa.get("overall") >= 0.8
 
 
+def test_contextual_identity_passes_text_contract_without_portrait_anchor(
+    monkeypatch,
+) -> None:
+    import asyncio
+    from app.multiview import review_keyframe_with_evidence
+    from app.schemas import Bible, Shot, World
+
+    captured: dict = {}
+
+    async def fake_vlm(_frames, expectation, call_meta=None):
+        captured.update(json.loads(expectation))
+        return json.dumps({
+            "overall": 0.9,
+            "action_match": 0.9,
+            "body_proportion": 0.9,
+            "face_identity": 0.9,
+            "outfit_match": 0.9,
+            "hair_match": 0.9,
+            "scene_match": 0.9,
+            "identity_contract": {
+                "characters": [{
+                    "name": "云吞七号",
+                    "present": True,
+                    "gender_match": True,
+                    "identity_match": "N/A",
+                    "text_contract_match": True,
+                    "outfit_match": True,
+                    "instance_count": 1,
+                }],
+                "unexpected_recognizable_people": 0,
+            },
+            "hard_failures": [],
+            "issues": [],
+        })
+
+    monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
+    monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
+    monkeypatch.setattr(
+        "app.compiler.keyframe_visual_contract",
+        lambda *_args, **_kwargs: {
+            "target_keyframe_desc": "云吞七号推开木门。",
+            "target_source": "last_frame_desc",
+            "target_contact_phase": "none",
+            "camera_angle": "平视",
+            "visible_characters": ["云吞七号"],
+            "individual_visible_characters": ["云吞七号"],
+            "identity_verification": {
+                "云吞七号": {
+                    "mode": "text_contract",
+                    "visual_policy": "contextual",
+                    "visual_canonical": "浅褐短袍，素面木簪",
+                },
+            },
+            "collective_visible_roles": [],
+            "anonymous_background_allowed": False,
+            "collective_presence_required": False,
+            "collective_presence_forbidden": False,
+            "required_text_expected": False,
+            "contact_camera_required": False,
+            "established_contact_required": False,
+            "relative_height_policy": "single_subject",
+            "scene_canonical": "",
+            "scene_landmarks": [],
+        },
+    )
+    shot = Shot(
+        shot_no=1,
+        duration_s=5,
+        shot_size="中景",
+        camera_move="固定",
+        scene_setting="地下圆厅",
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        action_desc="云吞七号推开木门。",
+        first_frame_desc="木门关闭。",
+        last_frame_desc="云吞七号已推开木门。",
+        source_excerpt="云吞七号推门。",
+        dialogues=[],
+    )
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="cinematic animation"),
+    )
+
+    qa = asyncio.run(review_keyframe_with_evidence(
+        "candidate",
+        shot=shot,
+        bible=bible,
+        visual_anchors=[],
+    ))
+
+    verification = captured["shot"]["identity_verification"]["云吞七号"]
+    assert verification["mode"] == "text_contract"
+    assert qa["identity_contract_passed"] is True
+    assert qa["passed"] is True
+
+
 def test_shot_video_assets_stale_when_portrait_revision_changes() -> None:
     from app.domain.storyboard_ops import _shot_adopted_assets_stale
 

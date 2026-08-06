@@ -2653,6 +2653,15 @@ async def run_video_completion_supervisor(
                 continue
 
             issues = _collect_issues(entry)
+            model_rejected = any(
+                not issue.repairable
+                and (issue.evidence or {}).get("pause_state") == "PAUSED_EXTERNAL"
+                for issue in issues
+            )
+            if model_rejected:
+                entry.repair_level = "L6"
+                entry.fallback_reason = "视频模型明确拒绝，已排除自动修复与付费重试"
+                continue
             # 更新 fatal 计数
             if any(is_fatal(i) for i in issues):
                 entry.fatal_repeat_count += 1

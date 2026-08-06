@@ -211,7 +211,11 @@ def route(
             is_paid=level != "L0",
         )
 
-    non_repairable = [issue for issue in normalized if not issue.repairable]
+    non_repairable = [
+        issue for issue in normalized
+        if not issue.repairable
+        and (issue.evidence or {}).get("pause_state")
+    ]
     if non_repairable:
         codes = [issue.code for issue in non_repairable]
         pause_state = next(

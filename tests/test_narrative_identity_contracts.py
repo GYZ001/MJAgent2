@@ -172,6 +172,21 @@ def test_resolver_handles_named_transient_collective_and_offscreen_by_policy() -
         resolver.resolve("井下回声", usage="visual")
 
 
+def test_keyframe_contract_uses_text_verification_for_contextual_identity() -> None:
+    contract = keyframe_visual_contract(
+        _shot(characters=["云吞七号"], characters_visible=["云吞七号"]),
+        _bible(),
+        screenplay=_screenplay(),
+    )
+
+    verification = contract["identity_verification"]["云吞七号"]
+    assert verification["mode"] == "text_contract"
+    assert verification["visual_policy"] == "contextual"
+    assert verification["visual_canonical"] == (
+        "浅褐短袍，素面木簪，面容普通且不抢主体"
+    )
+
+
 def test_bible_identity_overrides_redundant_model_identity_contract() -> None:
     screenplay = _screenplay()
     screenplay.narrative_plan.identity_contracts.append(

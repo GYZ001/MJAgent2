@@ -121,6 +121,29 @@ def test_issues_from_qa_and_job_and_enqueue():
     ))
 
 
+def test_structured_model_rejection_is_non_repairable_and_never_retried() -> None:
+    issues = issues_from_job_failure(
+        {
+            "id": "job-rejected",
+            "shot_id": "shot-rejected",
+            "status": "failed",
+            "reason_code": "ANY_FUTURE_MODEL_REJECTION",
+            "provider_create_state": "model_rejected",
+            "error": "provider rejected this input",
+        },
+        None,
+        shot_no=3,
+    )
+
+    assert len(issues) == 1
+    assert issues[0].code == "VIDEO_PROVIDER_MODEL_REJECTED"
+    assert issues[0].repairable is False
+    plan = route(issues)
+    assert plan.is_paid is False
+    assert plan.strategy == "handoff_human"
+    assert plan.pause_state == "PAUSED_EXTERNAL"
+
+
 def test_repair_router_levels_and_upgrade():
     plan = route([
         Issue(
