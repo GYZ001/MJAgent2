@@ -8,8 +8,6 @@ from typing import Any
 
 from app.renderability import (
     PREFERRED_SHOT_DURATION_S,
-    SHOT_HARD_MAX,
-    SPINE_BEATS_MAX,
     SPINE_BEATS_MIN,
     find_overdetail_hits,
 )

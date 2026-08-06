@@ -34,6 +34,8 @@ _NARRATIVE_PRESENTATION_EDIT_FIELDS = frozenset({
     "scene_setting", "characters", "action_desc", "first_frame_desc",
     "last_frame_desc", "source_excerpt", "dialogues", "audio_timeline",
     "transition", "camera_angle", "spatial_anchor", "risk_tags",
+    "context_requirement_ids", "resulting_change", "readability_focus",
+    "camera_motivation", "repeat_of_shot_id", "repeat_gain",
 })
 
 
@@ -1163,6 +1165,84 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
     return (persisted_total, to_total, reason)
 
 
+async def _prepare_storyboard_assets_background(episode_id: str) -> None:
+    """Fill portrait/scene assets without blocking screenplay-to-storyboard text work."""
+    conn = get_conn()
+    ep = conn.execute(
+        "SELECT * FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    if not ep or not ep["screenplay_json"]:
+        return
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
+    ).fetchone()
+    bible = _project_bible_or_placeholder(project)
+    screenplay = _load_screenplay(ep)
+    if screenplay is None:
+        return
+    try:
+        from app.portraits import ensure_cards_for_screenplay
+
+        portrait_result = await ensure_cards_for_screenplay(
+            ep["project_id"],
+            ep["episode_no"],
+            screenplay,
+            bible,
+        )
+        if portrait_result.get("blocking_errors"):
+            raise StageError(
+                "人物资产准备",
+                list(portrait_result["blocking_errors"]),
+            )
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
+        ).fetchone()
+        bible = _project_bible_or_placeholder(project)
+
+        from app.scenes import ensure_scenes_for_storyboard
+
+        scene_result = await ensure_scenes_for_storyboard(
+            ep["project_id"],
+            ep["episode_no"],
+            screenplay,
+            bible,
+        )
+        if scene_result.get("blocking_errors"):
+            raise StageError(
+                "场景资产准备",
+                list(scene_result["blocking_errors"]),
+            )
+        conn.execute(
+            "UPDATE episodes SET storyboard_warning=NULL WHERE id=? "
+            "AND storyboard_warning LIKE '资产异步准备:%'",
+            (episode_id,),
+        )
+        conn.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - text work remains independently recoverable
+        public = errors.record_and_format(
+            exc,
+            action="storyboard_assets_background",
+            context={
+                "episode_id": episode_id,
+                "project_id": ep["project_id"],
+            },
+        )
+        conn.execute(
+            "UPDATE episodes SET storyboard_warning=? WHERE id=?",
+            (
+                (
+                    "资产异步准备: 人物或场景参考资产尚未完整就绪；"
+                    "分镜文本不受影响，视频提交前会继续补齐。"
+                    + public
+                )[:800],
+                episode_id,
+            ),
+        )
+        conn.commit()
+
+
 async def _storyboard_task(
     episode_id: str,
     *,
@@ -1429,95 +1509,20 @@ async def _storyboard_task(
         conn.commit()
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
-        # 定妆照按集反应式维护（在分镜展开前）
-        _preflight_event(
-            "STORYBOARD_PREFLIGHT_PORTRAITS_STARTED",
-            "开始预检人物定妆：检查外观漂移与本集新增角色",
-        )
-        from app.portraits import ensure_cards_for_screenplay
-        disc = await ensure_cards_for_screenplay(
-            ep["project_id"], ep["episode_no"], screenplay, bible,
-        )
-        redrawn_names = [item.get("name") for item in (disc.get("redrawn") or []) if item.get("name")]
-        added_names = [item.get("name") for item in (disc.get("added") or []) if item.get("name")]
-        if redrawn_names or added_names:
-            summary_parts: list[str] = []
-            if added_names:
-                summary_parts.append(f"新增定妆 {len(added_names)} 位（{'、'.join(added_names)}）")
-            if redrawn_names:
-                summary_parts.append(f"漂移重绘 {len(redrawn_names)} 位（{'、'.join(redrawn_names)}）")
-            summary = "；".join(summary_parts)
-        else:
-            summary = "无角色需要重绘或新增"
-        _preflight_event(
-            "STORYBOARD_PREFLIGHT_PORTRAITS_FINISHED",
-            f"人物定妆预检完成：{summary}",
-            payload={"added": added_names, "redrawn": redrawn_names,
-                     "warnings": len(disc.get("errors") or [])},
-        )
-        if disc.get("blocking_errors"):
-            raise StageError("新人物发现", list(disc["blocking_errors"]))
-        for warning in disc.get("errors") or []:
-            errors.log_error(
-                None,
-                action="storyboard_character_maintenance_warning",
-                context={
-                    "project_id": ep["project_id"],
-                    "episode_id": episode_id,
-                    "episode_no": ep["episode_no"],
-                },
-                message=warning,
+        # Text identities were hard-gated during screenplay production. Image
+        # packages now start immediately but no longer serialize storyboard text.
+        if not task_registry.active("storyboard_assets", episode_id):
+            task_registry.spawn(
+                "storyboard_assets",
+                episode_id,
+                _prepare_storyboard_assets_background(episode_id),
+                project_id=ep["project_id"],
             )
-        if disc.get("added") or disc.get("redrawn"):
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-            bible = _project_bible_or_placeholder(p)
         _preflight_event(
-            "STORYBOARD_PREFLIGHT_SCENES_STARTED",
-            "开始预检场景：自动建库并等待场景图落盘",
+            "STORYBOARD_ASSETS_SCHEDULED",
+            "人物与场景资产已并行准备；分镜文本立即继续",
+            payload={"blocking": False},
         )
-        from app.scenes import ensure_scenes_for_storyboard
-        sdisc = await ensure_scenes_for_storyboard(
-            ep["project_id"], ep["episode_no"], screenplay, bible,
-        )
-        sc_added_names = [item.get("name") for item in (sdisc.get("added") or []) if item.get("name")]
-        sc_evolved_names = [item.get("name") for item in (sdisc.get("evolved") or []) if item.get("name")]
-        if sc_added_names or sc_evolved_names:
-            summary_parts: list[str] = []
-            if sc_added_names:
-                summary_parts.append(f"新建场景 {len(sc_added_names)} 个（{'、'.join(sc_added_names)}）")
-            if sc_evolved_names:
-                summary_parts.append(f"状态演进 {len(sc_evolved_names)} 个（{'、'.join(sc_evolved_names)}）")
-            scene_summary = "；".join(summary_parts)
-        else:
-            scene_summary = "本集无新场景，也未发生场景永久变化"
-        _preflight_event(
-            "STORYBOARD_PREFLIGHT_SCENES_FINISHED",
-            f"场景预检完成：{scene_summary}",
-            payload={"added": sc_added_names, "evolved": sc_evolved_names,
-                     "warnings": len(sdisc.get("errors") or [])},
-        )
-        if sdisc.get("blocking_errors"):
-            raise StageError(
-                "场景图准备",
-                [
-                    "相关场景图仍在自动准备，未使用其它场景替代；可稍后继续分镜",
-                    *list(sdisc["blocking_errors"]),
-                ],
-            )
-        for warning in sdisc.get("errors") or []:
-            errors.log_error(
-                None,
-                action="storyboard_scene_maintenance_warning",
-                context={
-                    "project_id": ep["project_id"],
-                    "episode_id": episode_id,
-                    "episode_no": ep["episode_no"],
-                },
-                message=warning,
-            )
-        # 场景自动建库/出图会推进 bible 版本；分镜 prompt 必须使用最新本集场景集合。
-        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = _project_bible_or_placeholder(p)
 
         # 恢复旧 checkpoint 时先把模型产生的引号漂移/拼接式证据收敛为授权原文中的
         # 连续片段。严格匹配不足的内容保持未解决，仍由确认门禁拦截。
@@ -1542,7 +1547,7 @@ async def _storyboard_task(
 
         _preflight_event(
             "STORYBOARD_PREFLIGHT_FINISHED",
-            "分镜前置资产就绪，交由分镜 Supervisor 展开生成",
+            "剧本身份合同已就绪，资产异步准备，交由分镜 Supervisor 展开生成",
         )
 
         # 集级 Supervisor：大纲 → 逐镜 → 整集校验 → 修复，完成后等待人工确认。
@@ -4294,7 +4299,9 @@ async def edit_shot(shot_id: str, body: dict):
         "required_text", "continuity_state_in", "continuity_state_out",
         "reference_roles", "do_not_repeat", "risk_tags",
         "prompt_contract_version", "legacy_unvalidated", "camera_angle",
-        "spatial_anchor", "is_final",
+        "spatial_anchor", "is_final", "context_requirement_ids",
+        "resulting_change", "readability_focus", "camera_motivation",
+        "repeat_of_shot_id", "repeat_gain",
     )
     for key in editable_keys:
         if key in body:

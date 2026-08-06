@@ -1493,6 +1493,8 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         f"{render_shot_size}；{camera_angle}；{render_camera_move}"
         + (f"。{scale_hint}" if scale_hint else "")
     )
+    if (shot.camera_motivation or "").strip():
+        camera_line += f"。摄影意图：{shot.camera_motivation.strip()}"
     if dialogue_focus:
         boundary_camera_prefix = "完成首帧边界的连续运镜后，" if first_last_boundary else ""
         camera_line += (

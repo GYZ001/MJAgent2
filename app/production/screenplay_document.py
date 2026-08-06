@@ -21,6 +21,7 @@ from app.schemas import (
     NarrativeContinuityPlan,
     PlotSpine,
     ScriptScene,
+    SourceCoverageDecision,
     StoryEvent,
     VoiceCanonical,
 )
@@ -51,6 +52,9 @@ class SceneBlockNode(BaseModel):
     conflict: str = ""
     turn: str = ""
     source_basis: str = ""
+    entry_state: str = ""
+    exit_state: str = ""
+    context_requirements: list[str] = Field(default_factory=list)
     action_blocks: list[ActionBlockNode] = Field(default_factory=list)
     dialogue_turns: list[DialogueTurnNode] = Field(default_factory=list)
 
@@ -92,6 +96,7 @@ class ScreenplayDocument(BaseModel):
     # 因此 EpisodeScreenplay <-> ScreenplayDocument 必须完整往返它。
     narrative_plan: NarrativeContinuityPlan | None = None
     plot_spine: PlotSpine | None = None
+    source_coverage: list[SourceCoverageDecision] = Field(default_factory=list)
     scene_blocks: list[SceneBlockNode] = Field(default_factory=list)
     story_events: list[StoryEvent] = Field(default_factory=list)
     information_ledger: list[InformationItem] = Field(default_factory=list)
@@ -142,6 +147,7 @@ def screenplay_to_document(script: EpisodeScreenplay) -> ScreenplayDocument:
             else None
         ),
         plot_spine=script.plot_spine,
+        source_coverage=list(script.source_coverage or []),
         scene_blocks=scene_blocks,
         story_events=list(script.events or []),
         information_ledger=list(script.information_ledger or []),
@@ -164,6 +170,9 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
             conflict=block.conflict,
             turn=block.turn,
             source_basis=block.source_basis,
+            entry_state=block.entry_state,
+            exit_state=block.exit_state,
+            context_requirements=list(block.context_requirements),
         )
         for block in rederived.scene_blocks
     ]
@@ -185,6 +194,7 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
         dialogue_chains=list(rederived.dialogue_chains),
         key_plot_points=list(meta.key_plot_points),
         plot_spine=rederived.plot_spine,
+        source_coverage=list(rederived.source_coverage),
         scene_outline=scene_outline,
         full_script_text=full_text,
         character_state_changes=list(meta.character_state_changes),
@@ -1111,6 +1121,9 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
                 conflict=scene.conflict or "",
                 turn=scene.turn or "",
                 source_basis=scene.source_basis or "",
+                entry_state=scene.entry_state or "",
+                exit_state=scene.exit_state or "",
+                context_requirements=list(scene.context_requirements or []),
                 action_blocks=actions,
                 dialogue_turns=turns,
             ))

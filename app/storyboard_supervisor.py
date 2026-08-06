@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -1763,6 +1764,7 @@ async def run_storyboard_supervisor(
         prefer_default_shot_durations,
         relieve_spoken_overflow,
         storyboard_shot_count_range,
+        validate_storyboard_direction_contract,
         validate_storyboard_preserves_key_content,
     )
     from app.domain.storyboard_ops import (
@@ -1861,25 +1863,17 @@ async def run_storyboard_supervisor(
     )
 
     if not preflight_done:
-        from app.portraits import ensure_cards_for_screenplay
-        character_result = await ensure_cards_for_screenplay(
-            ep["project_id"], ep["episode_no"], screenplay, bible,
-        )
-        if character_result.get("blocking_errors"):
-            raise StageError("人物图准备", list(character_result["blocking_errors"]))
-        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = _project_bible_or_placeholder(p)
-        from app.scenes import ensure_scenes_for_storyboard
-        scene_result = await ensure_scenes_for_storyboard(
-            ep["project_id"], ep["episode_no"], screenplay, bible,
-        )
-        if scene_result.get("blocking_errors"):
-            raise StageError(
-                "场景图准备",
-                ["相关场景图仍在自动准备，未使用其它场景替代", *scene_result["blocking_errors"]],
+        # Direct/recovery callers may enter without the REST wrapper. Text
+        # generation still proceeds from the published identity contract;
+        # portrait/scene files are a video-stage dependency, not a text gate.
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "STORYBOARD_ASSET_WAIT_SKIPPED",
+                "info",
+                "未等待人物/场景图片落盘，分镜文本继续生成",
+                payload={"episode_id": episode_id},
             )
-        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = _project_bible_or_placeholder(p)
 
     cp = load_latest_checkpoint(episode_id) if resume else None
     if cp is None:
@@ -2371,7 +2365,188 @@ async def run_storyboard_supervisor(
                 )
             save_checkpoint(cp, run_id=run_id)
 
-        # ---- 逐镜 ----
+        # ---- 按场景批量生成（新合同）----
+        scene_pack_failure: BaseException | None = None
+        scene_pack_mode = bool(
+            not narrative_authority
+            and outline is not None
+            and outline.scene_contexts
+            and not _repair_is_pending(cp)
+        )
+        if scene_pack_mode:
+            scene_ends = {
+                max(
+                    int(brief.shot_no)
+                    for brief in outline.shots
+                    if brief.scene_id == context.scene_id
+                )
+                for context in outline.scene_contexts
+                if any(
+                    brief.scene_id == context.scene_id
+                    for brief in outline.shots
+                )
+            }
+            # A scene pack is committed atomically. Legacy checkpoints that end
+            # inside a scene continue through the old per-shot compatibility path.
+            scene_pack_mode = len(completed) == 0 or len(completed) in scene_ends
+
+        if scene_pack_mode:
+            pending_contexts = [
+                context
+                for context in outline.scene_contexts
+                if any(
+                    int(brief.shot_no) > len(completed)
+                    for brief in outline.shots
+                    if brief.scene_id == context.scene_id
+                )
+                and context.scene_id not in cp.scene_pack_candidates
+            ]
+            if pending_contexts:
+                generated = await asyncio.gather(
+                    *[
+                        generate_storyboard_scene_pack(
+                            ep_data,
+                            source_text,
+                            bible,
+                            screenplay,
+                            outline,
+                            context,
+                        )
+                        for context in pending_contexts
+                    ],
+                    return_exceptions=True,
+                )
+                for context, result in zip(pending_contexts, generated):
+                    if isinstance(result, BaseException):
+                        if scene_pack_failure is None:
+                            scene_pack_failure = result
+                        continue
+                    cp.scene_pack_candidates[context.scene_id] = (
+                        result.model_dump(mode="json")
+                    )
+                save_checkpoint(cp, run_id=run_id)
+
+            from app.validators import (
+                normalize_dialogue_focus_offscreen_mentions,
+            )
+
+            for context in outline.scene_contexts:
+                scene_briefs = [
+                    brief for brief in outline.shots
+                    if brief.scene_id == context.scene_id
+                ]
+                if not scene_briefs:
+                    continue
+                scene_start = min(int(brief.shot_no) for brief in scene_briefs)
+                scene_end = max(int(brief.shot_no) for brief in scene_briefs)
+                if scene_end <= len(completed):
+                    cp.scene_pack_candidates.pop(context.scene_id, None)
+                    continue
+                if scene_start != len(completed) + 1:
+                    break
+                raw_pack = cp.scene_pack_candidates.get(context.scene_id)
+                if raw_pack is None:
+                    break
+                pack = StoryboardScenePack.model_validate(raw_pack)
+                candidate_board = Storyboard(
+                    episode_no=ep_data["episode_no"],
+                    shots=[*completed, *pack.shots],
+                )
+                normalize_continuity(candidate_board)
+                character_changes = normalize_offbible_characters(
+                    candidate_board,
+                    bible,
+                )
+                stripped = sorted({
+                    str(change.get("stripped") or "").strip()
+                    for change in character_changes
+                    if str(change.get("stripped") or "").strip()
+                })
+                if stripped:
+                    scene_pack_failure = StageError(
+                        "场景分镜人物合同",
+                        [
+                            "场景包残留未解析人物身份："
+                            + "、".join(stripped)
+                        ],
+                    )
+                    break
+                normalize_dialogue_focus_offscreen_mentions(
+                    candidate_board,
+                    bible,
+                )
+                relieve_spoken_overflow(candidate_board)
+                prefer_default_shot_durations(candidate_board)
+                normalize_transition_visuals(candidate_board)
+                expected_screenplay_artifact_id = cp.input_versions.get(
+                    "screenplay_artifact_id"
+                )
+                _sync_storyboard_shot_timing(
+                    conn,
+                    episode_id,
+                    candidate_board,
+                    expected_screenplay_artifact_id,
+                )
+                for shot in candidate_board.shots[len(completed):]:
+                    _insert_storyboard_shot(
+                        conn,
+                        episode_id,
+                        screenplay,
+                        shot,
+                        expected_screenplay_artifact_id,
+                    )
+                conn.execute(
+                    "UPDATE episodes SET status='scripting',script_error=NULL WHERE id=?",
+                    (episode_id,),
+                )
+                conn.commit()
+                completed = _reload_completed()
+                cp.scene_pack_candidates.pop(context.scene_id, None)
+                cp.phase = "GENERATING_SHOTS"
+                cp.expected_total = len(outline.shots)
+                cp.next_shot_no = len(completed) + 1
+                save_checkpoint(cp, run_id=run_id)
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id,
+                        "SCENE_PACK_COMMITTED",
+                        "info",
+                        f"{context.scene_id} 已原子提交第 {scene_start}~{scene_end} 镜",
+                        payload={
+                            "scene_id": context.scene_id,
+                            "scene_no": context.scene_no,
+                            "shot_start": scene_start,
+                            "shot_end": scene_end,
+                        },
+                    )
+
+            if scene_pack_failure is not None:
+                if _is_retryable_external_error(scene_pack_failure):
+                    return _pause_for_external_error(
+                        cp,
+                        conn,
+                        episode_id,
+                        scene_pack_failure,
+                        run_id=run_id,
+                        action="storyboard_scene_pack_provider",
+                    )
+                cp.phase = "WAITING_HUMAN"
+                cp.outcome = "WAITING_RETRY_SCENE_PACK"
+                save_checkpoint(cp, run_id=run_id)
+                conn.execute(
+                    "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
+                    (
+                        (
+                            "场景分镜包生成未完成，已提交场景和并行候选均已保留："
+                            + str(scene_pack_failure)
+                        )[:800],
+                        episode_id,
+                    ),
+                )
+                conn.commit()
+                return cp
+
+        # ---- 逐镜兼容/修复路径 ----
         if _repair_is_pending(cp):
             completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
         cp.phase = "GENERATING_SHOTS"
@@ -2792,17 +2967,23 @@ async def run_storyboard_supervisor(
             issue for issue in (evaluation.issues or [])
             if _storyboard_warning_requires_auto_repair(issue)
         ]
-        # QA Score Only: structural completeness was checked above. Content,
-        # continuity and narrative findings remain visible but never route
-        # another paid repair generation.
-        runtime_blocking_errors: list[str] = []
+        # The broad aesthetic QA remains score-only. Director-scene invariants
+        # are structural: missing context, an empty-purpose shot, or an
+        # unreadable action/emotion camera plan cannot be published.
+        runtime_blocking_errors = validate_storyboard_direction_contract(
+            evaluation.board,
+            outline,
+        )
         if runtime_blocking_errors:
             repair_warning_messages = [
                 str(getattr(issue, "message", "") or "")
                 for issue in repair_required_warnings
                 if str(getattr(issue, "message", "") or "").strip()
             ]
-            repair_inputs = [*evaluation.errors, *repair_warning_messages]
+            repair_inputs = [
+                *runtime_blocking_errors,
+                *repair_warning_messages,
+            ]
             if run_id:
                 evidence_repository.append_event(
                     run_id, "EPISODE_VALIDATION_FAILED", "warning",

@@ -27,7 +27,7 @@ from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenplay,
                          SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline,
                          StoryboardOutlineShot, StoryboardSceneContext,
-                         StoryboardContextRequirement, StoryboardScenePack,
+                         StoryboardScenePack,
                          TRANSITIONS,
                          extract_json, normalize_screenplay_json_shape,
                          schema_errors)
@@ -57,10 +57,9 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             validate_storyboard_preserves_key_content,
                             validate_storyboard_soundtrack)
 from app.renderability import (
+    ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
     ACTION_DESC_TARGET_MIN,
-    KEY_PLOT_POINTS_MAX,
-    KEY_PLOT_POINTS_MIN,
     PREFERRED_SHOT_DURATION_S,
     SHOT_HARD_MAX,
     renderability_prompt_block,
@@ -2621,7 +2620,7 @@ def _storyboard_progress_block(completed_shots: list[Shot]) -> str:
     used = sum(shot.duration_s for shot in completed_shots)
     return (
         f"\n【分镜进度】已通过 {len(completed_shots)} 镜、累计 {used}s；"
-        f"镜头数由完整覆盖剧情决定，技术硬上限 {SHOT_HARD_MAX} 镜。\n"
+        "镜头数由完整剧情与上下文交付决定，不设数量上限。\n"
         f"- 本镜 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**；仅当口播或连续动作确实放不下才取 "
         f"{PREFERRED_SHOT_DURATION_S + 1}~{config.VIDEO_DURATION_MAX_S}s，且须接受后续 AI 时长审核。\n"
         "- 继续按剧本主线推进，覆盖 must_keep spine 与主线台词后即可设置 is_final=true。\n"
@@ -3048,7 +3047,7 @@ async def _generate_episode_director_outline(
             outline,
             screenplay,
             int(episode.get("target_duration_s") or 0),
-            bible=bible,
+            bible=None,
         )
         contexts = outline.scene_contexts or []
         expected_scene_nos = list(range(1, len(screenplay.scene_outline) + 1))
@@ -3245,7 +3244,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》规划【分镜大纲】。
 
 你现在做的是全局节奏规划：把下方【完整剧本 / plot_spine】铺成有序的 N 条主线镜头（1 条 must_keep spine 通常约 1~2 镜）。
-镜头数由完整覆盖主线决定，仅保留 {SHOT_HARD_MAX} 镜技术硬上限；禁止为无关细节无限拆碎。
+镜头数由完整覆盖主线和场景上下文决定，不设数量上限；禁止无作用重复镜头。
 只覆盖 must_keep spine；drop_list 禁止安排。不写景别/运镜/首尾帧/台词原文。
 
 {renderability_prompt_block()}
@@ -3274,7 +3273,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 {scene_library_block}
 {narrative_shot_contract}
 硬性约束：
-1. 镜头数由完整覆盖主线决定，技术硬上限 {SHOT_HARD_MAX}；shot_no 从 1 连续递增。大纲 duration_s **默认 5**；仅必要时取 6~10。同 spine 事件通常 1~2 镜；禁止为无关细节无限拆镜。
+1. 镜头数由完整覆盖主线决定且不设上限；shot_no 从 1 连续递增。大纲 duration_s **默认 5**，仅必要时取 6~10；每镜必须有独立作用。
 2. 每条保留 beat/covers 兼容旧流程，同时必须填写上方叙事任务合同的 shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、capacity_budget、shot_contribution、逐先验 audience_state_paths、事实状态差、动作/阶段完成账本、readability_window_ids 与 boundary。state_in/primary_action/state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast 继续保留。beat 只作为一句话摘要，不得替代结构化任务。
 3. 相邻两镜 state_out -> state_in 与每个观众先验的 audience_state_out_target_id -> audience_state_in_id 都必须精确承接。primary_action_id 非空时必须唯一归属且不同于 completed_before_action_ids；为 null 时仍必须用 shot_contribution 证明新的叙事功能。
 4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一镜必保留口播字数不得超过该镜 duration_s 容量（10s≤{config.MAX_SPOKEN_CHARS_PER_SHOT}字），超限必须拆到相邻镜。
@@ -3350,7 +3349,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             narrative_errors: list[str] = []
             if not o.shots:
                 narrative_errors.append("[OUTLINE_EMPTY] 分镜大纲不能为空")
-            if len(o.shots) > SHOT_HARD_MAX:
+            if SHOT_HARD_MAX is not None and len(o.shots) > SHOT_HARD_MAX:
                 narrative_errors.append(
                     f"[OUTLINE_HARD_LIMIT] 分镜数 {len(o.shots)} 超过技术上限 {SHOT_HARD_MAX}"
                 )
@@ -3726,6 +3725,22 @@ async def generate_storyboard_scene_pack(
             "场景分镜",
             [f"{scene_context.scene_id} 没有导演规划镜头"],
         )
+    planning_bible = bible.model_copy(deep=True)
+    if (
+        scene_context.scene_name
+        and not any(
+            scene.name == scene_context.scene_name
+            for scene in planning_bible.scenes
+        )
+    ):
+        planning_bible.scenes.append(Scene(
+            name=scene_context.scene_name,
+            scene_canonical=(
+                f"{scene_context.scene_name}，{scene_context.scene_time or '本场时间'}，"
+                "空间结构、人物站位与光线服从本场剧本上下文，保持统一画风"
+            ),
+            first_episode=int(episode.get("episode_no") or 1),
+        ))
     shot_nos = [int(item.shot_no) for item in briefs]
     hints = [
         scene_context.scene_name,
@@ -3761,7 +3776,7 @@ async def generate_storyboard_scene_pack(
 {source_window}
 
 人物谱与统一画风：
-{bible.model_dump_json()}
+{planning_bible.model_dump_json()}
 
 导演规则：
 1. 每镜只完成规划中的一个连续动作或观看任务，不得改写 purpose、交付项和结果方向。
@@ -3877,12 +3892,23 @@ async def generate_storyboard_scene_pack(
                 error
                 for error in validate_storyboard(
                     temporary,
-                    bible,
+                    planning_bible,
                     int(episode.get("target_duration_s") or 0),
                     screenplay=screenplay,
                 )
                 if not error.startswith("shot_no 必须")
             )
+            errors.extend(validate_storyboard_direction_contract(
+                Storyboard(
+                    episode_no=episode["episode_no"],
+                    shots=pack.shots,
+                ),
+                StoryboardOutline(
+                    episode_no=episode["episode_no"],
+                    shots=briefs,
+                    scene_contexts=[scene_context],
+                ),
+            ))
         return list(dict.fromkeys(errors))
 
     loop = AgentLoop(
@@ -4342,7 +4368,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 {brief_block}{budget_block}{feedback_block}{repair_feedback_block}
 当前镜头约束：
 1. 只输出第 {shot_no} 镜，shot.shot_no 必须等于 {shot_no}。
-2. 本集镜头数由完整覆盖剧情决定（技术硬上限 {SHOT_HARD_MAX}）；当前按大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条、推进到新剧情，不得停留或复述已覆盖内容，也不得发明大纲/spine 之外的幻觉镜头。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。duration_s 默认 {PREFERRED_SHOT_DURATION_S}。
+2. 本集镜头数不设上限；当前按大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条并产生独立作用，不得停留、复述或发明大纲外内容。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。duration_s 默认 {PREFERRED_SHOT_DURATION_S}。
 2b. 动作容量必须与视频生成门禁一致：{shot_action_capacity_rule}
 2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。只能补全可拍表达，不得重新分配 ID 归属。
 2d. primary_action_id 可为 null，但 shot_contribution 必须非空；支撑/反应/建立/吸收镜必须明确交付证据、观众状态差、情绪、时空定向或戏剧压力中至少一项，不得借 null 产生无功能空镜。
@@ -4629,7 +4655,7 @@ def _storyboard_output_contract(
         physical_contract = "25. 动作符合物理；复杂手势改写成更稳的简单动作。"
     return f"""硬性输出规范（以下规则由代码校验，违反会被退回重写；请首轮直接满足）：
 1. episode_no 必须等于 {episode['episode_no']}；shots 按剧情顺序排列，shot_no 必须从 1 开始连续递增，不能跳号、重复或乱序。
-2. 整集镜头数由完整覆盖 must_keep spine 与主线台词决定；仅保留 {SHOT_HARD_MAX} 镜技术硬上限防止失控重复生成。
+2. 整集镜头数由完整覆盖 must_keep spine、上下文与主线台词决定，不设数量上限；重复由每镜作用门禁拦截。
 3. 复杂动作可拆，但优先删减超纲细节而非无限拆镜；禁止为碎镜而合并删主线。
 4. duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**；只能取整数 {duration_options} 秒。
    - 【选择原则】绝大多数镜用 {PREFERRED_SHOT_DURATION_S}s。仅当口播超过 {PREFERRED_SHOT_DURATION_S}s 预算、或同一连续动作确需铺陈时，才取 6~10s；超过 5s 的镜会进入 AI 时长审核。禁止无内容拉长。
@@ -4678,7 +4704,7 @@ def _storyboard_preflight_contract(
     min_shots, max_shots = storyboard_shot_count_range(target)
     if narrative_authority:
         return f"""首轮输出前必须逐镜预检（叙事权威路径）：
-1. 镜头数由完整交付因果图、target delta 与 assimilation task 决定，技术硬上限 {SHOT_HARD_MAX}。
+1. 镜头数由完整交付因果图、target delta 与 assimilation task 决定，不设数量上限。
 2. 动作容量只读取 ShotTask.action_phase_ids 实际分配的 AtomicAction phases；不设固定阶段个数阈值，capacity_budget.action_phase_s 不得低于这些阶段的 estimated_min_s 总和、全部观看任务预算总和不得超过 duration_s。动作用词、同义词与题材词不参与判定。
 3. 动作首阶段镜的 precondition_fact_ids 必须在 planned_state_in；末阶段镜的 effects_add/remove 必须在本镜状态差；completion_condition 必须在末阶段镜的 last_frame/observed_state_out 可核对。中间阶段不得冒充完整动作结果。
 4. 若超容，由 AI 在 AtomicAction.splittable_boundaries 声明的边界提出新的相邻 ShotTask 阶段分配；必须保持事件拓扑、状态方程、action owner、阶段顺序、观众路径、deadline 与可读窗口。无合法边界时上溯重构动作与任务，禁止文本分隔器自动拆镜。
@@ -4691,7 +4717,7 @@ def _storyboard_preflight_contract(
 11. 在输出前对本镜执行状态方程、阶段时间、动作防重演、观众状态交接与窗口截止时间的联合校验。"""
     hints = "、".join(TRANSITION_HINTS[:12])
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
-1. 镜头数由完整覆盖剧情决定（技术硬上限 {SHOT_HARD_MAX}）；每条 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**，仅当口播或连续动作需要时取到 {config.VIDEO_DURATION_MAX_S}s。动作容量与视频门禁一致：5~6s≤2 个顺序节拍，7~10s≤3 个；超限优先在同 spine 内拆为前后相邻两镜，禁止为无关细节无限拆碎。
+1. 镜头数由完整覆盖剧情与上下文决定，不设数量上限；每条 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**，仅当口播或连续动作需要时取到 {config.VIDEO_DURATION_MAX_S}s。动作容量与视频门禁一致：5~6s≤2 个顺序节拍，7~10s≤3 个；超限在自然动作边界拆镜，每镜必须有独立作用。
 2. 第 1 镜 continuity_mode 不得为 action_continuation；第 2 镜开始逐条和上一镜比较 state_out、scene_name、scene_time 与角色可见状态。
 3. 如果本镜 scene_name 与 scene_time 均与上一镜相同：
    - continuity_mode 必须是 same_scene_cut / reaction_cut / reverse_angle / insert_detail / action_continuation 之一；
