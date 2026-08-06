@@ -2346,6 +2346,77 @@ def test_empty_dialogue_chain_requires_local_content_patch_not_rederive():
     assert plan_screenplay_patch(issue, script) == []
 
 
+def test_recall_decision_mismatch_uses_typed_local_patch():
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "setup_payoff_contracts": [{
+                "setup_payoff_id": "SP1",
+                "recall_needed": False,
+            }],
+        }),
+    )
+    issue = structured_issue(
+        code="SETUP_RECALL_DECISION_MISMATCH",
+        message=(
+            "[SETUP_RECALL_DECISION_MISMATCH] "
+            "SP1.recall_needed=False 与低分位记忆结果 True 不一致"
+        ),
+        subject="screenplay",
+        path="/setup_payoff_contracts/SP1",
+        stage="screenplay",
+    )
+
+    operations = plan_screenplay_patch(issue, script)
+
+    assert len(operations) == 1
+    assert operations[0].op == "replace_field"
+    assert operations[0].path == "recall_needed"
+    assert operations[0].value is True
+
+
+def test_missing_character_dramatic_state_uses_event_action_relations():
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    script = _minimal_script(
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_p",
+            "events": [{
+                "event_id": "E1",
+                "action_ids": ["A1"],
+                "proposition_ids": ["P1"],
+                "salience": 0.8,
+            }],
+            "atomic_actions": [{
+                "action_id": "A1",
+                "actor_ids": ["char-a"],
+                "semantic_intent": "Complete the declared action.",
+                "completion_condition": "The result is visible.",
+            }],
+        }),
+    )
+    issue = structured_issue(
+        code="CHARACTER_DRAMATIC_STATE_MISSING",
+        message=(
+            "[CHARACTER_DRAMATIC_STATE_MISSING] "
+            "E1/A1 的执行者 char-a 缺少目标/情绪/关系状态"
+        ),
+        subject="screenplay",
+        path="/nodes/E1",
+        stage="screenplay",
+    )
+
+    operations = plan_screenplay_patch(issue, script)
+
+    assert len(operations) == 1
+    assert operations[0].op == "create_node"
+    assert operations[0].target["collection"] == "character_states"
+    assert operations[0].value["character_id"] == "char-a"
+    assert operations[0].value["tactic"] == "Complete the declared action."
+
+
 def test_apply_screenplay_patch_cas_and_noop(monkeypatch):
     from app.evidence import repository as evidence_repository
     from app.production.patch import PatchOperation, PatchRequest, apply_screenplay_patch
