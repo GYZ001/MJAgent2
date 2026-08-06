@@ -103,6 +103,7 @@ _INDEXED_PATH_RE = re.compile(
     re.I,
 )
 _SCENE_INDEX_RE = re.compile(r"\b(scene_outline)\s*第\s*(\d+)\s*场", re.I)
+_ENTITY_REF_RE = re.compile(r"\b([A-Z][A-Z0-9_]*-\d+)\b")
 
 
 def _canonical_issue_identity(code: str, message: str) -> tuple[str, str]:
@@ -145,6 +146,10 @@ def _canonical_issue_identity(code: str, message: str) -> tuple[str, str]:
         path = indexed.group(1)
     elif scene_index:
         path = f"{scene_index.group(1)}[{max(0, int(scene_index.group(2)) - 1)}]"
+    else:
+        entity = _ENTITY_REF_RE.search(message)
+        if entity:
+            path = f"entity:{entity.group(1)}"
 
     # Keep the concrete path as issue identity, while normalizing volatile
     # counts in the rule text. Distinct nodes must never share repair history.

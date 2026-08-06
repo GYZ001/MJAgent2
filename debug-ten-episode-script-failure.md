@@ -104,3 +104,49 @@
 - Verification remains open. A ten-episode terminal-success run is not sufficient;
   every published episode must also prove zero production blockers and a correctly
   bound narrative authority.
+
+## Implemented Fixes
+- Bumped the screenplay contract to `4.0.0` and wired the complete
+  `narrative_plan` contract and schema into the Baseline prompt.
+- Removed the product duration maximum. User input is now a minimum pacing hint;
+  the persisted duration expands from spoken capacity, spine beats, and scene count.
+- Changed screenplay QA to a blocking `runtime_gate`. Completion certificates derive
+  blocker and must-fix counts from their immutable Evaluations and reject nonzero
+  counts; callers can no longer submit zero manually.
+- New contract output cannot downgrade to the legacy path by omitting
+  `narrative_plan`. Existing invalid certificates are quarantined during startup.
+- All production issues now enter bounded local Patch. The final Agent Loop failure
+  reports the newest structural regression before older candidate blockers.
+- Issue identity preserves exact node paths and array indexes. Validation points emit
+  typed codes for dialogue length/function/source evidence and source coverage links.
+- Current-source character discovery scans every bounded batch, not only the first
+  18,000 characters. Future canonical identity no longer rewrites the current
+  audience-visible label.
+- Bible JSON, version, and Artifact pointer advance through one CAS authority update.
+- Batch generation now creates a durable `screenplay_batch` parent Run, exposes
+  `queued` separately from `running`, supports live concurrency resize, and cancels
+  all selected Tasks before awaiting any one of them.
+- Run snapshots record pipeline, prompt, QA, provider, model, concurrency, and
+  unbounded-duration policy versions.
+- Provider metadata compaction always emits valid JSON. Recovery cache reuse requires
+  an explicit durable semantic operation ID.
+
+## Automated Verification
+- Backend: `1763 passed, 4 skipped`.
+- Frontend: `158 passed`.
+- Frontend production build: passed.
+- Added regressions for certificate-derived blockers, required narrative authority,
+  unbounded duration, exact Issue fingerprints, complete identity-source batching,
+  future-identity display preservation, valid metadata compaction, durable Batch, and
+  two-phase cancellation.
+
+## Post-Fix Runtime Verification
+- Backend process loaded contract `screenplay@4.0.0`.
+- Invalid v3 publications were removed from the active projection; episodes returned
+  to a non-ready state while historical Artifacts and Evaluations remained auditable.
+- Runtime provider metadata currently has zero invalid JSON rows.
+- Active manual verification Runs:
+  `run_0bdd4646c751` (episode 1) and `run_1a4643a470eb` (episode 2).
+- Durable Batch Run: `run_253043b9a14d`.
+- Queue evidence: two episodes are `running`; later episodes are explicitly `queued`.
+- Terminal Baseline/Repair/certificate evidence is pending.
