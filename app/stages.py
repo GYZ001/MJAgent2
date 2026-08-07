@@ -4073,6 +4073,7 @@ def _scene_pack_source_excerpt(
 
 def _scene_pack_task_fields(
     brief: StoryboardOutlineShot,
+    screenplay: EpisodeScreenplay,
 ) -> tuple[str, str, str]:
     valid_focuses = {
         "context", "action", "emotion", "dialogue", "evidence", "transition",
@@ -4092,11 +4093,21 @@ def _scene_pack_task_fields(
             focus = "evidence"
     contribution = brief.shot_contribution
     if brief.key_line_ids:
+        catalog = key_line_catalog(screenplay)
+        lines = [
+            _parse_key_line(
+                catalog.get(str(key_id or "").strip().upper(), "")
+            )[1]
+            for key_id in brief.key_line_ids
+        ]
+        delivered = "；".join(line for line in lines if line)
         derived_purpose = (
             "交付剧本关键台词 " + "、".join(brief.key_line_ids)
         )
         derived_change = (
-            "观众听清关键台词 " + "、".join(brief.key_line_ids)
+            f"观众听清「{delivered}」"
+            if delivered
+            else "观众听清关键台词 " + "、".join(brief.key_line_ids)
         )
     elif contribution and contribution.character_state_delta_ids:
         derived_purpose = (
@@ -4167,6 +4178,7 @@ def _hydrate_directed_scene_pack(
         brief = briefs[int(item.shot_no)]
         purpose, resulting_change, readability_focus = _scene_pack_task_fields(
             brief,
+            screenplay,
         )
         dialogues = _scene_pack_dialogues(
             brief,
@@ -4501,7 +4513,7 @@ async def generate_storyboard_scene_pack(
             ))
         # #region debug-point B,E:scene-pack-validation-scope
         try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/storyboard-semantic-outline-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","storyboard-semantic-outline-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"B,E","location":"app/stages.py:generate_storyboard_scene_pack._validate","msg":"[DEBUG] Scene pack validation scope","data":{"sceneId":scene_context.scene_id,"briefShotNos":[int(item.shot_no) for item in briefs],"errorCount":len(errors),"errors":[str(item)[:260] for item in errors[:20]]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/storyboard-semantic-outline-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","storyboard-semantic-outline-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"B,E","location":"app/stages.py:generate_storyboard_scene_pack._validate","msg":"[DEBUG] Scene pack validation scope","data":{"sceneId":scene_context.scene_id,"briefShotNos":[int(item.shot_no) for item in briefs],"errorCount":len(errors),"errors":[str(item)[:260] for item in errors[:20]]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
         except Exception:
             pass
         # #endregion

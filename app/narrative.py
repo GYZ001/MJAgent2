@@ -2236,7 +2236,12 @@ def validate_storyboard_narrative(
         }
         if not event_preconditions.issubset(planned_in):
             errors.append(f"[SHOT_EVENT_PRECONDITION_MISSING] {label} 未承接事件前置事实")
-        if not event_adds.issubset(delta_add) or not event_removes.issubset(delta_remove):
+        effective_event_removes = event_removes & planned_in
+        effective_event_adds = event_adds - planned_in - effective_event_removes
+        if (
+            not effective_event_adds.issubset(delta_add)
+            or not effective_event_removes.issubset(delta_remove)
+        ):
             errors.append(f"[SHOT_EVENT_EFFECT_MISSING] {label} 的计划状态变化未覆盖所声明事件效果")
         minimum_action_s = 0.0
         for action_id in bound_action_ids:
