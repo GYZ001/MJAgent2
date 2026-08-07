@@ -156,13 +156,23 @@ def normalize_narrative_storyboard_outline(
             key_number += 1
         chain_key_ids[chain.chain_id] = ids
     base_by_event: dict[str, Any] = {}
+    bases_by_event: defaultdict[str, list[Any]] = defaultdict(list)
     for shot in outline.shots:
         event_ids = list(shot.event_ids or [])
         if not event_ids and shot.story_event_id:
             event_ids = [shot.story_event_id]
-        for event_id in event_ids:
-            if event_id in events:
-                base_by_event.setdefault(event_id, shot)
+        owned_event_ids = sorted(
+            {
+                event_id
+                for event_id in event_ids
+                if event_id in events
+            },
+            key=lambda event_id: event_order[event_id],
+        )
+        if owned_event_ids:
+            event_id = owned_event_ids[0]
+            base_by_event.setdefault(event_id, shot)
+            bases_by_event[event_id].append(shot)
     required_events = [
         item.event_id
         for item in plan.events
@@ -172,10 +182,11 @@ def normalize_narrative_storyboard_outline(
         return []
 
     key_event: dict[str, str] = {}
-    for event_id, base in base_by_event.items():
-        for key_id in base.key_line_ids:
-            if key_id in key_line_meta:
-                key_event[key_id] = event_id
+    for event_id, bases in bases_by_event.items():
+        for base in bases:
+            for key_id in base.key_line_ids:
+                if key_id in key_line_meta:
+                    key_event[key_id] = event_id
     for key_ids in chain_key_ids.values():
         known_events = {
             key_event[key_id]
@@ -420,16 +431,28 @@ def normalize_narrative_storyboard_outline(
         base = base_by_event.get(event.event_id)
         if base is None:
             continue
+        event_bases = list(bases_by_event[event.event_id])
         event_key_ids = key_ids_by_event.get(event.event_id) or [
             key_id
-            for key_id in base.key_line_ids
+            for event_base in event_bases
+            for key_id in event_base.key_line_ids
             if key_id in key_line_meta
+        ]
+        existing_key_ids = {
+            key_id
+            for event_base in event_bases
+            for key_id in event_base.key_line_ids
+        }
+        missing_key_ids = [
+            key_id
+            for key_id in event_key_ids
+            if key_id not in existing_key_ids
         ]
         dialogue_groups: list[list[str]] = []
         current_group: list[str] = []
         current_chars = 0
         current_speaker = ""
-        for key_id in event_key_ids:
+        for key_id in missing_key_ids:
             speaker, line, _chain_id = key_line_meta[key_id]
             line_chars = len(
                 "".join(
@@ -499,6 +522,7 @@ def normalize_narrative_storyboard_outline(
                 > config.VIDEO_DURATION_MAX_S
             )
         )
+        event_nodes: list[tuple[str, str, Any]] = []
         if needs_support:
             support = base.model_copy(deep=True)
             support.primary_action_id = None
@@ -526,7 +550,14 @@ def normalize_narrative_storyboard_outline(
             support.state_out = support.primary_action
             support.key_line_ids = []
             support.audio_cast = []
-            nodes.append((event.event_id, "support", support))
+            event_nodes.append((event.event_id, "support", support))
+        for event_base in event_bases:
+            event_nodes.append((
+                event.event_id,
+                "dialogue" if event_base.key_line_ids else "main",
+                event_base,
+            ))
+        generated_dialogues: list[tuple[str, str, Any]] = []
         for group in dialogue_groups:
             dialogue = base.model_copy(deep=True)
             dialogue.primary_action_id = None
@@ -546,16 +577,31 @@ def normalize_narrative_storyboard_outline(
             )
             dialogue.beat = dialogue.primary_action
             dialogue.covers = dialogue.primary_action
-            nodes.append((event.event_id, "dialogue", dialogue))
-        main = base.model_copy(deep=True)
-        if dialogue_groups:
+            generated_dialogues.append(
+                (event.event_id, "dialogue", dialogue)
+            )
+        if generated_dialogues:
+            insert_at = next(
+                (
+                    index
+                    for index, (_event_id, role, _shot) in enumerate(
+                        event_nodes
+                    )
+                    if role == "main"
+                ),
+                len(event_nodes),
+            )
+            event_nodes[insert_at:insert_at] = generated_dialogues
+        if not any(role == "main" for _event_id, role, _shot in event_nodes):
+            main = base.model_copy(deep=True)
             main.key_line_ids = []
             main.audio_cast = []
             if not event.action_ids:
                 main.primary_action = "人物闭口呈现本事件完成后的可见反应与状态结果"
                 main.beat = main.primary_action
                 main.covers = main.primary_action
-        nodes.append((event.event_id, "main", main))
+            event_nodes.append((event.event_id, "main", main))
+        nodes.extend(event_nodes)
 
     for position, (_event_id, _role, shot) in enumerate(nodes, start=1):
         shot.shot_no = position
@@ -574,6 +620,7 @@ def normalize_narrative_storyboard_outline(
     }
 
     delta_owner_position: dict[str, int] = {}
+    evidence_owner_position: dict[str, int] = {}
     for event_id, delta_ids in deltas_by_event.items():
         positions = positions_by_event.get(event_id) or []
         if not positions:
@@ -588,6 +635,15 @@ def normalize_narrative_storyboard_outline(
         )
         for delta_id in delta_ids:
             delta_owner_position[delta_id] = support_position
+    for event_id, positions in positions_by_event.items():
+        evidence_owner_position[event_id] = next(
+            (
+                position
+                for position in positions
+                if nodes[position][1] == "support"
+            ),
+            positions[-1],
+        )
 
     task_owner_position: defaultdict[int, list[str]] = defaultdict(list)
     if nodes:
@@ -689,16 +745,7 @@ def normalize_narrative_storyboard_outline(
         ]
         evidence_ids = (
             event_evidence_ids
-            if (
-                is_support
-                or is_dialogue
-                or not any(
-                    item_role == "support"
-                    for item_event, item_role, _item_shot in nodes
-                    if item_event == event_id
-                )
-                or bool(action_ids)
-            )
+            if position == evidence_owner_position.get(event_id)
             else []
         )
         character_state_ids = (
@@ -711,6 +758,26 @@ def normalize_narrative_storyboard_outline(
             for prior_id in sorted(paths)
             if path_inputs[prior_id] != current_audience_state[prior_id]
         ]
+        existing_contribution = shot.shot_contribution
+        spatial_temporal_delta = (
+            dict(existing_contribution.spatial_temporal_delta)
+            if existing_contribution is not None
+            else {}
+        )
+        if (
+            not spatial_temporal_delta
+            and (
+                position == 0
+                or shot.scene_name
+                != normalized_shots[-1].scene_name
+                or shot.scene_time
+                != normalized_shots[-1].scene_time
+            )
+        ):
+            spatial_temporal_delta = {
+                "scene_name": shot.scene_name,
+                "scene_time": shot.scene_time,
+            }
         shot.shot_contribution = ShotContribution.model_validate({
             "shot_contribution_id": f"SCONTRIB-{shot.shot_id}",
             "experience_intent_ids": [
@@ -723,9 +790,17 @@ def normalize_narrative_storyboard_outline(
             "story_delta_fact_ids": sorted(add_ids | remove_ids),
             "character_state_delta_ids": character_state_ids,
             "audience_state_delta_ids": audience_delta_ids,
-            "affective_delta": {},
-            "spatial_temporal_delta": {},
-            "dramatic_pressure_delta": 0.0,
+            "affective_delta": (
+                dict(existing_contribution.affective_delta)
+                if existing_contribution is not None
+                else {}
+            ),
+            "spatial_temporal_delta": spatial_temporal_delta,
+            "dramatic_pressure_delta": (
+                float(existing_contribution.dramatic_pressure_delta)
+                if existing_contribution is not None
+                else 0.0
+            ),
         })
 
         action_s = sum(

@@ -3341,14 +3341,18 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         for sc in screenplay.scene_outline) if screenplay.scene_outline else "（未提供场次结构）")
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》规划【分镜大纲】。
 
-你现在做的是全局节奏规划：把下方【完整剧本 / plot_spine】铺成有序的 N 条主线镜头（1 条 must_keep spine 通常约 1~2 镜）。
+你现在做的是全局节奏规划：把下方【完整剧本 / plot_spine】铺成有序的 N 条镜头。
 镜头数由完整覆盖主线和场景上下文决定，不设数量上限；禁止无作用重复镜头。
-只覆盖 must_keep spine；drop_list 禁止安排。不写景别/运镜/首尾帧/台词原文。
+must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list 明确授权删除外，
+完整剧本每个场次、动作结果、必要反应、出入场和因果承接都必须落镜。
+不写景别/运镜/首尾帧/台词原文。
 
 {renderability_prompt_block()}
 
 最重要的目标是节奏：后续会严格按这份大纲逐镜填充，所以——
 - 每一条镜头都必须包含 state_in、state_out 和非空 shot_contribution。只要为当前叙事意图交付真实的证据、观众认知、情绪、时空定向或压力差，建立镜/反应镜/吸收镜的 primary_action_id 可为 null；但禁止两条镜头重复交付同一 action/target_delta，也禁止纯填充。
+- scene_outline 的每一场必须按原顺序至少分配一镜；同一地点后来再次出现仍是新的场次，不能与前一次合并。场内出现新的连续动作、作用对象、说话人、可见结果或反应时继续拆镜。
+- 地点、时间或叙事视角发生较大跳跃时，从观众连续观看角度决定是否增加建立场、人物到达、环境/道具承接或动作衔接镜；不得从“家里”无承接硬切到“学校”后直接进入核心对白。
 - {rhythm_rule}
 - {ending_rule}
 - 禁止按文本长度机械拆分；每次拆镜必须对应新的动作、话轮或信息节拍。
@@ -3371,7 +3375,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 {scene_library_block}
 {narrative_shot_contract}
 硬性约束：
-1. 镜头数由完整覆盖主线决定且不设上限；shot_no 从 1 连续递增。大纲 duration_s **默认 5**，仅必要时取 6~10；每镜必须有独立作用。
+1. 镜头数由完整覆盖剧本决定且不设上限；20、40、60 镜都合法，禁止为贴合目标时长主动省略剧情。shot_no 从 1 连续递增。大纲 duration_s **默认 5**，仅必要时取 6~10；每镜必须有独立作用。
 2. 每条保留 beat/covers 兼容旧流程，同时必须填写上方叙事任务合同的 shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、capacity_budget、shot_contribution、逐先验 audience_state_paths、事实状态差、动作/阶段完成账本、readability_window_ids 与 boundary。state_in/primary_action/state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast 继续保留。beat 只作为一句话摘要，不得替代结构化任务。
 3. 相邻两镜 state_out -> state_in 与每个观众先验的 audience_state_out_target_id -> audience_state_in_id 都必须精确承接。primary_action_id 非空时必须唯一归属且不同于 completed_before_action_ids；为 null 时仍必须用 shot_contribution 证明新的叙事功能。
 4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一镜必保留口播字数不得超过该镜 duration_s 容量（10s≤{config.MAX_SPOKEN_CHARS_PER_SHOT}字），超限必须拆到相邻镜。
@@ -3386,7 +3390,8 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
 10. story_event_id 只写剧本事件 E*；主线节拍写 spine_beat_ids（S*）；禁止把 S* 写入 story_event_id。
 11. event_ids 是 narrative_plan.events 的权威引用；若同一事件也存在旧 events[] 台账，story_event_id 必须与 event_ids 中对应的主事件同义并优先复用同一 ID。第一镜 boundary 必须为 null，后续每镜的 boundary 必须连接真实相邻 shot_id 并阻止动作重演。
 
-本集目标时长 {target}s。上一集结尾：{prev_ending or "（本集为第一集）"}
+本集目标时长参考值 {target}s（不是上限；完整覆盖需要时允许明显超过）。
+上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON（不要解释、不要 Markdown）：
 {{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_time": "早|中|晚|黄昏|具体时刻", "scene_name": "上方场景库规范名", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜必须拍出/说出的具体事实（禁止反差/对比等导演抽象）", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）或空", "spine_beat_ids": ["S01"], "key_line_ids": ["KL01"], "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/功能性声音，可空"]}}]}}"""
@@ -3426,11 +3431,53 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                     },
                 )
             from app.validators import (
+                assign_outline_delivery_ids,
                 normalize_outline_spoken_durations,
+                outline_scene_coverage_errors,
                 outline_key_line_capacity_errors,
                 outline_key_line_speaker_errors,
+                split_outline_on_speaker_changes,
+                split_outline_over_action_capacity,
+                split_outline_over_key_line_capacity,
             )
 
+            assign_outline_delivery_ids(o, screenplay)
+            split_events = [
+                *split_outline_over_action_capacity(
+                    o,
+                    max_shots=max_shots,
+                ),
+                *split_outline_on_speaker_changes(
+                    o,
+                    screenplay,
+                    max_shots=max_shots,
+                ),
+                *split_outline_over_key_line_capacity(
+                    o,
+                    screenplay,
+                    max_shots=max_shots,
+                ),
+            ]
+            if split_events:
+                projection_changes = (
+                    normalize_narrative_storyboard_outline(
+                        o,
+                        screenplay,
+                    )
+                )
+                log_provider_call(
+                    "storyboard_outline_semantic_split",
+                    config.MODEL_TEXT,
+                    "NORMALIZED",
+                    None,
+                    0,
+                    meta={
+                        "episode_id": episode.get("id"),
+                        "episode_no": episode.get("episode_no"),
+                        "splits": split_events,
+                        "projection_changes": projection_changes,
+                    },
+                )
             for change in normalize_outline_spoken_durations(o, screenplay):
                 log_provider_call(
                     "storyboard_outline_spoken_duration",
@@ -3472,6 +3519,13 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             )
             narrative_errors.extend(
                 outline_key_line_speaker_errors(o, screenplay)
+            )
+            narrative_errors.extend(
+                outline_scene_coverage_errors(
+                    o,
+                    screenplay,
+                    bible,
+                )
             )
             narrative_errors.extend(narrative_outline_action_capacity_errors(
                 o,

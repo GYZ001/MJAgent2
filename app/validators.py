@@ -4058,6 +4058,58 @@ def split_outline_over_key_line_capacity(
     return events
 
 
+def outline_scene_coverage_errors(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+    bible: Bible | None = None,
+) -> list[str]:
+    """Require every screenplay scene to own an ordered outline shot."""
+    if not screenplay.scene_outline:
+        return []
+    bible_scenes = list(getattr(bible, "scenes", None) or [])
+
+    def canonical_scene(value: str) -> str:
+        matched = (
+            match_scene_name(value, bible_scenes, allow_fuzzy=False)
+            if bible_scenes
+            else None
+        )
+        if matched:
+            return _normalize_scene_label(matched)
+        _time, location = split_legacy_scene_setting(value)
+        return _normalize_scene_label(location or value)
+
+    shot_scenes = [
+        canonical_scene(
+            str(shot.scene_name or shot.scene_setting or "")
+        )
+        for shot in outline.shots
+    ]
+    errors: list[str] = []
+    search_from = 0
+    for scene in screenplay.scene_outline:
+        expected_scene = canonical_scene(scene.scene_heading)
+        matched_index = next(
+            (
+                index
+                for index in range(search_from, len(shot_scenes))
+                if expected_scene
+                and shot_scenes[index] == expected_scene
+            ),
+            None,
+        )
+        if matched_index is None:
+            errors.append(
+                "[OUTLINE_SCENE_COVERAGE_MISSING] "
+                f"剧本第 {scene.scene_no} 场「{scene.scene_heading}」"
+                "没有按剧情顺序分配任何镜头；plot_spine 只是最低覆盖线，"
+                "不得省略完整剧本中的场次"
+            )
+            continue
+        search_from = matched_index + 1
+    return errors
+
+
 def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeScreenplay,
                                 target_duration_s: int, *,
                                 bible: Bible | None = None) -> list[str]:
@@ -4075,6 +4127,11 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     if not shots:
         return ["分镜大纲为空；请按主线骨架规划连续镜头并覆盖 must_keep spine"]
     errors.extend(shot_count_budget_errors(len(shots), context="分镜大纲"))
+    errors.extend(outline_scene_coverage_errors(
+        outline,
+        screenplay,
+        bible,
+    ))
     actual = [s.shot_no for s in shots]
     if actual != list(range(1, len(shots) + 1)):
         errors.append(f"大纲 shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
