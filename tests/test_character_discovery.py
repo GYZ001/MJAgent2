@@ -193,6 +193,13 @@ def test_mentioned_only_unknown_character_does_not_require_identity_card() -> No
         },
         known,
     ) is False
+    assert portraits._candidate_requires_identity_card(
+        {
+            "name": "魂天帝",
+            "kind": "onscreen",
+        },
+        known,
+    ) is True
 
 
 def test_character_card_truncation_is_reported_as_generation_error(

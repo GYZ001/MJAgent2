@@ -1951,7 +1951,7 @@ def _candidate_requires_identity_card(item: dict, known_names: set[str]) -> bool
     return bool(
         name
         and name not in known_names
-        and item.get("identity_kind") == "named"
+        and str(item.get("identity_kind") or "named") == "named"
         and item.get("kind") != "mentioned"
     )
 
