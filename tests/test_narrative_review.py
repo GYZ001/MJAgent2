@@ -19,6 +19,7 @@ from app.narrative_review import (
     BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE,
     BLIND_READER_PROMPT_VERSION,
     NarrativeReviewError,
+    _comparator_prompt,
     run_blind_audience_review,
     verify_persisted_narrative_review,
 )
@@ -240,6 +241,19 @@ def _persist_review_projection(screenplay, board, screenplay_artifact=None):
         )
     conn.commit()
     return screenplay_artifact, shot_artifact_ids
+
+
+def test_comparator_matches_blind_questions_semantically_not_by_internal_id() -> None:
+    payload = _comparator_prompt(
+        _screenplay(),
+        [],
+        report_id="NRR-test",
+    )
+    rules = "；".join(payload["hard_rules"])
+
+    assert "未字面包含 DQ/XP/XD 内部编号" in rules
+    assert "自然语言含义" in rules
+    assert "supporting_evidence_ids 均不得为空" in rules
 
 
 def test_audience_perceptual_surface_contains_only_perceivable_timed_tracks() -> None:
@@ -544,6 +558,17 @@ async def test_blind_review_reuses_frozen_observations_after_comparator_failure(
     db.get_conn().execute(
         "UPDATE shots SET storyboard_artifact_id=? WHERE episode_id=?",
         (rebound_shot["id"], "episode-generic"),
+    )
+    db.get_conn().execute(
+        """UPDATE artifacts
+              SET status='stale',stale_reason='upstream artifact rebound'
+            WHERE scope_id='episode-generic'
+              AND type IN (
+                  'storyboard_review_input',
+                  'blind_audience_perceptual_input',
+                  'blind_audience_spontaneous_recall',
+                  'blind_audience_observation'
+              )"""
     )
     db.get_conn().commit()
 

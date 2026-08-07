@@ -32,7 +32,7 @@ from app.schemas import (
 )
 
 BLIND_READER_PROMPT_VERSION = "blind-audience.v3"
-COMPARATOR_PROMPT_VERSION = "narrative-comparator.v1"
+COMPARATOR_PROMPT_VERSION = "narrative-comparator.v2"
 BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE = "blind_audience_perceptual_input"
 BLIND_FIRST_PASS_ARTIFACT_TYPE = "blind_audience_spontaneous_recall"
 
@@ -1220,7 +1220,10 @@ def _comparator_prompt(
     # This second-stage prompt may see intent, but only after observations have
     # been parsed, validated and persisted as immutable artifacts.
     return {
-        "task": "将冻结的冷观众首轮观察与逐先验导演意图进行比较",
+        "task": (
+            "将冻结的冷观众首轮自然语言观察与逐先验导演意图做语义比较；"
+            "内部 DQ/XP/XD 编号从未提供给冷观众，不能要求观察原样复述编号"
+        ),
         "scope_id": plan.scope_id,
         "experience_intents": [item.model_dump(mode="json") for item in plan.experience_intents],
         "audience_priors": [item.model_dump(mode="json") for item in plan.audience_priors],
@@ -1278,9 +1281,20 @@ def _comparator_prompt(
         },
         "hard_rules": [
             "逐 audience_prior_id、逐 target_delta_id 比较，禁止先平均",
+            "冷观众只会输出自然语言问题、命题和因果假设；"
+            "必须按语义等价匹配 dramatic question/attention residue，"
+            "禁止因为 active_question_ids 未字面包含 DQ/XP/XD 内部编号而判 missed",
+            "对主动问题目标，应比较 spontaneous_recall.active_question_ids 的自然语言含义；"
+            "例如“受害者会反抗/报警/醒来后怎样/施害者如何利用把柄”等可与"
+            "“能否逃脱圈套/后果如何”形成语义交集",
+            "对注意力残留目标，应依据 recognized_entities、inferred_propositions、"
+            "causal_hypotheses、active_question_ids 与 noticed_attention_target_ids 的"
+            "联合语义判断，不能要求观察包含导演侧字段名或内部 ID",
             "每个 target_delta_result 必须给出 0..1 predicted_score，表示仅基于冻结首轮观察时"
             "该目标实际达成的模型置信度；不得按最终 decision 统一填 0 或 1",
             "只有 spontaneous_recall 自发出现且可下钻到 spontaneous_supporting_evidence_ids 的理解可计首轮达成",
+            "result=satisfied 时 supporting_observation_ids 与 supporting_evidence_ids 均不得为空；"
+            "证据 ID 必须从同一冻结观察的 spontaneous_supporting_evidence_ids 中复制",
             "故意隐藏须按 withheld_propositions/延续问题判断，不得误报为遗漏",
             "任何低分位关键路径 missed/contradicted/needs_review 时不得判 pass",
             "decision=pass 时，每个 applicability=applies 的审读维度都必须 passed=true，并引用冷观众实际观察到的 evidence_id",
@@ -1327,7 +1341,7 @@ def _load_reusable_partial_review(
         """SELECT id FROM artifacts
              WHERE type='storyboard_review_input'
                AND scope_type='episode' AND scope_id=?
-               AND status IN ('validated','approved')
+               AND status NOT IN ('rejected','needs_revision')
              ORDER BY created_at DESC,version DESC""",
         (episode_id,),
     ).fetchall()
@@ -1339,7 +1353,7 @@ def _load_reusable_partial_review(
                    'blind_audience_spontaneous_recall',
                    'blind_audience_observation'
                )
-               AND status IN ('validated','approved')
+               AND status NOT IN ('rejected','needs_revision')
              ORDER BY created_at DESC,version DESC""",
         (episode_id,),
     ).fetchall()
