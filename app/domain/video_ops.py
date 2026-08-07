@@ -62,6 +62,8 @@ def _is_storyboard_terminal_for_confirmation(
     """只允许人工确认已经停止写入且通过 Supervisor 门禁的完整分镜。"""
     if shot_count <= 0 or shot_count != planned_shots or not final_shot_valid:
         return False
+    if episode["status"] == "confirmed":
+        return not bool(episode["script_error"])
     if episode["status"] != "scripted" or episode["script_error"]:
         return False
     if checkpoint is not None:

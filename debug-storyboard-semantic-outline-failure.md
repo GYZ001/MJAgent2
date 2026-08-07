@@ -101,3 +101,20 @@
 - 最终 Run `run_7a2110f8d54c` 为
   `WAITING_HUMAN_CALIBRATION`；这是一次观看校准门，不是生成失败。
 - 本调试会话继续保持 `[OPEN]`，待用户观看并确认后再清理调试文件与插桩。
+
+## Confirmation Gate Verification
+- 用户点击确认时复现两类误判：
+  - 确认门按去重后的 `scene_name` 判断顺序，把办公室、卧室和高义家的合法
+    复访误报为“场景倒退”；
+  - 35/35 镜已完成，但一次观看校准与完成证书尚未收口，误显示为非完整终态。
+- 场次门禁现按保留重复项的剧本场次序列做子序列覆盖；嵌套子场景可额外出现，
+  但剧本中重复场次必须分别按顺序命中。
+- 导演字段、连续性和身份规范化结果已同步回批准大纲，后续
+  `finalize_evidence` 不再反复重签镜头 Artifact。
+- 最新稳定审读报告：`art_8fa8a68581e6`；AI 一次观看模拟权威：
+  `art_38cedb5c0937`，最低逐目标分 0.9，高于 0.8 门槛。
+- 最终发布 Run：`run_f8583ca2633e`，状态 `SUCCEEDED`；
+  Storyboard Artifact：`art_b246e6c234d3`；
+  Completion Certificate：`cert_66b6e29e7c1d`。
+- 确认预览结果：35/35 镜、最终镜有效、hard errors=0、warnings=0；
+  人工确认已提交，episode 状态为 `confirmed`，未自动产生视频费用。

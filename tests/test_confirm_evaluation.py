@@ -63,6 +63,11 @@ def test_manual_confirmation_accepts_succeeded_checkpoint() -> None:
         failed_episode, checkpoint, shot_count=11, planned_shots=11,
         final_shot_valid=True,
     )
+    confirmed_episode = {"status": "confirmed", "script_error": None}
+    assert _is_storyboard_terminal_for_confirmation(
+        confirmed_episode, checkpoint, shot_count=11, planned_shots=11,
+        final_shot_valid=True,
+    )
 
 
 def test_manual_confirmation_rejects_incomplete_validated_prefix() -> None:
