@@ -28,6 +28,7 @@ from app.schemas import (
     World,
 )
 from app.validators import (
+    _storyboard_scene_contiguity_key,
     validate_screenplay_source_coverage,
     validate_storyboard_direction_contract,
 )
@@ -182,6 +183,80 @@ def test_direction_contract_requires_context_and_camera_readability() -> None:
     errors = validate_storyboard_direction_contract(board, _outline())
     assert any("camera_angle" in error for error in errors)
     assert any("情绪转折" in error for error in errors)
+
+
+def test_direction_fields_are_derived_from_approved_outline() -> None:
+    outline = _outline()
+    outline.shots[1].resulting_change = (
+        "谷言从桌边移动到门口，人物和空间位置发生变化"
+    )
+    outline.shots[2].resulting_change = (
+        "谷言确认门外危险后由迟疑转为警觉"
+    )
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            _shot(
+                index,
+                focus=focus,
+                size=size,
+                move=move,
+            )
+            for index, (focus, size, move) in enumerate(
+                [
+                    ("context", "全景", "固定"),
+                    ("action", "中景", "跟随"),
+                    ("emotion", "近景", "固定"),
+                ],
+                start=1,
+            )
+        ],
+    )
+    for shot in board.shots:
+        shot.purpose = ""
+        shot.resulting_change = ""
+        shot.readability_focus = ""
+        shot.camera_angle = ""
+        shot.camera_motivation = ""
+        shot.context_requirement_ids = []
+
+    changes = stages.normalize_storyboard_direction_fields(
+        board,
+        outline,
+        EpisodeScreenplay(episode_no=1, title="E"),
+    )
+
+    assert changes
+    assert board.shots[0].context_requirement_ids == ["CTX-SC001-01"]
+    assert validate_storyboard_direction_contract(board, outline) == []
+
+
+def test_authority_scene_ids_allow_later_location_revisit() -> None:
+    first = _shot(1, focus="context", size="全景", move="固定")
+    middle = _shot(2, focus="context", size="全景", move="固定")
+    revisit = _shot(3, focus="context", size="全景", move="固定")
+    first.scene_id = "SC001"
+    middle.scene_id = "SC002"
+    middle.scene_name = "走廊"
+    revisit.scene_id = "SC003"
+
+    assert [
+        _storyboard_scene_contiguity_key(
+            shot,
+            narrative_authority=True,
+        )
+        for shot in (first, middle, revisit)
+    ] == ["SC001", "SC002", "SC003"]
+    assert (
+        _storyboard_scene_contiguity_key(
+            first,
+            narrative_authority=False,
+        )
+        == _storyboard_scene_contiguity_key(
+            revisit,
+            narrative_authority=False,
+        )
+    )
 
 
 def test_scene_pack_hydrates_director_fields_without_per_shot_calls(monkeypatch) -> None:

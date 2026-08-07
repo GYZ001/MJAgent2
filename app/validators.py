@@ -700,10 +700,9 @@ def validate_storyboard(
         # Authority outlines distinguish later revisits with scene_id; legacy
         # boards without IDs continue to use the normalized location name.
         scene = scene_name_of(shot)
-        scene_key = (
-            str(shot.scene_id).strip()
-            if narrative_authority and str(shot.scene_id or "").strip()
-            else _scene_contiguity_key(scene)
+        scene_key = _storyboard_scene_contiguity_key(
+            shot,
+            narrative_authority=narrative_authority,
         )
         if scene_key in scene_last_seen and scene_last_seen[scene_key] != i - 1:
             errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene_key]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
@@ -827,6 +826,16 @@ def _scene_contiguity_key(scene: str) -> str:
     """将历史子机位后缀收敛到规范主场景。"""
     base = re.split(r"[·・•\-—/]", (scene or "").strip(), maxsplit=1)[0]
     return _normalize_scene_label(base)
+
+
+def _storyboard_scene_contiguity_key(
+    shot: Shot,
+    *,
+    narrative_authority: bool,
+) -> str:
+    if narrative_authority and str(shot.scene_id or "").strip():
+        return str(shot.scene_id).strip()
+    return _scene_contiguity_key(scene_name_of(shot))
 
 
 def match_scene_name(scene_label: str, scenes, *, allow_fuzzy: bool = True) -> str | None:
