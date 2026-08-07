@@ -61,3 +61,18 @@
 - Run 所有权围栏已下沉到 Supervisor 与 `save_checkpoint()`；
   旧/取消协程不得再覆盖 episode 或 production revision checkpoint。
 - 本调试会话保持 `[OPEN]`，待真人校准完成并由用户确认后再清理插桩和日志。
+
+## Full-coverage Regression
+- 用户复核旧 12 镜后确认仍有叙事省略：饭后卧室未生成、从家到学校割裂、
+  下药过程缺失。
+- 运行与离线投影证据确认：剧本文字包含这些场次，直接丢失点是旧
+  `normalize_narrative_storyboard_outline()` 每个 event 只保留第一镜；
+  `must_keep spine` 提示又被误用成内容白名单。
+- 修复后新大纲为 35 镜、9 个顺序场次：客厅、饭后卧室、办公室、闪回、
+  返回办公室、学校走廊、办公室对白、周六卧室、高义家。
+- 当前权威 Run：`run_5649a2edebc8`，正式落库 15 镜，所有镜头
+  `source_excerpt` 均有效；饭后卧室为第 4~5 镜，学校走廊为第 14~15 镜。
+- SC07 场景包因历史大纲中的 `KL04` 重复 owner 局部失败，已自动进入
+  第 16~23 镜逐镜回退；当前第 16 镜第 2 轮修复在供应商调用中。
+- 新增全局 key-line owner 唯一门禁会阻止后续大纲再次批准相同问题；
+  当前运行只处理失败窗口，不清空已通过的 15 镜。
