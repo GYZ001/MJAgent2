@@ -285,6 +285,54 @@ def test_storyboard_source_evidence_resolves_stable_source_segment_id() -> None:
     assert "高义" in aligned.excerpt
 
 
+def test_short_exact_dialogue_expands_to_authoritative_source_segment() -> None:
+    source = (
+        "白洁心头一阵狂喜，来到了校长高义的办公室。"
+        "她站在办公桌前问：“校长，您找我？”"
+    )
+    screenplay = stages.EpisodeScreenplay(
+        episode_no=1,
+        events=[{
+            "event_id": "E3",
+            "source_span": "SRC0001",
+        }],
+    )
+    draft = StoryboardShotDraft.model_validate({
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 17,
+            "duration_s": 5,
+            "shot_size": "近景",
+            "camera_move": "固定",
+            "scene_setting": "白天，校长办公室",
+            "characters": ["白洁"],
+            "action_desc": "白洁站在办公桌前说出台词。",
+            "first_frame_desc": "白洁看向画外的校长。",
+            "last_frame_desc": "白洁说完后等待回应。",
+            "source_excerpt": "校长，您找我？",
+            "story_event_id": "E-3",
+            "event_ids": ["E-3"],
+            "dialogues": [{
+                "speaker": "白洁",
+                "line": "校长，您找我？",
+                "emotion": "平静",
+            }],
+            "transition": "硬切",
+        },
+    })
+
+    aligned = align_storyboard_source_evidence(
+        draft.shot,
+        source,
+        screenplay=screenplay,
+    )
+
+    assert aligned is not None
+    assert len(aligned.excerpt) >= 8
+    assert aligned.excerpt in source
+    assert "校长，您找我？" in aligned.excerpt
+
+
 def test_storyboard_candidate_leaves_ambiguous_legacy_event_join_empty() -> None:
     normalized, _ = normalize_storyboard_shot_candidate(
         {

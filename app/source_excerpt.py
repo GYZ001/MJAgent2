@@ -134,6 +134,8 @@ def align_source_excerpt(
     exact_start = source.find(candidate)
     if exact_start >= 0:
         normalized, _ = _alignment_view(candidate)
+        if len(normalized) < min_match_chars:
+            return None
         return AlignedExcerpt(
             excerpt=candidate,
             start_offset=exact_start,
