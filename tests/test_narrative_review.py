@@ -496,6 +496,81 @@ async def test_blind_review_isolates_models_and_persists_lineage_before_comparis
 
 
 @pytest.mark.asyncio
+async def test_blind_review_reuses_frozen_observations_after_comparator_failure(
+    monkeypatch,
+) -> None:
+    screenplay = _screenplay()
+    board = _board()
+    screenplay_artifact, _shot_artifact_ids = _persist_review_projection(
+        screenplay,
+        board,
+    )
+    first_roles: list[str] = []
+
+    async def fail_comparator(messages, **kwargs):
+        role = kwargs["call_meta"]["call_role"]
+        first_roles.append(role)
+        if role == "intent_comparator":
+            raise RuntimeError("comparator transport failed")
+        return await _passing_chat(messages, **kwargs)
+
+    monkeypatch.setattr(
+        "app.narrative_review.model_gateway.chat",
+        fail_comparator,
+    )
+    with pytest.raises(RuntimeError, match="comparator transport failed"):
+        await run_blind_audience_review(
+            episode_id="episode-generic",
+            screenplay=screenplay,
+            board=board,
+            screenplay_artifact_id=screenplay_artifact["id"],
+        )
+    assert first_roles == [
+        "blind_reader_first_pass",
+        "blind_reader_neutral_followup",
+        "blind_reader_first_pass",
+        "blind_reader_neutral_followup",
+        "intent_comparator",
+    ]
+    rebound_shot = evidence_repository.create_artifact(EvidenceArtifact(
+        type="storyboard_shot",
+        scope_type="storyboard_checkpoint",
+        scope_id="episode-generic:1",
+        status="validated",
+        trust_level="T2",
+        content=board.shots[0].model_dump(mode="json"),
+        parent_artifact_ids=[screenplay_artifact["id"]],
+    ))
+    db.get_conn().execute(
+        "UPDATE shots SET storyboard_artifact_id=? WHERE episode_id=?",
+        (rebound_shot["id"], "episode-generic"),
+    )
+    db.get_conn().commit()
+
+    resumed_roles: list[str] = []
+
+    async def resumed_chat(messages, **kwargs):
+        resumed_roles.append(kwargs["call_meta"]["call_role"])
+        return await _passing_chat(messages, **kwargs)
+
+    monkeypatch.setattr(
+        "app.narrative_review.model_gateway.chat",
+        resumed_chat,
+    )
+    observations, report, artifact_ids = await run_blind_audience_review(
+        episode_id="episode-generic",
+        screenplay=screenplay,
+        board=board,
+        screenplay_artifact_id=screenplay_artifact["id"],
+    )
+
+    assert resumed_roles == ["intent_comparator"]
+    assert len(observations) == 2
+    assert report.decision == "pass"
+    assert len(artifact_ids) == 8
+
+
+@pytest.mark.asyncio
 async def test_target_leak_is_rejected_before_observation_persistence(monkeypatch) -> None:
     screenplay = _screenplay()
     board = _board()

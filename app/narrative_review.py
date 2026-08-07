@@ -1366,15 +1366,20 @@ def _load_reusable_partial_review(
             ) != review_input.get("content_hash")
             or review_input.get("content")
             != board.model_dump(mode="json")
-            or list(review_input.get("parent_artifact_ids") or [])
-            != review_input_parent_ids
         ):
             continue
         review_input_id = str(review_input["id"])
+        needs_rebind = (
+            list(review_input.get("parent_artifact_ids") or [])
+            != review_input_parent_ids
+        )
         observations: list[BlindAudienceObservation] = []
         perceptual_ids: list[str] = []
         first_pass_ids: list[str] = []
         observation_ids: list[str] = []
+        perceptual_artifacts: list[dict[str, Any]] = []
+        first_pass_artifacts: list[dict[str, Any]] = []
+        observation_artifacts: list[dict[str, Any]] = []
         chain_valid = True
         for ordinal, prior in enumerate(plan.audience_priors, start=1):
             observation_id = f"BAO-{episode_id}-{ordinal}"
@@ -1478,8 +1483,8 @@ def _load_reusable_partial_review(
                 or observation.audience_prior_id
                 != prior.audience_prior_id
                 or any(
-                    getattr(observation, field_name)
-                    != getattr(first_pass, field_name)
+                    observation.model_dump(mode="json").get(field_name)
+                    != first_pass.model_dump(mode="json").get(field_name)
                     for field_name in BlindAudienceFirstPass.model_fields
                 )
             ):
@@ -1503,7 +1508,120 @@ def _load_reusable_partial_review(
             perceptual_ids.append(perceptual_id)
             first_pass_ids.append(first_id)
             observation_ids.append(str(observation_artifact["id"]))
+            perceptual_artifacts.append(perceptual)
+            first_pass_artifacts.append(first_artifact)
+            observation_artifacts.append(observation_artifact)
         if chain_valid and len(observations) == len(plan.audience_priors):
+            if needs_rebind:
+                current_input = evidence_repository.create_artifact(
+                    EvidenceArtifact(
+                        type="storyboard_review_input",
+                        scope_type="episode",
+                        scope_id=episode_id,
+                        status="validated",
+                        trust_level="T2",
+                        content=board.model_dump(mode="json"),
+                        parent_artifact_ids=review_input_parent_ids,
+                        contract_version=NARRATIVE_CONTRACT_VERSION,
+                    )
+                )
+                review_input_id = str(current_input["id"])
+                rebound_perceptual_ids: list[str] = []
+                rebound_first_ids: list[str] = []
+                rebound_observation_ids: list[str] = []
+                for perceptual, first_artifact, observation_artifact in zip(
+                    perceptual_artifacts,
+                    first_pass_artifacts,
+                    observation_artifacts,
+                    strict=True,
+                ):
+                    rebound_perceptual = evidence_repository.create_artifact(
+                        EvidenceArtifact(
+                            type=BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE,
+                            scope_type="episode",
+                            scope_id=episode_id,
+                            status="validated",
+                            trust_level="T2",
+                            content=perceptual.get("content"),
+                            parent_artifact_ids=[
+                                review_input_parent_ids[0],
+                                review_input_id,
+                            ],
+                            contract_version=AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
+                            prompt_version=BLIND_READER_PROMPT_VERSION,
+                        )
+                    )
+                    rebound_perceptual_id = str(
+                        rebound_perceptual["id"]
+                    )
+                    rebound_first = evidence_repository.create_artifact(
+                        EvidenceArtifact(
+                            type=BLIND_FIRST_PASS_ARTIFACT_TYPE,
+                            scope_type="episode",
+                            scope_id=episode_id,
+                            status="validated",
+                            trust_level="T2",
+                            content=first_artifact.get("content"),
+                            parent_artifact_ids=[
+                                review_input_parent_ids[0],
+                                review_input_id,
+                                rebound_perceptual_id,
+                            ],
+                            contract_version=NARRATIVE_CONTRACT_VERSION,
+                            prompt_version=BLIND_READER_PROMPT_VERSION,
+                        )
+                    )
+                    rebound_first_id = str(rebound_first["id"])
+                    evidence_repository.create_evaluation(
+                        rebound_first_id,
+                        Evaluation(
+                            evaluator_type="deterministic",
+                            evaluator_name="blind_review_isolation_gate",
+                            evaluator_version=BLIND_READER_PROMPT_VERSION,
+                            status="passed",
+                            hard_gate_passed=True,
+                            evaluation_role="runtime_gate",
+                            runtime_blocking=True,
+                            score=100,
+                            evidence={
+                                "rebound_from_artifact_id": str(
+                                    first_artifact["id"]
+                                ),
+                                "first_pass_frozen": True,
+                                "perceptual_payload_unchanged": True,
+                            },
+                        ),
+                    )
+                    rebound_observation = (
+                        evidence_repository.create_artifact(
+                            EvidenceArtifact(
+                                type="blind_audience_observation",
+                                scope_type="episode",
+                                scope_id=episode_id,
+                                status="validated",
+                                trust_level="T2",
+                                content=observation_artifact.get("content"),
+                                parent_artifact_ids=[
+                                    review_input_parent_ids[0],
+                                    review_input_id,
+                                    rebound_perceptual_id,
+                                    rebound_first_id,
+                                ],
+                                contract_version=NARRATIVE_CONTRACT_VERSION,
+                                prompt_version=BLIND_READER_PROMPT_VERSION,
+                            )
+                        )
+                    )
+                    rebound_perceptual_ids.append(
+                        rebound_perceptual_id
+                    )
+                    rebound_first_ids.append(rebound_first_id)
+                    rebound_observation_ids.append(
+                        str(rebound_observation["id"])
+                    )
+                perceptual_ids = rebound_perceptual_ids
+                first_pass_ids = rebound_first_ids
+                observation_ids = rebound_observation_ids
             artifact_ids = [
                 review_input_id,
                 *[
