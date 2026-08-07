@@ -17,6 +17,7 @@ from app.domain.storyboard_ops import (
 )
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
+from app.orchestration.engine import WorkflowRecorder
 from app.production.revision import ensure_production_revision
 from app.repair_router import route_issues
 from app.schemas import (
@@ -67,6 +68,52 @@ from app.storyboard_supervisor import (
     run_storyboard_supervisor,
     save_checkpoint,
 )
+
+
+def test_cancelled_run_cannot_overwrite_storyboard_checkpoint(repair_db) -> None:
+    conn, _screenplay = repair_db
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="checkpoint-owner",
+    )
+    recorder.start()
+    conn.execute(
+        "UPDATE episodes SET active_storyboard_run_id=? WHERE id='e1'",
+        (recorder.run_id,),
+    )
+    conn.commit()
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        phase="VALIDATING_EPISODE",
+        validated_prefix_end=1,
+        next_shot_no=2,
+        expected_total=1,
+    )
+    current_id = save_checkpoint(
+        checkpoint,
+        run_id=recorder.run_id,
+    )
+    recorder.cancel("superseded")
+    checkpoint.phase = "WAITING_HUMAN"
+    checkpoint.outcome = "STALE_RESULT"
+
+    returned_id = save_checkpoint(
+        checkpoint,
+        run_id=recorder.run_id,
+    )
+
+    assert returned_id == current_id
+    rows = conn.execute(
+        """SELECT content_json FROM artifacts
+             WHERE type='storyboard_supervisor_checkpoint'
+               AND scope_id='e1'"""
+    ).fetchall()
+    assert len(rows) == 1
+    assert json.loads(rows[0]["content_json"])["phase"] == (
+        "VALIDATING_EPISODE"
+    )
 
 
 @pytest.mark.parametrize("narrative_authority", [False, True])
