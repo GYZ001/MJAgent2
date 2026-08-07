@@ -616,22 +616,50 @@ def normalize_storyboard_shot_candidate(
                 })
                 shot["characters_visible"] = normalized_visible
             if len(unique_onscreen_speakers) == 1:
-                if shot.get("shot_size") not in {"近景", "特写"}:
+                planned_shot_size = str(
+                    outline_narrative_task.get("camera_size") or ""
+                )
+                target_shot_size = (
+                    planned_shot_size
+                    if planned_shot_size in SHOT_SIZES
+                    else "近景"
+                )
+                if shot.get("shot_size") != target_shot_size:
                     changes.append({
                         "field": "shot.shot_size",
                         "from": shot.get("shot_size"),
-                        "to": "近景",
-                        "reason": "single_speaker_framing",
+                        "to": target_shot_size,
+                        "reason": (
+                            "outline_camera_authority"
+                            if planned_shot_size in SHOT_SIZES
+                            else "single_speaker_framing"
+                        ),
                     })
-                    shot["shot_size"] = "近景"
-                if shot.get("camera_move") not in {"固定", "推近"}:
+                    shot["shot_size"] = target_shot_size
+                planned_camera_move = str(
+                    outline_narrative_task.get("camera_movement") or ""
+                )
+                target_camera_move = (
+                    planned_camera_move
+                    if planned_camera_move in CAMERA_MOVES
+                    else (
+                        shot.get("camera_move")
+                        if shot.get("camera_move") in {"固定", "推近"}
+                        else "固定"
+                    )
+                )
+                if shot.get("camera_move") != target_camera_move:
                     changes.append({
                         "field": "shot.camera_move",
                         "from": shot.get("camera_move"),
-                        "to": "固定",
-                        "reason": "single_speaker_framing",
+                        "to": target_camera_move,
+                        "reason": (
+                            "outline_camera_authority"
+                            if planned_camera_move in CAMERA_MOVES
+                            else "single_speaker_framing"
+                        ),
                     })
-                    shot["camera_move"] = "固定"
+                    shot["camera_move"] = target_camera_move
 
             dialogue_text = "".join(
                 str(item.get("line") or "")

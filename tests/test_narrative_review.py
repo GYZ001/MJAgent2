@@ -613,6 +613,19 @@ async def test_blind_review_reuses_frozen_observations_after_comparator_failure(
     assert len(observations) == 2
     assert report.decision == "pass"
     assert len(artifact_ids) == 8
+    report_artifact = next(
+        evidence_repository.get_artifact(artifact_id)
+        for artifact_id in artifact_ids
+        if evidence_repository.get_artifact(artifact_id)["type"]
+        == "narrative_review_report"
+    )
+    assert verify_persisted_narrative_review(
+        episode_id="episode-generic",
+        screenplay=screenplay,
+        board=board,
+        report=report,
+        artifact_ids=artifact_ids,
+    ) == report_artifact["id"]
 
 
 @pytest.mark.asyncio

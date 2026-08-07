@@ -1653,11 +1653,27 @@ def _load_reusable_partial_review(
                             runtime_blocking=True,
                             score=100,
                             evidence={
-                                "rebound_from_artifact_id": str(
-                                    first_artifact["id"]
+                                "audience_prior_id": str(
+                                    (first_artifact.get("content") or {}).get(
+                                        "audience_prior_id"
+                                    )
+                                    or ""
                                 ),
+                                "target_free_payload": True,
+                                "perceptual_input_artifact_id": (
+                                    rebound_perceptual_id
+                                ),
+                                "serializer_version": (
+                                    AUDIENCE_PERCEPTUAL_SURFACE_VERSION
+                                ),
+                                "prompt_version": BLIND_READER_PROMPT_VERSION,
+                                "perceptual_surface_hash": (
+                                    perceptual.get("content") or {}
+                                ).get("perceptual_surface_hash"),
+                                "prompt_payload_hash": (
+                                    perceptual.get("content") or {}
+                                ).get("prompt_payload_hash"),
                                 "first_pass_frozen": True,
-                                "perceptual_payload_unchanged": True,
                             },
                         ),
                     )

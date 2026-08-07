@@ -751,6 +751,46 @@ def test_storyboard_candidate_adds_lip_sync_speaker_to_visible_ids() -> None:
     )
 
 
+def test_single_speaker_respects_approved_medium_camera_plan() -> None:
+    normalized, changes = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {
+                "shot_no": 11,
+                "duration_s": 5,
+                "shot_size": "近景",
+                "camera_move": "推近",
+                "characters_visible": ["路人甲"],
+                "audio_timeline": [{
+                    "start_s": 0,
+                    "end_s": 4,
+                    "type": "spoken_dialogue",
+                    "speaker_id": "character-lurenjia",
+                    "text": "我这就去镇上告你！",
+                }],
+            },
+        },
+        episode_no=1,
+        shot_no=11,
+        outline_narrative_task={
+            "key_line_ids": [],
+            "audio_cast": ["路人甲"],
+            "camera_size": "中景",
+            "camera_movement": "固定",
+            "capacity_budget": {
+                "spoken_and_text_s": 0,
+            },
+        },
+    )
+
+    assert normalized["shot"]["shot_size"] == "中景"
+    assert normalized["shot"]["camera_move"] == "固定"
+    assert any(
+        change["reason"] == "outline_camera_authority"
+        for change in changes
+    )
+
+
 def test_silent_outline_does_not_reintroduce_character_audio_cast() -> None:
     normalized, changes = normalize_storyboard_shot_candidate(
         {
