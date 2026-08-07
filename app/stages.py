@@ -419,12 +419,30 @@ def normalize_storyboard_shot_candidate(
 
         planned_audio_cast = outline_narrative_task.get("audio_cast")
         if isinstance(planned_audio_cast, list):
+            has_spoken_audio = bool(shot.get("dialogues")) or any(
+                isinstance(item, dict)
+                and item.get("type") in {
+                    "spoken_dialogue",
+                    "offscreen_voice",
+                }
+                and str(item.get("text") or "").strip()
+                for item in (shot.get("audio_timeline") or [])
+            )
+            if (
+                not outline_narrative_task.get("key_line_ids")
+                and not has_spoken_audio
+            ):
+                planned_audio_cast = []
             if shot.get("audio_cast") != planned_audio_cast:
                 changes.append({
                     "field": "shot.audio_cast",
                     "from": shot.get("audio_cast"),
                     "to": planned_audio_cast,
-                    "reason": "outline_audio_authority",
+                    "reason": (
+                        "silent_outline_audio_cast_cleared"
+                        if not planned_audio_cast
+                        else "outline_audio_authority"
+                    ),
                 })
                 shot["audio_cast"] = deepcopy(planned_audio_cast)
             if (

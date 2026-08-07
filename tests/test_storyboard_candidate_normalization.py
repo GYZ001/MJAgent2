@@ -660,6 +660,38 @@ def test_storyboard_candidate_adds_lip_sync_speaker_to_visible_ids() -> None:
     )
 
 
+def test_silent_outline_does_not_reintroduce_character_audio_cast() -> None:
+    normalized, changes = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {
+                "shot_no": 4,
+                "duration_s": 5,
+                "audio_cast": ["高义"],
+                "audio_timeline": [{
+                    "start_s": 0,
+                    "end_s": 5,
+                    "type": "ambient_sound",
+                    "speaker_id": None,
+                    "text": "室内环境声",
+                }],
+            },
+        },
+        episode_no=1,
+        shot_no=4,
+        outline_narrative_task={
+            "audio_cast": ["character-gaoyi"],
+            "key_line_ids": [],
+        },
+    )
+
+    assert normalized["shot"]["audio_cast"] == []
+    assert any(
+        change["reason"] == "silent_outline_audio_cast_cleared"
+        for change in changes
+    )
+
+
 def test_storyboard_outline_candidate_joins_string_list_covers_only() -> None:
     candidate = {
         "episode_no": 1,

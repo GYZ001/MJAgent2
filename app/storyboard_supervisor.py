@@ -392,6 +392,32 @@ def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
 
 def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> str:
     cp = _migrate_checkpoint(cp)
+    if run_id:
+        fence_conn = get_conn()
+        run_row = fence_conn.execute(
+            "SELECT status FROM workflow_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        owner = fence_conn.execute(
+            "SELECT active_storyboard_run_id FROM episodes WHERE id=?",
+            (cp.episode_id,),
+        ).fetchone()
+        if (
+            run_row
+            and (
+                run_row["status"] not in {"CREATED", "RUNNING"}
+                or not owner
+                or owner["active_storyboard_run_id"] != run_id
+            )
+        ):
+            current = fence_conn.execute(
+                """SELECT id FROM artifacts
+                     WHERE type=? AND scope_type='episode' AND scope_id=?
+                       AND status IN ('candidate','validated','approved')
+                     ORDER BY created_at DESC,version DESC LIMIT 1""",
+                (CHECKPOINT_TYPE, cp.episode_id),
+            ).fetchone()
+            return str(current["id"]) if current else ""
     payload = cp.model_dump(mode="json")
     payload_hash = evidence_repository.content_hash(payload)
     # The production revision owns the current mutable recovery point.  Audit
@@ -2310,9 +2336,30 @@ async def run_storyboard_supervisor(
     final_feedback: list[str] | None = None
     needs_outline = outline is None
 
+    def _run_has_write_ownership() -> bool:
+        if not run_id:
+            return True
+        run_row = conn.execute(
+            "SELECT status FROM workflow_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            return True
+        owner = conn.execute(
+            "SELECT active_storyboard_run_id FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        return bool(
+            run_row["status"] in {"CREATED", "RUNNING"}
+            and owner
+            and owner["active_storyboard_run_id"] == run_id
+        )
+
     # Every activation is independently bounded. ``repair_epoch`` is lifetime
     # audit only and must never make a newly-authorized activation a no-op.
     while True:
+        if not _run_has_write_ownership():
+            return cp
         # 用户 pause / handoff：在安全边界生效
         from app.storyboard_control import consume_control
         ctrl = consume_control(episode_id)
@@ -3371,7 +3418,11 @@ async def run_storyboard_supervisor(
                         board=evaluation.board,
                         screenplay_artifact_id=ep["screenplay_artifact_id"],
                     )
+                    if not _run_has_write_ownership():
+                        return cp
                 except NarrativeReviewError as exc:
+                    if not _run_has_write_ownership():
+                        return cp
                     review_evidence_codes = {
                         "REVIEW_INPUT_SHOT_EVIDENCE_DRIFT",
                         "REVIEW_INPUT_SHOT_EVIDENCE_MISSING",
@@ -3420,6 +3471,8 @@ async def run_storyboard_supervisor(
                         exc.errors,
                         board=evaluation.board,
                     )
+                    if not _run_has_write_ownership():
+                        return cp
                     cp = _apply_repair(
                         cp, plan, conn, episode_id, list(evaluation.board.shots), outline,
                     )
@@ -3467,6 +3520,8 @@ async def run_storyboard_supervisor(
                     narrative_review_report,
                 )
             except Exception as exc:  # noqa: BLE001 - explicit bootstrap gate
+                if not _run_has_write_ownership():
+                    return cp
                 cp.phase = "WAITING_HUMAN"
                 cp.outcome = "WAITING_HUMAN_CALIBRATION"
                 cp.validated_prefix_end = len(evaluation.board.shots)
@@ -3498,6 +3553,8 @@ async def run_storyboard_supervisor(
                 )
                 conn.commit()
                 return cp
+        if not _run_has_write_ownership():
+            return cp
         if narrative_authority:
             _finalize_storyboard_evidence(
                 episode_id,

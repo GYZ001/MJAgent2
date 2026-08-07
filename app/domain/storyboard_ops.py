@@ -1596,6 +1596,24 @@ async def _storyboard_task(
     except (StageError, Exception) as exc:  # noqa: BLE001
         rec = errors.log_error(exc, action="storyboard_generate", context={"episode_id": episode_id})
         saved = conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)).fetchone()["c"]
+        if run_id:
+            run_row = conn.execute(
+                "SELECT status FROM workflow_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            owner = conn.execute(
+                "SELECT active_storyboard_run_id FROM episodes WHERE id=?",
+                (episode_id,),
+            ).fetchone()
+            if (
+                run_row
+                and (
+                    run_row["status"] not in {"CREATED", "RUNNING"}
+                    or not owner
+                    or owner["active_storyboard_run_id"] != run_id
+                )
+            ):
+                return
         # Supervisor 已把 WAITING_* 写为 scripted+script_error；此处只处理未捕获异常
         ep_now = conn.execute("SELECT status, script_error FROM episodes WHERE id=?", (episode_id,)).fetchone()
         if ep_now and ep_now["status"] in {"scripted", "confirmed", "scripting"} and ep_now["script_error"]:
