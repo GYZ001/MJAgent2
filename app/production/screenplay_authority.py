@@ -85,52 +85,60 @@ def _project_bible_projection(project: Any) -> dict[str, Any]:
         raise ValueError("项目 Bible JSON 无法解析为当前人物谱合同") from exc
 
 
-def _bible_extends_by_appending_characters(
+def _bible_extends_by_appending_cards(
     base: dict[str, Any],
     extended: dict[str, Any],
 ) -> bool:
-    """Return whether ``extended`` only appends uniquely named character cards."""
-    base_characters = list(base.get("characters") or [])
-    extended_characters = list(extended.get("characters") or [])
-    if len(extended_characters) < len(base_characters):
+    """Return whether characters/scenes only gained uniquely named cards."""
+    if (
+        {**base, "characters": [], "scenes": []}
+        != {**extended, "characters": [], "scenes": []}
+    ):
         return False
-    if {**base, "characters": []} != {**extended, "characters": []}:
-        return False
-    if extended_characters[:len(base_characters)] != base_characters:
-        return False
-    base_names = {
-        str(item.get("name") or "")
-        for item in base_characters
-        if isinstance(item, dict)
-    }
-    extension_names = [
-        str(item.get("name") or "")
-        for item in extended_characters[len(base_characters):]
-        if isinstance(item, dict)
-    ]
-    return (
-        len(extension_names) == len(extended_characters) - len(base_characters)
-        and all(extension_names)
-        and len(extension_names) == len(set(extension_names))
-        and not base_names.intersection(extension_names)
-    )
+
+    for collection in ("characters", "scenes"):
+        base_items = list(base.get(collection) or [])
+        extended_items = list(extended.get(collection) or [])
+        if (
+            len(extended_items) < len(base_items)
+            or extended_items[:len(base_items)] != base_items
+        ):
+            return False
+        base_names = {
+            str(item.get("name") or "")
+            for item in base_items
+            if isinstance(item, dict)
+        }
+        extension_names = [
+            str(item.get("name") or "")
+            for item in extended_items[len(base_items):]
+            if isinstance(item, dict)
+        ]
+        if (
+            len(extension_names) != len(extended_items) - len(base_items)
+            or any(not name for name in extension_names)
+            or len(extension_names) != len(set(extension_names))
+            or bool(base_names.intersection(extension_names))
+        ):
+            return False
+    return True
 
 
 def _bible_projections_are_append_compatible(
     projection: dict[str, Any],
     runtime_payload: dict[str, Any],
 ) -> bool:
-    """Allow append-only character growth across long-running generation.
+    """Allow append-only character/scene growth across production stages.
 
     Runtime may contain legacy compatibility cards not yet persisted, while the
-    project projection may gain cards from another episode during a model call.
-    Existing cards and every non-character field must remain byte-for-byte
+    project projection may gain cards during another episode or storyboard
+    prefetch. Existing cards and every non-card field must remain byte-for-byte
     equivalent in either direction.
     """
     return (
         runtime_payload == projection
-        or _bible_extends_by_appending_characters(projection, runtime_payload)
-        or _bible_extends_by_appending_characters(runtime_payload, projection)
+        or _bible_extends_by_appending_cards(projection, runtime_payload)
+        or _bible_extends_by_appending_cards(runtime_payload, projection)
     )
 
 
@@ -396,7 +404,7 @@ def _append_compatible_historical_materials(
     material: dict[str, Any],
     contract_version: str,
 ) -> list[dict[str, Any]]:
-    """Rebuild prior authority inputs reachable by character-only appends."""
+    """Rebuild prior authority inputs reachable by card-only appends."""
     if (
         not screenplay_contract_tracks_bible_projection(contract_version)
         or "bible_projection_hash" not in material
@@ -413,24 +421,35 @@ def _append_compatible_historical_materials(
     ).fetchone()
     projection = _project_bible_projection(project)
     characters = list(projection.get("characters") or [])
+    scenes = list(projection.get("scenes") or [])
     candidates: list[dict[str, Any]] = []
     projection_prefixes: list[tuple[dict[str, Any], str]] = []
-    for character_count in range(len(characters) - 1, -1, -1):
-        historical_projection = {
-            **projection,
-            "characters": characters[:character_count],
-        }
-        projection_hash = evidence_repository.content_hash(
-            historical_projection
-        )
-        projection_prefixes.append((historical_projection, projection_hash))
-        candidate = {
-            **material,
-            "bible_projection_hash": projection_hash,
-        }
-        if not candidate.get("bible_artifact_id"):
-            candidate["bible_content_hash"] = projection_hash
-        candidates.append(candidate)
+    for character_count in range(len(characters), -1, -1):
+        for scene_count in range(len(scenes), -1, -1):
+            if (
+                character_count == len(characters)
+                and scene_count == len(scenes)
+            ):
+                continue
+            historical_projection = {
+                **projection,
+                "characters": characters[:character_count],
+                "scenes": scenes[:scene_count],
+            }
+            projection_hash = evidence_repository.content_hash(
+                historical_projection
+            )
+            projection_prefixes.append((
+                historical_projection,
+                projection_hash,
+            ))
+            candidate = {
+                **material,
+                "bible_projection_hash": projection_hash,
+            }
+            if not candidate.get("bible_artifact_id"):
+                candidate["bible_content_hash"] = projection_hash
+            candidates.append(candidate)
 
     project_id = str(_episode_value(episode, "project_id", "") or "")
     artifact_rows = conn.execute(
@@ -477,9 +496,9 @@ def _published_authority_input_fingerprint(
     """Recover append-only Bible growth and legacy duration contamination.
 
     A screenplay certificate remains valid when the project Bible only gained
-    uniquely appended character cards after publication. Reproducing the exact
-    signed fingerprint from a current character-list prefix proves that no
-    existing card or non-character field changed.
+    uniquely appended character or scene cards after publication. Reproducing
+    the exact signed fingerprint from current list prefixes proves that no
+    existing card or non-card field changed.
 
     Older storyboard runs persisted their derived planning duration back into
     ``episodes.target_duration_s`` after screenplay publication.  The release
