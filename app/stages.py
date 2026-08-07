@@ -3756,7 +3756,6 @@ def ensure_storyboard_scene_contexts(
     for run_index, (_scene_key, briefs) in enumerate(runs, start=1):
         first = briefs[0]
         last = briefs[-1]
-        scene_id = str(first.scene_id or "").strip() or f"SC{run_index:03d}"
         script_scene = next(
             (
                 item
@@ -3765,9 +3764,17 @@ def ensure_storyboard_scene_contexts(
             ),
             None,
         )
+        script_scene_no = int(
+            getattr(script_scene, "scene_no", run_index) or run_index
+        )
+        scene_id = (
+            f"SC{script_scene_no:02d}"
+            if script_scene is not None
+            else str(first.scene_id or "").strip() or f"SC{run_index:02d}"
+        )
         heading_time, heading_name = _screenplay_scene_parts(
             screenplay,
-            int(getattr(script_scene, "scene_no", run_index) or run_index),
+            script_scene_no,
         )
         scene_time = str(first.scene_time or heading_time).strip()
         scene_name = str(
@@ -3795,7 +3802,7 @@ def ensure_storyboard_scene_contexts(
             first.context_requirement_ids = list(requirement_ids)
 
         for brief in briefs:
-            if not brief.scene_id:
+            if script_scene is not None or not brief.scene_id:
                 brief.scene_id = scene_id
             if not brief.scene_time:
                 brief.scene_time = scene_time

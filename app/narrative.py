@@ -1898,6 +1898,17 @@ def validate_storyboard_narrative(
     delta_owner_positions: defaultdict[str, list[int]] = defaultdict(list)
     task_owners: defaultdict[str, list[int]] = defaultdict(list)
     event_occurrences: defaultdict[str, list[tuple[int, int]]] = defaultdict(list)
+    operational_scene_ids = {
+        f"SC{int(scene.scene_no):02d}"
+        for scene in screenplay.scene_outline
+        if int(scene.scene_no or 0) > 0
+    }
+    if outline is not None:
+        operational_scene_ids.update(
+            _norm(context.scene_id)
+            for context in outline.scene_contexts
+            if _norm(context.scene_id)
+        )
     for item_position, item in enumerate(items):
         item_event_ids = list(getattr(item, "event_ids", []) or [])
         if not item_event_ids and _norm(getattr(item, "story_event_id", "")):
@@ -1951,10 +1962,10 @@ def validate_storyboard_narrative(
             event_ids = [_norm(getattr(shot, "story_event_id", ""))]
         _require_refs(event_ids, index.events, errors, label)
         scene_id = _norm(getattr(shot, "scene_id", ""))
-        if index.scenes:
+        if index.scenes or operational_scene_ids:
             if not scene_id:
                 errors.append(f"[SHOT_SCENE_ID_MISSING] {label} 缺少 SceneDramaticContract 引用")
-            else:
+            elif scene_id not in operational_scene_ids:
                 _require_refs([scene_id], index.scenes, errors, label)
         primary_action_id = _norm(getattr(shot, "primary_action_id", None)) or None
         supporting = [
@@ -2945,7 +2956,26 @@ def validate_storyboard_narrative(
         ):
             errors.append(f"[COGNITIVE_BRIDGE_ADDED_SHOT_UNGROUNDED] {bridge_id} 新增镜头未直接承担所绑定认知任务")
 
-    return list(dict.fromkeys(errors))
+    upstream_codes = {
+        _narrative_error_code(error)
+        for error in validate_screenplay_narrative(
+            screenplay,
+            require=True,
+            expected_scope_id=expected_scope_id,
+        )
+    }
+    derived_score_only_codes: set[str] = set()
+    if upstream_codes.intersection({
+        "TARGET_DELTA_TO_STATE_MISMATCH",
+        "TARGET_DELTA_STATE_MISMATCH",
+        "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
+    }):
+        derived_score_only_codes.add("SHOT_TARGET_TO_STATE_MISMATCH")
+    return list(dict.fromkeys(
+        error
+        for error in errors
+        if _narrative_error_code(error) not in derived_score_only_codes
+    ))
 
 
 def validate_blind_review(
