@@ -85,38 +85,52 @@ def _project_bible_projection(project: Any) -> dict[str, Any]:
         raise ValueError("项目 Bible JSON 无法解析为当前人物谱合同") from exc
 
 
-def _runtime_bible_extends_projection(
-    projection: dict[str, Any],
-    runtime_payload: dict[str, Any],
+def _bible_extends_by_appending_characters(
+    base: dict[str, Any],
+    extended: dict[str, Any],
 ) -> bool:
-    """Allow only legacy compatibility cards appended to the current projection."""
-    if runtime_payload == projection:
-        return True
-    projected_characters = list(projection.get("characters") or [])
-    runtime_characters = list(runtime_payload.get("characters") or [])
-    if len(runtime_characters) < len(projected_characters):
+    """Return whether ``extended`` only appends uniquely named character cards."""
+    base_characters = list(base.get("characters") or [])
+    extended_characters = list(extended.get("characters") or [])
+    if len(extended_characters) < len(base_characters):
         return False
-    projection_base = {**projection, "characters": []}
-    runtime_base = {**runtime_payload, "characters": []}
-    if projection_base != runtime_base:
+    if {**base, "characters": []} != {**extended, "characters": []}:
         return False
-    if runtime_characters[:len(projected_characters)] != projected_characters:
+    if extended_characters[:len(base_characters)] != base_characters:
         return False
-    projected_names = {
+    base_names = {
         str(item.get("name") or "")
-        for item in projected_characters
+        for item in base_characters
         if isinstance(item, dict)
     }
     extension_names = [
         str(item.get("name") or "")
-        for item in runtime_characters[len(projected_characters):]
+        for item in extended_characters[len(base_characters):]
         if isinstance(item, dict)
     ]
     return (
-        len(extension_names) == len(runtime_characters) - len(projected_characters)
+        len(extension_names) == len(extended_characters) - len(base_characters)
         and all(extension_names)
         and len(extension_names) == len(set(extension_names))
-        and not projected_names.intersection(extension_names)
+        and not base_names.intersection(extension_names)
+    )
+
+
+def _bible_projections_are_append_compatible(
+    projection: dict[str, Any],
+    runtime_payload: dict[str, Any],
+) -> bool:
+    """Allow append-only character growth across long-running generation.
+
+    Runtime may contain legacy compatibility cards not yet persisted, while the
+    project projection may gain cards from another episode during a model call.
+    Existing cards and every non-character field must remain byte-for-byte
+    equivalent in either direction.
+    """
+    return (
+        runtime_payload == projection
+        or _bible_extends_by_appending_characters(projection, runtime_payload)
+        or _bible_extends_by_appending_characters(runtime_payload, projection)
     )
 
 
@@ -306,7 +320,7 @@ def screenplay_authority_material(
         )
         if not bible_projection:
             bible_projection = runtime_payload
-        if not _runtime_bible_extends_projection(
+        if not _bible_projections_are_append_compatible(
             bible_projection,
             runtime_payload,
         ):

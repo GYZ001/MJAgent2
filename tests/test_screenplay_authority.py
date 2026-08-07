@@ -238,6 +238,65 @@ def test_contract_v4_rejects_stale_runtime_bible_against_current_projection() ->
         )
 
 
+def test_contract_v4_accepts_character_cards_appended_during_generation() -> None:
+    _published_case()
+    bible, _artifact = _seed_test_bible_authority()
+    runtime_bible = Bible.model_validate(bible)
+    projection = json.loads(json.dumps(bible))
+    projection["characters"].append({
+        "name": "New Ally",
+        "role": "配角",
+        "appearance_canonical": "黑发少女，浅色短袄，身形利落，随身携带一只旧布包",
+        "personality": "谨慎",
+        "speech_style": "直率",
+        "relationships": [],
+    })
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    material = screenplay_authority_material(
+        "episode-generic",
+        bible=runtime_bible,
+        contract_version="4.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+
+    assert material["bible_projection_hash"] == evidence_repository.content_hash(
+        screenplay_bible_payload(projection)
+    )
+    assert material["bible_projection_hash"] != evidence_repository.content_hash(
+        screenplay_bible_payload(runtime_bible)
+    )
+
+
+def test_contract_v4_rejects_existing_character_mutation_during_generation() -> None:
+    _published_case()
+    bible, _artifact = _seed_test_bible_authority()
+    runtime_bible = Bible.model_validate(bible)
+    projection = json.loads(json.dumps(bible))
+    projection["characters"][0]["appearance_canonical"] = (
+        "银发青年，白色长衣，身形高挑，佩戴一枚崭新的金色令牌"
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="项目当前组合投影不一致"):
+        screenplay_authority_material(
+            "episode-generic",
+            bible=runtime_bible,
+            contract_version="4.0.0",
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        )
+
+
 def test_legacy_contract_fingerprint_ignores_composed_projection_fields() -> None:
     _published_case()
     bible, _artifact = _seed_test_bible_authority()

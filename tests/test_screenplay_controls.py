@@ -50,6 +50,7 @@ def test_production_state_resumes_post_baseline_stages() -> None:
         kind="screenplay",
         resume=False,
     )
+    save_checkpoint(revision.id, {"phase": "GENERATING_BASELINE"})
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id="artifact-baseline",

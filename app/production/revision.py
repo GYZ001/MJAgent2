@@ -286,6 +286,15 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "FAILED": "STRUCTURE_VALIDATION",
     }
     phase = phase_aliases.get(phase, phase)
+    if (
+        has_working_baseline
+        and not published
+        and phase in {"GENERATING_BASELINE", "IDENTITY_AUDIT"}
+    ):
+        # Baseline persistence precedes the next checkpoint write. A crash in
+        # that narrow window must resume from the durable artifact instead of
+        # presenting or charging for another full baseline generation.
+        phase = "STRUCTURE_VALIDATION"
     stage_keys = [key for key, _label in stage_order]
     stage_index = (
         stage_keys.index(phase)
