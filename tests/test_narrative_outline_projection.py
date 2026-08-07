@@ -112,6 +112,34 @@ def test_narrative_outline_projects_graph_owned_fields_deterministically() -> No
     ) == []
 
 
+def test_narrative_outline_does_not_readd_already_established_fact() -> None:
+    screenplay = _screenplay()
+    first_event = screenplay.narrative_plan.events[0]
+    first_event.precondition_fact_ids = ["F-before"]
+    first_event.effects_add = ["F-before", "F-after"]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The declared event becomes visible.",
+                covers="The observable result is delivered.",
+                duration_s=5,
+            )
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    owner = outline.shots[-1]
+    assert owner.planned_state_in_fact_ids == ["F-before"]
+    assert owner.planned_delta_add_fact_ids == ["F-after"]
+    assert owner.planned_state_out_fact_ids == ["F-after"]
+
+
 def test_declared_narrator_capacity_splits_keep_shared_source_evidence() -> None:
     source = (
         "我知道你现在一定很瞧不起我，可我有什么办法，"

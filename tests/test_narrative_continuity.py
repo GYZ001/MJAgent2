@@ -12,6 +12,7 @@ from app.narrative import (
     compute_narrative_metrics,
     validate_blind_review,
     validate_screenplay_narrative,
+    validate_storyboard_screenplay_authority,
     validate_storyboard_narrative,
 )
 from app.production.screenplay_document import document_to_screenplay, screenplay_to_document
@@ -368,6 +369,41 @@ def _codes(errors: list[str]) -> set[str]:
         for error in errors
         if error.startswith("[") and "]" in error
     }
+
+
+def test_storyboard_authority_does_not_repromote_screenplay_score_only_findings() -> None:
+    screenplay = _screenplay()
+    first_event = screenplay.narrative_plan.events[0]
+    first_event.precondition_fact_ids = ["F-before"]
+    first_event.effects_add = ["F-before", "F-after"]
+
+    full_codes = _codes(validate_screenplay_narrative(
+        screenplay,
+        require=True,
+        expected_scope_id="episode-generic",
+    ))
+    operational = validate_storyboard_screenplay_authority(
+        screenplay,
+        expected_scope_id="episode-generic",
+    )
+
+    assert {
+        "EVENT_PRECONDITION_FROM_FUTURE",
+        "INITIAL_FACT_HAS_PRODUCER",
+        "STATE_REPLAY_WITHOUT_DELTA",
+    } & full_codes
+    assert operational == []
+
+
+def test_storyboard_authority_keeps_scope_errors_runtime_blocking() -> None:
+    screenplay = _screenplay()
+
+    errors = validate_storyboard_screenplay_authority(
+        screenplay,
+        expected_scope_id="another-episode",
+    )
+
+    assert "NARRATIVE_SCOPE_MISMATCH" in _codes(errors)
 
 
 def _boundary(previous_shot_id: str, next_shot_id: str) -> NarrativeBoundaryContract:
