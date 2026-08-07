@@ -38,6 +38,7 @@ from app.schemas import (
 from app.stages import (
     StageError,
     StoryboardShotDraft,
+    ensure_storyboard_scene_contexts,
     generate_storyboard_scene_pack,
     generate_storyboard_next_shot,
     generate_storyboard_outline,
@@ -1766,6 +1767,7 @@ async def run_storyboard_supervisor(
         storyboard_shot_count_range,
         validate_storyboard_direction_contract,
         validate_storyboard_preserves_key_content,
+        validate_storyboard,
     )
     from app.domain.storyboard_ops import (
         _board_from_shot_rows,
@@ -2367,9 +2369,27 @@ async def run_storyboard_supervisor(
 
         # ---- 按场景批量生成（新合同）----
         scene_pack_failure: BaseException | None = None
+        if outline is not None and not outline.scene_contexts:
+            derived_contexts = ensure_storyboard_scene_contexts(
+                outline,
+                screenplay,
+            )
+            if derived_contexts:
+                conn.execute(
+                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                    (outline.model_dump_json(), episode_id),
+                )
+                conn.commit()
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id,
+                        "STORYBOARD_SCENE_BATCHES_DERIVED",
+                        "info",
+                        f"已由批准大纲确定性划分 {len(derived_contexts)} 个场景批次",
+                        payload={"batches": derived_contexts},
+                    )
         scene_pack_mode = bool(
-            not narrative_authority
-            and outline is not None
+            outline is not None
             and outline.scene_contexts
             and not _repair_is_pending(cp)
         )
@@ -2466,31 +2486,65 @@ async def run_storyboard_supervisor(
                     shots=[*completed, *pack.shots],
                 )
                 normalize_continuity(candidate_board)
-                character_changes = normalize_offbible_characters(
+                if narrative_authority:
+                    _normalize_completed_authority_board(candidate_board)
+                    from app.identity_contracts import (
+                        canonicalize_storyboard_operational_identities,
+                    )
+                    canonicalize_storyboard_operational_identities(
+                        candidate_board,
+                        bible,
+                        screenplay,
+                    )
+                else:
+                    character_changes = normalize_offbible_characters(
+                        candidate_board,
+                        bible,
+                    )
+                    stripped = sorted({
+                        str(change.get("stripped") or "").strip()
+                        for change in character_changes
+                        if str(change.get("stripped") or "").strip()
+                    })
+                    if stripped:
+                        scene_pack_failure = StageError(
+                            "场景分镜人物合同",
+                            [
+                                "场景包残留未解析人物身份："
+                                + "、".join(stripped)
+                            ],
+                        )
+                        break
+                    normalize_dialogue_focus_offscreen_mentions(
+                        candidate_board,
+                        bible,
+                    )
+                relieve_spoken_overflow(candidate_board)
+                prefer_default_shot_durations(
                     candidate_board,
-                    bible,
+                    narrative_authority=narrative_authority,
+                    narrative_plan=screenplay.narrative_plan,
                 )
-                stripped = sorted({
-                    str(change.get("stripped") or "").strip()
-                    for change in character_changes
-                    if str(change.get("stripped") or "").strip()
-                })
-                if stripped:
+                if not narrative_authority:
+                    normalize_transition_visuals(candidate_board)
+                candidate_errors = (
+                    validate_storyboard(
+                        candidate_board,
+                        bible,
+                        int(ep_data.get("target_duration_s") or 0),
+                        narrative_authority=True,
+                        narrative_plan=screenplay.narrative_plan,
+                        screenplay=screenplay,
+                    )
+                    if narrative_authority
+                    else []
+                )
+                if candidate_errors:
                     scene_pack_failure = StageError(
-                        "场景分镜人物合同",
-                        [
-                            "场景包残留未解析人物身份："
-                            + "、".join(stripped)
-                        ],
+                        "场景分镜批量校验",
+                        candidate_errors,
                     )
                     break
-                normalize_dialogue_focus_offscreen_mentions(
-                    candidate_board,
-                    bible,
-                )
-                relieve_spoken_overflow(candidate_board)
-                prefer_default_shot_durations(candidate_board)
-                normalize_transition_visuals(candidate_board)
                 expected_screenplay_artifact_id = cp.input_versions.get(
                     "screenplay_artifact_id"
                 )
@@ -2543,21 +2597,32 @@ async def run_storyboard_supervisor(
                         run_id=run_id,
                         action="storyboard_scene_pack_provider",
                     )
-                cp.phase = "WAITING_HUMAN"
-                cp.outcome = "WAITING_RETRY_SCENE_PACK"
+                # A content/schema failure is local to the batch contract.
+                # Preserve already committed scenes and continue through the
+                # existing per-shot path instead of changing the delivery goal.
+                cp.scene_pack_candidates = {}
+                cp.phase = "GENERATING_SHOTS"
+                cp.outcome = None
                 save_checkpoint(cp, run_id=run_id)
                 conn.execute(
-                    "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
+                    "UPDATE episodes SET status='scripting',script_error=? WHERE id=?",
                     (
                         (
-                            "场景分镜包生成未完成，已提交场景和并行候选均已保留："
+                            "场景批量候选未通过，已自动切换逐镜兼容路径："
                             + str(scene_pack_failure)
                         )[:800],
                         episode_id,
                     ),
                 )
                 conn.commit()
-                return cp
+                if run_id:
+                    evidence_repository.append_event(
+                        run_id,
+                        "SCENE_PACK_FALLBACK_TO_SHOTS",
+                        "warning",
+                        "场景批量候选未通过，保留已提交场景并切换逐镜生成",
+                        payload={"error": str(scene_pack_failure)[:1000]},
+                    )
 
         # ---- 逐镜兼容/修复路径 ----
         if _repair_is_pending(cp):

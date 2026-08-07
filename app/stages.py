@@ -25,9 +25,9 @@ from app.evaluations.issues import issues_from_messages
 from app.harness import model_gateway
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenplay,
-                         SHOT_SIZES, Scene, Shot, Storyboard, StoryboardOutline,
-                         StoryboardOutlineShot, StoryboardSceneContext,
-                         StoryboardScenePack,
+                         RequiredOnScreenText, SHOT_SIZES, Scene, Shot, Storyboard,
+                         StoryboardContextRequirement, StoryboardOutline,
+                         StoryboardOutlineShot, StoryboardSceneContext, StoryboardScenePack,
                          TRANSITIONS,
                          extract_json, normalize_screenplay_json_shape,
                          schema_errors)
@@ -42,6 +42,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             normalize_dialogue_focus_offscreen_mentions,
                             normalize_offbible_characters, normalize_transition_visuals,
                             narrative_outline_action_capacity_errors,
+                            key_line_catalog,
                             prefer_default_shot_durations,
                             relieve_spoken_overflow,
                             source_dialogue_fragments,
@@ -102,24 +103,33 @@ class StoryboardShotDraft(BaseModel):
 
 
 class DirectedSceneShotDraft(BaseModel):
+    """Only fields that still require directing judgement.
+
+    Outline-owned IDs, timing, cast, dialogue, evidence and continuity are
+    hydrated by the server. Optional legacy fields remain readable so an
+    interrupted pre-upgrade scene candidate can still resume.
+    """
+
     shot_no: int
-    purpose: str
-    context_requirement_ids: list[str] = Field(default_factory=list)
-    resulting_change: str
-    readability_focus: str
-    duration_s: int
     shot_size: str
     camera_angle: str
     camera_move: str
     camera_motivation: str
-    characters: list[str]
     action_desc: str
     first_frame_desc: str
     last_frame_desc: str
-    source_excerpt: str
-    dialogues: list[Dialogue] = Field(default_factory=list)
-    transition: str = "硬切"
     spatial_anchor: str = ""
+    dialogue_emotions: dict[str, str] = Field(default_factory=dict)
+    required_text: RequiredOnScreenText | None = None
+    source_excerpt: str = ""
+    purpose: str = ""
+    context_requirement_ids: list[str] = Field(default_factory=list)
+    resulting_change: str = ""
+    readability_focus: str = ""
+    duration_s: int | None = None
+    characters: list[str] = Field(default_factory=list)
+    dialogues: list[Dialogue] = Field(default_factory=list)
+    transition: str = ""
     repeat_of_shot_id: str | None = None
     repeat_gain: str = ""
 
@@ -3576,6 +3586,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                 "分镜大纲硬合同",
                 list(dict.fromkeys(final_errors)),
             )
+        ensure_storyboard_scene_contexts(outline, screenplay)
         return outline
     # 减重试 #2：第一集第 1 镜是强制建场镜，把派给它的判决/反转类 covers 顺延合并到第 2 镜，
     # 避免逐镜阶段"照建场写→漏 covers / 硬塞判决→引入圣经外角色"的连环重试。
@@ -3628,6 +3639,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     )
     if post_narrative_errors:
         raise StageError("分镜大纲叙事合同", post_narrative_errors)
+    ensure_storyboard_scene_contexts(outline, screenplay)
     return outline
 
 
@@ -3690,12 +3702,377 @@ def _outline_brief(outline: StoryboardOutline | None, shot_no: int):
     return None
 
 
+def _screenplay_scene_parts(screenplay: EpisodeScreenplay, scene_no: int) -> tuple[str, str]:
+    scene = next(
+        (
+            item
+            for item in screenplay.scene_outline
+            if int(item.scene_no or 0) == scene_no
+        ),
+        None,
+    )
+    if scene is None:
+        return "", ""
+    heading = re.sub(
+        r"^\s*【?场\s*\d+】?\s*",
+        "",
+        str(scene.scene_heading or "").strip(),
+    )
+    parts = re.split(r"\s*[/／]\s*", heading, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return "", heading
+
+
+def ensure_storyboard_scene_contexts(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, Any]]:
+    """Build batch boundaries from an approved outline without another model call."""
+    if outline.scene_contexts or not outline.shots:
+        return []
+
+    runs: list[tuple[str, list[StoryboardOutlineShot]]] = []
+    for brief in outline.shots:
+        scene_key = str(brief.scene_id or "").strip()
+        if not scene_key:
+            scene_key = (
+                f"scene:{str(brief.scene_name or brief.scene_setting).strip()}:"
+                f"{str(brief.scene_time or '').strip()}"
+            )
+        if runs and runs[-1][0] == scene_key:
+            runs[-1][1].append(brief)
+        else:
+            runs.append((scene_key, [brief]))
+
+    # A scene that returns later cannot be committed as one contiguous pack.
+    # Keep the per-shot path for that uncommon structure instead of changing IDs.
+    run_keys = [key for key, _items in runs]
+    if len(run_keys) != len(set(run_keys)):
+        return []
+
+    contexts: list[StoryboardSceneContext] = []
+    changes: list[dict[str, Any]] = []
+    for run_index, (_scene_key, briefs) in enumerate(runs, start=1):
+        first = briefs[0]
+        last = briefs[-1]
+        scene_id = str(first.scene_id or "").strip() or f"SC{run_index:03d}"
+        script_scene = next(
+            (
+                item
+                for item in screenplay.scene_outline
+                if int(item.scene_no or 0) == run_index
+            ),
+            None,
+        )
+        heading_time, heading_name = _screenplay_scene_parts(
+            screenplay,
+            int(getattr(script_scene, "scene_no", run_index) or run_index),
+        )
+        scene_time = str(first.scene_time or heading_time).strip()
+        scene_name = str(
+            first.scene_name
+            or first.scene_setting
+            or heading_name
+        ).strip()
+        requirements: list[StoryboardContextRequirement] = []
+        requirement_ids: list[str] = []
+        for requirement_index, description in enumerate(
+            list(getattr(script_scene, "context_requirements", None) or []),
+            start=1,
+        ):
+            text = str(description or "").strip()
+            if not text:
+                continue
+            requirement_id = f"CTX-{scene_id}-{requirement_index:02d}"
+            requirement_ids.append(requirement_id)
+            requirements.append(StoryboardContextRequirement(
+                requirement_id=requirement_id,
+                description=text,
+                required_before_shot_no=int(first.shot_no),
+            ))
+        if requirement_ids and not first.context_requirement_ids:
+            first.context_requirement_ids = list(requirement_ids)
+
+        for brief in briefs:
+            if not brief.scene_id:
+                brief.scene_id = scene_id
+            if not brief.scene_time:
+                brief.scene_time = scene_time
+            if not brief.scene_name:
+                brief.scene_name = scene_name
+        context = StoryboardSceneContext(
+            scene_id=scene_id,
+            scene_no=run_index,
+            scene_name=scene_name,
+            scene_time=scene_time,
+            entry_state=(
+                str(first.state_in or "").strip()
+                or str(getattr(script_scene, "entry_state", "") or "").strip()
+                or "本场开始状态由首镜 state_in 承接"
+            ),
+            exit_state=(
+                str(last.state_out or "").strip()
+                or str(getattr(script_scene, "exit_state", "") or "").strip()
+                or "本场结束状态由末镜 state_out 交付"
+            ),
+            transition_from_previous=(
+                "首场直接建立"
+                if run_index == 1
+                else str(first.continuity_mode or "scene_change")
+            ),
+            spatial_axis=scene_id,
+            context_requirements=requirements,
+        )
+        contexts.append(context)
+        changes.append({
+            "scene_id": scene_id,
+            "shot_start": int(first.shot_no),
+            "shot_end": int(last.shot_no),
+            "requirement_ids": requirement_ids,
+        })
+    outline.scene_contexts = contexts
+    return changes
+
+
+def _parse_key_line(value: str) -> tuple[str, str]:
+    text = str(value or "").strip()
+    for separator in ("：", ":"):
+        speaker, found, line = text.partition(separator)
+        if found and speaker.strip() and line.strip():
+            return speaker.strip(), line.strip()
+    return "", text
+
+
+def _scene_pack_dialogues(
+    brief: StoryboardOutlineShot,
+    screenplay: EpisodeScreenplay,
+    emotions: dict[str, str],
+) -> list[Dialogue]:
+    catalog = key_line_catalog(screenplay)
+    dialogues: list[Dialogue] = []
+    for raw_id in brief.key_line_ids:
+        key_id = str(raw_id or "").strip().upper()
+        speaker, line = _parse_key_line(catalog.get(key_id, ""))
+        if not speaker or not line:
+            continue
+        emotion = str(
+            emotions.get(key_id)
+            or emotions.get(line)
+            or "平静"
+        ).strip()
+        dialogues.append(Dialogue(
+            speaker=speaker,
+            line=line,
+            emotion=emotion if emotion in EMOTIONS else "平静",
+        ))
+    return dialogues
+
+
+def _canonical_scene_pack_names(
+    values: list[str],
+    *,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+    usage: str,
+) -> list[str]:
+    if screenplay.narrative_plan is None:
+        return list(dict.fromkeys(
+            str(value or "").strip() for value in values if str(value or "").strip()
+        ))
+    from app.identity_contracts import (
+        IdentityContractError,
+        narrative_identity_resolver,
+    )
+
+    resolver = narrative_identity_resolver(bible, screenplay)
+    resolved: list[str] = []
+    for value in values:
+        token = str(value or "").strip()
+        if not token:
+            continue
+        try:
+            identity = resolver.resolve(token, usage=usage)
+        except IdentityContractError:
+            continue
+        if identity.display_name not in resolved:
+            resolved.append(identity.display_name)
+    return resolved
+
+
+def _scene_pack_characters(
+    brief: StoryboardOutlineShot,
+    dialogues: list[Dialogue],
+    *,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+    fallback: list[str],
+) -> list[str]:
+    candidates = [
+        *(brief.characters_visible or []),
+        *(brief.visible_entity_ids or []),
+        *[dialogue.speaker for dialogue in dialogues],
+    ]
+    resolved = _canonical_scene_pack_names(
+        candidates,
+        bible=bible,
+        screenplay=screenplay,
+        usage="visual",
+    )
+    if resolved:
+        return resolved
+    return _canonical_scene_pack_names(
+        fallback,
+        bible=bible,
+        screenplay=screenplay,
+        usage="visual",
+    )
+
+
+def _scene_pack_source_excerpt(
+    brief: StoryboardOutlineShot,
+    screenplay: EpisodeScreenplay,
+    source_text: str,
+    *,
+    fallback: str,
+) -> str:
+    candidates: list[str] = []
+    catalog = key_line_catalog(screenplay)
+    key_lines = {
+        _parse_key_line(catalog.get(str(key_id).strip().upper(), ""))[1]
+        for key_id in brief.key_line_ids
+    }
+    for chain in screenplay.dialogue_chains:
+        for turn in chain.turns:
+            if str(turn.line or "").strip() in key_lines:
+                candidates.append(str(turn.source_text or ""))
+
+    normalized_event_ids = {
+        re.sub(r"[^A-Za-z0-9]", "", str(value or "")).lower()
+        for value in [brief.story_event_id, *brief.event_ids]
+        if str(value or "").strip()
+    }
+    for event in screenplay.events:
+        event_key = re.sub(
+            r"[^A-Za-z0-9]",
+            "",
+            str(event.event_id or ""),
+        ).lower()
+        if event_key in normalized_event_ids:
+            candidates.append(str(event.source_span or ""))
+
+    plan = screenplay.narrative_plan
+    if plan is not None:
+        event_by_id = {item.event_id: item for item in plan.events}
+        evidence_by_id = {
+            item.source_evidence_id: item.verbatim_excerpt
+            for item in plan.source_evidence
+        }
+        proposition_by_id = {
+            item.proposition_id: item for item in plan.propositions
+        }
+        for event_id in brief.event_ids:
+            event = event_by_id.get(event_id)
+            if event is None:
+                continue
+            for proposition_id in event.proposition_ids:
+                proposition = proposition_by_id.get(proposition_id)
+                if proposition is None:
+                    continue
+                candidates.extend(
+                    evidence_by_id.get(evidence_id, "")
+                    for evidence_id in proposition.direct_source_evidence_ids
+                )
+            for decision in plan.adaptation_decisions:
+                if event_id not in decision.affected_event_ids:
+                    continue
+                for proposition_id in decision.source_proposition_ids:
+                    proposition = proposition_by_id.get(proposition_id)
+                    if proposition is None:
+                        continue
+                    candidates.extend(
+                        evidence_by_id.get(evidence_id, "")
+                        for evidence_id in proposition.direct_source_evidence_ids
+                    )
+
+    source_segments = {
+        segment.segment_id: segment.text
+        for segment in index_source_segments(source_text)
+    }
+    spine_by_id = {
+        str(item.beat_id or "").strip().upper(): item
+        for item in (
+            screenplay.plot_spine.spine_beats
+            if screenplay.plot_spine else []
+        )
+    }
+    for beat_id in brief.spine_beat_ids:
+        beat = spine_by_id.get(str(beat_id or "").strip().upper())
+        if beat is None:
+            continue
+        candidates.extend(
+            source_segments.get(segment_id, "")
+            for segment_id in beat.source_segment_ids
+        )
+    candidates.extend([
+        fallback,
+        brief.covers,
+        brief.primary_action,
+        brief.beat,
+    ])
+    for candidate in candidates:
+        aligned = align_source_excerpt(
+            str(candidate or ""),
+            source_text,
+            min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
+        )
+        if aligned is not None:
+            return aligned.excerpt
+    return ""
+
+
+def _scene_pack_task_fields(
+    brief: StoryboardOutlineShot,
+) -> tuple[str, str, str]:
+    purpose = str(
+        brief.purpose
+        or brief.beat
+        or brief.primary_action
+        or "落实当前镜头的叙事任务"
+    ).strip()
+    resulting_change = str(
+        brief.resulting_change
+        or brief.state_out
+        or brief.covers
+        or brief.beat
+        or "当前镜头任务完成"
+    ).strip()
+    valid_focuses = {
+        "context", "action", "emotion", "dialogue", "evidence", "transition",
+    }
+    focus = str(brief.readability_focus or "").strip()
+    if focus not in valid_focuses:
+        contribution = brief.shot_contribution
+        if brief.key_line_ids:
+            focus = "dialogue"
+        elif brief.primary_action_id or brief.action_phase_ids:
+            focus = "action"
+        elif contribution and contribution.character_state_delta_ids:
+            focus = "emotion"
+        elif contribution and contribution.assimilation_task_ids:
+            focus = "context"
+        else:
+            focus = "evidence"
+    return purpose, resulting_change, focus
+
+
 def _hydrate_directed_scene_pack(
     draft: DirectedScenePackDraft,
     *,
     outline: StoryboardOutline,
     source_text: str,
     screenplay: EpisodeScreenplay,
+    bible: Bible,
 ) -> StoryboardScenePack:
     briefs = {
         int(item.shot_no): item
@@ -3706,29 +4083,79 @@ def _hydrate_directed_scene_pack(
     last_global_shot_no = len(outline.shots)
     for item in draft.shots:
         brief = briefs[int(item.shot_no)]
+        purpose, resulting_change, readability_focus = _scene_pack_task_fields(
+            brief,
+        )
+        dialogues = _scene_pack_dialogues(
+            brief,
+            screenplay,
+            item.dialogue_emotions,
+        )
+        if not dialogues and item.dialogues:
+            dialogues = list(item.dialogues)
+        characters = _scene_pack_characters(
+            brief,
+            dialogues,
+            bible=bible,
+            screenplay=screenplay,
+            fallback=list(item.characters),
+        )
+        source_excerpt = _scene_pack_source_excerpt(
+            brief,
+            screenplay,
+            source_text,
+            fallback=item.source_excerpt,
+        )
+        duration_s = int(
+            brief.duration_s
+            or item.duration_s
+            or config.DEFAULT_VIDEO_DURATION_S
+        )
+        shot_size = (
+            brief.camera_size
+            if brief.camera_size in SHOT_SIZES
+            else item.shot_size
+        )
+        camera_angle = str(
+            brief.camera_angle or item.camera_angle
+        ).strip()
+        camera_move = (
+            brief.camera_movement
+            if brief.camera_movement in CAMERA_MOVES
+            else item.camera_move
+        )
+        camera_motivation = str(
+            brief.camera_motivation or item.camera_motivation
+        ).strip()
+        continuity_mode = str(brief.continuity_mode or "").strip()
+        transition = (
+            "叠化"
+            if continuity_mode == "scene_change"
+            else "硬切"
+        )
         shot = Shot(
             shot_no=int(item.shot_no),
             shot_id=brief.shot_id or f"SH{int(item.shot_no):04d}",
             scene_id=brief.scene_id,
-            duration_s=int(item.duration_s),
-            shot_size=item.shot_size,
-            camera_angle=item.camera_angle,
-            camera_move=item.camera_move,
-            camera_motivation=item.camera_motivation,
+            duration_s=duration_s,
+            shot_size=shot_size,
+            camera_angle=camera_angle,
+            camera_move=camera_move,
+            camera_motivation=camera_motivation,
             scene_time=brief.scene_time,
             scene_name=brief.scene_name,
             scene_setting=brief.scene_setting,
-            characters=list(item.characters),
-            characters_visible=list(item.characters),
+            characters=characters,
+            characters_visible=list(characters),
             action_desc=item.action_desc,
             first_frame_desc=item.first_frame_desc,
             last_frame_desc=item.last_frame_desc,
-            source_excerpt=item.source_excerpt,
+            source_excerpt=source_excerpt,
             narration="",
-            dialogues=list(item.dialogues),
-            transition=item.transition,
+            dialogues=dialogues,
+            transition=transition,
             story_event_id=brief.story_event_id,
-            purpose=item.purpose,
+            purpose=purpose,
             spine_beat_ids=list(brief.spine_beat_ids),
             key_line_ids=list(brief.key_line_ids),
             information_ids=list(brief.information_ids),
@@ -3737,24 +4164,29 @@ def _hydrate_directed_scene_pack(
             primary_action=brief.primary_action,
             emotion_beat=brief.emotion_beat,
             state_out=brief.state_out,
-            continuity_mode=brief.continuity_mode,
-            audio_cast=list(brief.audio_cast),
+            continuity_mode=continuity_mode,
+            audio_cast=_canonical_scene_pack_names(
+                [*(brief.audio_cast or []), *[
+                    dialogue.speaker for dialogue in dialogues
+                ]],
+                bible=bible,
+                screenplay=screenplay,
+                usage="voice",
+            ),
+            required_text=item.required_text,
             spatial_anchor=item.spatial_anchor,
             is_final=int(item.shot_no) == last_global_shot_no,
-            context_requirement_ids=list(item.context_requirement_ids),
-            resulting_change=item.resulting_change,
-            readability_focus=item.readability_focus,
-            repeat_of_shot_id=item.repeat_of_shot_id,
-            repeat_gain=item.repeat_gain,
-            prompt_contract_version="director_scene_pack_v1",
+            context_requirement_ids=list(brief.context_requirement_ids),
+            resulting_change=resulting_change,
+            readability_focus=readability_focus,
+            repeat_of_shot_id=brief.repeat_of_shot_id,
+            repeat_gain=brief.repeat_gain,
+            prompt_contract_version="director_scene_pack_v2",
         )
-        aligned = align_storyboard_source_evidence(
-            shot,
-            source_text,
-            screenplay=screenplay,
-        )
-        if aligned is not None:
-            shot.source_excerpt = aligned.excerpt
+        for field in _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS:
+            if not hasattr(brief, field):
+                continue
+            setattr(shot, field, deepcopy(getattr(brief, field)))
         ensure_audio_timeline(shot, screenplay.voice_bible)
         shots.append(shot)
     return StoryboardScenePack(
@@ -3815,16 +4247,40 @@ async def generate_storyboard_scene_pack(
         hints,
         max_chars=6000,
     )
+    creative_briefs = [
+        {
+            "shot_no": brief.shot_no,
+            "shot_id": brief.shot_id,
+            "beat": brief.beat,
+            "covers": brief.covers,
+            "state_in": brief.state_in,
+            "primary_action": brief.primary_action,
+            "state_out": brief.state_out,
+            "characters_visible": brief.characters_visible,
+            "visible_entity_ids": brief.visible_entity_ids,
+            "key_line_ids": brief.key_line_ids,
+            "duration_s": brief.duration_s,
+            "camera_preset": {
+                "shot_size": brief.camera_size,
+                "camera_angle": brief.camera_angle,
+                "camera_move": brief.camera_movement,
+                "camera_motivation": brief.camera_motivation,
+            },
+        }
+        for brief in briefs
+    ]
     prompt = f"""任务：按导演规划一次性生成 {scene_context.scene_id} 的完整场景分镜包。
 
 本场镜号必须精确为 {shot_nos}，数量不得增删；导演规划已经决定了完整剧情覆盖和拆镜边界。
-你负责把每个规划任务写成可直接送入视频模型的详细镜头。
+你只负责每镜的画面动作、首尾帧、摄影表达和空间构图。
+镜号、叙事 ID、场景、人物、台词、时长、来源证据、连续性边界、信息台账和是否末镜均由程序装配，
+不得在输出中重复这些字段。
 
 场景上下文：
 {json.dumps(scene_context.model_dump(mode='json'), ensure_ascii=False, indent=2)}
 
-本场导演规划：
-{json.dumps([item.model_dump(mode='json') for item in briefs], ensure_ascii=False, indent=2)}
+本场创作任务：
+{json.dumps(creative_briefs, ensure_ascii=False, indent=2)}
 
 相关剧本：
 {screenplay_window}
@@ -3836,19 +4292,18 @@ async def generate_storyboard_scene_pack(
 {planning_bible.model_dump_json()}
 
 导演规则：
-1. 每镜只完成规划中的一个连续动作或观看任务，不得改写 purpose、交付项和结果方向。
+1. 每镜只完成规划中的一个连续动作或观看任务，不得改写任务与结果方向。
 2. 每镜必须输出景别 shot_size、角度 camera_angle、运动 camera_move，并用 camera_motivation
    解释三者如何服务上下文、动作、情绪、对白、证据或转场。
-3. readability_focus=action 时，场内至少一镜用中景/全景/远景配合跟随或横摇，
+3. 动作任务用中景/全景/远景配合跟随或横摇，
    完整展示动作路径、主体和作用对象。
-4. readability_focus=emotion 时，场内至少一镜用近景/特写配合固定或推近，
+4. 情绪任务用近景/特写配合固定或推近，
    让情绪变化可读，不依赖微表情堆砌。
-5. 场景上下文要求必须在依赖动作前通过 context_requirement_ids 交付。
-6. first_frame_desc 与 last_frame_desc 保持同机位、同场景、同构图，只推进本镜动作。
-7. 相邻镜承接人物位置、视线、道具和动作结果；人物不得凭空出现、消失或换装。
-8. source_excerpt 必须逐字复制上方原文中的连续片段，至少 {SOURCE_EXCERPT_MIN_CHARS} 字。
-9. 不得写旁白；对白只放 dialogues。说话人变化按导演规划拆镜。
-10. 相同画面或动作只有产生新反应、验证、视角或兑现时才能重复，并填写 repeat_gain。
+5. first_frame_desc 与 last_frame_desc 保持同机位、同场景、同构图，只推进本镜动作。
+6. 相邻镜承接人物位置、视线、道具和动作结果；人物不得凭空出现、消失或换装。
+7. dialogue_emotions 只按 key_line_id 填情绪；台词文本和说话人由程序从剧本原样注入。
+8. required_text 仅在本镜确实需要画面精确文字时填写，否则为 null。
+9. source_excerpt 通常留空，由程序按 event/spine/台词证据回绑；只有任务证据不足时才逐字复制原文。
 
 输出 JSON：
 {{
@@ -3856,26 +4311,17 @@ async def generate_storyboard_scene_pack(
   "scene_id": "{scene_context.scene_id}",
   "shots": [{{
     "shot_no": {shot_nos[0]},
-    "purpose": str,
-    "context_requirement_ids": [],
-    "resulting_change": str,
-    "readability_focus": "context|action|emotion|dialogue|evidence|transition",
-    "duration_s": 5,
     "shot_size": "远景|全景|中景|近景|特写",
     "camera_angle": str,
     "camera_move": "固定|推近|拉远|横摇|跟随",
     "camera_motivation": str,
-    "characters": [str],
     "action_desc": str,
     "first_frame_desc": str,
     "last_frame_desc": str,
-    "source_excerpt": str,
-    "dialogues": [{{"speaker": str, "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定",
-                   "delivery": "spoken_dialogue|offscreen_voice"}}],
-    "transition": "硬切|叠化|淡出淡入|黑场|闪黑|闪白|甩镜|遮挡转场|匹配剪辑|声音延续+叠化|声音先行+淡入",
     "spatial_anchor": str,
-    "repeat_of_shot_id": null,
-    "repeat_gain": ""
+    "dialogue_emotions": {{"KL01": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}},
+    "required_text": null,
+    "source_excerpt": ""
   }}]
 }}"""
 
@@ -3893,51 +4339,33 @@ async def generate_storyboard_scene_pack(
         if actual_nos != shot_nos:
             errors.append(f"场景镜号必须精确为 {shot_nos}，当前 {actual_nos}")
             return errors
-        briefs_by_no = {int(item.shot_no): item for item in briefs}
-        for item in draft.shots:
-            brief = briefs_by_no[int(item.shot_no)]
-            tag = f"shot_no={item.shot_no}"
-            if item.duration_s not in config.ALLOWED_DURATIONS:
-                errors.append(f"{tag}.duration_s 必须为 5~10 秒整数")
-            if item.shot_size not in SHOT_SIZES:
-                errors.append(f"{tag}.shot_size 非法")
-            if item.camera_move not in CAMERA_MOVES:
-                errors.append(f"{tag}.camera_move 非法")
-            if not item.camera_angle.strip():
-                errors.append(f"{tag}.camera_angle 为空")
-            if len(item.camera_motivation.strip()) < 6:
-                errors.append(f"{tag}.camera_motivation 过短")
-            if len(item.purpose.strip()) < 6:
-                errors.append(f"{tag}.purpose 过短")
-            if len(item.resulting_change.strip()) < 4:
-                errors.append(f"{tag}.resulting_change 过短")
-            if item.readability_focus != brief.readability_focus:
-                errors.append(
-                    f"{tag}.readability_focus 必须保持导演规划值 {brief.readability_focus}"
-                )
-            if set(item.context_requirement_ids) != set(
-                brief.context_requirement_ids
-            ):
-                errors.append(
-                    f"{tag}.context_requirement_ids 必须等于导演规划 "
-                    f"{brief.context_requirement_ids}"
-                )
-            if len(item.action_desc.strip()) < ACTION_DESC_HARD_MIN:
-                errors.append(f"{tag}.action_desc 过短")
-            aligned = align_source_excerpt(
-                item.source_excerpt,
-                source_text,
-                min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
-            )
-            if aligned is None:
-                errors.append(f"{tag}.source_excerpt 无法对齐本集原文")
-        if not errors:
+        try:
             pack = _hydrate_directed_scene_pack(
                 draft,
                 outline=outline,
                 source_text=source_text,
                 screenplay=screenplay,
+                bible=planning_bible,
             )
+        except (TypeError, ValueError) as exc:
+            return [f"场景包程序化装配失败：{exc}"]
+        for shot in pack.shots:
+            tag = f"shot_no={shot.shot_no}"
+            if shot.duration_s not in config.ALLOWED_DURATIONS:
+                errors.append(f"{tag}.duration_s 必须为 5~10 秒整数")
+            if shot.shot_size not in SHOT_SIZES:
+                errors.append(f"{tag}.shot_size 非法")
+            if shot.camera_move not in CAMERA_MOVES:
+                errors.append(f"{tag}.camera_move 非法")
+            if not shot.camera_angle.strip():
+                errors.append(f"{tag}.camera_angle 为空")
+            if len(shot.camera_motivation.strip()) < 6:
+                errors.append(f"{tag}.camera_motivation 过短")
+            if len(shot.action_desc.strip()) < ACTION_DESC_HARD_MIN:
+                errors.append(f"{tag}.action_desc 过短")
+            if len(shot.source_excerpt.strip()) < SOURCE_EXCERPT_MIN_CHARS:
+                errors.append(f"{tag}.source_excerpt 无法从权威来源确定性回绑")
+        if not errors:
             temporary = Storyboard(
                 episode_no=episode["episode_no"],
                 shots=[
@@ -3951,6 +4379,8 @@ async def generate_storyboard_scene_pack(
                     temporary,
                     planning_bible,
                     int(episode.get("target_duration_s") or 0),
+                    narrative_authority=screenplay.narrative_plan is not None,
+                    narrative_plan=screenplay.narrative_plan,
                     screenplay=screenplay,
                 )
                 if not error.startswith("shot_no 必须")
@@ -4005,6 +4435,7 @@ async def generate_storyboard_scene_pack(
         outline=outline,
         source_text=source_text,
         screenplay=screenplay,
+        bible=planning_bible,
     )
     artifact_id = getattr(draft, "evidence_artifact_id", None)
     for shot in pack.shots:
