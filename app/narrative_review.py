@@ -1304,6 +1304,230 @@ def _issue(message: str, episode_id: str) -> Issue:
     )
 
 
+def _load_reusable_partial_review(
+    *,
+    episode_id: str,
+    screenplay: EpisodeScreenplay,
+    board: Storyboard,
+    review_input_parent_ids: list[str],
+) -> tuple[
+    str,
+    list[BlindAudienceObservation],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+] | None:
+    """Load a complete frozen-observation chain after comparator failure."""
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return None
+    conn = evidence_repository.get_conn()
+    input_rows = conn.execute(
+        """SELECT id FROM artifacts
+             WHERE type='storyboard_review_input'
+               AND scope_type='episode' AND scope_id=?
+               AND status IN ('validated','approved')
+             ORDER BY created_at DESC,version DESC""",
+        (episode_id,),
+    ).fetchall()
+    evidence_rows = conn.execute(
+        """SELECT id FROM artifacts
+             WHERE scope_type='episode' AND scope_id=?
+               AND type IN (
+                   'blind_audience_perceptual_input',
+                   'blind_audience_spontaneous_recall',
+                   'blind_audience_observation'
+               )
+               AND status IN ('validated','approved')
+             ORDER BY created_at DESC,version DESC""",
+        (episode_id,),
+    ).fetchall()
+    evidence_artifacts = [
+        artifact
+        for row in evidence_rows
+        if (
+            artifact := evidence_repository.get_artifact(str(row["id"]))
+        ) is not None
+        and evidence_repository.content_hash(
+            artifact.get("content"),
+            artifact.get("file_path"),
+        ) == artifact.get("content_hash")
+    ]
+    for input_row in input_rows:
+        review_input = evidence_repository.get_artifact(
+            str(input_row["id"])
+        )
+        if (
+            review_input is None
+            or evidence_repository.content_hash(
+                review_input.get("content"),
+                review_input.get("file_path"),
+            ) != review_input.get("content_hash")
+            or review_input.get("content")
+            != board.model_dump(mode="json")
+            or list(review_input.get("parent_artifact_ids") or [])
+            != review_input_parent_ids
+        ):
+            continue
+        review_input_id = str(review_input["id"])
+        observations: list[BlindAudienceObservation] = []
+        perceptual_ids: list[str] = []
+        first_pass_ids: list[str] = []
+        observation_ids: list[str] = []
+        chain_valid = True
+        for ordinal, prior in enumerate(plan.audience_priors, start=1):
+            observation_id = f"BAO-{episode_id}-{ordinal}"
+            expected_perceptual = _blind_perceptual_input_content(
+                prior=prior,
+                screenplay=screenplay,
+                board=board,
+                observation_id=observation_id,
+            )
+            perceptual = next((
+                artifact
+                for artifact in evidence_artifacts
+                if (
+                    artifact.get("type")
+                    == BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE
+                    and review_input_id
+                    in set(artifact.get("parent_artifact_ids") or [])
+                    and artifact.get("content") == expected_perceptual
+                )
+            ), None)
+            if perceptual is None:
+                chain_valid = False
+                break
+            perceptual_id = str(perceptual["id"])
+            first_artifact = next((
+                artifact
+                for artifact in evidence_artifacts
+                if (
+                    artifact.get("type")
+                    == BLIND_FIRST_PASS_ARTIFACT_TYPE
+                    and {
+                        review_input_id,
+                        perceptual_id,
+                    }.issubset(
+                        set(artifact.get("parent_artifact_ids") or [])
+                    )
+                )
+            ), None)
+            if first_artifact is None:
+                chain_valid = False
+                break
+            try:
+                first_pass = BlindAudienceFirstPass.model_validate(
+                    first_artifact.get("content") or {}
+                )
+            except (TypeError, ValueError):
+                chain_valid = False
+                break
+            if (
+                first_pass.observation_id != observation_id
+                or first_pass.audience_prior_id
+                != prior.audience_prior_id
+            ):
+                chain_valid = False
+                break
+            isolation_gate = conn.execute(
+                """SELECT 1 FROM evaluations
+                     WHERE artifact_id=?
+                       AND evaluator_name='blind_review_isolation_gate'
+                       AND evaluator_version=?
+                       AND status='passed' AND hard_gate_passed=1
+                       AND evaluation_role='runtime_gate'
+                       AND runtime_blocking=1
+                     LIMIT 1""",
+                (
+                    str(first_artifact["id"]),
+                    BLIND_READER_PROMPT_VERSION,
+                ),
+            ).fetchone()
+            if isolation_gate is None:
+                chain_valid = False
+                break
+            first_id = str(first_artifact["id"])
+            observation_artifact = next((
+                artifact
+                for artifact in evidence_artifacts
+                if (
+                    artifact.get("type")
+                    == "blind_audience_observation"
+                    and {
+                        review_input_id,
+                        perceptual_id,
+                        first_id,
+                    }.issubset(
+                        set(artifact.get("parent_artifact_ids") or [])
+                    )
+                )
+            ), None)
+            if observation_artifact is None:
+                chain_valid = False
+                break
+            try:
+                observation = BlindAudienceObservation.model_validate(
+                    observation_artifact.get("content") or {}
+                )
+            except (TypeError, ValueError):
+                chain_valid = False
+                break
+            if (
+                observation.observation_id != observation_id
+                or observation.audience_prior_id
+                != prior.audience_prior_id
+                or any(
+                    getattr(observation, field_name)
+                    != getattr(first_pass, field_name)
+                    for field_name in BlindAudienceFirstPass.model_fields
+                )
+            ):
+                chain_valid = False
+                break
+            visible_handles = {
+                evidence_id
+                for shot in expected_perceptual[
+                    "model_prompt_payload"
+                ]["input"]["ordered_storyboard_as_seen"]
+                for evidence_id in (
+                    shot.get("observable_evidence_handles") or []
+                )
+            }
+            if not set(
+                observation.supporting_evidence_ids
+            ).issubset(visible_handles):
+                chain_valid = False
+                break
+            observations.append(observation)
+            perceptual_ids.append(perceptual_id)
+            first_pass_ids.append(first_id)
+            observation_ids.append(str(observation_artifact["id"]))
+        if chain_valid and len(observations) == len(plan.audience_priors):
+            artifact_ids = [
+                review_input_id,
+                *[
+                    artifact_id
+                    for group in zip(
+                        perceptual_ids,
+                        first_pass_ids,
+                        observation_ids,
+                        strict=True,
+                    )
+                    for artifact_id in group
+                ],
+            ]
+            return (
+                review_input_id,
+                observations,
+                artifact_ids,
+                perceptual_ids,
+                first_pass_ids,
+                observation_ids,
+            )
+    return None
+
+
 async def run_blind_audience_review(
     *,
     episode_id: str,
@@ -1333,7 +1557,30 @@ async def run_blind_audience_review(
         board,
         screenplay_artifact_id,
     )
-    if storyboard_artifact_id:
+    reusable = (
+        _load_reusable_partial_review(
+            episode_id=episode_id,
+            screenplay=screenplay,
+            board=board,
+            review_input_parent_ids=review_input_parent_ids,
+        )
+        if not storyboard_artifact_id
+        else None
+    )
+    observations: list[BlindAudienceObservation] = []
+    perceptual_input_artifact_ids: list[str] = []
+    first_pass_artifact_ids: list[str] = []
+    observation_artifact_ids: list[str] = []
+    if reusable is not None:
+        (
+            storyboard_artifact_id,
+            observations,
+            artifact_ids,
+            perceptual_input_artifact_ids,
+            first_pass_artifact_ids,
+            observation_artifact_ids,
+        ) = reusable
+    elif storyboard_artifact_id:
         supplied_input = evidence_repository.get_artifact(storyboard_artifact_id)
         if (
             supplied_input is None
@@ -1362,11 +1609,10 @@ async def run_blind_audience_review(
         storyboard_artifact_id = str(review_input["id"])
         artifact_ids.append(storyboard_artifact_id)
     parents = [review_input_parent_ids[0], str(storyboard_artifact_id)]
-    observations: list[BlindAudienceObservation] = []
-    perceptual_input_artifact_ids: list[str] = []
-    first_pass_artifact_ids: list[str] = []
-    observation_artifact_ids: list[str] = []
-    for ordinal, prior in enumerate(plan.audience_priors, start=1):
+    pending_priors = [] if reusable is not None else list(
+        enumerate(plan.audience_priors, start=1)
+    )
+    for ordinal, prior in pending_priors:
         observation_id = f"BAO-{episode_id}-{ordinal}"
         perceptual_input_content = _blind_perceptual_input_content(
             prior=prior,
