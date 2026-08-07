@@ -4431,6 +4431,21 @@ def normalize_storyboard_direction_fields(
                     f"清晰呈现{shot.purpose}"
                 )
             ).strip()
+        outline_fields = {
+            "purpose": shot.purpose,
+            "resulting_change": shot.resulting_change,
+            "readability_focus": shot.readability_focus,
+            "camera_size": shot.shot_size,
+            "camera_angle": shot.camera_angle,
+            "camera_movement": shot.camera_move,
+            "camera_motivation": shot.camera_motivation,
+        }
+        outline_changed_fields: list[str] = []
+        for field, value in outline_fields.items():
+            if getattr(brief, field) == value:
+                continue
+            setattr(brief, field, value)
+            outline_changed_fields.append(f"outline.{field}")
         after = {
             "action_desc": shot.action_desc,
             "purpose": shot.purpose,
@@ -4447,6 +4462,7 @@ def normalize_storyboard_direction_fields(
             for field in before
             if before[field] != after[field]
         ]
+        changed_fields.extend(outline_changed_fields)
         if changed_fields:
             changes.append({
                 "shot_no": int(shot.shot_no),

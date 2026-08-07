@@ -3310,6 +3310,10 @@ async def run_storyboard_supervisor(
                     row["storyboard_artifact_id"],
                     narrative_authority=narrative_authority,
                 )
+            conn.execute(
+                "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                (outline.model_dump_json(), episode_id),
+            )
             conn.commit()
             completed = list(full_board.shots)
             if run_id:

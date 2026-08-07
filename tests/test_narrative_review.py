@@ -682,6 +682,13 @@ async def test_blind_review_repairs_empty_low_percentile_reason_without_model(
     assert incomplete_artifact["id"] in repaired_artifact[
         "parent_artifact_ids"
     ]
+    assert verify_persisted_narrative_review(
+        episode_id="episode-generic",
+        screenplay=screenplay,
+        board=board,
+        report=repaired,
+        artifact_ids=repaired_ids,
+    ) == repaired_artifact["id"]
 
 
 @pytest.mark.asyncio

@@ -231,6 +231,9 @@ def test_direction_fields_are_derived_from_approved_outline() -> None:
 
     assert changes
     assert board.shots[0].context_requirement_ids == ["CTX-SC001-01"]
+    assert outline.shots[1].camera_size == "中景"
+    assert outline.shots[1].camera_movement == "跟随"
+    assert outline.shots[2].readability_focus == "emotion"
     assert validate_storyboard_direction_contract(board, outline) == []
 
 

@@ -563,7 +563,26 @@ def verify_persisted_narrative_review(
                 if artifact_id
             ],
         ]))
-        if list(report_artifact.get("parent_artifact_ids") or []) != expected_report_parents:
+        actual_report_parents = list(
+            report_artifact.get("parent_artifact_ids") or []
+        )
+        reused_report_parents = [
+            artifact_id
+            for artifact_id in actual_report_parents
+            if (
+                (parent := artifacts.get(artifact_id)) is not None
+                and parent.get("type") == "narrative_review_report"
+            )
+        ]
+        canonical_report_parents = [
+            artifact_id
+            for artifact_id in actual_report_parents
+            if artifact_id not in reused_report_parents
+        ]
+        if (
+            canonical_report_parents != expected_report_parents
+            or len(reused_report_parents) > 1
+        ):
             errors.append(
                 "[NARRATIVE_REVIEW_REPORT_LINEAGE_MISSING] "
                 "报告未精确继承当前剧本、分镜输入、逐先验 payload 和全部冻结观察"
@@ -2115,6 +2134,11 @@ async def run_blind_audience_review(
         prompt_version=COMPARATOR_PROMPT_VERSION,
     ))
     artifact_ids.append(str(report_artifact["id"]))
+    if (
+        reused_report_artifact_id
+        and reused_report_artifact_id not in artifact_ids
+    ):
+        artifact_ids.append(reused_report_artifact_id)
     issues = [_issue(message, episode_id) for message in validation_errors]
     issues.extend(
         _issue(
