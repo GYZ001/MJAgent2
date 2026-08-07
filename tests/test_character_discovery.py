@@ -2,6 +2,8 @@ import asyncio
 import json
 import sqlite3
 
+import pytest
+
 from app import api, db, portraits
 from app.schemas import (Bible, Character, EpisodeScreenplay,
                          IdentityContractEvidence, InformationItem,
