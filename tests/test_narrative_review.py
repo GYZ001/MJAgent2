@@ -20,6 +20,7 @@ from app.narrative_review import (
     BLIND_READER_PROMPT_VERSION,
     COMPARATOR_PROMPT_VERSION,
     NarrativeReviewError,
+    _canonicalize_visible_evidence_handles,
     _comparator_prompt,
     run_blind_audience_review,
     verify_persisted_narrative_review,
@@ -60,6 +61,24 @@ def _observation(payload: dict) -> dict:
         "supporting_evidence_ids": ["EV-1"],
         "confidence": 0.8,
     }
+
+
+def test_blind_review_maps_visible_shot_ids_to_evidence_handles() -> None:
+    ordered_storyboard = [
+        {
+            "shot_id": "SH001",
+            "observable_evidence_handles": ["EV-1"],
+        },
+        {
+            "shot_id": "SH002",
+            "observable_evidence_handles": ["EV-1", "EV-2"],
+        },
+    ]
+
+    assert _canonicalize_visible_evidence_handles(
+        ["SH001", "SH002", "EV-2", "unknown"],
+        ordered_storyboard,
+    ) == ["EV-1", "EV-2", "unknown"]
 
 
 async def _passing_chat(messages, **kwargs):

@@ -97,6 +97,42 @@ class BlindAudienceNeutralFollowup(BaseModel):
     supporting_evidence_ids: list[str] = Field(default_factory=list)
 
 
+def _canonicalize_visible_evidence_handles(
+    evidence_ids: list[str],
+    ordered_storyboard: list[dict[str, Any]],
+) -> list[str]:
+    """Map visible shot handles to their public evidence handles."""
+    visible_handles = {
+        str(handle)
+        for shot in ordered_storyboard
+        for handle in shot.get("observable_evidence_handles") or []
+        if str(handle)
+    }
+    handles_by_shot = {
+        str(shot.get("shot_id") or ""): [
+            str(handle)
+            for handle in shot.get("observable_evidence_handles") or []
+            if str(handle)
+        ]
+        for shot in ordered_storyboard
+        if str(shot.get("shot_id") or "")
+    }
+    canonical: list[str] = []
+    for raw_id in evidence_ids:
+        evidence_id = str(raw_id or "").strip()
+        if not evidence_id:
+            continue
+        replacements = (
+            [evidence_id]
+            if evidence_id in visible_handles
+            else handles_by_shot.get(evidence_id, [evidence_id])
+        )
+        for replacement in replacements:
+            if replacement not in canonical:
+                canonical.append(replacement)
+    return canonical
+
+
 def _resolve_review_screenplay_authority(
     *,
     episode_id: str,
@@ -1857,6 +1893,15 @@ async def run_blind_audience_review(
             ]
             for evidence_id in shot.get("observable_evidence_handles") or []
         }
+        ordered_storyboard = perceptual_input_content["model_prompt_payload"][
+            "input"
+        ]["ordered_storyboard_as_seen"]
+        first_pass.spontaneous_supporting_evidence_ids = (
+            _canonicalize_visible_evidence_handles(
+                first_pass.spontaneous_supporting_evidence_ids,
+                ordered_storyboard,
+            )
+        )
         if not set(first_pass.spontaneous_supporting_evidence_ids).issubset(
             visible_handles
         ):
@@ -1926,6 +1971,10 @@ async def run_blind_audience_review(
             raise NarrativeReviewError([
                 "[BLIND_FOLLOWUP_ID_MISMATCH] 中性追问输出与冻结首轮不属于同一观察"
             ])
+        followup.supporting_evidence_ids = _canonicalize_visible_evidence_handles(
+            followup.supporting_evidence_ids,
+            ordered_storyboard,
+        )
         if not set(followup.supporting_evidence_ids).issubset(visible_handles):
             raise NarrativeReviewError([
                 "[BLIND_FOLLOWUP_EVIDENCE_NOT_VISIBLE] 中性追问引用了输入外证据"

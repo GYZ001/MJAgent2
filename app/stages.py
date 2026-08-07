@@ -4385,6 +4385,7 @@ def normalize_storyboard_direction_fields(
         if brief is None:
             continue
         before = {
+            "action_desc": shot.action_desc,
             "purpose": shot.purpose,
             "resulting_change": shot.resulting_change,
             "readability_focus": shot.readability_focus,
@@ -4404,12 +4405,23 @@ def normalize_storyboard_direction_fields(
             shot.resulting_change = resulting_change
         if not str(shot.readability_focus or "").strip():
             shot.readability_focus = readability_focus
+        if shot.dialogues and shot.readability_focus != "dialogue":
+            shot.readability_focus = "dialogue"
         if not shot.context_requirement_ids and brief.context_requirement_ids:
             shot.context_requirement_ids = list(brief.context_requirement_ids)
             if not brief.readability_focus:
                 shot.readability_focus = "context"
         if not str(shot.camera_angle or "").strip():
             shot.camera_angle = str(brief.camera_angle or "平视").strip()
+        if len(str(shot.action_desc or "").strip()) < ACTION_DESC_HARD_MIN:
+            planned_action = str(brief.primary_action or "").strip()
+            if planned_action and len(planned_action) < ACTION_DESC_HARD_MIN:
+                planned_action = (
+                    planned_action.rstrip("。")
+                    + "，并保持原位让动作结果清楚可见"
+                )
+            if len(planned_action) >= ACTION_DESC_HARD_MIN:
+                shot.action_desc = planned_action
         _normalize_scene_pack_camera(shot)
         if not str(shot.camera_motivation or "").strip():
             shot.camera_motivation = str(
@@ -4420,6 +4432,7 @@ def normalize_storyboard_direction_fields(
                 )
             ).strip()
         after = {
+            "action_desc": shot.action_desc,
             "purpose": shot.purpose,
             "resulting_change": shot.resulting_change,
             "readability_focus": shot.readability_focus,

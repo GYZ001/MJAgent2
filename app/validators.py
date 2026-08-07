@@ -697,9 +697,14 @@ def validate_storyboard(
             errors.append(f"{tag}.camera_move=「{shot.camera_move}」不在 {sorted(CAMERA_MOVES)}")
         if shot.transition not in TRANSITIONS:
             errors.append(f"{tag}.transition=「{shot.transition}」不在 {sorted(TRANSITIONS)}")
-        # V6 场景连续性以规范 scene_name 为唯一身份。
+        # Authority outlines distinguish later revisits with scene_id; legacy
+        # boards without IDs continue to use the normalized location name.
         scene = scene_name_of(shot)
-        scene_key = _scene_contiguity_key(scene)
+        scene_key = (
+            str(shot.scene_id).strip()
+            if narrative_authority and str(shot.scene_id or "").strip()
+            else _scene_contiguity_key(scene)
+        )
         if scene_key in scene_last_seen and scene_last_seen[scene_key] != i - 1:
             errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene_key]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
         scene_last_seen[scene_key] = i
