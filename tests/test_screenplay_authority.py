@@ -73,6 +73,60 @@ def _seed_test_bible_authority() -> tuple[dict, dict]:
     return bible, artifact
 
 
+def _republish_as_screenplay_v4(artifact: dict) -> object:
+    contract_version = "4.0.0"
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET contract_version=? WHERE id=?",
+        (contract_version, artifact["id"]),
+    )
+    conn.commit()
+    input_fingerprint = screenplay_authority_fingerprint(
+        "episode-generic",
+        contract_version=contract_version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    revision = ensure_production_revision(
+        episode_id="episode-generic",
+        kind="screenplay",
+        input_fingerprint=input_fingerprint,
+        contract_version=contract_version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        resume=False,
+    )
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+    qa_gate = evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
+            score=100,
+            evidence={"authority_input_fingerprint": input_fingerprint},
+        ),
+    )
+    publish_screenplay(
+        episode_id="episode-generic",
+        revision_id=revision.id,
+        artifact_id=artifact["id"],
+        artifact_hash=artifact["content_hash"],
+        evaluation_ids=[qa_gate["id"]],
+        input_fingerprint=input_fingerprint,
+        contract_version=contract_version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        clear_downstream=False,
+    )
+    return resolve_current_screenplay_authority("episode-generic")
+
+
 @pytest.mark.parametrize(
     "drift",
     [
@@ -295,6 +349,59 @@ def test_contract_v4_rejects_existing_character_mutation_during_generation() -> 
             contract_version="4.0.0",
             qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         )
+
+
+@pytest.mark.parametrize("artifact_backed", [True, False])
+def test_published_authority_survives_later_character_appends(
+    artifact_backed: bool,
+) -> None:
+    _screenplay_value, published_artifact, _legacy_authority = _published_case()
+    bible, _artifact = _seed_test_bible_authority()
+    conn = db.get_conn()
+    if not artifact_backed:
+        conn.execute(
+            "UPDATE projects SET bible_artifact_id=NULL WHERE id='project-generic'"
+        )
+        conn.commit()
+    published_authority = _republish_as_screenplay_v4(published_artifact)
+    projection = json.loads(json.dumps(bible))
+    projection["characters"].append({
+        "name": "New Ally",
+        "role": "配角",
+        "appearance_canonical": "黑发少女，浅色短袄，身形利落，随身携带一只旧布包",
+        "personality": "谨慎",
+        "speech_style": "直率",
+        "relationships": [],
+    })
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+
+    assert resolved.artifact_id == published_artifact["id"]
+    assert resolved.input_fingerprint == published_authority.input_fingerprint
+
+
+def test_published_authority_rejects_later_existing_character_mutation() -> None:
+    _screenplay_value, published_artifact, _legacy_authority = _published_case()
+    bible, _artifact = _seed_test_bible_authority()
+    _republish_as_screenplay_v4(published_artifact)
+    projection = json.loads(json.dumps(bible))
+    projection["characters"][0]["appearance_canonical"] = (
+        "银发青年，白色长衣，身形高挑，佩戴一枚崭新的金色令牌"
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="input_fingerprint"):
+        resolve_current_screenplay_authority("episode-generic")
 
 
 def test_legacy_contract_fingerprint_ignores_composed_projection_fields() -> None:

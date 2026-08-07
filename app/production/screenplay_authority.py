@@ -389,6 +389,49 @@ def _authority_material_fingerprint(material: dict[str, Any]) -> str:
     return hashlib.sha256(_json(material).encode("utf-8")).hexdigest()
 
 
+def _append_compatible_historical_materials(
+    episode_id: str,
+    *,
+    conn: Any,
+    material: dict[str, Any],
+    contract_version: str,
+) -> list[dict[str, Any]]:
+    """Rebuild prior authority inputs reachable by character-only appends."""
+    if (
+        not screenplay_contract_tracks_bible_projection(contract_version)
+        or "bible_projection_hash" not in material
+    ):
+        return []
+    episode = conn.execute(
+        "SELECT project_id FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    if episode is None:
+        return []
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?",
+        (_episode_value(episode, "project_id", ""),),
+    ).fetchone()
+    projection = _project_bible_projection(project)
+    characters = list(projection.get("characters") or [])
+    candidates: list[dict[str, Any]] = []
+    for character_count in range(len(characters) - 1, -1, -1):
+        historical_projection = {
+            **projection,
+            "characters": characters[:character_count],
+        }
+        projection_hash = evidence_repository.content_hash(
+            historical_projection
+        )
+        candidate = {
+            **material,
+            "bible_projection_hash": projection_hash,
+        }
+        if not candidate.get("bible_artifact_id"):
+            candidate["bible_content_hash"] = projection_hash
+        candidates.append(candidate)
+    return candidates
+
+
 def _published_authority_input_fingerprint(
     episode_id: str,
     *,
@@ -396,7 +439,12 @@ def _published_authority_input_fingerprint(
     certificate_id: str,
     contract_version: str,
 ) -> str:
-    """Recover only the known legacy storyboard duration contamination.
+    """Recover append-only Bible growth and legacy duration contamination.
+
+    A screenplay certificate remains valid when the project Bible only gained
+    uniquely appended character cards after publication. Reproducing the exact
+    signed fingerprint from a current character-list prefix proves that no
+    existing card or non-character field changed.
 
     Older storyboard runs persisted their derived planning duration back into
     ``episodes.target_duration_s`` after screenplay publication.  The release
@@ -422,6 +470,19 @@ def _published_authority_input_fingerprint(
     ):
         return current_fingerprint
 
+    historical_materials = _append_compatible_historical_materials(
+        episode_id,
+        conn=conn,
+        material=material,
+        contract_version=contract_version,
+    )
+    for candidate in historical_materials:
+        if (
+            _authority_material_fingerprint(candidate)
+            == certificate.input_fingerprint
+        ):
+            return certificate.input_fingerprint
+
     constraints = material.get("adaptation_constraints")
     if not isinstance(constraints, dict):
         return current_fingerprint
@@ -432,19 +493,23 @@ def _published_authority_input_fingerprint(
     if current_target not in legal_targets:
         return current_fingerprint
     matches: list[str] = []
-    for target in legal_targets:
-        if target == current_target:
+    for base_material in [material, *historical_materials]:
+        base_constraints = base_material.get("adaptation_constraints")
+        if not isinstance(base_constraints, dict):
             continue
-        candidate = {
-            **material,
-            "adaptation_constraints": {
-                **constraints,
-                "target_duration_s": target,
-            },
-        }
-        candidate_fingerprint = _authority_material_fingerprint(candidate)
-        if candidate_fingerprint == certificate.input_fingerprint:
-            matches.append(candidate_fingerprint)
+        for target in legal_targets:
+            if target == current_target:
+                continue
+            candidate = {
+                **base_material,
+                "adaptation_constraints": {
+                    **base_constraints,
+                    "target_duration_s": target,
+                },
+            }
+            candidate_fingerprint = _authority_material_fingerprint(candidate)
+            if candidate_fingerprint == certificate.input_fingerprint:
+                matches.append(candidate_fingerprint)
     if len(matches) == 1:
         return matches[0]
     return current_fingerprint
