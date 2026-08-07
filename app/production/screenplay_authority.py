@@ -101,9 +101,55 @@ def _bible_extends_by_appending_cards(
         extended_items = list(extended.get(collection) or [])
         if (
             len(extended_items) < len(base_items)
-            or extended_items[:len(base_items)] != base_items
         ):
             return False
+        if collection == "characters":
+            if extended_items[:len(base_items)] != base_items:
+                return False
+        else:
+            for base_scene, extended_scene in zip(
+                base_items,
+                extended_items[:len(base_items)],
+            ):
+                if not (
+                    isinstance(base_scene, dict)
+                    and isinstance(extended_scene, dict)
+                    and str(base_scene.get("name") or "")
+                    == str(extended_scene.get("name") or "")
+                ):
+                    return False
+                for field in ("aliases", "discovery_sources"):
+                    base_values = list(base_scene.get(field) or [])
+                    extended_values = list(extended_scene.get(field) or [])
+                    if (
+                        len(extended_values) < len(base_values)
+                        or extended_values[:len(base_values)] != base_values
+                    ):
+                        return False
+                stable_base = {
+                    **base_scene,
+                    "aliases": [],
+                    "discovery_sources": [],
+                }
+                stable_extended = {
+                    **extended_scene,
+                    "aliases": [],
+                    "discovery_sources": [],
+                }
+                if (
+                    stable_base != stable_extended
+                    and not (
+                        stable_base.get("first_episode") is None
+                        and stable_extended.get("first_episode") is not None
+                        and {
+                            **stable_base,
+                            "first_episode": stable_extended.get(
+                                "first_episode"
+                            ),
+                        } == stable_extended
+                    )
+                ):
+                    return False
         base_names = {
             str(item.get("name") or "")
             for item in base_items
@@ -423,7 +469,10 @@ def _append_compatible_historical_materials(
     characters = list(projection.get("characters") or [])
     scenes = list(projection.get("scenes") or [])
     candidates: list[dict[str, Any]] = []
-    projection_prefixes: list[tuple[dict[str, Any], str]] = []
+    projection_prefixes: list[tuple[dict[str, Any], str]] = [(
+        projection,
+        evidence_repository.content_hash(projection),
+    )]
     for character_count in range(len(characters), -1, -1):
         for scene_count in range(len(scenes), -1, -1):
             if (
@@ -474,13 +523,21 @@ def _append_compatible_historical_materials(
         except (TypeError, ValueError):
             continue
         for historical_projection, projection_hash in projection_prefixes:
-            if artifact_projection != historical_projection:
+            if not (
+                artifact_projection == historical_projection
+                or _bible_extends_by_appending_cards(
+                    artifact_projection,
+                    historical_projection,
+                )
+            ):
                 continue
             candidates.append({
                 **material,
                 "bible_artifact_id": str(artifact["id"]),
                 "bible_content_hash": artifact_hash,
-                "bible_projection_hash": projection_hash,
+                "bible_projection_hash": evidence_repository.content_hash(
+                    artifact_projection
+                ),
             })
             break
     return candidates

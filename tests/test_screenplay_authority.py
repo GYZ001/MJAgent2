@@ -327,6 +327,37 @@ def test_contract_v4_accepts_character_cards_appended_during_generation() -> Non
     )
 
 
+def test_contract_v4_accepts_scene_cards_and_aliases_appended_downstream() -> None:
+    _published_case()
+    bible, _artifact = _seed_test_bible_authority()
+    runtime_bible = Bible.model_validate(bible)
+    projection = json.loads(json.dumps(bible))
+    projection["scenes"][0]["aliases"] = ["宗门广场 / 清晨"]
+    projection["scenes"].append({
+        "name": "山门外",
+        "scene_canonical": "清晨山门外石阶与古树形成稳定空间结构",
+        "aliases": ["山门 / 清晨"],
+        "discovery_sources": ["后续分镜预取发现"],
+    })
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    material = screenplay_authority_material(
+        "episode-generic",
+        bible=runtime_bible,
+        contract_version="4.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+
+    assert material["bible_projection_hash"] == evidence_repository.content_hash(
+        screenplay_bible_payload(projection)
+    )
+
+
 def test_contract_v4_rejects_existing_character_mutation_during_generation() -> None:
     _published_case()
     bible, _artifact = _seed_test_bible_authority()
@@ -389,6 +420,45 @@ def test_published_authority_survives_later_character_appends(
         "UPDATE projects SET bible_json=?,bible_artifact_id=? "
         "WHERE id='project-generic'",
         (json.dumps(projection, ensure_ascii=False), next_artifact_id),
+    )
+    conn.commit()
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+
+    assert resolved.artifact_id == published_artifact["id"]
+    assert resolved.input_fingerprint == published_authority.input_fingerprint
+
+
+def test_published_authority_survives_later_scene_discovery_updates() -> None:
+    _screenplay_value, published_artifact, _legacy_authority = _published_case()
+    bible, _artifact = _seed_test_bible_authority()
+    published_authority = _republish_as_screenplay_v4(published_artifact)
+    projection = json.loads(json.dumps(bible))
+    projection["scenes"][0]["aliases"] = ["宗门广场 / 清晨"]
+    projection["scenes"][0]["discovery_sources"] = ["分镜预取发现别名"]
+    projection["scenes"].append({
+        "name": "山门外",
+        "scene_canonical": "清晨山门外石阶与古树形成稳定空间结构",
+        "aliases": ["山门 / 清晨"],
+        "discovery_sources": ["分镜预取新增场景"],
+    })
+    next_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_bible",
+        scope_type="project",
+        scope_id="project-generic",
+        status="approved",
+        trust_level="T4",
+        content=projection,
+        contract_version="character-bible-1.0.0",
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=?,bible_artifact_id=? "
+        "WHERE id='project-generic'",
+        (
+            json.dumps(projection, ensure_ascii=False),
+            next_artifact["id"],
+        ),
     )
     conn.commit()
 
