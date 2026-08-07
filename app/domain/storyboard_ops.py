@@ -450,6 +450,19 @@ def _storyboard_resume_decision(episode_id: str, ep: dict | None = None) -> dict
             "blocking_reason": None,
             "storyboard_status": status,
         }
+    if (
+        status.get("recommended_action") == "confirm_storyboard"
+        and not (
+            episode.get("storyboard_artifact_id")
+            and episode.get("storyboard_completion_certificate_id")
+        )
+    ):
+        return {
+            "allowed": True,
+            "resume_mode": "finalize_evidence",
+            "blocking_reason": None,
+            "storyboard_status": status,
+        }
 
     # Preserve recovery from a stale projection whose durable Run has already
     # ended.  A live task is handled by the caller's deduplication guard; a
@@ -580,6 +593,8 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
         "impact": (
             "保留现有镜头，重新执行整集门禁并仅在候选通过后替换问题镜"
             if resume_decision["resume_mode"] == "repair_existing"
+            else "保留全部已通过镜头，仅续做冷观众审读和发布证据签发"
+            if resume_decision["resume_mode"] == "finalize_evidence"
             else "保留已通过逐镜校验的镜头，并从下一镜继续"
             if action == "resume"
             else "从空白开始生成本集分镜"

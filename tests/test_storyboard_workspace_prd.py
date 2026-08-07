@@ -493,6 +493,11 @@ async def test_confirmable_final_tail_still_rejects_blind_resume(storyboard_db, 
         outcome="SUCCEEDED_READY_FOR_CONFIRM",
         input_versions={"screenplay_artifact_id": "screenplay-v1"},
     ))
+    storyboard_db.execute(
+        "UPDATE episodes SET storyboard_artifact_id='storyboard-v1',"
+        "storyboard_completion_certificate_id='certificate-v1' WHERE id='e1'"
+    )
+    storyboard_db.commit()
 
     preview = api._storyboard_start_preflight_payload("e1")
     assert preview["can_start"] is False
@@ -502,6 +507,43 @@ async def test_confirmable_final_tail_still_rejects_blind_resume(storyboard_db, 
         await api.resume_storyboard("e1")
 
     assert caught.value.status_code == 409
+
+
+def test_complete_board_without_publication_evidence_can_finalize(
+    storyboard_db,
+    monkeypatch,
+):
+    def passed_gate(_ep, board, _screenplay, _bible, **_kwargs):
+        return api.ConfirmationEvaluation(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+            compact_target=10,
+            estimated_cost_cny=0,
+        )
+
+    monkeypatch.setattr(
+        api,
+        "evaluate_storyboard_for_confirmation",
+        passed_gate,
+    )
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="GENERATING_SHOTS",
+        validated_prefix_end=1,
+        next_shot_no=2,
+        expected_total=1,
+        input_versions={"screenplay_artifact_id": "screenplay-v1"},
+    ))
+
+    preview = api._storyboard_start_preflight_payload("e1")
+
+    assert preview["can_start"] is True
+    assert preview["resume_mode"] == "finalize_evidence"
+    assert preview["remaining_shots"] == 0
+    assert "仅续做冷观众审读" in preview["impact"]
 
 
 def _leave_stale_checkpoint_after_screenplay_republish(storyboard_db) -> None:
