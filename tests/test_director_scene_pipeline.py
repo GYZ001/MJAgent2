@@ -11,8 +11,14 @@ from app.schemas import (
     Bible,
     Character,
     EpisodeScreenplay,
+    KeyDialogueChain,
+    KeyDialogueTurn,
+    NarrativeContinuityPlan,
     PlotSpine,
     PlotSpineBeat,
+    ScriptScene,
+    ShotCapacityBudget,
+    ShotContribution,
     Shot,
     Storyboard,
     StoryboardContextRequirement,
@@ -236,4 +242,163 @@ def test_scene_pack_hydrates_director_fields_without_per_shot_calls(monkeypatch)
     assert [shot.shot_no for shot in pack.shots] == [1, 2, 3]
     assert pack.shots[1].camera_move == "跟随"
     assert pack.shots[1].camera_angle == "平视侧面角度"
-    assert pack.shots[1].prompt_contract_version == "director_scene_pack_v1"
+    assert pack.shots[1].prompt_contract_version == "director_scene_pack_v2"
+
+
+def test_scene_pack_model_contract_only_requires_creative_fields() -> None:
+    required = set(
+        stages.DirectedSceneShotDraft.model_json_schema().get("required") or []
+    )
+
+    assert required == {
+        "shot_no",
+        "shot_size",
+        "camera_angle",
+        "camera_move",
+        "camera_motivation",
+        "action_desc",
+        "first_frame_desc",
+        "last_frame_desc",
+    }
+    assert required.isdisjoint({
+        "purpose",
+        "duration_s",
+        "characters",
+        "dialogues",
+        "source_excerpt",
+        "context_requirement_ids",
+        "readability_focus",
+    })
+
+
+def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields() -> None:
+    source = "谷言从桌边起身，快步走到门口停下。他压低声音说门外有人。"
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="【场1】夜 / 咖啡厅\n谷言从桌边起身。谷言：门外有人。",
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="【场1】夜 / 咖啡厅",
+                story_function="确认门外危险",
+                summary="谷言走到门前确认危险。",
+                entry_state="谷言坐在桌边等待",
+                exit_state="谷言停在门前保持警觉",
+                context_requirements=["建立谷言、桌子与门的空间关系"],
+            ),
+        ],
+        plot_spine=PlotSpine(
+            episode_premise="谷言确认门外危险",
+            spine_beats=[
+                PlotSpineBeat(
+                    beat_id="S01",
+                    who="谷言",
+                    does="走到门前确认危险",
+                    source_segment_ids=["SRC0001"],
+                )
+            ],
+            must_keep_ending="谷言确认门外有人",
+        ),
+        key_lines=["谷言：门外有人。"],
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="确认危险",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="谷言",
+                        line="门外有人。",
+                        source_text="他压低声音说门外有人。",
+                    )
+                ],
+            )
+        ],
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="e1",
+        ),
+    )
+    bible = Bible(
+        characters=[
+            Character(
+                name="谷言",
+                role="主角",
+                appearance_canonical="二十八岁男性，黑色短发，深灰西装，佩戴银色手表",
+            )
+        ],
+        world=World(visual_style_canonical="都市国漫厚涂风，统一电影光影"),
+    )
+    budget = ShotCapacityBudget(
+        spoken_and_text_s=2.0,
+        action_phase_s=3.0,
+    )
+    contribution = ShotContribution(
+        shot_contribution_id="SCONTRIB-SH001",
+        evidence_ids=["EV1"],
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                shot_id="SH001",
+                scene_id="SC001",
+                event_ids=["E1"],
+                story_event_id="E1",
+                spine_beat_ids=["S01"],
+                key_line_ids=["KL01"],
+                visible_entity_ids=["谷言"],
+                characters_visible=["谷言"],
+                capacity_budget=budget,
+                shot_contribution=contribution,
+                scene_time="夜",
+                scene_name="咖啡厅",
+                beat="谷言走到门前确认危险并压低声音示警",
+                state_in="谷言坐在桌边等待",
+                primary_action="谷言起身走到门前停下",
+                state_out="谷言停在门前保持警觉",
+                continuity_mode="scene_change",
+                duration_s=7,
+            )
+        ],
+    )
+
+    changes = stages.ensure_storyboard_scene_contexts(outline, screenplay)
+    draft = stages.DirectedScenePackDraft(
+        episode_no=1,
+        scene_id="SC001",
+        shots=[
+            stages.DirectedSceneShotDraft(
+                shot_no=1,
+                shot_size="中景",
+                camera_angle="平视侧面角度",
+                camera_move="跟随",
+                camera_motivation="完整看清谷言从桌边走到门前的动作路径",
+                action_desc="谷言从桌边起身走向门口，在门前停下并压低声音示警。",
+                first_frame_desc="谷言坐在咖啡厅桌边，门位于画面右侧。",
+                last_frame_desc="同一机位，谷言停在右侧门前保持警觉。",
+                dialogue_emotions={"KL01": "警觉"},
+            )
+        ],
+    )
+    pack = stages._hydrate_directed_scene_pack(
+        draft,
+        outline=outline,
+        source_text=source,
+        screenplay=screenplay,
+        bible=bible,
+    )
+
+    assert changes and outline.scene_contexts[0].scene_id == "SC001"
+    shot = pack.shots[0]
+    assert shot.duration_s == 7
+    assert shot.shot_id == "SH001"
+    assert shot.event_ids == ["E1"]
+    assert shot.capacity_budget == budget
+    assert shot.shot_contribution == contribution
+    assert shot.characters == ["谷言"]
+    assert [(item.speaker, item.line) for item in shot.dialogues] == [
+        ("谷言", "门外有人。"),
+    ]
+    assert shot.source_excerpt in source
+    assert shot.context_requirement_ids == ["CTX-SC001-01"]
+    assert shot.is_final is True

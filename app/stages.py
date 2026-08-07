@@ -4187,6 +4187,7 @@ def _hydrate_directed_scene_pack(
             if not hasattr(brief, field):
                 continue
             setattr(shot, field, deepcopy(getattr(brief, field)))
+        shot.capacity_budget = deepcopy(brief.capacity_budget)
         ensure_audio_timeline(shot, screenplay.voice_bible)
         shots.append(shot)
     return StoryboardScenePack(

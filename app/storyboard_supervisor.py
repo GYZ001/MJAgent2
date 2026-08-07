@@ -2369,7 +2369,11 @@ async def run_storyboard_supervisor(
 
         # ---- 按场景批量生成（新合同）----
         scene_pack_failure: BaseException | None = None
-        if outline is not None and not outline.scene_contexts:
+        if (
+            outline is not None
+            and not outline.scene_contexts
+            and not completed
+        ):
             derived_contexts = ensure_storyboard_scene_contexts(
                 outline,
                 screenplay,
