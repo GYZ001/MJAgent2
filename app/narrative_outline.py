@@ -104,6 +104,38 @@ def normalize_narrative_storyboard_outline(
 
     events = {item.event_id: item for item in plan.events}
     actions = {item.action_id: item for item in plan.atomic_actions}
+    event_aliases: defaultdict[str, list[str]] = defaultdict(list)
+    for event_id in events:
+        alias = "".join(
+            character.casefold()
+            for character in event_id
+            if character.isalnum()
+        )
+        if alias:
+            event_aliases[alias].append(event_id)
+
+    def canonical_event_id(value: str) -> str:
+        raw = str(value or "").strip()
+        if raw in events:
+            return raw
+        alias = "".join(
+            character.casefold()
+            for character in raw
+            if character.isalnum()
+        )
+        matches = event_aliases.get(alias) or []
+        return matches[0] if len(matches) == 1 else raw
+
+    for shot in outline.shots:
+        shot.event_ids = list(dict.fromkeys(
+            canonical_event_id(event_id)
+            for event_id in (shot.event_ids or [])
+            if str(event_id or "").strip()
+        ))
+        if shot.story_event_id:
+            shot.story_event_id = canonical_event_id(
+                shot.story_event_id
+            )
     event_order = {
         item.event_id: position
         for position, item in enumerate(plan.events)

@@ -3559,7 +3559,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
                 "OUTLINE_KEY_LINE_CAPACITY_INVALID",
                 "OUTLINE_KEY_LINE_SPEAKER_MIXED",
             }),
-            repair_all_blockers=False,
+            repair_all_blockers=screenplay.narrative_plan is not None,
             baseline_only=False,
         ),
     )
@@ -3775,11 +3775,7 @@ def ensure_storyboard_scene_contexts(
         script_scene_no = int(
             getattr(script_scene, "scene_no", run_index) or run_index
         )
-        scene_id = (
-            f"SC{script_scene_no:02d}"
-            if script_scene is not None
-            else str(first.scene_id or "").strip() or f"SC{run_index:02d}"
-        )
+        scene_id = f"SC{run_index:02d}"
         heading_time, heading_name = _screenplay_scene_parts(
             screenplay,
             script_scene_no,

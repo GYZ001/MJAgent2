@@ -112,6 +112,40 @@ def test_narrative_outline_projects_graph_owned_fields_deterministically() -> No
     ) == []
 
 
+def test_narrative_outline_normalizes_unique_event_id_punctuation() -> None:
+    screenplay = _screenplay()
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E1",
+                event_ids=["E1"],
+                beat="The declared event becomes visible.",
+                covers="The observable result is delivered.",
+                duration_s=5,
+            )
+        ],
+    )
+
+    changes = normalize_narrative_storyboard_outline(
+        outline,
+        screenplay,
+    )
+
+    assert changes
+    assert outline.shots[0].story_event_id == "E-1"
+    assert outline.shots[0].event_ids == ["E-1"]
+    assert validate_storyboard_narrative(
+        None,
+        screenplay,
+        outline=outline,
+        complete=True,
+        expected_scope_id="episode-generic",
+    ) == []
+
+
 def test_narrative_outline_does_not_readd_already_established_fact() -> None:
     screenplay = _screenplay()
     first_event = screenplay.narrative_plan.events[0]
