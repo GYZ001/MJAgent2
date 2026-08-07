@@ -170,8 +170,6 @@ def finalize_storyboard_cancellation(
         }
 
     run = repository.get_run(effective_run_id) if effective_run_id else None
-    if run and run.get("status") in repository.ACTIVE_RUN_STATUSES:
-        WorkflowRecorder(effective_run_id).cancel(message)
 
     revoke_active_video_grants_for_episode(episode_id)
     shot_count = int(conn.execute(
@@ -204,6 +202,8 @@ def finalize_storyboard_cancellation(
         checkpoint.phase = target_checkpoint_phase
         checkpoint.outcome = target_checkpoint_outcome
         save_checkpoint(checkpoint, run_id=effective_run_id)
+    if run and run.get("status") in repository.ACTIVE_RUN_STATUSES:
+        WorkflowRecorder(effective_run_id).cancel(message)
 
     target_status = "scripting" if paused else ("script_failed" if shot_count else "planned")
     if paused:
