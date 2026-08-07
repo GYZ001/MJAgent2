@@ -3192,6 +3192,62 @@ async def run_storyboard_supervisor(
         _assert_storyboard_write_authorized(
             conn, episode_id, cp.input_versions.get("screenplay_artifact_id")
         )
+        if narrative_authority and not published_storyboard_authority:
+            current_rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+            if len(current_rows) != len(evaluation.board.shots):
+                raise RuntimeError(
+                    "分镜发布前投影对账失败：正式镜头数与确认候选不一致"
+                )
+            projection_repairs: list[dict[str, Any]] = []
+            for row, shot in zip(current_rows, evaluation.board.shots):
+                current_shot = _board_from_shot_rows(
+                    [row],
+                    ep_data["episode_no"],
+                ).shots[0]
+                before = current_shot.model_dump(mode="json")
+                after = shot.model_dump(mode="json")
+                changed_fields = sorted(
+                    field
+                    for field in set(before) | set(after)
+                    if before.get(field) != after.get(field)
+                )
+                if not changed_fields:
+                    continue
+                _write_shot_fields(
+                    conn,
+                    str(row["id"]),
+                    shot,
+                    row["storyboard_artifact_id"],
+                    narrative_authority=True,
+                )
+                projection_repairs.append({
+                    "shot_no": int(shot.shot_no),
+                    "fields": changed_fields,
+                })
+            conn.commit()
+            rebound_rows = list(_ensure_current_storyboard_shot_artifacts(
+                conn,
+                episode_id,
+                evaluation.board,
+            ))
+            conn.commit()
+            cp.validated_shot_artifact_ids = [
+                str(row["storyboard_artifact_id"])
+                for row in rebound_rows
+                if row["storyboard_artifact_id"]
+            ]
+            if projection_repairs and run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "STORYBOARD_PREFINAL_PROJECTION_REBOUND",
+                    "info",
+                    "已在冷观众审读前对账正式镜头投影与逐镜证据",
+                    payload={"repairs": projection_repairs},
+                )
+            save_checkpoint(cp, run_id=run_id)
         narrative_review_report = None
         narrative_review_artifact_ids: list[str] = []
         if narrative_authority:
@@ -3316,6 +3372,50 @@ async def run_storyboard_supervisor(
                         screenplay_artifact_id=ep["screenplay_artifact_id"],
                     )
                 except NarrativeReviewError as exc:
+                    review_evidence_codes = {
+                        "REVIEW_INPUT_SHOT_EVIDENCE_DRIFT",
+                        "REVIEW_INPUT_SHOT_EVIDENCE_MISSING",
+                        "REVIEW_INPUT_SHOT_EVIDENCE_INVALID",
+                    }
+                    error_codes = {
+                        error[1:error.index("]")]
+                        for error in exc.errors
+                        if error.startswith("[") and "]" in error
+                    }
+                    if (
+                        error_codes
+                        and error_codes.issubset(review_evidence_codes)
+                    ):
+                        rebound_rows = list(
+                            _ensure_current_storyboard_shot_artifacts(
+                                conn,
+                                episode_id,
+                                evaluation.board,
+                            )
+                        )
+                        conn.commit()
+                        cp.validated_shot_artifact_ids = [
+                            str(row["storyboard_artifact_id"])
+                            for row in rebound_rows
+                            if row["storyboard_artifact_id"]
+                        ]
+                        cp.last_repair = {
+                            **(cp.last_repair or {}),
+                            "status": "review_input_evidence_rebound",
+                            "issue_codes": sorted(error_codes),
+                        }
+                        save_checkpoint(cp, run_id=run_id)
+                        if run_id:
+                            evidence_repository.append_event(
+                                run_id,
+                                "NARRATIVE_REVIEW_INPUT_EVIDENCE_REBOUND",
+                                "info",
+                                "冷观众审读输入证据已确定性重签，未调用语义修复模型",
+                                payload={
+                                    "issue_codes": sorted(error_codes),
+                                },
+                            )
+                        continue
                     plan = await _route_with_narrative_diagnosis(
                         exc.errors,
                         board=evaluation.board,
