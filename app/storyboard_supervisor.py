@@ -2251,6 +2251,8 @@ async def run_storyboard_supervisor(
         neither the current-best candidate nor an older pass may be promoted
         after the current gate failed.
         """
+        if not _run_has_write_ownership():
+            return cp
         if not candidate_shots:
             return None
         shot_count = len(candidate_shots)
@@ -2405,6 +2407,8 @@ async def run_storyboard_supervisor(
                     screenplay=screenplay,
                 )
             except Exception as exc:  # noqa: BLE001
+                if not _run_has_write_ownership():
+                    return cp
                 if _is_retryable_external_error(exc):
                     return _pause_for_external_error(
                         cp,
@@ -2424,6 +2428,8 @@ async def run_storyboard_supervisor(
                 )
                 conn.commit()
                 raise StageError("分镜大纲", [public]) from exc
+            if not _run_has_write_ownership():
+                return cp
             conn.execute(
                 "UPDATE episodes SET storyboard_outline_json=?, storyboard_warning=NULL WHERE id=?",
                 (outline.model_dump_json(), episode_id),
@@ -2827,11 +2833,15 @@ async def run_storyboard_supervisor(
                     semantic_attempt_id=active_repair.get("semantic_attempt_id") if repair_pending else None,
                 )
             except StageError as exc:
+                if not _run_has_write_ownership():
+                    return cp
                 plan = await _route_with_narrative_diagnosis(
                     list(exc.errors) if hasattr(exc, "errors") else [str(exc)],
                     board=Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
                     next_shot_no=shot_no,
                 )
+                if not _run_has_write_ownership():
+                    return cp
                 cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
                 if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                     if cp.outcome in {
@@ -2868,6 +2878,8 @@ async def run_storyboard_supervisor(
                     )
                 raise
 
+            if not _run_has_write_ownership():
+                return cp
             disposition = getattr(draft, "disposition", "PASS")
             blockers = _blocker_messages(draft)
 
@@ -2879,6 +2891,8 @@ async def run_storyboard_supervisor(
                     board=Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
                     next_shot_no=shot_no,
                 )
+                if not _run_has_write_ownership():
+                    return cp
                 if run_id:
                     evidence_repository.append_event(
                         run_id, "REPAIR_PLAN_SELECTED", "info",
@@ -3111,6 +3125,8 @@ async def run_storyboard_supervisor(
                     before_messages or after_messages or ["storyboard repair made no progress"],
                     board=official_board,
                 )
+                if not _run_has_write_ownership():
+                    return cp
                 cp = _apply_repair(
                     cp, retry_plan, conn, episode_id, list(official_board.shots), outline,
                 )
@@ -3229,6 +3245,8 @@ async def run_storyboard_supervisor(
                 repair_inputs,
                 board=evaluation.board,
             )
+            if not _run_has_write_ownership():
+                return cp
             cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
             if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                 if cp.outcome in {

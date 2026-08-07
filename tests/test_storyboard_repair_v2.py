@@ -116,6 +116,96 @@ def test_cancelled_run_cannot_overwrite_storyboard_checkpoint(repair_db) -> None
     )
 
 
+def test_stale_run_cannot_write_after_model_await(repair_db, monkeypatch) -> None:
+    from app.stages import StoryboardShotDraft
+    import app.storyboard_supervisor as supervisor_module
+
+    conn, _screenplay = repair_db
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+            )
+            for number in range(1, 5)
+        ],
+    )
+    conn.execute(
+        "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
+        (outline.model_dump_json(),),
+    )
+    stale = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="stale-owner",
+    )
+    stale.start()
+    current = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="current-owner",
+    )
+    current.start()
+    conn.execute(
+        "UPDATE episodes SET status='scripting',active_storyboard_run_id=? WHERE id='e1'",
+        (stale.run_id,),
+    )
+    conn.commit()
+    save_checkpoint(
+        SupervisorCheckpoint(
+            episode_id="e1",
+            phase="GENERATING_SHOTS",
+            validated_prefix_end=3,
+            next_shot_no=4,
+            expected_total=4,
+            input_versions={"screenplay_artifact_id": "sp1"},
+        ),
+        run_id=stale.run_id,
+    )
+
+    async def lose_ownership_during_generation(*_args, **_kwargs):
+        conn.execute(
+            """UPDATE episodes
+                  SET status='scripting',script_error='current owner is running',
+                      active_storyboard_run_id=?
+                WHERE id='e1'""",
+            (current.run_id,),
+        )
+        conn.commit()
+        return StoryboardShotDraft(
+            episode_no=1,
+            shot=_shot(4).model_copy(update={"is_final": True}),
+            is_final=True,
+        )
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "generate_storyboard_next_shot",
+        lose_ownership_during_generation,
+    )
+
+    asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=True,
+        run_id=stale.run_id,
+        preflight_done=True,
+    ))
+
+    episode = conn.execute(
+        "SELECT status,script_error,active_storyboard_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["active_storyboard_run_id"] == current.run_id
+    assert episode["status"] == "scripting"
+    assert episode["script_error"] == "current owner is running"
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+    ).fetchone()["c"] == 3
+
+
 @pytest.mark.parametrize("narrative_authority", [False, True])
 def test_storyboard_planning_target_preserves_published_narrative_duration(
     repair_db,
