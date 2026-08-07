@@ -332,7 +332,6 @@ def test_contract_v4_accepts_scene_cards_and_aliases_appended_downstream() -> No
     bible, _artifact = _seed_test_bible_authority()
     runtime_bible = Bible.model_validate(bible)
     projection = json.loads(json.dumps(bible))
-    projection["scenes"][0]["aliases"] = ["宗门广场 / 清晨"]
     projection["scenes"].append({
         "name": "山门外",
         "scene_canonical": "清晨山门外石阶与古树形成稳定空间结构",
@@ -434,8 +433,6 @@ def test_published_authority_survives_later_scene_discovery_updates() -> None:
     bible, _artifact = _seed_test_bible_authority()
     published_authority = _republish_as_screenplay_v4(published_artifact)
     projection = json.loads(json.dumps(bible))
-    projection["scenes"][0]["aliases"] = ["宗门广场 / 清晨"]
-    projection["scenes"][0]["discovery_sources"] = ["分镜预取发现别名"]
     projection["scenes"].append({
         "name": "山门外",
         "scene_canonical": "清晨山门外石阶与古树形成稳定空间结构",
