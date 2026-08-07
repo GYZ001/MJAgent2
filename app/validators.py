@@ -3480,6 +3480,13 @@ def outline_key_line_capacity_errors(
                     f"合法范围：{', '.join(catalog)}"
                 )
                 continue
+            if kid in assigned:
+                errors.append(
+                    "[OUTLINE_KEY_LINE_OWNER_DUPLICATE] "
+                    f"关键台词 {kid} 被重复分配到第 {shot.shot_no} 镜；"
+                    "同一句台词只能有一个交付镜，后续镜头应改为反应、动作或新信息"
+                )
+                continue
             assigned.add(kid)
             chars = content_char_count(_strip_speaker(text))
             required_chars += chars

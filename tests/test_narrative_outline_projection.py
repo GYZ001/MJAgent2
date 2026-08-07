@@ -35,6 +35,7 @@ from app.schemas import (
 from app.spoken_contract import content_char_count
 from app.validators import (
     outline_scene_coverage_errors,
+    outline_key_line_capacity_errors,
     outline_key_line_speaker_errors,
     validate_dialogue_chains,
     normalize_screenplay_dialogue_chains,
@@ -302,6 +303,38 @@ def test_screenplay_qa_records_scene_contract_coverage_mismatch() -> None:
             screenplay,
             expected_scope_id="episode-generic",
         )
+    )
+
+
+def test_outline_key_line_owner_is_globally_unique() -> None:
+    screenplay = _screenplay()
+    screenplay.key_lines = ["Hero: The exact line is delivered once."]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                beat="Hero delivers the line.",
+                key_line_ids=["KL01"],
+                duration_s=5,
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                beat="The same line is incorrectly repeated.",
+                key_line_ids=["KL01"],
+                duration_s=5,
+            ),
+        ],
+    )
+
+    errors = outline_key_line_capacity_errors(
+        outline,
+        screenplay,
+    )
+
+    assert any(
+        error.startswith("[OUTLINE_KEY_LINE_OWNER_DUPLICATE]")
+        for error in errors
     )
 
 
