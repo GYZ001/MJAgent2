@@ -25,6 +25,7 @@ from app.schemas import (
     KeyDialogueChain,
     KeyDialogueTurn,
     NarrativeEvent,
+    ScriptScene,
     StoryboardOutline,
     StoryboardOutlineShot,
     TargetDelta,
@@ -32,6 +33,7 @@ from app.schemas import (
 )
 from app.spoken_contract import content_char_count
 from app.validators import (
+    outline_scene_coverage_errors,
     outline_key_line_speaker_errors,
     validate_dialogue_chains,
     normalize_screenplay_dialogue_chains,
@@ -143,6 +145,126 @@ def test_narrative_outline_normalizes_unique_event_id_punctuation() -> None:
         outline=outline,
         complete=True,
         expected_scope_id="episode-generic",
+    ) == []
+
+
+def test_narrative_outline_preserves_all_model_shots_for_same_event() -> None:
+    screenplay = _screenplay()
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC01",
+                scene_name="Home",
+                scene_time="night",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The character asks for support.",
+                covers="The request becomes visible.",
+                duration_s=5,
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_id="SC01",
+                scene_name="Bedroom",
+                scene_time="night",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The relationship conflict continues in private.",
+                covers="The character turns away disappointed.",
+                duration_s=5,
+            ),
+            StoryboardOutlineShot(
+                shot_no=3,
+                scene_id="SC01",
+                scene_name="Street",
+                scene_time="morning",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="A transition carries the result into the next day.",
+                covers="The character arrives at the next location.",
+                duration_s=5,
+            ),
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert len(outline.shots) >= 3
+    assert [
+        shot.scene_name for shot in outline.shots
+        if shot.scene_name in {"Home", "Bedroom", "Street"}
+    ] == ["Home", "Bedroom", "Street"]
+
+
+def test_outline_scene_coverage_requires_repeated_scenes_in_story_order() -> None:
+    screenplay = _screenplay()
+    screenplay.scene_outline = [
+        ScriptScene(
+            scene_no=1,
+            scene_heading="Home",
+            story_function="Opening",
+            summary="The story starts at home.",
+        ),
+        ScriptScene(
+            scene_no=2,
+            scene_heading="School",
+            story_function="Development",
+            summary="The character reaches school.",
+        ),
+        ScriptScene(
+            scene_no=3,
+            scene_heading="Home",
+            story_function="Return",
+            summary="The story returns home.",
+        ),
+    ]
+    missing_middle = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_name="Home",
+                beat="Opening at home.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_name="Home",
+                beat="Return home.",
+            ),
+        ],
+    )
+    complete = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_name="Home",
+                beat="Opening at home.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_name="School",
+                beat="Arrival at school.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=3,
+                scene_name="Home",
+                beat="Return home.",
+            ),
+        ],
+    )
+
+    errors = outline_scene_coverage_errors(
+        missing_middle,
+        screenplay,
+    )
+
+    assert any("第 2 场" in error for error in errors)
+    assert outline_scene_coverage_errors(
+        complete,
+        screenplay,
     ) == []
 
 

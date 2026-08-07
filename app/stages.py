@@ -3478,6 +3478,11 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
                         "projection_changes": projection_changes,
                     },
                 )
+            o.scene_contexts = []
+            ensure_storyboard_scene_contexts(
+                o,
+                screenplay,
+            )
             for change in normalize_outline_spoken_durations(o, screenplay):
                 log_provider_call(
                     "storyboard_outline_spoken_duration",

@@ -620,7 +620,6 @@ def normalize_narrative_storyboard_outline(
     }
 
     delta_owner_position: dict[str, int] = {}
-    evidence_owner_position: dict[str, int] = {}
     for event_id, delta_ids in deltas_by_event.items():
         positions = positions_by_event.get(event_id) or []
         if not positions:
@@ -635,16 +634,6 @@ def normalize_narrative_storyboard_outline(
         )
         for delta_id in delta_ids:
             delta_owner_position[delta_id] = support_position
-    for event_id, positions in positions_by_event.items():
-        evidence_owner_position[event_id] = next(
-            (
-                position
-                for position in positions
-                if nodes[position][1] == "support"
-            ),
-            positions[-1],
-        )
-
     task_owner_position: defaultdict[int, list[str]] = defaultdict(list)
     if nodes:
         for task in plan.assimilation_tasks:
@@ -665,7 +654,6 @@ def normalize_narrative_storyboard_outline(
         event = events[event_id]
         is_last_occurrence = position == last_position[event_id]
         is_support = role == "support"
-        is_dialogue = role == "dialogue"
         action_ids = list(event.action_ids) if is_last_occurrence else []
         primary_action_id = action_ids[0] if action_ids else None
         supporting_action_ids = action_ids[1:]
@@ -743,11 +731,7 @@ def normalize_narrative_storyboard_outline(
             item.evidence_id
             for item in evidence_by_event[event_id]
         ]
-        evidence_ids = (
-            event_evidence_ids
-            if position == evidence_owner_position.get(event_id)
-            else []
-        )
+        evidence_ids = event_evidence_ids
         character_state_ids = (
             list(character_state_ids_by_event[event_id])
             if is_last_occurrence
@@ -758,26 +742,6 @@ def normalize_narrative_storyboard_outline(
             for prior_id in sorted(paths)
             if path_inputs[prior_id] != current_audience_state[prior_id]
         ]
-        existing_contribution = shot.shot_contribution
-        spatial_temporal_delta = (
-            dict(existing_contribution.spatial_temporal_delta)
-            if existing_contribution is not None
-            else {}
-        )
-        if (
-            not spatial_temporal_delta
-            and (
-                position == 0
-                or shot.scene_name
-                != normalized_shots[-1].scene_name
-                or shot.scene_time
-                != normalized_shots[-1].scene_time
-            )
-        ):
-            spatial_temporal_delta = {
-                "scene_name": shot.scene_name,
-                "scene_time": shot.scene_time,
-            }
         shot.shot_contribution = ShotContribution.model_validate({
             "shot_contribution_id": f"SCONTRIB-{shot.shot_id}",
             "experience_intent_ids": [
@@ -790,17 +754,9 @@ def normalize_narrative_storyboard_outline(
             "story_delta_fact_ids": sorted(add_ids | remove_ids),
             "character_state_delta_ids": character_state_ids,
             "audience_state_delta_ids": audience_delta_ids,
-            "affective_delta": (
-                dict(existing_contribution.affective_delta)
-                if existing_contribution is not None
-                else {}
-            ),
-            "spatial_temporal_delta": spatial_temporal_delta,
-            "dramatic_pressure_delta": (
-                float(existing_contribution.dramatic_pressure_delta)
-                if existing_contribution is not None
-                else 0.0
-            ),
+            "affective_delta": {},
+            "spatial_temporal_delta": {},
+            "dramatic_pressure_delta": 0.0,
         })
 
         action_s = sum(
