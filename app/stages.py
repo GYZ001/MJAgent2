@@ -4369,6 +4369,79 @@ def _normalize_scene_pack_camera(shot: Shot) -> None:
                 shot.camera_move = "固定"
 
 
+def normalize_storyboard_direction_fields(
+    board: Storyboard,
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, Any]]:
+    """Fill deterministic director metadata from the approved shot tasks."""
+    briefs = {
+        int(brief.shot_no): brief
+        for brief in outline.shots
+    }
+    changes: list[dict[str, Any]] = []
+    for shot in board.shots:
+        brief = briefs.get(int(shot.shot_no))
+        if brief is None:
+            continue
+        before = {
+            "purpose": shot.purpose,
+            "resulting_change": shot.resulting_change,
+            "readability_focus": shot.readability_focus,
+            "camera_angle": shot.camera_angle,
+            "camera_motivation": shot.camera_motivation,
+            "context_requirement_ids": list(shot.context_requirement_ids or []),
+            "shot_size": shot.shot_size,
+            "camera_move": shot.camera_move,
+        }
+        purpose, resulting_change, readability_focus = _scene_pack_task_fields(
+            brief,
+            screenplay,
+        )
+        if not str(shot.purpose or "").strip():
+            shot.purpose = purpose
+        if not str(shot.resulting_change or "").strip():
+            shot.resulting_change = resulting_change
+        if not str(shot.readability_focus or "").strip():
+            shot.readability_focus = readability_focus
+        if not shot.context_requirement_ids and brief.context_requirement_ids:
+            shot.context_requirement_ids = list(brief.context_requirement_ids)
+            if not brief.readability_focus:
+                shot.readability_focus = "context"
+        if not str(shot.camera_angle or "").strip():
+            shot.camera_angle = str(brief.camera_angle or "平视").strip()
+        _normalize_scene_pack_camera(shot)
+        if not str(shot.camera_motivation or "").strip():
+            shot.camera_motivation = str(
+                brief.camera_motivation
+                or (
+                    f"以{shot.shot_size}{shot.camera_angle}配合{shot.camera_move}，"
+                    f"清晰呈现{shot.purpose}"
+                )
+            ).strip()
+        after = {
+            "purpose": shot.purpose,
+            "resulting_change": shot.resulting_change,
+            "readability_focus": shot.readability_focus,
+            "camera_angle": shot.camera_angle,
+            "camera_motivation": shot.camera_motivation,
+            "context_requirement_ids": list(shot.context_requirement_ids or []),
+            "shot_size": shot.shot_size,
+            "camera_move": shot.camera_move,
+        }
+        changed_fields = [
+            field
+            for field in before
+            if before[field] != after[field]
+        ]
+        if changed_fields:
+            changes.append({
+                "shot_no": int(shot.shot_no),
+                "fields": changed_fields,
+            })
+    return changes
+
+
 def _hydrate_directed_scene_pack(
     draft: DirectedScenePackDraft,
     *,

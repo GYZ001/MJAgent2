@@ -42,6 +42,7 @@ from app.stages import (
     generate_storyboard_scene_pack,
     generate_storyboard_next_shot,
     generate_storyboard_outline,
+    normalize_storyboard_direction_fields,
     normalize_storyboard_shot_candidate,
     storyboard_shot_authority_context,
 )
@@ -3037,6 +3038,12 @@ async def run_storyboard_supervisor(
                 relieve_spoken_overflow(board)
                 prefer_default_shot_durations(board)
                 normalize_transition_visuals(board)
+            if generation_outline is not None:
+                normalize_storyboard_direction_fields(
+                    board,
+                    generation_outline,
+                    screenplay,
+                )
             expected_screenplay_artifact_id = cp.input_versions.get("screenplay_artifact_id")
             shot = board.shots[-1]
             shot.is_final = bool(draft.is_final)
@@ -3281,6 +3288,38 @@ async def run_storyboard_supervisor(
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
         has_real_bible = bool((p["bible_json"] or "").strip()) if p else False
+        direction_repairs = (
+            normalize_storyboard_direction_fields(
+                full_board,
+                outline,
+                screenplay,
+            )
+            if outline is not None
+            else []
+        )
+        if direction_repairs:
+            current_rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+            for row, shot in zip(current_rows, full_board.shots):
+                _write_shot_fields(
+                    conn,
+                    str(row["id"]),
+                    shot,
+                    row["storyboard_artifact_id"],
+                    narrative_authority=narrative_authority,
+                )
+            conn.commit()
+            completed = list(full_board.shots)
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "STORYBOARD_DIRECTION_FIELDS_REBOUND",
+                    "info",
+                    "已从批准大纲确定性补齐分镜导演字段",
+                    payload={"repairs": direction_repairs},
+                )
         evaluation = evaluate_storyboard_for_confirmation(
             ep_data, full_board, screenplay, bible, has_real_bible=has_real_bible,
         )
