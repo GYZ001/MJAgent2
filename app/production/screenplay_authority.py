@@ -414,6 +414,7 @@ def _append_compatible_historical_materials(
     projection = _project_bible_projection(project)
     characters = list(projection.get("characters") or [])
     candidates: list[dict[str, Any]] = []
+    projection_prefixes: list[tuple[dict[str, Any], str]] = []
     for character_count in range(len(characters) - 1, -1, -1):
         historical_projection = {
             **projection,
@@ -422,6 +423,7 @@ def _append_compatible_historical_materials(
         projection_hash = evidence_repository.content_hash(
             historical_projection
         )
+        projection_prefixes.append((historical_projection, projection_hash))
         candidate = {
             **material,
             "bible_projection_hash": projection_hash,
@@ -429,6 +431,39 @@ def _append_compatible_historical_materials(
         if not candidate.get("bible_artifact_id"):
             candidate["bible_content_hash"] = projection_hash
         candidates.append(candidate)
+
+    project_id = str(_episode_value(episode, "project_id", "") or "")
+    artifact_rows = conn.execute(
+        "SELECT id FROM artifacts WHERE type='character_bible' "
+        "AND scope_type='project' AND scope_id=? "
+        "AND status NOT IN ('rejected','needs_revision') "
+        "ORDER BY version DESC",
+        (project_id,),
+    ).fetchall()
+    for row in artifact_rows:
+        artifact = evidence_repository.get_artifact(str(row["id"]))
+        if artifact is None:
+            continue
+        try:
+            artifact_projection = screenplay_bible_payload(
+                artifact.get("content") or {}
+            )
+            artifact_hash = _verified_artifact_hash(
+                artifact,
+                label="历史 Bible Artifact",
+            )
+        except (TypeError, ValueError):
+            continue
+        for historical_projection, projection_hash in projection_prefixes:
+            if artifact_projection != historical_projection:
+                continue
+            candidates.append({
+                **material,
+                "bible_artifact_id": str(artifact["id"]),
+                "bible_content_hash": artifact_hash,
+                "bible_projection_hash": projection_hash,
+            })
+            break
     return candidates
 
 

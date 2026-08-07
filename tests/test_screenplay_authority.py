@@ -373,9 +373,22 @@ def test_published_authority_survives_later_character_appends(
         "speech_style": "直率",
         "relationships": [],
     })
+    next_artifact_id = None
+    if artifact_backed:
+        next_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="character_bible",
+            scope_type="project",
+            scope_id="project-generic",
+            status="approved",
+            trust_level="T4",
+            content=projection,
+            contract_version="character-bible-1.0.0",
+        ))
+        next_artifact_id = next_artifact["id"]
     conn.execute(
-        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
-        (json.dumps(projection, ensure_ascii=False),),
+        "UPDATE projects SET bible_json=?,bible_artifact_id=? "
+        "WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False), next_artifact_id),
     )
     conn.commit()
 
