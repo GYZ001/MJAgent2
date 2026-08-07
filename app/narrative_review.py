@@ -1660,6 +1660,66 @@ def _load_reusable_partial_review(
     return None
 
 
+def _load_deterministically_repairable_report(
+    *,
+    episode_id: str,
+    screenplay: EpisodeScreenplay,
+    observations: list[BlindAudienceObservation],
+) -> tuple[str, NarrativeReviewReport] | None:
+    """Reuse a pass report whose only defect is an empty derived reason."""
+    conn = evidence_repository.get_conn()
+    rows = conn.execute(
+        """SELECT id FROM artifacts
+             WHERE type='narrative_review_report'
+               AND scope_type='episode' AND scope_id=?
+               AND prompt_version=?
+               AND status NOT IN ('rejected')
+             ORDER BY created_at DESC,version DESC""",
+        (episode_id, COMPARATOR_PROMPT_VERSION),
+    ).fetchall()
+    expected_observation_ids = {
+        observation.observation_id for observation in observations
+    }
+    for row in rows:
+        artifact = evidence_repository.get_artifact(str(row["id"]))
+        if (
+            artifact is None
+            or evidence_repository.content_hash(
+                artifact.get("content"),
+                artifact.get("file_path"),
+            ) != artifact.get("content_hash")
+        ):
+            continue
+        try:
+            report = NarrativeReviewReport.model_validate(
+                artifact.get("content") or {}
+            )
+        except (TypeError, ValueError):
+            continue
+        if (
+            report.decision != "pass"
+            or set(report.observation_ids) != expected_observation_ids
+            or any(
+                result.result != "satisfied"
+                or not result.supporting_observation_ids
+                or not result.supporting_evidence_ids
+                for result in report.target_delta_results
+            )
+        ):
+            continue
+        errors = validate_blind_review(
+            screenplay,
+            observations,
+            report,
+        )
+        if errors and all(
+            error.startswith("[REVIEW_LOW_PERCENTILE_REASON_MISSING]")
+            for error in errors
+        ):
+            return str(artifact["id"]), report
+    return None
+
+
 async def run_blind_audience_review(
     *,
     episode_id: str,
@@ -1901,13 +1961,26 @@ async def run_blind_audience_review(
         artifact_ids.append(observation_artifact_id)
         observation_artifact_ids.append(observation_artifact_id)
 
-    report = await _structured_call(
-        system=_COMPARATOR_SYSTEM,
-        prompt=_comparator_prompt(screenplay, observations, report_id=f"NRR-{episode_id}"),
-        model_cls=NarrativeReviewReport,
-        call_role="intent_comparator",
+    reusable_report = _load_deterministically_repairable_report(
         episode_id=episode_id,
+        screenplay=screenplay,
+        observations=observations,
     )
+    reused_report_artifact_id: str | None = None
+    if reusable_report is not None:
+        reused_report_artifact_id, report = reusable_report
+    else:
+        report = await _structured_call(
+            system=_COMPARATOR_SYSTEM,
+            prompt=_comparator_prompt(
+                screenplay,
+                observations,
+                report_id=f"NRR-{episode_id}",
+            ),
+            model_cls=NarrativeReviewReport,
+            call_role="intent_comparator",
+            episode_id=episode_id,
+        )
     if report.decision == "pass":
         low = dict(report.low_percentile_result or {})
         expected_by_prior = {
@@ -1946,7 +2019,18 @@ async def run_blind_audience_review(
                 }
                 for prior_id, expected in expected_by_prior.items()
             }
-        low.setdefault("reason", "按逐先验目标比较结果确定低分位是否通过")
+        if not str(low.get("reason") or "").strip():
+            low["reason"] = "按逐先验目标比较结果确定低分位是否通过"
+        per_prior = low.get("per_prior")
+        if isinstance(per_prior, dict):
+            for prior_id, result in per_prior.items():
+                if (
+                    isinstance(result, dict)
+                    and not str(result.get("reason") or "").strip()
+                ):
+                    result["reason"] = (
+                        f"按先验 {prior_id} 的逐目标比较结果确定"
+                    )
         report.low_percentile_result = low
     validation_errors = validate_blind_review(screenplay, observations, report)
     passed = not validation_errors and report.decision == "pass"
@@ -1962,6 +2046,11 @@ async def run_blind_audience_review(
         content=report.model_dump(mode="json"),
         parent_artifact_ids=list(dict.fromkeys([
             *parents,
+            *(
+                [reused_report_artifact_id]
+                if reused_report_artifact_id
+                else []
+            ),
             *[
                 artifact_id
                 for pair in zip(
@@ -2010,6 +2099,9 @@ async def run_blind_audience_review(
             "observation_artifact_ids": observation_artifact_ids,
             "perceptual_surface_version": AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
             "blind_prompt_version": BLIND_READER_PROMPT_VERSION,
+            "reused_comparator_report_artifact_id": (
+                reused_report_artifact_id
+            ),
             "per_prior": sorted(index.priors),
             "low_percentile_result": report.low_percentile_result,
         },

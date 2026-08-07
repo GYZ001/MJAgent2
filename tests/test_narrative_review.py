@@ -18,6 +18,7 @@ from app.narrative_review import (
     BLIND_FIRST_PASS_ARTIFACT_TYPE,
     BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE,
     BLIND_READER_PROMPT_VERSION,
+    COMPARATOR_PROMPT_VERSION,
     NarrativeReviewError,
     _comparator_prompt,
     run_blind_audience_review,
@@ -593,6 +594,75 @@ async def test_blind_review_reuses_frozen_observations_after_comparator_failure(
     assert len(observations) == 2
     assert report.decision == "pass"
     assert len(artifact_ids) == 8
+
+
+@pytest.mark.asyncio
+async def test_blind_review_repairs_empty_low_percentile_reason_without_model(
+    monkeypatch,
+) -> None:
+    screenplay = _screenplay()
+    board = _board()
+    screenplay_artifact, _shot_artifact_ids = _persist_review_projection(
+        screenplay,
+        board,
+    )
+    monkeypatch.setattr(
+        "app.narrative_review.model_gateway.chat",
+        _passing_chat,
+    )
+    _observations, report, artifact_ids = await run_blind_audience_review(
+        episode_id="episode-generic",
+        screenplay=screenplay,
+        board=board,
+        screenplay_artifact_id=screenplay_artifact["id"],
+    )
+    original_report = next(
+        evidence_repository.get_artifact(artifact_id)
+        for artifact_id in artifact_ids
+        if evidence_repository.get_artifact(artifact_id)["type"]
+        == "narrative_review_report"
+    )
+    incomplete = report.model_copy(deep=True)
+    incomplete.low_percentile_result["reason"] = ""
+    incomplete_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="narrative_review_report",
+            scope_type="episode",
+            scope_id="episode-generic",
+            status="needs_revision",
+            trust_level="T2",
+            content=incomplete.model_dump(mode="json"),
+            parent_artifact_ids=original_report["parent_artifact_ids"],
+            contract_version=NARRATIVE_CONTRACT_VERSION,
+            prompt_version=COMPARATOR_PROMPT_VERSION,
+        )
+    )
+
+    async def unexpected_model_call(*_args, **_kwargs):
+        raise AssertionError("deterministic report repair called the model")
+
+    monkeypatch.setattr(
+        "app.narrative_review.model_gateway.chat",
+        unexpected_model_call,
+    )
+    _observations, repaired, repaired_ids = await run_blind_audience_review(
+        episode_id="episode-generic",
+        screenplay=screenplay,
+        board=board,
+        screenplay_artifact_id=screenplay_artifact["id"],
+    )
+
+    assert repaired.decision == "pass"
+    assert repaired.low_percentile_result["reason"]
+    repaired_artifact = next(
+        evidence_repository.get_artifact(artifact_id)
+        for artifact_id in repaired_ids
+        if evidence_repository.get_artifact(artifact_id)["type"]
+        == "narrative_review_report"
+    )
+    assert incomplete_artifact["id"] in repaired_artifact[
+        "parent_artifact_ids"
+    ]
 
 
 @pytest.mark.asyncio
