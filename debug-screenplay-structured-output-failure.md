@@ -53,3 +53,18 @@
 - 解析失败改为明确的 `ContentGenerationError`，不再伪装成系统内部异常。
 - 场景批量回退保留成功候选，避免重复付费调用。
 - 画外音保持声音合同，不改变人物可见性。
+
+## Verification Conclusion
+- Pre-fix：人物卡请求上限 900，`reasoning_tokens=865`，
+  `finish_reason=length`，可见 JSON 71 字且未闭合，Run 在
+  `character_discovery` 失败。
+- Post-fix：合法人物卡使用 4096 预算并返回闭合 JSON；
+  原失败响应在数据库副本重放时，“钟五”直接标记
+  `mentioned_only`，人物卡模型调用减少 1 次，`errors=[]`。
+- 场景批量失败回退测试证明：SC002 失败时 SC003 成功候选保留，
+  逐镜模型只调用 shot 2。
+- 画外音测试证明：说话人保持 `offscreen_voice`，不会进入
+  `characters/characters_visible`。
+- 专项回归：204 passed；Ruff/py_compile/diff check 通过。
+- 全量回归：1766 passed，13 failed，4 skipped。失败数与修改前远端
+  基线一致，本次未新增失败。
