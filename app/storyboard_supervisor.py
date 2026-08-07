@@ -2532,6 +2532,8 @@ async def run_storyboard_supervisor(
                     ],
                     return_exceptions=True,
                 )
+                if not _run_has_write_ownership():
+                    return cp
                 for context, result in zip(pending_contexts, generated):
                     if isinstance(result, BaseException):
                         failed_scene_ids.add(context.scene_id)
@@ -2634,24 +2636,33 @@ async def run_storyboard_supervisor(
                 expected_screenplay_artifact_id = cp.input_versions.get(
                     "screenplay_artifact_id"
                 )
-                _sync_storyboard_shot_timing(
-                    conn,
-                    episode_id,
-                    candidate_board,
-                    expected_screenplay_artifact_id,
-                )
-                for shot in candidate_board.shots[len(completed):]:
-                    _insert_storyboard_shot(
+                if not _run_has_write_ownership():
+                    return cp
+                conn.execute("SAVEPOINT scene_pack_commit")
+                try:
+                    _sync_storyboard_shot_timing(
                         conn,
                         episode_id,
-                        screenplay,
-                        shot,
+                        candidate_board,
                         expected_screenplay_artifact_id,
                     )
-                conn.execute(
-                    "UPDATE episodes SET status='scripting',script_error=NULL WHERE id=?",
-                    (episode_id,),
-                )
+                    for shot in candidate_board.shots[len(completed):]:
+                        _insert_storyboard_shot(
+                            conn,
+                            episode_id,
+                            screenplay,
+                            shot,
+                            expected_screenplay_artifact_id,
+                        )
+                    conn.execute(
+                        "UPDATE episodes SET status='scripting',script_error=NULL WHERE id=?",
+                        (episode_id,),
+                    )
+                    conn.execute("RELEASE SAVEPOINT scene_pack_commit")
+                except Exception:
+                    conn.execute("ROLLBACK TO SAVEPOINT scene_pack_commit")
+                    conn.execute("RELEASE SAVEPOINT scene_pack_commit")
+                    raise
                 conn.commit()
                 completed = _reload_completed()
                 cp.scene_pack_candidates.pop(context.scene_id, None)
