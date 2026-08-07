@@ -16,14 +16,24 @@ from app.schemas import Bible, EpisodeScreenplay
 SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-2"
 
 
-def screenplay_contract_requires_narrative(contract_version: str | None) -> bool:
-    """Return whether this contract generation requires typed narrative authority."""
+def _contract_major(contract_version: str | None) -> int:
     raw = str(contract_version or "").strip()
     try:
-        major = int(raw.split(".", 1)[0])
+        return int(raw.split(".", 1)[0])
     except (TypeError, ValueError):
-        return False
-    return major >= 3
+        return 0
+
+
+def screenplay_contract_requires_narrative(contract_version: str | None) -> bool:
+    """Return whether this contract generation requires typed narrative authority."""
+    return _contract_major(contract_version) >= 3
+
+
+def screenplay_contract_tracks_bible_projection(
+    contract_version: str | None,
+) -> bool:
+    """Return whether the screenplay binds the composed project Bible view."""
+    return _contract_major(contract_version) >= 4
 
 
 def _json(value: Any) -> str:
@@ -42,6 +52,72 @@ def _decode_list(value: Any) -> list[Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def screenplay_bible_payload(value: Bible | dict[str, Any]) -> dict[str, Any]:
+    """Return the semantic Bible payload consumed by screenplay generation.
+
+    Character/scene image paths and asset-generation prompt overrides live in
+    the mutable media projection. They must not change screenplay authority or
+    leak local file-system paths into a text-model prompt.
+    """
+    bible = value if isinstance(value, Bible) else Bible.model_validate(value)
+    payload = bible.model_dump(mode="json")
+    for character in payload.get("characters") or []:
+        character.pop("ref_image_path", None)
+        character.pop("portrait_prompt_override", None)
+    for scene in payload.get("scenes") or []:
+        scene.pop("ref_image_path", None)
+        scene.pop("scene_prompt_override", None)
+    return payload
+
+
+def _project_bible_projection(project: Any) -> dict[str, Any]:
+    raw = _episode_value(project, "bible_json", "") if project else ""
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(payload, dict):
+            raise TypeError("Bible JSON must be an object")
+        return screenplay_bible_payload(payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("项目 Bible JSON 无法解析为当前人物谱合同") from exc
+
+
+def _runtime_bible_extends_projection(
+    projection: dict[str, Any],
+    runtime_payload: dict[str, Any],
+) -> bool:
+    """Allow only legacy compatibility cards appended to the current projection."""
+    if runtime_payload == projection:
+        return True
+    projected_characters = list(projection.get("characters") or [])
+    runtime_characters = list(runtime_payload.get("characters") or [])
+    if len(runtime_characters) < len(projected_characters):
+        return False
+    projection_base = {**projection, "characters": []}
+    runtime_base = {**runtime_payload, "characters": []}
+    if projection_base != runtime_base:
+        return False
+    if runtime_characters[:len(projected_characters)] != projected_characters:
+        return False
+    projected_names = {
+        str(item.get("name") or "")
+        for item in projected_characters
+        if isinstance(item, dict)
+    }
+    extension_names = [
+        str(item.get("name") or "")
+        for item in runtime_characters[len(projected_characters):]
+        if isinstance(item, dict)
+    ]
+    return (
+        len(extension_names) == len(runtime_characters) - len(projected_characters)
+        and all(extension_names)
+        and len(extension_names) == len(set(extension_names))
+        and not projected_names.intersection(extension_names)
+    )
 
 
 def _episode_value(episode: Any, key: str, default: Any = None) -> Any:
@@ -195,6 +271,7 @@ def screenplay_authority_material(
         evidence_repository.get_artifact(str(bible_artifact_id))
         if bible_artifact_id else None
     )
+    bible_projection = _project_bible_projection(project)
     if bible_artifact is not None:
         if (
             bible_artifact.get("type") != "character_bible"
@@ -206,28 +283,37 @@ def screenplay_authority_material(
         ):
             raise ValueError("Bible Artifact 的类型、作用域或状态无效")
         bible_hash = _verified_artifact_hash(bible_artifact, label="Bible Artifact")
-        if bible is not None:
-            expected_bible_hash = evidence_repository.content_hash(
-                bible.model_dump(mode="json")
-            )
-        else:
-            raw_bible = _episode_value(project, "bible_json", "") if project else ""
-            try:
-                expected_bible = json.loads(raw_bible) if raw_bible else {}
-            except (TypeError, ValueError, json.JSONDecodeError):
-                expected_bible = {"invalid_raw": str(raw_bible or "")}
-            expected_bible_hash = evidence_repository.content_hash(expected_bible)
-        if expected_bible_hash != bible_hash:
-            raise ValueError("Bible JSON、Artifact 与本次运行快照不一致")
     elif bible is not None:
-        bible_hash = evidence_repository.content_hash(bible.model_dump(mode="json"))
+        bible_hash = evidence_repository.content_hash(
+            screenplay_bible_payload(bible)
+        )
     else:
-        raw_bible = _episode_value(project, "bible_json", "") if project else ""
-        try:
-            bible_content = json.loads(raw_bible) if raw_bible else {}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            bible_content = {"invalid_raw": str(raw_bible or "")}
-        bible_hash = evidence_repository.content_hash(bible_content)
+        bible_hash = evidence_repository.content_hash(bible_projection)
+
+    projection_hash = ""
+    if screenplay_contract_tracks_bible_projection(contract_version):
+        if not bible_projection and bible_artifact is not None:
+            try:
+                bible_projection = screenplay_bible_payload(
+                    bible_artifact.get("content") or {}
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Bible Artifact 无法解析为当前人物谱合同") from exc
+        runtime_payload = (
+            screenplay_bible_payload(bible)
+            if bible is not None
+            else bible_projection
+        )
+        if not bible_projection:
+            bible_projection = runtime_payload
+        if not _runtime_bible_extends_projection(
+            bible_projection,
+            runtime_payload,
+        ):
+            raise ValueError(
+                "本次剧本运行使用的人物谱与项目当前组合投影不一致"
+            )
+        projection_hash = evidence_repository.content_hash(bible_projection)
 
     constraints = {
         "title": _episode_value(episode, "title", "") or "",
@@ -245,7 +331,7 @@ def screenplay_authority_material(
             _episode_value(episode, "screenplay_constraint_version", 0) or 0
         ),
     }
-    return {
+    material = {
         "authority_contract": "screenplay-source-authority.v1",
         "episode_id": episode_id,
         "project_id": str(_episode_value(episode, "project_id", "") or ""),
@@ -260,6 +346,9 @@ def screenplay_authority_material(
         "contract_version": str(contract_version or ""),
         "qa_profile_version": str(qa_profile_version or ""),
     }
+    if projection_hash:
+        material["bible_projection_hash"] = projection_hash
+    return material
 
 
 def screenplay_authority_fingerprint(

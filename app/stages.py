@@ -1240,8 +1240,16 @@ async def generate_bible(chapters: list[dict], feedback: str = "", previous_bibl
             repair_all_blockers=True,
         ),
     )
+
+    def validate_authoritative_bible(candidate: Bible) -> list[str]:
+        # The forced project style is authority, not a post-processing display
+        # override. Apply it before AgentLoop records the accepted Artifact.
+        if visual_style_prompt:
+            candidate.world.visual_style_canonical = visual_style_prompt
+        return validate_bible(candidate)
+
     bible = await _run_with_agent_loop(
-        "角色圣经", "character_bible", prompt, Bible, validate_bible,
+        "角色圣经", "character_bible", prompt, Bible, validate_authoritative_bible,
         loop=loop, temperature=0.5, max_tokens=16384,
     )
     if visual_style_prompt:
@@ -1951,6 +1959,13 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     """
     speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
     bible_names_inline = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
+    from app.production.screenplay_authority import screenplay_bible_payload
+
+    screenplay_bible_json = json.dumps(
+        screenplay_bible_payload(bible),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     character_resolution_block = _character_resolution_prompt_block(episode)
     source_with_ids = render_indexed_source(source_text)
     source_segment_ids = [
@@ -2114,7 +2129,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 {required_dialogue_block}
 
 角色圣经：
-{bible.model_dump_json()}
+{screenplay_bible_json}
 
 {character_resolution_block}
 

@@ -7,15 +7,18 @@ from fastapi import HTTPException
 
 from app import api, db, storyboard_workspace
 from app.evidence import repository as evidence_repository
-from app.harness.types import Evaluation
+from app.harness.types import Evaluation, EvidenceArtifact
 from app.narrative_review import NarrativeReviewError, run_blind_audience_review
 from app.production.publish import publish_screenplay
 from app.production.revision import ensure_production_revision, mark_baseline_generated
 from app.production.screenplay_authority import (
     SCREENPLAY_QA_PROFILE_VERSION,
     resolve_current_screenplay_authority,
+    screenplay_authority_material,
+    screenplay_bible_payload,
     screenplay_authority_fingerprint,
 )
+from app.schemas import Bible
 from tests.test_narrative_continuity import _board, _screenplay
 from tests.test_narrative_review import _persist_review_projection
 
@@ -32,6 +35,42 @@ def _published_case():
     artifact, _shot_artifacts = _persist_review_projection(screenplay, _board())
     authority = resolve_current_screenplay_authority("episode-generic")
     return screenplay, artifact, authority
+
+
+def _seed_test_bible_authority() -> tuple[dict, dict]:
+    bible = {
+        "world": {
+            "visual_style_canonical": "统一国风动画电影画风与自然光影",
+            "era": "古代",
+            "genre": "剧情",
+        },
+        "characters": [{
+            "name": "Hero",
+            "role": "主角",
+            "appearance_canonical": "黑发青年，深色长衣，身形挺拔，佩戴一枚旧玉佩",
+            "personality": "沉稳",
+            "speech_style": "简洁",
+            "relationships": [],
+        }],
+        "scenes": [],
+    }
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_bible",
+        scope_type="project",
+        scope_id="project-generic",
+        status="approved",
+        trust_level="T4",
+        content=bible,
+        contract_version="character-bible-1.0.0",
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=?,bible_artifact_id=? "
+        "WHERE id='project-generic'",
+        (json.dumps(bible, ensure_ascii=False), artifact["id"]),
+    )
+    conn.commit()
+    return bible, artifact
 
 
 @pytest.mark.parametrize(
@@ -131,6 +170,72 @@ def test_resolver_recovers_legacy_storyboard_duration_contamination() -> None:
     assert conn.execute(
         "SELECT target_duration_s FROM episodes WHERE id='episode-generic'"
     ).fetchone()["target_duration_s"] == 60
+
+
+def test_contract_v4_tracks_composed_bible_projection_separately_from_base_artifact() -> None:
+    _published_case()
+    _seed_test_bible_authority()
+    conn = db.get_conn()
+    project = conn.execute(
+        "SELECT bible_json,bible_artifact_id FROM projects WHERE id='project-generic'"
+    ).fetchone()
+    projection = json.loads(project["bible_json"])
+    projection["world"]["visual_style_canonical"] = "统一动画电影画风与柔和自然光影"
+    projection["characters"][0]["ref_image_path"] = "/local/portrait.png"
+    projection["scenes"] = [{
+        "name": "宗门广场",
+        "scene_canonical": "动画电影风格的宗门广场，晨光照亮石阶与主殿，空间开阔且层次清晰",
+        "ref_image_path": "/local/scene.png",
+    }]
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+    bible = Bible.model_validate(projection)
+
+    material = screenplay_authority_material(
+        "episode-generic",
+        bible=bible,
+        contract_version="4.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    artifact = evidence_repository.get_artifact(project["bible_artifact_id"])
+
+    assert material["bible_content_hash"] == artifact["content_hash"]
+    assert material["bible_projection_hash"] == evidence_repository.content_hash(
+        screenplay_bible_payload(bible)
+    )
+    assert material["bible_projection_hash"] != material["bible_content_hash"]
+    assert "ref_image_path" not in screenplay_bible_payload(bible)["characters"][0]
+    assert "ref_image_path" not in screenplay_bible_payload(bible)["scenes"][0]
+
+
+def test_contract_v4_rejects_stale_runtime_bible_against_current_projection() -> None:
+    _published_case()
+    _seed_test_bible_authority()
+    conn = db.get_conn()
+    project = conn.execute(
+        "SELECT bible_json,bible_artifact_id FROM projects WHERE id='project-generic'"
+    ).fetchone()
+    stale_bible = Bible.model_validate(
+        evidence_repository.get_artifact(project["bible_artifact_id"])["content"]
+    )
+    projection = json.loads(project["bible_json"])
+    projection["world"]["visual_style_canonical"] = "更新后的统一动画电影风格与稳定光影"
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="项目当前组合投影不一致"):
+        screenplay_authority_material(
+            "episode-generic",
+            bible=stale_bible,
+            contract_version="4.0.0",
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        )
 
 
 @pytest.mark.parametrize("extra_drift", [False, True])
