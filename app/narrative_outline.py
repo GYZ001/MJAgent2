@@ -607,8 +607,10 @@ def normalize_narrative_storyboard_outline(
         shot.offscreen_action_target_ids = []
 
         shot.planned_state_in_fact_ids = sorted(current_facts)
-        add_ids = set(event.effects_add) if is_last_occurrence else set()
-        remove_ids = set(event.effects_remove) if is_last_occurrence else set()
+        declared_add_ids = set(event.effects_add) if is_last_occurrence else set()
+        declared_remove_ids = set(event.effects_remove) if is_last_occurrence else set()
+        remove_ids = declared_remove_ids & current_facts
+        add_ids = declared_add_ids - current_facts - remove_ids
         shot.planned_delta_add_fact_ids = sorted(add_ids)
         shot.planned_delta_remove_fact_ids = sorted(remove_ids)
         current_facts = (current_facts - remove_ids) | add_ids

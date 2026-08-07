@@ -1823,6 +1823,50 @@ def _outline_as_shots(outline: StoryboardOutline) -> list[Any]:
     return list(outline.shots or [])
 
 
+_STORYBOARD_SCORE_ONLY_SCREENPLAY_CODES = frozenset({
+    "EVENT_PRECONDITION_FROM_FUTURE",
+    "INITIAL_FACT_HAS_PRODUCER",
+    "STATE_REPLAY_WITHOUT_DELTA",
+    "CHARACTER_DECISION_BINDING_INCOMPLETE",
+    "CHARACTER_DECISION_CHAIN_MISSING",
+    "AUDIENCE_EVIDENCE_FROM_FUTURE",
+    "TARGET_DELTA_TO_STATE_MISMATCH",
+    "TARGET_DELTA_STATE_MISMATCH",
+    "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
+    "SETUP_RECALL_TASK_MISSING",
+    "SCENE_DRAMATIC_DIMENSION_MISSING",
+})
+
+
+def _narrative_error_code(message: str) -> str:
+    text = str(message or "")
+    return text[1:text.index("]")] if text.startswith("[") and "]" in text else ""
+
+
+def validate_storyboard_screenplay_authority(
+    screenplay: EpisodeScreenplay,
+    *,
+    expected_scope_id: str | None = None,
+) -> list[str]:
+    """Keep publication score-only findings score-only in storyboard runtime.
+
+    The screenplay QA report remains unchanged and auditable. Storyboard only
+    blocks on authority errors that prevent deterministic projection; audience
+    interpretation and authoring-quality findings cannot be repaired by
+    regenerating shots and must not be promoted into paid model retry loops.
+    """
+    return [
+        error
+        for error in validate_screenplay_narrative(
+            screenplay,
+            require=True,
+            expected_scope_id=expected_scope_id,
+        )
+        if _narrative_error_code(error)
+        not in _STORYBOARD_SCORE_ONLY_SCREENPLAY_CODES
+    ]
+
+
 def validate_storyboard_narrative(
     board: Storyboard | None,
     screenplay: EpisodeScreenplay,
@@ -1839,9 +1883,8 @@ def validate_storyboard_narrative(
     plan = screenplay.narrative_plan
     if plan is None:
         return ["[NARRATIVE_PLAN_MISSING] 分镜不能在缺少剧本叙事合同的情况下标记 narrative_ready"]
-    errors = validate_screenplay_narrative(
+    errors = validate_storyboard_screenplay_authority(
         screenplay,
-        require=True,
         expected_scope_id=expected_scope_id,
     )
     index = index_narrative_plan(plan)

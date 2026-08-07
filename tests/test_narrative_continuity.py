@@ -376,6 +376,7 @@ def test_storyboard_authority_does_not_repromote_screenplay_score_only_findings(
     first_event = screenplay.narrative_plan.events[0]
     first_event.precondition_fact_ids = ["F-before"]
     first_event.effects_add = ["F-before", "F-after"]
+    first_event.effects_remove = []
 
     full_codes = _codes(validate_screenplay_narrative(
         screenplay,

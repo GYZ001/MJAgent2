@@ -276,6 +276,10 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
     screenplay = EpisodeScreenplay(
         episode_no=1,
         full_script_text="【场1】夜 / 咖啡厅\n谷言从桌边起身。谷言：门外有人。",
+        events=[{
+            "event_id": "E1",
+            "source_span": source,
+        }],
         scene_outline=[
             ScriptScene(
                 scene_no=1,
@@ -342,8 +346,8 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
                 shot_no=1,
                 shot_id="SH001",
                 scene_id="SC001",
-                event_ids=["E1"],
-                story_event_id="E1",
+                event_ids=["E-1"],
+                story_event_id="E-1",
                 spine_beat_ids=["S01"],
                 key_line_ids=["KL01"],
                 visible_entity_ids=["谷言"],
@@ -392,7 +396,8 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
     shot = pack.shots[0]
     assert shot.duration_s == 7
     assert shot.shot_id == "SH001"
-    assert shot.event_ids == ["E1"]
+    assert shot.event_ids == ["E-1"]
+    assert shot.story_event_id == "E1"
     assert shot.capacity_budget == budget
     assert shot.shot_contribution == contribution
     assert shot.characters == ["谷言"]
@@ -425,7 +430,7 @@ def test_scene_pack_preserves_offscreen_voice_without_forcing_speaker_visible() 
         shot_no=1,
         key_line_ids=["KL01"],
         characters_visible=["谷言"],
-        visible_entity_ids=["谷言"],
+        visible_entity_ids=["谷言", "门外人"],
         audio_cast=["门外人"],
     )
 
@@ -447,3 +452,133 @@ def test_scene_pack_preserves_offscreen_voice_without_forcing_speaker_visible() 
     assert dialogues[0].speaker == "门外人"
     assert dialogues[0].delivery == "offscreen_voice"
     assert characters == ["谷言"]
+
+
+def test_scene_pack_normalizes_same_scene_continuity() -> None:
+    screenplay = EpisodeScreenplay(episode_no=1)
+    bible = Bible(
+        characters=[
+            Character(
+                name="谷言",
+                role="主角",
+                appearance_canonical="成年男性，黑色短发，深色常服，外观稳定清晰",
+            )
+        ],
+        world=World(visual_style_canonical="都市国漫"),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                shot_id=f"SH00{number}",
+                scene_id="SC001",
+                scene_name="咖啡厅",
+                scene_time="夜",
+                continuity_mode="scene_change",
+                duration_s=5,
+                characters_visible=["谷言"],
+            )
+            for number in (1, 2)
+        ],
+    )
+    draft = stages.DirectedScenePackDraft(
+        episode_no=1,
+        scene_id="SC001",
+        shots=[
+            stages.DirectedSceneShotDraft(
+                shot_no=number,
+                shot_size="中景",
+                camera_angle="平视",
+                camera_move="固定",
+                camera_motivation="保持空间和动作方向稳定可读",
+                action_desc=f"谷言在咖啡厅完成第{number}个连续动作并停下。",
+                first_frame_desc=f"谷言准备执行第{number}个动作。",
+                last_frame_desc=f"同一机位，谷言完成第{number}个动作。",
+                source_excerpt="谷言从桌边起身，快步走到门口停下。",
+            )
+            for number in (1, 2)
+        ],
+    )
+
+    pack = stages._hydrate_directed_scene_pack(
+        draft,
+        outline=outline,
+        source_text="谷言从桌边起身，快步走到门口停下。",
+        screenplay=screenplay,
+        bible=bible,
+    )
+
+    assert pack.shots[0].continuity_mode == "scene_change"
+    assert pack.shots[1].continuity_mode == "same_scene_cut"
+    assert pack.shots[1].transition == "硬切"
+
+
+def test_scene_pack_prompt_contains_all_planned_scene_names(monkeypatch) -> None:
+    outline = _outline()
+    outline.scene_contexts.append(StoryboardSceneContext(
+        scene_id="SC002",
+        scene_no=2,
+        scene_name="第二场办公室",
+        scene_time="日",
+        entry_state="角色进入办公室",
+        exit_state="角色离开办公室",
+    ))
+    outline.shots.append(StoryboardOutlineShot(
+        shot_no=4,
+        shot_id="SH0004",
+        scene_id="SC002",
+        scene_name="第二场办公室",
+        scene_time="日",
+        beat="第二场独立任务",
+    ))
+    bible = Bible(
+        characters=[
+            Character(
+                name="谷言",
+                role="主角",
+                appearance_canonical="成年男性，黑色短发，深色常服，外观稳定清晰",
+            )
+        ],
+        world=World(visual_style_canonical="都市国漫"),
+    )
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="谷言从桌边起身，快步走到门口停下。",
+    )
+    captured: dict[str, str] = {}
+
+    async def fake_loop(*args, **_kwargs):
+        captured["prompt"] = args[2]
+        return stages.DirectedScenePackDraft(
+            episode_no=1,
+            scene_id="SC001",
+            shots=[
+                stages.DirectedSceneShotDraft(
+                    shot_no=brief.shot_no,
+                    shot_size=brief.camera_size,
+                    camera_angle=brief.camera_angle,
+                    camera_move=brief.camera_movement,
+                    camera_motivation=brief.camera_motivation,
+                    action_desc="谷言从桌边起身走向门口，在门前停下观察外面。",
+                    first_frame_desc="谷言位于咖啡厅桌边，门在画面右侧。",
+                    last_frame_desc="同一机位，谷言走到右侧门前停下。",
+                    source_excerpt="谷言从桌边起身，快步走到门口停下。",
+                    characters=["谷言"],
+                )
+                for brief in outline.shots
+                if brief.scene_id == "SC001"
+            ],
+        )
+
+    monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    asyncio.run(stages.generate_storyboard_scene_pack(
+        {"id": "e1", "episode_no": 1, "target_duration_s": 50},
+        "谷言从桌边起身，快步走到门口停下。",
+        bible,
+        screenplay,
+        outline,
+        outline.scene_contexts[0],
+    ))
+
+    assert "第二场办公室" in captured["prompt"]

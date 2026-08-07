@@ -1804,6 +1804,22 @@ async def run_storyboard_supervisor(
         except Exception:
             pass
     # #endregion
+    if narrative_authority:
+        from app.narrative import validate_storyboard_screenplay_authority
+
+        upstream_runtime_errors = validate_storyboard_screenplay_authority(
+            screenplay,
+            expected_scope_id=episode_id,
+        )
+        if upstream_runtime_errors:
+            raise StageError(
+                "分镜上游权威",
+                [
+                    "已发布剧本含无法确定性投影的执行合同错误，"
+                    "必须先修复剧本，不得调用分镜模型",
+                    *upstream_runtime_errors,
+                ],
+            )
     resolved_screenplay_authority = None
     if narrative_authority:
         from app.production.screenplay_authority import (

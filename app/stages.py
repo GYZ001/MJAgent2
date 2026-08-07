@@ -3852,11 +3852,13 @@ def _scene_pack_dialogues(
     bible: Bible,
 ) -> list[Dialogue]:
     catalog = key_line_catalog(screenplay)
+    visible_tokens = (
+        list(brief.characters_visible)
+        if brief.characters_visible
+        else list(brief.visible_entity_ids)
+    )
     visible_names = set(_canonical_scene_pack_names(
-        [
-            *(brief.characters_visible or []),
-            *(brief.visible_entity_ids or []),
-        ],
+        visible_tokens,
         bible=bible,
         screenplay=screenplay,
         usage="visual",
@@ -3931,9 +3933,13 @@ def _scene_pack_characters(
     screenplay: EpisodeScreenplay,
     fallback: list[str],
 ) -> list[str]:
+    visual_candidates = (
+        list(brief.characters_visible)
+        if brief.characters_visible
+        else list(brief.visible_entity_ids)
+    )
     candidates = [
-        *(brief.characters_visible or []),
-        *(brief.visible_entity_ids or []),
+        *visual_candidates,
         *[
             dialogue.speaker
             for dialogue in dialogues
@@ -4161,6 +4167,14 @@ def _hydrate_directed_scene_pack(
             if continuity_mode == "scene_change"
             else "硬切"
         )
+        story_event_id = _resolve_legacy_story_event_id(
+            brief.story_event_id,
+            [
+                str(event.event_id or "")
+                for event in screenplay.events
+                if str(event.event_id or "").strip()
+            ],
+        )
         shot = Shot(
             shot_no=int(item.shot_no),
             shot_id=brief.shot_id or f"SH{int(item.shot_no):04d}",
@@ -4182,7 +4196,7 @@ def _hydrate_directed_scene_pack(
             narration="",
             dialogues=dialogues,
             transition=transition,
-            story_event_id=brief.story_event_id,
+            story_event_id=story_event_id,
             purpose=purpose,
             spine_beat_ids=list(brief.spine_beat_ids),
             key_line_ids=list(brief.key_line_ids),
@@ -4218,10 +4232,15 @@ def _hydrate_directed_scene_pack(
         shot.capacity_budget = deepcopy(brief.capacity_budget)
         ensure_audio_timeline(shot, screenplay.voice_bible)
         shots.append(shot)
+    normalized_board = Storyboard(
+        episode_no=draft.episode_no,
+        shots=shots,
+    )
+    normalize_continuity(normalized_board)
     return StoryboardScenePack(
         episode_no=draft.episode_no,
         scene_id=draft.scene_id,
-        shots=shots,
+        shots=normalized_board.shots,
     )
 
 
@@ -4244,17 +4263,19 @@ async def generate_storyboard_scene_pack(
             [f"{scene_context.scene_id} 没有导演规划镜头"],
         )
     planning_bible = bible.model_copy(deep=True)
-    if (
-        scene_context.scene_name
-        and not any(
-            scene.name == scene_context.scene_name
-            for scene in planning_bible.scenes
-        )
-    ):
+    for planned_scene in outline.scene_contexts:
+        if (
+            not planned_scene.scene_name
+            or any(
+                scene.name == planned_scene.scene_name
+                for scene in planning_bible.scenes
+            )
+        ):
+            continue
         planning_bible.scenes.append(Scene(
-            name=scene_context.scene_name,
+            name=planned_scene.scene_name,
             scene_canonical=(
-                f"{scene_context.scene_name}，{scene_context.scene_time or '本场时间'}，"
+                f"{planned_scene.scene_name}，{planned_scene.scene_time or '本场时间'}，"
                 "空间结构、人物站位与光线服从本场剧本上下文，保持统一画风"
             ),
             first_episode=int(episode.get("episode_no") or 1),
