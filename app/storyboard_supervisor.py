@@ -2369,6 +2369,8 @@ async def run_storyboard_supervisor(
 
         # ---- 按场景批量生成（新合同）----
         scene_pack_failure: BaseException | None = None
+        failed_scene_ids: set[str] = set()
+        scene_pack_fallback_end: int | None = None
         if (
             outline is not None
             and not outline.scene_contexts
@@ -2455,6 +2457,7 @@ async def run_storyboard_supervisor(
                 )
                 for context, result in zip(pending_contexts, generated):
                     if isinstance(result, BaseException):
+                        failed_scene_ids.add(context.scene_id)
                         if scene_pack_failure is None:
                             scene_pack_failure = result
                         continue
@@ -2511,6 +2514,7 @@ async def run_storyboard_supervisor(
                         if str(change.get("stripped") or "").strip()
                     })
                     if stripped:
+                        failed_scene_ids.add(context.scene_id)
                         scene_pack_failure = StageError(
                             "场景分镜人物合同",
                             [
@@ -2544,6 +2548,7 @@ async def run_storyboard_supervisor(
                     else []
                 )
                 if candidate_errors:
+                    failed_scene_ids.add(context.scene_id)
                     scene_pack_failure = StageError(
                         "场景分镜批量校验",
                         candidate_errors,
@@ -2604,7 +2609,24 @@ async def run_storyboard_supervisor(
                 # A content/schema failure is local to the batch contract.
                 # Preserve already committed scenes and continue through the
                 # existing per-shot path instead of changing the delivery goal.
-                cp.scene_pack_candidates = {}
+                for scene_id in failed_scene_ids:
+                    cp.scene_pack_candidates.pop(scene_id, None)
+                failed_ends = [
+                    max(
+                        int(brief.shot_no)
+                        for brief in outline.shots
+                        if brief.scene_id == context.scene_id
+                    )
+                    for context in outline.scene_contexts
+                    if (
+                        context.scene_id in failed_scene_ids
+                        and any(
+                            brief.scene_id == context.scene_id
+                            for brief in outline.shots
+                        )
+                    )
+                ]
+                scene_pack_fallback_end = min(failed_ends) if failed_ends else None
                 cp.phase = "GENERATING_SHOTS"
                 cp.outcome = None
                 save_checkpoint(cp, run_id=run_id)
@@ -2624,8 +2646,15 @@ async def run_storyboard_supervisor(
                         run_id,
                         "SCENE_PACK_FALLBACK_TO_SHOTS",
                         "warning",
-                        "场景批量候选未通过，保留已提交场景并切换逐镜生成",
-                        payload={"error": str(scene_pack_failure)[:1000]},
+                        "场景批量候选未通过，仅失败场景切换逐镜生成",
+                        payload={
+                            "error": str(scene_pack_failure)[:1000],
+                            "failed_scene_ids": sorted(failed_scene_ids),
+                            "fallback_end_shot_no": scene_pack_fallback_end,
+                            "preserved_scene_ids": sorted(
+                                cp.scene_pack_candidates
+                            ),
+                        },
                     )
 
         # ---- 逐镜兼容/修复路径 ----
@@ -2645,6 +2674,11 @@ async def run_storyboard_supervisor(
                 if repair_pending else outline
             )
             if repair_pending and len(completed) >= int(active_repair.get("window_end") or 0):
+                break
+            if (
+                scene_pack_fallback_end is not None
+                and len(completed) >= scene_pack_fallback_end
+            ):
                 break
             planned_now = (
                 len(generation_outline.shots)
@@ -2896,6 +2930,16 @@ async def run_storyboard_supervisor(
             )
 
         if shot_loop_broke_for_repair:
+            continue
+        if (
+            scene_pack_fallback_end is not None
+            and len(completed) >= scene_pack_fallback_end
+            and outline is not None
+            and len(completed) < len(outline.shots)
+        ):
+            cp.phase = "GENERATING_SHOTS"
+            cp.next_shot_no = len(completed) + 1
+            save_checkpoint(cp, run_id=run_id)
             continue
 
         # A repair candidate is fully generated in memory/artifacts. Validate

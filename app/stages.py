@@ -3848,23 +3848,46 @@ def _scene_pack_dialogues(
     brief: StoryboardOutlineShot,
     screenplay: EpisodeScreenplay,
     emotions: dict[str, str],
+    *,
+    bible: Bible,
 ) -> list[Dialogue]:
     catalog = key_line_catalog(screenplay)
+    visible_names = set(_canonical_scene_pack_names(
+        [
+            *(brief.characters_visible or []),
+            *(brief.visible_entity_ids or []),
+        ],
+        bible=bible,
+        screenplay=screenplay,
+        usage="visual",
+    ))
     dialogues: list[Dialogue] = []
     for raw_id in brief.key_line_ids:
         key_id = str(raw_id or "").strip().upper()
         speaker, line = _parse_key_line(catalog.get(key_id, ""))
         if not speaker or not line:
             continue
+        canonical_speakers = _canonical_scene_pack_names(
+            [speaker],
+            bible=bible,
+            screenplay=screenplay,
+            usage="voice",
+        )
+        canonical_speaker = canonical_speakers[0] if canonical_speakers else speaker
         emotion = str(
             emotions.get(key_id)
             or emotions.get(line)
             or "平静"
         ).strip()
         dialogues.append(Dialogue(
-            speaker=speaker,
+            speaker=canonical_speaker,
             line=line,
             emotion=emotion if emotion in EMOTIONS else "平静",
+            delivery=(
+                "spoken_dialogue"
+                if canonical_speaker in visible_names
+                else "offscreen_voice"
+            ),
         ))
     return dialogues
 
@@ -3911,7 +3934,11 @@ def _scene_pack_characters(
     candidates = [
         *(brief.characters_visible or []),
         *(brief.visible_entity_ids or []),
-        *[dialogue.speaker for dialogue in dialogues],
+        *[
+            dialogue.speaker
+            for dialogue in dialogues
+            if dialogue.delivery == "spoken_dialogue"
+        ],
     ]
     resolved = _canonical_scene_pack_names(
         candidates,
@@ -4090,6 +4117,7 @@ def _hydrate_directed_scene_pack(
             brief,
             screenplay,
             item.dialogue_emotions,
+            bible=bible,
         )
         if not dialogues and item.dialogues:
             dialogues = list(item.dialogues)

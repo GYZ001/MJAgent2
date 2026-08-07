@@ -402,3 +402,48 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
     assert shot.source_excerpt in source
     assert shot.context_requirement_ids == ["CTX-SC001-01"]
     assert shot.is_final is True
+
+
+def test_scene_pack_preserves_offscreen_voice_without_forcing_speaker_visible() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        key_lines=["门外人：别动。"],
+        narrative_plan=NarrativeContinuityPlan(scope_id="e1"),
+    )
+    bible = Bible(
+        characters=[
+            Character(
+                name=name,
+                role="角色",
+                appearance_canonical=f"成年{name}，黑色短发，深色常服，外观稳定清晰",
+            )
+            for name in ("谷言", "门外人")
+        ],
+        world=World(visual_style_canonical="都市国漫"),
+    )
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        key_line_ids=["KL01"],
+        characters_visible=["谷言"],
+        visible_entity_ids=["谷言"],
+        audio_cast=["门外人"],
+    )
+
+    dialogues = stages._scene_pack_dialogues(
+        brief,
+        screenplay,
+        {},
+        bible=bible,
+    )
+    characters = stages._scene_pack_characters(
+        brief,
+        dialogues,
+        bible=bible,
+        screenplay=screenplay,
+        fallback=[],
+    )
+
+    assert len(dialogues) == 1
+    assert dialogues[0].speaker == "门外人"
+    assert dialogues[0].delivery == "offscreen_voice"
+    assert characters == ["谷言"]

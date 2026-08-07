@@ -52,6 +52,7 @@ APPEARANCE_MAX = PRODUCTION_APPEARANCE_MAX_CHARS
 STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集号
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
+CHARACTER_CARD_MAX_TOKENS = 4096
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -1807,6 +1808,7 @@ async def ensure_cards_for_text(
     unknown_by_name: dict[str, list[dict]] = {}
     functional_candidates: list[dict] = []
     known_named_candidates: list[dict] = []
+    mentioned_only_candidates: list[dict] = []
     for item in candidates:
         if item.get("identity_kind") == "functional":
             functional_candidates.append(item)
@@ -1814,11 +1816,27 @@ async def ensure_cards_for_text(
         name = str(item.get("name") or "").strip()
         if name in known:
             known_named_candidates.append(item)
-        elif name:
+        elif _candidate_requires_identity_card(item, known):
             unknown_by_name.setdefault(name, []).append(item)
+        elif name:
+            mentioned_only_candidates.append(item)
     added: list[dict] = []
     provisional_characters: list[dict] = []
-    skipped: list[dict] = []
+    skipped: list[dict] = [
+        {
+            "status": "mentioned_only",
+            "name": str(item.get("name") or "").strip(),
+            "reason": "本集仅提及且未出镜/开口，不创建人物卡",
+        }
+        for item in mentioned_only_candidates
+    ]
+    # #region debug-point D:mentioned-only-skip
+    if mentioned_only_candidates:
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/screenplay-structured-output-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","screenplay-structured-output-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"D","location":"app/portraits.py:ensure_cards_for_text","msg":"[DEBUG] Mentioned-only identities skipped before card model","data":{"names":[str(item.get("name") or "").strip() for item in mentioned_only_candidates],"cardCallsAvoided":len(mentioned_only_candidates)},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+        except Exception:
+            pass
+    # #endregion
     errors: list[str] = []
     warnings: list[str] = []
     resolutions: list[dict] = []
@@ -1927,6 +1945,17 @@ async def ensure_cards_for_text(
     }
 
 
+def _candidate_requires_identity_card(item: dict, known_names: set[str]) -> bool:
+    """Only a new named identity that appears or speaks needs a visual card."""
+    name = str(item.get("name") or "").strip()
+    return bool(
+        name
+        and name not in known_names
+        and item.get("identity_kind") == "named"
+        and item.get("kind") != "mentioned"
+    )
+
+
 async def assess_new_character(name: str, fragments: str, *, style: str,
                                known_names: list[str], ep_label: str,
                                require_identity_card: bool = False) -> dict:
@@ -1967,16 +1996,27 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
 只输出一个 JSON 对象：
 {{"important": true/false, "reason": "一句话依据", "role": "主角|重要配角|反派", "appearance_canonical": str, "personality": str, "speech_style": str, "relationships": [{{"to": str, "relation": str}}]}}"""
     raw = await model_gateway.chat(
-        [{"role": "user", "content": prompt}], temperature=0.3, max_tokens=900,
-        call_meta={"stage": "assess_new_character", "character_name": name},
+        [{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=CHARACTER_CARD_MAX_TOKENS,
+        call_meta={
+            "stage": "assess_new_character",
+            "character_name": name,
+            "expected_json": True,
+        },
     )
     # #region debug-point A,B,D:character-card-raw
     try:
-        import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/screenplay-structured-output-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","screenplay-structured-output-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"A,B,D","location":"app/portraits.py:assess_new_character","msg":"[DEBUG] Character card raw model output","data":{"character":name,"rawChars":len(raw or ""),"startsWithObject":str(raw or "").lstrip().startswith("{"),"endsWithObject":str(raw or "").rstrip().endswith("}"),"tail":str(raw or "")[-160:]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/screenplay-structured-output-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","screenplay-structured-output-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"A,B,D","location":"app/portraits.py:assess_new_character","msg":"[DEBUG] Character card raw model output","data":{"character":name,"rawChars":len(raw or ""),"startsWithObject":str(raw or "").lstrip().startswith("{"),"endsWithObject":str(raw or "").rstrip().endswith("}"),"tail":str(raw or "")[-160:]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
     except Exception:
         pass
     # #endregion
-    obj = extract_json(raw)
+    try:
+        obj = extract_json(raw)
+    except ValueError as exc:
+        raise ContentGenerationError(
+            f"新角色「{name}」人物卡结构化输出不完整"
+        ) from exc
     important = bool(obj.get("important"))
     appearance = production_appearance_anchor(
         (obj.get("appearance_canonical") or "").strip()

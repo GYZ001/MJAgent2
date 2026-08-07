@@ -127,9 +127,11 @@ def test_required_identity_card_prompt_does_not_reapply_importance_gate(
     monkeypatch,
 ) -> None:
     captured: list[str] = []
+    call_options: list[dict] = []
 
     async def fake_chat(messages, **_kwargs):
         captured.append(messages[0]["content"])
+        call_options.append(_kwargs)
         return json.dumps({
             "important": False,
             "reason": "只出现一次",
@@ -158,6 +160,37 @@ def test_required_identity_card_prompt_does_not_reapply_importance_gate(
     assert result["card_complete"] is True
     assert "本次任务不是重新判断戏份重要度" in captured[0]
     assert "不得因只出现一次而拒绝建卡" in captured[0]
+    assert call_options[0]["max_tokens"] >= 4096
+    assert call_options[0]["call_meta"]["expected_json"] is True
+
+
+def test_mentioned_only_unknown_character_does_not_require_identity_card() -> None:
+    known = {"白洁", "小晶"}
+
+    assert portraits._candidate_requires_identity_card(
+        {
+            "name": "钟五",
+            "identity_kind": "named",
+            "kind": "mentioned",
+        },
+        known,
+    ) is False
+    assert portraits._candidate_requires_identity_card(
+        {
+            "name": "钟五",
+            "identity_kind": "named",
+            "kind": "onscreen",
+        },
+        known,
+    ) is True
+    assert portraits._candidate_requires_identity_card(
+        {
+            "name": "小晶",
+            "identity_kind": "named",
+            "kind": "onscreen",
+        },
+        known,
+    ) is False
 
 
 def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeypatch) -> None:
