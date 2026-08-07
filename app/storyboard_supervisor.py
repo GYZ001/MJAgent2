@@ -1797,6 +1797,13 @@ async def run_storyboard_supervisor(
         raise StageError("分镜脚本", [f"剧本权威链无效：{exc}"]) from exc
     screenplay = screenplay_context.screenplay
     narrative_authority = screenplay_context.narrative_authority_required
+    # #region debug-point A,C,E:upstream-screenplay-gate
+    if narrative_authority:
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; from app.narrative import validate_screenplay_narrative as _dbg_validate; _dbg_p=".dbg/storyboard-semantic-outline-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","storyboard-semantic-outline-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_errors=_dbg_validate(screenplay,require=True,expected_scope_id=episode_id); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"A,C,E","location":"app/storyboard_supervisor.py:run_storyboard_supervisor","msg":"[DEBUG] Published screenplay graph before storyboard","data":{"episodeId":episode_id,"errorCount":len(_dbg_errors),"errorCodes":[item.partition("]")[0].lstrip("[") if item.startswith("[") else "UNKNOWN" for item in _dbg_errors],"hasPublishedShots":bool(ep["published_storyboard_artifact_id"])},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+        except Exception:
+            pass
+    # #endregion
     resolved_screenplay_authority = None
     if narrative_authority:
         from app.production.screenplay_authority import (
@@ -1838,6 +1845,12 @@ async def run_storyboard_supervisor(
         if screenplay.narrative_plan is None:
             return route_issues(route_inputs, **route_kwargs)
         from app.narrative_repair import route_narrative_issues
+        # #region debug-point D:repair-routing-boundary
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; from app.narrative import validate_screenplay_narrative as _dbg_validate; _dbg_p=".dbg/storyboard-semantic-outline-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","storyboard-semantic-outline-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_upstream=_dbg_validate(screenplay,require=True,expected_scope_id=episode_id); _dbg_up_codes={item.partition("]")[0].lstrip("[") if item.startswith("[") else "UNKNOWN" for item in _dbg_upstream}; _dbg_messages=[str(getattr(item,"message",item)) for item in route_inputs]; _dbg_route_codes={item.partition("]")[0].lstrip("[") if item.startswith("[") else "UNKNOWN" for item in _dbg_messages}; _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"D","location":"app/storyboard_supervisor.py:_route_with_narrative_diagnosis","msg":"[DEBUG] Storyboard repair receives upstream screenplay errors","data":{"episodeId":episode_id,"routeCodes":sorted(_dbg_route_codes),"upstreamCodes":sorted(_dbg_up_codes),"overlap":sorted(_dbg_route_codes&_dbg_up_codes),"nextShotNo":next_shot_no},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
 
         return await route_narrative_issues(
             route_inputs,

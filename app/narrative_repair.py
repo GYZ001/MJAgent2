@@ -770,6 +770,12 @@ async def route_narrative_issues(
         )
         for item in issues
     ]
+    # #region debug-point D:semantic-router-upstream-overlap
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; from app.narrative import validate_screenplay_narrative as _dbg_validate; _dbg_p=".dbg/storyboard-semantic-outline-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","storyboard-semantic-outline-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_upstream=_dbg_validate(screenplay,require=True,expected_scope_id=episode_id); _dbg_up_codes={item.partition("]")[0].lstrip("[") if item.startswith("[") else "UNKNOWN" for item in _dbg_upstream}; _dbg_route_codes={str(item.code or "UNKNOWN") for item in normalized}; _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"D","location":"app/narrative_repair.py:route_narrative_issues","msg":"[DEBUG] Semantic storyboard router issue ownership","data":{"episodeId":episode_id,"routeCodes":sorted(_dbg_route_codes),"upstreamCodes":sorted(_dbg_up_codes),"overlap":sorted(_dbg_route_codes&_dbg_up_codes),"uncommittedCandidate":uncommitted_candidate},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
     if uncommitted_candidate:
         local_plan = route_issues(
             normalized,

@@ -1,7 +1,7 @@
 # Debug Session: storyboard-semantic-outline-failure
 - **Status**: [OPEN]
 - **Issue**: 第一集分镜在大纲语义候选阶段进入 WAITING_HUMAN，未生成正式镜头。
-- **Debug Server**: pending
+- **Debug Server**: http://127.0.0.1:7777/event
 - **Log File**: .dbg/trae-debug-log-storyboard-semantic-outline-failure.ndjson
 
 ## Reproduction Steps
