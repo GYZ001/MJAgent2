@@ -2061,6 +2061,20 @@ async def run_storyboard_supervisor(
             outline,
             screenplay,
         )
+        pending_repair_dialogue_repairs: list[dict[str, Any]] = []
+        discarded_repair = None
+        if _repair_is_pending(cp):
+            pending_outline = _repair_outline_for_checkpoint(cp, outline)
+            if pending_outline is not None and pending_outline is not outline:
+                pending_repair_dialogue_repairs = (
+                    normalize_outline_dialogue_ownership(
+                        pending_outline,
+                        screenplay,
+                    )
+                )
+                if pending_repair_dialogue_repairs:
+                    discarded_repair = cp.last_repair
+        authority_repairs: list[dict[str, Any]] = []
         if dialogue_repairs:
             authority_repairs = normalize_narrative_storyboard_outline(
                 outline,
@@ -2083,6 +2097,17 @@ async def run_storyboard_supervisor(
             )
             conn.commit()
             ep_data["storyboard_outline_json"] = outline.model_dump_json()
+        if discarded_repair is not None:
+            cp.legacy_repair_audit = {
+                **cp.legacy_repair_audit,
+                "discarded_pre_migration_repair": discarded_repair,
+            }
+            cp.last_repair = None
+            cp.repair_candidate_shots = []
+            cp.phase = "GENERATING_SHOTS"
+            cp.outcome = None
+            save_checkpoint(cp, run_id=run_id)
+        if dialogue_repairs or discarded_repair is not None:
             if run_id:
                 evidence_repository.append_event(
                     run_id,
@@ -2091,7 +2116,11 @@ async def run_storyboard_supervisor(
                     "已确定性修复历史大纲中的重复台词 owner 与对白残片",
                     payload={
                         "dialogue_repairs": dialogue_repairs,
+                        "pending_repair_dialogue_repairs": (
+                            pending_repair_dialogue_repairs
+                        ),
                         "authority_repairs": authority_repairs,
+                        "discarded_pending_repair": discarded_repair is not None,
                     },
                 )
 
