@@ -242,6 +242,49 @@ def test_storyboard_candidate_maps_graph_event_to_unique_legacy_event_for_eviden
     )
 
 
+def test_storyboard_source_evidence_resolves_stable_source_segment_id() -> None:
+    source = (
+        "王芬站在门口，高义抬头看向她。高义起身走到门边。\n\n"
+        "后续场景发生在学校走廊。"
+    )
+    screenplay = stages.EpisodeScreenplay(
+        episode_no=1,
+        events=[{
+            "event_id": "E2",
+            "source_span": "SRC0001",
+        }],
+    )
+    draft = StoryboardShotDraft.model_validate({
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 9,
+            "duration_s": 5,
+            "shot_size": "中景",
+            "camera_move": "固定",
+            "scene_setting": "日，办公室",
+            "characters": ["王芬", "高义"],
+            "action_desc": "高义起身走向站在门口的王芬。",
+            "first_frame_desc": "王芬站在门口，高义坐在室内。",
+            "last_frame_desc": "高义走到王芬面前。",
+            "source_excerpt": "无法直接对齐的模型改写。",
+            "story_event_id": "E-2",
+            "event_ids": ["E-2"],
+            "transition": "硬切",
+        },
+    })
+
+    aligned = align_storyboard_source_evidence(
+        draft.shot,
+        source,
+        screenplay=screenplay,
+    )
+
+    assert aligned is not None
+    assert aligned.exact is True
+    assert aligned.excerpt in source
+    assert "高义" in aligned.excerpt
+
+
 def test_storyboard_candidate_leaves_ambiguous_legacy_event_join_empty() -> None:
     normalized, _ = normalize_storyboard_shot_candidate(
         {

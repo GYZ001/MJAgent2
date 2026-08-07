@@ -2871,20 +2871,86 @@ def align_storyboard_source_evidence(
         ],
     ]))
     event_source_spans = {
-        str(event.event_id or "").strip(): str(event.source_span or "").strip()
+        re.sub(
+            r"[^A-Za-z0-9]",
+            "",
+            str(event.event_id or ""),
+        ).lower(): str(event.source_span or "").strip()
         for event in (screenplay.events or [])
         if (
             str(event.event_id or "").strip()
             and str(event.source_span or "").strip()
         )
     }
+    source_segments = {
+        segment.segment_id: segment
+        for segment in index_source_segments(source_text)
+    }
+    for event_id in event_ids:
+        event_key = re.sub(
+            r"[^A-Za-z0-9]",
+            "",
+            event_id,
+        ).lower()
+        source_span = event_source_spans.get(event_key, "")
+        for segment_id in re.findall(r"SRC\d+", source_span.upper()):
+            segment = source_segments.get(segment_id)
+            if segment is None:
+                continue
+            semantic_text = "".join([
+                str(shot.primary_action or ""),
+                str(shot.action_desc or ""),
+                *[
+                    str(dialogue.line or "")
+                    for dialogue in shot.dialogues
+                ],
+            ])
+            semantic_compact = _condense(semantic_text)
+            semantic_bigrams = {
+                semantic_compact[index:index + 2]
+                for index in range(max(0, len(semantic_compact) - 1))
+            }
+            sentences = [
+                value.strip()
+                for value in re.findall(
+                    r"[^。！？\n]+[。！？]?",
+                    segment.text,
+                )
+                if len(_condense(value)) >= SOURCE_EXCERPT_MIN_CHARS
+            ]
+            excerpt = max(
+                sentences or [segment.text],
+                key=lambda value: (
+                    len({
+                        _condense(value)[index:index + 2]
+                        for index in range(
+                            max(0, len(_condense(value)) - 1)
+                        )
+                    } & semantic_bigrams),
+                    -len(value),
+                ),
+            )
+            local_offset = segment.text.find(excerpt)
+            start_offset = (
+                segment.start_offset + max(0, local_offset)
+            )
+            return AlignedExcerpt(
+                excerpt=excerpt,
+                start_offset=start_offset,
+                end_offset=start_offset + len(excerpt),
+                match_chars=len(_condense(excerpt)),
+                exact=True,
+            )
     authoritative_matches = [
         match
         for event_id in event_ids
-        if event_id in event_source_spans
+        for event_key in [
+            re.sub(r"[^A-Za-z0-9]", "", event_id).lower()
+        ]
+        if event_key in event_source_spans
         for match in [
             align_source_excerpt(
-                event_source_spans[event_id],
+                event_source_spans[event_key],
                 source_text,
                 min_match_chars=SOURCE_EXCERPT_MIN_CHARS,
             )
