@@ -519,6 +519,10 @@ def normalize_narrative_storyboard_outline(
         if dialogue_groups:
             main.key_line_ids = []
             main.audio_cast = []
+            if not event.action_ids:
+                main.primary_action = "人物闭口呈现本事件完成后的可见反应与状态结果"
+                main.beat = main.primary_action
+                main.covers = main.primary_action
         nodes.append((event.event_id, "main", main))
 
     for position, (_event_id, _role, shot) in enumerate(nodes, start=1):

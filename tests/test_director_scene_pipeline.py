@@ -369,7 +369,7 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
     changes = stages.ensure_storyboard_scene_contexts(outline, screenplay)
     draft = stages.DirectedScenePackDraft(
         episode_no=1,
-        scene_id="SC001",
+        scene_id=outline.scene_contexts[0].scene_id,
         shots=[
             stages.DirectedSceneShotDraft(
                 shot_no=1,
@@ -392,7 +392,7 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
         bible=bible,
     )
 
-    assert changes and outline.scene_contexts[0].scene_id == "SC001"
+    assert changes and outline.scene_contexts[0].scene_id == "SC01"
     shot = pack.shots[0]
     assert shot.duration_s == 7
     assert shot.shot_id == "SH001"
@@ -405,7 +405,7 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
         ("谷言", "门外有人。"),
     ]
     assert shot.source_excerpt in source
-    assert shot.context_requirement_ids == ["CTX-SC001-01"]
+    assert shot.context_requirement_ids == ["CTX-SC01-01"]
     assert shot.is_final is True
 
 

@@ -4074,19 +4074,6 @@ def _scene_pack_source_excerpt(
 def _scene_pack_task_fields(
     brief: StoryboardOutlineShot,
 ) -> tuple[str, str, str]:
-    purpose = str(
-        brief.purpose
-        or brief.beat
-        or brief.primary_action
-        or "落实当前镜头的叙事任务"
-    ).strip()
-    resulting_change = str(
-        brief.resulting_change
-        or brief.state_out
-        or brief.covers
-        or brief.beat
-        or "当前镜头任务完成"
-    ).strip()
     valid_focuses = {
         "context", "action", "emotion", "dialogue", "evidence", "transition",
     }
@@ -4103,7 +4090,62 @@ def _scene_pack_task_fields(
             focus = "context"
         else:
             focus = "evidence"
+    contribution = brief.shot_contribution
+    if brief.key_line_ids:
+        derived_purpose = (
+            "交付剧本关键台词 " + "、".join(brief.key_line_ids)
+        )
+        derived_change = (
+            "观众听清关键台词 " + "、".join(brief.key_line_ids)
+        )
+    elif contribution and contribution.character_state_delta_ids:
+        derived_purpose = (
+            "呈现角色状态变化 "
+            + "、".join(contribution.character_state_delta_ids)
+        )
+        derived_change = brief.state_out or derived_purpose
+    elif contribution and contribution.assimilation_task_ids:
+        derived_purpose = (
+            "建立观看上下文 "
+            + "、".join(contribution.assimilation_task_ids)
+        )
+        derived_change = brief.state_out or derived_purpose
+    else:
+        derived_purpose = brief.beat or brief.primary_action or "落实当前镜头的叙事任务"
+        derived_change = brief.state_out or brief.covers or brief.beat or "当前镜头任务完成"
+    purpose = str(brief.purpose or derived_purpose).strip()
+    resulting_change = str(brief.resulting_change or derived_change).strip()
     return purpose, resulting_change, focus
+
+
+def _normalize_scene_pack_camera(shot: Shot) -> None:
+    """Apply only the deterministic camera grammar already enforced by QA."""
+    from app.continuity import dialogue_action_staging_kind
+
+    focus = str(shot.readability_focus or "")
+    if focus == "action":
+        if shot.shot_size not in {"中景", "全景", "远景"}:
+            shot.shot_size = "中景"
+        if shot.camera_move not in {"跟随", "横摇"}:
+            shot.camera_move = "跟随"
+    elif focus == "emotion":
+        if shot.shot_size not in {"近景", "特写"}:
+            shot.shot_size = "近景"
+        if shot.camera_move not in {"固定", "推近"}:
+            shot.camera_move = "固定"
+    elif focus == "dialogue":
+        staging = dialogue_action_staging_kind(
+            shot,
+            narrative_authority=bool(shot.event_ids),
+        )
+        if staging == "spatial":
+            if shot.shot_size not in {"中景", "全景", "远景"}:
+                shot.shot_size = "中景"
+        else:
+            if shot.shot_size not in {"近景", "特写"}:
+                shot.shot_size = "近景"
+            if shot.camera_move not in {"固定", "推近"}:
+                shot.camera_move = "固定"
 
 
 def _hydrate_directed_scene_pack(
@@ -4237,6 +4279,7 @@ def _hydrate_directed_scene_pack(
                 continue
             setattr(shot, field, deepcopy(getattr(brief, field)))
         shot.capacity_budget = deepcopy(brief.capacity_budget)
+        _normalize_scene_pack_camera(shot)
         ensure_audio_timeline(shot, screenplay.voice_bible)
         shots.append(shot)
     normalized_board = Storyboard(
@@ -4316,6 +4359,8 @@ async def generate_storyboard_scene_pack(
             "characters_visible": brief.characters_visible,
             "visible_entity_ids": brief.visible_entity_ids,
             "key_line_ids": brief.key_line_ids,
+            "speech_allowed": bool(brief.key_line_ids),
+            "program_dialogue_count": len(brief.key_line_ids),
             "duration_s": brief.duration_s,
             "camera_preset": {
                 "shot_size": brief.camera_size,
@@ -4359,6 +4404,7 @@ async def generate_storyboard_scene_pack(
 5. first_frame_desc 与 last_frame_desc 保持同机位、同场景、同构图，只推进本镜动作。
 6. 相邻镜承接人物位置、视线、道具和动作结果；人物不得凭空出现、消失或换装。
 7. dialogue_emotions 只按 key_line_id 填情绪；台词文本和说话人由程序从剧本原样注入。
+   speech_allowed=false 的镜头必须全程闭口，只写无声动作或反应，禁止出现“开口、说话、嘴唇张开”等口播动作。
 8. required_text 仅在本镜确实需要画面精确文字时填写，否则为 null。
 9. source_excerpt 通常留空，由程序按 event/spine/台词证据回绑；只有任务证据不足时才逐字复制原文。
 
