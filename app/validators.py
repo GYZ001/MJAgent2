@@ -3876,7 +3876,7 @@ def split_outline_over_action_capacity(
             continue
         plan_text, beats, atom_count = _outline_action_candidate(shot)
         limit = action_capacity_limit(shot.duration_s)
-        if not force and beats <= limit:
+        if not force and beats <= limit and atom_count <= limit:
             targets.discard(original_no)
             index += 1
             continue

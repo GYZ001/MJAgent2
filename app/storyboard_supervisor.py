@@ -2455,6 +2455,7 @@ async def run_storyboard_supervisor(
             derived_contexts = ensure_storyboard_scene_contexts(
                 outline,
                 screenplay,
+                bible,
             )
             if derived_contexts:
                 conn.execute(

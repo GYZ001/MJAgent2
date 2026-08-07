@@ -43,6 +43,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             normalize_offbible_characters, normalize_transition_visuals,
                             narrative_outline_action_capacity_errors,
                             key_line_catalog,
+                            match_scene_name,
                             prefer_default_shot_durations,
                             relieve_spoken_overflow,
                             source_dialogue_fragments,
@@ -57,6 +58,7 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             validate_storyboard_direction_contract,
                             validate_storyboard_preserves_key_content,
                             validate_storyboard_soundtrack)
+from app.scene_contract import looks_like_scene_time
 from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
@@ -1980,6 +1982,9 @@ def _narrative_plan_prompt_block(scope_id: str) -> str:
         "deliver+must_keep 事件和每个 target_delta 都必须反向引用唯一主窗口，窗口 event_ids/target_delta_ids "
         "也必须回引它们。\n"
         "9. 同时输出 SceneDramaticContract、NarrativeArcContract 和 SetupPayoffContract；"
+        "SceneDramaticContract 必须与最终 scene_outline 一一对应，数量完全相同，"
+        "按 scene_no 使用 SC01、SC02……连续 ID；即使两个场次使用同一物理地点，"
+        "只要中间发生过时间、地点、目标或连续动作切换，就必须保留为两个独立场次合同。"
         "非传统段落可设 not_applicable，但必须给出替代戏剧功能，不得强套模板。"
         "每个 arc.promise_proposition_ids 必须来自该 arc.payoff_contract_ids 所引用合同的 "
         "setup_proposition_ids；payoff_event_ids 表示兑现事件，intended_inference_ids 表示兑现后推论，"
@@ -2123,6 +2128,8 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 
 【场次合同】
 - scene_outline 场次数不设上限，由时间、地点和连续戏剧动作决定。
+- narrative_plan.scene_contracts 必须与 scene_outline 逐场一一对应，使用 SC01、SC02……连续 ID；
+  同一地点后来再次出现也不得和前一次合并。
 - 每场必须填写 entry_state、exit_state、context_requirements。
 - entry_state 写人物位置、目标、关键道具和承接来源。
 - context_requirements 写观众在主要动作发生前需要知道的时间、地点、空间关系、人物关系或关键道具。
@@ -3482,6 +3489,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
             ensure_storyboard_scene_contexts(
                 o,
                 screenplay,
+                bible,
             )
             for change in normalize_outline_spoken_durations(o, screenplay):
                 log_provider_call(
@@ -3676,7 +3684,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
                 "分镜大纲硬合同",
                 list(dict.fromkeys(final_errors)),
             )
-        ensure_storyboard_scene_contexts(outline, screenplay)
+        ensure_storyboard_scene_contexts(outline, screenplay, bible)
         return outline
     # 减重试 #2：第一集第 1 镜是强制建场镜，把派给它的判决/反转类 covers 顺延合并到第 2 镜，
     # 避免逐镜阶段"照建场写→漏 covers / 硬塞判决→引入圣经外角色"的连环重试。
@@ -3729,7 +3737,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
     )
     if post_narrative_errors:
         raise StageError("分镜大纲叙事合同", post_narrative_errors)
-    ensure_storyboard_scene_contexts(outline, screenplay)
+    ensure_storyboard_scene_contexts(outline, screenplay, bible)
     return outline
 
 
@@ -3810,13 +3818,21 @@ def _screenplay_scene_parts(screenplay: EpisodeScreenplay, scene_no: int) -> tup
     )
     parts = re.split(r"\s*[/／]\s*", heading, maxsplit=1)
     if len(parts) == 2:
-        return parts[0].strip(), parts[1].strip()
+        first = parts[0].strip()
+        second = parts[1].strip()
+        second_time = re.sub(r"[（(].*?[）)]", "", second).strip()
+        if looks_like_scene_time(first):
+            return first, second
+        if looks_like_scene_time(second_time):
+            return second, first
+        return "", first
     return "", heading
 
 
 def ensure_storyboard_scene_contexts(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
+    bible: Bible | None = None,
 ) -> list[dict[str, Any]]:
     """Build batch boundaries from an approved outline without another model call."""
     if outline.scene_contexts or not outline.shots:
@@ -3838,17 +3854,50 @@ def ensure_storyboard_scene_contexts(
 
     contexts: list[StoryboardSceneContext] = []
     changes: list[dict[str, Any]] = []
+    script_scenes = sorted(
+        list(screenplay.scene_outline or []),
+        key=lambda item: int(item.scene_no or 0),
+    )
+    script_cursor = 0
     for run_index, (_scene_key, briefs) in enumerate(runs, start=1):
         first = briefs[0]
         last = briefs[-1]
-        script_scene = next(
-            (
-                item
-                for item in screenplay.scene_outline
-                if int(item.scene_no or 0) == run_index
-            ),
-            None,
-        )
+        script_scene = None
+        if script_cursor < len(script_scenes):
+            candidate = script_scenes[script_cursor]
+            _candidate_time, candidate_name = _screenplay_scene_parts(
+                screenplay,
+                int(candidate.scene_no or 0),
+            )
+            candidate_canonical = (
+                match_scene_name(
+                    candidate.scene_heading,
+                    list(getattr(bible, "scenes", None) or []),
+                    allow_fuzzy=False,
+                )
+                if bible is not None
+                else None
+            )
+            run_name = str(
+                first.scene_name or first.scene_setting or ""
+            ).strip()
+            run_token = re.sub(r"[\W_]+", "", run_name).casefold()
+            candidate_token = re.sub(
+                r"[\W_]+",
+                "",
+                str(candidate_canonical or candidate_name),
+            ).casefold()
+            if (
+                run_token
+                and candidate_token
+                and (
+                    run_token == candidate_token
+                    or run_token in candidate_token
+                    or candidate_token in run_token
+                )
+            ):
+                script_scene = candidate
+                script_cursor += 1
         script_scene_no = int(
             getattr(script_scene, "scene_no", run_index) or run_index
         )
@@ -3883,8 +3932,7 @@ def ensure_storyboard_scene_contexts(
             first.context_requirement_ids = list(requirement_ids)
 
         for brief in briefs:
-            if script_scene is not None or not brief.scene_id:
-                brief.scene_id = scene_id
+            brief.scene_id = scene_id
             if not brief.scene_time:
                 brief.scene_time = scene_time
             if not brief.scene_name:

@@ -453,6 +453,21 @@ def validate_screenplay_narrative(
         errors.append("[EXPERIENCE_INTENT_MISSING] 缺少观众体验意图与逐先验状态路径")
     if not index.scenes:
         errors.append("[SCENE_CONTRACT_MISSING] 至少需要一个场景戏剧合同；非传统场景应显式声明替代功能")
+    expected_scene_ids = [
+        f"SC{int(scene.scene_no):02d}"
+        for scene in screenplay.scene_outline
+        if int(scene.scene_no or 0) > 0
+    ]
+    actual_scene_ids = [
+        _norm(scene.scene_id)
+        for scene in plan.scene_contracts
+    ]
+    if expected_scene_ids and actual_scene_ids != expected_scene_ids:
+        errors.append(
+            "[SCENE_CONTRACT_COVERAGE_MISMATCH] "
+            "narrative_plan.scene_contracts 必须与 scene_outline 逐场一一对应；"
+            f"期望 {expected_scene_ids}，当前 {actual_scene_ids}"
+        )
     episode_arcs = [arc for arc in index.arcs.values() if arc.scope == "episode"]
     if len(episode_arcs) != 1:
         errors.append("[EPISODE_ARC_CONTRACT_INVALID] 每集必须恰有一个 scope=episode 的整集戏剧合同")
@@ -1835,6 +1850,7 @@ _STORYBOARD_SCORE_ONLY_SCREENPLAY_CODES = frozenset({
     "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
     "SETUP_RECALL_TASK_MISSING",
     "SCENE_DRAMATIC_DIMENSION_MISSING",
+    "SCENE_CONTRACT_COVERAGE_MISMATCH",
 })
 
 

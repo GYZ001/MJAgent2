@@ -4,6 +4,7 @@ from app import config
 from app.continuity import state_chain_errors
 from app.narrative import (
     validate_screenplay_narrative,
+    validate_storyboard_screenplay_authority,
     validate_storyboard_narrative,
 )
 from app.narrative_outline import (
@@ -266,6 +267,42 @@ def test_outline_scene_coverage_requires_repeated_scenes_in_story_order() -> Non
         complete,
         screenplay,
     ) == []
+
+
+def test_screenplay_qa_records_scene_contract_coverage_mismatch() -> None:
+    screenplay = _screenplay()
+    screenplay.scene_outline = [
+        ScriptScene(
+            scene_no=1,
+            scene_heading="Home",
+            story_function="Opening",
+            summary="The story starts at home.",
+        ),
+        ScriptScene(
+            scene_no=2,
+            scene_heading="School",
+            story_function="Development",
+            summary="The character reaches school.",
+        ),
+    ]
+
+    full_errors = validate_screenplay_narrative(
+        screenplay,
+        require=True,
+        expected_scope_id="episode-generic",
+    )
+
+    assert any(
+        error.startswith("[SCENE_CONTRACT_COVERAGE_MISMATCH]")
+        for error in full_errors
+    )
+    assert not any(
+        error.startswith("[SCENE_CONTRACT_COVERAGE_MISMATCH]")
+        for error in validate_storyboard_screenplay_authority(
+            screenplay,
+            expected_scope_id="episode-generic",
+        )
+    )
 
 
 def test_narrative_outline_does_not_readd_already_established_fact() -> None:
