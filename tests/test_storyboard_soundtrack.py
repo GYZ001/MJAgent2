@@ -85,6 +85,13 @@ def test_explicit_silence_does_not_trigger_implicit_speech_gate() -> None:
     assert implicit_speech_without_dialogue_errors(shot) == []
 
 
+def test_negated_speech_does_not_trigger_implicit_speech_gate() -> None:
+    shot = _shot(1)
+    shot.action_desc = "萧炎听完后嘴唇紧闭，没有说话，只抬眼看向门口。"
+
+    assert implicit_speech_without_dialogue_errors(shot) == []
+
+
 def test_actual_implicit_speech_still_requires_dialogue() -> None:
     shot = _shot(1)
     shot.action_desc = "萧炎转身走向门口，开口询问门外来人。"
