@@ -953,16 +953,24 @@ def resolve_screenplay_scene_names(
     screenplay: EpisodeScreenplay | None,
     bible: Bible,
 ) -> list[str]:
-    """按剧本场次顺序解析本集真正会使用的规范场景名，并按首次出现去重。"""
+    """Return unique allowed scene names in first screenplay appearance order."""
+    return list(dict.fromkeys(
+        resolve_screenplay_scene_sequence(screenplay, bible)
+    ))
+
+
+def resolve_screenplay_scene_sequence(
+    screenplay: EpisodeScreenplay | None,
+    bible: Bible,
+) -> list[str]:
+    """Resolve screenplay scenes in order while preserving later revisits."""
     if screenplay is None:
         return []
     scenes = getattr(bible, "scenes", None) or []
     resolved: list[str] = []
-    seen: set[str] = set()
     for scene in screenplay.scene_outline or []:
         name = match_scene_name(scene.scene_heading, scenes, allow_fuzzy=False)
-        if name and name not in seen:
-            seen.add(name)
+        if name:
             resolved.append(name)
     return resolved
 
@@ -993,12 +1001,11 @@ def validate_storyboard_outline_scene_alignment(
 ) -> list[str]:
     """大纲只能按剧本场次顺序使用本集场景，不能从全片场景库借错地点。"""
     errors = _screenplay_scene_resolution_errors(screenplay, bible)
-    expected = resolve_screenplay_scene_names(screenplay, bible)
-    if errors or not expected:
+    expected_sequence = resolve_screenplay_scene_sequence(screenplay, bible)
+    if errors or not expected_sequence:
         return errors
-    expected_index = {name: index for index, name in enumerate(expected)}
+    allowed = set(expected_sequence)
     used: list[str] = []
-    last_index = -1
     for shot in outline.shots:
         matched = canonicalize_storyboard_scene(shot, bible)
         if not matched:
@@ -1008,22 +1015,28 @@ def validate_storyboard_outline_scene_alignment(
             )
             continue
         used.append(matched)
-        if matched not in expected_index:
+        if matched not in allowed:
             errors.append(
                 f"大纲第 {shot.shot_no} 镜误用了「{matched}」；本集剧本只允许场景："
-                f"{'、'.join(expected)}"
+                f"{'、'.join(dict.fromkeys(expected_sequence))}"
+            )
+    search_from = 0
+    for scene_no, expected in enumerate(expected_sequence, start=1):
+        matched_index = next(
+            (
+                index
+                for index in range(search_from, len(used))
+                if used[index] == expected
+            ),
+            None,
+        )
+        if matched_index is None:
+            errors.append(
+                f"分镜大纲遗漏剧本第 {scene_no} 场「{expected}」，"
+                "或该场未按剧本场次顺序出现"
             )
             continue
-        current_index = expected_index[matched]
-        if current_index < last_index:
-            errors.append(
-                f"大纲第 {shot.shot_no} 镜场景倒退到「{matched}」；"
-                "场景必须按剧本场次顺序推进"
-            )
-        last_index = max(last_index, current_index)
-    missing = [name for name in expected if name not in used]
-    if missing:
-        errors.append(f"分镜大纲遗漏本集剧本场景：{'、'.join(missing)}")
+        search_from = matched_index + 1
     return errors
 
 
@@ -1066,31 +1079,37 @@ def validate_storyboard_screenplay_scene_alignment(
 ) -> list[str]:
     """整集/确认门禁：拒绝任何来自本集剧本之外的场景，并检查场次顺序与覆盖。"""
     errors = _screenplay_scene_resolution_errors(screenplay, bible)
-    expected = resolve_screenplay_scene_names(screenplay, bible)
-    if errors or not expected:
+    expected_sequence = resolve_screenplay_scene_sequence(screenplay, bible)
+    if errors or not expected_sequence:
         return errors
-    expected_index = {name: index for index, name in enumerate(expected)}
+    allowed = set(expected_sequence)
     used: list[str] = []
-    last_index = -1
     for shot in board.shots:
         matched = canonicalize_storyboard_scene(shot, bible)
         if matched:
             used.append(matched)
-        if matched not in expected_index:
+        if matched not in allowed:
             errors.append(
                 f"第 {shot.shot_no} 镜 scene_name「{shot.scene_name or shot.scene_setting}」与本集剧本不一致；"
-                f"只能使用：{'、'.join(expected)}"
+                f"只能使用：{'、'.join(dict.fromkeys(expected_sequence))}"
+            )
+    search_from = 0
+    for scene_no, expected in enumerate(expected_sequence, start=1):
+        matched_index = next(
+            (
+                index
+                for index in range(search_from, len(used))
+                if used[index] == expected
+            ),
+            None,
+        )
+        if matched_index is None:
+            errors.append(
+                f"整集分镜遗漏剧本第 {scene_no} 场「{expected}」，"
+                "或该场未按剧本场次顺序出现"
             )
             continue
-        current_index = expected_index[matched]
-        if current_index < last_index:
-            errors.append(
-                f"第 {shot.shot_no} 镜场景倒退到「{matched}」；场景必须按剧本场次顺序推进"
-            )
-        last_index = max(last_index, current_index)
-    missing = [name for name in expected if name not in used]
-    if missing:
-        errors.append(f"整集分镜遗漏本集剧本场景：{'、'.join(missing)}")
+        search_from = matched_index + 1
     return errors
 
 

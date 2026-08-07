@@ -16,6 +16,7 @@ from app.schemas import (
     NarrativeContinuityPlan,
     PlotSpine,
     PlotSpineBeat,
+    Scene,
     ScriptScene,
     ShotCapacityBudget,
     ShotContribution,
@@ -31,6 +32,8 @@ from app.validators import (
     _storyboard_scene_contiguity_key,
     validate_screenplay_source_coverage,
     validate_storyboard_direction_contract,
+    validate_storyboard_outline_scene_alignment,
+    validate_storyboard_screenplay_scene_alignment,
 )
 
 
@@ -257,6 +260,73 @@ def test_authority_scene_ids_allow_later_location_revisit() -> None:
             narrative_authority=False,
         )
     )
+
+
+def test_scene_alignment_preserves_revisits_and_allows_nested_subscenes() -> None:
+    scene_names = ["客厅", "办公室", "学校", "卧室", "高义家"]
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="写实动画"),
+        scenes=[
+            Scene(
+                name=name,
+                scene_canonical=f"{name}固定空间环境锚点",
+            )
+            for name in scene_names
+        ],
+    )
+    expected = ["客厅", "办公室", "学校", "办公室", "卧室", "高义家", "高义家"]
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        title="E",
+        scene_outline=[
+            ScriptScene(
+                scene_no=index,
+                scene_heading=f"{name} / 白天",
+                story_function=f"推进第{index}场",
+                summary=f"第{index}场剧情",
+            )
+            for index, name in enumerate(expected, start=1)
+        ],
+    )
+    actual = [
+        "客厅",
+        "卧室",
+        "办公室",
+        "高义家",
+        "办公室",
+        "学校",
+        "办公室",
+        "卧室",
+        "高义家",
+        "高义家",
+    ]
+    shots: list[Shot] = []
+    briefs: list[StoryboardOutlineShot] = []
+    for index, name in enumerate(actual, start=1):
+        shot = _shot(index, focus="context", size="全景", move="固定")
+        shot.scene_id = f"SC{index:02d}"
+        shot.scene_name = name
+        shot.scene_setting = f"白天，{name}"
+        shots.append(shot)
+        briefs.append(StoryboardOutlineShot(
+            shot_no=index,
+            scene_id=shot.scene_id,
+            scene_name=name,
+            scene_setting=f"白天，{name}",
+            beat=f"第{index}镜推进剧情",
+        ))
+
+    assert validate_storyboard_screenplay_scene_alignment(
+        Storyboard(episode_no=1, shots=shots),
+        screenplay,
+        bible,
+    ) == []
+    assert validate_storyboard_outline_scene_alignment(
+        StoryboardOutline(episode_no=1, shots=briefs),
+        screenplay,
+        bible,
+    ) == []
 
 
 def test_scene_pack_hydrates_director_fields_without_per_shot_calls(monkeypatch) -> None:
