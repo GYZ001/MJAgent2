@@ -1830,13 +1830,6 @@ async def ensure_cards_for_text(
         }
         for item in mentioned_only_candidates
     ]
-    # #region debug-point D:mentioned-only-skip
-    if mentioned_only_candidates:
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/screenplay-structured-output-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","screenplay-structured-output-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"D","location":"app/portraits.py:ensure_cards_for_text","msg":"[DEBUG] Mentioned-only identities skipped before card model","data":{"names":[str(item.get("name") or "").strip() for item in mentioned_only_candidates],"cardCallsAvoided":len(mentioned_only_candidates)},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
-        except Exception:
-            pass
-    # #endregion
     errors: list[str] = []
     warnings: list[str] = []
     resolutions: list[dict] = []
@@ -2005,12 +1998,6 @@ async def assess_new_character(name: str, fragments: str, *, style: str,
             "expected_json": True,
         },
     )
-    # #region debug-point A,B,D:character-card-raw
-    try:
-        import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/screenplay-structured-output-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","screenplay-structured-output-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"A,B,D","location":"app/portraits.py:assess_new_character","msg":"[DEBUG] Character card raw model output","data":{"character":name,"rawChars":len(raw or ""),"startsWithObject":str(raw or "").lstrip().startswith("{"),"endsWithObject":str(raw or "").rstrip().endswith("}"),"tail":str(raw or "")[-160:]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
-    except Exception:
-        pass
-    # #endregion
     try:
         obj = extract_json(raw)
     except ValueError as exc:
