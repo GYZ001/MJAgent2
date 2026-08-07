@@ -27,6 +27,11 @@
   `startsWithObject=true`、`endsWithObject=false`，本地复现同一
   `Unterminated string`。
 - 本次 Run 在 `character_discovery` 失败，尚未进入剧本 Baseline。
+- Post-fix `.dbg/trae-debug-log-screenplay-structured-output-failure.ndjson`：
+  合法人物卡响应 `startsWithObject=true`、`endsWithObject=true`；
+  “钟五”在人物卡模型前被跳过，`cardCallsAvoided=1`。
+- 使用原失败 Run 的 current/future 两段模型响应在数据库副本重放：
+  `checked=0`、`errors=[]`，未调用 `ensure_character_card`。
 
 ## Verification Conclusion
 - A Rejected：响应包含任务 JSON 开头，不是无 JSON。
@@ -34,3 +39,17 @@
 - C Rejected：该调用未设置 `expected_json`，网关判定未参与本次失败。
 - D Confirmed：推理占满 900 token 预算，JSON 正文被截断。
 - E Rejected：只有一次 `assess_new_character` 调用，未发生 operation 复用。
+
+## Code Review Findings
+- P1：任一场景包失败时清空全部并发成功候选，造成后续场景重复调用模型。
+  已改为只移除失败场景，并把逐镜回退限制在失败场景窗口。
+- P1：程序化台词装配默认使用 `spoken_dialogue`，可能把画外说话人强制入画。
+  已按 `characters_visible/visible_entity_ids` 决定 `spoken_dialogue` 或
+  `offscreen_voice`，画外说话人不进入可见角色列表。
+
+## Fix Summary
+- mentioned-only 的陌生具名身份不建人物卡；真正出镜/开口时再建卡。
+- 人物卡结构化输出预算从 900 提升至 4096，并声明 `expected_json=true`。
+- 解析失败改为明确的 `ContentGenerationError`，不再伪装成系统内部异常。
+- 场景批量回退保留成功候选，避免重复付费调用。
+- 画外音保持声音合同，不改变人物可见性。

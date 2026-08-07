@@ -332,6 +332,156 @@ def test_supervisor_generates_and_commits_scene_packs(
     assert contract["purpose"].startswith("第2镜")
 
 
+def test_scene_pack_failure_preserves_successful_later_batch(
+    repair_db,
+    monkeypatch,
+) -> None:
+    from app.stages import StageError, StoryboardShotDraft
+
+    conn, _screenplay = repair_db
+    request_control("e1", "clear")
+    conn.execute("DELETE FROM shots WHERE episode_id='e1'")
+    bible = Bible(
+        characters=[Character(
+            name="少年",
+            role="主角",
+            appearance_canonical="十六岁黑发少年，蓝色长衫，身形清瘦，目光坚定",
+        )],
+        world=World(visual_style_canonical="国风动画电影感"),
+    )
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='p1'",
+        (bible.model_dump_json(),),
+    )
+    contexts = [
+        StoryboardSceneContext(
+            scene_id=f"SC00{number}",
+            scene_no=number,
+            scene_name="广场",
+            scene_time="日",
+            entry_state=f"第{number}场开始",
+            exit_state=f"第{number}场结束",
+        )
+        for number in range(1, 4)
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        scene_contexts=contexts,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                shot_id=f"SH{number:04d}",
+                scene_id=f"SC00{number}",
+                scene_time="日",
+                scene_name="广场",
+                beat=f"少年完成第{number}个任务",
+                purpose=f"第{number}镜承担独立剧情作用",
+                resulting_change=f"第{number}镜完成后状态改变",
+                readability_focus="action",
+                camera_size="中景",
+                camera_angle="平视侧面角度",
+                camera_movement="跟随",
+                camera_motivation="完整展示动作路径与结果",
+                state_in=f"第{number}镜开始状态",
+                primary_action=f"少年完成第{number}步动作",
+                state_out=f"第{number}镜结束状态",
+                continuity_mode="same_scene_cut",
+                duration_s=5,
+                characters_visible=["少年"],
+            )
+            for number in range(1, 4)
+        ],
+    )
+
+    def packed_shot(number: int) -> StoryboardScenePack:
+        return StoryboardScenePack(
+            episode_no=1,
+            scene_id=f"SC00{number}",
+            shots=[_shot(number).model_copy(update={
+                "shot_id": f"SH{number:04d}",
+                "scene_id": f"SC00{number}",
+                "scene_name": "广场",
+                "scene_time": "日",
+                "shot_size": "中景",
+                "camera_move": "跟随",
+                "purpose": f"第{number}镜承担独立剧情作用",
+                "resulting_change": f"第{number}镜完成后状态改变",
+                "readability_focus": "action",
+                "camera_angle": "平视侧面角度",
+                "camera_motivation": "完整展示动作路径与结果",
+                "is_final": number == 3,
+            })],
+        )
+
+    async def fake_outline(*_args, **_kwargs):
+        return outline
+
+    pack_calls: list[str] = []
+
+    async def fake_scene_pack(*_args, **_kwargs):
+        context = _args[-1]
+        pack_calls.append(context.scene_id)
+        if context.scene_id == "SC002":
+            raise StageError("场景分镜", ["模拟第二场批量格式失败"])
+        return packed_shot(context.scene_no)
+
+    shot_calls: list[int] = []
+
+    async def fake_next_shot(*_args, **kwargs):
+        shot_no = len(kwargs["completed_shots"]) + 1
+        shot_calls.append(shot_no)
+        return StoryboardShotDraft(
+            episode_no=1,
+            shot=packed_shot(shot_no).shots[0],
+            is_final=False,
+        )
+
+    def passed_evaluation(_ep, board, *_args, **_kwargs):
+        return SimpleNamespace(
+            passed=True,
+            errors=[],
+            warnings=[],
+            issues=[],
+            board=board,
+        )
+
+    import app.domain.storyboard_ops as storyboard_ops
+    import app.domain.video_ops as video_ops
+    import app.storyboard_supervisor as supervisor_module
+    import app.validators as storyboard_validators
+
+    monkeypatch.setattr(supervisor_module, "generate_storyboard_outline", fake_outline)
+    monkeypatch.setattr(supervisor_module, "generate_storyboard_scene_pack", fake_scene_pack)
+    monkeypatch.setattr(supervisor_module, "generate_storyboard_next_shot", fake_next_shot)
+    monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", passed_evaluation)
+    monkeypatch.setattr(
+        storyboard_validators,
+        "validate_storyboard_direction_contract",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        storyboard_ops,
+        "_finalize_storyboard_evidence",
+        lambda *_args, **_kwargs: "art-final",
+    )
+
+    checkpoint = asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=False,
+        preflight_done=True,
+    ))
+
+    assert checkpoint.phase == "SUCCEEDED"
+    assert pack_calls == ["SC001", "SC002", "SC003"]
+    assert shot_calls == [2]
+    assert [
+        row["shot_no"]
+        for row in conn.execute(
+            "SELECT shot_no FROM shots WHERE episode_id='e1' ORDER BY shot_no"
+        )
+    ] == [1, 2, 3]
+
+
 def test_resume_atomically_cleans_legacy_ghost_contract_before_gate(
     repair_db, monkeypatch
 ) -> None:

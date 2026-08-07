@@ -193,6 +193,28 @@ def test_mentioned_only_unknown_character_does_not_require_identity_card() -> No
     ) is False
 
 
+def test_character_card_truncation_is_reported_as_generation_error(
+    monkeypatch,
+) -> None:
+    async def truncated_chat(*_args, **_kwargs):
+        return '{"important":true,"reason":"响应被截断'
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", truncated_chat)
+
+    with pytest.raises(
+        portraits.ContentGenerationError,
+        match="人物卡结构化输出不完整",
+    ):
+        asyncio.run(portraits.assess_new_character(
+            "丁力",
+            "丁力走进大厅。",
+            style="国风",
+            known_names=[],
+            ep_label="第 1 集",
+            require_identity_card=True,
+        ))
+
+
 def test_ensure_character_card_keeps_auto_added_card_when_portrait_fails(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "美杜莎现身，紫色长发。美杜莎再次出手。美杜莎统领蛇人一族。" * 3)
