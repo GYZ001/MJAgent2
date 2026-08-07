@@ -73,6 +73,11 @@ _IMPLICIT_SPEECH_RE = re.compile(
     r"(?:回答|回应)(?:道|说|问题|问话)|"
     r"嘴(?:巴|唇)[^，。；！？]{0,8}(?:张开|微张|开合|翕动)"
 )
+_EXPLICIT_SILENCE_RE = re.compile(
+    r"(?:所有人物|人物|角色|全程)?"
+    r"(?:保持)?(?:闭口|不说话|不出声|无台词|没有台词|"
+    r"不做说话口型|无说话口型|不张嘴)"
+)
 
 def _scene_time_context(value: Any) -> str:
     """Use the same broad time buckets as storyboard validation."""
@@ -934,7 +939,8 @@ def implicit_speech_without_dialogue_errors(shot: Shot) -> list[str]:
         "last_frame_desc",
     ):
         value = str(getattr(shot, field, "") or "").strip()
-        if _IMPLICIT_SPEECH_RE.search(value):
+        searchable = _EXPLICIT_SILENCE_RE.sub("", value)
+        if _IMPLICIT_SPEECH_RE.search(searchable):
             conflicts.append(f"{field}=「{value[:48]}」")
     if not conflicts:
         return []

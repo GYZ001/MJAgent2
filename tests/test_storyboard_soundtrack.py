@@ -1,3 +1,4 @@
+from app.continuity import implicit_speech_without_dialogue_errors
 from app.schemas import Dialogue, EpisodeScreenplay, Shot, Storyboard
 from app.validators import validate_storyboard_soundtrack
 
@@ -75,3 +76,17 @@ def test_storyboard_soundtrack_accepts_dialogue_coverage_without_narration() -> 
 
     assert errors == []
     assert not any("内心OS" in error for error in errors)
+
+
+def test_explicit_silence_does_not_trigger_implicit_speech_gate() -> None:
+    shot = _shot(1)
+    shot.action_desc = "萧炎转身走向门口，全程闭口，无台词，不做说话口型。"
+
+    assert implicit_speech_without_dialogue_errors(shot) == []
+
+
+def test_actual_implicit_speech_still_requires_dialogue() -> None:
+    shot = _shot(1)
+    shot.action_desc = "萧炎转身走向门口，开口询问门外来人。"
+
+    assert implicit_speech_without_dialogue_errors(shot)
