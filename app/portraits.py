@@ -267,6 +267,7 @@ def _draft_identity_projection(draft_text: str) -> str:
 
     mentions: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    structured_turn_surfaces: set[tuple[str, str]] = set()
 
     def add(value: object, path: str, *, line_context: str = "") -> None:
         text = str(value or "").strip()
@@ -284,11 +285,17 @@ def _draft_identity_projection(draft_text: str) -> str:
             add(character, f"scene_outline[{scene_index}].characters")
     for chain_index, chain in enumerate(script.dialogue_chains or []):
         for turn_index, turn in enumerate(chain.turns or []):
+            speaker = str(turn.speaker or "").strip()
+            line = str(turn.line or "").strip()
             add(
-                turn.speaker,
+                speaker,
                 f"dialogue_chains[{chain_index}].turns[{turn_index}].speaker",
-                line_context=turn.line,
+                line_context=line,
             )
+            structured_turn_surfaces.add((
+                _identity_carrier_annotation_base(speaker) or speaker,
+                line,
+            ))
     for item_index, item in enumerate(script.information_ledger or []):
         add(item.speaker_id, f"information_ledger[{item_index}].speaker_id")
     for voice_index, voice in enumerate(script.voice_bible or []):
@@ -299,6 +306,14 @@ def _draft_identity_projection(draft_text: str) -> str:
     for scene_no, speaker, line in _script_dialogue_turns(
         script.full_script_text or "",
     ):
+        if (speaker, str(line or "").strip()) in structured_turn_surfaces:
+            # #region debug-point E:lossy-rendered-speaker-suppressed
+            try:
+                import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((item.split("=",1)[1] for item in _dbg_c.splitlines() if item.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((item.split("=",1)[1] for item in _dbg_c.splitlines() if item.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:_draft_identity_projection","msg":"[DEBUG] Lossy rendered speaker suppressed","data":{"episodeNo":script.episode_no,"lossySpeaker":speaker,"sceneNo":scene_no,"lineChars":len(str(line or ""))},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+            except Exception:
+                pass
+            # #endregion
+            continue
         add(
             speaker,
             f"full_script_text.scene[{scene_no}].speaker",
@@ -342,6 +357,18 @@ def _draft_identity_projection(draft_text: str) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+_IDENTITY_CARRIER_ANNOTATION_RE = re.compile(
+    r"^(?P<base>[^()（）]+?)\s*[（(][^()（）]+[）)]\s*$"
+)
+
+
+def _identity_carrier_annotation_base(value: object) -> str:
+    match = _IDENTITY_CARRIER_ANNOTATION_RE.fullmatch(
+        str(value or "").strip()
+    )
+    return match.group("base").strip() if match else ""
 
 
 def _future_identity_context(future_text: str, source_labels: list[str]) -> str:
@@ -1131,6 +1158,88 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
     return changes
 
 
+def normalize_screenplay_identity_annotations(screenplay, bible: Bible) -> list[dict]:
+    """Strip carrier annotations only when the base is already authoritative.
+
+    Identity fields may contain presentation notes such as ``角色（画外）``.
+    This normalization never interprets the note or classifies role names. It
+    only projects an exact Bible/contract/voice token back to its canonical
+    display name; ambiguous or unknown bases remain unresolved for model audit.
+    """
+    visual_targets: dict[str, set[str]] = {}
+    voice_targets: dict[str, set[str]] = {}
+
+    def register(targets: dict[str, set[str]], token: object, canonical: str) -> None:
+        value = str(token or "").strip()
+        if value and canonical:
+            targets.setdefault(value, set()).add(canonical)
+
+    for character in bible.characters:
+        name = str(character.name or "").strip()
+        register(visual_targets, name, name)
+        register(voice_targets, name, name)
+
+    plan = getattr(screenplay, "narrative_plan", None)
+    for contract in (getattr(plan, "identity_contracts", None) or []):
+        canonical = str(contract.display_name or "").strip()
+        if str(contract.visual_policy or "").strip() != "offscreen_only":
+            register(visual_targets, contract.identity_id, canonical)
+            register(visual_targets, contract.display_name, canonical)
+        for voice_id in contract.voice_ids or []:
+            register(voice_targets, voice_id, canonical)
+
+    for voice in getattr(screenplay, "voice_bible", None) or []:
+        if str(voice.role_type or "").strip() == "narrator":
+            speaker_id = str(voice.speaker_id or "").strip()
+            register(voice_targets, speaker_id, speaker_id)
+
+    usages: dict[str, set[str]] = {}
+
+    def collect(raw: object, usage: str) -> None:
+        value = str(raw or "").strip()
+        if _identity_carrier_annotation_base(value):
+            usages.setdefault(value, set()).add(usage)
+
+    for scene in getattr(screenplay, "scene_outline", None) or []:
+        for character in scene.characters or []:
+            collect(character, "visual")
+    for chain in getattr(screenplay, "dialogue_chains", None) or []:
+        for turn in chain.turns or []:
+            collect(turn.speaker, "voice")
+    for item in getattr(screenplay, "information_ledger", None) or []:
+        collect(item.speaker_id, "voice")
+    for voice in getattr(screenplay, "voice_bible", None) or []:
+        collect(voice.speaker_id, "voice")
+    from app.validators import screenplay_speaker_names
+    for speaker in screenplay_speaker_names(
+        getattr(screenplay, "full_script_text", "") or ""
+    ):
+        collect(speaker, "voice")
+
+    resolutions: list[dict] = []
+    target_maps = {"visual": visual_targets, "voice": voice_targets}
+    for source_label, required_usages in usages.items():
+        base = _identity_carrier_annotation_base(source_label)
+        candidates: set[str] | None = None
+        for usage in required_usages:
+            current = target_maps[usage].get(base, set())
+            candidates = set(current) if candidates is None else candidates & current
+        if candidates and len(candidates) == 1:
+            resolutions.append({
+                "source_label": source_label,
+                "canonical_name": next(iter(candidates)),
+                "resolution": "authority_annotation",
+            })
+    # #region debug-point E:authority-annotation-normalized
+    if resolutions:
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((item.split("=",1)[1] for item in _dbg_c.splitlines() if item.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((item.split("=",1)[1] for item in _dbg_c.splitlines() if item.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"E","location":"app/portraits.py:normalize_screenplay_identity_annotations","msg":"[DEBUG] Authoritative identity annotations normalized","data":{"episodeNo":getattr(screenplay,"episode_no",None),"resolutions":resolutions},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+        except Exception:
+            pass
+    # #endregion
+    return apply_screenplay_character_resolutions(screenplay, resolutions)
+
+
 def normalize_screenplay_offscreen_visual_identities(screenplay) -> list[dict]:
     """Remove typed offscreen-only identities from visual scene membership."""
     plan = getattr(screenplay, "narrative_plan", None)
@@ -1186,15 +1295,15 @@ def normalize_screenplay_voice_ids(screenplay, bible: Bible) -> list[dict]:
     metadata, not identities, and are removed without inspecting their names or
     role labels.
     """
+    changes = normalize_screenplay_identity_annotations(screenplay, bible)
     plan = getattr(screenplay, "narrative_plan", None)
     if plan is None:
-        return []
+        return changes
     bible_names = {
         str(character.name or "").strip()
         for character in bible.characters
         if str(character.name or "").strip()
     }
-    changes: list[dict] = []
     for voice in getattr(screenplay, "voice_bible", None) or []:
         speaker_id = str(voice.speaker_id or "").strip()
         role_type = str(voice.role_type or "").strip()
@@ -1590,7 +1699,7 @@ def screenplay_unknown_identity_errors(screenplay, bible: Bible) -> list[str]:
     # #region debug-point B-E:unresolved-identity-state
     if locations:
         try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_plan=getattr(screenplay,"narrative_plan",None); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"B,C,E","location":"app/portraits.py:screenplay_unknown_identity_errors","msg":"[DEBUG] Unresolved screenplay identity state","data":{"episodeNo":getattr(screenplay,"episode_no",None),"unresolved":locations,"bibleNames":sorted(str(item.name or "").strip() for item in bible.characters if str(item.name or "").strip()),"contracts":[{"identityId":str(item.identity_id or "").strip(),"displayName":str(item.display_name or "").strip(),"visualPolicy":str(item.visual_policy or "").strip(),"voiceIds":[str(value or "").strip() for value in (item.voice_ids or [])]} for item in (getattr(_dbg_plan,"identity_contracts",None) or [])],"voices":[{"speakerId":str(item.speaker_id or "").strip(),"roleType":str(item.role_type or "").strip()} for item in (getattr(screenplay,"voice_bible",None) or [])]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_plan=getattr(screenplay,"narrative_plan",None); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"B,C,E","location":"app/portraits.py:screenplay_unknown_identity_errors","msg":"[DEBUG] Unresolved screenplay identity state","data":{"episodeNo":getattr(screenplay,"episode_no",None),"unresolved":locations,"bibleNames":sorted(str(item.name or "").strip() for item in bible.characters if str(item.name or "").strip()),"contracts":[{"identityId":str(item.identity_id or "").strip(),"displayName":str(item.display_name or "").strip(),"visualPolicy":str(item.visual_policy or "").strip(),"voiceIds":[str(value or "").strip() for value in (item.voice_ids or [])]} for item in (getattr(_dbg_plan,"identity_contracts",None) or [])],"voices":[{"speakerId":str(item.speaker_id or "").strip(),"roleType":str(item.role_type or "").strip()} for item in (getattr(screenplay,"voice_bible",None) or [])]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
         except Exception:
             pass
     # #endregion

@@ -2224,6 +2224,7 @@ async def generate_screenplay_baseline(
         # 避免为“绿袍男子→路人甲”浪费一轮模型修复。
         from app.portraits import (
             apply_screenplay_character_resolutions,
+            normalize_screenplay_identity_annotations,
             screenplay_character_resolution_errors,
         )
         resolutions = list(episode.get("character_resolutions") or [])
@@ -2231,6 +2232,7 @@ async def generate_screenplay_baseline(
             s,
             resolutions,
         )
+        normalize_screenplay_identity_annotations(s, bible)
         errors = validate_screenplay(
             s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
             episode_no=episode["episode_no"], source_text=source_text,

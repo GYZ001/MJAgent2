@@ -3,9 +3,11 @@ import json
 import sqlite3
 
 from app import api, db, portraits
-from app.schemas import (Bible, Character, EpisodeScreenplay, InformationItem,
-                         KeyDialogueChain, KeyDialogueTurn, ScriptScene,
-                         NarrativeContinuityPlan, VoiceCanonical, World)
+from app.schemas import (Bible, Character, EpisodeScreenplay,
+                         IdentityContractEvidence, InformationItem,
+                         KeyDialogueChain, KeyDialogueTurn,
+                         NarrativeContinuityPlan, NarrativeIdentityContract,
+                         ScriptScene, VoiceCanonical, World)
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -897,6 +899,112 @@ def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> Non
     assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [
         ("紫甲女子", "functional"),
     ]
+
+
+def test_draft_identity_projection_keeps_structured_annotated_speaker() -> None:
+    script = EpisodeScreenplay(
+        episode_no=5,
+        full_script_text=(
+            "【场1】夜 / 室内\n"
+            "路人乙（小晶的声音）：我在信里说明经过。"
+        ),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            turns=[KeyDialogueTurn(
+                speaker="路人乙（小晶的声音）",
+                line="我在信里说明经过。",
+                source_text="我在信里说明经过。",
+            )],
+        )],
+    )
+
+    projection = json.loads(
+        portraits._draft_identity_projection(script.model_dump_json())
+    )
+    values = [item["value"] for item in projection["identity_mentions"]]
+
+    assert "路人乙（小晶的声音）" in values
+    assert "路人乙" not in values
+
+
+def test_identity_annotation_normalization_requires_authoritative_base() -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="小晶",
+            role="配角",
+            appearance_canonical="黑色长发，浅色衬衫，神情克制",
+        )],
+    )
+    script = EpisodeScreenplay(
+        episode_no=5,
+        scene_outline=[ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】夜 / 室内",
+            story_function="读信",
+            characters=["小晶（画外音）", "井下回声（画外）"],
+            summary="小晶的信件内容被读出。",
+        )],
+        full_script_text=(
+            "【场1】夜 / 室内\n"
+            "小晶（画外音）：这是信的内容。\n"
+            "路人乙（小晶的声音）：这是错误的说话人标签。"
+        ),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="小晶（画外音）",
+                    line="这是信的内容。",
+                    source_text="这是信的内容。",
+                ),
+                KeyDialogueTurn(
+                    speaker="路人乙（小晶的声音）",
+                    line="这是错误的说话人标签。",
+                    source_text="这是错误的说话人标签。",
+                ),
+            ],
+        )],
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="episode-5",
+            identity_contracts=[NarrativeIdentityContract(
+                identity_id="voice-well",
+                display_name="井下回声",
+                kind="画外声源",
+                visual_policy="offscreen_only",
+                asset_requirement="forbidden",
+                voice_ids=["井下回声"],
+                evidence=IdentityContractEvidence(
+                    proposition_ids=["P1"],
+                    rationale="来源只定义声音，不定义可见实体",
+                ),
+            )],
+        ),
+        voice_bible=[
+            VoiceCanonical(
+                speaker_id="小晶",
+                voice_canonical="克制的年轻声音",
+            ),
+            VoiceCanonical(
+                speaker_id="井下回声",
+                voice_canonical="遥远的回声",
+                role_type="offscreen_speaker",
+            ),
+        ],
+    )
+
+    changes = portraits.normalize_screenplay_identity_annotations(script, bible)
+
+    assert changes == [{
+        "source_label": "小晶（画外音）",
+        "canonical_name": "小晶",
+        "resolution": "authority_annotation",
+    }]
+    assert script.scene_outline[0].characters == ["小晶", "井下回声（画外）"]
+    assert script.dialogue_chains[0].turns[0].speaker == "小晶"
+    assert script.dialogue_chains[0].turns[1].speaker == "路人乙（小晶的声音）"
+    assert "小晶：这是信的内容。" in script.full_script_text
+    assert "路人乙（小晶的声音）" in script.full_script_text
 
 
 def test_existing_bible_name_that_looks_generic_keeps_its_canonical_identity(monkeypatch) -> None:
