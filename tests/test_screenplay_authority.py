@@ -238,6 +238,36 @@ def test_contract_v4_rejects_stale_runtime_bible_against_current_projection() ->
         )
 
 
+def test_legacy_contract_fingerprint_ignores_composed_projection_fields() -> None:
+    _published_case()
+    bible, _artifact = _seed_test_bible_authority()
+    before = screenplay_authority_material(
+        "episode-generic",
+        bible=Bible.model_validate(bible),
+        contract_version="3.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    projection = json.loads(json.dumps(bible))
+    projection["world"]["visual_style_canonical"] = "后来组合进项目投影的新画风"
+    projection["characters"][0]["ref_image_path"] = "/local/new-portrait.png"
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    after = screenplay_authority_material(
+        "episode-generic",
+        bible=Bible.model_validate(projection),
+        contract_version="3.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+
+    assert "bible_projection_hash" not in before
+    assert after == before
+
+
 @pytest.mark.parametrize("extra_drift", [False, True])
 def test_duration_recovery_rejects_non_storyboard_or_combined_drift(
     extra_drift: bool,
