@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from app import config, hiagent
@@ -8,6 +9,30 @@ from app.db import get_conn, now
 from app.evidence import repository
 from app.observability.tracing import current_trace
 from app.orchestration.state_machine import transition_run
+
+
+def _is_non_candidate_json_response(value: str) -> bool:
+    """Detect transport-success responses that contain no task JSON candidate."""
+    text = str(value or "").strip()
+    if "{" not in text:
+        return True
+    candidate = text[text.find("{"):].strip()
+    if candidate.endswith("```"):
+        candidate = candidate[:-3].rstrip()
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    code = payload.get("code")
+    error_keys = {"code", "message", "error", "detail", "status"}
+    return (
+        isinstance(code, int)
+        and code >= 400
+        and bool(payload.get("message") or payload.get("error") or payload.get("detail"))
+        and set(payload).issubset(error_keys)
+    )
 
 
 def _retry_can_pause_run(run_id: str, step_run_id: str | None, stage_key: str | None) -> bool:
@@ -86,12 +111,19 @@ async def chat(
     stage_key = str(meta.get("stage_key") or "") or None
     for failure_no in range(max_retries + 1):
         try:
-            return await hiagent.chat(
+            result = await hiagent.chat(
                 messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 call_meta=meta,
             )
+            if meta.get("expected_json") and _is_non_candidate_json_response(result):
+                raise hiagent.ProviderError(
+                    "文本模型未返回任务 JSON 候选",
+                    retryable=True,
+                    raw=result,
+                )
+            return result
         except hiagent.ProviderError as exc:
             if not exc.retryable or failure_no >= max_retries:
                 raise

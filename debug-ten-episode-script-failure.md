@@ -280,3 +280,53 @@
 - Both persisted failed candidates, `art_3c6cd664f483` and
   `art_b074a849a2ed`, now parse and pass `EpisodeScreenplay` validation without
   any story-specific token or field-name rule.
+
+## 2026-08-07 Episode 8 Merged Source-Coverage Field Failure
+- Round 16 Run `run_026b1b7c7e61` received complete Provider responses. The
+  second response parsed as JSON but merged a missing `beat_ids` sibling into
+  the preceding enum value:
+  `"disposition":"deliver, beat_ids: [S11]"`.
+- The only hard failure was the resulting invalid `disposition` literal.
+- Generic fix: when an allowed source-coverage disposition is followed by an
+  explicitly serialized list field, restore the list only if its field name is
+  declared by `SourceCoverageDecision`; if that sibling already exists, its
+  values must match exactly. No source ID or narrative meaning is inferred.
+- Failed candidate `art_a6d8c193e85a` now validates with
+  `disposition="deliver"` and the explicitly supplied `beat_ids` restored.
+
+## 2026-08-07 Episode 7 Concurrent Bible Projection Failure
+- Round 17 Run `run_18f6fbbe7414` generated and durably persisted exactly one
+  Baseline, then expanded its content-derived duration from 340 to 460 seconds.
+- The subsequent authority-fingerprint rebind raised
+  `本次剧本运行使用的人物谱与项目当前组合投影不一致`.
+- Confirmed root cause: another concurrent episode advanced the project's
+  composed Bible while episode 7 was generating. The post-Baseline rebind
+  incorrectly revalidated the stale generation snapshot against that newer
+  projection.
+- Generic fix: generation startup still strictly validates its runtime Bible,
+  while post-Baseline duration and publication rebinds use the latest durable
+  project projection. This matches their purpose and removes the cross-episode
+  timing race without weakening initial input validation.
+
+## 2026-08-07 Episode 1 HTTP-200 Content Refusal
+- Round 18 Run `run_cd3fbf373f6f` received two short HTTP-200 responses in
+  roughly four seconds each: refusal prose, then a `{code:400,message:...}`
+  error envelope.
+- Both were incorrectly persisted as screenplay candidates and consumed the
+  two structural bootstrap iterations.
+- Generic fix: Agent Loop calls declare that they expect JSON. The model
+  gateway classifies a response as retryable Provider failure when it contains
+  no JSON object at all or consists solely of a 4xx error envelope. It does not
+  inspect story text or safety keywords. Malformed task JSON still proceeds to
+  the structural repair loop.
+
+## 2026-08-07 Episode 2 Unmatched Root-Level Closer
+- Round 19 Run `run_6e2f37a1ac5b` received two complete approximately 134 KB
+  Provider responses. Both contained the same extra `]` after all nested
+  containers had already closed.
+- A structural scan at the decoder error position showed only the root `{`
+  remained open, so the `]` could not legally close any container.
+- Generic fix: remove one mismatched closer only when the decoder stops on it
+  and the structural stack contains exactly the root object. All other
+  mismatched or nested closer errors remain fail-closed.
+- Both failed candidates now parse and pass `EpisodeScreenplay` validation.

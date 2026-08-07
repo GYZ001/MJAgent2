@@ -958,6 +958,55 @@ def normalize_screenplay_json_shape(obj: dict) -> tuple[dict, list[str]]:
                 normalized_plan["experience_intents"] = normalized_intents
                 normalized["narrative_plan"] = normalized_plan
 
+    coverage = normalized.get("source_coverage")
+    if isinstance(coverage, list):
+        normalized_coverage: list[object] = []
+        coverage_changed = False
+        allowed_dispositions = {"deliver", "merge", "context", "duplicate"}
+        merged_list_pattern = re.compile(
+            r"^(?P<disposition>[a-z]+)\s*[,，;；]\s*"
+            r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*"
+            r"\[(?P<items>[^\]]*)\]\s*$"
+        )
+        for coverage_index, item in enumerate(coverage):
+            if not isinstance(item, dict):
+                normalized_coverage.append(item)
+                continue
+            disposition = str(item.get("disposition") or "").strip()
+            match = merged_list_pattern.fullmatch(disposition)
+            if match is None or match.group("disposition") not in allowed_dispositions:
+                normalized_coverage.append(item)
+                continue
+            sibling_field = match.group("field")
+            if sibling_field not in SourceCoverageDecision.model_fields:
+                normalized_coverage.append(item)
+                continue
+            sibling_value = item.get(sibling_field)
+            merged_items = [
+                value.strip().strip("\"'")
+                for value in match.group("items").split(",")
+                if value.strip()
+            ]
+            if (
+                sibling_value is not None
+                and (
+                    not isinstance(sibling_value, list)
+                    or not all(isinstance(value, str) for value in sibling_value)
+                    or merged_items != sibling_value
+                )
+            ):
+                normalized_coverage.append(item)
+                continue
+            normalized_item = dict(item)
+            normalized_item["disposition"] = match.group("disposition")
+            if sibling_value is None:
+                normalized_item[sibling_field] = merged_items
+            normalized_coverage.append(normalized_item)
+            coverage_changed = True
+            changes.append(f"source_coverage[{coverage_index}].disposition")
+        if coverage_changed:
+            normalized["source_coverage"] = normalized_coverage
+
     return normalized, changes
 
 
@@ -1601,6 +1650,44 @@ def _repair_merged_object_string_entry(
     return text[:match.start()] + replacement + text[error.pos:]
 
 
+def _remove_unmatched_root_level_closer(
+    text: str,
+    error: json.JSONDecodeError,
+) -> str:
+    """Remove one closer that cannot belong to any open nested container."""
+    if error.pos >= len(text) or text[error.pos] not in "]}":
+        return text
+    expected_closers: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text[:error.pos]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            expected_closers.append("}")
+        elif char == "[":
+            expected_closers.append("]")
+        elif char in "]}":
+            if not expected_closers or expected_closers[-1] != char:
+                return text
+            expected_closers.pop()
+    if (
+        not in_string
+        and expected_closers == ["}"]
+        and text[error.pos] != expected_closers[-1]
+    ):
+        return text[:error.pos] + text[error.pos + 1:]
+    return text
+
+
 def extract_json(
     text: str,
     *,
@@ -1643,6 +1730,19 @@ def extract_json(
                             return obj
                     candidate = repaired
             repaired = _repair_structural_json_delimiters(candidate)
+            if repaired != candidate:
+                try:
+                    obj, _ = json.JSONDecoder().raw_decode(repaired)
+                except json.JSONDecodeError as repaired_exc:
+                    candidate_error = repaired_exc
+                else:
+                    if isinstance(obj, dict):
+                        return obj
+                candidate = repaired
+            repaired = _remove_unmatched_root_level_closer(
+                candidate,
+                candidate_error,
+            )
             if repaired != candidate:
                 try:
                     obj, _ = json.JSONDecoder().raw_decode(repaired)

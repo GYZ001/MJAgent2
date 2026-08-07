@@ -3710,7 +3710,10 @@ def _complete_screenplay_from_working_artifact(
         episode_id,
         conn=conn,
         source_text=source_text,
-        bible=bible,
+        # Discovery in another concurrent episode may advance the persisted
+        # composite Bible after this run loaded its generation snapshot.
+        # Publication binds the current durable authority projection.
+        bible=None,
         contract_version=contract_version,
         qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
     )
@@ -4041,7 +4044,10 @@ async def run_screenplay_production(
                 episode_id,
                 conn=conn,
                 source_text=source_text,
-                bible=bible,
+                # The Baseline is durable now. Rebind its duration change to
+                # the latest persisted composite Bible, which concurrent
+                # episode discovery may have advanced during generation.
+                bible=None,
                 contract_version=contract.version,
                 qa_profile_version="screenplay-qa-gate-2",
             )

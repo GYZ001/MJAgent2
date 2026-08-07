@@ -809,6 +809,7 @@ async def _run_with_agent_loop(
         "initiator_label": stage,
         "initiator_scope": "agent_loop",
         "contract_version": loop.contract.version,
+        "expected_json": True,
     }
 
     async def producer(
