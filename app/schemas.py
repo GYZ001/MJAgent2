@@ -1561,6 +1561,46 @@ def _repair_structural_json_delimiters(text: str) -> str:
     return "".join(repaired)
 
 
+def _repair_merged_object_string_entry(
+    text: str,
+    error: json.JSONDecodeError,
+) -> str:
+    """Split one object key accidentally merged into the preceding string value."""
+    if error.msg != "Expecting ',' delimiter" or error.pos >= len(text):
+        return text
+    if text[error.pos] != ":":
+        return text
+
+    prefix = text[:error.pos]
+    match = re.search(
+        r':\s*"(?P<value>(?:\\.|[^"\\])*)"(?P<space>\s*)$',
+        prefix,
+    )
+    if match is None:
+        return text
+
+    value = match.group("value")
+    delimiter_index = max(
+        value.rfind(","),
+        value.rfind("，"),
+        value.rfind(";"),
+        value.rfind("；"),
+    )
+    if delimiter_index <= 0 or delimiter_index >= len(value) - 1:
+        return text
+
+    previous_value = value[:delimiter_index].strip()
+    merged_key = value[delimiter_index + 1:].strip()
+    if not previous_value or not merged_key:
+        return text
+
+    replacement = (
+        f':"{previous_value}","{merged_key}"'
+        f'{match.group("space")}'
+    )
+    return text[:match.start()] + replacement + text[error.pos:]
+
+
 def extract_json(
     text: str,
     *,
@@ -1603,6 +1643,19 @@ def extract_json(
                             return obj
                     candidate = repaired
             repaired = _repair_structural_json_delimiters(candidate)
+            if repaired != candidate:
+                try:
+                    obj, _ = json.JSONDecoder().raw_decode(repaired)
+                except json.JSONDecodeError as repaired_exc:
+                    candidate_error = repaired_exc
+                else:
+                    if isinstance(obj, dict):
+                        return obj
+                candidate = repaired
+            repaired = _repair_merged_object_string_entry(
+                candidate,
+                candidate_error,
+            )
             if repaired != candidate:
                 try:
                     obj, _ = json.JSONDecoder().raw_decode(repaired)

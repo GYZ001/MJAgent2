@@ -263,3 +263,20 @@
 - Generic fix: action-derived turns may enter a dialogue chain only when their
   speaker token exactly matches `voice_bible` or an identity-contract token.
   No prefix, suffix, role-name, or story-text inference is allowed.
+
+## 2026-08-07 Episode 3 Merged JSON Object Entry Failure
+- Round 15 Run `run_adb8e7ae64fa` received two complete Provider responses,
+  each approximately 101 KB. Both failed at the same JSON structure with an
+  object string value merged into the following key:
+  `{"first_key":"first_value,second_key":"second_value"}`.
+- This was not transport truncation. The existing deterministic JSON repair
+  covered inner quotes, missing container delimiters, and missing commas
+  between containers, but not a key merged into the tail of a string value.
+- Generic fix: only when `json.JSONDecodeError` reports
+  `Expecting ',' delimiter` at a colon immediately after an object string
+  value, split the final comma-like delimiter inside that value into the
+  uniquely implied next object key. Inputs without a non-empty value and key
+  remain unchanged.
+- Both persisted failed candidates, `art_3c6cd664f483` and
+  `art_b074a849a2ed`, now parse and pass `EpisodeScreenplay` validation without
+  any story-specific token or field-name rule.
