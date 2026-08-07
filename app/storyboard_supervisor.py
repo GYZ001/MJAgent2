@@ -3194,8 +3194,7 @@ async def run_storyboard_supervisor(
         )
         narrative_review_report = None
         narrative_review_artifact_ids: list[str] = []
-        automatic_narrative_review = False
-        if narrative_authority and automatic_narrative_review:
+        if narrative_authority:
             from app.narrative_review import (
                 NarrativeReviewError,
                 run_blind_audience_review,

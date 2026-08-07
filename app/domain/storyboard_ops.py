@@ -1586,10 +1586,28 @@ async def _storyboard_task(
         if ep_now and ep_now["status"] in {"scripted", "confirmed", "scripting"} and ep_now["script_error"]:
             return
         if saved:
-            note = (
-                f"追加镜生成失败，已保留前 {saved} 个 QA 通过镜头，可人工补写最后一镜、修改后确认，"
-                f"或重新生成分镜。（{rec.code} · {rec.error_id}）"
-            )
+            try:
+                planned = len(
+                    json.loads(
+                        conn.execute(
+                            "SELECT storyboard_outline_json FROM episodes WHERE id=?",
+                            (episode_id,),
+                        ).fetchone()["storyboard_outline_json"] or "{}"
+                    ).get("shots") or []
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                planned = 0
+            if planned and saved >= planned:
+                note = (
+                    f"分镜 {saved}/{planned} 镜已完成，但发布证据校验失败："
+                    f"{rec.message}（{rec.code} · {rec.error_id}）"
+                )
+            else:
+                note = (
+                    f"追加镜生成失败，已保留前 {saved} 个 QA 通过镜头，"
+                    "可人工补写最后一镜、修改后确认，或重新生成分镜。"
+                    f"（{rec.code} · {rec.error_id}）"
+                )
             conn.execute("UPDATE episodes SET status='scripted', script_error=? WHERE id=?",
                          (note[:800], episode_id))
         else:
