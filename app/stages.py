@@ -2130,6 +2130,8 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - scene_outline 场次数不设上限，由时间、地点和连续戏剧动作决定。
 - narrative_plan.scene_contracts 必须与 scene_outline 逐场一一对应，使用 SC01、SC02……连续 ID；
   同一地点后来再次出现也不得和前一次合并。
+- full_script_text 中只要地点或主要时间段变化就必须新建场标；禁止在“客厅”场内用
+  “饭后卧室”“转到学校”等一句话暗藏未登记子场景。
 - 每场必须填写 entry_state、exit_state、context_requirements。
 - entry_state 写人物位置、目标、关键道具和承接来源。
 - context_requirements 写观众在主要动作发生前需要知道的时间、地点、空间关系、人物关系或关键道具。
@@ -3391,7 +3393,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
 4d. {outline_action_capacity_rule}
 5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止用纯抽象导演意图代替可观测证据；意图写入 shot_contribution/affective_delta，可拍事实写入 beat/primary_action/state_out。
 6. {first_rule}
-7. scene_time 与 scene_name 分开填：scene_time 可为早/中/晚/黄昏/具体时刻；scene_name 必须是场景库规范名，同一物理场景不因人物走到门口/桌边而改名。
+7. scene_time 与 scene_name 分开填：scene_time 可为早/中/晚/黄昏/具体时刻；scene_name 必须是场景库规范名，同一物理场景不因人物走到门口/桌边而改名。scene_id 按 scene_outline 场次使用 SC01、SC02……；禁止整集复用同一个 scene_id。
 8. beat 必须写清人物或作用对象跨越可见性/空间边界的原因、起始条件与完成条件。
 9. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只有 action_continuation 表示承接上一镜同一动作尾状态，其他同场景切换不得冒充动作连续。
 10. story_event_id 只写剧本事件 E*；主线节拍写 spine_beat_ids（S*）；禁止把 S* 写入 story_event_id。

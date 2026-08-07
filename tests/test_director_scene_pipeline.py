@@ -626,3 +626,62 @@ def test_scene_batches_follow_contiguous_scene_name_and_time_not_stale_id() -> N
     assert [shot.scene_id for shot in outline.shots] == [
         "SC01", "SC01", "SC02", "SC02", "SC03",
     ]
+
+
+def test_extra_physical_scene_does_not_shift_screenplay_context_contracts() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="Home",
+                story_function="Opening",
+                summary="The story starts at home.",
+                context_requirements=["Establish the family relationship."],
+            ),
+            ScriptScene(
+                scene_no=2,
+                scene_heading="School",
+                story_function="Development",
+                summary="The character reaches school.",
+                context_requirements=["Establish the school destination."],
+            ),
+        ],
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_name="Home",
+                scene_time="night",
+                beat="Opening at home.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_name="Bedroom",
+                scene_time="night",
+                beat="An extra physical subscene.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=3,
+                scene_name="School",
+                scene_time="day",
+                beat="Arrival at school.",
+            ),
+        ],
+    )
+
+    stages.ensure_storyboard_scene_contexts(outline, screenplay)
+
+    assert [
+        [
+            requirement.description
+            for requirement in context.context_requirements
+        ]
+        for context in outline.scene_contexts
+    ] == [
+        ["Establish the family relationship."],
+        [],
+        ["Establish the school destination."],
+    ]
