@@ -580,13 +580,27 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
     conn.commit()
     _patch_settings(monkeypatch, conn)
 
+    prompts: list[str] = []
+
     async def fake_chat(_messages, **_kwargs):
         prompt = _messages[0]["content"]
+        prompts.append(prompt)
+        phase = _kwargs["call_meta"]["discovery_phase"]
+        if phase == "current":
+            assert "绿袍男子摘下斗笠" not in prompt
+            return json.dumps({
+                "characters": [{
+                    "source_label": "绿袍男子",
+                    "canonical_name": "",
+                    "identity_kind": "functional",
+                    "kind": "onscreen",
+                    "evidence": "绿袍男子拦路呵斥",
+                    "future_evidence": "",
+                }],
+            }, ensure_ascii=False)
         assert "绿袍男子摘下斗笠" in prompt
         assert "丁力再次现身" in prompt
         assert "超出十章" not in prompt
-        assert "姓氏加师兄/师姐" in prompt
-        assert "这类情况必须判为 functional" in prompt
         return json.dumps({
             "characters": [{
                 "source_label": "绿袍男子",
@@ -621,6 +635,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
     ))
 
     assert ensured == ["丁力"]
+    assert len(prompts) == 2
     assert result["future_context_label"] == "第 31-40 章（仅姓名消歧）"
     assert result["resolutions"] == [{
         "source_label": "绿袍男子",
@@ -643,7 +658,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     )
     future_text = (
         "前批章节暂无身份线索。"
-        + "甲" * portraits.CAST_DISCOVERY_FUTURE_BATCH_BUDGET
+        + "甲" * (portraits.CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET * 2)
         + "青衣人摘下面具，萧炎这才认出他就是丁力。"
     )
     prompts: list[str] = []
@@ -651,7 +666,8 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     async def fake_chat(messages, **_kwargs):
         prompt = messages[0]["content"]
         prompts.append(prompt)
-        if "他就是丁力" in prompt:
+        if _kwargs["call_meta"]["discovery_phase"] == "future_identity":
+            assert "前批章节暂无身份线索" not in prompt
             return json.dumps({"characters": [{
                 "source_label": "青衣人",
                 "canonical_name": "丁力",
@@ -678,7 +694,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
         future_label="第 31-40 章",
     ))
 
-    assert len(prompts) >= 2
+    assert len(prompts) == 2
     assert "他就是丁力" in prompts[-1]
     assert [(item["source_label"], item["name"], item["identity_kind"]) for item in candidates] == [
         ("青衣人", "丁力", "named"),
@@ -829,6 +845,55 @@ def test_baseline_audit_uses_model_to_classify_arbitrary_descriptive_identity(mo
         "萧炎来到山门。", bible, 21, draft_text=draft,
     ))
 
+    assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [
+        ("紫甲女子", "functional"),
+    ]
+
+
+def test_baseline_audit_sends_typed_identity_projection_only(monkeypatch) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="萧炎", role="主角",
+            appearance_canonical="黑发少年，玄色劲装，目光坚定，身形修长，腰佩火纹玉佩",
+        )],
+    )
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompt = messages[0]["content"]
+        prompts.append(prompt)
+        assert _kwargs["call_meta"]["discovery_phase"] == "current"
+        assert "SOURCE_BODY_MARKER" not in prompt
+        assert "SCRIPT_ACTION_MARKER" not in prompt
+        assert "紫甲女子" in prompt
+        return json.dumps({"characters": [{
+            "source_label": "紫甲女子",
+            "canonical_name": "",
+            "identity_kind": "functional",
+            "kind": "onscreen",
+            "evidence": "类型合同中的场次人物",
+            "future_evidence": "",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    draft = EpisodeScreenplay(
+        episode_no=21,
+        scene_outline=[ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】日 / 山门",
+            story_function="SCRIPT_ACTION_MARKER",
+            characters=["萧炎", "紫甲女子"],
+            summary="SCRIPT_ACTION_MARKER",
+        )],
+        full_script_text="【场1】日 / 山门\nSCRIPT_ACTION_MARKER",
+    ).model_dump_json()
+
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "SOURCE_BODY_MARKER", bible, 21, draft_text=draft,
+    ))
+
+    assert len(prompts) == 1
     assert [(item["source_label"], item["identity_kind"]) for item in candidates] == [
         ("紫甲女子", "functional"),
     ]
@@ -1033,12 +1098,170 @@ def test_voice_alias_is_normalized_only_from_unambiguous_ledger_identity() -> No
         "source_label": "V-WYC",
         "canonical_name": "王有材",
         "resolution": "voice_alias_from_ledger",
+    }, {
+        "source_label": "V-AMBIGUOUS",
+        "canonical_name": "",
+        "resolution": "non_voice_carrier_removed",
     }]
     assert script.voice_bible[0].speaker_id == "孟浩"
     assert script.information_ledger[0].speaker_id == "孟浩"
     assert script.voice_bible[1].speaker_id == "王有材"
     assert script.information_ledger[1].speaker_id == "王有材"
-    assert script.voice_bible[2].speaker_id == "V-AMBIGUOUS"
+    assert len(script.voice_bible) == 2
+    assert script.information_ledger[2].speaker_id is None
+
+
+def test_voice_normalization_removes_only_unreferenced_unbound_entries() -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="孟浩",
+            role="主角",
+            appearance_canonical="清瘦书生，青色长衫，目光坚定",
+        )],
+    )
+    script = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=NarrativeContinuityPlan(scope_id="episode-1"),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="门外来客",
+            turns=[KeyDialogueTurn(
+                speaker="门外来客",
+                line="请开门。",
+                source_text="请开门。",
+            )],
+        )],
+        voice_bible=[
+            VoiceCanonical(
+                speaker_id="门外来客",
+                voice_canonical="门外传来的低沉人声",
+            ),
+            VoiceCanonical(
+                speaker_id="未引用声源",
+                voice_canonical="短促的非语言声响",
+                role_type="sound_effect",
+            ),
+        ],
+    )
+
+    changes = portraits.normalize_screenplay_voice_ids(script, bible)
+
+    assert [voice.speaker_id for voice in script.voice_bible] == ["门外来客"]
+    assert changes == [{
+        "source_label": "未引用声源",
+        "canonical_name": "",
+        "resolution": "unreferenced_voice_removed",
+    }]
+
+
+def test_voice_normalization_projects_non_voice_delivery_out_of_speaker_fields() -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="孟浩",
+            role="主角",
+            appearance_canonical="清瘦书生，青色长衫，目光坚定",
+        )],
+    )
+    script = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=NarrativeContinuityPlan(scope_id="episode-1"),
+        full_script_text="未绑定声源：当——\n门外来客：请开门。",
+        key_lines=["未绑定声源：当——", "门外来客：请开门。"],
+        information_ledger=[InformationItem(
+            info_id="I1",
+            content="门外传来一声钟响。",
+            delivery_owner="ambient_sound",
+            speaker_id="未绑定声源",
+            exact_text="当——",
+        )],
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="门外动静",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="未绑定声源",
+                    line="当——",
+                    source_text="当——",
+                ),
+                KeyDialogueTurn(
+                    speaker="门外来客",
+                    line="请开门。",
+                    source_text="请开门。",
+                ),
+            ],
+        )],
+        voice_bible=[
+            VoiceCanonical(
+                speaker_id="未绑定声源",
+                voice_canonical="短促的非语言声响",
+                role_type="sound_effect",
+            ),
+            VoiceCanonical(
+                speaker_id="门外来客",
+                voice_canonical="门外传来的低沉人声",
+            ),
+        ],
+    )
+
+    changes = portraits.normalize_screenplay_voice_ids(script, bible)
+
+    assert script.information_ledger[0].speaker_id is None
+    assert [turn.speaker for turn in script.dialogue_chains[0].turns] == ["门外来客"]
+    assert script.key_lines == ["门外来客：请开门。"]
+    assert script.full_script_text == "【当——】\n门外来客：请开门。"
+    assert [voice.speaker_id for voice in script.voice_bible] == ["门外来客"]
+    assert changes == [{
+        "source_label": "未绑定声源",
+        "canonical_name": "",
+        "resolution": "non_voice_carrier_removed",
+    }]
+
+
+def test_source_identity_contexts_cover_complete_long_source() -> None:
+    source = "甲" * 19 + "\n\n" + "乙" * 17
+
+    chunks = portraits._source_identity_contexts(source, budget=10)
+
+    assert len(chunks) == 4
+    assert "".join(chunks) == source.replace("\n", "")
+
+
+def test_future_identity_keeps_current_display_label() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        scene_outline=[ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】夜 / 山门",
+            story_function="神秘来客阻路",
+            characters=["青衣人"],
+            summary="青衣人挡在门前，没有公开姓名。",
+            source_basis="原文只称青衣人。",
+        )],
+        full_script_text="【场1】夜 / 山门\n青衣人挡在门前。\n青衣人：止步。",
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="阻路",
+            turns=[KeyDialogueTurn(
+                speaker="青衣人",
+                line="止步。",
+                source_text="止步。",
+            )],
+        )],
+    )
+
+    portraits.apply_screenplay_character_resolutions(script, [{
+        "source_label": "青衣人",
+        "canonical_name": "丁力",
+        "resolution": "future_identity",
+    }])
+
+    assert script.scene_outline[0].characters == ["丁力"]
+    assert script.dialogue_chains[0].turns[0].speaker == "丁力"
+    assert "青衣人挡在门前" in script.full_script_text
+    assert "青衣人：止步" in script.full_script_text
+    assert "丁力" not in script.scene_outline[0].summary
 
 
 def test_late_episode_screenplay_auto_adds_character_and_defers_portrait_generation(tmp_path, monkeypatch) -> None:

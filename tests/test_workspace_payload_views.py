@@ -270,6 +270,61 @@ def test_review_detail_omits_oversized_legacy_inputs(monkeypatch) -> None:
     assert review["video_status"] == "adopted"
 
 
+def test_review_detail_projects_mode_specific_input_media(monkeypatch) -> None:
+    conn = _conn()
+    _seed_episode(conn)
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,characters,action_desc,narration,dialogues,
+               transition,continuity_from_prev
+           ) VALUES('upstream','e1',2,5,'medium','static','room','[]',
+                    'action','','[]','cut',0)"""
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               video_path,cost_cny,latency_s,created_at
+           ) VALUES('upstream-v','upstream',1,'prompt','upstream-idem',
+                    'succeeded','/owned/upstream.mp4',1,1,1)"""
+    )
+    conn.execute(
+        "UPDATE shot_versions SET image_inputs=? WHERE id='v1'",
+        (json.dumps({
+            "mode": "FIRST_LAST_FRAME_MODE",
+            "first_frame_path": "/owned/first.jpg",
+            "last_frame_path": "/owned/last.jpg",
+            "boundary_pair_qa": {
+                "first_frame_source": "PREVIOUS_STATIC_TAIL",
+                "last_frame_source": "STATIC_BOUNDARY_ASSET",
+            },
+            "upstream_adopted_video_revision": "upstream-v",
+            "video_input_url": "https://provider.example/signed.mp4",
+        }),),
+    )
+    conn.commit()
+    _patch_storyboard_db(monkeypatch, conn)
+    monkeypatch.setattr(
+        storyboard_ops,
+        "_media_url",
+        lambda path: f"/media/{str(path).rsplit('/', 1)[-1]}" if path else None,
+    )
+
+    review = storyboard_ops.shot_review_detail("s1")
+    inputs = next(
+        version["image_inputs"]
+        for version in review["versions"]
+        if version["id"] == "v1"
+    )
+
+    assert inputs["first_frame_image_url"] == "/media/first.jpg"
+    assert inputs["first_frame_source"] == "PREVIOUS_STATIC_TAIL"
+    assert inputs["last_frame_image_url"] == "/media/last.jpg"
+    assert inputs["last_frame_source"] == "STATIC_BOUNDARY_ASSET"
+    assert inputs["video_input_url"] == "/media/upstream.mp4"
+    assert inputs["video_input_source_revision_id"] == "upstream-v"
+
+
 def test_review_detail_reads_published_artifact_when_write_authority_is_stale(
     monkeypatch,
 ) -> None:

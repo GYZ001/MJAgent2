@@ -1079,17 +1079,27 @@ export default function BiblePage() {
             </button>
           )}
           {p.bible && !generating && (
-            <button
-              className="btn primary"
-              disabled={busy || dirty}
-              title={dirty ? '请先定稿当前人物谱修订' : '先选择角色范围，再预览定妆照费用'}
-              aria-label={busy || dirty
-                ? `选择角色并重新生成定妆照，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
-                : '选择角色并重新生成定妆照；下一步选择范围并预览费用'}
-              onClick={() => void restartRefsWithLatestSettings()}
-            >
-              选择角色并重新生成定妆照
-            </button>
+            <>
+              <button
+                className="btn primary"
+                disabled={busy || dirty}
+                title={dirty ? '请先定稿当前人物谱修订' : '先选择角色范围，再预览定妆照费用'}
+                aria-label={busy || dirty
+                  ? `选择角色并重新生成定妆照，暂不可用：${busy ? '正在处理上一项操作' : '请先定稿当前人物谱修订'}`
+                  : '选择角色并重新生成定妆照；下一步选择范围并预览费用'}
+                onClick={() => void restartRefsWithLatestSettings()}
+              >
+                选择角色并重新生成定妆照
+              </button>
+              <button
+                className="btn"
+                disabled={busy || dirty}
+                title={dirty ? '请先定稿当前人物谱修订' : '重新选择统一画风，并预览人物谱与定妆照费用'}
+                onClick={() => void startBible()}
+              >
+                重新生成人物谱并更换画风
+              </button>
+            </>
           )}
           {p.bible && (p.refs_status === 'failed' || hasRefGaps) && !generating && (
             <>

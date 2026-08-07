@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 
@@ -432,7 +431,7 @@ def test_transient_preflight_failure_is_retried_by_sweeper(
     assert recovered["pipeline_stage"] == "job_queued"
 
 
-def test_orphaned_continuity_wait_degrades_after_timeout(
+def test_orphaned_continuity_wait_requires_repair_without_mode_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
@@ -471,27 +470,29 @@ def test_orphaned_continuity_wait_degrades_after_timeout(
 
     report = worker.reconcile_stalled_video_jobs()
 
-    assert report["continuity_degraded"] == 1
+    assert report["continuity_degraded"] == 0
+    assert report["dependency_repair_required"] == 1
     job = conn.execute(
         "SELECT status,after_shot_id,reason_code,pipeline_stage FROM jobs WHERE id='j2'"
     ).fetchone()
     assert dict(job) == {
-        "status": "queued",
-        "after_shot_id": None,
-        "reason_code": "CONTINUITY_DEGRADED_TIMEOUT",
-        "pipeline_stage": "job_queued",
+        "status": "waiting_human",
+        "after_shot_id": "s1",
+        "reason_code": "VIDEO_DEPENDENCY_REPAIR_REQUIRED",
+        "pipeline_stage": "waiting_human",
     }
     version = conn.execute(
-        "SELECT prompt_text,image_inputs FROM shot_versions WHERE id='v2'"
+        "SELECT prompt_text,image_inputs,status FROM shot_versions WHERE id='v2'"
     ).fetchone()
-    assert version["prompt_text"].startswith("独立首帧安全提示词")
+    assert version["prompt_text"] == "旧连续提示词"
+    assert version["status"] == "waiting_human"
     meta = json.loads(version["image_inputs"])
-    assert meta["continuity_degraded"] is True
-    assert meta["continuity_mode"] == "same_scene_cut"
-    assert meta["after_shot_id"] is None
+    assert "continuity_degraded" not in meta
+    assert meta["continuity_mode"] == "action_continuation"
+    assert meta["after_shot_id"] == "s1"
 
 
-def test_planned_orphan_advances_versioned_fallback_without_rewriting_prompt(
+def test_planned_orphan_keeps_mode_and_requires_dependency_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
@@ -519,17 +520,6 @@ def test_planned_orphan_advances_versioned_fallback_without_rewriting_prompt(
            )"""
     )
     conn.commit()
-    import app.video_plan as video_plan
-
-    monkeypatch.setattr(
-        video_plan,
-        "create_fallback_plan_revision",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            plan_revision=2,
-            mode=SimpleNamespace(value="REFERENCE_IMAGE_MODE"),
-            depends_on_shot_id=None,
-        ),
-    )
     enqueued: list[dict] = []
     monkeypatch.setattr(
         worker,
@@ -539,27 +529,23 @@ def test_planned_orphan_advances_versioned_fallback_without_rewriting_prompt(
 
     report = worker.reconcile_stalled_video_jobs()
 
-    assert report["continuity_degraded"] == 1
+    assert report["continuity_degraded"] == 0
+    assert report["dependency_repair_required"] == 1
     job = conn.execute(
         "SELECT status,reason_code FROM jobs WHERE id='j2'"
     ).fetchone()
     assert dict(job) == {
-        "status": "degraded",
-        "reason_code": "PLANNED_FALLBACK_APPLIED",
+        "status": "waiting_human",
+        "reason_code": "VIDEO_PLAN_DEPENDENCY_REPAIR_REQUIRED",
     }
     version = conn.execute(
         "SELECT prompt_text,status FROM shot_versions WHERE id='v2'"
     ).fetchone()
     assert dict(version) == {
         "prompt_text": "已冻结的计划提示词",
-        "status": "failed",
+        "status": "waiting_human",
     }
-    assert enqueued == [{
-        "shot_id": "s2",
-        "reroll": True,
-        "after_shot_id": None,
-        "dependency_snapshot": {"qualification_version": "q1"},
-    }]
+    assert enqueued == []
 
 
 def test_legacy_jobless_preflight_issue_is_adopted_by_new_state_machine(

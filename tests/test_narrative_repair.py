@@ -9,6 +9,7 @@ from app.narrative_repair import (
     SemanticCandidateAssessment,
     SemanticOutlineOperation,
     SemanticRepairDiagnosis,
+    _focus_operation_errors,
     diagnose_narrative_repair,
     route_narrative_issues,
     validate_semantic_diagnosis,
@@ -146,6 +147,8 @@ async def test_model_diagnosis_compares_open_candidates_without_issue_code_routi
         issues=[issue],
         screenplay=_screenplay(),
         board=_board(),
+        focus_shot_no=1,
+        validated_prefix_end=0,
     )
 
     assert diagnosis.selected_strategy == "repair_current"
@@ -161,9 +164,93 @@ async def test_model_diagnosis_compares_open_candidates_without_issue_code_routi
         "move_outline_shot",
     }
     assert "开放语义意图" in captured["request"]["semantic_intent_contract"]
+    assert captured["request"]["repair_focus"]["focus_shot_no"] == 1
+    assert "未来 brief" in "\n".join(captured["request"]["hard_rules"])
+    transition_contract = captured["request"][
+        "boundary_state_transition_contract"
+    ]
+    assert "必填" in transition_contract["transition_id"]
+    assert "action_phase_handoff" in transition_contract["basis_type"]
+    hard_rules = "\n".join(captured["request"]["hard_rules"])
+    assert "不得输出 from_fact_id" in hard_rules
+    assert "source_fact_id 与 target_fact_id 相同" in hard_rules
     assert captured["meta"]["stage_key"] == "semantic_repair_planner"
 
 
+def test_focus_operation_errors_reject_remote_future_shot() -> None:
+    replacement = StoryboardOutlineShot.model_validate(
+        _settled_followup_shot().model_dump(mode="json")
+    )
+    selected = SemanticCandidateAssessment(
+        strategy="repair_current_and_remote",
+        expected_narrative_gain=0.9,
+        destructive_cost=0.2,
+        satisfies_gap_test=True,
+        passes_marginal_gain_test=True,
+        preserves_invariants=True,
+        outline_operations=[
+            SemanticOutlineOperation(
+                op="repair-focus",
+                executor="replace_outline_shot",
+                target={"shot_no": 6},
+                value=replacement.model_copy(update={"shot_no": 6}),
+            ),
+            SemanticOutlineOperation(
+                op="repair-remote",
+                executor="replace_outline_shot",
+                target={"shot_no": 9},
+                value=replacement.model_copy(update={"shot_no": 9}),
+            ),
+        ],
+    )
+    diagnosis = SemanticRepairDiagnosis(
+        diagnosis_id="NRD-focus",
+        semantic_gap="The current shot needs a local repair.",
+        candidate_assessments=[
+            _assessment("repair_current", gain=0.2, cost=0.1),
+            selected,
+        ],
+        selected_strategy=selected.strategy,
+        selection_reason="The model incorrectly included a remote future shot.",
+    )
+
+    errors = _focus_operation_errors(diagnosis, focus_shot_no=6)
+
+    assert any("禁止跨到远端镜头：[9]" in error for error in errors)
+
+
+def test_focus_operation_errors_resolve_stable_ids_and_insert_positions() -> None:
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot.model_validate(
+                _shot(shot_no=1, shot_id="SH-1").model_dump(mode="json")
+            ),
+            StoryboardOutlineShot.model_validate(
+                _settled_followup_shot(
+                    shot_no=2, shot_id="SH-2",
+                ).model_dump(mode="json")
+            ),
+            StoryboardOutlineShot.model_validate(
+                _settled_followup_shot(
+                    shot_no=3, shot_id="SH-3",
+                ).model_dump(mode="json")
+            ),
+            StoryboardOutlineShot.model_validate(
+                _settled_followup_shot(
+                    shot_no=4, shot_id="SH-4",
+                ).model_dump(mode="json")
+            ),
+        ],
+    )
+    replacement = outline.shots[-1].model_copy(deep=True)
+    selected = SemanticCandidateAssessment(
+        strategy="repair_remote_stable_id",
+        expected_narrative_gain=0.9,
+        destructive_cost=0.2,
+        satisfies_gap_test=True,
+        passes_marginal_gain_test=True,
+        preserves_invariants=True,
         outline_operations=[
             SemanticOutlineOperation(
                 op="replace-remote",
@@ -235,6 +322,43 @@ async def test_provider_failure_pauses_instead_of_substituting_a_fixed_strategy(
 
     monkeypatch.setattr("app.narrative_repair.model_gateway.chat", unavailable)
     issue = Issue(
+        code="SEMANTIC_GAP_OTHER",
+        severity=IssueSeverity.BLOCKER,
+        subject="shot:1",
+        message="An open narrative relation needs semantic diagnosis.",
+        repairable=True,
+    )
+
+    plan = await route_narrative_issues(
+        [issue],
+        episode_id="episode-generic",
+        screenplay=_screenplay(),
+        board=_board(),
+        validated_prefix_end=1,
+    )
+
+    assert plan.issue_codes == ["SEMANTIC_GAP_OTHER"]
+    assert plan.strategy == "waiting_human"
+    assert plan.pause_state == "WAITING_HUMAN"
+    assert plan.reason == "semantic_strategy_not_executable"
+    assert plan.needs_semantic_selection is True
+    assert plan.semantic_diagnosis["selected_strategy"] == (
+        "semantic_diagnosis_needs_review"
+    )
+    assert plan.semantic_diagnosis["execution_verified"] is False
+    assert len(plan.candidates) >= 2
+    assert all(
+        candidate.strategy not in {"redo_suffix", "replan_outline"}
+        for candidate in plan.candidates
+    )
+
+
+def test_open_semantic_operation_requires_a_declared_runtime_executor() -> None:
+    unsupported = SemanticCandidateAssessment(
+        strategy="repair_unmodeled_relation",
+        expected_narrative_gain=0.8,
+        destructive_cost=0.2,
+        satisfies_gap_test=True,
         passes_marginal_gain_test=True,
         preserves_invariants=True,
         outline_operations=[SemanticOutlineOperation(

@@ -89,6 +89,7 @@ def test_concat_uses_completed_real_videos_while_other_shots_are_still_generatin
     tmp_path, monkeypatch,
 ) -> None:
     from app.evidence import media as media_evidence
+    from app import final_edit
 
     conn = _database((1, 2))
     project_root = tmp_path / "projects"
@@ -96,6 +97,7 @@ def test_concat_uses_completed_real_videos_while_other_shots_are_still_generatin
     completed_path.parent.mkdir(parents=True)
     completed_path.write_bytes(b"completed-real-video")
     _version(conn, shot_no=1, path=completed_path, adopted=True)
+    conn.execute("UPDATE shots SET transition='闪白' WHERE id='s2'")
     conn.execute(
         """INSERT INTO shot_versions(
                id,shot_id,version_no,prompt_text,idem_key,status,created_at
@@ -112,6 +114,12 @@ def test_concat_uses_completed_real_videos_while_other_shots_are_still_generatin
     monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
     monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    monkeypatch.setattr(
+        final_edit,
+        "render_episode_final_edit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("partial preview must stay fast")),
+    )
 
     def successful_run(command, **_kwargs):
         if command[0] == "ffprobe":
@@ -134,7 +142,53 @@ def test_concat_uses_completed_real_videos_while_other_shots_are_still_generatin
     assert result["partial"] is True
     assert result["included_shot_nos"] == [1]
     assert result["skipped_shot_nos"] == [2]
+    assert result["final_edit"]["mode"] == "draft_concat"
+    assert result["final_edit"]["skipped_final_edit"] is True
+    assert result["final_edit"]["decision_reason"] == "partial_timeline_fast_preview"
     assert conn.execute("SELECT COUNT(*) FROM shot_versions").fetchone()[0] == 2
+
+
+def test_full_episode_with_real_transition_still_uses_final_edit(tmp_path, monkeypatch) -> None:
+    from app import final_edit
+    from app.evidence import media as media_evidence
+
+    conn = _database((1, 2))
+    project_root = tmp_path / "projects"
+    for shot_no in (1, 2):
+        path = project_root / "p" / "episodes" / "1" / "shots" / f"shot-{shot_no}.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"real-video-{shot_no}".encode())
+        _version(conn, shot_no=shot_no, path=path, adopted=True)
+    conn.execute("UPDATE shots SET transition='闪白' WHERE id='s2'")
+    conn.commit()
+
+    calls: list[list[tuple[int, str, float]]] = []
+
+    def fake_render_episode_final_edit(_conn, _episode_id, piece_specs, destination, _work_dir):
+        calls.append(piece_specs)
+        Path(destination).write_bytes(b"edited-final")
+        return {
+            "ok": True,
+            "prepared_shots": len(piece_specs),
+            "total_duration_s": 10.0,
+            "transitions": [{"edit_type": "dip_white"}],
+        }
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(final_edit, "render_episode_final_edit", fake_render_episode_final_edit)
+
+    result = worker.concatenate_episode("e")
+
+    assert calls == [[(1, str(project_root / "p" / "episodes" / "1" / "shots" / "shot-1.mp4"), 1.0),
+                      (2, str(project_root / "p" / "episodes" / "1" / "shots" / "shot-2.mp4"), 1.0)]]
+    assert result["partial"] is False
+    assert result["final_edit"]["mode"] == "final_edit"
+    assert result["final_edit"]["decision_reason"] == "enhanced_transition"
+    assert (project_root / "p" / "episodes" / "1" / "final" / "episode.mp4").read_bytes() == b"edited-final"
 
 
 def test_episode_without_adoption_selects_existing_model_videos_before_mix(tmp_path, monkeypatch) -> None:

@@ -34,6 +34,8 @@ _NARRATIVE_PRESENTATION_EDIT_FIELDS = frozenset({
     "scene_setting", "characters", "action_desc", "first_frame_desc",
     "last_frame_desc", "source_excerpt", "dialogues", "audio_timeline",
     "transition", "camera_angle", "spatial_anchor", "risk_tags",
+    "context_requirement_ids", "resulting_change", "readability_focus",
+    "camera_motivation", "repeat_of_shot_id", "repeat_gain",
 })
 
 
@@ -138,6 +140,7 @@ def _narrative_calibration_summary(episode: dict) -> dict:
         ),
         "artifact_id": authority.artifact_id,
         "bound_artifact_id": bound_artifact_id or None,
+        "authority_mode": authority.authority_mode,
         "model_pass_threshold": authority.model_pass_threshold,
         "calibration_score": authority.report.calibration_score,
         "sample_summary": authority.report.sample_summary,
@@ -701,6 +704,8 @@ def _ensure_current_storyboard_shot_artifacts(
     conn,
     episode_id: str,
     board: Storyboard,
+    *,
+    commit: bool = True,
 ):
     """Bind every current shot to immutable evidence for its current number and content."""
     rows = conn.execute(
@@ -723,16 +728,6 @@ def _ensure_current_storyboard_shot_artifacts(
         ):
             continue
 
-        artifact = evidence_repository.create_artifact(EvidenceArtifact(
-            type="storyboard_shot",
-            scope_type="storyboard_checkpoint",
-            scope_id=f"{episode_id}:{shot.shot_no}",
-            status="candidate",
-            trust_level="T1",
-            content=content,
-            parent_artifact_ids=[str(current_id)] if current_id else [],
-            contract_version=contract_version,
-        ))
         evaluation = Evaluation(
             evaluator_type="deterministic",
             evaluator_name="storyboard_projection_rebind",
@@ -747,14 +742,33 @@ def _ensure_current_storyboard_shot_artifacts(
                 "reason": "current shot projection and immutable evidence were realigned",
             },
         )
-        artifact = evidence_repository.commit_artifact(
-            None, artifact["id"], [evaluation],
+        artifact_input = EvidenceArtifact(
+            type="storyboard_shot",
+            scope_type="storyboard_checkpoint",
+            scope_id=f"{episode_id}:{shot.shot_no}",
+            status="candidate",
+            trust_level="T1",
+            content=content,
+            parent_artifact_ids=[str(current_id)] if current_id else [],
+            contract_version=contract_version,
         )
+        if commit:
+            artifact = evidence_repository.create_artifact(artifact_input)
+            artifact = evidence_repository.commit_artifact(
+                None, artifact["id"], [evaluation],
+            )
+        else:
+            artifact = evidence_repository.create_and_commit_artifact_in_transaction(
+                conn,
+                artifact_input,
+                [evaluation],
+            )
         conn.execute(
             "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
             (artifact["id"], row["id"]),
         )
-        conn.commit()
+        if commit:
+            conn.commit()
 
     return conn.execute(
         "SELECT id,shot_no,source_excerpt,storyboard_artifact_id FROM shots "
@@ -879,8 +893,10 @@ def _finalize_storyboard_evidence(
                 report=narrative_review_report,
                 artifact_ids=list(narrative_review_artifact_ids or []),
             )
-        except Exception as exc:  # noqa: BLE001 - persisted release-gate boundary
-            raise RuntimeError(f"分镜冷观众审读未通过或已因分镜变化失效：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"分镜冷观众审读未通过或已因分镜变化失效：{exc}"
+            ) from exc
         try:
             from app.narrative_calibration import (
                 assert_report_meets_current_calibration,
@@ -889,8 +905,14 @@ def _finalize_storyboard_evidence(
             calibration_authority = assert_report_meets_current_calibration(
                 narrative_review_report,
             )
-        except Exception as exc:  # noqa: BLE001 - human calibration release gate
-            raise RuntimeError(f"真人一次观看校准未就绪，禁止发布叙事分镜：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"真人一次观看校准未就绪，禁止发布叙事分镜：{exc}"
+            ) from exc
+        if calibration_authority.authority_mode != "human_calibration":
+            raise RuntimeError(
+                "真人一次观看校准未就绪，禁止用 AI 模拟或豁免替代真人观察"
+            )
     if _sync_storyboard_scene_bindings(conn, episode_id, board):
         # 这是由当前门禁确定的派生外键修复，即使后续证据发布失败也应保留，
         # 避免下次重试继续读取已经证伪的历史场景绑定。
@@ -908,7 +930,9 @@ def _finalize_storyboard_evidence(
         except Exception as exc:  # noqa: BLE001 - evidence finding is score-only at publish
             findings.append(f"镜头来源证据未绑定：{exc}")
     if narrative_authority and findings:
-        raise RuntimeError("分镜来源证据硬门禁未通过：" + "；".join(findings[:8]))
+        raise RuntimeError(
+            "分镜来源证据硬门禁未通过：" + "；".join(findings[:8])
+        )
     shot_parent_ids: list[str] = []
     for row in shot_rows:
         artifact_id = row["storyboard_artifact_id"]
@@ -994,9 +1018,15 @@ def _finalize_storyboard_evidence(
             retry_eligible=False,
             score=100,
             evidence={
-                "narrative_review_report": narrative_review_report.model_dump(mode="json"),
-                "narrative_review_artifact_ids": list(narrative_review_artifact_ids or []),
-                "narrative_calibration_artifact_id": calibration_authority.artifact_id,
+                "narrative_review_report": narrative_review_report.model_dump(
+                    mode="json"
+                ),
+                "narrative_review_artifact_ids": list(
+                    narrative_review_artifact_ids or []
+                ),
+                "narrative_calibration_artifact_id": (
+                    calibration_authority.artifact_id
+                ),
                 "human_calibrated_model_threshold": (
                     calibration_authority.model_pass_threshold
                 ),
@@ -1007,6 +1037,7 @@ def _finalize_storyboard_evidence(
         )
     from app.production.publish import publish_storyboard
     from app.production.revision import (
+        bind_unpublished_revision_metadata,
         ensure_production_revision,
         mark_baseline_generated,
         update_working_artifact,
@@ -1028,6 +1059,15 @@ def _finalize_storyboard_evidence(
             baseline_artifact_id=artifact["id"],
             working_artifact_id=artifact["id"],
         )
+    revision = bind_unpublished_revision_metadata(
+        revision.id,
+        input_fingerprint=(
+            revision.input_fingerprint
+            or evidence_repository.content_hash(board.model_dump(mode="json"))
+        ),
+        contract_version=contract_version,
+        qa_profile_version="storyboard-full-gate-2",
+    )
     eval_rows = conn.execute(
         "SELECT id FROM evaluations WHERE artifact_id=? ORDER BY created_at",
         (artifact["id"],),
@@ -1144,6 +1184,84 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
     return (persisted_total, to_total, reason)
 
 
+async def _prepare_storyboard_assets_background(episode_id: str) -> None:
+    """Fill portrait/scene assets without blocking screenplay-to-storyboard text work."""
+    conn = get_conn()
+    ep = conn.execute(
+        "SELECT * FROM episodes WHERE id=?", (episode_id,),
+    ).fetchone()
+    if not ep or not ep["screenplay_json"]:
+        return
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
+    ).fetchone()
+    bible = _project_bible_or_placeholder(project)
+    screenplay = _load_screenplay(ep)
+    if screenplay is None:
+        return
+    try:
+        from app.portraits import ensure_cards_for_screenplay
+
+        portrait_result = await ensure_cards_for_screenplay(
+            ep["project_id"],
+            ep["episode_no"],
+            screenplay,
+            bible,
+        )
+        if portrait_result.get("blocking_errors"):
+            raise StageError(
+                "人物资产准备",
+                list(portrait_result["blocking_errors"]),
+            )
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
+        ).fetchone()
+        bible = _project_bible_or_placeholder(project)
+
+        from app.scenes import ensure_scenes_for_storyboard
+
+        scene_result = await ensure_scenes_for_storyboard(
+            ep["project_id"],
+            ep["episode_no"],
+            screenplay,
+            bible,
+        )
+        if scene_result.get("blocking_errors"):
+            raise StageError(
+                "场景资产准备",
+                list(scene_result["blocking_errors"]),
+            )
+        conn.execute(
+            "UPDATE episodes SET storyboard_warning=NULL WHERE id=? "
+            "AND storyboard_warning LIKE '资产异步准备:%'",
+            (episode_id,),
+        )
+        conn.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - text work remains independently recoverable
+        public = errors.record_and_format(
+            exc,
+            action="storyboard_assets_background",
+            context={
+                "episode_id": episode_id,
+                "project_id": ep["project_id"],
+            },
+        )
+        conn.execute(
+            "UPDATE episodes SET storyboard_warning=? WHERE id=?",
+            (
+                (
+                    "资产异步准备: 人物或场景参考资产尚未完整就绪；"
+                    "分镜文本不受影响，视频提交前会继续补齐。"
+                    + public
+                )[:800],
+                episode_id,
+            ),
+        )
+        conn.commit()
+
+
 async def _storyboard_task(
     episode_id: str,
     *,
@@ -1184,106 +1302,246 @@ async def _storyboard_task(
             and ep["storyboard_completion_certificate_id"]
         )
         if resume and published_storyboard_authority:
-            raise StageError(
-                "分镜脚本",
-                [
-                    "当前叙事分镜已原子发布，不能在正式 shots 上原地续跑；"
-                    "请创建语义修订候选，通过整板验证与冷观众盲审后重新发布"
-                ],
+            rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+            board = _board_from_shot_rows(rows, ep["episode_no"])
+            from app.production.certificate import (
+                verify_completion_certificate,
             )
+            from app.narrative import storyboard_authority_projection
+
+            published_artifact = evidence_repository.get_artifact(
+                str(ep["published_storyboard_artifact_id"])
+            )
+            if published_artifact is None:
+                raise StageError("分镜脚本", ["当前发布分镜 Artifact 已缺失"])
+            published_board = Storyboard.model_validate(
+                published_artifact.get("content") or {}
+            )
+            verify_completion_certificate(
+                str(ep["storyboard_completion_certificate_id"]),
+                expected_kind="storyboard",
+                expected_scope_id=episode_id,
+                expected_artifact_id=str(ep["published_storyboard_artifact_id"]),
+                expected_production_revision_id=str(
+                    ep["storyboard_production_revision_id"] or ""
+                ),
+                allow_consumed=True,
+                allow_stale_artifact_for_revision=True,
+            )
+            projection_restored = bool(
+                storyboard_authority_projection(board)
+                != storyboard_authority_projection(published_board)
+            )
+            if projection_restored:
+                if ep["status"] in {"confirmed", "generating", "done", "mixed"}:
+                    raise StageError(
+                        "分镜脚本",
+                        ["已确认分镜投影与证书漂移，禁止自动覆盖，请先停止下游"],
+                    )
+                if len(rows) != len(published_board.shots):
+                    raise StageError(
+                        "分镜脚本",
+                        ["当前 shots 行数与已签证 Storyboard Artifact 不一致"],
+                    )
+                from app.storyboard_supervisor import _write_shot_fields
+
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for row, shot in zip(rows, published_board.shots):
+                        _write_shot_fields(
+                            conn,
+                            str(row["id"]),
+                            shot,
+                            row["storyboard_artifact_id"],
+                            narrative_authority=True,
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                rows = conn.execute(
+                    "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                    (episode_id,),
+                ).fetchall()
+                board = _board_from_shot_rows(rows, ep["episode_no"])
+                _preflight_event(
+                    "STORYBOARD_PUBLISHED_PROJECTION_RESTORED",
+                    "已从签证 Artifact 恢复 mutable shots 正式投影",
+                    payload={
+                        "artifact_id": ep["published_storyboard_artifact_id"],
+                        "shot_count": len(rows),
+                    },
+                    severity="warning",
+                )
+
+            # The immutable baseline was verified above with its exact
+            # artifact, revision and evaluation set. A stale baseline may
+            # seed an isolated revision, but it no longer authorizes
+            # downstream work; the replacement publish issues a new
+            # completion certificate.
+            p = conn.execute(
+                "SELECT * FROM projects WHERE id=?",
+                (ep["project_id"],),
+            ).fetchone()
+            bible = _project_bible_or_placeholder(p)
+            from app.identity_contracts import (
+                canonicalize_storyboard_operational_identities,
+            )
+
+            identity_repairs = canonicalize_storyboard_operational_identities(
+                board,
+                bible,
+                screenplay,
+            )
+            if not identity_repairs:
+                from app.storyboard_supervisor import (
+                    _repair_is_pending,
+                    load_latest_checkpoint,
+                    run_storyboard_supervisor,
+                )
+
+                repair_checkpoint = load_latest_checkpoint(episode_id)
+                if (
+                    repair_checkpoint is not None
+                    and _repair_is_pending(repair_checkpoint)
+                    and ep["status"] in {"scripted", "scripting"}
+                ):
+                    _preflight_event(
+                        "STORYBOARD_PUBLISHED_REPAIR_CANDIDATE_STARTED",
+                        "已基于发布分镜建立隔离修订候选，正式投影保持不变",
+                        payload={
+                            "artifact_id": ep["published_storyboard_artifact_id"],
+                            "window_start": (
+                                repair_checkpoint.last_repair or {}
+                            ).get("window_start"),
+                            "window_end": (
+                                repair_checkpoint.last_repair or {}
+                            ).get("window_end"),
+                        },
+                    )
+                    return await run_storyboard_supervisor(
+                        episode_id,
+                        resume=True,
+                        run_id=run_id,
+                        preflight_done=True,
+                        new_activation=False,
+                    )
+            if not identity_repairs and projection_restored:
+                conn.execute(
+                    "UPDATE episodes SET status='scripted',script_error=NULL,"
+                    "storyboard_warning=NULL WHERE id=?",
+                    (episode_id,),
+                )
+                conn.commit()
+                from app.storyboard_supervisor import load_latest_checkpoint
+
+                return load_latest_checkpoint(episode_id)
+            if not identity_repairs or ep["status"] in {
+                "confirmed", "generating", "done", "mixed",
+            }:
+                raise StageError(
+                    "分镜脚本",
+                    [
+                        "当前叙事分镜已原子发布，不能在正式 shots 上原地续跑；"
+                        "请创建语义修订候选并重新发布"
+                    ],
+                )
+            old_artifact_id = str(ep["published_storyboard_artifact_id"])
+            old_revision_id = str(ep["storyboard_production_revision_id"] or "")
+            stamp = now()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if old_revision_id:
+                    conn.execute(
+                        """UPDATE production_revisions
+                              SET status='superseded',updated_at=?
+                            WHERE id=? AND status='published'
+                              AND published_artifact_id=?""",
+                        (stamp, old_revision_id, old_artifact_id),
+                    )
+                conn.execute(
+                    """UPDATE artifacts
+                          SET status='superseded',
+                              stale_reason='deterministic_identity_projection_rebind'
+                        WHERE id=? AND status IN ('validated','approved')""",
+                    (old_artifact_id,),
+                )
+                episode_update = conn.execute(
+                    """UPDATE episodes
+                          SET storyboard_artifact_id=NULL,
+                              working_storyboard_artifact_id=NULL,
+                              published_storyboard_artifact_id=NULL,
+                              storyboard_completion_certificate_id=NULL,
+                              storyboard_production_revision_id=NULL,
+                              narrative_status='needs_review',
+                              narrative_review_artifact_id=NULL,
+                              narrative_calibration_artifact_id=NULL
+                        WHERE id=? AND status IN ('scripted','scripting')
+                          AND published_storyboard_artifact_id=?
+                          AND storyboard_completion_certificate_id=?""",
+                    (
+                        episode_id,
+                        old_artifact_id,
+                        ep["storyboard_completion_certificate_id"],
+                    ),
+                )
+                if episode_update.rowcount != 1:
+                    raise RuntimeError("分镜身份修订撤下旧发布指针发生并发冲突")
+                from app.storyboard_supervisor import _write_shot_fields
+
+                for row, shot in zip(rows, board.shots):
+                    _write_shot_fields(
+                        conn,
+                        str(row["id"]),
+                        shot,
+                        None,
+                        narrative_authority=True,
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            _ensure_current_storyboard_shot_artifacts(
+                conn,
+                episode_id,
+                board,
+            )
+            conn.commit()
+            _preflight_event(
+                "STORYBOARD_IDENTITY_PROJECTION_REVISION_CREATED",
+                "已撤下未确认旧版并创建确定性身份修订工作投影",
+                payload={
+                    "old_artifact_id": old_artifact_id,
+                    "old_revision_id": old_revision_id,
+                    "repairs": identity_repairs,
+                },
+            )
+            ep = conn.execute(
+                "SELECT * FROM episodes WHERE id=?",
+                (episode_id,),
+            ).fetchone()
+            published_storyboard_authority = False
         conn.execute("UPDATE episodes SET status='scripting', script_error=NULL, storyboard_warning=NULL WHERE id=?", (episode_id,))
         conn.commit()
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
-        # 定妆照按集反应式维护（在分镜展开前）
-        _preflight_event(
-            "STORYBOARD_PREFLIGHT_PORTRAITS_STARTED",
-            "开始预检人物定妆：检查外观漂移与本集新增角色",
-        )
-        from app.portraits import ensure_cards_for_screenplay
-        disc = await ensure_cards_for_screenplay(
-            ep["project_id"], ep["episode_no"], screenplay, bible,
-        )
-        redrawn_names = [item.get("name") for item in (disc.get("redrawn") or []) if item.get("name")]
-        added_names = [item.get("name") for item in (disc.get("added") or []) if item.get("name")]
-        if redrawn_names or added_names:
-            summary_parts: list[str] = []
-            if added_names:
-                summary_parts.append(f"新增定妆 {len(added_names)} 位（{'、'.join(added_names)}）")
-            if redrawn_names:
-                summary_parts.append(f"漂移重绘 {len(redrawn_names)} 位（{'、'.join(redrawn_names)}）")
-            summary = "；".join(summary_parts)
-        else:
-            summary = "无角色需要重绘或新增"
-        _preflight_event(
-            "STORYBOARD_PREFLIGHT_PORTRAITS_FINISHED",
-            f"人物定妆预检完成：{summary}",
-            payload={"added": added_names, "redrawn": redrawn_names,
-                     "warnings": len(disc.get("errors") or [])},
-        )
-        if disc.get("blocking_errors"):
-            raise StageError("新人物发现", list(disc["blocking_errors"]))
-        for warning in disc.get("errors") or []:
-            errors.log_error(
-                None,
-                action="storyboard_character_maintenance_warning",
-                context={
-                    "project_id": ep["project_id"],
-                    "episode_id": episode_id,
-                    "episode_no": ep["episode_no"],
-                },
-                message=warning,
+        # Text identities were hard-gated during screenplay production. Image
+        # packages now start immediately but no longer serialize storyboard text.
+        if not task_registry.active("storyboard_assets", episode_id):
+            task_registry.spawn(
+                "storyboard_assets",
+                episode_id,
+                _prepare_storyboard_assets_background(episode_id),
+                project_id=ep["project_id"],
             )
-        if disc.get("added") or disc.get("redrawn"):
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-            bible = _project_bible_or_placeholder(p)
         _preflight_event(
-            "STORYBOARD_PREFLIGHT_SCENES_STARTED",
-            "开始预检场景：自动建库并等待场景图落盘",
+            "STORYBOARD_ASSETS_SCHEDULED",
+            "人物与场景资产已并行准备；分镜文本立即继续",
+            payload={"blocking": False},
         )
-        from app.scenes import ensure_scenes_for_storyboard
-        sdisc = await ensure_scenes_for_storyboard(
-            ep["project_id"], ep["episode_no"], screenplay, bible,
-        )
-        sc_added_names = [item.get("name") for item in (sdisc.get("added") or []) if item.get("name")]
-        sc_evolved_names = [item.get("name") for item in (sdisc.get("evolved") or []) if item.get("name")]
-        if sc_added_names or sc_evolved_names:
-            summary_parts: list[str] = []
-            if sc_added_names:
-                summary_parts.append(f"新建场景 {len(sc_added_names)} 个（{'、'.join(sc_added_names)}）")
-            if sc_evolved_names:
-                summary_parts.append(f"状态演进 {len(sc_evolved_names)} 个（{'、'.join(sc_evolved_names)}）")
-            scene_summary = "；".join(summary_parts)
-        else:
-            scene_summary = "本集无新场景，也未发生场景永久变化"
-        _preflight_event(
-            "STORYBOARD_PREFLIGHT_SCENES_FINISHED",
-            f"场景预检完成：{scene_summary}",
-            payload={"added": sc_added_names, "evolved": sc_evolved_names,
-                     "warnings": len(sdisc.get("errors") or [])},
-        )
-        if sdisc.get("blocking_errors"):
-            raise StageError(
-                "场景图准备",
-                [
-                    "相关场景图仍在自动准备，未使用其它场景替代；可稍后继续分镜",
-                    *list(sdisc["blocking_errors"]),
-                ],
-            )
-        for warning in sdisc.get("errors") or []:
-            errors.log_error(
-                None,
-                action="storyboard_scene_maintenance_warning",
-                context={
-                    "project_id": ep["project_id"],
-                    "episode_id": episode_id,
-                    "episode_no": ep["episode_no"],
-                },
-                message=warning,
-            )
-        # 场景自动建库/出图会推进 bible 版本；分镜 prompt 必须使用最新本集场景集合。
-        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = _project_bible_or_placeholder(p)
 
         # 恢复旧 checkpoint 时先把模型产生的引号漂移/拼接式证据收敛为授权原文中的
         # 连续片段。严格匹配不足的内容保持未解决，仍由确认门禁拦截。
@@ -1308,7 +1566,7 @@ async def _storyboard_task(
 
         _preflight_event(
             "STORYBOARD_PREFLIGHT_FINISHED",
-            "分镜前置资产就绪，交由分镜 Supervisor 展开生成",
+            "剧本身份合同已就绪，资产异步准备，交由分镜 Supervisor 展开生成",
         )
 
         # 集级 Supervisor：大纲 → 逐镜 → 整集校验 → 修复，完成后等待人工确认。
@@ -1729,6 +1987,8 @@ def _storyboard_generation_is_live(ep: dict) -> bool:
         run_id = None
     if not run_id:
         return False
+    if str(run_id).startswith("starting:"):
+        return True
     from app.evidence import repository
     run = repository.get_run(run_id)
     return bool(run and run.get("status") in {"CREATED", "RUNNING"})
@@ -1767,23 +2027,30 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
         "script_error": ep["script_error"],
         "active_storyboard_run_id": ep["active_storyboard_run_id"],
     }
+    start_claim = f"starting:{int(now())}:{new_id('storyboard')}"
     cursor = conn.execute(
-        "UPDATE episodes SET status='scripting', script_error=NULL, active_storyboard_run_id=NULL "
-        "WHERE id=? AND screenplay_publish_fence=0",
-        (episode_id,),
+        """UPDATE episodes
+              SET status='scripting', script_error=NULL, active_storyboard_run_id=?
+            WHERE id=? AND screenplay_publish_fence=0
+              AND active_storyboard_run_id IS ?""",
+        (start_claim, episode_id, previous["active_storyboard_run_id"]),
     )
     if cursor.rowcount != 1:
         conn.rollback()
-        raise HTTPException(409, "剧本发布栅栏已生效，未启动分镜")
+        raise HTTPException(409, "分镜状态已被其他请求抢占，请刷新后查看当前任务")
     conn.commit()
     recorder = None
     coro = None
     try:
         recorder = _new_storyboard_recorder(episode_id)
-        conn.execute(
-            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
+        owned = conn.execute(
+            "UPDATE episodes SET active_storyboard_run_id=? "
+            "WHERE id=? AND active_storyboard_run_id=?",
+            (recorder.run_id, episode_id, start_claim),
         )
+        if owned.rowcount != 1:
+            conn.rollback()
+            raise RuntimeError("分镜启动所有权已变化")
         conn.commit()
         coro = _storyboard_guarded_recorded(
             episode_id,
@@ -1798,13 +2065,17 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
     except Exception as exc:
         if coro is not None:
             coro.close()
+        current_owner = recorder.run_id if recorder is not None else start_claim
         conn.execute(
-            "UPDATE episodes SET status=?, script_error=?, active_storyboard_run_id=? WHERE id=?",
+            """UPDATE episodes
+                  SET status=?, script_error=?, active_storyboard_run_id=?
+                WHERE id=? AND active_storyboard_run_id=?""",
             (
                 previous["status"],
                 previous["script_error"],
                 previous["active_storyboard_run_id"],
                 episode_id,
+                current_owner,
             ),
         )
         conn.commit()
@@ -1833,9 +2104,15 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     """内部从 Supervisor Checkpoint / 已验证前缀恢复；对外统一走 POST /storyboard。"""
     body_was_explicit = isinstance(body, dict)
     body = _as_body_dict(body)
+    preview_payload: dict = {}
     if body_was_explicit:
         from app.storyboard_workspace import require_preview
-        require_preview(body.get("preflight_token"), "start:resume", episode_id, consume=True)
+        preview_payload = require_preview(
+            body.get("preflight_token"),
+            "start:resume",
+            episode_id,
+            consume=True,
+        )
     ep = _episode_or_404(episode_id)
     _require_harness_engine(ep["project_id"])
     if ep["screenplay_publish_fence"]:
@@ -1868,6 +2145,19 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     resume_decision = _storyboard_resume_decision(episode_id, dict(ep))
     if not resume_decision["allowed"]:
         raise HTTPException(409, resume_decision["blocking_reason"])
+    prepared_published_repair = False
+    if preview_payload.get("resume_mode") == "repair_existing":
+        from app.storyboard_supervisor import prepare_published_storyboard_repair
+
+        prepare_published_storyboard_repair(
+            episode_id,
+            [
+                str(message)
+                for message in preview_payload.get("current_gate_issues") or []
+                if str(message).strip()
+            ],
+        )
+        prepared_published_repair = True
     parent = conn.execute(
         """SELECT id FROM workflow_runs
            WHERE workflow_type='storyboard' AND scope_type='episode' AND scope_id=?
@@ -1879,13 +2169,17 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
         "script_error": ep["script_error"],
         "active_storyboard_run_id": ep["active_storyboard_run_id"],
     }
+    start_claim = f"starting:{int(now())}:{new_id('storyboard')}"
     cursor = conn.execute(
-        "UPDATE episodes SET status='scripting', script_error=NULL "
-        "WHERE id=? AND screenplay_publish_fence=0", (episode_id,)
+        """UPDATE episodes
+              SET status='scripting', script_error=NULL, active_storyboard_run_id=?
+            WHERE id=? AND screenplay_publish_fence=0
+              AND active_storyboard_run_id IS ?""",
+        (start_claim, episode_id, previous["active_storyboard_run_id"]),
     )
     if cursor.rowcount != 1:
         conn.rollback()
-        raise HTTPException(409, "剧本发布栅栏已生效，未继续分镜")
+        raise HTTPException(409, "分镜状态已被其他请求抢占，请刷新后查看当前任务")
     conn.commit()
     recorder = None
     coro = None
@@ -1896,16 +2190,20 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             parent_run_id=parent["id"] if parent else None,
         )
         # 任务注册前持久化指针，避免 Run 已启动但页面无法轮询或控制。
-        conn.execute(
-            "UPDATE episodes SET active_storyboard_run_id=? WHERE id=?",
-            (recorder.run_id, episode_id),
+        owned = conn.execute(
+            "UPDATE episodes SET active_storyboard_run_id=? "
+            "WHERE id=? AND active_storyboard_run_id=?",
+            (recorder.run_id, episode_id, start_claim),
         )
+        if owned.rowcount != 1:
+            conn.rollback()
+            raise RuntimeError("分镜续跑所有权已变化")
         conn.commit()
         coro = _storyboard_guarded_recorded(
             episode_id,
             recorder,
             resume=True,
-            new_activation=True,
+            new_activation=not prepared_published_repair,
             priority=0,
         )
         task_registry.spawn(
@@ -1923,11 +2221,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
                 previous["status"],
                 previous["script_error"],
                 episode_id,
-                (
-                    recorder.run_id
-                    if recorder is not None
-                    else previous["active_storyboard_run_id"]
-                ),
+                recorder.run_id if recorder is not None else start_claim,
             ),
         )
         conn.commit()
@@ -2114,6 +2408,7 @@ async def cancel_storyboard(episode_id: str, body: dict | None = Body(None)):
             "message": "任务已自然结束或此前已停止；当前状态保持不变",
         }
     await task_registry.cancel_and_wait("storyboard", episode_id)
+    await task_registry.cancel_and_wait("storyboard_assets", episode_id)
     from app.storyboard_workspace import finalize_storyboard_cancellation
     return finalize_storyboard_cancellation(
         episode_id,
@@ -2345,7 +2640,7 @@ async def clear_storyboard_projection(episode_id: str) -> dict:
             conn.execute(
                 """UPDATE artifacts SET status='rejected',
                        stale_reason=COALESCE(stale_reason,'用户已清空分镜工作区')
-                   WHERE type='storyboard_supervisor_checkpoint'
+                   WHERE type IN ('storyboard_supervisor_checkpoint','storyboard_outline')
                      AND scope_type='episode' AND scope_id=?
                      AND status IN ('candidate','validated','approved')""",
                 (episode_id,),
@@ -2816,6 +3111,7 @@ def _storyboard_status_snapshot(
         ]
     gate_errors: list[str] = list(dict.fromkeys(active_repair_errors))
     score_warnings: list[str] = []
+    gate_system_error: str | None = None
     if complete_structure:
         try:
             try:
@@ -2853,7 +3149,9 @@ def _storyboard_status_snapshot(
             # 分镜结构错误。发布证据仍会记录该 finding，但不能让状态快照误报
             # 一个没有镜号、没有修复入口的整集门禁。
         except Exception as exc:  # noqa: BLE001
-            gate_errors.append(f"确认门禁暂不可用：{exc}")
+            gate_system_error = (
+                f"确认门禁执行失败（{type(exc).__name__}）：{exc}"
+            )
     for index, shot in enumerate(shots):
         shot_no = int(shot.get("shot_no") or index + 1)
         localized = [
@@ -2883,7 +3181,13 @@ def _storyboard_status_snapshot(
         or (full_terminal and running)
         or (confirmed and not shots)
     )
-    if invalid:
+    if gate_system_error:
+        state, headline, action = (
+            "syncing",
+            "确认门禁服务异常，暂不可执行写操作",
+            "refresh_status",
+        )
+    elif invalid:
         state, headline, action = "syncing", "状态同步中，暂不可执行高影响操作", "refresh_status"
     elif not screenplay_ready:
         state, headline, action = "no_screenplay", "尚无可用于分镜的剧本", "go_screenplay"
@@ -2944,13 +3248,22 @@ def _storyboard_status_snapshot(
         "hard_gates_passed": bool(not gate_errors and (full_terminal or confirmed)),
         "hard_gate_issue_count": len(gate_errors),
         "hard_gate_issues": gate_errors[:30],
+        "system_error": gate_system_error,
         "feature_flags": feature_flags,
         "confirmed": confirmed,
-        "editable": bool(screenplay_ready and not running and not invalid and not feature_flags["safe_readonly"]),
+        "editable": bool(
+            screenplay_ready
+            and not running
+            and not invalid
+            and not gate_system_error
+            and not feature_flags["safe_readonly"]
+        ),
         "confirmable": bool(full_terminal and not feature_flags["safe_readonly"]),
         "recommended_action": action,
         "write_block_reason": (
             "分镜正在生成或修复，请先暂停" if running
+            else gate_system_error
+            if gate_system_error
             else "状态组合不安全，请刷新" if invalid or state == "syncing"
             else None
         ),
@@ -3131,13 +3444,14 @@ def _structure_operation_plan(episode_id: str, body: dict) -> dict:
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         raise HTTPException(404, "剧集不存在")
+    from app.storyboard_workspace import assert_storyboard_mutation_allowed
+
+    assert_storyboard_mutation_allowed(conn, episode_id)
     screenplay_context = _resolve_storyboard_mutation_screenplay(conn, episode_id)
     if screenplay_context.narrative_authority_required:
         _raise_narrative_semantic_mutation_required(
             operation=str(body.get("operation") or "structure_edit"),
         )
-    if ep["status"] == "scripting":
-        raise HTTPException(409, "分镜运行中不能调整镜头结构，请先暂停")
     rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
     ).fetchall()
@@ -3226,7 +3540,25 @@ def _set_row_final_contract(conn, shot_id: str, final: bool) -> None:
 
 @router.post("/episodes/{episode_id}/storyboard/structure")
 def apply_storyboard_structure(episode_id: str, body: dict):
-    from app.storyboard_workspace import consume_preview, require_preview, source_binding_for_shot
+    conn = get_conn()
+    try:
+        return _apply_storyboard_structure_transaction(episode_id, body)
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
+    from app.artifacts import (
+        flush_media_cleanup_outbox,
+        stage_shot_artifact_cleanup,
+    )
+    from app.storyboard_workspace import (
+        assert_storyboard_mutation_allowed,
+        require_preview,
+        source_binding_for_shot,
+    )
 
     preview = require_preview(
         body.get("preview_token"), "structure", episode_id,
@@ -3242,9 +3574,25 @@ def apply_storyboard_structure(episode_id: str, body: dict):
         if value != preview.get(key):
             raise HTTPException(409, "结构操作与已批准预览不一致，请重新预览")
     conn = get_conn()
+    conn.execute("BEGIN IMMEDIATE")
+    assert_storyboard_mutation_allowed(conn, episode_id)
+    require_preview(
+        body.get("preview_token"),
+        "structure",
+        episode_id,
+        shot_id=str(body.get("shot_id") or ""),
+        consume=True,
+    )
     rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
     ).fetchall()
+    cleanup_outbox_ids: list[str] = []
+    invalidated = 0
+    for row in rows:
+        cleanup = stage_shot_artifact_cleanup(conn, str(row["id"]))
+        invalidated += int(cleanup.get("videos", 0)) + int(cleanup.get("references", 0))
+        if cleanup.get("outbox_id"):
+            cleanup_outbox_ids.append(str(cleanup["outbox_id"]))
     prior_shot_artifact_ids = [
         str(row["storyboard_artifact_id"])
         for row in rows
@@ -3377,17 +3725,15 @@ def apply_storyboard_structure(episode_id: str, body: dict):
         f"分镜结构已执行 {operation}，旧叙事审读失效",
         upstream_artifact_ids=prior_shot_artifact_ids,
     )
-    conn.commit()
     _ensure_current_storyboard_shot_artifacts(
         conn,
         episode_id,
         _board_from_shot_rows(current_rows, int(ep["episode_no"])),
+        commit=False,
     )
-    invalidated = 0
-    for item_id in ordered_ids:
-        cleared = worker.clear_shot_artifacts(item_id) or {}
-        invalidated += int(cleared.get("videos", 0)) + int(cleared.get("references", 0))
-    consume_preview(str(body["preview_token"]))
+    conn.commit()
+    for outbox_id in cleanup_outbox_ids:
+        flush_media_cleanup_outbox(outbox_id)
     return {
         "ok": True,
         "operation": operation,
@@ -3440,7 +3786,9 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                            THEN 1 ELSE 0 END AS delivery_fallback,
                       CASE WHEN length(image_inputs) <= ? THEN image_inputs END AS image_inputs,
                       CASE WHEN length(image_inputs) > ? THEN 1 ELSE 0 END AS image_inputs_omitted
-               FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
+               FROM shot_versions
+               WHERE shot_id=? AND status!='cleared'
+               ORDER BY version_no DESC""",
             (_MAX_PUBLIC_IMAGE_INPUT_CHARS, _MAX_PUBLIC_IMAGE_INPUT_CHARS, shot_id),
         ).fetchall()
     else:
@@ -3452,7 +3800,9 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
                       CASE WHEN status='rejected_static_fallback'
                            THEN 1 ELSE 0 END AS delivery_fallback,
                       NULL AS image_inputs
-               FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC""",
+               FROM shot_versions
+               WHERE shot_id=? AND status!='cleared'
+               ORDER BY version_no DESC""",
             (shot_id,),
         ).fetchall()
     versions = [
@@ -3473,6 +3823,23 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
         version.pop("qa_json", None)
         meta = json.loads(version.get("image_inputs") or "{}") if include_inputs else {}
         inputs_omitted = bool(version.pop("image_inputs_omitted", 0))
+        boundary_contract = (
+            meta.get("boundary_pair_qa")
+            if isinstance(meta.get("boundary_pair_qa"), dict)
+            else {}
+        )
+        upstream_video_url = None
+        upstream_video_revision = str(
+            meta.get("upstream_adopted_video_revision") or ""
+        )
+        if upstream_video_revision:
+            upstream_video = conn.execute(
+                """SELECT video_path FROM shot_versions
+                   WHERE id=? AND status='succeeded'""",
+                (upstream_video_revision,),
+            ).fetchone()
+            if upstream_video:
+                upstream_video_url = _media_url(upstream_video["video_path"])
         refs = [
             _public_reference_image(ref)
             for ref in (meta.get("reference_images") or [])
@@ -3483,12 +3850,16 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
         version["image_inputs"] = {
             "first_frame_used": bool(meta.get("first_frame_used")),
             "first_frame_src": meta.get("first_frame_src"),
+            "first_frame_source": boundary_contract.get("first_frame_source"),
             "first_frame_scene_id": meta.get("first_frame_scene_id"),
             "first_frame_image_url": _media_url(meta.get("first_frame_path")),
             "last_frame_used": bool(meta.get("last_frame_used")),
             "last_frame_src": meta.get("last_frame_src"),
+            "last_frame_source": boundary_contract.get("last_frame_source"),
             "last_frame_scene_id": meta.get("last_frame_scene_id"),
             "last_frame_image_url": _media_url(meta.get("last_frame_path")),
+            "video_input_url": upstream_video_url or meta.get("video_input_url"),
+            "video_input_source_revision_id": upstream_video_revision or None,
             "mode": meta.get("mode"),
             "mode_decision": meta.get("mode_decision"),
             "reference_image_used": bool(meta.get("reference_image_used")),
@@ -3602,9 +3973,14 @@ def episode_detail(episode_id: str, view: str | None = None):
     ep.pop("screenplay_json", None)
     # 分镜大纲（先规划后逐镜填充）：透出给前端做 已通过 k / 计划 N 镜 的进度展示
     outline = None
+    outline_json_for_gate = (
+        ep.get("storyboard_outline_json")
+        if full or view == "board"
+        else None
+    )
     if full or view == "board":
         try:
-            outline = json.loads(ep.get("storyboard_outline_json") or "null")
+            outline = json.loads(outline_json_for_gate or "null")
         except (TypeError, ValueError):
             outline = None
     ep.pop("storyboard_outline_json", None)
@@ -3753,7 +4129,9 @@ def episode_detail(episode_id: str, view: str | None = None):
         _apply_contract_to_public_shot(s)
         from app.continuity import information_items_for_shot
         s["new_information_items"] = information_items_for_shot(s, script)
-        s["est_cost_cny"] = shot_cost_cny(s["duration_s"])
+        from app.video_cost_model import initial_shot_generation_cost
+
+        s["est_cost_cny"] = initial_shot_generation_cost(s["duration_s"])
         if s.get("storyboard_artifact_id") and (full or view == "board"):
             shot_artifact = evidence_repository.get_artifact(s["storyboard_artifact_id"])
             if shot_artifact:
@@ -3808,8 +4186,14 @@ def episode_detail(episode_id: str, view: str | None = None):
             s["continuity_degraded"] = False
     ep["shots"] = shots
     if full or view == "board":
+        status_episode = {
+            **ep,
+            # The public response omits the raw JSON, but the shared full gate
+            # must still receive the approved outline readability windows.
+            "storyboard_outline_json": outline_json_for_gate,
+        }
         ep["storyboard_status"] = _storyboard_status_snapshot(
-            ep, shots, ep.get("supervisor"), script,
+            status_episode, shots, ep.get("supervisor"), script,
         )
         if ep["storyboard_status"].pop("_obsolete_policy_repair", False):
             ep["script_error"] = None
@@ -3883,7 +4267,9 @@ def shot_review_detail(shot_id: str):
             else:
                 screenplay = _load_screenplay(dict(episode_row))
     shot["new_information_items"] = information_items_for_shot(shot, screenplay)
-    shot["est_cost_cny"] = shot_cost_cny(shot["duration_s"])
+    from app.video_cost_model import initial_shot_generation_cost
+
+    shot["est_cost_cny"] = initial_shot_generation_cost(shot["duration_s"])
     shot["video_stale"] = _shot_video_is_stale(
         conn, shot, episode_row["storyboard_artifact_id"] if episode_row else None
     )
@@ -3951,7 +4337,7 @@ async def edit_shot(shot_id: str, body: dict):
         raise HTTPException(404, "镜头不存在")
     _resolve_storyboard_mutation_screenplay(conn, str(shot["episode_id"]))
     from app.storyboard_workspace import (
-        close_edit_session, consume_preview, persist_source_binding, require_edit_session,
+        persist_source_binding, require_edit_session,
         require_preview, validate_source_binding,
     )
     session = require_edit_session(body.get("edit_session_token"), shot_id)
@@ -4001,7 +4387,9 @@ async def edit_shot(shot_id: str, body: dict):
         "required_text", "continuity_state_in", "continuity_state_out",
         "reference_roles", "do_not_repeat", "risk_tags",
         "prompt_contract_version", "legacy_unvalidated", "camera_angle",
-        "spatial_anchor", "is_final",
+        "spatial_anchor", "is_final", "context_requirement_ids",
+        "resulting_change", "readability_focus", "camera_motivation",
+        "repeat_of_shot_id", "repeat_gain",
     )
     for key in editable_keys:
         if key in body:
@@ -4208,90 +4596,111 @@ async def edit_shot(shot_id: str, body: dict):
             "message": "编辑候选未通过整集叙事不变量，本次未保存",
             "errors": deduped[:20],
         })
-    # 业务结构检查只写评分警告。人工编辑的已成形镜头不能因门禁被拒绝保存。
+    # 正式镜头、证据、下游失效索引和编辑会话必须在同一事务收口。
     previous_artifact_id = shot["storyboard_artifact_id"]
-    conn.execute(
-        "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_time=?, scene_setting=?, scene_name=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
-        (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_time,
-         instance.scene_setting, instance.scene_name or None,
-         json.dumps(instance.characters, ensure_ascii=False), instance.action_desc, instance.first_frame_desc, instance.last_frame_desc,
-         instance.source_excerpt, instance.narration,
-         json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
-         instance.transition, int(instance.continuity_from_prev), _shot_contract_json(instance),
-         instance.continuity_mode, instance.observed_state_out, shot_id))
+    contract_version = get_contract("storyboard").version
+    from app.artifacts import (
+        flush_media_cleanup_outbox,
+        stage_shot_artifact_cleanup,
+    )
     from app.narrative_review import invalidate_episode_narrative_review
 
-    invalidate_episode_narrative_review(
-        conn,
-        episode_id,
-        f"镜头 {shot_id} 已人工修订，旧叙事审读失效",
-        upstream_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
-    )
-    conn.commit()
-    if normalized_source_binding is not None:
-        persist_source_binding(shot_id, normalized_source_binding)
-    manual_artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="storyboard_shot",
-        scope_type="storyboard_checkpoint",
-        scope_id=f"{episode_id}:{shot['shot_no']}",
-        status="validated",
-        trust_level="T2",
-        content=instance.model_dump(mode="json"),
-        parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
-        contract_version=get_contract("storyboard").version,
-    ))
-    contract_version = get_contract("storyboard").version
-    # Human authorship is provenance, not a hard gate.
-    evidence_repository.create_evaluation(
-        manual_artifact["id"],
-        Evaluation(
-            evaluator_type="human",
-            evaluator_name="storyboard_editor",
-            evaluator_version="1.0.0",
-            status="passed",
-            hard_gate_passed=False,
-            score=100,
-            evidence={"decision": "authored_or_reviewed", "shot_id": shot_id},
-        ),
-    )
-    manual_artifact = evidence_repository.commit_artifact(
-        None,
-        manual_artifact["id"],
-        [Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="storyboard_shot_business_gate",
-            evaluator_version=contract_version,
-            status="warning" if deduped else "passed",
-            hard_gate_passed=not bool(deduped),
-            evaluation_role="score_only",
-            runtime_blocking=False,
-            retry_eligible=False,
-            score=0 if deduped else 100,
-            evidence={
-                "shot_id": shot_id,
-                "spoken_contract_status": instance.spoken_contract_status,
-                "gate_retry_exhausted": bool(deduped),
-                "warnings": deduped[:12],
-            },
-        )],
-    )
-    conn.execute(
-        "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
-        (manual_artifact["id"], shot_id),
-    )
-    conn.commit()
-    # 任一分镜字段都参与参考图或视频 prompt。保存后统一清理全部旧衍生产物，
-    # 避免 done/generating 状态继续展示旧成片；剧集必须重新确认后才能花钱生成。
-    invalidated = worker.clear_shot_artifacts(shot_id)
-    # 任一人工修订都使上次确认的评分警告失效。若不同步清空，
-    # 即使当前台词合同已通过 0 错误预检，页面仍会展示旧的“缺失台词”。
-    conn.execute(
-        "UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?",
-        (episode_id,),
-    )
-    conn.commit()
-    consume_preview(str(body["preview_token"]))
-    close_edit_session(str(body["edit_session_token"]), "saved")
+    conn.execute("BEGIN IMMEDIATE")
+    cleanup_outbox_id = None
+    try:
+        session = require_edit_session(body.get("edit_session_token"), shot_id)
+        require_preview(
+            body.get("preview_token"),
+            "shot_edit",
+            episode_id,
+            shot_id=shot_id,
+            consume=True,
+        )
+        if body.get("baseline_content_hash") != session["baseline_content_hash"]:
+            raise HTTPException(409, "保存基线已变化，请重新对比最新版")
+        conn.execute(
+            "UPDATE shots SET duration_s=?, shot_size=?, camera_move=?, scene_time=?, scene_setting=?, scene_name=?, characters=?, action_desc=?, first_frame_desc=?, last_frame_desc=?, source_excerpt=?, narration=?, dialogues=?, transition=?, continuity_from_prev=?, shot_contract_json=?, continuity_mode=?, observed_state_out=? WHERE id=?",
+            (instance.duration_s, instance.shot_size, instance.camera_move, instance.scene_time,
+             instance.scene_setting, instance.scene_name or None,
+             json.dumps(instance.characters, ensure_ascii=False), instance.action_desc, instance.first_frame_desc, instance.last_frame_desc,
+             instance.source_excerpt, instance.narration,
+             json.dumps([d.model_dump() for d in instance.dialogues], ensure_ascii=False),
+             instance.transition, int(instance.continuity_from_prev), _shot_contract_json(instance),
+             instance.continuity_mode, instance.observed_state_out, shot_id))
+        invalidate_episode_narrative_review(
+            conn,
+            episode_id,
+            f"镜头 {shot_id} 已人工修订，旧叙事审读失效",
+            upstream_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
+        )
+        if normalized_source_binding is not None:
+            persist_source_binding(
+                shot_id,
+                normalized_source_binding,
+                conn=conn,
+                commit=False,
+            )
+        manual_artifact = evidence_repository.create_and_commit_artifact_in_transaction(
+            conn,
+            EvidenceArtifact(
+                type="storyboard_shot",
+                scope_type="storyboard_checkpoint",
+                scope_id=f"{episode_id}:{shot['shot_no']}",
+                status="validated",
+                trust_level="T2",
+                content=instance.model_dump(mode="json"),
+                parent_artifact_ids=[previous_artifact_id] if previous_artifact_id else [],
+                contract_version=contract_version,
+            ),
+            [
+                Evaluation(
+                    evaluator_type="human",
+                    evaluator_name="storyboard_editor",
+                    evaluator_version="1.0.0",
+                    status="passed",
+                    hard_gate_passed=False,
+                    score=100,
+                    evidence={"decision": "authored_or_reviewed", "shot_id": shot_id},
+                ),
+                Evaluation(
+                    evaluator_type="deterministic",
+                    evaluator_name="storyboard_shot_business_gate",
+                    evaluator_version=contract_version,
+                    status="warning" if deduped else "passed",
+                    hard_gate_passed=not bool(deduped),
+                    evaluation_role="score_only",
+                    runtime_blocking=False,
+                    retry_eligible=False,
+                    score=0 if deduped else 100,
+                    evidence={
+                        "shot_id": shot_id,
+                        "spoken_contract_status": instance.spoken_contract_status,
+                        "gate_retry_exhausted": bool(deduped),
+                        "warnings": deduped[:12],
+                    },
+                ),
+            ],
+        )
+        conn.execute(
+            "UPDATE shots SET storyboard_artifact_id=? WHERE id=?",
+            (manual_artifact["id"], shot_id),
+        )
+        invalidated = stage_shot_artifact_cleanup(conn, shot_id)
+        cleanup_outbox_id = invalidated.get("outbox_id")
+        conn.execute(
+            "UPDATE episodes SET status='scripted', storyboard_warning=NULL WHERE id=?",
+            (episode_id,),
+        )
+        conn.execute(
+            "UPDATE storyboard_edit_sessions SET status='saved' WHERE token=?",
+            (body.get("edit_session_token"),),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if cleanup_outbox_id:
+        flush_media_cleanup_outbox(str(cleanup_outbox_id))
     try:
         from app.observability.metrics import inc
         inc(

@@ -51,7 +51,7 @@ AUDIO_TIMELINE_TYPES = {
     "ambient_sound",
 }
 
-PROMPT_CONTRACT_VERSION = "seedance_structured_continuity_v4"
+PROMPT_CONTRACT_VERSION = "seedance_structured_continuity_v5"
 
 # 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
 # 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。
@@ -146,6 +146,9 @@ class ScriptScene(BaseModel):
     conflict: str = ""
     turn: str = ""
     source_basis: str = ""
+    entry_state: str = ""
+    exit_state: str = ""
+    context_requirements: list[str] = Field(default_factory=list)
 
 
 class StoryEvent(BaseModel):
@@ -193,6 +196,8 @@ class PlotSpineBeat(BaseModel):
     does: str = ""
     turn: str = ""
     must_keep: bool = True
+    source_segment_ids: list[str] = Field(default_factory=list)
+    purpose: str = ""
     # VAL-422 §4.4.3：可选绑定信息原子/关键台词；跨镜聚合校验时按这些 ID 核对交付。
     information_ids: list[str] = Field(default_factory=list)
     key_line_ids: list[str] = Field(default_factory=list)
@@ -205,6 +210,28 @@ class PlotSpine(BaseModel):
     spine_beats: list[PlotSpineBeat] = Field(default_factory=list)
     must_keep_ending: str = ""
     drop_list: list[str] = Field(default_factory=list)
+
+
+class SourceCoverageDecision(BaseModel):
+    """One explicit disposition for a deterministically indexed source segment."""
+
+    source_segment_id: str
+    disposition: Literal["deliver", "merge", "context", "duplicate"]
+    beat_ids: list[str] = Field(default_factory=list)
+    duplicate_of: str | None = None
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_disposition(self) -> "SourceCoverageDecision":
+        if not self.source_segment_id.strip():
+            raise ValueError("source_segment_id 不能为空")
+        if self.disposition in {"deliver", "merge"} and not self.beat_ids:
+            raise ValueError("deliver/merge 必须绑定至少一个 beat_id")
+        if self.disposition == "duplicate" and not (self.duplicate_of or "").strip():
+            raise ValueError("duplicate 必须指向 duplicate_of")
+        if self.disposition in {"context", "duplicate"} and len(self.reason.strip()) < 4:
+            raise ValueError("context/duplicate 必须说明保留方式或重复依据")
+        return self
 
 
 class KeyDialogueTurn(BaseModel):
@@ -685,6 +712,7 @@ class EpisodeScreenplay(BaseModel):
     dialogue_chains: list[KeyDialogueChain] = Field(default_factory=list)
     key_plot_points: list[str] = Field(default_factory=list)  # 与 spine 对齐的局势变化
     plot_spine: PlotSpine | None = None
+    source_coverage: list[SourceCoverageDecision] = Field(default_factory=list)
     scene_outline: list[ScriptScene] = Field(default_factory=list)
     full_script_text: str = ""
     character_state_changes: list[str] = Field(default_factory=list)
@@ -833,6 +861,103 @@ def normalize_screenplay_json_shape(obj: dict) -> tuple[dict, list[str]]:
                 normalized_plan["action_relation_audits"] = normalized_audits
                 normalized["narrative_plan"] = normalized_plan
 
+        current_plan = normalized.get("narrative_plan")
+        audience_states = (
+            current_plan.get("audience_states")
+            if isinstance(current_plan, dict)
+            else None
+        )
+        if isinstance(audience_states, list):
+            normalized_states: list[object] = []
+            states_changed = False
+            for state_index, state in enumerate(audience_states):
+                if not isinstance(state, dict):
+                    normalized_states.append(state)
+                    continue
+                working_memory = state.get("working_memory")
+                if not isinstance(working_memory, list):
+                    normalized_states.append(state)
+                    continue
+                normalized_memory: list[object] = []
+                state_changed = False
+                for memory_index, memory in enumerate(working_memory):
+                    if isinstance(memory, str) and memory.strip():
+                        normalized_memory.append({
+                            "proposition_id": memory.strip(),
+                            "retention_confidence": 1.0,
+                        })
+                        changes.append(
+                            "narrative_plan.audience_states"
+                            f"[{state_index}].working_memory[{memory_index}]"
+                        )
+                        state_changed = True
+                    else:
+                        normalized_memory.append(memory)
+                if state_changed:
+                    normalized_state = dict(state)
+                    normalized_state["working_memory"] = normalized_memory
+                    normalized_states.append(normalized_state)
+                    states_changed = True
+                else:
+                    normalized_states.append(state)
+            if states_changed:
+                normalized_plan = dict(current_plan)
+                normalized_plan["audience_states"] = normalized_states
+                normalized["narrative_plan"] = normalized_plan
+
+        current_plan = normalized.get("narrative_plan")
+        intents = (
+            current_plan.get("experience_intents")
+            if isinstance(current_plan, dict)
+            else None
+        )
+        if isinstance(intents, list):
+            normalized_intents: list[object] = []
+            intents_changed = False
+            for intent_index, intent in enumerate(intents):
+                if not isinstance(intent, dict):
+                    normalized_intents.append(intent)
+                    continue
+                withheld = intent.get("withheld_propositions")
+                if not isinstance(withheld, list):
+                    normalized_intents.append(intent)
+                    continue
+                normalized_withheld: list[object] = []
+                intent_changed = False
+                for withheld_index, item in enumerate(withheld):
+                    if isinstance(item, str) and item.strip():
+                        normalized_withheld.append({
+                            "proposition_id": item.strip(),
+                            "reason": "",
+                        })
+                        changes.append(
+                            "narrative_plan.experience_intents"
+                            f"[{intent_index}].withheld_propositions"
+                            f"[{withheld_index}]"
+                        )
+                        intent_changed = True
+                    elif isinstance(item, dict) and "reason" not in item:
+                        normalized_withheld.append({**item, "reason": ""})
+                        changes.append(
+                            "narrative_plan.experience_intents"
+                            f"[{intent_index}].withheld_propositions"
+                            f"[{withheld_index}].reason"
+                        )
+                        intent_changed = True
+                    else:
+                        normalized_withheld.append(item)
+                if intent_changed:
+                    normalized_intent = dict(intent)
+                    normalized_intent["withheld_propositions"] = normalized_withheld
+                    normalized_intents.append(normalized_intent)
+                    intents_changed = True
+                else:
+                    normalized_intents.append(intent)
+            if intents_changed:
+                normalized_plan = dict(current_plan)
+                normalized_plan["experience_intents"] = normalized_intents
+                normalized["narrative_plan"] = normalized_plan
+
     return normalized, changes
 
 
@@ -962,6 +1087,12 @@ class Shot(BaseModel):
     camera_angle: str = ""
     spatial_anchor: str = ""
     is_final: bool = False
+    context_requirement_ids: list[str] = Field(default_factory=list)
+    resulting_change: str = ""
+    readability_focus: str = ""
+    camera_motivation: str = ""
+    repeat_of_shot_id: str | None = None
+    repeat_gain: str = ""
     # Narrative task.  A reaction/establishing/processing shot may have no
     # primary action, but it must still own a non-empty evidence contribution.
     shot_id: str = ""
@@ -1022,6 +1153,16 @@ class StoryboardOutlineShot(BaseModel):
     duration_s: int | None = None
     characters_visible: list[str] = Field(default_factory=list)
     audio_cast: list[str] = Field(default_factory=list)
+    purpose: str = ""
+    context_requirement_ids: list[str] = Field(default_factory=list)
+    resulting_change: str = ""
+    readability_focus: str = ""
+    camera_size: str = ""
+    camera_angle: str = ""
+    camera_movement: str = ""
+    camera_motivation: str = ""
+    repeat_of_shot_id: str | None = None
+    repeat_gain: str = ""
     shot_id: str = ""
     scene_id: str = ""
     event_ids: list[str] = Field(default_factory=list)
@@ -1054,8 +1195,33 @@ class StoryboardOutline(BaseModel):
 
     episode_no: int
     shots: list[StoryboardOutlineShot] = Field(default_factory=list)
+    scene_contexts: list["StoryboardSceneContext"] = Field(default_factory=list)
     readability_windows: list[ReadabilityWindow] = Field(default_factory=list)
     cognitive_bridge_plans: list["CognitiveBridgePlan"] = Field(default_factory=list)
+
+
+class StoryboardContextRequirement(BaseModel):
+    requirement_id: str
+    description: str
+    required_before_shot_no: int | None = None
+
+
+class StoryboardSceneContext(BaseModel):
+    scene_id: str
+    scene_no: int
+    scene_name: str = ""
+    scene_time: str = ""
+    entry_state: str
+    exit_state: str
+    transition_from_previous: str = ""
+    spatial_axis: str = ""
+    context_requirements: list[StoryboardContextRequirement] = Field(default_factory=list)
+
+
+class StoryboardScenePack(BaseModel):
+    episode_no: int
+    scene_id: str
+    shots: list[Shot] = Field(default_factory=list)
 
 
 class BoundaryStateTransition(BaseModel):
@@ -1254,6 +1420,42 @@ def _close_missing_root_object(text: str) -> str:
     return text
 
 
+def _repair_trailing_container_closure(text: str) -> str:
+    """Replace one wrong EOF closer with the uniquely required close sequence."""
+    expected_closers: list[str] = []
+    in_string = False
+    escaped = False
+    last_nonspace = len(text.rstrip()) - 1
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            expected_closers.append("}")
+        elif char == "[":
+            expected_closers.append("]")
+        elif char in "}]":
+            if not expected_closers:
+                return text
+            if expected_closers[-1] != char:
+                if index != last_nonspace or in_string or escaped:
+                    return text
+                return (
+                    text[:index]
+                    + "".join(reversed(expected_closers))
+                    + text[index + 1:]
+                )
+            expected_closers.pop()
+    return text
+
+
 def _repair_singleton_string_object_fields(
     text: str,
     field_names: tuple[str, ...],
@@ -1268,6 +1470,95 @@ def _repair_singleton_string_object_fields(
             text,
         )
     return text
+
+
+def _repair_structural_json_delimiters(text: str) -> str:
+    """Repair delimiter omissions that are uniquely implied by JSON nesting."""
+    repaired: list[str] = []
+    expected_closers: list[str] = []
+    in_string = False
+    escaped = False
+    previous_significant = ""
+    string_started_after = ""
+
+    def next_significant_char(start: int) -> str:
+        index = start
+        while index < len(text) and text[index].isspace():
+            index += 1
+        return text[index] if index < len(text) else "\0"
+
+    def next_token_is_object_key(start: int) -> bool:
+        index = start
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text) or text[index] != '"':
+            return False
+        index += 1
+        local_escaped = False
+        while index < len(text):
+            char = text[index]
+            if local_escaped:
+                local_escaped = False
+            elif char == "\\":
+                local_escaped = True
+            elif char == '"':
+                index += 1
+                break
+            index += 1
+        while index < len(text) and text[index].isspace():
+            index += 1
+        return index < len(text) and text[index] == ":"
+
+    for index, char in enumerate(text):
+        if in_string:
+            repaired.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+                if (
+                    expected_closers
+                    and expected_closers[-1] == "}"
+                    and string_started_after in "{,"
+                    and next_significant_char(index + 1) in "},"
+                ):
+                    repaired.extend(":null")
+                previous_significant = '"'
+            continue
+        if char == '"':
+            in_string = True
+            string_started_after = previous_significant
+            repaired.append(char)
+            continue
+        if (
+            char in "[{"
+            and previous_significant in "}]"
+            and expected_closers
+            and expected_closers[-1] == "]"
+        ):
+            repaired.append(",")
+        if char == "{":
+            expected_closers.append("}")
+        elif char == "[":
+            expected_closers.append("]")
+        elif char in "}]":
+            if expected_closers and expected_closers[-1] == char:
+                expected_closers.pop()
+        elif (
+            char == ","
+            and previous_significant == "}"
+            and expected_closers
+            and expected_closers[-1] == "]"
+            and next_token_is_object_key(index + 1)
+        ):
+            repaired.append("]")
+            expected_closers.pop()
+        repaired.append(char)
+        if not char.isspace():
+            previous_significant = char
+    return "".join(repaired)
 
 
 def extract_json(
@@ -1311,6 +1602,26 @@ def extract_json(
                         if isinstance(obj, dict):
                             return obj
                     candidate = repaired
+            repaired = _repair_structural_json_delimiters(candidate)
+            if repaired != candidate:
+                try:
+                    obj, _ = json.JSONDecoder().raw_decode(repaired)
+                except json.JSONDecodeError as repaired_exc:
+                    candidate_error = repaired_exc
+                else:
+                    if isinstance(obj, dict):
+                        return obj
+                candidate = repaired
+            if candidate_error.pos >= len(candidate.rstrip()) - 1:
+                repaired = _repair_trailing_container_closure(candidate)
+                if repaired != candidate:
+                    try:
+                        obj, _ = json.JSONDecoder().raw_decode(repaired)
+                    except json.JSONDecodeError:
+                        pass
+                    else:
+                        if isinstance(obj, dict):
+                            return obj
             # Only an EOF failure may be eligible.  Missing commas and damaged
             # inner structure fail before EOF and must still enter the repair
             # loop instead of being silently guessed here.

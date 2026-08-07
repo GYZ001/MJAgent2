@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app import config
 from app.atomic_io import atomic_write_text
-from app.db import get_conn, rows_to_dicts
+from app.db import get_conn, new_id, now, rows_to_dicts
 
 _CLEAR_TERMINAL_RUN_STATES = {
     "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED", "PARTIAL",
@@ -20,6 +20,7 @@ def _begin_clear_transaction(
     episode_id: str,
     *,
     active_storyboard_run_id: str | None = None,
+    allow_storyboard_workspace_mutation: bool = False,
 ) -> None:
     """Serialize the final upstream check and media purge in SQLite."""
     # Supervisor 局部修复可能在同一连接已有事务（例如先写修复计划再清理相邻镜）。
@@ -28,7 +29,8 @@ def _begin_clear_transaction(
     if not conn.in_transaction:
         conn.execute("BEGIN IMMEDIATE")
     ep = conn.execute(
-        "SELECT status, active_screenplay_run_id, active_storyboard_run_id FROM episodes WHERE id=?",
+        "SELECT status, active_screenplay_run_id, active_storyboard_run_id, active_video_run_id "
+        "FROM episodes WHERE id=?",
         (episode_id,),
     ).fetchone()
     if not ep:
@@ -48,7 +50,11 @@ def _begin_clear_transaction(
             and allowed["status"] not in _CLEAR_TERMINAL_RUN_STATES
         )
     active: list[str] = []
-    for run_id in (ep["active_screenplay_run_id"], ep["active_storyboard_run_id"]):
+    for run_id in (
+        ep["active_screenplay_run_id"],
+        ep["active_storyboard_run_id"],
+        ep["active_video_run_id"],
+    ):
         if not run_id:
             continue
         if authorized_storyboard_run and run_id == active_storyboard_run_id:
@@ -56,8 +62,12 @@ def _begin_clear_transaction(
         run = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()
         if not run or run["status"] not in _CLEAR_TERMINAL_RUN_STATES:
             active.append(str(run_id))
-    writing_status = ep["status"] in {"planned", "scripting", "storyboarding"}
-    if (writing_status and not authorized_storyboard_run) or active:
+    writing_status = ep["status"] in {"planned", "scripting", "storyboarding", "generating"}
+    if (
+        writing_status
+        and not authorized_storyboard_run
+        and not allow_storyboard_workspace_mutation
+    ) or active:
         conn.rollback()
         raise ValueError("编剧或分镜任务仍在写入，清空已原子拒绝")
 
@@ -73,13 +83,37 @@ def _delete_version_files(video_path: str | None) -> None:
             pass
 
 
-def _purge_shots(conn, shots: list[dict]) -> tuple[int, set[str]]:
+def _delete_shot_boundary_assets(conn, shot_id: str) -> int:
+    """Delete durable first/last-frame records and their local files."""
+    rows = conn.execute(
+        "SELECT path FROM video_boundary_assets WHERE shot_id=?",
+        (shot_id,),
+    ).fetchall()
+    for row in rows:
+        path = str(row["path"] or "").strip()
+        if not path:
+            continue
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    conn.execute("DELETE FROM video_boundary_assets WHERE shot_id=?", (shot_id,))
+    return len(rows)
+
+
+def _purge_shots(
+    conn,
+    shots: list[dict],
+    *,
+    preserve_video_audit: bool = False,
+) -> tuple[int, set[str]]:
     """删除给定镜头的全部版本、关键帧、任务与采用标记。
     返回 (删除版本数, 受影响剧集 id 集合)。"""
     versions_removed = 0
     affected_eps: set[str] = set()
     for s in shots:
         affected_eps.add(s["episode_id"])
+        _delete_shot_boundary_assets(conn, s["id"])
         versions = conn.execute(
             "SELECT id, video_path FROM shot_versions WHERE shot_id=?", (s["id"],)).fetchall()
         for v in versions:
@@ -91,7 +125,16 @@ def _purge_shots(conn, shots: list[dict]) -> tuple[int, set[str]]:
                     Path(sc["image_path"]).unlink()
                 except OSError:
                     pass
-        conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (s["id"],))
+        if preserve_video_audit:
+            conn.execute(
+                """UPDATE shot_versions
+                      SET status='cleared',video_path=NULL,
+                          error='用户已清空本集生成资源'
+                    WHERE shot_id=?""",
+                (s["id"],),
+            )
+        else:
+            conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (s["id"],))
         conn.execute("DELETE FROM shot_scenes WHERE shot_id=?", (s["id"],))
         conn.execute("DELETE FROM jobs WHERE shot_id=?", (s["id"],))
         conn.execute(
@@ -461,6 +504,7 @@ def clear_shot_artifacts(
         conn,
         shot["episode_id"],
         active_storyboard_run_id=active_storyboard_run_id,
+        allow_storyboard_workspace_mutation=True,
     )
     try:
         refs = _delete_shot_reference_dir(conn, shot)
@@ -477,6 +521,165 @@ def clear_shot_artifacts(
             "keyframes_cleared": True, "mode_plan_cleared": True}
 
 
+def stage_shot_artifact_cleanup(
+    conn,
+    shot_id: str,
+    *,
+    active_storyboard_run_id: str | None = None,
+) -> dict:
+    """Invalidate one shot in the caller transaction and defer file deletion."""
+    shot = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+    if not shot:
+        return {
+            "shot_id": shot_id,
+            "videos": 0,
+            "references": 0,
+            "outbox_id": None,
+        }
+    _begin_clear_transaction(
+        conn,
+        shot["episode_id"],
+        active_storyboard_run_id=active_storyboard_run_id,
+    )
+    ep = conn.execute(
+        "SELECT project_id,episode_no FROM episodes WHERE id=?",
+        (shot["episode_id"],),
+    ).fetchone()
+    ref_dir = (
+        config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"])
+        / "shots" / str(shot["shot_no"]) / "references"
+        if ep else None
+    )
+    references = (
+        sum(1 for path in ref_dir.glob("*") if path.is_file())
+        if ref_dir and ref_dir.exists()
+        else 0
+    )
+    versions = conn.execute(
+        "SELECT id,video_path FROM shot_versions WHERE shot_id=?",
+        (shot_id,),
+    ).fetchall()
+    files: list[str] = []
+    for version in versions:
+        if not version["video_path"]:
+            continue
+        video_path = Path(version["video_path"])
+        files.extend([
+            str(video_path),
+            str(Path(str(video_path.with_suffix("")) + "_last.jpg")),
+        ])
+    files.extend(
+        str(row["image_path"])
+        for row in conn.execute(
+            "SELECT image_path FROM shot_scenes WHERE shot_id=? AND image_path IS NOT NULL",
+            (shot_id,),
+        ).fetchall()
+        if row["image_path"]
+    )
+    files.extend(
+        str(row["path"])
+        for row in conn.execute(
+            "SELECT path FROM video_boundary_assets WHERE shot_id=? AND path IS NOT NULL",
+            (shot_id,),
+        ).fetchall()
+        if row["path"]
+    )
+    _delete_shot_reference_records(conn, shot_id)
+    conn.execute("DELETE FROM video_boundary_assets WHERE shot_id=?", (shot_id,))
+    conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (shot_id,))
+    conn.execute("DELETE FROM shot_scenes WHERE shot_id=?", (shot_id,))
+    conn.execute("DELETE FROM jobs WHERE shot_id=?", (shot_id,))
+    conn.execute(
+        """UPDATE shots
+              SET adopted_version_id=NULL,approved_scene_id=NULL,
+                  approved_head_scene_id=NULL,approved_tail_scene_id=NULL,
+                  scene_status='none',mode_plan=NULL
+            WHERE id=?""",
+        (shot_id,),
+    )
+    outbox_id = new_id("cleanup")
+    payload = {
+        "files": list(dict.fromkeys(files)),
+        "directories": [str(ref_dir)] if ref_dir else [],
+        "invalidate_final": (
+            {
+                "project_id": ep["project_id"],
+                "episode_no": int(ep["episode_no"]),
+            }
+            if ep else None
+        ),
+    }
+    conn.execute(
+        """INSERT INTO media_cleanup_outbox(
+               id,episode_id,shot_id,payload_json,status,created_at
+           ) VALUES(?,?,?,?,'pending',?)""",
+        (
+            outbox_id,
+            shot["episode_id"],
+            shot_id,
+            json.dumps(payload, ensure_ascii=False),
+            now(),
+        ),
+    )
+    return {
+        "shot_id": shot_id,
+        "videos": len(versions),
+        "references": references,
+        "outbox_id": outbox_id,
+    }
+
+
+def flush_media_cleanup_outbox(outbox_id: str) -> bool:
+    """Delete files recorded by a committed cleanup transaction."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM media_cleanup_outbox WHERE id=?",
+        (outbox_id,),
+    ).fetchone()
+    if not row or row["status"] == "completed":
+        return bool(row)
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+        for raw_path in payload.get("files") or []:
+            try:
+                Path(str(raw_path)).unlink(missing_ok=True)
+            except OSError:
+                pass
+        for raw_path in payload.get("directories") or []:
+            shutil.rmtree(Path(str(raw_path)), ignore_errors=True)
+        final = payload.get("invalidate_final") or {}
+        if final.get("project_id") and final.get("episode_no") is not None:
+            _invalidate_final_video(
+                str(final["project_id"]),
+                int(final["episode_no"]),
+            )
+        conn.execute(
+            """UPDATE media_cleanup_outbox
+                  SET status='completed',attempts=attempts+1,last_error=NULL,completed_at=?
+                WHERE id=?""",
+            (now(), outbox_id),
+        )
+        conn.commit()
+        return True
+    except Exception as exc:
+        conn.execute(
+            """UPDATE media_cleanup_outbox
+                  SET status='pending',attempts=attempts+1,last_error=?
+                WHERE id=?""",
+            (str(exc)[:800], outbox_id),
+        )
+        conn.commit()
+        return False
+
+
+def flush_pending_media_cleanup(limit: int = 100) -> int:
+    rows = get_conn().execute(
+        "SELECT id FROM media_cleanup_outbox WHERE status='pending' ORDER BY created_at LIMIT ?",
+        (max(1, min(int(limit), 1000)),),
+    ).fetchall()
+    return sum(flush_media_cleanup_outbox(str(row["id"])) for row in rows)
+
+
 def clear_episode_artifacts(episode_id: str) -> dict:
     """清空整集每个镜头的参考图、关键帧、视频版本与模型分析（mode_plan），并把该集回退到「已确认」。
     用于生成台的「清空本集」操作。"""
@@ -490,7 +693,40 @@ def clear_episode_artifacts(episode_id: str) -> dict:
             refs += _delete_shot_reference_dir(conn, s)
             _delete_shot_reference_records(conn, s["id"])
             conn.execute("UPDATE shots SET mode_plan=NULL WHERE id=?", (s["id"],))
-        versions, affected_eps = _purge_shots(conn, shots)
+        # A resource clear is a new execution epoch. Keep historical plans and
+        # attempts for audit, but never reactivate a failure-derived fallback
+        # revision when the user starts the episode again.
+        conn.execute(
+            """UPDATE shot_video_generation_plans
+                  SET status='stale',updated_at=strftime('%s','now')
+                WHERE episode_video_plan_id IN (
+                    SELECT id FROM episode_video_generation_plans
+                    WHERE episode_id=?
+                      AND status IN ('draft','valid','blocked','stale')
+                )""",
+            (episode_id,),
+        )
+        conn.execute(
+            """UPDATE episode_video_generation_plans
+                  SET status='superseded'
+                WHERE episode_id=?
+                  AND status IN ('draft','valid','blocked','stale')""",
+            (episode_id,),
+        )
+        conn.execute(
+            """UPDATE artifacts
+                  SET status='superseded',
+                      stale_reason='用户已清空本集生成资源'
+                WHERE type='video_supervisor_checkpoint'
+                  AND scope_type='episode' AND scope_id=?
+                  AND status IN ('candidate','validated','approved')""",
+            (episode_id,),
+        )
+        versions, affected_eps = _purge_shots(
+            conn,
+            shots,
+            preserve_video_audit=True,
+        )
         _rollback_episodes(conn, affected_eps or {episode_id})
         conn.commit()
     except Exception:

@@ -347,6 +347,19 @@ def _register_human_only(registry) -> None:
             tags=("human", "episode", "destructive"),
         ),
         HumanOnlySpec(
+            "human.activate_ai_narrative_simulation",
+            "运行 AI 一次观看模拟",
+            "用户在分镜台显式运行 AI 多先验模拟并激活对应校准权威",
+            reason=(
+                "AI 模拟只能作为独立的机器评估路径，不能伪造或替代真人参与者的"
+                "一次观看、自由复述与观察记录，且不得向 Agent/MCP 开放"
+            ),
+            rest_routes=(
+                "POST /api/episodes/{episode_id}/narrative-calibration/ai-simulate",
+            ),
+            tags=("human", "narrative", "calibration", "ai-simulation"),
+        ),
+        HumanOnlySpec(
             "human.record_narrative_one_watch",
             "记录真人一次观看校准",
             "用户亲自确认观看协议、冻结首次复述并在冻结后记录逐目标观察",

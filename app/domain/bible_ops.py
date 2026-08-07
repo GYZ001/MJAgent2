@@ -239,10 +239,18 @@ def _start_refs_generation(
         (project_id,),
     ).fetchone()
     target_payload = _refs_target_payload(only_character, only_characters)
-    # fresh_after 只在“全量重生被进程恢复”时传入；新的全量批次在此冻结起点。
-    # 恢复时 generate_refs 使用 resume=True，但只跳过该起点之后已提交的新包。
-    batch_started_at = fresh_after if fresh_after is not None else (None if resume else now())
-    persisted_resume = 0 if batch_started_at is not None else 1
+    # ``fresh_after`` controls which ready packs resume may skip.  The operation
+    # batch timestamp is separate and always durable so paid image calls can be
+    # reused after a restart, including gap-only resume batches.
+    previous_batch_started_at = previous["refs_batch_started_at"] if previous else None
+    batch_started_at = (
+        fresh_after
+        if fresh_after is not None
+        else previous_batch_started_at
+        if resume and previous_batch_started_at is not None
+        else now()
+    )
+    persisted_resume = 1 if resume and fresh_after is None else 0
     if target_payload is None:
         conn.execute(
             "UPDATE projects SET refs_status='running', refs_error=NULL, refs_target=NULL, "
@@ -269,7 +277,9 @@ def _start_refs_generation(
             "refs", project_id,
             _refs_task(
                 project_id, only_character, only_characters=only_characters,
-                resume=resume, fresh_after=batch_started_at, parent_run_id=parent_run_id,
+                resume=resume, fresh_after=fresh_after,
+                operation_started_at=batch_started_at,
+                parent_run_id=parent_run_id,
                 requested_by=requested_by, trigger_type=trigger_type, recorder=recorder,
             ),
             project_id=project_id,
@@ -308,23 +318,44 @@ def _start_scene_refs_generation(
     if _scene_refs_task_active(project_id):
         return False
     conn = get_conn()
+    project_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+    }
+    batch_column_supported = "scene_refs_batch_started_at" in project_columns
     previous = conn.execute(
-        "SELECT scene_refs_status,scene_refs_error,scene_refs_target FROM projects WHERE id=?",
+        "SELECT scene_refs_status,scene_refs_error,scene_refs_target,"
+        + ("scene_refs_batch_started_at" if batch_column_supported else "NULL AS scene_refs_batch_started_at")
+        + " FROM projects WHERE id=?",
         (project_id,),
     ).fetchone()
+    batch_started_at = (
+        previous["scene_refs_batch_started_at"]
+        if resume and previous and previous["scene_refs_batch_started_at"] is not None
+        else now()
+    )
     target_payload = (
         json.dumps(only_scene, ensure_ascii=False)
         if isinstance(only_scene, list) else only_scene
     )
-    conn.execute(
-        "UPDATE projects SET scene_refs_status='running', scene_refs_error=NULL, scene_refs_target=? WHERE id=?",
-        (target_payload, project_id))
+    if batch_column_supported:
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL,"
+            "scene_refs_target=?,scene_refs_batch_started_at=? WHERE id=?",
+            (target_payload, batch_started_at, project_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='running',scene_refs_error=NULL,"
+            "scene_refs_target=? WHERE id=?",
+            (target_payload, project_id),
+        )
     conn.commit()
     try:
         task_registry.spawn(
             "scene_refs", project_id,
             _scene_refs_task(
                 project_id, only_scene, resume=resume, parent_run_id=parent_run_id,
+                operation_started_at=batch_started_at,
                 requested_by="system" if resume else "user",
                 trigger_type="resume" if resume else "manual",
             ),
@@ -332,14 +363,25 @@ def _start_scene_refs_generation(
         )
     except Exception as exc:
         if previous:
-            conn.execute(
-                "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=? "
-                "WHERE id=?",
-                (
-                    previous["scene_refs_status"], previous["scene_refs_error"],
-                    previous["scene_refs_target"], project_id,
-                ),
-            )
+            if batch_column_supported:
+                conn.execute(
+                    "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=?,"
+                    "scene_refs_batch_started_at=? WHERE id=?",
+                    (
+                        previous["scene_refs_status"], previous["scene_refs_error"],
+                        previous["scene_refs_target"], previous["scene_refs_batch_started_at"],
+                        project_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE projects SET scene_refs_status=?,scene_refs_error=?,scene_refs_target=? "
+                    "WHERE id=?",
+                    (
+                        previous["scene_refs_status"], previous["scene_refs_error"],
+                        previous["scene_refs_target"], project_id,
+                    ),
+                )
             conn.commit()
         raise ValueError("场景图任务未能启动，原状态和费用凭证已保留，请重试") from exc
     return True
@@ -2602,6 +2644,7 @@ async def _refs_task(
     only_characters: list[str] | None = None,
     resume: bool = False,
     fresh_after: float | None = None,
+    operation_started_at: float | None = None,
     parent_run_id: str | None = None,
     requested_by: str = "user",
     trigger_type: str = "manual",
@@ -2632,6 +2675,7 @@ async def _refs_task(
             lambda: generate_refs(
                 project_id, only_character, only_characters=only_characters,
                 resume=resume, fresh_after=fresh_after,
+                operation_started_at=operation_started_at,
             ),
             agent_name="reference_asset_loop",
         )
@@ -3378,6 +3422,7 @@ async def _scene_refs_task(
     only_scene: str | list[str] | None,
     *,
     resume: bool = False,
+    operation_started_at: float | None = None,
     parent_run_id: str | None = None,
     requested_by: str = "user",
     trigger_type: str = "manual",
@@ -3398,10 +3443,19 @@ async def _scene_refs_task(
         recorder.start()
         await recorder.step(
             "scene_references",
-            lambda: generate_scene_refs(project_id, only_scene, resume=resume),
+            lambda: generate_scene_refs(
+                project_id,
+                only_scene,
+                resume=resume,
+                operation_started_at=operation_started_at,
+            ),
             agent_name="reference_asset_loop",
         )
-        conn.execute("UPDATE projects SET scene_refs_status='ready', scene_refs_error=NULL WHERE id=?", (project_id,))
+        conn.execute(
+            "UPDATE projects SET scene_refs_status='ready',scene_refs_error=NULL,"
+            "scene_refs_batch_started_at=NULL WHERE id=?",
+            (project_id,),
+        )
         conn.commit()
         recorder.succeed("场景参考资产已生成并通过证据门禁")
     except asyncio.CancelledError:
@@ -3597,7 +3651,8 @@ async def cancel_scene_refs(project_id: str):
     final_progress = _scene_refs_progress_payload(project_id)
     conn = get_conn()
     conn.execute(
-        "UPDATE projects SET scene_refs_status='idle', scene_refs_error=NULL, scene_refs_target=NULL WHERE id=?",
+        "UPDATE projects SET scene_refs_status='idle',scene_refs_error=NULL,"
+        "scene_refs_target=NULL,scene_refs_batch_started_at=NULL WHERE id=?",
         (project_id,))
     conn.commit()
     was_running = p["scene_refs_status"] == "running"

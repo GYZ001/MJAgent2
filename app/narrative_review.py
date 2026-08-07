@@ -554,6 +554,303 @@ def verify_persisted_narrative_review(
     return report_id
 
 
+def rebind_unchanged_narrative_review(
+    *,
+    episode_id: str,
+    screenplay: EpisodeScreenplay,
+    board: Storyboard,
+    report: NarrativeReviewReport,
+    artifact_ids: list[str],
+) -> tuple[NarrativeReviewReport, list[str]]:
+    """Rebind a passed review when only its immutable parent artifacts changed.
+
+    Model outputs are reused only when every target-free perceptual payload is
+    byte-for-byte identical to the payload generated from the current board.
+    This repairs lineage churn without treating stale model observations as
+    current evidence or paying for a nondeterministic duplicate review.
+    """
+    screenplay, _screenplay_artifact_id = _resolve_review_screenplay_authority(
+        episode_id=episode_id,
+        supplied_screenplay=screenplay,
+    )
+    ids = list(dict.fromkeys(str(item) for item in artifact_ids if str(item)))
+    artifacts = [
+        artifact
+        for artifact_id in ids
+        if (artifact := evidence_repository.get_artifact(artifact_id)) is not None
+    ]
+    review_inputs = [
+        artifact for artifact in artifacts
+        if artifact.get("type") == "storyboard_review_input"
+    ]
+    perceptual_inputs = [
+        artifact for artifact in artifacts
+        if artifact.get("type") == BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE
+    ]
+    first_passes = [
+        artifact for artifact in artifacts
+        if artifact.get("type") == BLIND_FIRST_PASS_ARTIFACT_TYPE
+    ]
+    observations = [
+        artifact for artifact in artifacts
+        if artifact.get("type") == "blind_audience_observation"
+    ]
+    reports = [
+        artifact for artifact in artifacts
+        if artifact.get("type") == "narrative_review_report"
+    ]
+    plan = screenplay.narrative_plan
+    errors: list[str] = []
+    if plan is None:
+        errors.append("[NARRATIVE_PLAN_MISSING] 审读证据重绑定缺少叙事合同")
+    if len(review_inputs) != 1 or len(reports) != 1:
+        errors.append("[NARRATIVE_REVIEW_REBIND_CHAIN_INVALID] 旧审读链结构不完整")
+    if len(perceptual_inputs) != len(plan.audience_priors if plan else []):
+        errors.append("[NARRATIVE_REVIEW_REBIND_INPUT_COVERAGE_INVALID] 感知输入覆盖不完整")
+    if len(first_passes) != len(plan.audience_priors if plan else []):
+        errors.append("[NARRATIVE_REVIEW_REBIND_FIRST_PASS_COVERAGE_INVALID] 首轮观察覆盖不完整")
+    if len(observations) != len(plan.audience_priors if plan else []):
+        errors.append("[NARRATIVE_REVIEW_REBIND_OBSERVATION_COVERAGE_INVALID] 冻结观察覆盖不完整")
+    for artifact in artifacts:
+        current_hash = evidence_repository.content_hash(
+            artifact.get("content"),
+            artifact.get("file_path"),
+        )
+        if current_hash != artifact.get("content_hash"):
+            errors.append(
+                f"[NARRATIVE_REVIEW_REBIND_HASH_DRIFT] {artifact.get('id')}"
+            )
+    if reports:
+        try:
+            persisted_report = NarrativeReviewReport.model_validate(
+                reports[0].get("content") or {}
+            )
+        except Exception as exc:  # noqa: BLE001 - immutable evidence boundary
+            errors.append(f"[NARRATIVE_REVIEW_REBIND_REPORT_INVALID] {exc}")
+            persisted_report = None
+        if persisted_report != report or report.decision != "pass":
+            errors.append("[NARRATIVE_REVIEW_REBIND_REPORT_DRIFT] 旧报告不是当前通过报告")
+        report_gate = evidence_repository.get_conn().execute(
+            """SELECT 1 FROM evaluations
+                 WHERE artifact_id=?
+                   AND evaluator_name='narrative_blind_comparator'
+                   AND evaluator_version=?
+                   AND evaluation_role='runtime_gate'
+                   AND runtime_blocking=1
+                   AND status='passed' AND hard_gate_passed=1
+                 LIMIT 1""",
+            (reports[0]["id"], COMPARATOR_PROMPT_VERSION),
+        ).fetchone()
+        if report_gate is None:
+            errors.append("[NARRATIVE_REVIEW_REBIND_GATE_MISSING] 旧报告没有通过门禁")
+    if errors:
+        raise NarrativeReviewError(list(dict.fromkeys(errors)))
+
+    assert plan is not None
+    perceptual_by_prior = {
+        str((artifact.get("content") or {}).get("audience_prior_id") or ""): artifact
+        for artifact in perceptual_inputs
+    }
+    first_by_prior: dict[str, tuple[dict[str, Any], BlindAudienceFirstPass]] = {}
+    for artifact in first_passes:
+        first = BlindAudienceFirstPass.model_validate(artifact.get("content") or {})
+        first_by_prior[first.audience_prior_id] = (artifact, first)
+    observation_by_prior: dict[
+        str, tuple[dict[str, Any], BlindAudienceObservation]
+    ] = {}
+    for artifact in observations:
+        observation = BlindAudienceObservation.model_validate(
+            artifact.get("content") or {}
+        )
+        observation_by_prior[observation.audience_prior_id] = (
+            artifact,
+            observation,
+        )
+
+    for ordinal, prior in enumerate(plan.audience_priors, start=1):
+        expected = _blind_perceptual_input_content(
+            prior=prior,
+            screenplay=screenplay,
+            board=board,
+            observation_id=f"BAO-{episode_id}-{ordinal}",
+        )
+        artifact = perceptual_by_prior.get(prior.audience_prior_id)
+        if artifact is None or artifact.get("content") != expected:
+            errors.append(
+                "[NARRATIVE_REVIEW_REBIND_PERCEPTUAL_DRIFT] "
+                f"prior={prior.audience_prior_id}"
+            )
+        if prior.audience_prior_id not in first_by_prior:
+            errors.append(
+                f"[NARRATIVE_REVIEW_REBIND_FIRST_PASS_MISSING] prior={prior.audience_prior_id}"
+            )
+        if prior.audience_prior_id not in observation_by_prior:
+            errors.append(
+                f"[NARRATIVE_REVIEW_REBIND_OBSERVATION_MISSING] prior={prior.audience_prior_id}"
+            )
+    if errors:
+        raise NarrativeReviewError(list(dict.fromkeys(errors)))
+
+    current_parents = _current_review_input_parent_artifact_ids(
+        episode_id,
+        board,
+        None,
+    )
+    created_ids: list[str] = []
+    try:
+        review_input = evidence_repository.create_artifact(EvidenceArtifact(
+            type="storyboard_review_input",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T2",
+            content=board.model_dump(mode="json"),
+            parent_artifact_ids=current_parents,
+            contract_version=NARRATIVE_CONTRACT_VERSION,
+        ))
+        created_ids.append(str(review_input["id"]))
+        base_parents = [current_parents[0], str(review_input["id"])]
+        cloned_artifact_ids: list[str] = []
+        for ordinal, prior in enumerate(plan.audience_priors, start=1):
+            prior_id = prior.audience_prior_id
+            old_perceptual = perceptual_by_prior[prior_id]
+            perceptual = evidence_repository.create_artifact(EvidenceArtifact(
+                type=BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE,
+                scope_type="episode",
+                scope_id=episode_id,
+                status="validated",
+                trust_level="T2",
+                content=old_perceptual["content"],
+                parent_artifact_ids=base_parents,
+                contract_version=AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
+                prompt_version=BLIND_READER_PROMPT_VERSION,
+            ))
+            created_ids.append(str(perceptual["id"]))
+            old_first, first = first_by_prior[prior_id]
+            first_pass = evidence_repository.create_artifact(EvidenceArtifact(
+                type=BLIND_FIRST_PASS_ARTIFACT_TYPE,
+                scope_type="episode",
+                scope_id=episode_id,
+                status="validated",
+                trust_level="T2",
+                content=old_first["content"],
+                parent_artifact_ids=[*base_parents, str(perceptual["id"])],
+                contract_version=NARRATIVE_CONTRACT_VERSION,
+                prompt_version=BLIND_READER_PROMPT_VERSION,
+            ))
+            created_ids.append(str(first_pass["id"]))
+            perceptual_content = old_perceptual["content"]
+            evidence_repository.create_evaluation(
+                first_pass["id"],
+                Evaluation(
+                    evaluator_type="deterministic",
+                    evaluator_name="blind_review_isolation_gate",
+                    evaluator_version=BLIND_READER_PROMPT_VERSION,
+                    status="passed",
+                    hard_gate_passed=True,
+                    evaluation_role="runtime_gate",
+                    runtime_blocking=True,
+                    score=100,
+                    evidence={
+                        "audience_prior_id": prior_id,
+                        "target_free_payload": True,
+                        "perceptual_input_artifact_id": perceptual["id"],
+                        "serializer_version": AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
+                        "prompt_version": BLIND_READER_PROMPT_VERSION,
+                        "perceptual_surface_hash": perceptual_content[
+                            "perceptual_surface_hash"
+                        ],
+                        "prompt_payload_hash": perceptual_content[
+                            "prompt_payload_hash"
+                        ],
+                        "first_pass_frozen": True,
+                    },
+                ),
+            )
+            old_observation, _observation = observation_by_prior[prior_id]
+            observation = evidence_repository.create_artifact(EvidenceArtifact(
+                type="blind_audience_observation",
+                scope_type="episode",
+                scope_id=episode_id,
+                status="validated",
+                trust_level="T2",
+                content=old_observation["content"],
+                parent_artifact_ids=[
+                    *base_parents,
+                    str(perceptual["id"]),
+                    str(first_pass["id"]),
+                ],
+                contract_version=NARRATIVE_CONTRACT_VERSION,
+                prompt_version=BLIND_READER_PROMPT_VERSION,
+            ))
+            created_ids.append(str(observation["id"]))
+            cloned_artifact_ids.extend([
+                str(perceptual["id"]),
+                str(first_pass["id"]),
+                str(observation["id"]),
+            ])
+
+        report_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="narrative_review_report",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T2",
+            content=report.model_dump(mode="json"),
+            parent_artifact_ids=[*base_parents, *cloned_artifact_ids],
+            contract_version=NARRATIVE_CONTRACT_VERSION,
+            prompt_version=COMPARATOR_PROMPT_VERSION,
+        ))
+        created_ids.append(str(report_artifact["id"]))
+        evidence_repository.create_evaluation(
+            report_artifact["id"],
+            Evaluation(
+                evaluator_type="deterministic",
+                evaluator_name="narrative_blind_comparator",
+                evaluator_version=COMPARATOR_PROMPT_VERSION,
+                status="passed",
+                hard_gate_passed=True,
+                evaluation_role="runtime_gate",
+                runtime_blocking=True,
+                retry_eligible=False,
+                score=100,
+                evidence={
+                    "rebound_from_report_artifact_id": reports[0]["id"],
+                    "perceptual_surface_unchanged": True,
+                },
+            ),
+        )
+        rebound_ids = [
+            str(review_input["id"]),
+            *cloned_artifact_ids,
+            str(report_artifact["id"]),
+        ]
+        verified_id = verify_persisted_narrative_review(
+            episode_id=episode_id,
+            screenplay=screenplay,
+            board=board,
+            report=report,
+            artifact_ids=rebound_ids,
+        )
+        if verified_id != report_artifact["id"]:
+            raise NarrativeReviewError([
+                "[NARRATIVE_REVIEW_REBIND_POINTER_DRIFT] 重绑定报告指针漂移"
+            ])
+        return report, rebound_ids
+    except Exception:
+        if created_ids:
+            conn = evidence_repository.get_conn()
+            conn.executemany(
+                "UPDATE artifacts SET status='rejected',stale_reason=? WHERE id=?",
+                [
+                    ("审读证据重绑定校验失败", artifact_id)
+                    for artifact_id in created_ids
+                ],
+            )
+            conn.commit()
+        raise
+
+
 def verify_review_chain_for_storyboard_artifact(
     *,
     episode_id: str,
@@ -750,16 +1047,17 @@ def _current_review_input_parent_artifact_ids(
             raise NarrativeReviewError([
                 f"[REVIEW_INPUT_SHOT_EVIDENCE_MISSING] 第 {shot_no} 镜缺少当前证据"
             ])
-        artifact = conn.execute(
-            "SELECT status FROM artifacts WHERE id=?",
-            (artifact_id,),
-        ).fetchone()
+        artifact = evidence_repository.get_artifact(artifact_id)
         if (
             artifact is None
-            or artifact["status"] in {"stale", "rejected", "superseded"}
+            or artifact.get("status") in {"stale", "rejected", "superseded"}
         ):
             raise NarrativeReviewError([
                 f"[REVIEW_INPUT_SHOT_EVIDENCE_INVALID] 第 {shot_no} 镜当前证据不可用"
+            ])
+        if artifact.get("content") != shot.model_dump(mode="json"):
+            raise NarrativeReviewError([
+                f"[REVIEW_INPUT_SHOT_EVIDENCE_DRIFT] 第 {shot_no} 镜当前证据内容未对账"
             ])
         parent_ids.append(artifact_id)
     return list(dict.fromkeys(parent_ids))

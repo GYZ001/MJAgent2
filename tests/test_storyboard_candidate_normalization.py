@@ -7,8 +7,10 @@ from app import stages
 from app.continuity import dialogue_framing_errors
 from app.loops import AgentLoop, AgentLoopPolicy
 from app.stages import (StoryboardShotDraft, _run_with_agent_loop,
+                        align_storyboard_source_evidence,
                         normalize_storyboard_outline_candidate,
                         normalize_storyboard_shot_candidate)
+from app.storyboard_supervisor import _blocker_messages
 
 
 def _loop() -> AgentLoop[StoryboardShotDraft]:
@@ -40,6 +42,46 @@ def _dialogue_loop() -> AgentLoop[StoryboardShotDraft]:
     )
 
 
+def test_storyboard_repair_preserves_only_omitted_top_level_shot_fields() -> None:
+    previous = json.dumps({
+        "episode_no": 2,
+        "is_final": False,
+        "shot": {
+            "shot_no": 6,
+            "source_excerpt": "旧的无效来源",
+            "first_frame_desc": "首帧保持",
+            "last_frame_desc": "尾帧保持",
+            "narration": "应被清空",
+            "continuity_state_in": {"scene": {"axis_id": "AXIS-1"}},
+        },
+    }, ensure_ascii=False)
+    repaired = json.dumps({
+        "episode_no": 2,
+        "is_final": False,
+        "shot": {
+            "shot_no": 6,
+            "source_excerpt": "新的有效来源",
+            "narration": "",
+            "continuity_state_in": {"scene": {}},
+        },
+    }, ensure_ascii=False)
+
+    merged_raw, preserved = (
+        stages._preserve_omitted_storyboard_repair_fields(
+            previous,
+            repaired,
+        )
+    )
+    merged = json.loads(merged_raw)
+
+    assert merged["shot"]["source_excerpt"] == "新的有效来源"
+    assert merged["shot"]["narration"] == ""
+    assert merged["shot"]["first_frame_desc"] == "首帧保持"
+    assert merged["shot"]["last_frame_desc"] == "尾帧保持"
+    assert merged["shot"]["continuity_state_in"] == {"scene": {}}
+    assert preserved == ["shot.first_frame_desc", "shot.last_frame_desc"]
+
+
 def test_storyboard_candidate_normalizes_nullable_contract_fields() -> None:
     candidate = {
         "episode_no": 99,
@@ -66,6 +108,171 @@ def test_storyboard_candidate_normalizes_nullable_contract_fields() -> None:
         "episode_no", "shot.shot_no", "shot.story_event_id",
         "shot.state_in", "shot.new_information_ids", "shot.audio_cast",
     }
+
+
+def test_storyboard_source_evidence_can_use_source_backed_audio() -> None:
+    source = "门外忽然传来一阵急促的敲门声，屋内两人同时停下动作。"
+    draft = StoryboardShotDraft.model_validate({
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 1,
+            "duration_s": 5,
+            "shot_size": "中景",
+            "camera_move": "固定",
+            "scene_setting": "日，室内",
+            "characters": ["甲"],
+            "action_desc": "甲听见门外动静后停下手里的动作。",
+            "first_frame_desc": "甲站在桌边整理文件。",
+            "last_frame_desc": "同一机位，甲停下动作看向门口。",
+            "source_excerpt": "模型改写后无法直接回绑的证据。",
+            "audio_timeline": [{
+                "start_s": 1.0,
+                "end_s": 2.0,
+                "type": "ambient_sound",
+                "speaker_id": None,
+                "text": "门外忽然传来一阵急促的敲门声",
+                "lip_sync": False,
+                "emotion": "平静",
+                "voice_canonical": "急促敲门声",
+            }],
+            "transition": "硬切",
+        },
+    })
+
+    aligned = align_storyboard_source_evidence(draft.shot, source)
+
+    assert aligned is not None
+    assert aligned.excerpt == "门外忽然传来一阵急促的敲门声"
+    assert aligned.exact is True
+
+
+def test_storyboard_source_evidence_uses_unique_authoritative_event_span() -> None:
+    source = (
+        "前文。那你下来帮我扶梯，我来找找看。她一边说着，一边爬上人字梯，"
+        "阿宾抬头望去。后文。"
+    )
+    screenplay = stages.EpisodeScreenplay(
+        episode_no=1,
+        events=[{
+            "event_id": "E7",
+            "source_span": (
+                "原文第1章：那你下来帮我扶梯，我来找找看。"
+                "她一边说着，一边爬上人字梯，阿宾抬头望去。"
+            ),
+        }],
+    )
+    draft = StoryboardShotDraft.model_validate({
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 14,
+            "duration_s": 5,
+            "shot_size": "中景",
+            "camera_move": "固定",
+            "scene_setting": "中，厨房",
+            "characters": ["阿宾", "胡太太"],
+            "action_desc": "阿宾扶住梯子，胡太太爬上去翻找壁橱。",
+            "first_frame_desc": "阿宾扶住梯子，胡太太准备向上爬。",
+            "last_frame_desc": "胡太太爬到梯子上，阿宾仍在下方扶梯。",
+            "source_excerpt": "模型改写后无法直接回绑的证据。",
+            "story_event_id": "E7",
+            "event_ids": ["E7"],
+            "transition": "硬切",
+        },
+    })
+
+    aligned = align_storyboard_source_evidence(
+        draft.shot,
+        source,
+        screenplay=screenplay,
+    )
+
+    assert aligned is not None
+    assert "她一边说着，一边爬上人字梯" in aligned.excerpt
+    assert source[aligned.start_offset:aligned.end_offset] == aligned.excerpt
+
+
+def test_storyboard_candidate_maps_graph_event_to_unique_legacy_event_for_evidence() -> None:
+    source = "前文。她放下手里的文件，抬头确认门外的来人。后文。"
+    screenplay = stages.EpisodeScreenplay(
+        episode_no=1,
+        events=[{
+            "event_id": "E2",
+            "source_span": "她放下手里的文件，抬头确认门外的来人。",
+        }],
+    )
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 2,
+            "duration_s": 5,
+            "shot_size": "中景",
+            "camera_move": "固定",
+            "scene_setting": "日，办公室",
+            "characters": ["甲"],
+            "action_desc": "甲放下文件后抬头看向门口。",
+            "first_frame_desc": "甲低头查看手里的文件。",
+            "last_frame_desc": "同一机位，甲放下文件看向门口。",
+            "source_excerpt": "模型改写后无法直接回绑的证据。",
+            "story_event_id": "E-2",
+            "event_ids": ["E-2"],
+            "transition": "硬切",
+        },
+    }
+
+    normalized, changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=2,
+        outline_story_event_id="E-2",
+        legacy_story_event_ids=["E2"],
+    )
+    draft = StoryboardShotDraft.model_validate(normalized)
+    aligned = align_storyboard_source_evidence(
+        draft.shot,
+        source,
+        screenplay=screenplay,
+    )
+
+    assert draft.shot.story_event_id == "E2"
+    assert aligned is not None
+    assert aligned.excerpt == "她放下手里的文件，抬头确认门外的来人。"
+    assert any(
+        change["reason"] == "outline_legacy_event_authority"
+        for change in changes
+    )
+
+
+def test_storyboard_candidate_leaves_ambiguous_legacy_event_join_empty() -> None:
+    normalized, _ = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {"shot_no": 2, "story_event_id": "model-guess"},
+        },
+        episode_no=1,
+        shot_no=2,
+        outline_story_event_id="E 2",
+        legacy_story_event_ids=["E-2", "E_2"],
+    )
+
+    assert normalized["shot"]["story_event_id"] == ""
+
+
+def test_source_fidelity_issue_remains_a_structural_blocker() -> None:
+    message = "shot.source_excerpt 无法在本集授权原文中找到连续依据"
+    draft = StoryboardShotDraft.model_construct(
+        episode_no=1,
+        shot=None,
+        is_final=False,
+    )
+    object.__setattr__(draft, "disposition", "WARNING")
+    object.__setattr__(draft, "residual_errors", [message])
+    object.__setattr__(draft, "residual_issues", [{
+        "code": "SOURCE_FIDELITY",
+        "message": message,
+        "severity": "blocker",
+    }])
+
+    assert _blocker_messages(draft) == [message]
 
 
 def test_storyboard_candidate_restores_shot_fields_misplaced_at_root() -> None:
@@ -249,6 +456,76 @@ def test_storyboard_candidate_removes_unassigned_speech_and_expands_duration() -
     }
 
 
+def test_storyboard_candidate_does_not_double_charge_audio_only_required_text() -> None:
+    spoken_line = "这是一段需要十秒才能完整说完并且不应重复计费的对白内容一二三四五六七八九"
+    assert len(spoken_line) == 36
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 5,
+            "duration_s": 10,
+            "audio_timeline": [{
+                "start_s": 0,
+                "end_s": 10,
+                "type": "spoken_dialogue",
+                "speaker_id": "speaker-a",
+                "text": spoken_line,
+            }],
+            "required_text": {
+                "exact_text": spoken_line,
+                "strategy": "audio_only",
+            },
+        },
+    }
+    outline_task = {
+        "key_line_ids": ["KL05"],
+        "audio_cast": ["speaker-a"],
+        "capacity_budget": {
+            "action_phase_s": 0.0,
+            "spoken_and_text_s": 10.0,
+            "attention_switch_s": 0.0,
+            "inference_processing_s": 0.0,
+            "reaction_registration_s": 0.0,
+            "spatial_reorientation_s": 0.0,
+            "entry_exit_settle_s": 0.0,
+            "other_s": 0.0,
+        },
+    }
+
+    normalized, _ = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=5,
+        outline_narrative_task=outline_task,
+    )
+
+    assert normalized["shot"]["capacity_budget"]["spoken_and_text_s"] == 10.0
+    assert normalized["shot"]["duration_s"] == 10
+
+
+def test_storyboard_candidate_charges_visual_required_text() -> None:
+    normalized, _ = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {
+                "shot_no": 5,
+                "duration_s": 5,
+                "required_text": {
+                    "exact_text": "一二三四五六七八九十一二三四五六七八",
+                    "strategy": "deterministic_insert",
+                },
+            },
+        },
+        episode_no=1,
+        shot_no=5,
+        outline_narrative_task={
+            "capacity_budget": {"spoken_and_text_s": 0.0},
+        },
+    )
+
+    assert normalized["shot"]["capacity_budget"]["spoken_and_text_s"] == 5.0
+
+
 def test_storyboard_candidate_derives_scene_change_and_transition() -> None:
     candidate = {
         "episode_no": 1,
@@ -280,6 +557,39 @@ def test_storyboard_candidate_derives_scene_change_and_transition() -> None:
     assert shot["transition"] == "叠化"
     assert {change["reason"] for change in changes} >= {
         "outline_scene_authority",
+        "derived_scene_continuity",
+        "derived_scene_transition",
+    }
+
+
+def test_storyboard_candidate_uses_hard_cut_for_derived_same_scene_mode() -> None:
+    normalized, changes = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {
+                "shot_no": 9,
+                "scene_name": "同一办公室",
+                "scene_time": "白天",
+                "continuity_mode": "scene_change",
+                "transition": "叠化",
+            },
+        },
+        episode_no=1,
+        shot_no=9,
+        outline_narrative_task={
+            "scene_name": "同一办公室",
+            "scene_time": "白天",
+            "continuity_mode": "scene_change",
+        },
+        previous_scene_name="同一办公室",
+        previous_scene_time="白天",
+    )
+
+    assert normalized["shot"]["continuity_mode"] == "same_scene_cut"
+    assert normalized["shot"]["transition"] == "硬切"
+    assert {
+        change["reason"] for change in changes
+    } >= {
         "derived_scene_continuity",
         "derived_scene_transition",
     }

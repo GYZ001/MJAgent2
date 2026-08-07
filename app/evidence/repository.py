@@ -306,6 +306,124 @@ def create_evaluation(
     return get_evaluations(artifact_id)[-1]
 
 
+def create_and_commit_artifact_in_transaction(
+    conn,
+    artifact: EvidenceArtifact,
+    evaluations: list[Evaluation],
+    *,
+    step_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Create and adopt an artifact without committing the caller's transaction."""
+    if artifact.content is None and artifact.file_path and not Path(artifact.file_path).is_file():
+        raise FileNotFoundError(artifact.file_path)
+    if not evaluations:
+        raise ValueError("artifact commit requires at least one evaluation")
+    gate_evaluations = [
+        evaluation for evaluation in evaluations
+        if not _is_score_only_evaluation(evaluation)
+        and not (
+            evaluation.evaluator_type == "human"
+            and evaluation.evaluator_name == "storyboard_editor"
+            and not evaluation.hard_gate_passed
+        )
+    ]
+    if any(
+        not evaluation.hard_gate_passed or evaluation.status in {"failed", "error"}
+        for evaluation in gate_evaluations
+    ):
+        raise ValueError("hard gate evaluation failed")
+    if any(
+        issue.severity.value == "blocker"
+        for evaluation in gate_evaluations
+        for issue in evaluation.issues
+    ):
+        raise ValueError("unresolved blocker prevents artifact commit")
+    if any(evaluation.recovered for evaluation in gate_evaluations):
+        raise ValueError("recovered evaluation cannot independently commit an artifact")
+
+    version = conn.execute(
+        "SELECT COALESCE(MAX(version),0)+1 AS version FROM artifacts "
+        "WHERE type=? AND scope_type=? AND scope_id=?",
+        (artifact.type, artifact.scope_type, artifact.scope_id),
+    ).fetchone()["version"]
+    artifact_id = artifact.id or new_id("art")
+    artifact_hash = content_hash(artifact.content, artifact.file_path)
+    evaluator_types = {evaluation.evaluator_type for evaluation in gate_evaluations}
+    if artifact.type == "delivery_package" and {"human", "file"}.issubset(evaluator_types):
+        trust_level = "T5"
+    elif "human" in evaluator_types:
+        trust_level = "T4"
+    elif evaluator_types.intersection({"model", "file"}):
+        trust_level = "T3"
+    else:
+        trust_level = "T2"
+    stamp = now()
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,content_json,
+               file_path,content_hash,created_by_step_run_id,parent_artifact_ids_json,
+               contract_version,prompt_version,model_snapshot_json,created_at,approved_at
+           ) VALUES(?,?,?,?,?,'approved',?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            artifact_id, artifact.type, artifact.scope_type, artifact.scope_id, version,
+            trust_level, _json(artifact.content) if artifact.content is not None else None,
+            artifact.file_path, artifact_hash, step_run_id, _json(artifact.parent_artifact_ids),
+            artifact.contract_version, artifact.prompt_version, _json(artifact.model_snapshot),
+            stamp, stamp,
+        ),
+    )
+    for evaluation in evaluations:
+        conn.execute(
+            """INSERT INTO evaluations(
+                   id,artifact_id,step_run_id,evaluator_type,evaluator_name,evaluator_version,
+                   status,hard_gate_passed,evaluation_role,score_status,runtime_blocking,
+                   retry_eligible,score,dimension_scores_json,issues_json,evidence_json,
+                   raw_result_ref,confidence,recovered,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                new_id("eval"), artifact_id, step_run_id, evaluation.evaluator_type,
+                evaluation.evaluator_name, evaluation.evaluator_version, evaluation.status,
+                int(evaluation.hard_gate_passed), evaluation.evaluation_role,
+                evaluation.score_status, int(evaluation.runtime_blocking),
+                int(evaluation.retry_eligible), evaluation.score,
+                _json(evaluation.dimension_scores),
+                _json([issue.model_dump(mode="json") for issue in evaluation.issues]),
+                _json(evaluation.evidence), evaluation.raw_result_ref,
+                evaluation.confidence, int(evaluation.recovered), stamp,
+            ),
+        )
+    previous = [
+        str(row["id"])
+        for row in conn.execute(
+            """SELECT id FROM artifacts
+                 WHERE type=? AND scope_type=? AND scope_id=?
+                   AND status='approved' AND id!=?""",
+            (artifact.type, artifact.scope_type, artifact.scope_id, artifact_id),
+        ).fetchall()
+    ]
+    conn.executemany(
+        "UPDATE artifacts SET status='superseded',superseded_by_artifact_id=? WHERE id=?",
+        [(artifact_id, previous_id) for previous_id in previous],
+    )
+    for previous_id in previous:
+        descendants = list_descendants(previous_id, exclude_ids={artifact_id})
+        conn.executemany(
+            "UPDATE artifacts SET status='stale',stale_reason=? "
+            "WHERE id=? AND status!='rejected'",
+            [
+                (f"上游产物已由 {artifact_id} 替代", descendant_id)
+                for descendant_id in descendants
+            ],
+        )
+    if step_run_id:
+        conn.execute(
+            "UPDATE step_runs SET output_artifact_id=?,decision='accept' WHERE id=?",
+            (artifact_id, step_run_id),
+        )
+    row = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+    return _decode_rows([dict(row)])[0] if row else {}
+
+
 def commit_artifact(
     step_run_id: str | None,
     artifact_id: str,

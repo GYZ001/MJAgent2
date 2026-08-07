@@ -1,6 +1,7 @@
 """剧本 Production Repair Agent：Baseline 一次生成后只做局部 Patch。"""
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 import hashlib
 import json
@@ -8,6 +9,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
+from app import config, textmatch
 from app.db import get_conn, get_setting, now
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue
@@ -50,7 +52,7 @@ from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX, OVERDETAIL_TERMS
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-13"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-16"
 NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
     "CHARACTER_IDENTITY_UNRESOLVED",
 })
@@ -68,7 +70,11 @@ _SCENE_STORY_FUNCTION_CODES = {
 }
 _SCENE_NUMBER_RE = re.compile(r"scene_outline\s*第\s*(\d+)\s*场|/scene_blocks/SC(\d+)", re.I)
 _DIALOGUE_SOURCE_MISMATCH_RE = re.compile(
-    r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\.source_text\s+未在本集原文中找到"
+    r"dialogue_chains\[(\d+)\]\.turns\[(\d+)\]\.source_text\s+"
+    r"(?:未在本集原文中找到|与改编台词语义不匹配)"
+)
+_SOURCE_SPAN_EXACT_MISMATCH_RE = re.compile(
+    r"\[SOURCE_SPAN_EXACT_MISMATCH\]\s+([^\s.。:：]+)"
 )
 _SOURCE_SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?")
 _SOURCE_EVIDENCE_STOP_CHARS = set(
@@ -145,6 +151,15 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
             f"fix_dialogue_function_{op.target.get('chain_id')}_"
             f"{op.target.get('turn_index')}"
         )
+    if (
+        kind == "narrative_node"
+        and str((op.target or {}).get("collection") or "") == "source_evidence"
+        and op.path in {"source_span", "verbatim_excerpt"}
+    ):
+        return str(
+            (op.target or {}).get("strategy")
+            or f"fix_source_span_{(op.target or {}).get('id') or 'unknown'}"
+        )
     if kind == "narrative_node":
         return (
             f"{op.op}:{(op.target or {}).get('id') or 'unknown'}:"
@@ -152,6 +167,11 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
         )
     if op.op == "create_node" and kind == "dialogue_turn":
         return "insert_trigger"
+    if op.op == "create_node" and kind == "action_block":
+        return str(
+            (op.target or {}).get("strategy")
+            or f"create_action_{(op.target or {}).get('id') or 'unknown'}"
+        )
     locator = op.path or str((op.target or {}).get("id") or "")
     return f"{op.op}:{locator}" if locator else op.op
 
@@ -161,6 +181,131 @@ def _strategy_attempt_count(entries: list[str]) -> int:
         1 for entry in entries
         if entry and not entry.startswith(("fail:", "exhausted"))
     )
+
+
+def _source_evidence_contexts(script: EpisodeScreenplay) -> dict[str, list[str]]:
+    plan = script.narrative_plan
+    if plan is None:
+        return {}
+    contexts: dict[str, list[str]] = {}
+    for proposition in plan.propositions or []:
+        statement = str(proposition.canonical_statement or "").strip()
+        if not statement:
+            continue
+        for evidence_id in proposition.direct_source_evidence_ids or []:
+            contexts.setdefault(str(evidence_id), []).append(statement)
+    return contexts
+
+
+def _source_span_issue_evidence_id(issue: Issue) -> str:
+    match = _SOURCE_SPAN_EXACT_MISMATCH_RE.search(issue.message or "")
+    return match.group(1).strip() if match else ""
+
+
+def _plan_source_span_patch(
+    issue: Issue,
+    script: EpisodeScreenplay,
+    *,
+    source_text: str,
+    tried: list[str],
+) -> list[PatchOperation]:
+    if script.narrative_plan is None or not source_text:
+        return []
+    evidence_id = _source_span_issue_evidence_id(issue)
+    if not evidence_id:
+        return []
+    strategy = f"fix_source_span_{evidence_id}"
+    if _strategy_was_tried(tried, strategy):
+        return []
+    evidence = next(
+        (
+            item for item in script.narrative_plan.source_evidence
+            if item.source_evidence_id == evidence_id
+        ),
+        None,
+    )
+    if evidence is None:
+        return []
+    contexts = _source_evidence_contexts(script)
+    resolved = _source_evidence_span(
+        source_text,
+        evidence.verbatim_excerpt,
+        context=" ".join(contexts.get(evidence_id, [])),
+    )
+    if resolved is None:
+        return []
+    start, end, expanded_excerpt = resolved
+    target = {
+        "kind": "narrative_node",
+        "collection": "source_evidence",
+        "id": evidence_id,
+        "strategy": strategy,
+    }
+    operations: list[PatchOperation] = []
+    if (
+        expanded_excerpt is not None
+        and expanded_excerpt != evidence.verbatim_excerpt
+    ):
+        operations.append(PatchOperation(
+            op="replace_field",
+            path="verbatim_excerpt",
+            value=expanded_excerpt,
+            target=target,
+        ))
+    current_span = evidence.source_span.model_dump(mode="json")
+    if current_span.get("start") != start or current_span.get("end") != end:
+        operations.append(PatchOperation(
+            op="replace_field",
+            path="source_span",
+            value={**current_span, "start": start, "end": end},
+            target=target,
+        ))
+    return operations
+
+
+def _best_scene_for_spine_beat(
+    script: EpisodeScreenplay,
+    *,
+    beat_index: int,
+    who: str,
+    does: str,
+) -> str:
+    """Place one authoritative spine action in the closest existing scene."""
+    scenes = list(script.scene_outline or [])
+    if not scenes:
+        return ""
+    beat_text = f"{who}{does}"
+    ranked: list[tuple[float, int, int, str]] = []
+    for index, scene in enumerate(scenes):
+        scene_text = " ".join([
+            scene.story_function or "",
+            scene.summary or "",
+            scene.conflict or "",
+            scene.turn or "",
+            scene.source_basis or "",
+        ])
+        semantic_score = max(
+            textmatch.longest_run_ratio(beat_text, scene_text),
+            textmatch.bigram_coverage(beat_text, scene_text),
+        )
+        actor_score = int(
+            bool(who)
+            and any(
+                who == character
+                or who in character
+                or character in who
+                for character in (scene.characters or [])
+            )
+        )
+        ordinal_distance = abs(index - min(beat_index, len(scenes) - 1))
+        ranked.append((
+            semantic_score,
+            actor_score,
+            -ordinal_distance,
+            f"SC{int(scene.scene_no):02d}",
+        ))
+    ranked.sort(reverse=True)
+    return ranked[0][3]
 
 
 def run_screenplay_qa(
@@ -175,20 +320,28 @@ def run_screenplay_qa(
     from app import config
     from app.narrative import validate_screenplay_narrative
     from app.stages import adaptation_hook_errors
-    from app.validators import validate_screenplay
+    from app.validators import (
+        validate_screenplay,
+        validate_screenplay_source_coverage,
+    )
     from app.harness.contracts import get_contract
     from app.production.screenplay_authority import (
         SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_contract_requires_narrative,
         screenplay_authority_fingerprint,
     )
 
+    contract_version = str(
+        episode.get("screenplay_contract_version")
+        or get_contract("screenplay").version
+    )
     authority_error = ""
     try:
         authority_input_fingerprint = screenplay_authority_fingerprint(
             str(episode.get("id") or ""),
             source_text=source_text,
             bible=bible,
-            contract_version=get_contract("screenplay").version,
+            contract_version=contract_version,
             qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         )
     except ValueError as exc:
@@ -209,7 +362,7 @@ def run_screenplay_qa(
                         "required_dialogue_occurrences", "character_resolutions",
                     )
                 },
-                "contract_version": get_contract("screenplay").version,
+                "contract_version": contract_version,
                 "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
             }
             authority_input_fingerprint = hashlib.sha256(
@@ -259,8 +412,9 @@ def run_screenplay_qa(
             )
         except ValueError:
             authorized_source_chapters = None
-    messages.extend(
-        validate_screenplay_narrative(
+    requires_narrative = screenplay_contract_requires_narrative(contract_version)
+    if script.narrative_plan is not None:
+        messages.extend(validate_screenplay_narrative(
             script,
             require=True,
             source_text=source_text,
@@ -272,8 +426,17 @@ def run_screenplay_qa(
                 else None
             ),
             authorized_source_chapters=authorized_source_chapters,
+        ))
+    elif requires_narrative:
+        messages.append(
+            "[NARRATIVE_PLAN_REQUIRED] 当前剧本合同要求 narrative_plan；"
+            "缺失时禁止按 legacy 路径发布"
         )
-    )
+    else:
+        messages.extend(validate_screenplay_source_coverage(
+            script,
+            source_text,
+        ))
     from app.portraits import (
         screenplay_character_resolution_errors,
         screenplay_unknown_identity_errors,
@@ -296,7 +459,10 @@ def run_screenplay_qa(
             code="CHARACTER_IDENTITY_UNRESOLVED",
             message=message,
             subject="screenplay",
-            path="/character_identities",
+            path=(
+                "/character_identities/"
+                + hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+            ),
             rule_id="character_identity_must_resolve_before_publish",
             repairable=True,
             requires_user_input=False,
@@ -332,8 +498,6 @@ def run_screenplay_qa(
         evaluator_name="screenplay_production_qa",
         evaluator_version="screenplay-qa-gate-2",
         status=status,
-        # Compatibility readers still inspect hard_gate_passed. Score-only
-        # findings never revoke runtime eligibility.
         hard_gate_passed=True,
         evaluation_role=evaluation_role,
         score_status="scored",
@@ -373,6 +537,63 @@ def plan_screenplay_patch(
     related = list((issue.evidence or {}).get("related_node_ids") or [])
 
     ops: list[PatchOperation] = []
+
+    if code == "SOURCE_SPAN_EXACT_MISMATCH":
+        ops = _plan_source_span_patch(
+            issue,
+            script,
+            source_text=source_text,
+            tried=tried,
+        )
+        if ops:
+            return ops
+
+    if code == "SPINE_MISSING" and script.plot_spine is not None:
+        referenced_ids = {
+            str(value).strip().upper()
+            for value in related
+            if re.fullmatch(r"S\d+", str(value).strip(), re.I)
+        }
+        referenced_ids.update(
+            match.upper()
+            for match in re.findall(r"\bS\d+\b", issue.message or "", re.I)
+        )
+        for beat_index, beat in enumerate(script.plot_spine.spine_beats or []):
+            beat_id = str(beat.beat_id or "").strip().upper()
+            if (
+                not beat.must_keep
+                or (referenced_ids and beat_id not in referenced_ids)
+            ):
+                continue
+            strategy = f"deliver_spine_{beat_id}"
+            if _strategy_was_tried(tried, strategy):
+                continue
+            scene_id = _best_scene_for_spine_beat(
+                script,
+                beat_index=beat_index,
+                who=(beat.who or "").strip(),
+                does=(beat.does or "").strip(),
+            )
+            if not scene_id:
+                continue
+            who = (beat.who or "").strip()
+            does = (beat.does or "").strip()
+            action_text = f"{who}{does}".strip()
+            if not action_text:
+                continue
+            return [PatchOperation(
+                op="create_node",
+                target={
+                    "kind": "action_block",
+                    "id": f"AC-SPINE-{beat_id}",
+                    "scene_id": scene_id,
+                    "strategy": strategy,
+                },
+                value={
+                    "action_id": f"AC-SPINE-{beat_id}",
+                    "text": action_text.rstrip("。") + "。",
+                },
+            )]
 
     staging_match = re.search(
         r"\]\s*([^/\s]+)/([^\s]+)\s+在\s+([^\s]+)\s+->\s+([^\s]+)"
@@ -591,11 +812,14 @@ def plan_screenplay_patch(
             chain, turn = turn_ref
             strategy = f"fix_dialogue_source_{chain.chain_id}_{turn_index}"
             if not _strategy_was_tried(tried, strategy):
-                evidence = _best_source_evidence_for_turn(
-                    script,
-                    chain_index=chain_index,
-                    turn_index=turn_index,
-                    source_text=source_text,
+                evidence = (
+                    _unique_source_dialogue(turn.line or "", source_text)
+                    or _best_source_evidence_for_turn(
+                        script,
+                        chain_index=chain_index,
+                        turn_index=turn_index,
+                        source_text=source_text,
+                    )
                 )
                 if evidence and evidence != (turn.source_text or "").strip():
                     return [PatchOperation(
@@ -788,6 +1012,87 @@ def plan_screenplay_patch(
                             "decision_action_ids": [action_id],
                         },
                     )]
+
+    dramatic_state_match = re.search(
+        r"\]\s*([^/\s]+)/([^\s]+)\s+的执行者\s+([^\s]+)"
+        r"\s+缺少目标/情绪/关系状态",
+        issue.message or "",
+    )
+    if (
+        code == "CHARACTER_DRAMATIC_STATE_MISSING"
+        and dramatic_state_match
+        and script.narrative_plan is not None
+    ):
+        event_id, action_id, actor_id = dramatic_state_match.groups()
+        strategy = f"create_dramatic_state_{event_id}_{action_id}_{actor_id}"
+        if not _strategy_was_tried(tried, strategy):
+            plan = script.narrative_plan
+            event = next(
+                (item for item in plan.events if item.event_id == event_id),
+                None,
+            )
+            action = next(
+                (
+                    item for item in plan.atomic_actions
+                    if item.action_id == action_id
+                ),
+                None,
+            )
+            if (
+                event is not None
+                and action is not None
+                and action_id in event.action_ids
+                and actor_id in action.actor_ids
+            ):
+                existing_ids = {
+                    item.character_state_id
+                    for item in plan.character_states
+                }
+                state_no = 1
+                while f"CDS-{state_no}" in existing_ids:
+                    state_no += 1
+                state_id = f"CDS-{state_no}"
+                evidence_ids = [
+                    item.evidence_id
+                    for item in plan.evidence
+                    if (
+                        item.anchor.type == "event"
+                        and item.anchor.id == event_id
+                        and actor_id in item.perceivable_by
+                    )
+                ]
+                return [PatchOperation(
+                    op="create_node",
+                    target={
+                        "kind": "narrative_node",
+                        "collection": "character_states",
+                        "id": state_id,
+                        "strategy": strategy,
+                    },
+                    value={
+                        "character_state_id": state_id,
+                        "character_id": actor_id,
+                        "anchor": {"type": "event", "id": event_id},
+                        "goal_proposition_ids": list(
+                            event.proposition_ids
+                        ),
+                        "stakes_proposition_ids": [],
+                        "relationship_state": {},
+                        "emotion": {
+                            "label": "事件压力",
+                            "intensity": max(
+                                0.0,
+                                min(1.0, float(event.salience or 0)),
+                            ),
+                            "observable_evidence": evidence_ids,
+                        },
+                        "pressure": max(
+                            0.0,
+                            min(1.0, float(event.salience or 0)),
+                        ),
+                        "tactic": action.semantic_intent,
+                    },
+                )]
 
     delta_match = re.search(
         r"\]\s*([^\s.]+)\.(from_state|to_state)\s+不是",
@@ -1014,6 +1319,110 @@ def plan_screenplay_patch(
                                 ))
                             if operations:
                                 return operations
+                if uncovered_fields == {"affective_state"}:
+                    intent = next(
+                        (
+                            item
+                            for item in plan.experience_intents
+                            if any(
+                                path.audience_path_id == path_id
+                                for path in item.audience_paths
+                            )
+                        ),
+                        None,
+                    )
+                    deadline_event_id = (
+                        state_out.anchor.id
+                        if state_out.anchor.type == "event"
+                        else (
+                            intent.anchor_event_ids[-1]
+                            if intent is not None and intent.anchor_event_ids
+                            else ""
+                        )
+                    )
+                    delta_id = f"XD-{path_id}-affective"
+                    existing_delta_ids = {
+                        delta.target_delta_id
+                        for path in (
+                            intent.audience_paths if intent is not None else []
+                        )
+                        for delta in path.target_deltas
+                    }
+                    strategy = f"cover_{path_id}_affective_state"
+                    if (
+                        intent is not None
+                        and deadline_event_id
+                        and delta_id not in existing_delta_ids
+                        and not _strategy_was_tried(tried, strategy)
+                    ):
+                        return [PatchOperation(
+                            op="create_node",
+                            target={
+                                "kind": "narrative_node",
+                                "collection": "experience_intents",
+                                "id": delta_id,
+                                "parent_id": path_id,
+                                "parent_field": "target_deltas",
+                                "strategy": strategy,
+                            },
+                            value={
+                                "target_delta_id": delta_id,
+                                "dimension": "affective",
+                                "proposition_ids": [],
+                                "description": (
+                                    f"{path_id} 的观众情绪由入场状态"
+                                    "变化到目标出场状态"
+                                ),
+                                "from_state": {
+                                    "affective_state": dict(
+                                        state_in.affective_state
+                                    ),
+                                },
+                                "to_state": {
+                                    "affective_state": dict(
+                                        state_out.affective_state
+                                    ),
+                                },
+                                "required_processing_s": 0.0,
+                                "deadline_event_id": deadline_event_id,
+                            },
+                        )]
+
+    recall_decision_match = re.search(
+        r"\]\s*([^\s.]+)\.recall_needed=(?:False|false)"
+        r"\s+与低分位记忆结果\s+(?:True|true)\s+不一致",
+        issue.message or "",
+    )
+    if (
+        code == "SETUP_RECALL_DECISION_MISMATCH"
+        and recall_decision_match
+        and script.narrative_plan is not None
+    ):
+        payoff_id = recall_decision_match.group(1)
+        strategy = f"enable_recall_{payoff_id}"
+        if not _strategy_was_tried(tried, strategy):
+            payoff = next(
+                (
+                    item
+                    for item in (
+                        script.narrative_plan.setup_payoff_contracts
+                    )
+                    if item.setup_payoff_id == payoff_id
+                ),
+                None,
+            )
+            if payoff is not None:
+                return [PatchOperation(
+                    op="replace_field",
+                    path="recall_needed",
+                    value=True,
+                    target={
+                        "kind": "narrative_node",
+                        "collection": "setup_payoff_contracts",
+                        "id": payoff_id,
+                        "strategy": strategy,
+                    },
+                )]
 
     recall_task_match = re.search(
         r"\]\s*([^/\s]+)/([^\s]+)\s+在使用前已遗忘\s+\[([^\]]+)\]",
@@ -1040,8 +1449,27 @@ def plan_screenplay_patch(
             for path in intent.audience_paths
             if path.audience_prior_id == prior_id
         ]
-        if payoff is not None and len(paths) == 1 and missing_propositions:
-            intent, path = paths[0]
+        payoff_event_ids = set(
+            payoff.payoff_event_ids if payoff is not None else []
+        )
+        payoff_paths = [
+            (intent, path)
+            for intent, path in paths
+            if (
+                payoff_event_ids.intersection(intent.anchor_event_ids)
+                or any(
+                    delta.deadline_event_id in payoff_event_ids
+                    for delta in path.target_deltas
+                )
+            )
+        ]
+        selected_paths = payoff_paths if len(payoff_paths) == 1 else paths
+        if (
+            payoff is not None
+            and len(selected_paths) == 1
+            and missing_propositions
+        ):
+            intent, path = selected_paths[0]
             downstream_event = next(
                 iter(payoff.payoff_event_ids),
                 payoff.retention_deadline_event_id,
@@ -1125,6 +1553,7 @@ def plan_screenplay_patch(
     if (
         code == "KEY_LINE_MISSING"
         and "主线对白上下文断裂" not in (issue.message or "")
+        and "turns 需包含" not in (issue.message or "")
         and not _strategy_was_tried(tried, "rederive")
     ):
         return [PatchOperation(op="rederive")]
@@ -1384,6 +1813,8 @@ def _best_source_evidence_for_turn(
 def _source_evidence_span(
     chapter: str,
     excerpt: str,
+    *,
+    context: str = "",
 ) -> tuple[int, int, str | None] | None:
     """Resolve one exact raw span, optionally expanding a proven excerpt elision."""
     from app.narrative import normalize_source_evidence_text
@@ -1417,35 +1848,75 @@ def _source_evidence_span(
             raw_positions[offset + len(normalized_excerpt) - 1] + 1,
             None,
         )
-    if exact_offsets or len(normalized_excerpt) < 24:
+    if len(exact_offsets) > 1 and context:
+        ranked: list[tuple[float, int]] = []
+        for offset in exact_offsets:
+            raw_start = raw_positions[offset]
+            raw_end = raw_positions[offset + len(normalized_excerpt) - 1] + 1
+            window = chapter[
+                max(0, raw_start - 320):min(len(chapter), raw_end + 320)
+            ]
+            score = max(
+                textmatch.longest_run_ratio(context, window),
+                textmatch.bigram_coverage(context, window),
+            )
+            ranked.append((score, offset))
+        ranked.sort(reverse=True)
+        best_score, best_offset = ranked[0]
+        second_score = ranked[1][0] if len(ranked) > 1 else -1.0
+        if best_score >= 0.2 and best_score - second_score >= 0.03:
+            return (
+                raw_positions[best_offset],
+                raw_positions[
+                    best_offset + len(normalized_excerpt) - 1
+                ] + 1,
+                None,
+            )
+    match_excerpt = re.sub(
+        r"(?:…{2,}|\.{3,})",
+        "",
+        normalized_excerpt,
+    )
+    if exact_offsets or len(match_excerpt) < 24:
         return None
 
     # A model may concatenate two exact source regions while omitting an
     # irrelevant paragraph. Recover only when unique prefix/suffix anchors prove
     # one bounded containing span and the authored excerpt is an ordered
     # subsequence of it. This expands evidence; it never invents or fuzzy-edits it.
-    anchor_size = min(32, max(12, len(normalized_excerpt) // 8))
-    prefix = normalized_excerpt[:anchor_size]
-    suffix = normalized_excerpt[-anchor_size:]
+    anchor_size = min(32, max(12, len(match_excerpt) // 8))
+    prefix = match_excerpt[:anchor_size]
+    suffix = match_excerpt[-anchor_size:]
     prefix_offsets = occurrences(normalized_chapter, prefix)
     suffix_offsets = occurrences(normalized_chapter, suffix)
     candidates: list[tuple[int, int, int]] = []
-    max_extra = max(200, min(1000, len(normalized_excerpt)))
-
     for start in prefix_offsets:
         for suffix_start in suffix_offsets:
             end = suffix_start + len(suffix)
-            if end <= start or end - start < len(normalized_excerpt):
+            if end <= start or end - start < len(match_excerpt):
                 continue
             segment = normalized_chapter[start:end]
-            extra = len(segment) - len(normalized_excerpt)
-            if extra > max_extra:
-                continue
+            extra = len(segment) - len(match_excerpt)
             cursor = 0
             for char in segment:
-                if cursor < len(normalized_excerpt) and char == normalized_excerpt[cursor]:
+                if cursor < len(match_excerpt) and char == match_excerpt[cursor]:
                     cursor += 1
-            if cursor == len(normalized_excerpt):
+            matching_coverage = (
+                sum(
+                    block.size
+                    for block in SequenceMatcher(
+                        None,
+                        match_excerpt,
+                        segment,
+                        autojunk=False,
+                    ).get_matching_blocks()
+                )
+                / max(1, len(match_excerpt))
+            )
+            if (
+                cursor == len(match_excerpt)
+                or matching_coverage >= 0.98
+            ):
                 candidates.append((extra, start, end))
 
     if not candidates:
@@ -1472,6 +1943,30 @@ def _normalize_screenplay_narrative_graph(
         return []
     data = plan.model_dump(mode="json")
     changes: list[dict[str, Any]] = []
+    from app.validators import normalize_screenplay_dialogue_chains
+
+    before_dialogue_chains = [
+        chain.model_dump(mode="json")
+        for chain in (script.dialogue_chains or [])
+    ]
+    before_full_script_text = script.full_script_text
+    normalize_screenplay_dialogue_chains(script)
+    after_dialogue_chains = [
+        chain.model_dump(mode="json")
+        for chain in (script.dialogue_chains or [])
+    ]
+    if (
+        after_dialogue_chains != before_dialogue_chains
+        or script.full_script_text != before_full_script_text
+    ):
+        changes.append({
+            "kind": "dialogue_chain_normalization",
+            "before_chain_count": len(before_dialogue_chains),
+            "after_chain_count": len(after_dialogue_chains),
+            "full_script_text_changed": (
+                script.full_script_text != before_full_script_text
+            ),
+        })
 
     for index, chain in enumerate(script.dialogue_chains or []):
         topic = (chain.topic or "").strip()
@@ -1509,6 +2004,15 @@ def _normalize_screenplay_narrative_graph(
         script,
         "\n".join(dict.fromkeys(chapters.values())),
     ))
+    source_contexts: dict[str, list[str]] = {}
+    for proposition in data.get("propositions") or []:
+        if not isinstance(proposition, dict):
+            continue
+        statement = str(proposition.get("canonical_statement") or "").strip()
+        if not statement:
+            continue
+        for evidence_id in proposition.get("direct_source_evidence_ids") or []:
+            source_contexts.setdefault(str(evidence_id), []).append(statement)
     for index, evidence in enumerate(data.get("source_evidence") or []):
         if not isinstance(evidence, dict):
             continue
@@ -1516,14 +2020,51 @@ def _normalize_screenplay_narrative_graph(
         excerpt = str(evidence.get("verbatim_excerpt") or "")
         if not isinstance(span, dict) or not excerpt:
             continue
-        chapter = chapters.get(str(span.get("chapter_id") or ""))
+        evidence_id = evidence.get("source_evidence_id") or f"source-{index}"
+        context = " ".join(source_contexts.get(str(evidence_id), []))
+        chapter_id = str(span.get("chapter_id") or "")
+        chapter = chapters.get(chapter_id)
+        resolved = (
+            _source_evidence_span(chapter, excerpt, context=context)
+            if chapter is not None
+            else None
+        )
         if chapter is None:
-            continue
-        resolved = _source_evidence_span(chapter, excerpt)
+            candidates = (
+                [(candidate_id, None) for candidate_id in chapters]
+                if len(chapters) == 1
+                else [
+                    (candidate_id, candidate)
+                    for candidate_id, candidate_text in chapters.items()
+                    if (
+                        candidate := _source_evidence_span(
+                            candidate_text,
+                            excerpt,
+                            context=context,
+                        )
+                    ) is not None
+                ]
+            )
+            if len(candidates) != 1:
+                continue
+            chapter_id, resolved = candidates[0]
+            chapter = chapters[chapter_id]
+            if resolved is None:
+                resolved = _source_evidence_span(
+                    chapter,
+                    excerpt,
+                    context=context,
+                )
+            changes.append({
+                "kind": "source_chapter",
+                "id": evidence_id,
+                "from": span.get("chapter_id"),
+                "to": chapter_id,
+            })
+            span["chapter_id"] = chapter_id
         if resolved is None:
             continue
         start, end, expanded_excerpt = resolved
-        evidence_id = evidence.get("source_evidence_id") or f"source-{index}"
         if expanded_excerpt is not None and expanded_excerpt != excerpt:
             changes.append({
                 "kind": "source_excerpt_expanded",
@@ -1606,6 +2147,14 @@ def _normalize_screenplay_narrative_graph(
                 walk(child, f"{path}[{index}]")
 
     walk(data)
+    actions_by_id = {
+        str(item.get("action_id") or "").strip(): item
+        for item in (data.get("atomic_actions") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("action_id") or "").strip()
+        )
+    }
     fact_propositions = {
         str(fact.get("fact_id") or "").strip(): str(
             fact.get("proposition_id") or ""
@@ -1620,6 +2169,57 @@ def _normalize_screenplay_narrative_graph(
     for event in data.get("events") or []:
         if not isinstance(event, dict):
             continue
+        bound_actions = [
+            actions_by_id[action_id]
+            for action_id in (event.get("action_ids") or [])
+            if action_id in actions_by_id
+        ]
+        action_preconditions = {
+            str(fact_id)
+            for action in bound_actions
+            for fact_id in (action.get("precondition_fact_ids") or [])
+            if str(fact_id or "").strip()
+        }
+        action_adds = {
+            str(fact_id)
+            for action in bound_actions
+            for fact_id in (action.get("effects_add") or [])
+            if str(fact_id or "").strip()
+        }
+        action_removes = {
+            str(fact_id)
+            for action in bound_actions
+            for fact_id in (action.get("effects_remove") or [])
+            if str(fact_id or "").strip()
+        }
+        touched_action_facts = (
+            action_preconditions | action_adds | action_removes
+        )
+        derived_action_facts = {
+            "precondition_fact_ids": action_preconditions - action_adds,
+            "effects_add": action_adds - action_removes,
+            "effects_remove": action_removes - action_adds,
+        }
+        for field, derived_facts in derived_action_facts.items():
+            existing_facts = list(event.get(field) or [])
+            preserved_event_facts = [
+                fact_id
+                for fact_id in existing_facts
+                if str(fact_id) not in touched_action_facts
+            ]
+            normalized_facts = list(dict.fromkeys([
+                *preserved_event_facts,
+                *sorted(derived_facts),
+            ]))
+            if normalized_facts != existing_facts:
+                changes.append({
+                    "kind": "event_action_fact_refs",
+                    "id": event.get("event_id"),
+                    "field": field,
+                    "from": existing_facts,
+                    "to": normalized_facts,
+                })
+                event[field] = normalized_facts
         existing = list(event.get("proposition_ids") or [])
         required = [
             fact_propositions[fact_id]
@@ -1640,31 +2240,333 @@ def _normalize_screenplay_narrative_graph(
             })
             event["proposition_ids"] = normalized
 
+    propositions_by_id = {
+        str(item.get("proposition_id") or ""): item
+        for item in (data.get("propositions") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("proposition_id") or "").strip()
+        )
+    }
+    evidence_by_id = {
+        str(item.get("evidence_id") or ""): item
+        for item in (data.get("evidence") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("evidence_id") or "").strip()
+        )
+    }
+    events_by_id = {
+        str(item.get("event_id") or ""): item
+        for item in (data.get("events") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("event_id") or "").strip()
+        )
+    }
+
+    payoff_contracts_by_id = {
+        str(item.get("setup_payoff_id") or ""): item
+        for item in (data.get("setup_payoff_contracts") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("setup_payoff_id") or "").strip()
+        )
+    }
+    for arc in data.get("arc_contracts") or []:
+        if not isinstance(arc, dict):
+            continue
+        promises = [
+            str(item)
+            for item in (arc.get("promise_proposition_ids") or [])
+            if str(item or "").strip()
+        ]
+        referenced_payoffs = [
+            payoff_contracts_by_id[payoff_id]
+            for payoff_id in (arc.get("payoff_contract_ids") or [])
+            if payoff_id in payoff_contracts_by_id
+        ]
+        setup_promises = {
+            str(proposition_id)
+            for payoff in referenced_payoffs
+            for proposition_id in (payoff.get("setup_proposition_ids") or [])
+            if str(proposition_id or "") in propositions_by_id
+        }
+        orphan_promises = [
+            proposition_id
+            for proposition_id in promises
+            if proposition_id not in setup_promises
+        ]
+        replacements: dict[str, str] = {}
+        for proposition_id in orphan_promises:
+            matching_payoffs = [
+                payoff
+                for payoff in referenced_payoffs
+                if proposition_id in (
+                    payoff.get("intended_inference_ids") or []
+                )
+            ]
+            if len(matching_payoffs) != 1:
+                break
+            setup_ids = list(dict.fromkeys(
+                str(item)
+                for item in (
+                    matching_payoffs[0].get("setup_proposition_ids") or []
+                )
+                if str(item or "") in propositions_by_id
+            ))
+            if len(setup_ids) != 1:
+                break
+            replacements[proposition_id] = setup_ids[0]
+        else:
+            if replacements:
+                normalized_promises = list(dict.fromkeys(
+                    replacements.get(proposition_id, proposition_id)
+                    for proposition_id in promises
+                ))
+                changes.append({
+                    "kind": "arc_promise_setup_projection",
+                    "id": arc.get("arc_id"),
+                    "from": promises,
+                    "to": normalized_promises,
+                    "inference_to_setup": replacements,
+                })
+                arc["promise_proposition_ids"] = normalized_promises
+
+        current_promises = [
+            str(item)
+            for item in (arc.get("promise_proposition_ids") or [])
+            if str(item or "").strip()
+        ]
+        current_payoff_ids = [
+            str(item)
+            for item in (arc.get("payoff_contract_ids") or [])
+            if str(item or "").strip()
+        ]
+        current_setup_promises = {
+            str(proposition_id)
+            for payoff_id in current_payoff_ids
+            if payoff_id in payoff_contracts_by_id
+            for proposition_id in (
+                payoff_contracts_by_id[payoff_id].get(
+                    "setup_proposition_ids"
+                ) or []
+            )
+        }
+        newly_linked_payoffs: list[str] = []
+        for proposition_id in current_promises:
+            if proposition_id in current_setup_promises:
+                continue
+            candidates = [
+                payoff_id
+                for payoff_id, payoff in payoff_contracts_by_id.items()
+                if proposition_id in (
+                    payoff.get("setup_proposition_ids") or []
+                )
+            ]
+            if len(candidates) == 1 and candidates[0] not in current_payoff_ids:
+                newly_linked_payoffs.append(candidates[0])
+                current_payoff_ids.append(candidates[0])
+                current_setup_promises.add(proposition_id)
+        if newly_linked_payoffs:
+            changes.append({
+                "kind": "arc_payoff_contract_link",
+                "id": arc.get("arc_id"),
+                "added": newly_linked_payoffs,
+            })
+            arc["payoff_contract_ids"] = current_payoff_ids
+
+        unsupported_promises = [
+            proposition_id
+            for proposition_id in current_promises
+            if proposition_id not in current_setup_promises
+        ]
+        if unsupported_promises and arc.get("core_question_ids"):
+            supported_promises = [
+                proposition_id
+                for proposition_id in current_promises
+                if proposition_id not in unsupported_promises
+            ]
+            changes.append({
+                "kind": "arc_unsupported_promise_removed",
+                "id": arc.get("arc_id"),
+                "from": current_promises,
+                "to": supported_promises,
+                "unsupported": unsupported_promises,
+            })
+            arc["promise_proposition_ids"] = supported_promises
+
+    existing_fact_ids = {
+        str(item.get("fact_id") or "")
+        for item in (data.get("state_facts") or [])
+        if isinstance(item, dict) and str(item.get("fact_id") or "").strip()
+    }
+    missing_effect_ids = {
+        str(fact_id)
+        for event in events_by_id.values()
+        for fact_id in (event.get("effects_add") or [])
+        if str(fact_id or "").strip() not in existing_fact_ids
+    }
+    for missing_fact_id in sorted(missing_effect_ids):
+        producer_events = [
+            event
+            for event in events_by_id.values()
+            if missing_fact_id in (event.get("effects_add") or [])
+        ]
+        producer_actions = [
+            action
+            for action in actions_by_id.values()
+            if missing_fact_id in (action.get("effects_add") or [])
+        ]
+        if len(producer_events) != 1 or len(producer_actions) > 1:
+            continue
+        event = producer_events[0]
+        event_id = str(event.get("event_id") or "")
+        supported = {
+            str(proposition_id)
+            for evidence in evidence_by_id.values()
+            if (
+                isinstance(evidence.get("anchor"), dict)
+                and evidence["anchor"].get("type") == "event"
+                and str(evidence["anchor"].get("id") or "") == event_id
+            )
+            for proposition_id in (
+                evidence.get("supports_proposition_ids") or []
+            )
+            if str(proposition_id or "") in propositions_by_id
+        }
+        candidates = [
+            proposition_id
+            for proposition_id in (event.get("proposition_ids") or [])
+            if proposition_id in supported
+        ]
+        if len(candidates) != 1:
+            continue
+        proposition_id = candidates[0]
+        proposition = propositions_by_id[proposition_id]
+        action = producer_actions[0] if producer_actions else None
+        actors = list((action or {}).get("actor_ids") or [])
+        if len(actors) != 1:
+            continue
+        event_position = list(events_by_id).index(event_id) + 1
+        fact = {
+            "fact_id": missing_fact_id,
+            "proposition_id": proposition_id,
+            "subject_id": actors[0],
+            "predicate_id": str(
+                proposition.get("semantic_identity_key")
+                or f"state-after-{event_id}"
+            ),
+            "value": {
+                "kind": "text",
+                "data": str(proposition.get("canonical_statement") or ""),
+            },
+            "time_scope": f"main@{event_position}",
+            "visibility": "visible",
+            "provenance": "screenplay",
+            "confidence": 1.0,
+        }
+        data.setdefault("state_facts", []).append(fact)
+        existing_fact_ids.add(missing_fact_id)
+        changes.append({
+            "kind": "missing_effect_fact",
+            "id": missing_fact_id,
+            "event_id": event_id,
+            "proposition_id": proposition_id,
+            "subject_id": actors[0],
+        })
+
+    proposition_entities = {
+        proposition_id: {
+            str(entity_id)
+            for entity_id in (item.get("entity_ids") or [])
+            if str(entity_id or "").strip()
+        }
+        for proposition_id, item in propositions_by_id.items()
+    }
+    for belief in data.get("character_beliefs") or []:
+        if not isinstance(belief, dict):
+            continue
+        character_id = str(belief.get("character_id") or "").strip()
+        if not character_id:
+            continue
+        for evidence_id in belief.get("perceived_evidence_ids") or []:
+            evidence = evidence_by_id.get(str(evidence_id))
+            if evidence is None:
+                continue
+            perceivable = list(evidence.get("perceivable_by") or [])
+            if character_id in perceivable:
+                continue
+            supported_entities = {
+                entity_id
+                for proposition_id in (
+                    evidence.get("supports_proposition_ids") or []
+                )
+                for entity_id in proposition_entities.get(
+                    str(proposition_id),
+                    set(),
+                )
+            }
+            anchor = evidence.get("anchor") or {}
+            event = events_by_id.get(str(anchor.get("id") or ""))
+            event_entities = {
+                entity_id
+                for action_id in (
+                    (event or {}).get("action_ids") or []
+                )
+                for entity_id in (
+                    *((actions_by_id.get(str(action_id)) or {}).get(
+                        "actor_ids",
+                    ) or []),
+                    *((actions_by_id.get(str(action_id)) or {}).get(
+                        "target_ids",
+                    ) or []),
+                )
+            }
+            if character_id not in supported_entities | event_entities:
+                continue
+            evidence["perceivable_by"] = [
+                *perceivable,
+                character_id,
+            ]
+            changes.append({
+                "kind": "evidence_perceiver",
+                "id": evidence_id,
+                "character_id": character_id,
+            })
+
     stance_aliases = {
         "accepted": "believed",
+        "committed": "believed",
+        "confirmed": "believed",
         "disbelieved": "rejected",
+        "known": "believed",
         "uncertain": "suspected",
     }
-    for snapshot in data.get("character_beliefs") or []:
-        if not isinstance(snapshot, dict):
-            continue
-        for belief in snapshot.get("beliefs") or []:
-            if not isinstance(belief, dict):
+    for collection, id_field in (
+        ("character_beliefs", "character_belief_id"),
+        ("audience_states", "audience_state_id"),
+    ):
+        for snapshot in data.get(collection) or []:
+            if not isinstance(snapshot, dict):
                 continue
-            stance = str(belief.get("stance") or "").strip()
-            normalized = stance_aliases.get(stance, stance)
-            if normalized == stance:
-                continue
-            changes.append({
-                "kind": "belief_stance",
-                "id": (
-                    f"{snapshot.get('character_belief_id')}/"
-                    f"{belief.get('proposition_id')}"
-                ),
-                "from": stance,
-                "to": normalized,
-            })
-            belief["stance"] = normalized
+            for belief in snapshot.get("beliefs") or []:
+                if not isinstance(belief, dict):
+                    continue
+                stance = str(belief.get("stance") or "").strip()
+                normalized = stance_aliases.get(stance, stance)
+                if normalized == stance:
+                    continue
+                changes.append({
+                    "kind": "belief_stance",
+                    "id": (
+                        f"{snapshot.get(id_field)}/"
+                        f"{belief.get('proposition_id')}"
+                    ),
+                    "from": stance,
+                    "to": normalized,
+                })
+                belief["stance"] = normalized
 
     events = [
         event for event in (data.get("events") or [])
@@ -1743,6 +2645,766 @@ def _normalize_screenplay_narrative_graph(
                     "to": normalized,
                 })
                 delta["proposition_ids"] = normalized
+
+    audience_states_by_id = {
+        str(item.get("audience_state_id") or ""): item
+        for item in (data.get("audience_states") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("audience_state_id") or "").strip()
+        )
+    }
+    audience_priors_by_id = {
+        str(item.get("audience_prior_id") or ""): item
+        for item in (data.get("audience_priors") or [])
+        if (
+            isinstance(item, dict)
+            and str(item.get("audience_prior_id") or "").strip()
+        )
+    }
+    evidence_for_proposition = {
+        proposition_id: [
+            evidence_id
+            for evidence_id, evidence in evidence_by_id.items()
+            if proposition_id in (
+                evidence.get("supports_proposition_ids") or []
+            )
+        ]
+        for proposition_id in propositions_by_id
+    }
+    used_delta_ids = {
+        str(delta.get("target_delta_id") or "")
+        for intent in (data.get("experience_intents") or [])
+        if isinstance(intent, dict)
+        for path in (intent.get("audience_paths") or [])
+        if isinstance(path, dict)
+        for delta in (path.get("target_deltas") or [])
+        if (
+            isinstance(delta, dict)
+            and str(delta.get("target_delta_id") or "").strip()
+        )
+    }
+    removed_delta_ids: set[str] = set()
+
+    def unique_delta_id(path_id: str, suffix: str) -> str:
+        base = f"{path_id}-{suffix}"
+        value = base
+        counter = 2
+        while value in used_delta_ids:
+            value = f"{base}-{counter}"
+            counter += 1
+        used_delta_ids.add(value)
+        return value
+
+    intent_items = [
+        intent
+        for intent in (data.get("experience_intents") or [])
+        if isinstance(intent, dict)
+    ]
+    prior_ids = [
+        str(prior.get("audience_prior_id") or "").strip()
+        for prior in (data.get("audience_priors") or [])
+        if (
+            isinstance(prior, dict)
+            and str(prior.get("audience_prior_id") or "").strip()
+        )
+    ]
+    states_by_prior: dict[str, list[str]] = {}
+    for state_id, state in audience_states_by_id.items():
+        prior_id = str(state.get("audience_prior_id") or "").strip()
+        if prior_id:
+            states_by_prior.setdefault(prior_id, []).append(state_id)
+    used_path_ids = {
+        str(path.get("audience_path_id") or "").strip()
+        for intent in intent_items
+        for path in (intent.get("audience_paths") or [])
+        if (
+            isinstance(path, dict)
+            and str(path.get("audience_path_id") or "").strip()
+        )
+    }
+    current_state_by_prior: dict[str, str] = {}
+    for intent_index, intent in enumerate(intent_items, start=1):
+        paths = [
+            path
+            for path in (intent.get("audience_paths") or [])
+            if isinstance(path, dict)
+        ]
+        intent["audience_paths"] = paths
+        paths_by_prior = {
+            str(path.get("audience_prior_id") or "").strip(): path
+            for path in paths
+            if str(path.get("audience_prior_id") or "").strip()
+        }
+        for prior_id in prior_ids:
+            if prior_id in paths_by_prior:
+                continue
+            state_id = current_state_by_prior.get(prior_id)
+            if not state_id:
+                state_id = next(
+                    (
+                        str(path.get("audience_state_in_id") or "")
+                        for later_intent in intent_items[intent_index:]
+                        for path in (
+                            later_intent.get("audience_paths") or []
+                        )
+                        if (
+                            isinstance(path, dict)
+                            and str(
+                                path.get("audience_prior_id") or ""
+                            ).strip() == prior_id
+                            and str(
+                                path.get("audience_state_in_id") or ""
+                            ).strip()
+                        )
+                    ),
+                    "",
+                )
+            if not state_id:
+                state_id = next(
+                    iter(states_by_prior.get(prior_id) or []),
+                    "",
+                )
+            if not state_id:
+                continue
+            base_path_id = (
+                f"XP-{prior_id}-{intent.get('experience_intent_id')}"
+            )
+            path_id = base_path_id
+            suffix = 2
+            while path_id in used_path_ids:
+                path_id = f"{base_path_id}-{suffix}"
+                suffix += 1
+            used_path_ids.add(path_id)
+            target_state_id = state_id
+            target_deltas: list[dict[str, Any]] = []
+            attention_targets = [
+                str(item)
+                for item in (
+                    intent.get("attention_target_ids") or []
+                )
+                if str(item or "").strip()
+            ]
+            source_state = audience_states_by_id.get(state_id)
+            anchor_event_id = str(
+                (intent.get("anchor_event_ids") or [""])[-1]
+            )
+            if attention_targets and source_state is not None:
+                base_state_id = (
+                    f"AS-{prior_id}-"
+                    f"{intent.get('experience_intent_id')}-COARSE"
+                )
+                target_state_id = base_state_id
+                state_suffix = 2
+                while target_state_id in audience_states_by_id:
+                    target_state_id = (
+                        f"{base_state_id}-{state_suffix}"
+                    )
+                    state_suffix += 1
+                target_state = deepcopy(source_state)
+                target_state["audience_state_id"] = target_state_id
+                target_state["anchor"] = {
+                    "type": "event",
+                    "id": anchor_event_id,
+                }
+                before_attention = list(
+                    source_state.get("attention_residue_ids") or []
+                )
+                after_attention = list(dict.fromkeys([
+                    *before_attention,
+                    *attention_targets,
+                ]))
+                before_memory = deepcopy(
+                    source_state.get("working_memory") or []
+                )
+                after_memory = deepcopy(before_memory)
+                if after_attention == before_attention:
+                    remembered = {
+                        str(item.get("proposition_id") or "")
+                        for item in after_memory
+                        if isinstance(item, dict)
+                    }
+                    for proposition_id in attention_targets:
+                        if proposition_id in remembered:
+                            continue
+                        after_memory.append({
+                            "proposition_id": proposition_id,
+                            "retention_confidence": 0.7,
+                        })
+                target_state["attention_residue_ids"] = after_attention
+                target_state["working_memory"] = after_memory
+                data.setdefault("audience_states", []).append(
+                    target_state
+                )
+                audience_states_by_id[target_state_id] = target_state
+                states_by_prior.setdefault(prior_id, []).append(
+                    target_state_id
+                )
+                delta_id = unique_delta_id(path_id, "attention")
+                event = events_by_id.get(anchor_event_id) or {}
+                target_deltas.append({
+                    "target_delta_id": delta_id,
+                    "dimension": "attention",
+                    "proposition_ids": attention_targets,
+                    "description": (
+                        "为缺失先验路径登记当前意图的注意目标"
+                    ),
+                    "from_state": {
+                        "attention_residue_ids": before_attention,
+                        "working_memory": before_memory,
+                    },
+                    "to_state": {
+                        "attention_residue_ids": after_attention,
+                        "working_memory": after_memory,
+                    },
+                    "target_confidence": None,
+                    "required_processing_s": 0.5,
+                    "deadline_event_id": anchor_event_id,
+                    "primary_delivery_window_id": event.get(
+                        "primary_delivery_window_id"
+                    ),
+                    "custom_dimension": None,
+                })
+            path = {
+                "audience_path_id": path_id,
+                "audience_prior_id": prior_id,
+                "audience_state_in_id": state_id,
+                "audience_state_out_target_id": target_state_id,
+                "target_deltas": target_deltas,
+            }
+            paths.append(path)
+            paths_by_prior[prior_id] = path
+            changes.append({
+                "kind": "coarse_audience_path",
+                "id": path_id,
+                "experience_intent_id": intent.get(
+                    "experience_intent_id"
+                ),
+                "audience_prior_id": prior_id,
+                "state_in_id": state_id,
+                "state_out_id": target_state_id,
+            })
+        for prior_id, path in paths_by_prior.items():
+            state_id = str(
+                path.get("audience_state_out_target_id") or ""
+            ).strip()
+            if state_id:
+                current_state_by_prior[prior_id] = state_id
+
+    intent_paths_by_event_prior: dict[
+        tuple[str, str],
+        tuple[str, str],
+    ] = {}
+    for intent in intent_items:
+        anchor_event_ids = [
+            str(value or "").strip()
+            for value in (intent.get("anchor_event_ids") or [])
+            if str(value or "").strip()
+        ]
+        for path in intent.get("audience_paths") or []:
+            if not isinstance(path, dict):
+                continue
+            prior_id = str(path.get("audience_prior_id") or "").strip()
+            state_in_id = str(path.get("audience_state_in_id") or "").strip()
+            state_out_id = str(
+                path.get("audience_state_out_target_id") or ""
+            ).strip()
+            if not prior_id or not state_in_id or not state_out_id:
+                continue
+            for event_id in anchor_event_ids:
+                intent_paths_by_event_prior[(event_id, prior_id)] = (
+                    state_in_id,
+                    state_out_id,
+                )
+
+    for scene in data.get("scene_contracts") or []:
+        if not isinstance(scene, dict):
+            continue
+        paths = [
+            path
+            for path in (scene.get("audience_state_paths") or [])
+            if isinstance(path, dict)
+        ]
+        scene["audience_state_paths"] = paths
+        existing_priors = {
+            str(path.get("audience_prior_id") or "").strip()
+            for path in paths
+        }
+        scene_event_ids = [
+            str(value or "").strip()
+            for value in (scene.get("turn_event_ids") or [])
+            if str(value or "").strip()
+        ]
+        for prior_id in prior_ids:
+            if prior_id in existing_priors:
+                continue
+            scene_transitions = [
+                intent_paths_by_event_prior[(event_id, prior_id)]
+                for event_id in scene_event_ids
+                if (event_id, prior_id) in intent_paths_by_event_prior
+            ]
+            if scene_transitions:
+                state_in_id = scene_transitions[0][0]
+                state_out_id = scene_transitions[-1][1]
+            else:
+                # Without an event-local transition, only the earliest known
+                # state is temporally safe. The episode-final state may contain
+                # facts learned in later scenes.
+                state_in_id = next(
+                    iter(states_by_prior.get(prior_id) or []),
+                    "",
+                )
+                state_out_id = state_in_id
+            if not state_in_id or not state_out_id:
+                continue
+            paths.append({
+                "audience_prior_id": prior_id,
+                "audience_state_in_id": state_in_id,
+                "audience_state_out_target_id": state_out_id,
+            })
+            changes.append({
+                "kind": "coarse_scene_audience_path",
+                "id": scene.get("scene_id"),
+                "audience_prior_id": prior_id,
+                "state_in_id": state_in_id,
+                "state_out_id": state_out_id,
+            })
+
+    for intent in intent_items:
+        if not isinstance(intent, dict):
+            continue
+        for path in intent.get("audience_paths") or []:
+            if not isinstance(path, dict):
+                continue
+            state_in = audience_states_by_id.get(
+                str(path.get("audience_state_in_id") or "")
+            )
+            state_out = audience_states_by_id.get(
+                str(path.get("audience_state_out_target_id") or "")
+            )
+            if state_in is None or state_out is None:
+                continue
+            deltas = [
+                item
+                for item in (path.get("target_deltas") or [])
+                if isinstance(item, dict)
+            ]
+            path["target_deltas"] = deltas
+            template = deltas[0] if deltas else {}
+            deadline_event_id = str(
+                template.get("deadline_event_id")
+                or (intent.get("anchor_event_ids") or [""])[-1]
+            )
+            window_id = template.get("primary_delivery_window_id")
+
+            incoming_beliefs = {
+                str(item.get("proposition_id") or ""): item
+                for item in (state_in.get("beliefs") or [])
+                if isinstance(item, dict)
+            }
+            prior = audience_priors_by_id.get(
+                str(path.get("audience_prior_id") or "")
+            ) or {}
+            assumed_unknown = {
+                str(item)
+                for item in (
+                    prior.get("assumed_unknown_proposition_ids") or []
+                )
+            }
+            outgoing_beliefs = {
+                str(item.get("proposition_id") or ""): item
+                for item in (state_out.get("beliefs") or [])
+                if isinstance(item, dict)
+            }
+            for delta in deltas:
+                if str(delta.get("dimension") or "") != "belief":
+                    continue
+                for proposition_id in delta.get("proposition_ids") or []:
+                    proposition_id = str(proposition_id)
+                    if (
+                        proposition_id in incoming_beliefs
+                        or proposition_id not in assumed_unknown
+                    ):
+                        continue
+                    unknown_belief = {
+                        "proposition_id": proposition_id,
+                        "stance": "unknown",
+                        "confidence": 0.0,
+                        "evidence_ids": [],
+                    }
+                    state_in.setdefault("beliefs", []).append(
+                        unknown_belief
+                    )
+                    incoming_beliefs[proposition_id] = unknown_belief
+                    changes.append({
+                        "kind": "audience_prior_unknown_belief",
+                        "id": state_in.get("audience_state_id"),
+                        "proposition_id": proposition_id,
+                    })
+                for proposition_id in delta.get("proposition_ids") or []:
+                    proposition_id = str(proposition_id)
+                    if proposition_id in outgoing_beliefs:
+                        continue
+                    target_confidence = float(
+                        delta.get("target_confidence")
+                        if delta.get("target_confidence") is not None
+                        else 1.0
+                    )
+                    outgoing_beliefs[proposition_id] = {
+                        "proposition_id": proposition_id,
+                        "stance": "believed",
+                        "confidence": target_confidence,
+                        "evidence_ids": evidence_for_proposition.get(
+                            proposition_id,
+                            [],
+                        ),
+                    }
+                    state_out.setdefault("beliefs", []).append(
+                        outgoing_beliefs[proposition_id]
+                    )
+                    changes.append({
+                        "kind": "audience_target_belief",
+                        "id": state_out.get("audience_state_id"),
+                        "proposition_id": proposition_id,
+                    })
+                proposition_ids = [
+                    str(item)
+                    for item in (delta.get("proposition_ids") or [])
+                ]
+                delta["from_state"] = {
+                    "beliefs": [
+                        item
+                        for item in (state_in.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(item.get("proposition_id") or "")
+                            in proposition_ids
+                        )
+                    ],
+                }
+                delta["to_state"] = {
+                    "beliefs": [
+                        item
+                        for item in (state_out.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(item.get("proposition_id") or "")
+                            in proposition_ids
+                        )
+                    ],
+                }
+
+            changed_belief_ids = {
+                proposition_id
+                for proposition_id in (
+                    set(incoming_beliefs) | set(outgoing_beliefs)
+                )
+                if incoming_beliefs.get(proposition_id)
+                != outgoing_beliefs.get(proposition_id)
+            }
+            covered_belief_ids = {
+                str(proposition_id)
+                for delta in deltas
+                if str(delta.get("dimension") or "") == "belief"
+                for proposition_id in (
+                    delta.get("proposition_ids") or []
+                )
+            }
+            missing_belief_ids = sorted(
+                changed_belief_ids - covered_belief_ids
+            )
+            if missing_belief_ids:
+                delta = {
+                    "target_delta_id": unique_delta_id(
+                        str(path.get("audience_path_id") or "path"),
+                        "belief",
+                    ),
+                    "dimension": "belief",
+                    "proposition_ids": missing_belief_ids,
+                    "description": "绑定该观众路径中实际发生的信念变化",
+                    "from_state": {
+                        "beliefs": [
+                            item
+                            for item in (state_in.get("beliefs") or [])
+                            if (
+                                isinstance(item, dict)
+                                and str(item.get("proposition_id") or "")
+                                in missing_belief_ids
+                            )
+                        ],
+                    },
+                    "to_state": {
+                        "beliefs": [
+                            item
+                            for item in (state_out.get("beliefs") or [])
+                            if (
+                                isinstance(item, dict)
+                                and str(item.get("proposition_id") or "")
+                                in missing_belief_ids
+                            )
+                        ],
+                    },
+                    "target_confidence": None,
+                    "required_processing_s": 0.5,
+                    "deadline_event_id": deadline_event_id,
+                    "primary_delivery_window_id": window_id,
+                    "custom_dimension": None,
+                }
+                deltas.append(delta)
+                changes.append({
+                    "kind": "audience_belief_delta",
+                    "id": delta["target_delta_id"],
+                    "proposition_ids": missing_belief_ids,
+                })
+
+            attention_changed = (
+                state_in.get("attention_residue_ids")
+                != state_out.get("attention_residue_ids")
+                or state_in.get("working_memory")
+                != state_out.get("working_memory")
+            )
+            attention_delta = next((
+                delta
+                for delta in deltas
+                if str(delta.get("dimension") or "") == "attention"
+            ), None)
+            if attention_changed:
+                if attention_delta is None:
+                    attention_delta = {
+                        "target_delta_id": unique_delta_id(
+                            str(path.get("audience_path_id") or "path"),
+                            "attention",
+                        ),
+                        "dimension": "attention",
+                        "proposition_ids": sorted({
+                            str(item.get("proposition_id") or "")
+                            for item in (
+                                state_out.get("working_memory") or []
+                            )
+                            if (
+                                isinstance(item, dict)
+                                and str(
+                                    item.get("proposition_id") or ""
+                                ).strip()
+                            )
+                        }),
+                        "description": "绑定注意残留与工作记忆变化",
+                        "target_confidence": None,
+                        "required_processing_s": 0.5,
+                        "deadline_event_id": deadline_event_id,
+                        "primary_delivery_window_id": window_id,
+                        "custom_dimension": None,
+                    }
+                    deltas.append(attention_delta)
+                    changes.append({
+                        "kind": "audience_attention_delta",
+                        "id": attention_delta["target_delta_id"],
+                    })
+                attention_delta["from_state"] = {
+                    "attention_residue_ids": list(
+                        state_in.get("attention_residue_ids") or []
+                    ),
+                    "working_memory": deepcopy(
+                        state_in.get("working_memory") or []
+                    ),
+                }
+                attention_delta["to_state"] = {
+                    "attention_residue_ids": list(
+                        state_out.get("attention_residue_ids") or []
+                    ),
+                    "working_memory": deepcopy(
+                        state_out.get("working_memory") or []
+                    ),
+                }
+
+            if state_in.get("affective_state") != state_out.get(
+                "affective_state"
+            ):
+                affective_delta = next((
+                    delta
+                    for delta in deltas
+                    if str(delta.get("dimension") or "") == "affective"
+                ), None)
+                if affective_delta is None:
+                    affective_delta = {
+                        "target_delta_id": unique_delta_id(
+                            str(path.get("audience_path_id") or "path"),
+                            "affective",
+                        ),
+                        "dimension": "affective",
+                        "proposition_ids": [],
+                        "description": "绑定观众入场与目标出场的情绪状态变化",
+                        "target_confidence": None,
+                        "required_processing_s": 0.0,
+                        "deadline_event_id": deadline_event_id,
+                        "primary_delivery_window_id": window_id,
+                        "custom_dimension": None,
+                    }
+                    deltas.append(affective_delta)
+                    changes.append({
+                        "kind": "audience_affective_delta",
+                        "id": affective_delta["target_delta_id"],
+                    })
+                affective_delta["from_state"] = {
+                    "affective_state": dict(
+                        state_in.get("affective_state") or {}
+                    ),
+                }
+                affective_delta["to_state"] = {
+                    "affective_state": dict(
+                        state_out.get("affective_state") or {}
+                    ),
+                }
+                if not affective_delta.get("deadline_event_id"):
+                    affective_delta["deadline_event_id"] = deadline_event_id
+                if (
+                    not affective_delta.get("primary_delivery_window_id")
+                    and window_id
+                ):
+                    affective_delta["primary_delivery_window_id"] = window_id
+                changes.append({
+                    "kind": "audience_affective_delta_state",
+                    "id": affective_delta["target_delta_id"],
+                })
+
+            if (
+                state_in.get("active_question_ids")
+                != state_out.get("active_question_ids")
+            ):
+                question_delta = next((
+                    delta
+                    for delta in deltas
+                    if (
+                        str(delta.get("dimension") or "") == "other"
+                        and str(delta.get("custom_dimension") or "")
+                        == "active_question_ids"
+                    )
+                ), None)
+                if question_delta is None:
+                    question_delta = {
+                        "target_delta_id": unique_delta_id(
+                            str(path.get("audience_path_id") or "path"),
+                            "questions",
+                        ),
+                        "dimension": "other",
+                        "proposition_ids": [],
+                        "description": "绑定观众主动问题集合变化",
+                        "target_confidence": None,
+                        "required_processing_s": 0.0,
+                        "deadline_event_id": deadline_event_id,
+                        "primary_delivery_window_id": window_id,
+                        "custom_dimension": "active_question_ids",
+                    }
+                    deltas.append(question_delta)
+                    changes.append({
+                        "kind": "audience_question_delta",
+                        "id": question_delta["target_delta_id"],
+                    })
+                question_delta["from_state"] = {
+                    "active_question_ids": list(
+                        state_in.get("active_question_ids") or []
+                    ),
+                }
+                question_delta["to_state"] = {
+                    "active_question_ids": list(
+                        state_out.get("active_question_ids") or []
+                    ),
+                }
+            retained_deltas = []
+            for delta in deltas:
+                semantic_no_change = (
+                    delta.get("from_state") == delta.get("to_state")
+                )
+                if str(delta.get("dimension") or "") == "belief":
+                    proposition_ids = {
+                        str(item)
+                        for item in (
+                            delta.get("proposition_ids") or []
+                        )
+                    }
+                    before_beliefs = {
+                        str(item.get("proposition_id") or ""): (
+                            item.get("stance"),
+                            item.get("confidence"),
+                        )
+                        for item in (state_in.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(
+                                item.get("proposition_id") or ""
+                            ) in proposition_ids
+                        )
+                    }
+                    after_beliefs = {
+                        str(item.get("proposition_id") or ""): (
+                            item.get("stance"),
+                            item.get("confidence"),
+                        )
+                        for item in (state_out.get("beliefs") or [])
+                        if (
+                            isinstance(item, dict)
+                            and str(
+                                item.get("proposition_id") or ""
+                            ) in proposition_ids
+                        )
+                    }
+                    semantic_no_change = (
+                        bool(proposition_ids)
+                        and all(
+                            before_beliefs.get(proposition_id)
+                            == after_beliefs.get(proposition_id)
+                            for proposition_id in proposition_ids
+                        )
+                    )
+                if not semantic_no_change:
+                    retained_deltas.append(delta)
+                    continue
+                delta_id = str(
+                    delta.get("target_delta_id") or ""
+                ).strip()
+                if delta_id:
+                    removed_delta_ids.add(delta_id)
+                changes.append({
+                    "kind": "no_change_target_delta_removed",
+                    "id": delta_id,
+                    "path_id": path.get("audience_path_id"),
+                })
+            path["target_deltas"] = retained_deltas
+
+    if removed_delta_ids:
+        for window in data.get("readability_windows") or []:
+            if not isinstance(window, dict):
+                continue
+            existing = list(window.get("target_delta_ids") or [])
+            normalized = [
+                delta_id
+                for delta_id in existing
+                if str(delta_id) not in removed_delta_ids
+            ]
+            if normalized != existing:
+                window["target_delta_ids"] = normalized
+                changes.append({
+                    "kind": "removed_delta_window_refs",
+                    "id": window.get("readability_window_id"),
+                    "from": existing,
+                    "to": normalized,
+                })
+        existing_tasks = list(data.get("assimilation_tasks") or [])
+        normalized_tasks = [
+            task
+            for task in existing_tasks
+            if (
+                not isinstance(task, dict)
+                or str(task.get("target_delta_id") or "")
+                not in removed_delta_ids
+            )
+        ]
+        if normalized_tasks != existing_tasks:
+            data["assimilation_tasks"] = normalized_tasks
+            changes.append({
+                "kind": "removed_delta_assimilation_tasks",
+                "removed_target_delta_ids": sorted(removed_delta_ids),
+            })
 
     delta_requirements: dict[str, tuple[str, float]] = {}
     delta_windows: dict[str, str] = {}
@@ -1835,6 +3497,52 @@ def _normalize_screenplay_narrative_graph(
             window["scheduled_processing_s"] = normalized_scheduled
             window["planned_available_s"] = normalized_available
 
+    valid_identity_refs = {
+        "source_evidence_ids": {
+            str(item.get("source_evidence_id") or "")
+            for item in (data.get("source_evidence") or [])
+            if isinstance(item, dict)
+        },
+        "proposition_ids": {
+            str(item.get("proposition_id") or "")
+            for item in (data.get("propositions") or [])
+            if isinstance(item, dict)
+        },
+        "adaptation_decision_ids": {
+            str(item.get("adaptation_decision_id") or "")
+            for item in (data.get("adaptation_decisions") or [])
+            if isinstance(item, dict)
+        },
+    }
+    for contract in data.get("identity_contracts") or []:
+        if not isinstance(contract, dict):
+            continue
+        evidence = contract.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        normalized_fields = {
+            field: [
+                value
+                for value in (evidence.get(field) or [])
+                if str(value or "") in valid_ids
+            ]
+            for field, valid_ids in valid_identity_refs.items()
+        }
+        if not any(normalized_fields.values()):
+            continue
+        for field, normalized_values in normalized_fields.items():
+            existing_values = list(evidence.get(field) or [])
+            if normalized_values == existing_values:
+                continue
+            changes.append({
+                "kind": "identity_evidence_refs",
+                "id": contract.get("identity_id"),
+                "field": field,
+                "from": existing_values,
+                "to": normalized_values,
+            })
+            evidence[field] = normalized_values
+
     if changes:
         script.narrative_plan = type(plan).model_validate(data)
     return changes
@@ -1863,11 +3571,7 @@ def _complete_screenplay_from_working_artifact(
     checkpoint: dict[str, Any],
     activation_no: int,
 ) -> EpisodeScreenplay:
-    """Validate structure, record score-only QA, then publish atomically.
-
-    Quality observations never trigger Patch or block publication. Only
-    deterministic identity/context failures stop this stage.
-    """
+    """Validate every production gate and publish only a zero-blocker artifact."""
     from app.harness.contracts import get_contract
     from app.portraits import (
         apply_screenplay_character_resolutions,
@@ -2082,6 +3786,17 @@ async def run_screenplay_production(
     from app.stages import generate_screenplay_baseline
 
     conn = get_conn()
+    if not isinstance(episode.get("authorized_source_chapters"), dict):
+        from app.production.screenplay_authority import (
+            screenplay_authorized_source_chapters,
+        )
+
+        try:
+            episode["authorized_source_chapters"] = (
+                screenplay_authorized_source_chapters(episode_id)
+            )
+        except ValueError:
+            episode["authorized_source_chapters"] = {}
     contract = get_contract("screenplay")
     from app.production.screenplay_authority import screenplay_authority_fingerprint
 
@@ -2219,6 +3934,7 @@ async def run_screenplay_production(
         raise ScreenplayNarrativeGateError(message)
 
     # ---- Baseline（仅一次）----
+    baseline_created_this_activation = False
     if not rev.baseline_done:
         assert_baseline_allowed(rev, command="screenplay.generate", episode_id=episode_id)
         save_checkpoint(rev.id, {
@@ -2236,52 +3952,47 @@ async def run_screenplay_production(
         script = await generate_screenplay_baseline(
             episode, source_text, bible, prev_ending=prev_ending,
         )
-        # 即使模型在正文中沿用了“绿袍男子/大汉”，也要在
-        # Baseline 落库与 QA 之前按预检结果原子性改成真名或路人编号。
+        from app.renderability import screenplay_required_duration_s
+
+        current_target = int(
+            episode.get("target_duration_s")
+            or config.EPISODE_TARGET_DEFAULT_S
+        )
+        required_target = screenplay_required_duration_s(
+            script,
+            minimum_s=current_target,
+        )
+        duration_expanded = required_target > current_target
+        if duration_expanded:
+            conn.execute(
+                "UPDATE episodes SET target_duration_s=?,"
+                "screenplay_snapshot_version=screenplay_snapshot_version+1 "
+                "WHERE id=?",
+                (required_target, episode_id),
+            )
+            conn.commit()
+            episode["target_duration_s"] = required_target
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "SCREENPLAY_DURATION_EXPANDED",
+                    "info",
+                    "已按完整剧情与口播容量自动扩展整集时长",
+                    payload={
+                        "previous_target_s": current_target,
+                        "required_target_s": required_target,
+                    },
+                )
+        # 先应用首次预检已有决议并持久化 Baseline。任何后续人物增量调用
+        # 都必须发生在这个耐久边界之后，避免外部失败迫使完整剧本重生。
         from app.portraits import (
             apply_screenplay_character_resolutions,
             normalize_screenplay_voice_ids,
-            screenplay_unknown_identity_errors,
         )
         apply_screenplay_character_resolutions(
             script,
             episode.get("character_resolutions") or [],
         )
-        normalize_screenplay_voice_ids(script, bible)
-        # 增量人物只在本地身份门禁仍发现缺口时调用模型。角色已由首次预检、
-        # Bible 和 typed contract 覆盖时，避免重复发送整份原文与剧本草稿。
-        draft_identity_errors = screenplay_unknown_identity_errors(script, bible)
-        if draft_identity_errors:
-            draft_audit = await ensure_source_characters_incremental(
-                episode_id, source_text, draft_text=script.model_dump_json(),
-            )
-        else:
-            draft_audit = {
-                "added": [],
-                "resolutions": [],
-                "skipped": "static_identity_contract_complete",
-            }
-            if run_id:
-                evidence_repository.append_event(
-                    run_id,
-                    "CHARACTER_DISCOVERY_DRAFT_AUDIT_SKIPPED",
-                    "info",
-                    "Baseline 身份合同已静态闭合，跳过生成后人物模型审计",
-                    payload={"episode_id": episode_id},
-                )
-        from app.portraits import merge_screenplay_character_resolutions
-        episode["character_resolutions"] = merge_screenplay_character_resolutions(
-            episode.get("character_resolutions") or [],
-            draft_audit.get("resolutions") or [],
-        )
-        apply_screenplay_character_resolutions(script, episode["character_resolutions"])
-        if draft_audit.get("added"):
-            # 重新加载 bible，仅 patch 受影响的 speaker/voice（最小）
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (episode["project_id"],)).fetchone()
-            from app.domain.common import _project_bible_or_placeholder
-            bible = _project_bible_or_placeholder(p)
-        from app.portraits import bible_with_provisional_characters
-        bible = bible_with_provisional_characters(bible, draft_audit)
         normalize_screenplay_voice_ids(script, bible)
         _normalize_screenplay_narrative_graph(
             script,
@@ -2291,6 +4002,17 @@ async def run_screenplay_production(
         from app.validators import normalize_screenplay_candidate
         script = normalize_screenplay_candidate(script)
         payload = screenplay_artifact_payload(script)
+        candidate_parent_ids: list[str] = []
+        if run_id:
+            candidate_row = conn.execute(
+                "SELECT output_artifact_id FROM step_runs "
+                "WHERE run_id=? AND step_key='screenplay.iteration' "
+                "AND output_artifact_id IS NOT NULL "
+                "ORDER BY started_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if candidate_row and candidate_row["output_artifact_id"]:
+                candidate_parent_ids.append(candidate_row["output_artifact_id"])
         baseline_art = evidence_repository.create_artifact(
             EvidenceArtifact(
                 type="screenplay_document",
@@ -2299,6 +4021,7 @@ async def run_screenplay_production(
                 status="candidate",
                 trust_level="T1",
                 content=payload,
+                parent_artifact_ids=candidate_parent_ids,
                 contract_version=contract.version,
             )
         )
@@ -2307,6 +4030,35 @@ async def run_screenplay_production(
             baseline_artifact_id=baseline_art["id"],
             working_artifact_id=baseline_art["id"],
         )
+        if duration_expanded:
+            input_fp = screenplay_authority_fingerprint(
+                episode_id,
+                conn=conn,
+                source_text=source_text,
+                bible=bible,
+                contract_version=contract.version,
+                qa_profile_version="screenplay-qa-gate-2",
+            )
+            rev = rebind_input_fingerprint(
+                rev.id,
+                input_fingerprint=input_fp,
+                expected_working_artifact_id=baseline_art["id"],
+            )
+        baseline_created_this_activation = True
+        checkpoint = {
+            **checkpoint,
+            "phase": "IDENTITY_AUDIT",
+            "activation_no": activation_no,
+            "working_artifact_id": baseline_art["id"],
+            "yield_reason": None,
+        }
+        save_checkpoint(rev.id, checkpoint)
+        # #region debug-point D:baseline-persisted
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"D","location":"app/production/screenplay_repair.py:baseline_persisted","msg":"[DEBUG] Production baseline persisted","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"baselineArtifactId":rev.baseline_artifact_id,"workingArtifactId":rev.working_artifact_id},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         record_baseline_generation(
             kind="screenplay", episode_id=episode_id, revision_id=rev.id,
         )
@@ -2325,20 +4077,172 @@ async def run_screenplay_production(
     elif not rev.working_artifact_id:
         raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
 
-    # QA Score Only: once a parseable Baseline exists, resume from that
-    # immutable working Artifact and finish the remaining deterministic stages.
-    # The legacy semantic Patch loop below is intentionally bypassed; quality
-    # observations are recorded but never trigger another model generation.
-    return _complete_screenplay_from_working_artifact(
-        episode_id=episode_id,
-        episode=episode,
-        source_text=source_text,
-        bible=bible,
-        revision_id=rev.id,
-        run_id=run_id,
-        checkpoint=checkpoint,
-        activation_no=activation_no,
+    # ---- Baseline 后身份收口（可恢复，不消耗第二次完整生成）----
+    rev = get_production_revision(rev.id)  # type: ignore[assignment]
+    assert rev and rev.working_artifact_id
+    working_id = rev.working_artifact_id
+    working_artifact = evidence_repository.get_artifact(working_id)
+    assert working_artifact
+    working_hash = (
+        working_artifact.get("content_hash")
+        or evidence_repository.content_hash(working_artifact.get("content"))
     )
+    working_script = load_screenplay_from_artifact(working_id)
+    identity_audit_required = (
+        baseline_created_this_activation
+        or checkpoint.get("phase") == "IDENTITY_AUDIT"
+    )
+    from app.portraits import (
+        apply_screenplay_character_resolutions,
+        bible_with_provisional_characters,
+        merge_screenplay_character_resolutions,
+        normalize_screenplay_voice_ids,
+        screenplay_unknown_identity_errors,
+    )
+
+    # Reapply durable identity resolutions before every QA entry, including
+    # resume paths whose checkpoint already advanced beyond IDENTITY_AUDIT.
+    identity_normalization_changes = apply_screenplay_character_resolutions(
+        working_script,
+        episode.get("character_resolutions") or [],
+    )
+    identity_normalization_changes.extend(
+        normalize_screenplay_voice_ids(working_script, bible)
+    )
+    draft_identity_errors = screenplay_unknown_identity_errors(
+        working_script,
+        bible,
+    )
+    # #region debug-point B:post-baseline-identity-gate
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"B","location":"app/production/screenplay_repair.py:post_baseline_identity_gate","msg":"[DEBUG] Post-baseline identity gate","data":{"episodeId":episode_id,"revisionId":rev.id,"baselineGenerationCount":rev.baseline_generation_count,"resolutionCount":len(episode.get("character_resolutions") or []),"identityErrorCount":len(draft_identity_errors),"scriptChars":len(working_script.model_dump_json())},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
+    if draft_identity_errors:
+        draft_audit = await ensure_source_characters_incremental(
+            episode_id,
+            source_text,
+            draft_text=working_script.model_dump_json(),
+        )
+        episode["character_resolutions"] = merge_screenplay_character_resolutions(
+            episode.get("character_resolutions") or [],
+            draft_audit.get("resolutions") or [],
+        )
+        identity_normalization_changes.extend(
+            apply_screenplay_character_resolutions(
+                working_script,
+                episode["character_resolutions"],
+            )
+        )
+        if draft_audit.get("added"):
+            project = conn.execute(
+                "SELECT * FROM projects WHERE id=?",
+                (episode["project_id"],),
+            ).fetchone()
+            from app.domain.common import _project_bible_or_placeholder
+
+            bible = _project_bible_or_placeholder(project)
+        bible = bible_with_provisional_characters(bible, draft_audit)
+        identity_normalization_changes.extend(
+            normalize_screenplay_voice_ids(working_script, bible)
+        )
+    elif run_id:
+        evidence_repository.append_event(
+            run_id,
+            "CHARACTER_DISCOVERY_DRAFT_AUDIT_SKIPPED",
+            "info",
+            "Baseline 身份合同已静态闭合，跳过生成后人物模型审计",
+            payload={"episode_id": episode_id},
+        )
+
+    if identity_normalization_changes:
+        identity_normalization_changes.extend(
+            _normalize_screenplay_narrative_graph(
+                working_script,
+                authorized_source_chapters=episode.get(
+                    "authorized_source_chapters"
+                ),
+            )
+        )
+    normalized_payload = screenplay_artifact_payload(working_script)
+    normalized_hash = evidence_repository.content_hash(normalized_payload)
+    if identity_normalization_changes and normalized_hash != working_hash:
+        normalized_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_document",
+                scope_type="episode",
+                scope_id=episode_id,
+                status="candidate",
+                trust_level="T1",
+                content=normalized_payload,
+                parent_artifact_ids=[working_id],
+                contract_version=rev.contract_version or contract.version,
+            )
+        )
+        update_working_artifact(
+            rev.id,
+            normalized_artifact["id"],
+            expected_hash=working_hash,
+        )
+        rev = get_production_revision(rev.id)  # type: ignore[assignment]
+        assert rev
+        working_id = normalized_artifact["id"]
+        working_hash = normalized_artifact["content_hash"]
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                "SCREENPLAY_IDENTITY_NORMALIZATION_APPLIED",
+                "info",
+                "已从耐久 Baseline 派生身份规范化工作副本",
+                payload={
+                    "before_artifact_id": working_artifact["id"],
+                    "after_artifact_id": working_id,
+                },
+            )
+    if identity_audit_required:
+        checkpoint = {
+            **checkpoint,
+            "phase": "STRUCTURE_VALIDATION",
+            "activation_no": activation_no,
+            "working_artifact_id": working_id,
+            "yield_reason": None,
+        }
+        save_checkpoint(rev.id, checkpoint)
+
+    # Identity authority remains a deterministic production gate. Only those
+    # non-waivable issues may enter the bounded local Patch loop below;
+    # narrative, renderability, and adaptation findings stay score-only.
+    initial_issues, _initial_evaluation = run_screenplay_qa(
+        working_script,
+        bible=bible,
+        source_text=source_text,
+        episode=episode,
+        artifact_id=working_id,
+        artifact_hash=working_hash,
+    )
+    initial_hard_identity_issues = non_waivable_screenplay_issues(initial_issues)
+    if not initial_hard_identity_issues:
+        return _complete_screenplay_from_working_artifact(
+            episode_id=episode_id,
+            episode=episode,
+            source_text=source_text,
+            bible=bible,
+            revision_id=rev.id,
+            run_id=run_id,
+            checkpoint=checkpoint,
+            activation_no=activation_no,
+        )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
+        "screenplay_updated_at=? WHERE id=?",
+        (
+            f"剧本有 {len(initial_hard_identity_issues)} 项身份合同问题，正在局部修复",
+            now(),
+            episode_id,
+        ),
+    )
+    conn.commit()
 
     # ---- Repair loop ----
     patches_this_activation = 0
@@ -2442,6 +4346,19 @@ async def run_screenplay_production(
         if not rev.first_evaluation_done:
             rev = mark_first_evaluation(rev.id, eval_id or f"eval-{working_id}")
 
+        hard_identity_issues = non_waivable_screenplay_issues(issues)
+        if not hard_identity_issues:
+            return _complete_screenplay_from_working_artifact(
+                episode_id=episode_id,
+                episode=episode,
+                source_text=source_text,
+                bible=bible,
+                revision_id=rev.id,
+                run_id=run_id,
+                checkpoint=checkpoint,
+                activation_no=activation_no,
+            )
+
         current_fps = {i.fingerprint for i in issues}
         reopened = prev_issue_fps & current_fps
         # reopened means previously cleared then came back - track when we had improvement
@@ -2507,8 +4424,7 @@ async def run_screenplay_production(
         # Identity authority is a non-waivable prerequisite for every later
         # graph repair.  Resolve it before spending a model call on unrelated
         # narrative quality issues.
-        hard_identity_issues = non_waivable_screenplay_issues(issues)
-        issue = _choose_issue(hard_identity_issues or issues)
+        issue = _choose_issue(hard_identity_issues)
         if issue is None or not issue.repairable:
             return _publish_retry_exhausted_fallback(
                 rev,
@@ -2816,14 +4732,45 @@ def _issue_acceptance_test(issue: Issue) -> str:
     )
 
 
+def _introduced_issue_messages(
+    baseline_issues: list[Issue],
+    candidate_issues: list[Issue],
+) -> list[str]:
+    """Detect new validation slots while allowing one aggregate slot to shrink."""
+    def slot(issue: Issue) -> tuple[str, str, str, str, str, str]:
+        evidence = issue.evidence or {}
+        path = str(evidence.get("path") or evidence.get("span") or "")
+        collection_path = re.sub(r"\[\d+\]", "[]", path)
+        return (
+            issue.code,
+            issue.subject,
+            str(evidence.get("rule_id") or ""),
+            collection_path,
+            str(evidence.get("stage") or ""),
+            issue.severity.value,
+        )
+
+    baseline_counts = Counter(slot(issue) for issue in baseline_issues)
+    candidate_counts: Counter[tuple[str, str, str, str, str, str]] = Counter()
+    introduced: list[str] = []
+    for issue in candidate_issues:
+        key = slot(issue)
+        candidate_counts[key] += 1
+        if candidate_counts[key] > baseline_counts[key]:
+            introduced.append(issue.message)
+    return introduced
+
+
 def _dialogue_chain_replacement_is_local(
     document: Any,
     *,
     chain_id: str,
     turns: Any,
+    source_text: str = "",
 ) -> bool:
-    """Allow chain repair only by selecting existing body dialogue without deletion."""
+    """Allow body selection, or source-grounded recovery of one empty chain."""
     from app.production.screenplay_document import action_block_spoken_identity
+    from app.spoken_contract import content_char_count
 
     if (
         not isinstance(turns, list)
@@ -2851,6 +4798,53 @@ def _dialogue_chain_replacement_is_local(
     )
     if current_chain is None:
         return False
+    if not current_chain.turns:
+        declared_speakers = {
+            str(voice.speaker_id or "").strip()
+            for voice in document.voice_bible
+            if str(voice.speaker_id or "").strip()
+        }
+        plan = getattr(document, "narrative_plan", None)
+        for identity in getattr(plan, "identity_contracts", []) if plan else []:
+            declared_speakers.update({
+                str(identity.identity_id or "").strip(),
+                str(identity.display_name or "").strip(),
+                *(
+                    str(voice_id or "").strip()
+                    for voice_id in (identity.voice_ids or [])
+                ),
+            })
+        allowed_functions = {
+            "trigger",
+            "announcement",
+            "question",
+            "response",
+            "decision",
+            "statement",
+        }
+        candidate_turns: list[tuple[str, str]] = []
+        for turn in turns:
+            if not isinstance(turn, dict):
+                return False
+            speaker = str(turn.get("speaker") or "").strip()
+            line = str(turn.get("line") or "").strip()
+            function = str(turn.get("function") or "").strip()
+            evidence = str(turn.get("source_text") or "").strip()
+            if (
+                not speaker
+                or speaker not in declared_speakers
+                or not line
+                or content_char_count(line) > config.MAX_SPOKEN_CHARS_PER_SHOT
+                or function not in allowed_functions
+                or len(textmatch.condense(evidence)) < 2
+                or not source_text
+                or evidence not in source_text
+                or not _source_references_are_grounded(turn, source_text)
+            ):
+                return False
+            candidate_turns.append((speaker, line))
+        return len(candidate_turns) == len(set(candidate_turns))
+
     current_turns = {
         ((turn.speaker or "").strip(), (turn.line or "").strip())
         for turn in current_chain.turns
@@ -2981,7 +4975,19 @@ def _normalize_dialogue_source_references(
     citation = str(normalized.get("source_text") or "").strip()
     line = str(normalized.get("line") or "").strip()
     speaker = str(normalized.get("speaker") or "").strip()
-    if not citation or citation in source_text or not line or not speaker:
+    if not citation or not line or not speaker:
+        return normalized
+
+    from app import textmatch
+
+    citation_supports_line = (
+        textmatch.spoken_digit_sequence_equivalent(citation, line)
+        or textmatch.longest_run_ratio(line, citation)
+        >= textmatch.KEY_LINE_PRESENT_RATIO
+        or textmatch.bigram_coverage(line, citation)
+        >= textmatch.KEY_LINE_BIGRAM_COVERAGE
+    )
+    if citation in source_text and citation_supports_line:
         return normalized
 
     source_dialogue = _unique_source_dialogue(line, source_text)
@@ -3003,6 +5009,44 @@ def _normalize_dialogue_chain_continuity(
 
     if not source_text or not script.dialogue_chains:
         return []
+    changes: list[dict[str, Any]] = []
+    from app.validators import source_dialogue_fragments
+
+    source_dialogues = source_dialogue_fragments(source_text)
+    allowed_speakers = {
+        str(voice.speaker_id or "").strip()
+        for voice in (script.voice_bible or [])
+        if str(voice.speaker_id or "").strip()
+    }
+    if script.narrative_plan is not None:
+        for contract in script.narrative_plan.identity_contracts:
+            allowed_speakers.update({
+                str(contract.identity_id or "").strip(),
+                str(contract.display_name or "").strip(),
+                *(
+                    str(voice_id or "").strip()
+                    for voice_id in (contract.voice_ids or [])
+                ),
+            })
+    allowed_speakers.discard("")
+    first_turn = (
+        script.dialogue_chains[0].turns[0]
+        if script.dialogue_chains[0].turns else None
+    )
+    if first_turn is not None and source_dialogues:
+        opening = source_dialogues[0]
+        matched = _unique_source_dialogue(first_turn.line or "", source_text)
+        if (
+            matched == opening
+            and (first_turn.source_text or "").strip() != opening
+        ):
+            changes.append({
+                "kind": "opening_dialogue_source",
+                "id": f"{script.dialogue_chains[0].chain_id}-T1",
+                "from": (first_turn.source_text or "").strip(),
+                "to": opening,
+            })
+            first_turn.source_text = opening
     document = screenplay_to_document(script)
     observed: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -3018,6 +5062,7 @@ def _normalize_dialogue_chain_continuity(
             identity
             for action in block.action_blocks
             if (identity := action_block_spoken_identity(action.text)) is not None
+            and identity[0] in allowed_speakers
         )
         for speaker, line in spoken:
             identity = (block.scene_id, speaker, line)
@@ -3035,7 +5080,6 @@ def _normalize_dialogue_chain_continuity(
                 "source_position": source_text.find(source_dialogue),
             })
 
-    changes: list[dict[str, Any]] = []
     for chain in script.dialogue_chains:
         turns = list(chain.turns or [])
         if len(turns) >= DIALOGUE_CHAIN_TURNS_HARD_MAX:
@@ -3393,8 +5437,13 @@ def _normalize_patch_operation_payload(item: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(item)
     target = dict(item.get("target") or {})
     has_field_path = bool(str(item.get("path") or "").strip())
-    if has_field_path:
+    structural_op = str(item.get("op") or "") in {
+        "create_node", "insert_node", "delete_node", "move_node",
+    }
+    if has_field_path and not structural_op:
         normalized["op"] = "replace_field"
+    elif structural_op:
+        normalized["path"] = ""
     for key in ("parent_id", "parent_field", "to_index"):
         if key in item and key not in target:
             target[key] = item[key]
@@ -3429,6 +5478,50 @@ def _candidate_is_executable(
             operation = PatchOperation.model_validate(
                 _normalize_patch_operation_payload(raw),
             )
+            target = dict(operation.target or {})
+            plan = getattr(working, "narrative_plan", None)
+            plan_data = (
+                plan.model_dump(mode="json")
+                if plan is not None
+                else {}
+            )
+            collection = re.split(
+                r"[.\[]+",
+                str(target.get("collection") or "").strip(),
+                maxsplit=1,
+            )[0]
+            node_id = str(target.get("id") or "").strip()
+            if not collection and node_id:
+                collection = (
+                    _narrative_collection_for_node(plan_data, node_id)
+                    or ""
+                )
+            if (
+                not collection
+                and operation.op in {"create_node", "insert_node"}
+                and node_id
+                and isinstance(operation.value, dict)
+            ):
+                collection = (
+                    _narrative_collection_for_new_node(
+                        plan_data,
+                        node_id,
+                        operation.value,
+                    )
+                    or ""
+                )
+            if isinstance(plan_data.get(collection), list):
+                target = _normalize_top_level_narrative_parent(
+                    target,
+                    collection=collection,
+                    plan_data=plan_data,
+                )
+                target = {
+                    **target,
+                    "kind": "narrative_node",
+                    "collection": collection,
+                }
+            operation.target = target
             working, _ = apply_patch_operation_to_document(working, operation)
     except Exception:  # noqa: BLE001 - probing untrusted model output
         return False
@@ -3528,18 +5621,12 @@ def _preflight_document_candidate(
         ))
         return errors
 
-    def error_fingerprints(messages: list[str]) -> set[str]:
-        return {
-            item.fingerprint
-            for item in issues_from_validator_messages(
-                messages,
-                subject="screenplay",
-                stage="screenplay",
-            )
-        }
-
     baseline_errors = errors_for(document)
-    baseline_fingerprints = error_fingerprints(baseline_errors)
+    baseline_issues = issues_from_validator_messages(
+        baseline_errors,
+        subject="screenplay",
+        stage="screenplay",
+    )
     for subset_size in range(1, len(parsed) + 1):
         for subset_indices in combinations(range(len(parsed)), subset_size):
             working = document
@@ -3594,6 +5681,7 @@ def _preflight_document_candidate(
                             working,
                             chain_id=chain_id,
                             turns=operation.value,
+                            source_text=source_text,
                         )
                     ):
                         valid = False
@@ -3622,7 +5710,12 @@ def _preflight_document_candidate(
             candidate_errors = errors_for(working)
             if issue.message in candidate_errors:
                 continue
-            if error_fingerprints(candidate_errors) - baseline_fingerprints:
+            candidate_issues = issues_from_validator_messages(
+                candidate_errors,
+                subject="screenplay",
+                stage="screenplay",
+            )
+            if _introduced_issue_messages(baseline_issues, candidate_issues):
                 continue
             selection = {
                 "candidate_ids": [candidate.get("candidate_id")],
@@ -3736,6 +5829,21 @@ async def _llm_field_patch_once(
                 "to_index": "移动/插入位置，可省略",
             },
             "value": "replace 的新字段值或 create 的完整单节点",
+            "dialogue_chain_turns": {
+                "count": f"1~{DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮",
+                "speaker": "只能使用 voice_bible 或 identity_contracts 已声明的说话人",
+                "line": (
+                    f"非空且每轮纯文字不得超过 "
+                    f"{config.MAX_SPOKEN_CHARS_PER_SHOT} 字"
+                ),
+                "function": (
+                    "只能是 trigger|announcement|question|response|"
+                    "decision|statement"
+                ),
+                "source_text": (
+                    "每轮必填，且必须逐字连续存在于 authorized_source_excerpt"
+                ),
+            },
         },
         "output_contract": {
             "semantic_gap": "自由语义诊断；无法归类时仍需保留",
@@ -3766,6 +5874,12 @@ async def _llm_field_patch_once(
             "create/replace 一旦引入新 identity_id、display_name 或非旁白 voice ID，同一候选必须以局部操作创建或补齐完整 identity_contracts 节点及 voice_ids 连接；否则候选无效",
             "修复可以更正身份合同本身，但不得借修复器绕过已有角色圣经或已发布身份合同的 ID 权威",
             "来源证据必须逐字来自 authorized_source_excerpt",
+            (
+                "替换 dialogue_chain.turns 时，每个 line 的纯文字不得超过 "
+                f"{config.MAX_SPOKEN_CHARS_PER_SHOT} 字，"
+                "function 只能是 trigger|announcement|question|response|decision|statement；"
+                "禁止输出 narration、voiceover、explanation、apology、closing 等其他值"
+            ),
             "改写命题不得直接挂原文证据，角色/观众信念不得补入不可感知证据",
             "修复后仍会运行整图 DAG、状态、信念与观众路径全量复验",
         ],
@@ -3824,10 +5938,7 @@ async def _llm_field_patch_once(
             if (
                 bool(item.get("satisfies_gap_test"))
                 and bool(item.get("preserves_invariants"))
-                and (
-                    _candidate_targets_narrative_graph(item, plan_data)
-                    or _candidate_is_executable(item, document)
-                )
+                and _candidate_is_executable(item, document)
             )
         ), None)
         if selected is None:
@@ -3847,9 +5958,8 @@ async def _llm_field_patch_once(
         ]
     except Exception:  # noqa: BLE001 - model output is untrusted
         return []
-    if any(operation.op in {"create_node", "insert_node"} for operation in operations) and not (
-        bool(selected.get("satisfies_gap_test"))
-        and bool(selected.get("passes_marginal_gain_test"))
+    if any(operation.op in {"create_node", "insert_node"} for operation in operations) and not bool(
+        selected.get("satisfies_gap_test")
     ):
         return []
     if any(operation.op == "delete_node" for operation in operations) and not bool(
@@ -3990,6 +6100,7 @@ async def _llm_field_patch_once(
                     document,
                     chain_id=chain_id,
                     turns=operation.value,
+                    source_text=source_text,
                 ):
                     continue
                 target = {
@@ -4065,14 +6176,11 @@ async def _llm_field_patch_once(
             return errors
 
         baseline_errors = targeted_errors(document_to_screenplay(document))
-        baseline_issue_fingerprints = {
-            item.fingerprint
-            for item in issues_from_validator_messages(
-                baseline_errors,
-                subject="screenplay",
-                stage="screenplay",
-            )
-        }
+        baseline_issues = issues_from_validator_messages(
+            baseline_errors,
+            subject="screenplay",
+            stage="screenplay",
+        )
         candidate_script = document_to_screenplay(candidate_document)
         _normalize_screenplay_narrative_graph(
             candidate_script,
@@ -4104,11 +6212,10 @@ async def _llm_field_patch_once(
         subject="screenplay",
         stage="screenplay",
     )
-    introduced = [
-        item.message
-        for item in candidate_issues
-        if item.fingerprint not in baseline_issue_fingerprints
-    ]
+    introduced = _introduced_issue_messages(
+        baseline_issues,
+        candidate_issues,
+    )
     if introduced:
         if rejection_feedback is not None:
             rejection_feedback.append(

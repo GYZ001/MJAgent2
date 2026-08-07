@@ -4,19 +4,26 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { Shot, ShotVersion, ReferenceImage } from '../api'
 import {
   EPISODE_COMPLETION_BUDGET_CAP_CNY,
+  EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
   InfoSection,
+  MaterialGallery,
+  REVIEW_TABS,
   boundarySourceLabel,
   currentMaterialVersion,
   currentVersionRefs,
   classifyReferenceBuckets,
   countReferenceImages,
+  describeShotUpdate,
   episodeCompletionRequest,
+  episodeGenerationAction,
+  isVideoModelInputRejection,
   refSourceLabel,
   referenceLibraryLabel,
   reviewWallPositionKey,
   resolvePreviewVersionId,
   resolveStableShotSelection,
   reviewContextRefreshKey,
+  shotDetailRefreshKey,
   shotHasActiveGeneration,
   shotHasPausedGeneration,
   shotMaterialLibraryKind,
@@ -141,7 +148,119 @@ describe('生成台三类分组与视角标签', () => {
       source: 'asset_library',
       entity_type: 'scene',
       view_role: 'reverse_angle',
+    })).toBe('场景参考 · 反打')
+  })
+})
+
+describe('模式化素材库', () => {
+  const renderLibrary = (shot: Shot) => renderToStaticMarkup(createElement(
+    MaterialGallery,
+    {
+      shot,
+      productionEligible: true,
+      onOpen: () => undefined,
+      onRefresh: async () => undefined,
+      onToast: () => undefined,
+    },
+  ))
+
+  const materialShot = (
+    mode: NonNullable<Shot['mode_plan']>['mode'],
+    imageInputs: NonNullable<ShotVersion['image_inputs']>,
+  ) => ({
+    id: `shot-${mode}`,
+    shot_no: 1,
+    mode_plan: { mode, confidence: 1 },
+    adopted_version_id: null,
+    versions: [{
+      ...version('v1', 'succeeded', imageInputs.reference_images ?? [], 1),
+      image_inputs: imageInputs,
+    }],
+  }) as unknown as Shot
+
+  it('按计划模式选择唯一素材类型', () => {
+    expect(shotMaterialLibraryKind(materialShot(
+      'FIRST_LAST_FRAME_MODE', {},
+    ))).toBe('keyframes')
+    expect(shotMaterialLibraryKind(materialShot(
+      'REFERENCE_IMAGE_MODE', {},
+    ))).toBe('references')
+    expect(shotMaterialLibraryKind(materialShot(
+      'VIDEO_INPUT_MODE', {},
+    ))).toBe('video')
+  })
+
+  it('首尾帧模式只展示关键帧', () => {
+    const shot = materialShot('FIRST_LAST_FRAME_MODE', {
+      mode: 'FIRST_LAST_FRAME_MODE',
+      first_frame_image_url: '/media/first.jpg',
+      first_frame_source: 'PREVIOUS_STATIC_TAIL',
+      last_frame_image_url: '/media/last.jpg',
+      last_frame_source: 'STATIC_BOUNDARY_ASSET',
+    })
+    const html = renderLibrary(shot)
+
+    expect(html).toContain('本镜关键帧')
+    expect(html).toContain('首帧')
+    expect(html).toContain('尾帧')
+    expect(html).toContain('上一镜静态尾帧')
+    expect(html).not.toContain('实际提交参考图')
+    expect(html).not.toContain('<video')
+    expect(currentMaterialVersion(shot)?.version.id).toBe('v1')
+  })
+
+  it('参考图模式只展示参考图', () => {
+    const shot = materialShot('REFERENCE_IMAGE_MODE', {
+      mode: 'REFERENCE_IMAGE_MODE',
+      reference_images: [{
+        id: 'ref',
+        type: 'scene',
+        source: 'asset_library',
+        image_url: '/media/ref.jpg',
+        selectedForSeedance: true,
+      }],
+    })
+    const html = renderLibrary(shot)
+
+    expect(html).toContain('本镜参考图')
+    expect(html).toContain('实际提交参考图')
+    expect(html).toContain('场景参考')
+    expect(html).not.toContain('关键帧 ·')
+    expect(html).not.toContain('<video')
+  })
+
+  it('视频参考模式只展示视频输入', () => {
+    const shot = materialShot('VIDEO_INPUT_MODE', {
+      mode: 'VIDEO_INPUT_MODE',
+      video_input_url: '/media/upstream.mp4',
+      video_input_source_revision_id: 'upstream-v1',
+    })
+    const html = renderLibrary(shot)
+
+    expect(html).toContain('本镜视频输入')
+    expect(html).toContain('<video')
+    expect(html).toContain('/media/upstream.mp4')
+    expect(html).not.toContain('实际提交参考图')
+    expect(html).not.toContain('关键帧 ·')
+    expect(boundarySourceLabel('PREVIOUS_ADOPTED_TAIL'))
+      .toBe('上一镜真实视频尾帧')
+    expect(referenceLibraryLabel({
+      id: 'plot',
+      type: 'plot_key_frame',
+      source: 'seedream_generated',
     })).toBe('剧情参考图')
+  })
+})
+
+describe('生成台对象稳定性', () => {
+  it('视频模型拒绝输入时展示换模型提示，不视为自动降级', () => {
+    expect(isVideoModelInputRejection(
+      '当前模型拒绝（VIDEO_INPUT_PRIVACY_REJECTED · ERR-1）',
+      null,
+    )).toBe(true)
+    expect(isVideoModelInputRejection(
+      '普通网络错误',
+      'VIDEO_INPUT_PRIVACY_REJECTED',
     )).toBe(true)
     expect(isVideoModelInputRejection('普通网络错误', null)).toBe(false)
   })
@@ -203,6 +322,13 @@ describe('生成台三类分组与视角标签', () => {
   })
 
   it('只有从未保存过镜头身份时才默认首镜', () => {
+    expect(resolveStableShotSelection([{ id: 's1' }], null, false))
+      .toEqual({ selectedShotId: 's1', tombstoneShotId: null })
+  })
+
+  it('不同分镜制品使用独立位置键，重生成后不会读取旧镜头身份', () => {
+    expect(reviewWallPositionKey('p1', 'e1', 'board-v1'))
+      .toBe('manju:review-wall:p1:e1:board-v1')
     expect(reviewWallPositionKey('p1', 'e1', 'board-v2'))
       .toBe('manju:review-wall:p1:e1:board-v2')
     expect(shouldPersistReviewWallPosition(
@@ -259,7 +385,7 @@ describe('生成台三类分组与视角标签', () => {
         image_url: '/assets/ref-1.png',
         selectedForSeedance: true,
       }], 1)],
-    expect(REVIEW_TABS.map(tab => tab.label)).toEqual(['文字内容', '参考图', '视频预览'])
+    } as Shot
 
     expect(shotDetailRefreshKey(withReference)).not.toBe(shotDetailRefreshKey(running))
   })

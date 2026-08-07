@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app import textmatch
 from app.schemas import (
     EpisodeScreenplay,
     InformationItem,
@@ -20,6 +21,7 @@ from app.schemas import (
     NarrativeContinuityPlan,
     PlotSpine,
     ScriptScene,
+    SourceCoverageDecision,
     StoryEvent,
     VoiceCanonical,
 )
@@ -50,6 +52,9 @@ class SceneBlockNode(BaseModel):
     conflict: str = ""
     turn: str = ""
     source_basis: str = ""
+    entry_state: str = ""
+    exit_state: str = ""
+    context_requirements: list[str] = Field(default_factory=list)
     action_blocks: list[ActionBlockNode] = Field(default_factory=list)
     dialogue_turns: list[DialogueTurnNode] = Field(default_factory=list)
 
@@ -91,6 +96,7 @@ class ScreenplayDocument(BaseModel):
     # 因此 EpisodeScreenplay <-> ScreenplayDocument 必须完整往返它。
     narrative_plan: NarrativeContinuityPlan | None = None
     plot_spine: PlotSpine | None = None
+    source_coverage: list[SourceCoverageDecision] = Field(default_factory=list)
     scene_blocks: list[SceneBlockNode] = Field(default_factory=list)
     story_events: list[StoryEvent] = Field(default_factory=list)
     information_ledger: list[InformationItem] = Field(default_factory=list)
@@ -141,6 +147,7 @@ def screenplay_to_document(script: EpisodeScreenplay) -> ScreenplayDocument:
             else None
         ),
         plot_spine=script.plot_spine,
+        source_coverage=list(script.source_coverage or []),
         scene_blocks=scene_blocks,
         story_events=list(script.events or []),
         information_ledger=list(script.information_ledger or []),
@@ -163,11 +170,19 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
             conflict=block.conflict,
             turn=block.turn,
             source_basis=block.source_basis,
+            entry_state=block.entry_state,
+            exit_state=block.exit_state,
+            context_requirements=list(block.context_requirements),
         )
         for block in rederived.scene_blocks
     ]
-    key_lines = _key_lines_from_chains(rederived.dialogue_chains)
     full_text = render_full_script_text(rederived)
+    from app.validators import key_lines_in_story_order
+
+    key_lines = key_lines_in_story_order(
+        _key_lines_from_chains(rederived.dialogue_chains),
+        full_text,
+    )
     return EpisodeScreenplay(
         episode_no=meta.episode_no,
         id=meta.id,
@@ -184,6 +199,7 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
         dialogue_chains=list(rederived.dialogue_chains),
         key_plot_points=list(meta.key_plot_points),
         plot_spine=rederived.plot_spine,
+        source_coverage=list(rederived.source_coverage),
         scene_outline=scene_outline,
         full_script_text=full_text,
         character_state_changes=list(meta.character_state_changes),
@@ -322,6 +338,61 @@ def _remove_actions_projected_as_dialogue(doc: ScreenplayDocument) -> None:
         block.action_blocks = retained
 
 
+def _best_scene_for_unmatched_chain_turn(
+    scene_blocks: list[SceneBlockNode],
+    chain: KeyDialogueChain,
+    turn: KeyDialogueTurn,
+) -> SceneBlockNode:
+    """Place a projection gap in the closest existing scene by document semantics."""
+    speaker = _dialogue_identity(turn.speaker)
+    speaker_scenes = [
+        block
+        for block in scene_blocks
+        if speaker
+        and speaker in {
+            _dialogue_identity(character)
+            for character in block.characters
+        }
+    ]
+    candidates = speaker_scenes or scene_blocks
+    queries = [
+        str(chain.topic or "").strip(),
+        str(turn.line or "").strip(),
+        str(turn.source_text or "").strip(),
+    ]
+
+    def rank(block: SceneBlockNode) -> tuple[float, float, float, int]:
+        scene_text = " ".join([
+            block.scene_heading,
+            block.story_function,
+            block.summary,
+            block.conflict,
+            block.turn,
+            block.source_basis,
+            *(action.text for action in block.action_blocks),
+            *(
+                f"{item.speaker} {item.line}"
+                for item in block.dialogue_turns
+            ),
+        ])
+        scores = [
+            max(
+                textmatch.longest_run_ratio(query, scene_text),
+                textmatch.bigram_coverage(query, scene_text),
+            )
+            if query else 0.0
+            for query in queries
+        ]
+        return (
+            scores[0] * 2.0 + scores[1] + scores[2],
+            scores[0],
+            max(scores[1:]),
+            -block.scene_no,
+        )
+
+    return max(candidates, key=rank)
+
+
 def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
     """Project authoritative chain turns into scene dialogue without rewriting prose."""
     matches: dict[tuple[int, int], tuple[SceneBlockNode, DialogueTurnNode]] = {}
@@ -389,13 +460,10 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
                 block, sibling = following
                 insert_at = _node_index(block.dialogue_turns, sibling)
             else:
-                block = next(
-                    (
-                        item for item in doc.scene_blocks
-                        if _dialogue_identity(turn.speaker)
-                        in {_dialogue_identity(name) for name in item.characters}
-                    ),
-                    doc.scene_blocks[0],
+                block = _best_scene_for_unmatched_chain_turn(
+                    doc.scene_blocks,
+                    chain,
+                    turn,
                 )
                 insert_at = len(block.dialogue_turns)
             node = DialogueTurnNode(
@@ -417,6 +485,11 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
         id(node)
         for _block, node in matches.values()
     }
+    authoritative_by_line: dict[str, list[DialogueTurnNode]] = {}
+    for _block, node in matches.values():
+        line = _dialogue_identity(node.line)
+        if line:
+            authoritative_by_line.setdefault(line, []).append(node)
     for block in doc.scene_blocks:
         seen: set[tuple[str, str]] = set()
         deduped: list[DialogueTurnNode] = []
@@ -425,6 +498,19 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
                 _dialogue_identity(node.speaker),
                 _dialogue_identity(node.line),
             )
+            if id(node) not in authoritative_nodes and identity[1]:
+                covered_by = {
+                    id(authoritative)
+                    for line, authoritative_turns in authoritative_by_line.items()
+                    if len(line) >= 4 and identity[1].startswith(line)
+                    for authoritative in authoritative_turns
+                }
+                if len(covered_by) == 1:
+                    # The prose parser can mistake a performance cue such as
+                    # "角色不耐烦地说：" for a new speaker, then preserve the
+                    # same authoritative line plus trailing action as another
+                    # turn. The typed chain owns the spoken content.
+                    continue
             if (
                 all(identity)
                 and identity in seen
@@ -1058,15 +1144,23 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
                 conflict=scene.conflict or "",
                 turn=scene.turn or "",
                 source_basis=scene.source_basis or "",
+                entry_state=scene.entry_state or "",
+                exit_state=scene.exit_state or "",
+                context_requirements=list(scene.context_requirements or []),
                 action_blocks=actions,
                 dialogue_turns=turns,
             ))
-        # If scenes have no dialogue but chains exist, attach all turns to first scene with capacity
+        # If the prose body has no dialogue, place each authoritative turn in
+        # the closest scene instead of distributing unrelated chains by index.
         if script.dialogue_chains and all(not b.dialogue_turns for b in blocks):
-            all_turns: list[DialogueTurnNode] = []
             for chain in script.dialogue_chains:
                 for idx, turn in enumerate(chain.turns, start=1):
-                    all_turns.append(DialogueTurnNode(
+                    block = _best_scene_for_unmatched_chain_turn(
+                        blocks,
+                        chain,
+                        turn,
+                    )
+                    block.dialogue_turns.append(DialogueTurnNode(
                         turn_id=f"{chain.chain_id}-T{idx}",
                         chain_id=chain.chain_id,
                         speaker=turn.speaker,
@@ -1074,12 +1168,6 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
                         function=turn.function,
                         source_text=turn.source_text,
                     ))
-            if blocks and all_turns:
-                # distribute round-robin-ish: put into scenes evenly
-                per = max(1, (len(all_turns) + len(blocks) - 1) // len(blocks))
-                for i, block in enumerate(blocks):
-                    chunk = all_turns[i * per:(i + 1) * per]
-                    block.dialogue_turns = chunk
         return blocks
 
     # Fallback: parse full_script_text only

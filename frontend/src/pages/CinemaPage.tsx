@@ -32,6 +32,23 @@ export function canConcatenateMix(mix: Pick<MixStatus, 'ready' | 'shots_ready'> 
   return Boolean(mix && mix.ready && mix.shots_ready > 0)
 }
 
+export function finalEditStatusLabel(report: Record<string, unknown>): string {
+  if (report.ok === true) return '当前成片已执行确定性文字、镜间转场与音轨衔接'
+  if (report.mode === 'draft_concat' && report.skipped_final_edit === true) {
+    if (report.decision_reason === 'partial_timeline_fast_preview') {
+      return '当前成片使用快速阶段拼接；缺镜补齐后再执行终剪增强'
+    }
+    if (report.decision_reason === 'simple_timeline_fast_concat') {
+      return '当前成片使用快速无重编码拼接；未检测到必须终剪的文字或转场'
+    }
+    if (report.decision_reason === 'disabled_by_env') {
+      return '当前成片使用快速基础拼接；终剪增强已关闭'
+    }
+    return '当前成片使用快速基础拼接'
+  }
+  return '当前成片已使用基础合成降级，但时间线仍完整交付'
+}
+
 /**
  * 状态轮询只更新真正变化的字段，并保护已经展示的整集成品。
  *
@@ -447,9 +464,7 @@ export default function CinemaPage() {
                 <span>将按分镜号顺序合成当前已有的真实视频；缺失或生成中的镜头直接跳过，不使用静态图片、轻运动卡或静音片段代替{spedShots.length ? `；${spedShots.length} 镜使用变速定稿` : ''}</span>
                 {mix.final_edit_report && (
                   <span>
-                    {mix.final_edit_report.ok === true
-                      ? '当前成片已执行确定性文字、镜间转场与音轨衔接'
-                      : '当前成片已使用基础合成降级，但时间线仍完整交付'}
+                    {finalEditStatusLabel(mix.final_edit_report)}
                   </span>
                 )}
               </div>

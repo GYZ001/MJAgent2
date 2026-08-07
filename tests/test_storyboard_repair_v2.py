@@ -20,10 +20,13 @@ from app.harness.types import EvidenceArtifact
 from app.production.revision import ensure_production_revision
 from app.repair_router import route_issues
 from app.schemas import (
+    AudioTimelineItem,
     Bible,
     Character,
     Dialogue,
     EpisodeScreenplay,
+    KeyDialogueChain,
+    KeyDialogueTurn,
     Shot,
     Storyboard,
     StoryboardOutline,
@@ -39,11 +42,15 @@ from app.storyboard_supervisor import (
     STORYBOARD_REPAIR_PLANNER_VERSION,
     SupervisorCheckpoint,
     _apply_storyboard_planning_target,
+    _apply_repair,
     _begin_repair_activation,
+    _commit_repair_candidate,
     _deterministic_ambient_audio_cast_candidate,
     _deterministic_dialogue_framing_candidate,
     _deterministic_missing_spoken_candidate,
+    _merge_repair_candidate,
     _migrate_checkpoint,
+    _open_shot_gap,
     _repair_is_pending,
     _repair_feedback_for_shot,
     _recover_outline_from_current_artifact,
@@ -53,6 +60,7 @@ from app.storyboard_supervisor import (
     _retarget_spine_repair_shot,
     _shot_checkpoint_payload,
     _storyboard_generation_is_complete,
+    _storyboard_hash,
     _validated_candidate_projection,
     _withdraw_legacy_failed_publication,
     prepare_published_storyboard_repair,
@@ -427,6 +435,36 @@ def test_resume_atomically_cleans_legacy_ghost_contract_before_gate(
     monkeypatch.setattr(video_ops, "evaluate_storyboard_for_confirmation", _passed_evaluation)
     monkeypatch.setattr(storyboard_ops, "_finalize_storyboard_evidence", lambda *_args: "art-final")
 
+    checkpoint = asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=True,
+        preflight_done=True,
+        new_activation=True,
+    ))
+
+    assert checkpoint.phase == "SUCCEEDED"
+    repaired = conn.execute("SELECT * FROM shots WHERE id='s1'").fetchone()
+    repaired_contract = json.loads(repaired["shot_contract_json"])
+    assert repaired_contract["characters_visible"] == ["少年"]
+    assert repaired_contract["audio_cast"] == []
+    assert repaired_contract["audio_timeline"] == []
+    assert repaired_contract["reference_roles"] == []
+
+
+def test_resume_discards_pending_candidate_when_current_gate_already_passes(
+    repair_db, monkeypatch,
+) -> None:
+    conn, _screenplay = repair_db
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+            )
+            for number in range(1, 4)
+        ],
     )
     conn.execute(
         "UPDATE episodes SET storyboard_outline_json=? WHERE id='e1'",
@@ -1213,6 +1251,17 @@ def test_candidate_cas_conflict_never_overwrites_official_projection(
     monkeypatch.setattr(
         "app.worker.clear_shot_artifacts", lambda *_args, **_kwargs: None,
     )
+
+    with pytest.raises(RuntimeError, match="CAS conflict"):
+        _commit_repair_candidate(
+            conn,
+            checkpoint,
+            episode_id="e1",
+            screenplay=screenplay,
+            current_board=current,
+            candidate_board=_merge_repair_candidate(current, checkpoint),
+            expected_screenplay_artifact_id="sp1",
+            run_id=None,
         )
 
     assert conn.execute(
@@ -1266,6 +1315,61 @@ def test_publish_rebinds_inserted_and_shifted_shots_to_current_evidence(
         trust_level="T2",
         content=old_shot.model_dump(mode="json"),
     ))
+    conn.execute(
+        "UPDATE shots SET storyboard_artifact_id=? WHERE id='s2'",
+        (old_artifact["id"],),
+    )
+    conn.commit()
+
+    _open_shot_gap(conn, "e1", 2)
+    inserted = _shot(2, action="新增主线镜头")
+    inserted.is_final = False
+    _insert_storyboard_shot(conn, "e1", screenplay, inserted, "sp1")
+    conn.commit()
+    board = _current_board(conn)
+
+    assert _storyboard_shot_evidence_requires_rebind(conn, "e1", board) is True
+    rows = _ensure_current_storyboard_shot_artifacts(conn, "e1", board)
+
+    assert len(rows) == 4
+    assert _storyboard_shot_evidence_requires_rebind(conn, "e1", board) is False
+    for row, shot in zip(rows, board.shots):
+        artifact = evidence_repository.get_artifact(row["storyboard_artifact_id"])
+        assert artifact is not None
+        assert artifact["scope_id"] == f"e1:{shot.shot_no}"
+        assert artifact["status"] == "approved"
+        assert artifact["content_hash"] == evidence_repository.content_hash(
+            shot.model_dump(mode="json")
+        )
+    historical = evidence_repository.get_artifact(old_artifact["id"])
+    assert historical is not None
+    assert historical["content"]["shot_no"] == 2
+    assert historical["status"] == "superseded"
+
+
+def test_generated_shot_cannot_claim_human_duration_review(repair_db) -> None:
+    conn, screenplay = repair_db
+    generated = _shot(4, action="模型新增镜头")
+    generated.duration_s = 10
+    generated.risk_tags = ["duration_human_reviewed"]
+
+    _insert_storyboard_shot(conn, "e1", screenplay, generated, "sp1")
+    row = conn.execute(
+        "SELECT shot_contract_json FROM shots WHERE episode_id='e1' AND shot_no=4"
+    ).fetchone()
+
+    assert "duration_human_reviewed" not in json.loads(
+        row["shot_contract_json"]
+    )["risk_tags"]
+
+
+def test_validated_projection_does_not_leak_unrelated_derived_fields(repair_db) -> None:
+    conn, _screenplay = repair_db
+    current = _current_board(conn)
+    replacement = _shot(2, action="已校验候选")
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        last_repair={"mode": "replace", "window_start": 2, "window_end": 2},
         repair_candidate_shots=[replacement.model_dump(mode="json")],
     )
     evaluated = _merge_repair_candidate(current, checkpoint)
@@ -1337,6 +1441,87 @@ def test_candidate_without_any_resolved_target_is_not_progress() -> None:
 def test_candidate_can_resolve_one_target_from_combined_spine_issue() -> None:
     conflict = "shot_no=16 dialogues 与 audio_timeline 的口播内容分叉"
     warning = "shots[1](shot_no=2).last_frame_desc 含超纲细节词：眼泪"
+    combined_spine = (
+        "主线节拍主体已入画但未完成对应动作/对白交付："
+        "S01/李富贵:一路哭闹抱怨；S02/路人丙:交代杂役规则并发放凝气卷"
+    )
+    remaining_spine = (
+        "主线节拍主体已入画但未完成对应动作/对白交付："
+        "S02/路人丙:交代杂役规则并发放凝气卷"
+    )
+
+    assert _repair_candidate_made_progress(
+        mode="insert",
+        candidate_passed=False,
+        before_messages=[conflict, combined_spine, warning],
+        after_messages=[conflict, remaining_spine, warning],
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "action, initial_size, expected_size, staging_tag",
+    [
+        (
+            "少年翻开手中名册，同时宣布下一位测试者的名字。",
+            "特写",
+            "近景",
+            "dialogue_action_prop_staging",
+        ),
+        (
+            "少年说完后转身穿过人群，走向广场出口。",
+            "近景",
+            "中景",
+            "dialogue_action_spatial_staging",
+        ),
+    ],
+)
+def test_deterministic_action_dialogue_framing_candidate(
+    action: str,
+    initial_size: str,
+    expected_size: str,
+    staging_tag: str,
+) -> None:
+    shot = _shot(2, action=action)
+    shot.shot_size = initial_size
+    shot.dialogues = [Dialogue(speaker="少年", line="下一位。", emotion="平静")]
+    shot.risk_tags = [staging_tag]
+
+    candidate = _deterministic_dialogue_framing_candidate(shot)
+
+    assert candidate is not None
+    assert candidate.shot_size == expected_size
+    assert "dialogue_action_staging" in candidate.risk_tags
+    assert shot.shot_size == initial_size
+
+
+def test_deterministic_missing_spoken_candidate_uses_published_dialogue_clause() -> None:
+    shot = _shot(
+        2,
+        action="老师告知学生评选结果，并承诺协助完成申报。",
+    )
+    shot.primary_action = "老师向学生确认评选结果并承诺协助申报"
+    shot.characters = ["老师", "学生"]
+    shot.characters_visible = ["老师", "学生"]
+    shot.first_frame_desc = "老师看向学生，正准备开口说明评选结果。"
+    shot.last_frame_desc = "老师说完承诺，学生点头回应。"
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text="老师向学生说明结果。",
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="评选结果与后续申报",
+            turns=[KeyDialogueTurn(
+                speaker="老师",
+                line="本次评选结果已经确定，我会协助你完成申报。",
+                source_text="本次评选结果已经确定，我会协助你完成申报。",
+            )],
+        )],
+    )
+
+    candidate = _deterministic_missing_spoken_candidate(shot, screenplay)
+
+    assert candidate is not None
+    assert candidate.dialogues[0].speaker == "老师"
     assert candidate.dialogues[0].line in screenplay.dialogue_chains[0].turns[0].line
     assert candidate.audio_cast == ["老师"]
     assert candidate.audio_timeline[0].type == "spoken_dialogue"
@@ -1379,6 +1564,64 @@ def test_deterministic_ambient_audio_cast_candidate_removes_identity_claim() -> 
         text="咚咚",
         lip_sync=False,
     )]
+
+    candidate = _deterministic_ambient_audio_cast_candidate(shot)
+
+    assert candidate is not None
+    assert candidate.audio_cast == []
+    assert candidate.audio_timeline == shot.audio_timeline
+    assert shot.audio_cast == ["未绑定的拟音标签"]
+
+
+def test_deterministic_single_dialogue_marks_named_listener_offscreen() -> None:
+    shot = _shot(
+        2,
+        action="少年看向纳兰嫣然，平静说出少女名字。",
+    )
+    shot.shot_size = "近景"
+    shot.characters = ["少年"]
+    shot.characters_visible = ["少年"]
+    shot.dialogues = [Dialogue(speaker="少年", line="纳兰嫣然。", emotion="平静")]
+    shot.first_frame_desc = "少年近景，目光看向纳兰嫣然。"
+    shot.last_frame_desc = "少年说完后仍看着纳兰嫣然。"
+    issue = (
+        "shots[1](shot_no=2) 是「少年」的单人对白近景，但 action_desc/首尾帧仍把"
+        "「纳兰嫣然」写进可见画面；请把听者明确留在画外，下一话轮再切反打"
+    )
+
+    candidate = _deterministic_dialogue_framing_candidate(shot, [issue])
+
+    assert candidate is not None
+    assert candidate.characters == ["少年"]
+    assert candidate.characters_visible == ["少年"]
+    assert "画外纳兰嫣然" in candidate.action_desc
+    assert "画外纳兰嫣然" in candidate.first_frame_desc
+    assert "画外纳兰嫣然" in candidate.last_frame_desc
+    assert "画外" not in shot.action_desc
+
+
+def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repair_db) -> None:
+    conn, _screenplay = repair_db
+    shot = _shot(2, action="少年翻开手中名册，同时宣布下一位测试者的名字。")
+    shot.shot_size = "特写"
+    shot.dialogues = [Dialogue(speaker="少年", line="下一位。", emotion="平静")]
+    shot.risk_tags = ["dialogue_action_prop_staging"]
+    conn.execute(
+        "UPDATE shots SET shot_size=?,action_desc=?,dialogues=?,shot_contract_json=? WHERE id='s2'",
+        (
+            shot.shot_size,
+            shot.action_desc,
+            json.dumps([dialogue.model_dump() for dialogue in shot.dialogues], ensure_ascii=False),
+            json.dumps(shot.model_dump(mode="json"), ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    issue = (
+        "shot_no=2 的对白同时包含剧情道具操作，shot_size 不得为特写；"
+        "请至少使用近景并完整保留双手、道具和接触关系"
+    )
+    plan = route_issues(
+        [issue],
         validated_prefix_end=3,
         semantic_diagnosis={
             "scope": "current_shot",

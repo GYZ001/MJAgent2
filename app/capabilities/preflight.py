@@ -306,7 +306,7 @@ def video_clear_shot(args) -> PreflightResult:
 
 
 def video_generate_shot(args) -> PreflightResult:
-    from app.compiler import shot_cost_cny
+    from app.video_cost_model import initial_shot_generation_cost
 
     conn = get_conn()
     shot = conn.execute(
@@ -328,7 +328,7 @@ def video_generate_shot(args) -> PreflightResult:
         "SELECT id, status, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)
     ).fetchone()
     confirmed = bool(ep and ep["status"] in {"confirmed", "generating", "done", "mixed"})
-    estimated = float(shot_cost_cny(int(shot["duration_s"] or 0)))
+    estimated = initial_shot_generation_cost(float(shot["duration_s"] or 0))
     return PreflightResult(
         command="video.generate_shot",
         allowed=True,
@@ -355,7 +355,7 @@ def video_generate_shot(args) -> PreflightResult:
 
 
 def video_generate_episode(args) -> PreflightResult:
-    from app.compiler import shot_cost_cny
+    from app.video_cost_model import initial_shot_generation_cost
 
     conn = get_conn()
     ep = conn.execute(
@@ -410,7 +410,7 @@ def video_generate_episode(args) -> PreflightResult:
         (args.episode_id,),
     ).fetchall()
     estimated = round(sum(
-        shot_cost_cny(int(row["duration_s"] or 0))
+        initial_shot_generation_cost(float(row["duration_s"] or 0))
         for row in payable_rows
     ), 2)
     confirmed = ep["status"] in {"confirmed", "generating", "done", "mixed"}
@@ -883,7 +883,10 @@ def screenplay_delete(args) -> PreflightResult:
     conn = get_conn()
     ep = conn.execute(
         "SELECT id, episode_no, status, screenplay_json, screenplay_status, "
-        "screenplay_artifact_id, working_screenplay_artifact_id, screenplay_updated_at "
+        "screenplay_artifact_id, working_screenplay_artifact_id, "
+        "published_screenplay_artifact_id, screenplay_production_revision_id, "
+        "screenplay_completion_certificate_id, active_screenplay_run_id, "
+        "screenplay_updated_at "
         "FROM episodes WHERE id=?",
         (args.episode_id,),
     ).fetchone()
@@ -899,7 +902,28 @@ def screenplay_delete(args) -> PreflightResult:
             denial_code="not_found",
             denial_message="剧集不存在",
         )
-    if not ep["screenplay_json"] and not ep["working_screenplay_artifact_id"]:
+    active_revision = conn.execute(
+        "SELECT id, baseline_generation_count, working_artifact_id "
+        "FROM production_revisions "
+        "WHERE episode_id=? AND kind='screenplay' AND status='active' "
+        "ORDER BY updated_at DESC LIMIT 1",
+        (args.episode_id,),
+    ).fetchone()
+    shots = conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
+    ).fetchone()["c"]
+    has_clearable_state = bool(
+        ep["screenplay_json"]
+        or ep["screenplay_artifact_id"]
+        or ep["working_screenplay_artifact_id"]
+        or ep["published_screenplay_artifact_id"]
+        or ep["screenplay_production_revision_id"]
+        or ep["screenplay_completion_certificate_id"]
+        or ep["active_screenplay_run_id"]
+        or active_revision
+        or int(shots or 0)
+    )
+    if not has_clearable_state:
         return PreflightResult(
             command="screenplay.delete",
             allowed=False,
@@ -908,6 +932,8 @@ def screenplay_delete(args) -> PreflightResult:
             state_fingerprint=_fp({
                 "episode_id": args.episode_id,
                 "screenplay_status": ep["screenplay_status"],
+                "active_revision": None,
+                "active_run": None,
                 "empty": True,
             }),
             requires_confirmation=False,
@@ -915,9 +941,6 @@ def screenplay_delete(args) -> PreflightResult:
             denial_code="invalid_state",
             denial_message="本集没有可删除的剧本",
         )
-    shots = conn.execute(
-        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
-    ).fetchone()["c"]
     versions = conn.execute(
         """SELECT COUNT(*) AS c FROM shot_versions v
            JOIN shots s ON s.id=v.shot_id WHERE s.episode_id=?""",
@@ -945,6 +968,11 @@ def screenplay_delete(args) -> PreflightResult:
             "screenplay_status": ep["screenplay_status"],
             "artifact": ep["screenplay_artifact_id"],
             "working_artifact": ep["working_screenplay_artifact_id"],
+            "published_artifact": ep["published_screenplay_artifact_id"],
+            "revision_id": ep["screenplay_production_revision_id"],
+            "completion_certificate_id": ep["screenplay_completion_certificate_id"],
+            "active_run": ep["active_screenplay_run_id"],
+            "active_revision": dict(active_revision) if active_revision else None,
             "updated_at": ep["screenplay_updated_at"],
             "shots": shots,
             "versions": versions,

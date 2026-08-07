@@ -217,6 +217,12 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
         code, message, action = "screenplay_cancelling", "正在取消剧本任务，等待 worker 退出", "view_cancel_progress"
     elif bool(ep.get("screenplay_publish_fence")):
         code, message, action = "save_stopping_downstream", "正在安全停止下游任务", "view_save_progress"
+    elif screenplay_active and screenplay_status == "queued":
+        code, message, action = (
+            "screenplay_queued",
+            "剧本任务排队中，尚未占用模型生成槽位",
+            "stop_screenplay",
+        )
     elif screenplay_active:
         operation = production.get("operation") or "baseline"
         code = "baseline_running" if operation == "baseline" else "finalize_running"
@@ -232,7 +238,11 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
             "resume_screenplay",
         )
     elif screenplay_status == "ready" and not screenplay_ready:
-        code, message, action = "qa_certificate_invalid", "剧本 QA 凭证与当前版本不一致", "refresh"
+        code, message, action = (
+            "qa_certificate_invalid",
+            "上游版本已变化，需重新校验剧本并签发完成凭证",
+            "resume_screenplay",
+        )
     elif screenplay_status == "ready" and storyboard_active:
         code, message, action = "ready_storyboard_running", "剧本已交付｜分镜生成中", "view_storyboard"
     elif screenplay_status == "ready" and checkpoint:
@@ -311,12 +321,20 @@ def update_episode_target_duration(
         target = int(numeric_target) if numeric_target.is_integer() else -1
     except (TypeError, ValueError, OverflowError):
         target = -1
-    allowed = list(config.EPISODE_TARGET_CHOICES)
-    if target not in allowed:
+    suggested = list(config.EPISODE_TARGET_CHOICES)
+    if (
+        target < config.EPISODE_TARGET_MIN_S
+        or target % config.EPISODE_TARGET_STEP_S != 0
+    ):
         raise HTTPException(422, {
             "code": "invalid_episode_target_duration",
-            "message": f"目标时长只能选择 {allowed[0]}–{allowed[-1]} 秒，按 {config.EPISODE_TARGET_STEP_S} 秒递增",
-            "allowed_choices": allowed,
+            "message": (
+                f"目标时长至少为 {config.EPISODE_TARGET_MIN_S} 秒，"
+                f"按 {config.EPISODE_TARGET_STEP_S} 秒递增；不设上限"
+            ),
+            "minimum_s": config.EPISODE_TARGET_MIN_S,
+            "step_s": config.EPISODE_TARGET_STEP_S,
+            "suggested_choices": suggested,
         })
 
     ep = dict(_episode_or_404(episode_id))
@@ -327,7 +345,7 @@ def update_episode_target_duration(
             "unchanged": True,
             "episode_id": episode_id,
             "target_duration_s": current,
-            "allowed_choices": allowed,
+            "suggested_choices": suggested,
             "constraint_version": int(ep.get("screenplay_constraint_version") or 0),
         }
 
@@ -389,7 +407,7 @@ def update_episode_target_duration(
         "episode_id": episode_id,
         "previous_target_duration_s": current,
         "target_duration_s": target,
-        "allowed_choices": allowed,
+        "suggested_choices": suggested,
         "constraint_version": int(saved.get("screenplay_constraint_version") or 0),
         "snapshot_version": int(saved.get("screenplay_snapshot_version") or 0),
     }
@@ -437,11 +455,33 @@ def recover_screenplay_tasks() -> int:
     from app.generation_concurrency import PRIORITY_RECOVERY
 
     conn = get_conn()
+    published_rows = conn.execute(
+        "SELECT * FROM episodes WHERE screenplay_status='ready' "
+        "AND screenplay_artifact_id IS NOT NULL"
+    ).fetchall()
+    for published in published_rows:
+        try:
+            valid = _screenplay_ready(dict(published))
+        except Exception:
+            valid = False
+        if valid:
+            continue
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,"
+            "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+            (
+                "现有完成凭证未通过当前生产门禁；旧剧本与证据已保留，"
+                "请重新发起剧本生成",
+                now(),
+                published["id"],
+            ),
+        )
+    conn.commit()
     rows = conn.execute(
         """SELECT e.*
              FROM episodes e
             WHERE (
-                    e.screenplay_status='running'
+                    e.screenplay_status IN ('queued','running')
                     AND COALESCE(e.screenplay_error, '') NOT LIKE 'CANCELLING:%'
                     AND NOT EXISTS(
                         SELECT 1 FROM workflow_runs cancelled
@@ -465,31 +505,80 @@ def recover_screenplay_tasks() -> int:
         episode_id = row["id"]
         if _screenplay_task_active(episode_id):
             continue
+        orphan_run = conn.execute(
+            "SELECT status FROM workflow_runs WHERE id=?",
+            (row["active_screenplay_run_id"],),
+        ).fetchone()
+        if orphan_run and orphan_run["status"] == "CREATED":
+            try:
+                WorkflowRecorder(row["active_screenplay_run_id"]).cancel(
+                    "服务重启前尚在排队，已由恢复运行接管"
+                )
+            except StateConflict:
+                pass
+        from app.production.revision import get_active_production_revision
+
+        revision = get_active_production_revision(episode_id, "screenplay")
+        current_contract = get_contract("screenplay").version
+        if (
+            revision is not None
+            and revision.contract_version
+            and revision.contract_version != current_contract
+        ):
+            conn.execute(
+                "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
+                "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+                (
+                    (
+                        f"剧本工作副本使用旧合同 {revision.contract_version}；"
+                        f"当前合同为 {current_contract}。旧 Artifact 已保留，"
+                        "请点击继续以创建新 revision，禁止自动恢复旧付费修复循环"
+                    ),
+                    now(),
+                    episode_id,
+                ),
+            )
+            conn.commit()
+            continue
         parent = conn.execute(
             "SELECT id FROM workflow_runs WHERE workflow_type='screenplay' "
             "AND scope_type='episode' AND scope_id=? AND status='PAUSED_EXTERNAL' "
             "AND recovered_by_run_id IS NULL ORDER BY updated_at DESC LIMIT 1",
             (episode_id,),
         ).fetchone()
+        batch_parent = conn.execute(
+            "SELECT parent.id,parent.status FROM workflow_runs child "
+            "JOIN workflow_runs parent ON parent.id=child.parent_run_id "
+            "WHERE child.id=? AND parent.workflow_type='screenplay_batch' "
+            "AND parent.status IN ('RUNNING','PAUSED_EXTERNAL')",
+            (row["active_screenplay_run_id"],),
+        ).fetchone()
+        batch_run_id = batch_parent["id"] if batch_parent else None
+        if batch_parent and batch_parent["status"] == "PAUSED_EXTERNAL":
+            try:
+                WorkflowRecorder(batch_run_id).start()
+            except StateConflict:
+                pass
         recorder = None
         try:
             recorder = _new_screenplay_recorder(
                 episode_id,
                 requested_by="recovery",
                 trigger_type="resume",
-                parent_run_id=parent["id"] if parent else None,
+                parent_run_id=batch_run_id or (parent["id"] if parent else None),
             )
             _spawn_screenplay_activation(
                 episode_id,
                 recorder,
                 project_id=row["project_id"],
-                status=row["screenplay_status"],
-                message=row["screenplay_error"],
+                status="queued",
+                message="恢复任务已排队，等待文本生成槽位",
                 preserve_started_at=True,
-                task_factory=lambda episode_id=episode_id, recorder=recorder: _screenplay_guarded(
+                task_factory=lambda episode_id=episode_id, recorder=recorder, batch_run_id=batch_run_id: _screenplay_guarded(
                     episode_id,
                     recorder,
                     priority=PRIORITY_RECOVERY,
+                    batch_run_id=batch_run_id,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - recover remaining episodes independently
@@ -555,6 +644,12 @@ async def _screenplay_character_discovery(
     )
 
     try:
+        # #region debug-point A:character-discovery-entry
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"A","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:entry","msg":"[DEBUG] Character discovery entry","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"sourceChars":len(source_text or ""),"draftChars":len(draft_text or ""),"bibleCharacters":len(bible.characters)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         result = await ensure_cards_for_text(
             ep["project_id"],
             ep["episode_no"],
@@ -566,6 +661,12 @@ async def _screenplay_character_discovery(
     except StageError:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转成剧本阶段可恢复诊断
+        # #region debug-point C:character-discovery-exception
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:exception","msg":"[DEBUG] Character discovery failed","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"draftPresent":bool(draft_text),"errorType":type(exc).__name__,"errorChars":len(str(exc))},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+        except Exception:
+            pass
+        # #endregion
         from app.errors import code_ref
 
         public = code_ref(
@@ -577,6 +678,12 @@ async def _screenplay_character_discovery(
             "新人物发现",
             [f"人物身份模型暂未完成本集预检，请在剧本阶段重试（{public}）"],
         ) from exc
+    # #region debug-point B:character-discovery-result
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"B","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:result","msg":"[DEBUG] Character discovery result","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"draftPresent":bool(draft_text),"candidateCount":len(result.get("candidates") or []),"resolutionCount":len(result.get("resolutions") or []),"addedCount":len(result.get("added") or []),"errorCount":len(result.get("errors") or [])},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
     if result.get("errors"):
         raise StageError("新人物发现", list(result["errors"]))
     result["resolutions"] = persist_screenplay_character_resolutions(
@@ -649,9 +756,13 @@ async def _screenplay_task(
             load_screenplay_character_resolutions(conn, episode_id),
             preflight_result.get("resolutions") or [],
         )
-        if preflight_result.get("added"):
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-            bible = _project_bible_or_placeholder(p)
+        # Other episodes can add a character while this run is in discovery.
+        # Always bind generation to the latest persisted Bible authority.
+        p = conn.execute(
+            "SELECT * FROM projects WHERE id=?",
+            (ep["project_id"],),
+        ).fetchone()
+        bible = _project_bible_or_placeholder(p)
         from app.portraits import (
             bible_with_pending_characters_for_text,
             bible_with_provisional_characters,
@@ -791,6 +902,13 @@ def _new_screenplay_recorder(
     trigger_type: str = "manual",
     parent_run_id: str | None = None,
 ) -> WorkflowRecorder:
+    from app import hiagent
+    from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
+    from app.stages import (
+        SCREENPLAY_BASELINE_PROMPT_VERSION,
+        SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS,
+    )
+
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
@@ -799,6 +917,8 @@ def _new_screenplay_recorder(
         "SELECT bible_version FROM projects WHERE id=?", (ep["project_id"],)
     ).fetchone()
     source_text = _episode_source_text(conn, ep)
+    active_text_provider = hiagent.active_provider("text")
+    active_text_model = hiagent.active_model("text", provider=active_text_provider)
     return WorkflowRecorder.create(
         workflow_type="screenplay",
         scope_type="episode",
@@ -813,9 +933,25 @@ def _new_screenplay_recorder(
         trigger_type=trigger_type,
         policy_snapshot={
             "contract": f"screenplay@{get_contract('screenplay').version}",
-            "max_iterations": min(max(int(get_setting("max_repair_attempts") or 4), 1), 4),
+            "max_iterations": SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS,
             "stall_rounds": 2,
             "min_quality_gain": 0.03,
+            "baseline_only": True,
+            "repair_activation_patch_limit": 12,
+            "repair_activation_pass_limit": 32,
+        },
+        config_snapshot={
+            "pipeline_version": "screenplay-pipeline-4.0.0",
+            "prompt_version": SCREENPLAY_BASELINE_PROMPT_VERSION,
+            "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
+            "provider": active_text_provider,
+            "model": active_text_model,
+            "text_generation_concurrency": (
+                get_setting("text_generation_concurrency")
+                or get_setting("storyboard_concurrency")
+                or "2"
+            ),
+            "duration_policy": "content_derived_unbounded",
         },
         parent_run_id=parent_run_id,
     )
@@ -1317,7 +1453,7 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     _require_harness_engine(ep["project_id"])
     if ep["status"] == "scripting":
         raise HTTPException(409, "分镜正在生成中，不能同时重写剧本")
-    if ep["screenplay_status"] in {"running", "repairing"} and _screenplay_task_active(episode_id):
+    if ep["screenplay_status"] in {"queued", "running", "repairing"} and _screenplay_task_active(episode_id):
         return {
             "status": ep["screenplay_status"],
             "run_id": ep["active_screenplay_run_id"],
@@ -1387,10 +1523,10 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             episode_id,
             recorder,
             project_id=ep["project_id"],
-            status="running",
+            status="queued",
             message=(
                 "从 working Artifact 继续结构校验、评分与发布"
-                if resume_existing else None
+                if resume_existing else "剧本任务已排队，等待文本生成槽位"
             ),
         )
     except Exception as exc:
@@ -1400,10 +1536,82 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             "action": "retry_resume" if resume_existing else "retry_generate",
         }) from exc
     return {
-        "status": "running",
+        "status": "queued",
         "run_id": recorder.run_id,
         "mode": "finalize" if resume_existing else "baseline",
     }
+
+
+def _prepare_published_screenplay_revalidation(ep: dict):
+    """Create a new revision that revalidates immutable published content."""
+    from app.harness.contracts import get_contract
+    from app.production.patch import load_screenplay_from_artifact
+    from app.production.revision import (
+        ensure_production_revision,
+        mark_baseline_generated,
+        save_checkpoint,
+    )
+    from app.production.screenplay_authority import (
+        SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_authority_fingerprint,
+    )
+
+    episode_id = str(ep["id"])
+    artifact_id = str(ep.get("published_screenplay_artifact_id") or "")
+    artifact = evidence_repository.get_artifact(artifact_id)
+    if (
+        not artifact
+        or artifact.get("type") != "screenplay_document"
+        or artifact.get("scope_id") != episode_id
+        or artifact.get("status") != "approved"
+    ):
+        raise HTTPException(409, "当前发布剧本缺少可复验的权威 Artifact")
+    try:
+        load_screenplay_from_artifact(artifact_id)
+    except Exception as exc:
+        raise HTTPException(409, "当前发布剧本 Artifact 无法读取") from exc
+
+    conn = get_conn()
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
+    ).fetchone()
+    bible = _project_bible_or_placeholder(project)
+    source_text = _episode_source_text(conn, ep)
+    contract = get_contract("screenplay")
+    input_fingerprint = screenplay_authority_fingerprint(
+        episode_id,
+        conn=conn,
+        source_text=source_text,
+        bible=bible,
+        contract_version=contract.version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    revision = ensure_production_revision(
+        episode_id=episode_id,
+        kind="screenplay",
+        input_fingerprint=input_fingerprint,
+        contract_version=contract.version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        resume=False,
+    )
+    revision = mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact_id,
+        working_artifact_id=artifact_id,
+    )
+    save_checkpoint(revision.id, {
+        "phase": "REVALIDATING_PUBLISHED",
+        "working_artifact_id": artifact_id,
+        "source_revision_id": ep.get("screenplay_production_revision_id"),
+        "yield_reason": "upstream_input_fingerprint_changed",
+    })
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
+        "screenplay_updated_at=? WHERE id=?",
+        ("上游版本已变化，正在重新校验已发布剧本", now(), episode_id),
+    )
+    conn.commit()
+    return revision
 
 
 @router.post("/episodes/{episode_id}/screenplay/resume")
@@ -1425,12 +1633,19 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         raise HTTPException(409, "分镜正在生成中，不能同时修复剧本")
     if _screenplay_task_active(episode_id):
         return {
-            "status": "running",
+            "status": ep["screenplay_status"],
             "run_id": ep["active_screenplay_run_id"],
             "mode": "finalize",
             "deduplicated": True,
         }
     rev = get_active_production_revision(episode_id, "screenplay")
+    if (
+        rev is None
+        and ep["screenplay_status"] == "ready"
+        and ep["published_screenplay_artifact_id"]
+        and not _screenplay_ready(ep)
+    ):
+        rev = _prepare_published_screenplay_revalidation(dict(ep))
     if not rev or not rev.baseline_done or not rev.working_artifact_id:
         raise HTTPException(409, "没有可继续的剧本工作副本；请使用「首次生成整版」")
 
@@ -1444,8 +1659,8 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             episode_id,
             recorder,
             project_id=ep["project_id"],
-            status="running",
-            message="从 working Artifact 继续结构校验、评分与发布",
+            status="queued",
+            message="剧本续修已排队，等待文本生成槽位",
         )
     except Exception as exc:
         raise HTTPException(503, {
@@ -1454,7 +1669,7 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             "action": "retry_resume",
         }) from exc
     return {
-        "status": "running",
+        "status": "queued",
         "run_id": recorder.run_id,
         "revision_id": rev.id,
         "mode": "finalize",
@@ -1547,10 +1762,23 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
         instance = normalize_screenplay_candidate(instance)
         project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(project)
+    contract_row = (
+        conn.execute(
+            "SELECT contract_version FROM artifacts WHERE id=?",
+            (current_version,),
+        ).fetchone()
+        if current_version
+        else None
+    )
     qa_episode = {
         **ep,
         "required_dialogue_lines": _screenplay_required_dialogues(ep),
         "character_resolutions": resolutions,
+        "screenplay_contract_version": (
+            contract_row["contract_version"]
+            if contract_row and contract_row["contract_version"]
+            else ("2.0.0" if current_version else get_contract("screenplay").version)
+        ),
     }
     issues, evaluation = run_screenplay_qa(
         instance,
@@ -1763,19 +1991,94 @@ async def delete_screenplay(episode_id: str):
     }
 
 
+def _refresh_screenplay_batch_run(batch_run_id: str) -> None:
+    from app.orchestration.state_machine import StateConflict, transition_run
+
+    conn = get_conn()
+    parent = conn.execute(
+        "SELECT status FROM workflow_runs WHERE id=? AND workflow_type='screenplay_batch'",
+        (batch_run_id,),
+    ).fetchone()
+    if not parent or parent["status"] != "RUNNING":
+        return
+    rows = conn.execute(
+        "SELECT status FROM workflow_runs WHERE parent_run_id=? "
+        "AND workflow_type='screenplay'",
+        (batch_run_id,),
+    ).fetchall()
+    if not rows:
+        return
+    statuses = [row["status"] for row in rows]
+    terminal = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"}
+    if any(status not in terminal for status in statuses):
+        return
+    failures = sum(status in {"PARTIAL", "FAILED", "CANCELLED"} for status in statuses)
+    target = "SUCCEEDED" if failures == 0 else "PARTIAL"
+    reason = (
+        f"批量剧本全部完成，共 {len(statuses)} 集"
+        if failures == 0
+        else f"批量剧本已收口，共 {len(statuses)} 集，{failures} 集未成功"
+    )
+    try:
+        transition_run(
+            batch_run_id,
+            "RUNNING",
+            target,
+            reason,
+            failure_code="PARTIAL_RESULT" if failures else None,
+        )
+    except StateConflict:
+        return
+    evidence_repository.append_event(
+        batch_run_id,
+        "BATCH_FINISHED",
+        "info" if failures == 0 else "warning",
+        reason,
+        payload={"children": len(statuses), "unsuccessful": failures},
+    )
+
+
 async def _screenplay_guarded(
     episode_id: str,
     recorder: WorkflowRecorder,
     *,
     priority: int = 0,
+    batch_run_id: str | None = None,
 ):
     from app.generation_concurrency import run_with_generation_slot
 
-    await run_with_generation_slot(
-        "screenplay",
-        lambda: _recorded_screenplay_task(episode_id, recorder),
-        priority=priority,
-    )
+    async def activate() -> EpisodeScreenplay | None:
+        conn = get_conn()
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='running',"
+            "screenplay_error=COALESCE(screenplay_error, ?),screenplay_updated_at=? "
+            "WHERE id=? AND active_screenplay_run_id=? "
+            "AND screenplay_status IN ('queued','running','repairing')",
+            ("正在生成人物上下文与首版剧本", now(), episode_id, recorder.run_id),
+        )
+        conn.commit()
+        return await _recorded_screenplay_task(episode_id, recorder)
+
+    try:
+        await run_with_generation_slot(
+            "screenplay",
+            activate,
+            priority=priority,
+        )
+    except asyncio.CancelledError:
+        row = get_conn().execute(
+            "SELECT status FROM workflow_runs WHERE id=?",
+            (recorder.run_id,),
+        ).fetchone()
+        if row and row["status"] == "CREATED":
+            try:
+                recorder.cancel("排队中的剧本任务已取消")
+            except StateConflict:
+                pass
+        raise
+    finally:
+        if batch_run_id:
+            _refresh_screenplay_batch_run(batch_run_id)
 
 
 @router.post("/projects/{project_id}/screenplay-all")
@@ -1794,19 +2097,45 @@ async def start_screenplay_all(project_id: str):
     selected = [
         r for r in rows
         if (
-            not r["screenplay_json"]
-            or r["screenplay_status"] in ("pending", "failed", "repairing")
-            or (r["screenplay_status"] == "running" and not task_registry.active("screenplay", r["id"]))
+            r["screenplay_status"] in ("pending", "failed", "repairing")
+            or (
+                not r["screenplay_json"]
+                and r["screenplay_status"] not in {"queued", "running"}
+            )
+            or (
+                r["screenplay_status"] in {"queued", "running"}
+                and not task_registry.active("screenplay", r["id"])
+            )
         )
         and r["screenplay_status"] != "ready"
     ]
     if not selected:
         raise HTTPException(409, "没有待生成剧本的剧集")
+    selected_ids = [row["id"] for row in selected]
+    batch_recorder = WorkflowRecorder.create(
+        workflow_type="screenplay_batch",
+        scope_type="project",
+        scope_id=project_id,
+        input_fingerprint=fingerprint(
+            project_id,
+            selected_ids,
+            get_contract("screenplay").version,
+        ),
+        requested_by="user",
+        trigger_type="batch",
+        policy_snapshot={
+            "contract": f"screenplay@{get_contract('screenplay').version}",
+            "selected_episode_ids": selected_ids,
+            "queue_policy": "priority_fifo",
+            "cancel_policy": "cancel_all_then_wait",
+        },
+    )
+    batch_recorder.start()
     run_ids: list[str] = []
     failed_to_start: list[dict] = []
     for row in selected:
         eid = row["id"]
-        if row["screenplay_status"] == "running" and not _screenplay_task_active(eid):
+        if row["screenplay_status"] in {"queued", "running"} and not _screenplay_task_active(eid):
             conn.execute(
                 "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, "
                 "active_screenplay_run_id=NULL, screenplay_updated_at=? WHERE id=?",
@@ -1821,21 +2150,22 @@ async def start_screenplay_all(project_id: str):
             recorder = _new_screenplay_recorder(
                 eid,
                 trigger_type="batch_resume" if is_resume else "batch",
-                parent_run_id=row["active_screenplay_run_id"] if is_resume else None,
+                parent_run_id=batch_recorder.run_id,
             )
             _spawn_screenplay_activation(
                 eid,
                 recorder,
                 project_id=project_id,
-                status="running",
+                status="queued",
                 message=(
                     "批量任务已从工作副本继续结构校验、评分与发布"
-                    if is_resume else None
+                    if is_resume else "批量剧本已排队，等待文本生成槽位"
                 ),
                 task_factory=lambda eid=eid, recorder=recorder: _screenplay_guarded(
                     eid,
                     recorder,
                     priority=PRIORITY_BATCH,
+                    batch_run_id=batch_recorder.run_id,
                 ),
             )
             run_ids.append(recorder.run_id)
@@ -1851,6 +2181,7 @@ async def start_screenplay_all(project_id: str):
                 "retryable": True,
             })
     if not run_ids:
+        batch_recorder.fail(RuntimeError("批量剧本任务均未能进入持久化队列"))
         raise HTTPException(503, {
             "code": "SCREENPLAY_BATCH_START_FAILED",
             "message": "批量剧本任务均未能启动，各集原状态已保留，可直接重试",
@@ -1858,6 +2189,7 @@ async def start_screenplay_all(project_id: str):
         })
     return {
         "started": len(run_ids),
+        "batch_run_id": batch_recorder.run_id,
         "run_ids": run_ids,
         "failed_to_start": failed_to_start,
         "retryable_failures": len(failed_to_start),
@@ -1874,20 +2206,41 @@ async def cancel_screenplay_all(project_id: str):
     _project_or_404(project_id)
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, screenplay_json FROM episodes WHERE project_id=? AND screenplay_status IN ('running','repairing')",
+        "SELECT id, screenplay_json FROM episodes "
+        "WHERE project_id=? AND screenplay_status IN ('queued','running','repairing')",
         (project_id,)).fetchall()
-    stopped = 0
+    episode_ids = [row["id"] for row in rows]
+    batch_rows = conn.execute(
+        "SELECT id FROM workflow_runs WHERE workflow_type='screenplay_batch' "
+        "AND scope_type='project' AND scope_id=? AND status='RUNNING'",
+        (project_id,),
+    ).fetchall()
+    cancelled_batches = 0
+    for batch in batch_rows:
+        try:
+            WorkflowRecorder(batch["id"]).cancel("用户停止批量剧本")
+            cancelled_batches += 1
+        except StateConflict:
+            continue
+    stopped = await task_registry.cancel_many_and_wait(
+        "screenplay",
+        episode_ids,
+    )
     for r in rows:
         eid = r["id"]
-        await task_registry.cancel_and_wait("screenplay", eid)
         full = conn.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
         fallback = _screenplay_fallback_status(full)
         conn.execute(
-            "UPDATE episodes SET screenplay_status=?, screenplay_error=NULL, screenplay_updated_at=? WHERE id=?",
-            (fallback, now(), eid))
-        stopped += 1
+            "UPDATE episodes SET screenplay_status=?,screenplay_error=NULL,"
+            "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+            (fallback, now(), eid),
+        )
     conn.commit()
-    return {"stopped": stopped}
+    return {
+        "stopped": stopped,
+        "matched": len(rows),
+        "cancelled_batches": cancelled_batches,
+    }
 
 
 @router.post("/episodes/{episode_id}/screenplay/cancel")
@@ -1923,7 +2276,7 @@ async def cancel_screenplay(episode_id: str):
             "requested_at": ep.get("screenplay_updated_at"),
             "deduplicated": True,
         }
-    if ep["screenplay_status"] not in {"running", "repairing"} or not _screenplay_task_active(episode_id):
+    if ep["screenplay_status"] not in {"queued", "running", "repairing"} or not _screenplay_task_active(episode_id):
         raise HTTPException(409, "当前没有正在进行的剧本任务")
     conn = get_conn()
     requested_at = now()
@@ -2105,6 +2458,13 @@ async def edit_screenplay(episode_id: str, body: dict):
             "message": "剧本流程正在运行；请先停止并等待任务退出，再发布人工草稿",
             "run_id": ep.get("active_screenplay_run_id"),
         })
+    if ep.get("status") == "scripting" and not task_registry.active(
+        "storyboard", episode_id
+    ):
+        raise HTTPException(
+            409,
+            "分镜状态显示运行中但找不到对应 worker；未发布草稿也未清空下游",
+        )
     current_version = ep.get("screenplay_artifact_id") or ""
     if expected_version is not None and str(expected_version) != str(current_version):
         current_script = _load_screenplay(ep)
@@ -2173,10 +2533,23 @@ async def edit_screenplay(episode_id: str, body: dict):
             "artifact_id": current_version or None,
             "downstream_cleared": False,
         }
+    contract_row = (
+        conn.execute(
+            "SELECT contract_version FROM artifacts WHERE id=?",
+            (current_version,),
+        ).fetchone()
+        if current_version
+        else None
+    )
     qa_episode = {
         **ep,
         "required_dialogue_lines": _screenplay_required_dialogues(ep),
         "character_resolutions": resolutions,
+        "screenplay_contract_version": (
+            contract_row["contract_version"]
+            if contract_row and contract_row["contract_version"]
+            else ("2.0.0" if current_version else get_contract("screenplay").version)
+        ),
     }
     qa_issues, qa_evaluation = run_screenplay_qa(
         instance,
@@ -2257,7 +2630,7 @@ async def edit_screenplay(episode_id: str, body: dict):
             mark_first_evaluation,
         )
 
-        contract_version = get_contract("screenplay").version
+        contract_version = str(qa_episode["screenplay_contract_version"])
         from app.production.screenplay_authority import screenplay_authority_fingerprint
 
         revision = ensure_production_revision(

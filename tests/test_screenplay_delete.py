@@ -8,12 +8,17 @@ import pytest
 
 from app import api, db
 from app.capabilities import ensure_catalog_loaded
+from app.capabilities import inputs as capability_inputs
+from app.capabilities import preflight as capability_preflight
 from app.capabilities.direct import enter_handler
 from app.capabilities.registry import get_registry
 from app.production.revision import (
     ensure_production_revision,
+    get_active_production_revision,
     mark_baseline_generated,
+    save_checkpoint,
     screenplay_production_state,
+    set_published_artifact,
 )
 
 
@@ -101,6 +106,33 @@ def test_delete_screenplay_resets_to_fresh_baseline_but_keeps_dialogue_selection
     assert state["can_resume_repair"] is False
 
 
+def test_delete_published_screenplay_does_not_project_historical_completed_stages() -> None:
+    revision = get_active_production_revision("e1", "screenplay")
+    assert revision is not None
+    save_checkpoint(revision.id, {
+        "phase": "SUCCEEDED",
+        "quality_score": 20.0,
+        "quality_issue_count": 0,
+    })
+    set_published_artifact(revision.id, "art-published")
+
+    before = screenplay_production_state("e1")
+    assert all(stage["status"] == "completed" for stage in before["stages"])
+
+    with enter_handler():
+        asyncio.run(api.delete_screenplay("e1"))
+
+    after = screenplay_production_state("e1")
+    assert after["operation"] == "baseline"
+    assert "quality_score" not in after
+    assert all(stage["status"] == "pending" for stage in after["stages"])
+    historical = db.get_conn().execute(
+        "SELECT status FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()
+    assert historical["status"] == "published"
+
+
 def test_failed_working_baseline_can_be_deleted_before_any_version_is_published() -> None:
     conn = db.get_conn()
     conn.execute(
@@ -131,6 +163,34 @@ def test_failed_working_baseline_can_be_deleted_before_any_version_is_published(
     after = screenplay_production_state("e1")
     assert after["operation"] == "baseline"
     assert after["can_resume_repair"] is False
+
+
+def test_delete_preflight_allows_failed_revision_without_projection() -> None:
+    conn = db.get_conn()
+    conn.execute("DELETE FROM shots WHERE episode_id='e1'")
+    conn.execute(
+        """UPDATE episodes SET
+               screenplay_json=NULL,
+               screenplay_status='failed',
+               screenplay_artifact_id=NULL,
+               working_screenplay_artifact_id=NULL,
+               published_screenplay_artifact_id=NULL,
+               screenplay_production_revision_id=NULL,
+               screenplay_completion_certificate_id=NULL,
+               active_screenplay_run_id='run-failed',
+               status='planned'
+           WHERE id='e1'"""
+    )
+    conn.commit()
+
+    result = capability_preflight.screenplay_delete(
+        capability_inputs.ScreenplayDeleteInput(episode_id="e1"),
+    )
+
+    assert result.allowed is True
+    assert result.requires_confirmation is True
+    assert result.affected.episodes == ["e1"]
+    assert result.affected.shot_count == 0
 
 
 def test_delete_route_is_registered_as_destructive_capability() -> None:

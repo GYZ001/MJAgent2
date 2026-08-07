@@ -63,6 +63,13 @@ class AgentLoopPolicy:
     # Production Repair：只跑一轮完整生成，无论 QA 是否通过都交出候选给局部 Patch Agent。
     # 禁止再用“重新输出完整 JSON”的修复轮。
     baseline_only: bool = False
+    # A parseable legacy-shaped value may still omit a contract-required
+    # authority subtree. These explicit contract codes must be repaired before
+    # baseline handoff; score-only quality findings remain non-blocking.
+    baseline_handoff_blocking_codes: frozenset[str] = field(default_factory=frozenset)
+    # Isolated repair candidates must not supersede approved upstream artifacts
+    # before their enclosing transaction passes the full gate.
+    commit_accepted_artifact: bool = True
 
 
 @dataclass(slots=True)
@@ -148,6 +155,7 @@ class AgentLoop(Generic[T]):
         artifact_type: str,
         policy: AgentLoopPolicy | None = None,
         input_artifact_ids: list[str] | None = None,
+        prompt_version: str | None = None,
     ):
         self.stage_key = stage_key
         self.contract = get_contract(contract_key)
@@ -161,6 +169,7 @@ class AgentLoop(Generic[T]):
             min_quality_gain=self.contract.min_quality_gain,
         )
         self.input_artifact_ids = input_artifact_ids or []
+        self.prompt_version = prompt_version
 
     async def run(self, producer: Producer, evaluator: Evaluator) -> AgentLoopResult[T]:
         issue_history: list[list[Issue]] = []
@@ -171,6 +180,8 @@ class AgentLoop(Generic[T]):
         last_value: T | None = None
         last_value_issues: list[Issue] = []
         last_value_artifact_id: str | None = None
+        latest_value: T | None = None
+        latest_issues: list[Issue] = []
         exit_reason = "max_iterations"
 
         for iteration_no in range(1, self.policy.max_iterations + 1):
@@ -202,6 +213,8 @@ class AgentLoop(Generic[T]):
                     )
                 raise
 
+            latest_value = value
+            latest_issues = list(issues)
             previous_raw = raw
             structural_issues, quality_issues = split_structural_quality_issues(issues)
             targeted_repair_issues = [
@@ -268,7 +281,15 @@ class AgentLoop(Generic[T]):
                 )
 
             # Baseline-only：首轮结束后立即交出可解析候选（含 blocker），交由 Production Repair。
-            if self.policy.baseline_only and value is not None:
+            baseline_handoff_blocked = any(
+                issue.code in self.policy.baseline_handoff_blocking_codes
+                for issue in issues
+            )
+            if (
+                self.policy.baseline_only
+                and value is not None
+                and not baseline_handoff_blocked
+            ):
                 if iteration_step_id:
                     transition_step(
                         iteration_step_id, "RUNNING", "WARNING", "baseline_handoff",
@@ -348,13 +369,25 @@ class AgentLoop(Generic[T]):
                     artifact_id=last_value_artifact_id,
                 )
             if self.policy.repair_all_blockers and blockers:
+                reported: list[Issue] = []
+                seen: set[tuple[str, str]] = set()
+                for issue in (
+                    [*latest_issues, *blockers]
+                    if latest_value is None
+                    else blockers
+                ):
+                    identity = (issue.fingerprint, issue.message)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    reported.append(issue)
                 raise AgentLoopFailure(
                     self.stage_key,
-                    blockers,
+                    reported,
                     "authority_blockers_exhausted",
                     len(issue_history),
                 )
-            if last_value_artifact_id:
+            if last_value_artifact_id and self.policy.commit_accepted_artifact:
                 try:
                     repository.commit_artifact(
                         None,
@@ -456,6 +489,7 @@ class AgentLoop(Generic[T]):
                 content=value.model_dump(mode="json") if value is not None else {"raw_output": raw},
                 parent_artifact_ids=self.input_artifact_ids,
                 contract_version=self.contract.version,
+                prompt_version=self.prompt_version,
             ),
             step_run_id=step_run_id,
         )
@@ -473,6 +507,13 @@ class AgentLoop(Generic[T]):
             evidence={"iteration_no": iteration_no, "goal": self.goal},
         )
         if accepted_candidate:
+            if not self.policy.commit_accepted_artifact:
+                repository.create_evaluation(
+                    artifact["id"],
+                    evaluation,
+                    step_run_id=step_run_id,
+                )
+                return str(artifact["id"])
             committed = repository.commit_artifact(step_run_id, artifact["id"], [evaluation])
             return str(committed["id"])
         repository.create_evaluation(artifact["id"], evaluation, step_run_id=step_run_id)

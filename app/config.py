@@ -173,13 +173,13 @@ VIDEO_DURATION_MAX_S = 10
 DEFAULT_VIDEO_DURATION_S = VIDEO_DURATION_MIN_S
 ALLOWED_DURATIONS = frozenset(range(VIDEO_DURATION_MIN_S, VIDEO_DURATION_MAX_S + 1))
 EPISODE_TARGET_MIN_S = 40
-EPISODE_TARGET_MAX_S = 90   # 放宽上限给模型更大质量保证空间：内容密/高潮集可取更长时长，简单集仍可短
+EPISODE_TARGET_MAX_S = None  # 整集时长不设产品上限；完整剧情与容量估算决定最终值
 EPISODE_TARGET_DEFAULT_S = 50
-EPISODE_TARGET_STEP_S = 10  # 分集规划字段仅保留为节奏参考；主线压缩后按 spine 下调
+EPISODE_TARGET_STEP_S = 10  # 用户输入是最低节奏参考；生成后只允许按实际容量向上扩展
 # 仅用于防止异常模型无限循环的技术熔断，不是产品镜头数上限。
 STORYBOARD_MAX_SHOTS = 1_000_000
-# 集目标时长合法取值：[MIN, MAX] 内 STEP 的整数倍（当前 40/50/60/70/80/90）。prompt 与校验统一引用，避免各处硬编码漂移。
-EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, EPISODE_TARGET_MAX_S + 1, EPISODE_TARGET_STEP_S))
+# 常用建议值仅供 UI 快捷输入，不构成合法值上限。
+EPISODE_TARGET_CHOICES = tuple(range(EPISODE_TARGET_MIN_S, 181, EPISODE_TARGET_STEP_S))
 # 口播预算（纯文字、不计标点）：5 秒 18 字，10 秒 36 字。
 # 超过 10 秒所能承载的口播仍必须拆镜，不能靠延长 duration_s 合并不同节拍。
 SPOKEN_CHARS_PER_5_SECONDS = 18
@@ -239,7 +239,7 @@ DEFAULT_SETTINGS = {
     "spoken_contract_audit_mode": "enforce",  # audit_only | enforce
     "spine_structured_hard_gate": "true",     # false 时 LEGACY_COVERAGE_UNCERTAIN 降为 warning
     "max_repair_attempts": "8",  # LLM 输出校验失败的最大修复重试次数（含首次）；模型不可用不走此重试
-    "screenplay_qa_pass_score": "80",  # 剧本 QA 只评估；低于此分由独立 Repair 修复后复验
+    "screenplay_qa_pass_score": "80",  # 剧本生产门禁；低于此分或存在 blocker 时由 Repair 修复后复验
     "model_route": "hiagent",           # 文本/质检模型路由：hiagent（火山）| openrouter
     # 职责分配必须落到明确 Model ID；init_db 以 INSERT OR IGNORE 补齐旧库。
     # provider 仍沿用 active_provider 的旧版 model_route 兼容逻辑，避免覆盖历史路由。
@@ -247,7 +247,8 @@ DEFAULT_SETTINGS = {
     "hiagent_model_vlm": MODEL_VLM,
     "hiagent_model_video": MODEL_VIDEO,
     "hiagent_model_image": MODEL_IMAGE,
-    "storyboard_concurrency": "2",      # 手动批量分镜的并发上限
+    "text_generation_concurrency": "2", # 剧本与分镜共享文本模型资源池
+    "storyboard_concurrency": "2",      # 旧设置兼容读取，不再作为新资源池名称
     # PRD-03 分镜台独立灰度/回滚开关；P0 服务端防线不受 UI 开关影响。
     "storyboard_workspace_safe_readonly": "false",
     "storyboard_structure_edit_enabled": "true",

@@ -135,6 +135,24 @@ export function countAdoptedVideos(shots: Shot[]): number {
 export function compactShotStage(shot: Shot): string {
   const pipeline = shot.pipeline
   const stage = pipeline?.pipeline_stage || pipeline?.current_stage || ''
+  const pipelineStatus = pipeline?.pipeline_status || ''
+  if (pipeline?.reason_code === 'WAITING_STATIC_BOUNDARY_ASSET') {
+    return '等待上一镜静态尾帧'
+  }
+  if (pipeline?.reason_code === 'PREFETCHING_STATIC_TAIL') {
+    return '预生成本镜静态尾帧'
+  }
+  const dependsOnUpstream = Boolean(
+    shot.mode_plan?.depends_on_shot_id
+    || shot.versions?.some(
+      version => Boolean(version.image_inputs?.after_shot_id),
+    )
+  )
+  if (pipelineStatus === 'paused_budget') {
+    return dependsOnUpstream
+      ? '预算暂停，恢复后等待上一镜素材'
+      : '预算暂停'
+  }
   if (stage === 'job_queued' && dependsOnUpstream) {
     return '等待上一镜采用素材'
   }

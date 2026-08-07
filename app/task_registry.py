@@ -88,6 +88,24 @@ async def cancel_and_wait(kind: str, key: str) -> bool:
     return True
 
 
+async def cancel_many_and_wait(kind: str, keys: list[str]) -> int:
+    """Cancel every selected task before awaiting any one of them."""
+    records = [
+        record
+        for key in dict.fromkeys(keys)
+        if (
+            (record := _records.get((kind, key))) is not None
+            and not record.task.done()
+        )
+    ]
+    for record in records:
+        _records.pop((record.kind, record.key), None)
+        record.task.cancel()
+    if records:
+        await asyncio.gather(*(record.task for record in records), return_exceptions=True)
+    return len(records)
+
+
 async def cancel_project(project_id: str) -> int:
     records = [r for r in list(_records.values()) if r.project_id == project_id and not r.task.done()]
     for record in records:

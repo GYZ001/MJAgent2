@@ -149,18 +149,117 @@
   `run_0bdd4646c751` (episode 1) and `run_1a4643a470eb` (episode 2).
 - Durable Batch Run: `run_253043b9a14d`.
 - Queue evidence: two episodes are `running`; later episodes are explicitly `queued`.
-- Episode 2 persisted Baseline `art_f34ddd706df9` with
-  `baseline_generation_count=1`, `narrative_plan=object`, and model-candidate parent
-  `art_9a92bf1d3934`. Its duration expanded from 50 to 170 seconds.
-- Episode 2 did not publish with open gates. Run `run_1a4643a470eb` ended `PARTIAL`
-  and preserved a working Artifact after deterministic/local repairs.
-- Episode 1 received a provider policy-refusal response during structural bootstrap.
-  Run `run_86ffa0c06bf6` ended `FAILED`; no screenplay certificate or ready projection
-  was created.
-- Batch `run_253043b9a14d` was cancelled atomically with all 28 children recorded as
-  `CANCELLED`; no cancellation cascade started the remaining children.
-- The next Prompt contains actual authorized chapter IDs (for example `6675` and `2`)
-  and contains no `current-source-chapter` placeholder.
-- Runtime provider metadata has zero invalid JSON rows.
-- A subsequent episode-2 Baseline is still running; long model generation is allowed
-  by the unbounded duration policy and has not been reported as success.
+- Terminal Baseline/Repair/certificate evidence is pending.
+
+## 2026-08-07 Runtime Failure Evidence
+- Episode 1 Run `run_86ffa0c06bf6` failed at `00:07:36` after two structural
+  bootstrap iterations.
+- Provider Call `9559` returned HTTP 200 after 211,810 ms, but the reconstructed
+  stream had `finish_reason=null`, no usage record, and only 34,982 response
+  characters. The JSON stopped inside `scene_outline`, before `full_script_text`
+  and `narrative_plan`.
+- `_stream_chat_completion` nevertheless persisted Call `9559` as `OK`, so the
+  Agent Loop classified the transport-incomplete stream as a repairable
+  `SCHEMA_INVALID/$/json_decode` candidate.
+- Repair Call `9563` then sent an 84,487-character request containing the full
+  original task and truncated candidate. The provider returned an explicit
+  content-policy refusal in 4,472 ms.
+- The refusal was persisted as a second T0 candidate
+  `art_f5b365a4534d` and reported as `json_object_missing`, masking the first
+  transport defect behind the later refusal.
+- Revision `rev_fdcba7c23260` remained correctly bound to episode 1 and never
+  crossed the durable Baseline boundary (`baseline_generation_count=0`).
+  No publish or certificate event preceded the failure.
+
+## 2026-08-07 Hypothesis Status
+| ID | Status | Evidence |
+|----|--------|----------|
+| A | Rejected as primary cause | The first response began as the requested contract but ended mid-object; no complete candidate reached schema validation. |
+| B | Rejected as primary cause | Iteration 2 did not produce a malformed repair; it returned explicit refusal prose. |
+| C | Confirmed | Call `9559` ended without a terminal finish reason and Call `9563` was a model refusal. |
+| D | Rejected | Run, Revision, and candidate Artifacts all bind to `ep_0893abc3451e`; no foreign parent was observed. |
+| E | Rejected | Event order contains no successful publish/certificate before `RUN_FAILED`. |
+
+## 2026-08-07 Root-Cause Direction
+- Transport layer: a streamed response without a terminal finish reason must
+  be classified as `PROVIDER_RESPONSE_INCOMPLETE`, never `OK`.
+- Agent Loop: transport-incomplete output must not enter semantic repair or be
+  embedded into a second full-document prompt.
+- Contract architecture: the current monolithic Baseline requests screenplay,
+  exhaustive source coverage, rendered text, and the full narrative authority
+  graph in one response. Episode 1 demonstrates that this output surface can
+  exceed the provider's practical streaming lifetime before reaching the
+  narrative graph. The production fix must reduce or stage that surface
+  generically; increasing retry count is not a root-cause fix.
+
+## 2026-08-07 Final Merge Verification
+- Concurrent auto-commit `8f775d2` had removed or corrupted 2,231 test lines,
+  ten Python test modules, the review wall, media cleanup, budget accounting,
+  workspace atomicity, recovery, and capability registration. The merge was
+  reconstructed from verified commit `db78ffe` while retaining the newer video
+  mode implementation and the human-only one-watch UI.
+- The restored full suite passes again: backend `1763 passed, 4 skipped`;
+  frontend `158 passed`; production frontend build passed.
+- The final backend process is PID `10506` on `127.0.0.1:8230`; the frontend
+  parent process is PID `10508` on `127.0.0.1:5230`. Both health checks return
+  HTTP 200 after a clean proxy-free restart.
+- Runtime Run snapshots report `screenplay-pipeline-4.0.0`,
+  `screenplay-baseline-4.0.0`, `screenplay-qa-gate-2`,
+  `content_derived_unbounded`, and `text_generation_concurrency=2`.
+- The current episode projection preserves a content-derived 300-second target,
+  proving the old 50-second ceiling is not reapplied during startup recovery.
+- Historical fail-open certificates remain auditable, but neither
+  `cert_9124a9fb1b3f` nor `cert_cfeb5f1a6f4e` is referenced by an episode.
+- Provider metadata has zero invalid JSON rows.
+- Storyboard publication now requires a bound cold-reader runtime gate and a
+  `human_calibration` authority; `ai_simulation` and `waived` cannot satisfy the
+  human one-watch production gate.
+- Debug Server PID `80052` remains healthy on `127.0.0.1:7777`. Session status
+  intentionally remains `[OPEN]` until user verification.
+
+## 2026-08-07 Episode 5 Voice Contract Failure
+- Round 12 Run `run_c055dcf29aaa` failed with
+  `CHARACTER_IDENTITY_UNRESOLVED`: a `voice_bible.speaker_id` exactly matched
+  one identity contract's `display_name`, but the contract's `voice_ids`
+  contained only a different generated namespace.
+- The durable Baseline and post-Baseline discovery were complete. The failure
+  occurred after identity normalization, not during Provider transport or JSON
+  parsing.
+- Semantic repair proposed one no-op contract update and one speaker-ID rename.
+  Isolated validation rejected both; no patch Artifact was applied and the
+  per-issue strategy budget was exhausted.
+- Confirmed root cause: deterministic voice normalization only bound narrator
+  voices to unique offscreen contracts. It did not bind ordinary voices to a
+  uniquely and exactly matching `identity_id` or `display_name`.
+- Generic fix: when a voice speaker ID exactly matches one and only one identity
+  contract token, append that actual speaker ID to the contract's `voice_ids`.
+  Narrator binding still additionally requires `offscreen_only`. Ambiguous
+  matches remain untouched and fail closed.
+
+## 2026-08-07 Episode 1 Withheld Proposition Shape Failure
+- Round 13 Run `run_700709f8452f` received two complete Provider responses with
+  `finish_reason=stop`; this was not a transport truncation.
+- Iteration 1 contained a JSON delimiter error. Iteration 2 repaired the JSON
+  but emitted `experience_intents[].withheld_propositions` as proposition-ID
+  strings instead of typed objects, then exhausted the two structural bootstrap
+  iterations.
+- Existing deterministic normalization handled typed objects missing `reason`
+  but not the equivalent string shorthand.
+- Generic fix: normalize each non-empty string to
+  `{"proposition_id": <original string>, "reason": ""}`. This preserves the
+  exact authority ID and represents the unknown reason without inventing
+  narrative semantics.
+
+## 2026-08-07 Episode 2 Dialogue Continuity Identity Failure
+- Round 14 Run `run_6ad8653edf9d` persisted a valid Baseline, then deterministic
+  dialogue-continuity normalization repeatedly added an action-derived turn
+  whose speaker token included both the character identity and stage action.
+- Semantic repair changed the generated turn once, but the next deterministic
+  normalization recreated the same invalid turn, so the issue strategy was
+  exhausted after one applied patch.
+- Confirmed root cause: `action_block_spoken_identity()` is intentionally a
+  permissive legacy parser, while `_normalize_dialogue_chain_continuity()` used
+  its result without checking the screenplay's typed identity authority.
+- Generic fix: action-derived turns may enter a dialogue chain only when their
+  speaker token exactly matches `voice_bible` or an identity-contract token.
+  No prefix, suffix, role-name, or story-text inference is allowed.

@@ -14,6 +14,23 @@ class ApiError extends Error {
   }
 }
 
+function normalizeNetworkError(error: unknown): Error {
+  if (error instanceof ApiError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    error instanceof TypeError
+    || /Failed to fetch|fetch failed|ECONNREFUSED|NetworkError|Load failed/i.test(message)
+  ) {
+    return new ApiError(
+      0,
+      "无法连接本机后端服务，请等待服务恢复后重试",
+      "BACKEND_UNAVAILABLE",
+      "网络错误",
+    );
+  }
+  return error instanceof Error ? error : new Error(message);
+}
+
 const SESSION_HEADER = "X-Manju-Session";
 const APPROVAL_HEADER = "X-Manju-Approval-Token";
 
@@ -37,7 +54,7 @@ async function ensureSession(forceRefresh = false): Promise<void> {
       })
       .catch((err) => {
         sessionReady = null;
-        throw err;
+        throw normalizeNetworkError(err);
       });
   }
   await sessionReady;
@@ -109,15 +126,30 @@ async function request(
       : undefined,
     options?.approvalToken,
   );
-  const resp = await fetch(`/api${path}`, {
-    method,
-    headers,
-    body: isForm
-      ? options?.form
-      : body !== undefined
-        ? JSON.stringify(body)
-        : undefined,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`/api${path}`, {
+      method,
+      headers,
+      body: isForm
+        ? options?.form
+        : body !== undefined
+          ? JSON.stringify(body)
+          : undefined,
+    });
+  } catch (error: unknown) {
+    throw normalizeNetworkError(error);
+  }
+
+  // 后端重启后，已打开页面可能仍缓存旧会话。401 表示请求尚未进入业务处理，
+  // 因此可以安全地重新领取会话并只重试一次，避免页面永久停在失败/加载状态。
+  if (resp.status === 401 && !options?._sessionRefreshed) {
+    await ensureSession(true);
+    return request(method, path, body, {
+      ...options,
+      _sessionRefreshed: true,
+    });
+  }
 
   if (resp.status === 202) {
     const payload = await resp.json();
@@ -1050,6 +1082,9 @@ export interface ScriptScene {
   conflict?: string;
   turn?: string;
   source_basis?: string;
+  entry_state?: string;
+  exit_state?: string;
+  context_requirements?: string[];
 }
 
 export interface PlotSpineBeat {
@@ -1058,6 +1093,8 @@ export interface PlotSpineBeat {
   does?: string;
   turn?: string;
   must_keep?: boolean;
+  source_segment_ids?: string[];
+  purpose?: string;
 }
 
 export interface PlotSpine {
@@ -1103,6 +1140,13 @@ export interface EpisodeScreenplay {
   dialogue_chains?: KeyDialogueChain[];
   key_plot_points?: string[];
   plot_spine?: PlotSpine | null;
+  source_coverage?: {
+    source_segment_id: string;
+    disposition: "deliver" | "merge" | "context" | "duplicate";
+    beat_ids: string[];
+    duplicate_of?: string | null;
+    reason?: string;
+  }[];
   scene_outline?: ScriptScene[];
   full_script_text?: string;
   character_state_changes?: string[];
@@ -1149,6 +1193,7 @@ export interface NarrativeCalibrationSummary {
   status: "calibrated" | "awaiting_republish" | "needs_review";
   artifact_id?: string | null;
   bound_artifact_id?: string | null;
+  authority_mode?: "human_calibration" | "ai_simulation" | "waived";
   model_pass_threshold?: number | null;
   calibration_score?: number | null;
   sample_summary?: Record<string, unknown>;
@@ -1227,6 +1272,7 @@ export type VideoInputIntent =
 export type VideoPlanAssetSource =
   | "ASSET_REVISION"
   | "STATIC_BOUNDARY_ASSET"
+  | "PREVIOUS_STATIC_TAIL"
   | "PREVIOUS_ADOPTED_TAIL"
   | "PREVIOUS_ADOPTED_VIDEO";
 
@@ -1409,6 +1455,18 @@ export interface ShotVersion {
   technical_validation_json?: string | null;
   created_at?: number | null;
   image_inputs?: {
+    first_frame_used?: boolean;
+    first_frame_src?: string | null;
+    first_frame_source?: VideoPlanAssetSource | null;
+    first_frame_scene_id?: string | null;
+    first_frame_image_url?: string | null;
+    last_frame_used?: boolean;
+    last_frame_src?: string | null;
+    last_frame_source?: VideoPlanAssetSource | null;
+    last_frame_scene_id?: string | null;
+    last_frame_image_url?: string | null;
+    video_input_url?: string | null;
+    video_input_source_revision_id?: string | null;
     mode?: VideoGenerationMode;
     planned_mode?: VideoGenerationMode;
     actual_mode?: VideoGenerationMode | null;
@@ -1577,6 +1635,7 @@ export interface Shot {
   shot_no: number;
   duration_s: number;
   shot_size: string;
+  camera_angle?: string;
   camera_move: string;
   scene_time: string;
   scene_name: string;
@@ -1600,6 +1659,12 @@ export interface Shot {
   adopted_version_id: string | null;
   story_event_id?: string;
   purpose?: string;
+  context_requirement_ids?: string[];
+  resulting_change?: string;
+  readability_focus?: "context" | "action" | "emotion" | "dialogue" | "evidence" | "transition" | string;
+  camera_motivation?: string;
+  repeat_of_shot_id?: string | null;
+  repeat_gain?: string;
   new_information_ids?: string[];
   new_information_items?: {
     info_id: string;
@@ -1712,8 +1777,16 @@ export interface Episode {
   screenplay_state?: ScreenplayState | null;
   screenplay_production?: {
     revision_id?: string;
-    operation: "baseline" | "repair";
+    operation: "baseline" | "finalize" | "complete";
     phase: string;
+    phase_label?: string;
+    stage_index?: number;
+    stage_count?: number;
+    stages?: Array<{
+      key: string;
+      label: string;
+      status: "pending" | "in_progress" | "paused" | "completed";
+    }>;
     baseline_done: boolean;
     first_evaluation_done: boolean;
     task_active: boolean;
@@ -1721,6 +1794,9 @@ export interface Episode {
     activation_count?: number;
     patch_count?: number;
     open_issue_count?: number;
+    quality_score?: number | null;
+    quality_issue_count?: number;
+    gate_retry_exhausted?: boolean;
     yield_reason?: string;
   } | null;
   shots?: Shot[];
@@ -1822,6 +1898,7 @@ export interface StoryboardStatus {
   hard_gates_passed: boolean;
   hard_gate_issue_count?: number;
   hard_gate_issues?: string[];
+  system_error?: string | null;
   feature_flags?: {
     safe_readonly: boolean;
     structure_edit: boolean;
@@ -2138,6 +2215,7 @@ export interface Project {
   episode_counts?: {
     total: number;
     done: number;
+    screenplay_queued: number;
     screenplay_running: number;
     scripting: number;
     screenplay_todo: number;
