@@ -2492,6 +2492,21 @@ async def run_storyboard_supervisor(
             # A scene pack is committed atomically. Legacy checkpoints that end
             # inside a scene continue through the old per-shot compatibility path.
             scene_pack_mode = len(completed) == 0 or len(completed) in scene_ends
+            if not scene_pack_mode:
+                next_shot_no = len(completed) + 1
+                scene_pack_fallback_end = next((
+                    max(
+                        int(brief.shot_no)
+                        for brief in outline.shots
+                        if brief.scene_id == context.scene_id
+                    )
+                    for context in outline.scene_contexts
+                    if any(
+                        int(brief.shot_no) == next_shot_no
+                        for brief in outline.shots
+                        if brief.scene_id == context.scene_id
+                    )
+                ), None)
 
         if scene_pack_mode:
             pending_contexts = [
