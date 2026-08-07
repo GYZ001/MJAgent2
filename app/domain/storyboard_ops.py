@@ -838,6 +838,13 @@ def _storyboard_shot_evidence_requires_rebind(
     )
 
 
+def _storyboard_calibration_mode_is_publishable(mode: str) -> bool:
+    return str(mode or "").strip() in {
+        "human_calibration",
+        "ai_simulation",
+    }
+
+
 def _finalize_storyboard_evidence(
     episode_id: str,
     board: Storyboard,
@@ -922,11 +929,14 @@ def _finalize_storyboard_evidence(
             )
         except Exception as exc:
             raise RuntimeError(
-                f"真人一次观看校准未就绪，禁止发布叙事分镜：{exc}"
+                f"一次观看校准未就绪，禁止发布叙事分镜：{exc}"
             ) from exc
-        if calibration_authority.authority_mode != "human_calibration":
+        if not _storyboard_calibration_mode_is_publishable(
+            calibration_authority.authority_mode
+        ):
             raise RuntimeError(
-                "真人一次观看校准未就绪，禁止用 AI 模拟或豁免替代真人观察"
+                "一次观看校准未达到发布要求；仅允许真人校准或"
+                "已通过独立 runtime gate 的 AI 一次观看模拟"
             )
     if _sync_storyboard_scene_bindings(conn, episode_id, board):
         # 这是由当前门禁确定的派生外键修复，即使后续证据发布失败也应保留，
@@ -1044,6 +1054,9 @@ def _finalize_storyboard_evidence(
                 ),
                 "human_calibrated_model_threshold": (
                     calibration_authority.model_pass_threshold
+                ),
+                "calibration_authority_mode": (
+                    calibration_authority.authority_mode
                 ),
             },
         )

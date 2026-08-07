@@ -14,6 +14,7 @@ from app.domain.storyboard_ops import (
     _finalize_storyboard_evidence,
     _insert_storyboard_shot,
     _storyboard_shot_evidence_requires_rebind,
+    _storyboard_calibration_mode_is_publishable,
 )
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
@@ -114,6 +115,16 @@ def test_cancelled_run_cannot_overwrite_storyboard_checkpoint(repair_db) -> None
     assert json.loads(rows[0]["content_json"])["phase"] == (
         "VALIDATING_EPISODE"
     )
+
+
+def test_storyboard_publish_accepts_gated_ai_calibration_not_waiver() -> None:
+    assert _storyboard_calibration_mode_is_publishable(
+        "human_calibration"
+    )
+    assert _storyboard_calibration_mode_is_publishable(
+        "ai_simulation"
+    )
+    assert not _storyboard_calibration_mode_is_publishable("waived")
 
 
 def test_stale_run_cannot_write_after_model_await(repair_db, monkeypatch) -> None:

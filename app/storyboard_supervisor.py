@@ -2284,6 +2284,27 @@ async def run_storyboard_supervisor(
                 screenplay,
             )
             if identity_repairs and not published_storyboard_authority:
+                outline_identity_repairs: list[dict[str, Any]] = []
+                outline_by_no = {
+                    int(brief.shot_no): brief
+                    for brief in (outline.shots if outline is not None else [])
+                }
+                for shot in shots:
+                    brief = outline_by_no.get(int(shot.shot_no))
+                    if brief is None:
+                        continue
+                    changed_fields: list[str] = []
+                    for field in ("characters_visible", "audio_cast"):
+                        value = list(getattr(shot, field) or [])
+                        if getattr(brief, field) == value:
+                            continue
+                        setattr(brief, field, value)
+                        changed_fields.append(field)
+                    if changed_fields:
+                        outline_identity_repairs.append({
+                            "shot_no": int(shot.shot_no),
+                            "fields": changed_fields,
+                        })
                 for row, shot in zip(prefix_rows, shots):
                     _write_shot_fields(
                         conn,
@@ -2291,6 +2312,11 @@ async def run_storyboard_supervisor(
                         shot,
                         row["storyboard_artifact_id"],
                         narrative_authority=True,
+                    )
+                if outline_identity_repairs and outline is not None:
+                    conn.execute(
+                        "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                        (outline.model_dump_json(), episode_id),
                     )
                 conn.commit()
                 prefix_rows = list(_ensure_current_storyboard_shot_artifacts(
@@ -2307,7 +2333,10 @@ async def run_storyboard_supervisor(
                         "STORYBOARD_OPERATIONAL_IDENTITIES_CANONICALIZED",
                         "info",
                         "已把分镜内部身份投影为人物与声音业务身份",
-                        payload={"repairs": identity_repairs},
+                        payload={
+                            "repairs": identity_repairs,
+                            "outline_repairs": outline_identity_repairs,
+                        },
                     )
         cp.validated_prefix_end = len(shots)
         cp.next_shot_no = len(shots) + 1
@@ -3413,6 +3442,11 @@ async def run_storyboard_supervisor(
                     "分镜发布前投影对账失败：正式镜头数与确认候选不一致"
                 )
             projection_repairs: list[dict[str, Any]] = []
+            outline_projection_repairs: list[dict[str, Any]] = []
+            outline_by_no = {
+                int(brief.shot_no): brief
+                for brief in (outline.shots if outline is not None else [])
+            }
             for row, shot in zip(current_rows, evaluation.board.shots):
                 current_shot = _board_from_shot_rows(
                     [row],
@@ -3425,6 +3459,16 @@ async def run_storyboard_supervisor(
                     for field in set(before) | set(after)
                     if before.get(field) != after.get(field)
                 )
+                brief = outline_by_no.get(int(shot.shot_no))
+                if (
+                    brief is not None
+                    and brief.continuity_mode != shot.continuity_mode
+                ):
+                    brief.continuity_mode = shot.continuity_mode
+                    outline_projection_repairs.append({
+                        "shot_no": int(shot.shot_no),
+                        "fields": ["continuity_mode"],
+                    })
                 if not changed_fields:
                     continue
                 _write_shot_fields(
@@ -3438,6 +3482,11 @@ async def run_storyboard_supervisor(
                     "shot_no": int(shot.shot_no),
                     "fields": changed_fields,
                 })
+            if outline_projection_repairs and outline is not None:
+                conn.execute(
+                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                    (outline.model_dump_json(), episode_id),
+                )
             conn.commit()
             rebound_rows = list(_ensure_current_storyboard_shot_artifacts(
                 conn,
@@ -3450,13 +3499,16 @@ async def run_storyboard_supervisor(
                 for row in rebound_rows
                 if row["storyboard_artifact_id"]
             ]
-            if projection_repairs and run_id:
+            if (projection_repairs or outline_projection_repairs) and run_id:
                 evidence_repository.append_event(
                     run_id,
                     "STORYBOARD_PREFINAL_PROJECTION_REBOUND",
                     "info",
                     "已在冷观众审读前对账正式镜头投影与逐镜证据",
-                    payload={"repairs": projection_repairs},
+                    payload={
+                        "repairs": projection_repairs,
+                        "outline_repairs": outline_projection_repairs,
+                    },
                 )
             save_checkpoint(cp, run_id=run_id)
         narrative_review_report = None
