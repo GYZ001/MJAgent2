@@ -1,7 +1,7 @@
 # Debug Session: contextual-speaker-contract
 - **Status**: [OPEN]
 - **Issue**: 前五集剧本生成在人物身份预检阶段停止；`full_script_text.speaker` 中的「路人乙」既未进入人物谱，也未形成完整的 `identity_contracts + voice_bible` 可见/声音政策。预期是所有来源中实际出现的一次性或功能性说话人均通过本集权威身份合同泛化建模，不依赖白名单或黑名单。
-- **Debug Server**: pending
+- **Debug Server**: http://127.0.0.1:7777/event
 - **Log File**: .dbg/trae-debug-log-contextual-speaker-contract.ndjson
 
 ## Reproduction Steps
@@ -20,10 +20,10 @@
 | E | 名称规范化导致同一身份在抽取、合同和声音表之间不一致 | Low | Low | 三处 token 仅在空格、标点、别名或规范名上不同 | Pending |
 
 ## Instrumentation Design
-1. 身份落实入口：记录候选身份、已有合同和声音身份。
-2. 身份落实出口：记录落实结果、合同和声音身份。
-3. 最终未解决身份扫描：记录名字、用途、来源位置及解析器集合。
-4. 剧本阶段阻断：记录 working Artifact 版本与身份错误。
+1. 身份预检出口：记录候选身份和持久化前的姓名决议。
+2. Baseline 后身份审计出口：记录 working Artifact、归一化变更、合同和声音身份。
+3. 最终未解决身份扫描：记录名字、来源位置及解析器权威集合。
+4. 剧本阶段阻断：记录最终 working Artifact 版本与身份错误。
 
 ## Log Evidence
 Pending.

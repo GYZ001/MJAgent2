@@ -1587,6 +1587,13 @@ def screenplay_unknown_identity_errors(screenplay, bible: Bible) -> list[str]:
         getattr(screenplay, "full_script_text", "") or ""
     ):
         collect(speaker, "full_script_text.speaker", usage="voice")
+    # #region debug-point B-E:unresolved-identity-state
+    if locations:
+        try:
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_plan=getattr(screenplay,"narrative_plan",None); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"B,C,E","location":"app/portraits.py:screenplay_unknown_identity_errors","msg":"[DEBUG] Unresolved screenplay identity state","data":{"episodeNo":getattr(screenplay,"episode_no",None),"unresolved":locations,"bibleNames":sorted(str(item.name or "").strip() for item in bible.characters if str(item.name or "").strip()),"contracts":[{"identityId":str(item.identity_id or "").strip(),"displayName":str(item.display_name or "").strip(),"visualPolicy":str(item.visual_policy or "").strip(),"voiceIds":[str(value or "").strip() for value in (item.voice_ids or [])]} for item in (getattr(_dbg_plan,"identity_contracts",None) or [])],"voices":[{"speakerId":str(item.speaker_id or "").strip(),"roleType":str(item.role_type or "").strip()} for item in (getattr(screenplay,"voice_bible",None) or [])]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+        except Exception:
+            pass
+    # #endregion
     return [
         f"剧本人物身份未解决：「{name}」既不在人物谱，"
         + (

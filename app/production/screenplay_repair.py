@@ -3860,6 +3860,12 @@ async def run_screenplay_production(
         """
         hard_identity_issues = non_waivable_screenplay_issues(open_issues)
         if hard_identity_issues:
+            # #region debug-point D:identity-hard-gate-working-artifact
+            try:
+                import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"D","location":"app/production/screenplay_repair.py:identity_hard_gate","msg":"[DEBUG] Identity hard gate working artifact","data":{"episodeId":episode_id,"revisionId":current_rev.id,"workingArtifactId":working_id,"artifactHash":artifact_hash,"reason":reason,"issues":[{"code":issue.code,"message":issue.message} for issue in hard_identity_issues]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+            except Exception:
+                pass
+            # #endregion
             message = (
                 "剧本人物身份预检未通过，已在剧本阶段停止："
                 + "；".join(issue.message for issue in hard_identity_issues[:5])
@@ -4156,6 +4162,12 @@ async def run_screenplay_production(
             payload={"episode_id": episode_id},
         )
 
+    # #region debug-point A-D:post-baseline-audit-state
+    try:
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_plan=getattr(working_script,"narrative_plan",None); _dbg_audit=locals().get("draft_audit") or {}; _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"pre-fix","hypothesisId":"A,B,C,D","location":"app/production/screenplay_repair.py:post_baseline_identity_audit","msg":"[DEBUG] Post-baseline identity audit state","data":{"episodeId":episode_id,"revisionId":rev.id,"workingArtifactId":working_id,"workingHash":working_hash,"draftIdentityErrors":draft_identity_errors,"auditResolutions":[{"sourceLabel":str(item.get("source_label") or ""),"canonicalName":str(item.get("canonical_name") or ""),"resolution":str(item.get("resolution") or "")} for item in (_dbg_audit.get("resolutions") or []) if isinstance(item,dict)],"durableResolutions":[{"sourceLabel":str(item.get("source_label") or ""),"canonicalName":str(item.get("canonical_name") or ""),"resolution":str(item.get("resolution") or "")} for item in (episode.get("character_resolutions") or []) if isinstance(item,dict)],"normalizationChanges":identity_normalization_changes,"contracts":[{"identityId":str(item.identity_id or "").strip(),"displayName":str(item.display_name or "").strip(),"visualPolicy":str(item.visual_policy or "").strip(),"voiceIds":[str(value or "").strip() for value in (item.voice_ids or [])]} for item in (getattr(_dbg_plan,"identity_contracts",None) or [])],"voices":[{"speakerId":str(item.speaker_id or "").strip(),"roleType":str(item.role_type or "").strip()} for item in (getattr(working_script,"voice_bible",None) or [])]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
+    except Exception:
+        pass
+    # #endregion
     if identity_normalization_changes:
         identity_normalization_changes.extend(
             _normalize_screenplay_narrative_graph(
