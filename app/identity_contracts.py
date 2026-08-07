@@ -71,6 +71,15 @@ def _clean(value: object) -> str:
     return str(value or "").strip()
 
 
+def _semantic_alias_key(value: object) -> str:
+    """Normalize a contract-local role phrase without using a global title list."""
+    return "".join(
+        character.casefold()
+        for character in _clean(value)
+        if character.isalnum() and character != "的"
+    )
+
+
 def _contract_evidence_errors(
     contract: NarrativeIdentityContract,
     screenplay: EpisodeScreenplay,
@@ -113,6 +122,7 @@ class NarrativeIdentityResolver:
         self._by_token: dict[str, ResolvedIdentity] = {}
         self._voice_tokens: dict[str, ResolvedIdentity] = {}
         self._identities: dict[str, ResolvedIdentity] = {}
+        self._rationale_by_identity: dict[str, str] = {}
         bible_by_name = {
             _clean(character.name): character
             for character in bible.characters
@@ -160,6 +170,9 @@ class NarrativeIdentityResolver:
                 source="bible" if bible_name else "narrative_contract",
             )
             self._register(resolved)
+            self._rationale_by_identity[identity_id] = _clean(
+                contract.evidence.rationale
+            )
 
         # Bible remains authoritative for persistent characters even when a
         # plan does not repeat them in ``identity_contracts``.  This is an
@@ -279,6 +292,23 @@ class NarrativeIdentityResolver:
             else self._by_token.get(value)
         )
         if identity is None:
+            alias_key = _semantic_alias_key(value)
+            semantic_matches = [
+                candidate
+                for identity_id, rationale in self._rationale_by_identity.items()
+                for candidate in [self._identities[identity_id]]
+                if (
+                    len(alias_key) >= 2
+                    and alias_key in _semantic_alias_key(rationale)
+                    and (
+                        usage != "voice"
+                        or bool(candidate.voice_ids)
+                    )
+                )
+            ]
+            if len(semantic_matches) == 1:
+                identity = semantic_matches[0]
+        if identity is None:
             if usage == "voice":
                 raise IdentityContractError(
                     f"声音身份「{value}」未在 voice_bible + identity contract 中声明"
@@ -386,7 +416,12 @@ def canonicalize_storyboard_operational_identities(
 
     def canonical(token: object) -> str:
         value = _clean(token)
-        return token_map.get(value, value)
+        if value in token_map:
+            return token_map[value]
+        try:
+            return resolver.resolve(value).display_name
+        except IdentityContractError:
+            return value
 
     def replace_list(shot_no: int, field: str, values: list[str]) -> list[str]:
         replaced = [canonical(value) for value in values]

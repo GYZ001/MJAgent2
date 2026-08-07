@@ -155,6 +155,45 @@ def _shot(**overrides) -> Shot:
     return Shot(**payload)
 
 
+def test_contract_rationale_uniquely_resolves_contextual_role_alias() -> None:
+    screenplay = _screenplay()
+    husband = NarrativeIdentityContract(
+        identity_id="contextual-husband",
+        display_name="路人甲",
+        kind="single-scene relationship role",
+        visual_policy="contextual",
+        visual_canonical="普通中年男性，便装，神情愤怒",
+        asset_requirement="optional",
+        voice_ids=["路人甲"],
+        evidence=_evidence("王芬的丈夫，仅在本场闪回中出现"),
+    )
+    screenplay.narrative_plan.identity_contracts.append(husband)
+    screenplay.narrative_plan.propositions[0].entity_ids.append(
+        husband.identity_id
+    )
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            _shot(
+                characters=["王芬丈夫"],
+                characters_visible=["王芬丈夫"],
+                audio_cast=["王芬丈夫"],
+            )
+        ],
+    )
+
+    changes = canonicalize_storyboard_operational_identities(
+        board,
+        _bible(),
+        screenplay,
+    )
+
+    assert changes
+    assert board.shots[0].characters == ["路人甲"]
+    assert board.shots[0].characters_visible == ["路人甲"]
+    assert board.shots[0].audio_cast == ["路人甲"]
+
+
 def test_resolver_handles_named_transient_collective_and_offscreen_by_policy() -> None:
     screenplay = _screenplay()
     resolver = narrative_identity_resolver(_bible(), screenplay)
