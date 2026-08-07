@@ -34,6 +34,7 @@ from app.schemas import (
 )
 from app.spoken_contract import content_char_count
 from app.validators import (
+    normalize_outline_dialogue_ownership,
     outline_scene_coverage_errors,
     outline_key_line_capacity_errors,
     outline_key_line_speaker_errors,
@@ -67,6 +68,89 @@ def _attach_generic_action(screenplay) -> AtomicAction:
     screenplay.narrative_plan.atomic_actions.append(action)
     screenplay.narrative_plan.events[0].action_ids = [action.action_id]
     return action
+
+
+def test_outline_dialogue_ownership_repairs_split_fragments_and_duplicates() -> None:
+    screenplay = _screenplay()
+    screenplay.dialogue_chains = [
+        KeyDialogueChain(
+            chain_id="DC1",
+            topic="办公室话轮",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="高义",
+                    line="白洁，你来了，这次评你为先进是我的意思。",
+                    source_text="白洁，你来了，这次评你为先进是我的意思。",
+                ),
+                KeyDialogueTurn(
+                    speaker="白洁",
+                    line="校长，我才毕业这么几年，别人会不会……",
+                    source_text="校长，我才毕业这么几年，别人会不会……",
+                ),
+            ],
+        )
+    ]
+    screenplay.key_lines = [
+        "高义：白洁，你来了，这次评你为先进是我的意思。",
+        "白洁：校长，我才毕业这么几年，别人会不会……",
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="白洁敲门进入；高义说“白洁",
+                covers="白洁敲门进入；高义说“白洁",
+                primary_action="白洁敲门进入；高义说“白洁",
+                characters_visible=["白洁", "高义"],
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="高义说明评先进是他的意思",
+                covers="高义：白洁，你来了，这次评你为先进是我的意思。",
+                primary_action="高义说出台词",
+                key_line_ids=["KL01"],
+                characters_visible=["高义"],
+            ),
+            StoryboardOutlineShot(
+                shot_no=3,
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="高义再次说明评先进是他的意思",
+                covers="高义：白洁，你来了，这次评你为先进是我的意思。",
+                primary_action="高义重复说出台词",
+                key_line_ids=["KL01"],
+                characters_visible=["高义"],
+            ),
+            StoryboardOutlineShot(
+                shot_no=4,
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="白洁表达担忧",
+                covers="白洁：校长，我才毕业这么几年，别人会不会……",
+                primary_action="白洁说出台词",
+                key_line_ids=["KL02"],
+                characters_visible=["白洁"],
+            ),
+        ],
+    )
+
+    changes = normalize_outline_dialogue_ownership(outline, screenplay)
+
+    assert changes
+    assert outline.shots[0].covers == "白洁敲门进入"
+    assert outline.shots[0].audio_cast == []
+    assert outline.shots[1].key_line_ids == ["KL01"]
+    assert outline.shots[1].covers == "高义：白洁，你来了，这次评你为先进是我的意思。"
+    assert outline.shots[2].key_line_ids == []
+    assert outline.shots[2].characters_visible == ["白洁"]
+    assert outline.shots[2].continuity_mode == "reaction_cut"
+    assert "闭口作出可见反应" in outline.shots[2].covers
+    assert outline_key_line_capacity_errors(outline, screenplay) == []
 
 
 def test_narrative_outline_projects_graph_owned_fields_deterministically() -> None:

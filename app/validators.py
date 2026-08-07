@@ -3773,6 +3773,274 @@ def split_outline_on_speaker_changes(
     return events
 
 
+_OUTLINE_SPEECH_CUE_RE = re.compile(
+    r"(?P<speaker>[^，,。；;！？\n“”\"']{1,16}?)"
+    r"(?:说|说明|问|喊|答|道|告诉|表示|回应|交代|要求)"
+    r"[：:]?[“\"']?(?P<line>[^”\"']*)"
+)
+
+
+def _split_outline_text_outside_quotes(
+    text: str,
+    *,
+    separators: str,
+) -> list[str]:
+    """Split prose without cutting punctuation inside quoted dialogue."""
+    parts: list[str] = []
+    current: list[str] = []
+    closer: str | None = None
+    quote_pairs = {"“": "”", "「": "」", "『": "』", '"': '"', "'": "'"}
+    for character in str(text or ""):
+        if closer is None and character in quote_pairs:
+            closer = quote_pairs[character]
+            current.append(character)
+            continue
+        if closer is not None and character == closer:
+            closer = None
+            current.append(character)
+            continue
+        if closer is None and character in separators:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            continue
+        current.append(character)
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
+def _outline_quotes_balanced(text: str) -> bool:
+    parts = _split_outline_text_outside_quotes(text, separators="")
+    if not parts:
+        return True
+    raw = str(text or "")
+    return (
+        raw.count("“") == raw.count("”")
+        and raw.count("「") == raw.count("」")
+        and raw.count("『") == raw.count("』")
+        and raw.count('"') % 2 == 0
+        and raw.count("'") % 2 == 0
+    )
+
+
+def normalize_outline_dialogue_ownership(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, Any]]:
+    """Make structured key-line ownership executable after deterministic splits.
+
+    Historical prose splitting could leave an unowned dialogue fragment in an
+    action shot or duplicate one key line across adjacent shots. Canonical
+    screenplay lines remain the only spoken authority: the first structured
+    owner delivers the line, while later redundant nodes become silent
+    listener reactions. Mixed action/dialogue fragments retain only the real
+    non-dialogue action.
+    """
+    catalog = key_line_catalog(screenplay)
+    if not catalog or not outline.shots:
+        return []
+    speaker_by_key = {
+        key_id: _speaker_name(text) or ""
+        for key_id, text in catalog.items()
+    }
+    line_by_key = {
+        key_id: _strip_speaker(text)
+        for key_id, text in catalog.items()
+    }
+    changes: list[dict[str, Any]] = []
+    owner_index: dict[str, int] = {}
+
+    for index, shot in enumerate(outline.shots):
+        kept: list[str] = []
+        removed: list[str] = []
+        for raw_key_id in shot.key_line_ids or []:
+            key_id = str(raw_key_id).strip().upper()
+            if key_id not in catalog:
+                kept.append(key_id)
+                continue
+            if key_id in owner_index:
+                removed.append(key_id)
+                continue
+            owner_index[key_id] = index
+            kept.append(key_id)
+        if removed:
+            shot.key_line_ids = kept
+            changes.append({
+                "shot_no": shot.shot_no,
+                "field": "key_line_ids",
+                "removed": removed,
+                "reason": "duplicate_delivery_owner",
+            })
+
+    def _event_ids(shot: Any) -> set[str]:
+        values = {
+            str(value or "").strip()
+            for value in (shot.event_ids or [])
+            if str(value or "").strip()
+        }
+        if str(shot.story_event_id or "").strip():
+            values.add(str(shot.story_event_id).strip())
+        return values
+
+    def _same_event(left: Any, right: Any) -> bool:
+        left_ids = _event_ids(left)
+        right_ids = _event_ids(right)
+        return not left_ids or not right_ids or bool(left_ids & right_ids)
+
+    def _matching_key_id(clause: str, shot_index: int) -> str | None:
+        match = _OUTLINE_SPEECH_CUE_RE.search(clause)
+        prefixed_speaker = _speaker_name(clause) or ""
+        if match is None and not prefixed_speaker:
+            return None
+        spoken_speaker = _condense(
+            match.group("speaker") if match is not None else prefixed_speaker
+        )
+        fragment = _condense(
+            match.group("line") if match is not None else _strip_speaker(clause)
+        )
+        for key_id, key_owner in owner_index.items():
+            if key_owner == shot_index:
+                continue
+            owner_shot = outline.shots[key_owner]
+            if not _same_event(outline.shots[shot_index], owner_shot):
+                continue
+            canonical_speaker = _condense(speaker_by_key.get(key_id, ""))
+            if canonical_speaker and canonical_speaker not in spoken_speaker:
+                continue
+            canonical_line = _condense(line_by_key.get(key_id, ""))
+            if fragment and len(fragment) >= 2 and (
+                canonical_line.startswith(fragment)
+                or fragment in canonical_line
+                or _bigram_coverage(fragment, canonical_line) >= 0.6
+            ):
+                return key_id
+            if (
+                not fragment
+                and canonical_speaker
+                and canonical_speaker in spoken_speaker
+            ):
+                return key_id
+        return None
+
+    def _reaction_actor(index: int, excluded_speakers: set[str]) -> str:
+        current = outline.shots[index]
+        for positions in (
+            range(index + 1, len(outline.shots)),
+            range(index - 1, -1, -1),
+        ):
+            for position in positions:
+                candidate = outline.shots[position]
+                if not _same_event(current, candidate):
+                    continue
+                for key_id in candidate.key_line_ids or []:
+                    speaker = speaker_by_key.get(str(key_id).upper(), "")
+                    if speaker and speaker not in excluded_speakers:
+                        return speaker
+        return next(
+            (
+                name
+                for name in current.characters_visible or []
+                if name not in excluded_speakers
+            ),
+            "",
+        )
+
+    # Structured owners always deliver the canonical screenplay line. This
+    # removes stale split prose from their beat/action fields.
+    for shot in outline.shots:
+        valid_keys = [
+            str(key_id).strip().upper()
+            for key_id in shot.key_line_ids or []
+            if str(key_id).strip().upper() in catalog
+        ]
+        if not valid_keys:
+            continue
+        speakers = list(dict.fromkeys(
+            speaker_by_key[key_id]
+            for key_id in valid_keys
+            if speaker_by_key[key_id]
+        ))
+        canonical = "；".join(
+            catalog[key_id]
+            for key_id in valid_keys
+        )
+        shot.covers = canonical
+        if len(speakers) == 1:
+            speaker = speakers[0]
+            shot.beat = f"{speaker}说出本话轮"
+            if not _outline_dialogue_two_shot_required(shot, speaker):
+                shot.primary_action = f"{speaker}单人近景说出本话轮"
+                shot.characters_visible = [speaker]
+            shot.audio_cast = [speaker]
+
+    # Remove speech copied into a different, unowned action node. Preserve any
+    # genuine action clauses; a speech-only duplicate becomes a silent reaction.
+    for index, shot in enumerate(outline.shots):
+        if shot.key_line_ids:
+            continue
+        source = max(
+            (
+                str(shot.primary_action or ""),
+                str(shot.covers or ""),
+                str(shot.beat or ""),
+            ),
+            key=len,
+        )
+        clauses = _split_outline_text_outside_quotes(
+            source,
+            separators="；;。！？\n",
+        )
+        removed_keys: list[str] = []
+        kept_clauses: list[str] = []
+        for clause in clauses:
+            key_id = _matching_key_id(clause, index)
+            if key_id is None:
+                kept_clauses.append(clause)
+            else:
+                removed_keys.append(key_id)
+        if not removed_keys:
+            continue
+        speakers = {
+            speaker_by_key.get(key_id, "")
+            for key_id in removed_keys
+            if speaker_by_key.get(key_id, "")
+        }
+        remaining = "；".join(kept_clauses).strip("； ")
+        if remaining:
+            shot.beat = remaining
+            shot.covers = remaining
+            shot.primary_action = remaining
+            shot.state_out = f"{remaining.rstrip('。')}完成，准备承接后续动作"
+            shot.audio_cast = []
+            reason = "unowned_dialogue_fragment_removed"
+        else:
+            actor = _reaction_actor(index, speakers)
+            reaction = (
+                f"{actor}听完上一话轮后闭口作出可见反应"
+                if actor
+                else "听者闭口作出可见反应"
+            )
+            shot.beat = reaction
+            shot.covers = reaction
+            shot.primary_action = reaction
+            shot.state_out = reaction
+            shot.audio_cast = []
+            if actor:
+                shot.characters_visible = [actor]
+            shot.continuity_mode = "reaction_cut"
+            reason = "redundant_dialogue_converted_to_reaction"
+        changes.append({
+            "shot_no": shot.shot_no,
+            "field": "dialogue_ownership",
+            "removed_key_line_ids": sorted(set(removed_keys)),
+            "reason": reason,
+        })
+    return changes
+
+
 _ACTION_CAPACITY_SPLIT_MARKER = "动作容量拆分"
 
 
@@ -3824,9 +4092,16 @@ def _split_outline_action_text(
     beats = count_sequential_action_beats(raw)
     if beats > limit or force:
         by_verbs = split_sequential_action_text(raw)
-        if by_verbs is not None:
+        if (
+            by_verbs is not None
+            and _outline_quotes_balanced(by_verbs[0])
+            and _outline_quotes_balanced(by_verbs[1])
+        ):
             return by_verbs
-    atoms = _atomize_claim(raw)
+    atoms = _split_outline_text_outside_quotes(
+        raw,
+        separators="；;。.！!？?，,、\n",
+    )
     if len(atoms) < 2:
         return None
     split_at = max(1, len(atoms) // 2)

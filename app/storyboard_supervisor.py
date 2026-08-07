@@ -2047,6 +2047,53 @@ async def run_storyboard_supervisor(
         outline = _recover_outline_from_current_artifact(conn, ep, cp)
         if outline is not None:
             save_checkpoint(cp, run_id=run_id)
+    if (
+        outline is not None
+        and narrative_authority
+        and not published_storyboard_authority
+    ):
+        from app.narrative_outline import (
+            normalize_narrative_storyboard_outline,
+        )
+        from app.validators import normalize_outline_dialogue_ownership
+
+        dialogue_repairs = normalize_outline_dialogue_ownership(
+            outline,
+            screenplay,
+        )
+        if dialogue_repairs:
+            authority_repairs = normalize_narrative_storyboard_outline(
+                outline,
+                screenplay,
+            )
+            dialogue_repairs.extend(
+                normalize_outline_dialogue_ownership(
+                    outline,
+                    screenplay,
+                )
+            )
+            ensure_storyboard_scene_contexts(
+                outline,
+                screenplay,
+                bible,
+            )
+            conn.execute(
+                "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                (outline.model_dump_json(), episode_id),
+            )
+            conn.commit()
+            ep_data["storyboard_outline_json"] = outline.model_dump_json()
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "STORYBOARD_OUTLINE_DIALOGUE_OWNERSHIP_REPAIRED",
+                    "info",
+                    "已确定性修复历史大纲中的重复台词 owner 与对白残片",
+                    payload={
+                        "dialogue_repairs": dialogue_repairs,
+                        "authority_repairs": authority_repairs,
+                    },
+                )
 
     def _normalize_completed_authority_board(
         board: Storyboard,

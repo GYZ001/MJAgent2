@@ -3508,6 +3508,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
             from app.validators import (
                 assign_outline_delivery_ids,
                 normalize_outline_spoken_durations,
+                normalize_outline_dialogue_ownership,
                 outline_scene_coverage_errors,
                 outline_key_line_capacity_errors,
                 outline_key_line_speaker_errors,
@@ -3532,10 +3533,20 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
                     screenplay,
                     max_shots=max_shots,
                 ),
+                *normalize_outline_dialogue_ownership(
+                    o,
+                    screenplay,
+                ),
             ]
             if split_events:
                 projection_changes = (
                     normalize_narrative_storyboard_outline(
+                        o,
+                        screenplay,
+                    )
+                )
+                projection_changes.extend(
+                    normalize_outline_dialogue_ownership(
                         o,
                         screenplay,
                     )
@@ -3726,11 +3737,13 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
     )
     if screenplay.narrative_plan is not None:
         from app.validators import (
+            normalize_outline_dialogue_ownership,
             normalize_outline_spoken_durations,
             outline_key_line_capacity_errors,
             outline_key_line_speaker_errors,
         )
 
+        normalize_outline_dialogue_ownership(outline, screenplay)
         normalize_outline_spoken_durations(outline, screenplay)
         final_errors = [
             *(
