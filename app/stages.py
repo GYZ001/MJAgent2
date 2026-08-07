@@ -714,6 +714,19 @@ def normalize_storyboard_outline_candidate(
             shots.append(raw_shot)
             continue
         shot = dict(raw_shot)
+        for field_name, field_info in StoryboardOutlineShot.model_fields.items():
+            if field_name not in shot or shot[field_name] is not None:
+                continue
+            default = field_info.get_default(call_default_factory=True)
+            if not isinstance(default, (str, list, dict)):
+                continue
+            shot[field_name] = deepcopy(default)
+            changes.append({
+                "field": f"shots.{index}.{field_name}",
+                "from": None,
+                "to": deepcopy(default),
+                "reason": "nullable_outline_field_normalization",
+            })
         covers = shot.get("covers")
         if isinstance(covers, list) and all(
             isinstance(item, str) for item in covers
@@ -3734,22 +3747,17 @@ def ensure_storyboard_scene_contexts(
 
     runs: list[tuple[str, list[StoryboardOutlineShot]]] = []
     for brief in outline.shots:
-        scene_key = str(brief.scene_id or "").strip()
-        if not scene_key:
-            scene_key = (
-                f"scene:{str(brief.scene_name or brief.scene_setting).strip()}:"
-                f"{str(brief.scene_time or '').strip()}"
-            )
+        scene_name = str(brief.scene_name or brief.scene_setting).strip()
+        scene_time = str(brief.scene_time or "").strip()
+        scene_key = (
+            f"scene:{scene_name}:{scene_time}"
+            if scene_name or scene_time
+            else f"id:{str(brief.scene_id or '').strip()}"
+        )
         if runs and runs[-1][0] == scene_key:
             runs[-1][1].append(brief)
         else:
             runs.append((scene_key, [brief]))
-
-    # A scene that returns later cannot be committed as one contiguous pack.
-    # Keep the per-shot path for that uncommon structure instead of changing IDs.
-    run_keys = [key for key, _items in runs]
-    if len(run_keys) != len(set(run_keys)):
-        return []
 
     contexts: list[StoryboardSceneContext] = []
     changes: list[dict[str, Any]] = []

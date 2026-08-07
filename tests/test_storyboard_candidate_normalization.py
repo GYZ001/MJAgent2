@@ -681,6 +681,30 @@ def test_storyboard_outline_candidate_joins_string_list_covers_only() -> None:
     }]
 
 
+def test_storyboard_outline_candidate_normalizes_nullable_default_fields() -> None:
+    candidate = {
+        "episode_no": 1,
+        "shots": [{
+            "shot_no": 1,
+            "story_event_id": None,
+            "characters_visible": None,
+            "primary_action_id": None,
+        }],
+    }
+
+    normalized, changes = normalize_storyboard_outline_candidate(candidate)
+
+    assert normalized["shots"][0]["story_event_id"] == ""
+    assert normalized["shots"][0]["characters_visible"] == []
+    assert normalized["shots"][0]["primary_action_id"] is None
+    assert {
+        change["field"] for change in changes
+    } == {
+        "shots.0.story_event_id",
+        "shots.0.characters_visible",
+    }
+
+
 def test_storyboard_loop_recovers_broken_json_then_null_event_id(monkeypatch) -> None:
     """Use the two structural failure shapes observed in ERR-20260725-c8bb0d."""
     outputs = [

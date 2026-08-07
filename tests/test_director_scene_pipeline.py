@@ -582,3 +582,47 @@ def test_scene_pack_prompt_contains_all_planned_scene_names(monkeypatch) -> None
     ))
 
     assert "第二场办公室" in captured["prompt"]
+
+
+def test_scene_batches_follow_contiguous_scene_name_and_time_not_stale_id() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        scene_outline=[
+            ScriptScene(
+                scene_no=index,
+                scene_heading=f"【场{index}】日 / 场景{index}",
+                story_function=f"第{index}场承担独立剧情功能",
+                summary=f"第{index}场剧情摘要",
+            )
+            for index in range(1, 4)
+        ],
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=index,
+                scene_id="SC01",
+                scene_name=scene_name,
+                scene_time=scene_time,
+                beat=f"第{index}镜任务",
+            )
+            for index, (scene_name, scene_time) in enumerate([
+                ("客厅", "晚上"),
+                ("客厅", "晚上"),
+                ("办公室", "白天"),
+                ("办公室", "白天"),
+                ("客厅", "晚上"),
+            ], start=1)
+        ],
+    )
+
+    changes = stages.ensure_storyboard_scene_contexts(outline, screenplay)
+
+    assert len(changes) == 3
+    assert [context.scene_id for context in outline.scene_contexts] == [
+        "SC01", "SC02", "SC03",
+    ]
+    assert [shot.scene_id for shot in outline.shots] == [
+        "SC01", "SC01", "SC02", "SC02", "SC03",
+    ]
