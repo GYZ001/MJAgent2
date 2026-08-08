@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from app import stages
 from app import errors as app_errors
+from app import identity_adjudication
+from app.identity_adjudication import adjudicate_screenplay_ir_identities
+from app.identity_authority import normalize_character_resolution
 from app.identity_contracts import narrative_identity_resolver
 from app.narrative import validate_screenplay_narrative
 from app.production.screenplay_document import (
@@ -1231,6 +1235,223 @@ def test_ir_identity_conflict_has_generation_error_classification() -> None:
     ) == ("generation", "GEN")
 
 
+def test_identity_adjudication_skips_ai_when_exact_authorities_are_complete(
+    monkeypatch,
+) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    friend_resolution = normalize_character_resolution({
+        "source_label": "旧友",
+        "canonical_name": "旧友",
+        "resolution": "functional_identity",
+        "identity_group": "episode:old-friend",
+    })
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
+    episode = {
+        "id": "ep-ir-exact",
+        "episode_no": 1,
+        "authorized_source_chapters": {"chapter-1": SOURCE},
+        "character_resolutions": [friend_resolution],
+    }
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+
+    async def forbidden_chat(*_args, **_kwargs):
+        raise AssertionError("精确 authority_id 完整时不应调用 AI")
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", forbidden_chat)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        candidate,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+    ))
+    screenplay = compile_screenplay_ir(
+        resolved,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    assert screenplay.id == "ep-ir-exact"
+    assert resolved.identities[1].authority_id == friend_resolution["authority_id"]
+
+
+def test_identity_adjudication_calls_ai_once_for_conflicting_exact_authorities(
+    monkeypatch,
+) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1].update({
+        "authority_id": "",
+        "source_names": ["旧友", "来人"],
+    })
+    old_friend = normalize_character_resolution({
+        "source_label": "旧友",
+        "canonical_name": "旧友",
+        "resolution": "functional_identity",
+        "identity_group": "episode:old-friend",
+    })
+    visitor = normalize_character_resolution({
+        "source_label": "来人",
+        "canonical_name": "来人",
+        "resolution": "functional_identity",
+        "identity_group": "episode:visitor",
+    })
+    episode = {
+        "id": "ep-ir-conflict",
+        "episode_no": 1,
+        "authorized_source_chapters": {"chapter-1": SOURCE},
+        "character_resolutions": [old_friend, visitor],
+    }
+    calls = []
+
+    async def fake_chat(messages, **kwargs):
+        calls.append((messages, kwargs))
+        return json.dumps({"decisions": [{
+            "identity_key": "friend",
+            "status": "bind",
+            "authority_id": old_friend["authority_id"],
+            "canonical_name": "",
+            "evidence_source_ids": ["SRC0002"],
+            "rationale": "SRC0002 明确写明旧友推门出现并递钥匙",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        candidate,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+        persist_new_resolutions=False,
+    ))
+    screenplay = compile_screenplay_ir(
+        resolved,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    assert screenplay.id == "ep-ir-conflict"
+    assert resolved.identities[1].authority_id == old_friend["authority_id"]
+    assert len(calls) == 1
+    assert calls[0][1]["call_meta"]["stage"] == (
+        "screenplay_ir_identity_adjudication"
+    )
+    assert calls[0][1]["call_meta"]["reuse_successful_operation"] is True
+
+
+def test_identity_adjudication_creates_source_backed_functional_authority(
+    monkeypatch,
+) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1]["authority_id"] = ""
+    episode = {
+        "id": "ep-ir-new-functional",
+        "episode_no": 1,
+        "authorized_source_chapters": {"chapter-1": SOURCE},
+        "character_resolutions": [],
+    }
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({"decisions": [{
+            "identity_key": "friend",
+            "status": "new_functional",
+            "authority_id": "",
+            "canonical_name": "旧友",
+            "evidence_source_ids": ["SRC0002"],
+            "rationale": "原文明确写出旧友出现、递钥匙并开口",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        candidate,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+        persist_new_resolutions=False,
+    ))
+
+    assert resolved.identities[1].authority_id.startswith("functional:")
+    assert episode["character_resolutions"][0]["authority_id"] == (
+        resolved.identities[1].authority_id
+    )
+    assert episode["character_resolutions"][0]["evidence_source_ids"] == [
+        "SRC0002"
+    ]
+
+
+def test_identity_adjudication_fails_closed_on_insufficient_source_evidence(
+    monkeypatch,
+) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    episode = {
+        "id": "ep-ir-insufficient",
+        "episode_no": 1,
+        "character_resolutions": [],
+    }
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({"decisions": [{
+            "identity_key": "friend",
+            "status": "insufficient_evidence",
+            "authority_id": "",
+            "canonical_name": "",
+            "evidence_source_ids": ["SRC0002"],
+            "rationale": "原文没有提供可唯一绑定到既有实体的证据",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+
+    with pytest.raises(ScreenplayIRIdentityConflictError):
+        asyncio.run(adjudicate_screenplay_ir_identities(
+            candidate,
+            episode=episode,
+            source_text=SOURCE,
+            bible=_bible(),
+            persist_new_resolutions=False,
+        ))
+
+
+def test_identity_adjudication_rejects_unavailable_source_id(monkeypatch) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({"decisions": [{
+            "identity_key": "friend",
+            "status": "new_functional",
+            "canonical_name": "旧友",
+            "evidence_source_ids": ["SRC9999"],
+            "rationale": "无效引用",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+
+    with pytest.raises(app_errors.ContentGenerationError, match="原文来源段"):
+        asyncio.run(adjudicate_screenplay_ir_identities(
+            candidate,
+            episode={
+                "id": "ep-ir-bad-source",
+                "episode_no": 1,
+                "character_resolutions": [],
+            },
+            source_text=SOURCE,
+            bible=_bible(),
+            persist_new_resolutions=False,
+        ))
+
+
 def test_shared_functional_source_label_requires_ai_before_merging_identities() -> None:
     payload = _v13_payload()
     payload["identities"] = [
@@ -1403,8 +1624,8 @@ def test_generation_entry_uses_compact_ir_model_and_bounded_output(
 
     assert captured["model_cls"] is ScreenplayGenerationIR
     assert captured["max_tokens"] == stages.SCREENPLAY_IR_MIN_TOKENS == 20480
-    assert captured["prefill"]["format_version"] == "screenplay-generation-ir.v1.4"
-    assert '"format_version":"screenplay-generation-ir.v1.4"' in captured["prompt"]
+    assert captured["prefill"]["format_version"] == stages.IR_VERSION
+    assert f'"format_version":"{stages.IR_VERSION}"' in captured["prompt"]
     assert '"source_names":["该身份在本集原文中的逐字称谓"]' in captured["prompt"]
     assert '"resulting_state":"该动作完成后新成立的局势' in captured["prompt"]
     assert "所有 SRC 必须至少被一个正文 unit 消费" in captured["prompt"]
