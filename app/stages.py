@@ -6235,6 +6235,13 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     )
     errors.extend(identity_errors)
     current = board.shots[-1]
+    structural_issues.extend(_storyboard_shot_visual_identity_issues(
+        current,
+        outline_narrative_task,
+        bible,
+        screenplay,
+        episode_id=str(episode.get("id") or episode["episode_no"]),
+    ))
     # A per-shot checkpoint is only safe when the exact object can already be
     # compiled for the downstream image/video prompt.  Keep this as a typed
     # structural issue so AgentLoop repairs it now instead of accepting a
@@ -6345,6 +6352,102 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
                 "请将 is_final 设为 false 继续补镜，在后续镜头补齐——"
                 + "；".join(episode_errors[:6]))
     return [*list(dict.fromkeys(errors)), *structural_issues]
+
+
+def _storyboard_shot_visual_identity_issues(
+    shot: Shot,
+    task: StoryboardOutlineShot | None,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+    *,
+    episode_id: str,
+) -> list[Issue]:
+    """Keep rendered identities inside the current narrative task relation.
+
+    The episode identity contract answers whether an identity exists.  The
+    outline task answers whether that identity belongs in this exact shot.
+    These are different joins: accepting any episode-level identity here can
+    silently replace a source-backed anonymous group with an unrelated named
+    person.  Free-form background action remains prose; only persistent visual
+    identities must be owned by ``task.visible_entity_ids``.
+    """
+    if (
+        task is None
+        or screenplay.narrative_plan is None
+        or not task.visible_entity_ids
+    ):
+        return []
+
+    from app.identity_contracts import (
+        IdentityContractError,
+        narrative_identity_resolver,
+    )
+
+    try:
+        resolver = narrative_identity_resolver(bible, screenplay)
+    except IdentityContractError:
+        # The downstream compiler reports a malformed episode identity
+        # contract with its complete diagnostic; do not duplicate it here.
+        return []
+
+    task_identities = []
+    for token in task.visible_entity_ids:
+        try:
+            task_identities.append(resolver.resolve(token, usage="visual"))
+        except IdentityContractError:
+            # Outline graph validation owns broken task references.  This gate
+            # only checks successfully resolved identity relations.
+            continue
+    task_identity_ids = {identity.identity_id for identity in task_identities}
+    if not task_identity_ids:
+        return []
+
+    visual_tokens = [
+        *((value or "").strip() for value in (shot.characters or [])),
+        *((value or "").strip() for value in (shot.characters_visible or [])),
+    ]
+    for role in shot.reference_roles or []:
+        prefix, separator, value = str(role or "").partition(":")
+        if separator and prefix in {"character_identity", "collective_group"}:
+            visual_tokens.append(value.strip())
+
+    unexpected = {}
+    for token in dict.fromkeys(value for value in visual_tokens if value):
+        try:
+            identity = resolver.resolve(token, usage="visual")
+        except IdentityContractError:
+            # Unknown identities are reported by the downstream compile gate.
+            continue
+        if identity.identity_id not in task_identity_ids:
+            unexpected[identity.identity_id] = identity.display_name
+    if not unexpected:
+        return []
+
+    task_names = list(dict.fromkeys(
+        identity.display_name for identity in task_identities
+    ))
+    return [Issue(
+        code="SHOT_VISIBLE_IDENTITY_NOT_GROUNDED",
+        severity=IssueSeverity.BLOCKER,
+        category="structural",
+        subject=f"storyboard_checkpoint:{episode_id}:{shot.shot_no}",
+        message=(
+            f"第 {shot.shot_no} 镜的持久可见身份 {list(unexpected.values())} "
+            f"不属于本镜叙事任务；本镜 visible_entity_ids 仅绑定 {task_names}"
+        ),
+        evidence={
+            "path": f"shots[{max(0, shot.shot_no - 1)}]",
+            "rule_id": "shot_visible_identity_relation",
+            "task_identity_ids": sorted(task_identity_ids),
+            "unexpected_identity_ids": sorted(unexpected),
+        },
+        repair_hint=(
+            "让 characters、characters_visible 与角色 reference_roles 只引用本镜 "
+            "visible_entity_ids；原文中的非持久背景群体可保留在动作描述中，"
+            "不得改绑为无本镜关系的命名身份"
+        ),
+        repairable=True,
+    )]
 
 
 async def _generate_episode_director_outline(

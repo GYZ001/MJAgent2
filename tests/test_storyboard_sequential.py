@@ -16,10 +16,11 @@ from app.compiler import CompileError
 from app.harness.types import Issue, IssueSeverity
 from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay,
                          InformationItem, Scene, Shot, StoryboardOutline,
-                         StoryboardOutlineShot, World)
+                         StoryboardOutlineShot, NarrativeContinuityPlan, World)
 from app.stages import (StoryboardShotDraft, _storyboard_progress_block,
                         _project_shot_scene_from_outline,
                         _relevant_text_windows, _render_completed_shots_context,
+                        _storyboard_shot_visual_identity_issues,
                         _validate_storyboard_shot_draft)
 
 KEY_LINE = "我一定要查清斗气消失的真相。"
@@ -103,6 +104,40 @@ def test_downstream_prompt_compile_failure_is_a_structural_loop_issue(
     assert issue.code == "SHOT_PROMPT_COMPILE_FAILED"
     assert issue.category == "structural"
     assert issue.severity == IssueSeverity.BLOCKER
+
+
+def test_shot_visual_identity_must_belong_to_current_narrative_task() -> None:
+    bible = _bible()
+    bible.characters.append(Character(
+        name="旁场人物",
+        role="另一场戏中的人物",
+        appearance_canonical="成年男子，灰色长袍，短发",
+    ))
+    screenplay = _screenplay()
+    screenplay.narrative_plan = NarrativeContinuityPlan(scope_id="e2")
+    shot = _shot(1)
+    shot.characters = ["萧炎", "旁场人物"]
+    shot.characters_visible = ["萧炎", "旁场人物"]
+    task = StoryboardOutlineShot(
+        shot_no=1,
+        visible_entity_ids=["萧炎"],
+    )
+
+    issues = _storyboard_shot_visual_identity_issues(
+        shot,
+        task,
+        bible,
+        screenplay,
+        episode_id="e2",
+    )
+
+    assert [issue.code for issue in issues] == [
+        "SHOT_VISIBLE_IDENTITY_NOT_GROUNDED"
+    ]
+    assert issues[0].category == "structural"
+    assert issues[0].severity == IssueSeverity.BLOCKER
+    assert issues[0].evidence["task_identity_ids"] == ["萧炎"]
+    assert issues[0].evidence["unexpected_identity_ids"] == ["旁场人物"]
 
 
 def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bool,
