@@ -559,6 +559,10 @@ def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
     assert "window.confirm(`确认恢复" not in source
     assert "查看分镜台 →" in source
     assert "go('board', projectId, ep.id)" in source
+    assert "storyboardTaskNotice" not in source
+    assert "EpisodeStatusStamp" not in source
+    assert "分镜生成未完成" not in source
+    assert "查看分镜错误详情" not in source
     assert "必保留原文台词" not in source
     assert "/target-duration" not in source
     assert "required_dialogue" not in source

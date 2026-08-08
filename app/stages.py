@@ -8384,12 +8384,8 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
         main_rule = (
             "- 这是纯环境图：画面无人是合格要求，绝不能因没有人物、角色锚点、动作或互动而扣分。\n"
             "- expectation_match 的主项是场景语义与环境细节；场景名称和预期描述中的明确要求都要核对。\n"
-            "- space_type_matches 只判断室内外和地点大类。仅当画面实际成为另一类地点时返回 false，"
-            "例如电影院门厅画成海堤、室外街廊、住宅或普通房间。售票口大小、柜台形式、内部通道是否"
-            "完全封闭、灯箱/吸音墙/铜铃等陈设缺失，只写入 issues 并降低 expectation_match，"
-            "不得因此把 space_type_matches 设为 false。\n"
-            "- 输出必须自洽：如果 issues 写出“场景并非预期地点”“实际为另一地点”或同义结论，"
-            "space_type_matches 必须为 false；不得一边声明错地点，一边返回 true。"
+            "- space_type_matches 只判断室内外和地点大类；layout_detail_matches 单独判断布局、陈设与结构细节。\n"
+            "- material_contract_matches 单独判断画面材质是否满足预期描述。三个字段必须根据各自语义独立填写。"
         )
     else:
         anchors = "\n".join(character_anchors) or "（缺少角色锚点）"
@@ -8432,15 +8428,19 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
 纯环境资产还必须输出可机器判断的观察事实；不能确认时使用 null，禁止猜测：
 - person_count: 识别到的人物数量（int 或 null）
 - watermark_detected: 是否检出任意水印/Logo（bool 或 null）
+- watermark_occluding: 水印/Logo 是否遮挡主体或关键场景结构（bool 或 null）
 - forbidden_text_detected: 是否检出不属于场景合理陈设的字幕、角标、随机字形或叠字（bool 或 null）
+- forbidden_text_is_provider_mark: 检出的多余文字是否全部来自同一供应商标识（bool 或 null）
 - space_type_matches: 室内外及空间类型是否符合预期（bool 或 null）
+- layout_detail_matches: 布局、陈设与结构细节是否符合预期（bool 或 null）
+- material_contract_matches: 材质是否符合预期描述（bool 或 null）
 
 评分硬规则（务必遵守）：
 {main_rule}
 - overall 不得高于 expectation_match：动作/朝向/互动不对就是不合格，画面再干净、画风再连贯也不能给高 overall。
 - issues 里必须逐条点明当前主体、作用对象、空间关系、起止条件或完成条件的具体不符之处，供下一版定向改正。
 
-只输出 JSON：{{"expectation_match": float, "continuity": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "forbidden_text_detected": bool|null, "space_type_matches": bool|null, "issues": [str], "uncertainties": [str]}}"""
+只输出 JSON：{{"expectation_match": float, "continuity": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "watermark_occluding": bool|null, "forbidden_text_detected": bool|null, "forbidden_text_is_provider_mark": bool|null, "space_type_matches": bool|null, "layout_detail_matches": bool|null, "material_contract_matches": bool|null, "issues": [str], "uncertainties": [str]}}"""
     frames = [image_b64] + ([prev_image_b64] if prev_image_b64 else [])
     raw = await hiagent.vlm_check(
         frames, expectation,
@@ -8453,71 +8453,16 @@ async def review_scene_image(image_b64: str, frame_desc: str, scene_setting: str
     defaults = {"continuity": 1.0} if not prev_image_b64 else None
     result = _parse_qa_result(raw, ["expectation_match", "continuity", "clean_frame"], defaults=defaults)
     if ignore_non_occluding_watermark:
-        original_issues = [str(item) for item in (result.get("issues") or [])]
-
-        def _provider_corner_mark(issue: str) -> bool:
-            lower = issue.lower()
-            mentions_watermark = any(
-                token in lower for token in ("watermark", "logo", "水印", "ai生成")
-            )
-            corner_position = any(
-                token in lower for token in (
-                    "右下角", "左下角", "右上角", "左上角",
-                    "corner", "lower right", "lower left", "upper right", "upper left",
-                )
-            )
-            critical_occlusion = any(
-                token in lower for token in (
-                    "主体", "关键结构", "主要结构", "核心区域", "中央", "中心",
-                    "大面积", "人物", "脸部", "五官", "main subject", "critical",
-                    "central", "center", "large area",
-                )
-            )
-            mentions_occlusion = any(
-                token in lower for token in ("occlud", "遮挡", "遮住", "覆盖")
-            )
-            return mentions_watermark and (
-                (corner_position and not critical_occlusion)
-                or not mentions_occlusion
-            )
-
-        provider_mark_reported = any(_provider_corner_mark(item) for item in original_issues)
-        watermark_reported = (
-            result.get("watermark_detected") is True
-            or provider_mark_reported
-        )
-        occluding_watermark = any(
-            _provider_corner_mark(item) is False
-            and any(token in item.lower() for token in ("watermark", "logo", "水印", "ai生成"))
-            and any(token in item.lower() for token in ("occlud", "遮挡", "遮住", "覆盖主体"))
-            for item in original_issues
-        )
-        result["issues"] = [item for item in original_issues if not _provider_corner_mark(item)]
-        if watermark_reported and not occluding_watermark:
+        watermark_reported = result.get("watermark_detected") is True
+        watermark_occluding = result.get("watermark_occluding")
+        if watermark_reported and watermark_occluding is False:
             # Preserve the observed fact for audit, while explicitly telling
             # the deterministic policy that this provider mark is allowed by
             # the configured practical-quality mode.
-            result["watermark_detected"] = True
             result["non_occluding_provider_watermark"] = True
-            remaining_text_issues = [
-                item for item in result["issues"]
-                if any(token in item.lower() for token in (
-                    "字幕", "角标", "叠字", "随机文字", "多余文字", "caption", "overlay text",
-                ))
-            ]
-            if result.get("forbidden_text_detected") is True and not remaining_text_issues:
-                result["forbidden_text_is_provider_mark"] = True
             warnings = [str(item) for item in (result.get("warnings") or []) if str(item).strip()]
             warnings.append("检测到不遮挡主体的供应商角落标识，按实用质量模式不阻断采用")
             result["warnings"] = list(dict.fromkeys(warnings))
-        if original_issues and not result["issues"]:
-            result["clean_frame"] = 1.0
-            expectation_score = _score_or_none(result.get("expectation_match")) or 0.0
-            continuity_score = _score_or_none(result.get("continuity")) or 0.0
-            result["overall"] = round(
-                min(expectation_score, (expectation_score + continuity_score + 1.0) / 3),
-                3,
-            )
     # 动作/朝向/互动是关键帧的主项：把 overall 夹到不超过 expectation_match，避免"画面干净但动作不对"
     # 被 continuity/clean_frame 拉高均值而蒙混过审（VLM 即便没遵守上面的硬规则，这里也强制生效）。
     em = _score_or_none(result.get("expectation_match"))

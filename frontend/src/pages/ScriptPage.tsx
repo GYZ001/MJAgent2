@@ -13,11 +13,11 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import DecisionDialog from '../components/DecisionDialog'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
-import { EpisodeStatusStamp, ScreenplayStatusStamp } from '../components/ProductionStatusStamp'
+import { ScreenplayStatusStamp } from '../components/ProductionStatusStamp'
 import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
-import { screenplayTaskNotice, storyboardTaskNotice } from '../lib/productionNotices'
+import { screenplayTaskNotice } from '../lib/productionNotices'
 import { paginateItems, paginateManuscript, paginateSpine } from './scriptReaderPagination'
 
 type EditorSection = 'spine' | 'body' | 'scenes' | 'evidence'
@@ -150,9 +150,6 @@ export default function ScriptPage() {
   const script = draft ?? ep?.screenplay ?? null
   const editing = draft !== null
   const screenplayNotice = ep ? screenplayTaskNotice(ep) : null
-  const storyboardNotice = ep
-    ? storyboardTaskNotice(ep, ep.storyboard_status?.state)
-    : null
 
   const localDraftKey = ep ? `manju:screenplay-draft:${projectId}:${ep.id}` : ''
   const draftEpisodeId = ep?.id
@@ -528,7 +525,7 @@ export default function ScriptPage() {
         error={error}
         hasData={false}
         objectName="剧本台"
-        loadingText="正在加载剧本、本集状态与分镜进度…"
+        loadingText="正在加载剧本与本集状态…"
         emptyText="未找到可展示的剧本数据，请刷新后重试。"
         onRetry={() => void refresh()}
       >
@@ -537,13 +534,11 @@ export default function ScriptPage() {
     )
   }
 
-  const state: Pick<ScreenplayState, 'code' | 'message' | 'recommended_action' | 'publish_blocked' | 'reason'> = ep.screenplay_state ?? {
-    code: 'unknown',
+  const state: Pick<ScreenplayState, 'message' | 'recommended_action'> = ep.screenplay_state ?? {
     message: '状态同步中',
     recommended_action: 'refresh',
-    publish_blocked: true,
-    reason: '',
   }
+  const screenplayStateMessage = ep.screenplay_status === 'ready' ? '剧本已交付' : state.message
   const screenplayGenerateDisabledReason = busy
     ? '正在处理上一项操作'
     : ''
@@ -603,9 +598,8 @@ export default function ScriptPage() {
       <section className="card script-toolbar">
         <div className="screenplay-primary-row">
           <div className="screenplay-state-copy">
-            <div><ScreenplayStatusStamp status={ep.screenplay_status} /> <EpisodeStatusStamp status={ep.status} issue={storyboardNotice?.message} /></div>
-            <strong>{state.message}</strong>
-            {state.reason && <small>{state.reason}</small>}
+            <div><ScreenplayStatusStamp status={ep.screenplay_status} /></div>
+            <strong>{screenplayStateMessage}</strong>
           </div>
           <div className="screenplay-primary-actions">
             {primaryAction()}
@@ -699,7 +693,7 @@ export default function ScriptPage() {
           <div className="screenplay-detail-grid">
             <div className="kv"><b>当前分集</b>第{numToCn(ep.episode_no)}集</div>
             <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}{!script?.source_text_range && <em>推断显示</em>}</div>
-            <div className="kv"><b>状态快照</b>v{ep.screenplay_state?.version ?? 0} · {ep.screenplay_state?.code ?? 'unknown'}</div>
+            <div className="kv"><b>剧本状态</b>{ep.screenplay_status ?? 'unknown'}</div>
             {ep.screenplay_production && (
               <div className="kv"><b>当前阶段</b>
                 {ep.screenplay_production.phase_label ?? ep.screenplay_production.phase} ·
@@ -726,21 +720,12 @@ export default function ScriptPage() {
             detailLabel={screenplayNotice.severity === 'error' ? '查看剧本错误详情' : '查看剧本处理详情'}
           />
         )}
-        {storyboardNotice && (
-          <OperationError
-            title={storyboardNotice.severity === 'error' ? '分镜生成未完成' : '分镜任务已暂停'}
-            message={storyboardNotice.message}
-            guidance="已有镜头与安全恢复点会保留。请到分镜台按当前状态继续处理。"
-            variant={storyboardNotice.severity}
-            detailLabel={storyboardNotice.severity === 'error' ? '查看分镜错误详情' : '查看暂停详情'}
-          />
-        )}
       </section>
 
       <div className="workspace-gap" />
 
       {!script ? (
-        <div className="empty screenplay-mobile-summary"><div className="big">剧</div>{state.message}<br />请使用顶部唯一主操作</div>
+        <div className="empty screenplay-mobile-summary"><div className="big">剧</div>{screenplayStateMessage}<br />请使用顶部唯一主操作</div>
       ) : editing ? (
         <ScreenplayEditor
           draft={draft!}

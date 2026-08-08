@@ -487,18 +487,44 @@ def _screenplay_fallback_status(ep) -> str:
 def recover_screenplay_tasks() -> int:
     """Resume only work that was actually interrupted by a service restart."""
     from app.generation_concurrency import PRIORITY_RECOVERY
+    from app.production.screenplay_authority import (
+        resolve_current_screenplay_authority,
+    )
 
     conn = get_conn()
     published_rows = conn.execute(
-        "SELECT * FROM episodes WHERE screenplay_status='ready' "
-        "AND screenplay_artifact_id IS NOT NULL"
+        """SELECT *
+             FROM episodes
+            WHERE screenplay_artifact_id IS NOT NULL
+              AND (
+                    screenplay_status='ready'
+                    OR (
+                        screenplay_status='failed'
+                        AND active_screenplay_run_id IS NULL
+                    )
+                  )"""
     ).fetchall()
     for published in published_rows:
         try:
-            valid = _screenplay_ready(dict(published))
+            if published["screenplay_status"] == "ready":
+                valid = _screenplay_ready(dict(published))
+            else:
+                resolve_current_screenplay_authority(
+                    str(published["id"]),
+                    conn=conn,
+                )
+                valid = True
         except Exception:
             valid = False
         if valid:
+            if published["screenplay_status"] == "failed":
+                conn.execute(
+                    "UPDATE episodes SET screenplay_status='ready',"
+                    "screenplay_error=NULL,screenplay_updated_at=? WHERE id=?",
+                    (now(), published["id"]),
+                )
+            continue
+        if published["screenplay_status"] != "ready":
             continue
         conn.execute(
             "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,"
