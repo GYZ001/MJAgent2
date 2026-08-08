@@ -581,7 +581,7 @@ def test_manual_retry_requires_confirmation_for_unverified_provider_charge(monke
     assert confirmed["job"]["status"] == "queued"
 
 
-def test_manual_retry_rejects_terminal_provider_failure(monkeypatch) -> None:
+def test_manual_retry_rejects_typed_terminal_provider_failure(monkeypatch) -> None:
     import app.system_api as system_api
 
     conn = _conn()
@@ -592,12 +592,13 @@ def test_manual_retry_rejects_terminal_provider_failure(monkeypatch) -> None:
            ) VALUES('v-failed','s1',1,'p','i1','failed','provider-task-1',1)"""
     )
     conn.execute(
-        """INSERT INTO jobs(
-               id, kind, status, version_id, error, created_at, updated_at
-           ) VALUES(
-               'j-failed','video','failed','v-failed',
-               'Seedance 任务失败：内容审核未通过',1,1
-           )"""
+            """INSERT INTO jobs(
+                   id, kind, status, version_id, error, provider_create_state,
+                   created_at, updated_at
+               ) VALUES(
+                   'j-failed','video','failed','v-failed',
+                   '任意上游错误','model_rejected',1,1
+               )"""
     )
     conn.commit()
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)

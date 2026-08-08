@@ -5526,79 +5526,19 @@ def _shot_narrative_plan_context(
     screenplay: EpisodeScreenplay,
     brief: StoryboardOutlineShot | None,
 ) -> str:
-    """Project the transitive authority-graph neighborhood for one shot.
-
-    Node selection follows declared IDs and graph references.  It does not
-    classify words, genres, identities, or issue types.  The complete graph is
-    still consumed while compiling the outline; a per-shot fallback only needs
-    the nodes reachable from its already-approved task.
-    """
+    """Render the approved per-shot graph projection without replaying the episode graph."""
     plan = screenplay.narrative_plan
     if plan is None:
         return "【本镜叙事权威图投影】缺失；新生产不得生成分镜。\n"
     if brief is None:
         return _compact_narrative_plan_context(screenplay)
-
-    def _strings(value: Any):
-        if isinstance(value, str):
-            if value:
-                yield value
-        elif isinstance(value, dict):
-            for nested in value.values():
-                yield from _strings(nested)
-        elif isinstance(value, (list, tuple, set)):
-            for nested in value:
-                yield from _strings(nested)
-
-    nodes: dict[str, tuple[str, BaseModel]] = {}
-    ordered_fields: list[str] = []
-    for field_name in plan.__class__.model_fields:
-        collection = getattr(plan, field_name, None)
-        if not isinstance(collection, list):
-            continue
-        for item in collection:
-            if not isinstance(item, BaseModel):
-                continue
-            identity = ""
-            for item_field in item.__class__.model_fields:
-                candidate = getattr(item, item_field, None)
-                if item_field.endswith("_id") and isinstance(candidate, str) and candidate:
-                    identity = candidate
-                    break
-            if not identity:
-                continue
-            nodes[identity] = (field_name, item)
-            if field_name not in ordered_fields:
-                ordered_fields.append(field_name)
-
-    referenced = set(_strings(brief.model_dump(mode="json")))
-    selected: set[str] = set()
-    frontier = set(referenced) & set(nodes)
-    while frontier:
-        node_id = frontier.pop()
-        if node_id in selected:
-            continue
-        selected.add(node_id)
-        node_payload = nodes[node_id][1].model_dump(mode="json")
-        frontier.update(
-            value for value in _strings(node_payload)
-            if value in nodes and value not in selected
-        )
-
-    payload: dict[str, Any] = {
+    payload = {
         "contract_version": plan.contract_version,
         "scope_id": plan.scope_id,
+        "approved_shot_task": brief.model_dump(mode="json"),
     }
-    for field_name in ordered_fields:
-        items = [
-            item.model_dump(mode="json")
-            for node_id, (node_field, item) in nodes.items()
-            if node_field == field_name and node_id in selected
-        ]
-        if items:
-            payload[field_name] = items
     return (
-        "【本镜叙事权威图投影·按 ID 关系从完整权威图闭包取得】\n"
+        "【本镜叙事权威图投影·已由完整权威图编译并通过确定性校验】\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         + "\n"
     )
@@ -5775,24 +5715,51 @@ def _storyboard_key_content_block(
     from app.validators import key_line_catalog
     catalog = key_line_catalog(screenplay)
     if catalog:
-        lines_text = "\n".join(f"- {kid}｜{text}" for kid, text in catalog.items())
+        catalog_items = list(catalog.items())
+        if brief is not None:
+            current_key_line_ids = set(brief.key_line_ids or [])
+            catalog_items = [
+                (key_line_id, text)
+                for key_line_id, text in catalog_items
+                if key_line_id in current_key_line_ids
+            ]
+        lines_text = "\n".join(
+            f"- {key_line_id}｜{text}"
+            for key_line_id, text in catalog_items
+        ) or "（本镜未分配关键台词）"
     else:
         lines_text = "\n".join(f"- {ln}" for ln in key_lines) or "（剧本未单列，请从完整剧本文本中提取主线对白）"
-    points_text = "\n".join(f"- {pt}" for pt in key_points) or "（剧本未单列，请从完整剧本文本中提取主线剧情）"
-    blocks: list[str] = [
-        _shot_narrative_plan_context(screenplay, brief)
-        if brief is not None else _compact_narrative_plan_context(screenplay),
-        "",
-    ]
+    points_text = (
+        f"- {brief.covers or brief.beat}"
+        if brief is not None else
+        ("\n".join(f"- {pt}" for pt in key_points)
+         or "（剧本未单列，请从完整剧本文本中提取主线剧情）")
+    )
+    blocks: list[str] = (
+        [
+            "【叙事连续性】本镜任务已由完整权威图编译；"
+            "执行下方本镜大纲任务，不得重新分配 ID 或剧情归属。",
+            "",
+        ]
+        if brief is not None else
+        [_compact_narrative_plan_context(screenplay), ""]
+    )
     spine = screenplay.plot_spine
     if spine:
-        beats = spine.spine_beats or []
+        beats = list(spine.spine_beats or [])
+        if brief is not None:
+            current_spine_ids = set(brief.spine_beat_ids or [])
+            beats = [beat for beat in beats if beat.beat_id in current_spine_ids]
         beat_lines = "\n".join(
             f"- {b.beat_id}｜{b.who}｜{b.does}→{b.turn}"
             + ("" if b.must_keep else "（可删过渡）")
             for b in beats
         ) or "（无）"
-        drops = "\n".join(f"- {d}" for d in (spine.drop_list or []) if d) or "（无）"
+        drops = (
+            "（完整大纲编译阶段已执行，本镜不得拍摄大纲任务之外的内容）"
+            if brief is not None else
+            ("\n".join(f"- {d}" for d in (spine.drop_list or []) if d) or "（无）")
+        )
         blocks.extend([
             "【主线骨架 plot_spine】（必须覆盖 must_keep 节拍；drop_list 禁止拍摄）：",
             f"- premise：{spine.episode_premise or screenplay.episode_premise or '（无）'}",
@@ -8426,7 +8393,17 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
         if info_id in valid_info_ids
     ] if brief is not None else []
     ledger_context = ledger_context_for_shot(screenplay, completed_shots, current_info_ids)
-    ledger_block = json.dumps(ledger_context, ensure_ascii=False, indent=2)
+    ledger_prompt_context = ledger_context
+    if narrative_authority:
+        ledger_prompt_context = {
+            "delivered_ids": list(ledger_context.get("delivered_ids") or [])[-5:],
+            "current_ids": list(ledger_context.get("current_ids") or []),
+            "pending_count": len(ledger_context.get("pending_ids") or []),
+            "delivered_items": list(ledger_context.get("delivered_items") or [])[-5:],
+            "current_items": list(ledger_context.get("current_items") or []),
+            "do_not_repeat": list(ledger_context.get("do_not_repeat") or [])[-5:],
+        }
+    ledger_block = json.dumps(ledger_prompt_context, ensure_ascii=False, indent=2)
     brief_block = ""
     if brief is not None:
         brief_block = (
@@ -8502,6 +8479,17 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             + "\n不得原样返回上一个候选；若报错涉及相邻镜头，必须同时参照上一镜的景别与尾状态。\n"
         )
 
+    character_state_block = (
+        "\n".join(screenplay.character_state_changes)
+        if not narrative_authority else
+        (
+            f"本镜入态：{brief.state_in or '（未填）'}\n"
+            f"本镜动作：{brief.primary_action or brief.beat}\n"
+            f"本镜出态：{brief.state_out or '（未填）'}"
+            if brief is not None else "（按本镜大纲任务承接）"
+        )
+    )
+
     prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》按顺序生成【第 {shot_no} 镜】。
 
 你现在处于“逐镜头分镜台”：每次只输出一个镜头。前面已经 QA 通过的镜头不可重写，只能把它们作为上下文，继续往后承接剧情。
@@ -8520,7 +8508,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 {screenplay_window}
 
 人物状态变化：
-{chr(10).join(screenplay.character_state_changes) if screenplay.character_state_changes else '（无单列项）'}
+{character_state_block or '（无单列项）'}
 
 情绪曲线：
 {screenplay.emotional_curve}

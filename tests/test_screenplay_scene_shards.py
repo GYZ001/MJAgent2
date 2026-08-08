@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import uuid
 
 import pytest
 from pydantic import ValidationError
@@ -22,6 +23,7 @@ from app.screenplay_scene_shards import (
     UnresolvedParticipant,
     blueprint_content_hash,
     build_screenplay_scene_shard_plans,
+    generate_screenplay_envelope,
     generate_screenplay_scene_shards,
     merge_screenplay_scene_shards,
     validate_screenplay_scene_shard,
@@ -319,3 +321,52 @@ def test_owner_change_after_provider_response_prevents_artifact_persist(monkeypa
     assert evidence_repository.latest_artifact(
         "screenplay_scene_shard", "episode", episode_id,
     ) is None
+
+
+def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    prompts: dict[str, str] = {}
+
+    async def fake_structured(messages, **kwargs):
+        meta = kwargs["call_meta"]
+        prompts[str(meta["stage_key"] + ":" + meta.get("shard_id", ""))] = messages[0]["content"]
+        if meta["stage_key"] == "screenplay_envelope":
+            return _envelope(blueprint)
+        plan = next(item for item in plans if item.shard_id == meta["shard_id"])
+        return _shard(plan, blueprint)
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    episode_id = f"ep-shard-prompt-scope-test-{uuid.uuid4()}"
+    asyncio.run(generate_screenplay_envelope(
+        episode={"id": episode_id, "episode_no": 1, "title": "测试"},
+        blueprint=blueprint,
+        identity_registry=[],
+        identity_registry_hash="identity-hash",
+    ))
+    asyncio.run(generate_screenplay_scene_shards(
+        episode={"id": episode_id, "episode_no": 1},
+        source_text=SOURCE,
+        blueprint=blueprint,
+        identity_registry=[],
+        identities=_identities(),
+        plans=plans,
+    ))
+    envelope_prompt = prompts["screenplay_envelope:"]
+    assert "甲推门进入。" not in envelope_prompt
+    assert "乙接过钥匙并回答。" not in envelope_prompt
+    first_prompt = prompts["screenplay_scene_shards:SS001"]
+    second_prompt = prompts["screenplay_scene_shards:SS002"]
+    assert "甲推门进入。" in first_prompt
+    assert "乙接过钥匙并回答。" not in first_prompt
+    assert "乙接过钥匙并回答。" in second_prompt
+    assert "甲推门进入。" not in second_prompt

@@ -5,7 +5,8 @@
 - Episode Mapping 由确定性代码执行，一章严格对应一集，不调用模型。
 - 每个视频镜头由分镜模型按单一连续动作与口播密度选择 5~10 秒整数时长；选择能自然完成内容的最短时长，超过 10 秒仍放不下或出现不同节拍时拆成相邻镜头。
 - Storyboard 逐镜循环每轮只接受单数 `shot`；超出 10 秒口播容量的大纲内容由 Harness 在模型调用前确定性拆成多个 checkpoint，模型不得用 `shots` 数组绕过合同。
-- 功能性路人使用确定性通用标签白名单：可以入画、开口，但必须在画面描述中明确调度，且不创建持久角色圣经身份；其它圣经外具体姓名继续由硬门禁拒绝。
+- 功能身份由 owned SRC、`source_instance_key`、`identity_group` 和 authority ID 确定；禁止用姓名、职业、年龄、服饰、题材或称谓后缀白名单推断实体同一性。
+- 新 validator 必须直接填写 `Issue.category=structural|quality|operational`；AgentLoop 不读取错误码或文案决定修复类别。`must_fix/runtime_blocking` 独立决定发布门禁。
 - 模型、文件校验器失败不能伪装成通过；恢复结果不能独立触发自动采用。
 - 付费媒体必须先原子预留预算，并由 lease 的 CAS 所有者执行。
 - T5 交付包必须同时具备文件门禁、人工决定、完整血缘和至少 90% 证据覆盖率。
@@ -37,6 +38,15 @@
 - provider 不可取消时，用户取消会把本地任务标为 `abandoned`；上游结果不再采用，预算预留释放。
 - 预算暂停后先调整单集上限，再调用剧集恢复接口；原 job 和 reservation 被复用。
 - Storyboard 按逐镜 Artifact checkpoint 恢复，已通过镜头不重做。
+- 剧本 Baseline 前按 Blueprint/identity/Envelope/Scene Shard/Merged IR 保存 checkpoint。
+  恢复时只有 contract version、Blueprint hash、identity registry hash、source hash 和 boundary hash
+  全部相同的 validated Artifact 可复用；raw/candidate 输出绝不能用于业务恢复。页面显示
+  `can_resume_baseline` 时使用“继续首版场次生成”，已有完整 working Document 时使用
+  `can_resume_repair` 的“继续完整剧本校验”。
+- 若某个 Scene Shard 失败，只重试该 shard；其余 validated shard 不回滚。若 provider 回包时
+  `active_screenplay_run_id` 已变化，旧 worker 必须丢弃结果且不得写 Artifact/episode 状态。
+- 排查重复计费时在 `/api/system/calls` 按 `operation_id/stage/substage/shard_id` 对照 Artifact 血缘；
+  format attempt、semantic attempt、local recovery、输入输出字符数和 shard 数必须可追踪。
 - 分镜台在「已有落库镜头 + script_error + status 为 scripted/script_failed」时显示“从镜 N 继续”
   （含追加失败、取消保留 checkpoint、单镜需修改等）；该入口创建带 `parent_run_id` 的续跑 Run，
   并以 `resume=true` 从下一镜生成。“重新生成整版”才会主动清空旧镜头。
@@ -69,3 +79,9 @@ npm.cmd run build
 ```
 
 默认阈值只允许通过真实双轨结果调整。每次调整需保留 benchmark 记录、样本项目、旧/新指标、回归项和决定人；不得为了让门禁变绿而降低证据覆盖率或放宽重复计费/状态漂移上限。
+
+剧本 M5 使用 `scripts/record_screenplay_dual_track.py` 记录至少 30 集、每个 Track 每集至少
+2 次的同模型同输入结果。必须提供真实 provider Token/时间、调用数、格式/语义修复、保真轮次、
+Document Patch、来源/对白证据、身份冲突、runtime gate 和盲评差值；脚本只验证和落库，不生成
+或伪造测量。出口门槛为 Token 降幅至少 30%、P90 墙钟降幅至少 25%、质量差 95% CI 下界
+不低于 -2%，重复计费和状态漂移为 0。

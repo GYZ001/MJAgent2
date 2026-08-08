@@ -328,7 +328,10 @@ def test_manual_publish_turns_identity_model_failure_into_retriable_screenplay_e
     async def unavailable(*_args, **_kwargs):
         raise RuntimeError("provider unavailable")
 
-    monkeypatch.setattr(portraits, "ensure_cards_for_text", unavailable)
+    monkeypatch.setattr(
+        "app.identity_adjudication.adjudicate_screenplay_document_identities",
+        unavailable,
+    )
     with enter_handler(), pytest.raises(HTTPException) as caught:
         asyncio.run(api.edit_screenplay("e1", {
             "screenplay": changed.model_dump(mode="json"),
@@ -336,8 +339,8 @@ def test_manual_publish_turns_identity_model_failure_into_retriable_screenplay_e
         }))
 
     assert caught.value.status_code == 422
-    assert caught.value.detail["code"] == "screenplay_character_discovery_failed"
-    assert "剧本阶段重试" in caught.value.detail["errors"][0]
+    assert caught.value.detail["code"] == "screenplay_identity_adjudication_failed"
+    assert "provider unavailable" in caught.value.detail["errors"][0]
     row = conn.execute(
         "SELECT screenplay_artifact_id,screenplay_json FROM episodes WHERE id='e1'"
     ).fetchone()
@@ -410,7 +413,7 @@ def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(
     ).fetchone()["screenplay_artifact_id"] == "art_sp_old"
 
 
-def test_manual_screenplay_edit_uses_model_identity_resolution_before_publish(monkeypatch) -> None:
+def test_manual_screenplay_edit_rejects_identity_without_owned_source_evidence(monkeypatch) -> None:
     _seed_episode(with_artifact=True)
     changed = _valid_script()
     changed.scene_outline[0].characters.append("青衣人")
@@ -433,24 +436,19 @@ def test_manual_screenplay_edit_uses_model_identity_resolution_before_publish(mo
         }]}, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
-    with enter_handler():
-        result = asyncio.run(api.edit_screenplay("e1", {
+    with enter_handler(), pytest.raises(HTTPException) as caught:
+        asyncio.run(api.edit_screenplay("e1", {
             "screenplay": changed.model_dump(mode="json"),
             "expected_version": "art_sp_old",
         }))
 
-    assert result["saved"] is True
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "screenplay_character_identity_unresolved"
     row = db.get_conn().execute(
         "SELECT screenplay_json,screenplay_character_resolutions FROM episodes WHERE id='e1'"
     ).fetchone()
-    published = json.loads(row["screenplay_json"])
-    resolutions = json.loads(row["screenplay_character_resolutions"])
-    assert "青衣人" in published["scene_outline"][0]["characters"]
-    assert "路人甲" not in published["scene_outline"][0]["characters"]
-    assert resolutions[0]["source_label"] == "青衣人"
-    assert resolutions[0]["canonical_name"] == "青衣人"
-    assert resolutions[0]["resolution"] == "functional_identity"
-    assert resolutions[0]["authority_id"].startswith("functional:")
+    assert "青衣人" not in json.loads(row["screenplay_json"])["scene_outline"][0]["characters"]
+    assert row["screenplay_character_resolutions"] in {None, "[]"}
 
 
 def test_unchanged_legacy_screenplay_is_canonicalized_before_noop_return(monkeypatch) -> None:
@@ -497,8 +495,7 @@ def test_unchanged_legacy_screenplay_is_canonicalized_before_noop_return(monkeyp
     resolutions = json.loads(conn.execute(
         "SELECT screenplay_character_resolutions FROM episodes WHERE id='e1'"
     ).fetchone()["screenplay_character_resolutions"])
-    assert resolutions[0]["canonical_name"] == "青衣人"
-    assert resolutions[0]["resolution"] == "functional_identity"
+    assert resolutions == []
 
 
 def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:

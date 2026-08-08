@@ -3,7 +3,7 @@
 > 对应 PRD §4.2~§4.4。每个 LLM 阶段 = 一个 prompt 模板 + 一个 Pydantic Schema + 一个业务规则校验器 + 修复回路。
 > 本文件中的 prompt 是可直接使用的初稿；任何修改必须先跑金样回归（PRD §7）再合入。
 
-## 当前生产合同（Blueprint 1.2.1 + IR 5.4，兼容 v3/v4 发布结构）
+## 当前生产合同（Blueprint 1.2.1 + IR Prompt 5.5 / IR v1.4，兼容 v3/v4 发布结构）
 
 - 剧本写作前先生成 `screenplay-narrative-blueprint.v2`。模型只识别时间域、单一地点、
   人物位置、状态事实、重大决定依据和行为自主性；程序根据节点确定性生成
@@ -26,8 +26,10 @@
   程序以来源称谓生成唯一显示名；未命名群众使用地点与戏剧职责构成稳定实体，不使用
   按出现顺序生成的临时编号，也不使用姓名黑白名单。
 
-- 剧本 Baseline 从 `screenplay-generation-ir.v1.3` 紧凑语义 IR 生成。模型负责人物、
-  场次有序单元、对白、事件与观众意图；后端从 events 确定性生成 beats、动作阶段、
+- 剧本 Baseline 使用 `screenplay-envelope.v1` + `screenplay-scene-shard.v1` 生成并合并为
+  `screenplay-generation-ir.v1.4`。Envelope 只接收 Blueprint 全局摘要、集元数据和冻结
+  identity registry，不接收完整原文；Scene Shard 只接收其 Blueprint scene plans、owned
+  SRC、边界状态和冻结身份。模型负责场次有序单元、对白与观众意图；后端从 units 确定性生成 events、beats、动作阶段、
   audience priors、稳定 ID、
   精确来源 offset、状态重放、双向引用、窗口预算和最终 `EpisodeScreenplay`。
 - 发布字段没有精简：`plot_spine/source_coverage/scene_outline/full_script_text`、
@@ -46,17 +48,19 @@
   `segment_ids/coverage_type/context_note`、单字符串 information、字符串形式的
   familiarity assumption，以及省略的 source_excerpt。归一化只改变容器/字段表示，
   不改写创作语义。
-- IR Baseline 只允许一次完整模型响应。原始响应先保存为
-  `screenplay_generation_ir_raw`，规范化结果保存为 `screenplay_generation_ir`；
-  编译器升级或服务恢复时按输入指纹本地重编译，不再次付费生成。结构问题不得触发
-  “原任务 + 完整候选”的第二次整版重写。
+- 每个 Envelope/Scene Shard 只允许当前小单元的一次格式修复和一次语义修复。原始响应分别
+  保存为 `screenplay_envelope_raw` / `screenplay_scene_shard_raw`，只有 Schema 与业务门禁均通过的
+  normalized Artifact 才能复用。服务恢复按 contract version、Blueprint hash、identity registry
+  hash、source hash 和 boundary hash 复用已验证分片；禁止再次计费生成。
 - 若供应商因长度上限在 events 等程序派生尾部截断，但顶层 `scenes` 数组已由标准 JSON
   decoder 证明完整，系统只恢复完整成员并从 units 重建尾部；不猜测或补闭未完成场次。
-- `v1.3` 不允许未被 event 直接消费的来源段发布；未知 ID、漏段、来源首次入戏顺序错误、
+- `v1.4` 不允许未被 unit 直接消费的来源段发布；未知 ID、漏段、来源首次入戏顺序错误、
   对白错绑来源段、单 unit 过量挂载来源 ID都会在编译阶段失败。
 - `audience` 只作为感知主体，不进入人物身份图；IR 实际引用但未预登记的功能身份按当前
   事件关系生成 contextual identity，不使用姓名或题材白名单。
-- 剧本 IR 输出预算按细粒度来源段数量在 `20480~36864` 内动态计算。单 unit 最多合并
+- 关闭 `screenplay_scene_shards_enabled` 时，旧整版 IR 输出预算仍按细粒度来源段数量在
+  `20480~36864` 内动态计算，仅作为回滚路径。默认候选链每个 Scene Shard 目标 16~24 units、
+  5k~12k JSON 字符，单集分片并发最多 2。单 unit 最多合并
   12 个连续来源段；整集改编净文本不得低于原文的 35%，每 12 个来源段的局部窗口不得
   低于 18%。模型不再重复输出事件；事件、前置状态、完成条件、可观察证据和动作阶段由
   `scenes.units` 确定性派生。旧 `v1.1/v1.2` Artifact 继续按原分段合同恢复。

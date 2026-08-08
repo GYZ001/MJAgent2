@@ -19,6 +19,7 @@ from app.screenplay_ir import (
     ScreenplayGenerationIR,
     ScreenplayIRIdentityConflictError,
     IRIdentity,
+    IRScene,
     prepare_ir_identity_authorities,
 )
 from app.source_excerpt import index_source_segments
@@ -559,22 +560,30 @@ async def adjudicate_screenplay_document_identities(
     if not unresolved:
         return list(episode.get("character_resolutions") or [])
 
+    pseudo_identities = [
+        IRIdentity(
+            key=(
+                "document_identity_"
+                + hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
+            ),
+            display_name=label,
+            source_names=[label],
+            authority_id="",
+            role_type="functional_character",
+            rationale="来自完整 Document 的 typed identity-bearing fields",
+        )
+        for label in unresolved
+    ]
     pseudo = ScreenplayGenerationIR(
         episode_no=int(episode.get("episode_no") or screenplay.episode_no),
-        identities=[
-            IRIdentity(
-                key=(
-                    "document_identity_"
-                    + hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
-                ),
-                display_name=label,
-                source_names=[label],
-                authority_id="",
-                role_type="functional_character",
-                rationale="来自完整 Document 的 typed identity-bearing fields",
-            )
-            for label in unresolved
-        ],
+        identities=pseudo_identities,
+        scenes=[IRScene(
+            key="document-identity-projection",
+            scene_heading="【身份投影】",
+            story_function="只用于未决身份仲裁，不进入剧本正文",
+            summary="完整 Document typed identity-bearing fields",
+            character_keys=[identity.key for identity in pseudo_identities],
+        )],
     )
     await adjudicate_screenplay_ir_identities(
         pseudo,
