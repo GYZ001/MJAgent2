@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import config, textmatch
 from app.character_policy import is_functional_extra
+from app.identity_authority import identity_authority_registry
 from app.schemas import (
     Bible,
     EpisodeScreenplay,
@@ -42,8 +43,8 @@ from app.source_excerpt import (
 from app.spoken_contract import content_char_count
 
 
-IR_VERSION = "screenplay-generation-ir.v1.3"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v1.4"
+IR_VERSION = "screenplay-generation-ir.v1.4"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v1.5"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -55,6 +56,15 @@ _DIALOGUE_FUNCTIONS = {
 
 class ScreenplayIRIdentityConflictError(ValueError):
     """Typed preflight identities still disagree after structural resolution."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        issues: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.issues = list(issues or [])
+        super().__init__(message)
 
 
 def scene_heading_has_multiple_locations(heading: str) -> bool:
@@ -104,6 +114,7 @@ def _as_list(value: Any) -> list[Any]:
 class IRIdentity(BaseModel):
     key: str
     display_name: str
+    authority_id: str = ""
     source_names: list[str] = Field(default_factory=list)
     kind: str = "contextual_character"
     visual_policy: Literal[

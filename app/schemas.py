@@ -1531,13 +1531,6 @@ def _repair_structural_json_delimiters(text: str) -> str:
     in_string = False
     escaped = False
     previous_significant = ""
-    string_started_after = ""
-
-    def next_significant_char(start: int) -> str:
-        index = start
-        while index < len(text) and text[index].isspace():
-            index += 1
-        return text[index] if index < len(text) else "\0"
 
     def next_token_is_object_key(start: int) -> bool:
         index = start
@@ -1574,7 +1567,6 @@ def _repair_structural_json_delimiters(text: str) -> str:
             continue
         if char == '"':
             in_string = True
-            string_started_after = previous_significant
             repaired.append(char)
             continue
         if (

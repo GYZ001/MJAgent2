@@ -33,6 +33,10 @@ from app.evidence.media import record_reference_asset
 from app.errors import ContentGenerationError, code_ref
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
+from app.identity_authority import (
+    normalize_character_resolution,
+    normalize_character_resolutions,
+)
 from app.ingest import chapter_is_stub, chapter_titles_match
 from app.refs import (
     PRODUCTION_APPEARANCE_MAX_CHARS,
@@ -1004,7 +1008,7 @@ def _identity_resolution(
     *,
     reason: str = "",
 ) -> dict:
-    return {
+    return normalize_character_resolution({
         "source_label": str(item.get("source_label") or item.get("name") or "").strip(),
         "canonical_name": canonical_name,
         "resolution": resolution,
@@ -1012,7 +1016,7 @@ def _identity_resolution(
         "evidence": str(item.get("evidence") or "").strip()[:80],
         "future_evidence": str(item.get("future_evidence") or "").strip()[:120],
         "identity_group": str(item.get("identity_group") or "").strip()[:96],
-    }
+    })
 
 
 def _replace_resolved_label(text: str, source_label: str, canonical_name: str) -> str:
@@ -2180,7 +2184,11 @@ def merge_screenplay_character_resolutions(
         canonical_name = str(item.get("canonical_name") or "").strip()
         if not source_label or not canonical_name:
             continue
-        candidate = {**item, "source_label": source_label, "canonical_name": canonical_name}
+        candidate = normalize_character_resolution({
+            **item,
+            "source_label": source_label,
+            "canonical_name": canonical_name,
+        })
         current = merged.get(source_label)
         if current is None:
             merged[source_label] = candidate
@@ -2219,7 +2227,11 @@ def load_screenplay_character_resolutions(conn, episode_id: str) -> list[dict]:
         payload = json.loads(row["screenplay_character_resolutions"] or "[]")
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
-    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+    return (
+        normalize_character_resolutions(payload)
+        if isinstance(payload, list)
+        else []
+    )
 
 
 def persist_screenplay_character_resolutions(
