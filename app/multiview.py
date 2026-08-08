@@ -1985,7 +1985,9 @@ def keyframe_runtime_blocking_failures(qa: dict[str, Any]) -> set[str]:
 
 
 def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
-    """Use the typed identity contract, never a failure-code allow/deny list."""
+    """Use typed identity and runtime contracts, never failure-code lists."""
+    if qa.get("runtime_blocking") is True:
+        return False
     if "identity_contract_passed" in qa:
         return qa.get("identity_contract_passed") is True
     # Compatibility for test fixtures and historical scored rows. New v17

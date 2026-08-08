@@ -26,26 +26,6 @@ LEVEL_ORDER: list[RepairLevel] = ["L0", "L1", "L2", "L3", "L4", "L5", "L6"]
 STALL_ROUNDS = 2
 MAX_CHAIN_CASCADE_DEPTH = 3
 
-_PREFERRED_LEVEL: dict[str, RepairLevel] = {
-    "VIDEO_PROVIDER_TRANSIENT": "L0",
-    "VIDEO_DOWNLOAD_FAILED": "L0",
-    "VIDEO_PROBE_UNAVAILABLE": "L0",
-    "VIDEO_PROVIDER_TIMEOUT": "L1",
-    "VIDEO_FILE_INVALID": "L1",
-    "VIDEO_DURATION_CONTRACT": "L1",
-    "VIDEO_REFERENCE_UNAVAILABLE": "L3",
-    "VIDEO_CHAIN_ANCHOR_BLOCKED": "L3",
-    "VIDEO_PROVIDER_SAFETY": "L4",
-    "VIDEO_PROVIDER_COPYRIGHT": "L4",
-    "VIDEO_PREFLIGHT_BLOCKED": "L5",
-    "VIDEO_HARNESS_DISABLED": "L6",
-    "VIDEO_PROVIDER_UNAVAILABLE": "L6",
-    "VIDEO_BUDGET_EXHAUSTED": "L6",
-    "VIDEO_WALL_CLOCK_EXCEEDED": "L6",
-    "VIDEO_STORYBOARD_CHANGED": "L6",
-}
-
-
 class VideoRepairPlan(BaseModel):
     level: RepairLevel
     strategy: RepairStrategy
@@ -64,7 +44,9 @@ class VideoRepairPlan(BaseModel):
 
 
 def preferred_level_for_code(code: str) -> RepairLevel:
-    return _PREFERRED_LEVEL.get(code, "L1")
+    """Compatibility shim: display codes never prescribe a repair level."""
+    _ = code
+    return "L1"
 
 
 def upgrade_level(level: RepairLevel) -> RepairLevel:
@@ -87,7 +69,10 @@ def strategy_for_level(
     if level == "L2":
         return "retake_directed"
     if level == "L3":
-        if "VIDEO_CHAIN_ANCHOR_BLOCKED" in codes:
+        if any(
+            (issue.evidence or {}).get("repair_mode") == "degrade_chain"
+            for issue in issues
+        ):
             return "degrade_chain"
         return "rebuild_reference"
     if level == "L4":
@@ -105,43 +90,12 @@ def bump_fingerprint_count(counts: dict[str, int], fingerprint: str) -> dict[str
 
 
 def _directed_patch(issues: list[Issue]) -> tuple[list[str], list[str]]:
-    from app.continuity import retry_patch_for_failure
-
-    negatives: list[str] = []
-    critiques: list[str] = []
-    for issue in issues:
-        rule = str((issue.evidence or {}).get("rule_id") or "")
-        if not rule:
-            # map issue code back to classify failure type
-            reverse = {
-                "VIDEO_QA_CHARACTER_DUPLICATE": "character_duplicate",
-                "VIDEO_QA_TEXT_ARTIFACT": "text_error",
-                "VIDEO_QA_STATE_MISMATCH": "state_mismatch",
-                "VIDEO_QA_STORY_REPEAT": "story_repeat",
-                "VIDEO_QA_FUTURE_LEAK": "future_leak",
-                "VIDEO_QA_WRONG_DIALOGUE": "wrong_dialogue",
-                "VIDEO_QA_NEEDS_CROP": "needs_crop",
-                "VIDEO_QA_WRONG_IDENTITY": "wrong_identity",
-                "VIDEO_QA_WRONG_OUTFIT": "wrong_outfit",
-                "VIDEO_QA_SUBJECT_OCCLUSION": "subject_occlusion",
-                "VIDEO_QA_ACTION_MISSING": "action_missing",
-                "VIDEO_QA_PROP_IDENTITY": "prop_identity_mismatch",
-                "VIDEO_QA_PROP_STATE": "prop_state_mismatch",
-                "VIDEO_QA_OBJECT_COUNT": "object_count_mismatch",
-                "VIDEO_QA_CAMERA_AXIS": "wrong_camera_axis",
-                "VIDEO_QA_GEOMETRY": "geometry_guard_unverified",
-            }
-            rule = reverse.get(issue.code, "")
-        if not rule:
-            continue
-        patch = retry_patch_for_failure(rule)
-        for n in patch.get("extra_negative") or []:
-            if n not in negatives:
-                negatives.append(n)
-        hint = patch.get("hint")
-        if hint and hint not in critiques:
-            critiques.append(str(hint))
-    return negatives[:8], critiques[:6]
+    critiques = list(dict.fromkeys(
+        str(issue.repair_hint).strip()
+        for issue in issues
+        if str(issue.repair_hint or "").strip()
+    ))
+    return [], critiques[:6]
 
 
 def route(
@@ -173,17 +127,17 @@ def route(
 
     contract_failures = [
         issue for issue in normalized
-        if str(issue.code).startswith("VIDEO_QA_")
+        if issue.category == "quality"
         and issue.severity == IssueSeverity.BLOCKER
     ]
     score_only = [
         issue for issue in normalized
-        if str(issue.code).startswith("VIDEO_QA_")
+        if issue.category == "quality"
         and issue.severity != IssueSeverity.BLOCKER
     ]
     normalized = [
         issue for issue in normalized
-        if not str(issue.code).startswith("VIDEO_QA_")
+        if issue.category != "quality"
     ] + contract_failures
     if score_only and not normalized:
         codes = [issue.code for issue in score_only]
@@ -236,57 +190,19 @@ def route(
             is_paid=False,
         )
 
-    preferred = max(
-        (preferred_level_for_code(c) for c in codes),
-        key=LEVEL_ORDER.index,
-    )
+    requested_levels = [
+        str((issue.evidence or {}).get("recommended_level") or "L1")
+        for issue in normalized
+    ]
+    requested_levels = [
+        level for level in requested_levels if level in LEVEL_ORDER
+    ] or ["L1"]
+    preferred = max(requested_levels, key=LEVEL_ORDER.index)
     level = preferred
     if current_level and current_level in LEVEL_ORDER:
         # 修复成功后不降级：保留当前层级下限
         if LEVEL_ORDER.index(current_level) > LEVEL_ORDER.index(level):
             level = current_level  # type: ignore[assignment]
-
-    # 特殊暂停码
-    if "VIDEO_PROVIDER_UNAVAILABLE" in codes:
-        return VideoRepairPlan(
-            level="L6",
-            strategy="handoff_human",
-            issue_codes=codes,
-            fingerprint=normalized[0].fingerprint,
-            reason="Provider 长时间不可用",
-            pause_state="PAUSED_EXTERNAL",
-            is_paid=False,
-        )
-    if "VIDEO_BUDGET_EXHAUSTED" in codes or "VIDEO_WALL_CLOCK_EXCEEDED" in codes:
-        return VideoRepairPlan(
-            level="L6",
-            strategy="handoff_human",
-            issue_codes=codes,
-            fingerprint=normalized[0].fingerprint,
-            reason="预算或时长墙用尽",
-            pause_state="WAITING_AUTHORIZATION",
-            is_paid=False,
-        )
-    if "VIDEO_STORYBOARD_CHANGED" in codes:
-        return VideoRepairPlan(
-            level="L6",
-            strategy="handoff_human",
-            issue_codes=codes,
-            fingerprint=normalized[0].fingerprint,
-            reason="分镜 Artifact 已变更",
-            pause_state="WAITING_AUTHORIZATION",
-            is_paid=False,
-        )
-    if "VIDEO_HARNESS_DISABLED" in codes:
-        return VideoRepairPlan(
-            level="L6",
-            strategy="handoff_human",
-            issue_codes=codes,
-            fingerprint=normalized[0].fingerprint,
-            reason="Harness 灰度隔离",
-            pause_state="WAITING_HUMAN",
-            is_paid=False,
-        )
 
     primary_fp = normalized[0].fingerprint
     prior = int(counts.get(primary_fp, 0))
@@ -294,8 +210,11 @@ def route(
         level = upgrade_level(level)
 
     # 致命失败换过参考图后仍出现 → L6
-    from app.video_issues import is_fatal
-    has_fatal = any(is_fatal(i) for i in normalized)
+    has_fatal = any(
+        issue.severity == IssueSeverity.BLOCKER
+        and bool((issue.evidence or {}).get("runtime_blocking"))
+        for issue in normalized
+    )
     if has_fatal and rebuilt_reference:
         level = "L6"
     if fatal_repeat_count >= 3:

@@ -1182,8 +1182,11 @@ const projectBusy = (p: Project | null): boolean => {
   if (
     p.episodes?.some(
       (ep) =>
-        ep.screenplay_status === "queued" ||
-        ep.screenplay_status === "running" ||
+        ep.screenplay_production?.task_active === true ||
+        (ep.screenplay_production == null && (
+          ep.screenplay_status === "queued" ||
+          ep.screenplay_status === "running"
+        )) ||
         ep.status === "scripting" ||
         ep.status === "generating",
     )
@@ -1230,7 +1233,10 @@ function videoSupervisorBusy(ep: Episode): boolean {
  *  空闲时彻底停轮询，避免反复拉取 1MB+ 的分集 payload 拖垮页面。 */
 export const episodeBusy = (ep: Episode | null): boolean => {
   if (!ep) return true; // 首次未拿到数据时，按可能忙碌处理触发首次拉取后的轮询
-  if (ep.screenplay_status === "queued" || ep.screenplay_status === "running") return true;
+  if (ep.screenplay_production?.task_active === true) return true;
+  if (!ep.screenplay_production && (
+    ep.screenplay_status === "queued" || ep.screenplay_status === "running"
+  )) return true;
   // storyboard_status is the run-aware authority.  A stale episode.status can
   // remain "scripting" after a FAILED run; treating that projection as live
   // makes the board poll forever and keeps showing the old running state.

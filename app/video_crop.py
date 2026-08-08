@@ -135,13 +135,18 @@ def try_auto_crop_shot_version(version_id: str) -> dict[str, Any] | None:
         "tail_trim_s": result.get("tail_trim_s"),
         "supervisor_strategy": "auto_crop",
     }
-    # 复制 QA（裁切后构图问题可能缓解，保留原 QA 供对比，标记 crop_applied）
-    qa = json.loads(row["qa_json"] or "{}")
-    if isinstance(qa, dict):
-        qa = dict(qa)
-        qa["crop_applied"] = True
-        fts = [x for x in (qa.get("failure_types") or []) if x != "needs_crop"]
-        qa["failure_types"] = fts
+    # 裁切会改变时间轴和构图；旧 QA 只能作为审计，不能删掉某个失败词后冒充新结论。
+    source_qa = json.loads(row["qa_json"] or "{}")
+    qa = {
+        "status": "unverified",
+        "overall": None,
+        "qa_recovered": True,
+        "crop_applied": True,
+        "runtime_blocking": False,
+        "contract_facts": [],
+        "blocking_facts": [],
+        "source_qa_audit": source_qa if isinstance(source_qa, dict) else {},
+    }
     conn.execute(
         """INSERT INTO shot_versions(
             id, shot_id, version_no, prompt_text, idem_key, status, created_at,

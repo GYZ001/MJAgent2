@@ -14,10 +14,11 @@ from app.identity_authority import (
     identity_authority_registry,
     normalize_character_resolution,
 )
-from app.schemas import Bible, extract_json
+from app.schemas import Bible, EpisodeScreenplay, extract_json
 from app.screenplay_ir import (
     ScreenplayGenerationIR,
     ScreenplayIRIdentityConflictError,
+    IRIdentity,
     prepare_ir_identity_authorities,
 )
 from app.source_excerpt import index_source_segments
@@ -499,3 +500,82 @@ async def adjudicate_screenplay_ir_identities(
             issues=remaining,
         )
     return candidate
+
+
+async def adjudicate_screenplay_document_identities(
+    screenplay: EpisodeScreenplay,
+    *,
+    episode: dict[str, Any],
+    source_text: str,
+    bible: Bible,
+) -> list[dict[str, Any]]:
+    """Resolve only typed identity references from a manual/repair Document.
+
+    This adapter intentionally never sends the full screenplay or full chapter.
+    It projects identity-bearing fields, then reuses the owned-SRC adjudicator.
+    """
+    labels: list[str] = []
+
+    def add(value: Any) -> None:
+        label = str(value or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+
+    for scene in screenplay.scene_outline:
+        for character in scene.characters:
+            add(character)
+    for chain in screenplay.dialogue_chains:
+        for turn in chain.turns:
+            add(turn.speaker)
+    for voice in screenplay.voice_bible:
+        add(voice.speaker_id)
+    if screenplay.narrative_plan is not None:
+        for contract in screenplay.narrative_plan.identity_contracts:
+            add(contract.display_name)
+            for voice_id in contract.voice_ids:
+                add(voice_id)
+
+    known = {
+        str(character.name or "").strip()
+        for character in bible.characters
+        if str(character.name or "").strip()
+    }
+    for resolution in episode.get("character_resolutions") or []:
+        if not isinstance(resolution, dict):
+            continue
+        known.update({
+            str(resolution.get("source_label") or "").strip(),
+            str(resolution.get("canonical_name") or "").strip(),
+        })
+    unresolved = [
+        label for label in labels
+        if label not in known and label in source_text
+    ]
+    if not unresolved:
+        return list(episode.get("character_resolutions") or [])
+
+    pseudo = ScreenplayGenerationIR(
+        episode_no=int(episode.get("episode_no") or screenplay.episode_no),
+        identities=[
+            IRIdentity(
+                key=(
+                    "document_identity_"
+                    + hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
+                ),
+                display_name=label,
+                source_names=[label],
+                authority_id="",
+                role_type="functional_character",
+                rationale="来自完整 Document 的 typed identity-bearing fields",
+            )
+            for label in unresolved
+        ],
+    )
+    await adjudicate_screenplay_ir_identities(
+        pseudo,
+        episode=episode,
+        source_text=source_text,
+        bible=bible,
+        persist_new_resolutions=True,
+    )
+    return list(episode.get("character_resolutions") or [])

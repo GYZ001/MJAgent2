@@ -145,8 +145,10 @@ export default function ScriptPage() {
 
   const screenplayTaskActive = ep?.screenplay_production?.task_active
     ?? ['queued', 'running'].includes(ep?.screenplay_status ?? '')
-  const canResumeFlow = ep?.screenplay_production?.can_resume_repair
+  const canResumeBaseline = ep?.screenplay_production?.can_resume_baseline ?? false
+  const canResumeRepair = ep?.screenplay_production?.can_resume_repair
     ?? ep?.screenplay_status === 'repairing'
+  const canResumeFlow = canResumeBaseline || canResumeRepair
   const script = draft ?? ep?.screenplay ?? null
   const editing = draft !== null
   const screenplayNotice = ep ? screenplayTaskNotice(ep) : null
@@ -565,7 +567,7 @@ export default function ScriptPage() {
         return <button className="btn primary" disabled={busy}
           aria-label={busy ? '继续剧本流程，暂不可用：正在处理上一项操作' : '继续剧本流程'}
           title={busy ? '正在处理上一项操作' : undefined} onClick={resumeRepair}>
-          继续剧本流程
+          {canResumeBaseline ? '继续首版场次生成' : '继续完整剧本校验'}
         </button>
       case 'generate_storyboard':
       case 'resume_storyboard':
@@ -626,6 +628,18 @@ export default function ScriptPage() {
                 </li>
               ))}
             </ol>
+            {ep.screenplay_production.shard_progress?.total ? (
+              <p className="screenplay-quality-summary" role="status">
+                场次写作已完成 {ep.screenplay_production.shard_progress.validated}/
+                {ep.screenplay_production.shard_progress.total} 组
+                {ep.screenplay_production.shard_progress.failed
+                  ? ` · ${ep.screenplay_production.shard_progress.failed} 组等待重试`
+                  : ep.screenplay_production.shard_progress.running
+                    ? ` · ${ep.screenplay_production.shard_progress.running} 组进行中`
+                    : ''}
+                <small>技术错误与单组重试记录可在任务中心查看</small>
+              </p>
+            ) : null}
             {ep.screenplay_production.quality_score != null && (
               <p className={`screenplay-quality-summary ${
                 (ep.screenplay_production.quality_issue_count ?? 0) > 0 ? 'warning' : ''

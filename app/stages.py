@@ -8754,10 +8754,28 @@ def _normalize_qa_object(obj: dict, score_keys: list[str], *, raw: str = "",
         if recovered or incomplete else []
     )
     out["issues"] = _normalize_issues(obj.get("issues"), fallback_issues)
-    out["failure_types"] = _normalize_issues(obj.get("failure_types"))
     out["observed_state_out"] = str(obj.get("observed_state_out") or "").strip()
     for key in ("no_story_repeat", "no_future_leak", "no_character_duplicate", "whole_clip_usable"):
         out[key] = _bool_or_default(obj.get(key), True)
+    contract_facts = [
+        f"{key}_below_contract"
+        for key in score_keys
+        if float(out.get(key) or 0.0) < 0.45
+    ]
+    contract_facts.extend(
+        f"{key}_failed"
+        for key in (
+            "no_story_repeat",
+            "no_future_leak",
+            "no_character_duplicate",
+        )
+        if out.get(key) is False
+    )
+    out["contract_facts"] = list(dict.fromkeys(contract_facts))
+    out["runtime_blocking"] = out.get("whole_clip_usable") is False
+    out["blocking_facts"] = (
+        ["whole_clip_contract_failed"] if out["runtime_blocking"] else []
+    )
     # 供自动重抽判断“这是资产质量失败，还是 QA 响应格式失败”。
     # 非标准输出可以展示恢复分，但不应据此花钱重生视频。
     out["qa_recovered"] = recovered or incomplete
@@ -9025,10 +9043,10 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
 - 画内人物是否缺失必须以“画内角色合同”为准；明确标为画外的叙事关系人物不得按角色缺失、互动缺失或状态缺失扣分。
 - overall 不得高于 character_match、action_match、start_state_match、end_state_match、dialogue_match、text_match，以及合同启用的道具/轴线主项。
 - 缺必需分数时不要伪造满分。
-- failure_types 可用 story_repeat、future_leak、wrong_dialogue、text_error、character_duplicate、state_mismatch、needs_crop、wrong_identity、wrong_outfit、subject_occlusion、action_missing、prop_identity_mismatch、prop_state_mismatch、object_count_mismatch、wrong_camera_axis、geometry_guard_unverified。
+- 对每个字段按 Schema 返回原始分数或布尔值，不输出自定义失败码；issues 只作审计说明。
 {"- duration_justified=false 时 overall≤0.55。" if duration_block else ""}
 
-只输出 JSON：{{"character_match": float, "action_match": float, "body_proportion": float, "outfit_match": float, "hair_match": float, "face_identity": float|null, "scene_match": float, "clean_frame": float, "start_state_match": float, "end_state_match": float, "dialogue_match": float, "text_match": float, "prop_identity_match": float, "prop_state_match": float, "object_count_match": float, "camera_axis_match": float, "no_story_repeat": bool, "no_future_leak": bool, "no_character_duplicate": bool, "whole_clip_usable": bool, "failure_types": [str], "observed_state_out": str, "overall": float, "issues": [str]{', "duration_justified": bool' if duration_block else ''}}}"""
+只输出 JSON：{{"character_match": float, "action_match": float, "body_proportion": float, "outfit_match": float, "hair_match": float, "face_identity": float|null, "scene_match": float, "clean_frame": float, "start_state_match": float, "end_state_match": float, "dialogue_match": float, "text_match": float, "prop_identity_match": float, "prop_state_match": float, "object_count_match": float, "camera_axis_match": float, "no_story_repeat": bool, "no_future_leak": bool, "no_character_duplicate": bool, "whole_clip_usable": bool, "observed_state_out": str, "overall": float, "issues": [str]{', "duration_justified": bool' if duration_block else ''}}}"""
     try:
         raw = await hiagent.vlm_check(
             all_frames, expectation,
@@ -9069,7 +9087,9 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
             "issues": [f"视频 QA 未完成：{type(exc).__name__}: {exc}"],
             "qa_recovered": True,
             "image_manifest": effective_manifest,
-            "failure_types": [],
+            "contract_facts": [],
+            "blocking_facts": [],
+            "runtime_blocking": False,
         }
     try:
         raw_obj = extract_json(raw)
@@ -9100,12 +9120,6 @@ async def qa_shot(frames_b64: list[str], action_desc: str, scene_setting: str,
             issues.append(f"时长过长，建议改回 {PREFERRED_SHOT_DURATION_S}s")
         result["issues"] = issues
         result["overall"] = round(min(float(result.get("overall") or 1), 0.55), 3)
-    if wm_mode == "ignore_unless_occluding":
-        ftypes = [str(x) for x in (result.get("failure_types") or [])]
-        result["failure_types"] = [
-            ft for ft in ftypes
-            if "watermark" not in ft.lower() and ft not in {"水印", "logo"}
-        ]
     result["image_manifest"] = effective_manifest
     result["status"] = "unverified" if result.get("qa_recovered") else "scored"
     return result

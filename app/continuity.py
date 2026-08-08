@@ -1691,173 +1691,27 @@ def outline_atomic_errors(outline: StoryboardOutline) -> list[str]:
     return errors
 
 
-HARD_QA_FAILURE_TYPES = {
-    "story_repeat",
-    "future_leak",
-    "wrong_dialogue",
-    "text_error",
-    "required_text_error",
-    "character_duplicate",
-    "state_mismatch",
-    "needs_crop",
-    "wrong_identity",
-    "wrong_outfit",
-    "subject_occlusion",
-    "action_missing",
-    "wrong_action",
-    "prop_identity_mismatch",
-    "prop_state_mismatch",
-    "object_count_mismatch",
-    "wrong_camera_axis",
-    "geometry_guard_unverified",
-}
-
-
-def classify_video_hard_failures(qa: dict[str, Any] | None, *,
-                                 technical: dict[str, Any] | None = None) -> list[str]:
-    """从 QA/技术门禁提取硬失败类型。"""
-    failures: list[str] = []
+def classify_video_hard_failures(
+    qa: dict[str, Any] | None,
+    *,
+    technical: dict[str, Any] | None = None,
+) -> list[str]:
+    """读取结构化 QA 合同事实；自然语言 issues 不参与判定。"""
     qa = qa or {}
     technical = technical or {}
-    if technical and not technical.get("passed", True):
-        failures.append("needs_crop")
-    issues = [str(x).lower() for x in (qa.get("issues") or [])]
-    aliases = {
-        "wrong_action": "action_missing",
-        "required_text_error": "text_error",
-    }
-    failure_types = [aliases.get(str(x), str(x)) for x in (qa.get("failure_types") or [])]
-    for ft in failure_types:
-        if ft in HARD_QA_FAILURE_TYPES and ft not in failures:
-            failures.append(ft)
-    joined = "；".join(issues)
-    checks = (
-        ("重复", "story_repeat"),
-        ("重演", "story_repeat"),
-        ("抢演", "future_leak"),
-        ("下一镜", "future_leak"),
-        ("台词", "wrong_dialogue"),
-        ("口型", "wrong_dialogue"),
-        ("文字", "text_error"),
-        ("乱码", "text_error"),
-        ("字幕", "text_error"),
-        ("错人", "wrong_identity"),
-        ("身份", "wrong_identity"),
-        ("换脸", "wrong_identity"),
-        ("服装", "wrong_outfit"),
-        ("复制", "character_duplicate"),
-        ("分身", "character_duplicate"),
-        ("双人", "character_duplicate"),
-        ("动作缺失", "action_missing"),
-        ("没有完成动作", "action_missing"),
-        ("道具变形", "prop_identity_mismatch"),
-        ("道具消失", "prop_state_mismatch"),
-        ("数量", "object_count_mismatch"),
-        ("越轴", "wrong_camera_axis"),
-        ("首帧", "state_mismatch"),
-        ("尾帧", "state_mismatch"),
-        ("状态", "state_mismatch"),
-        ("裁切", "needs_crop"),
-        ("裁剪", "needs_crop"),
-    )
-    for keyword, code in checks:
-        if keyword in joined and code not in failures:
-            failures.append(code)
-    # 分项硬门槛
-    for key in (
-        "start_state_match", "end_state_match", "action_match", "character_match",
-        "prop_identity_match", "prop_state_match", "object_count_match", "camera_axis_match",
-    ):
-        try:
-            score = float(qa.get(key)) if qa.get(key) is not None else None
-        except (TypeError, ValueError):
-            score = None
-        if score is None or score >= 0.45:
-            continue
-        failure = {
-            "start_state_match": "state_mismatch",
-            "end_state_match": "state_mismatch",
-            "action_match": "action_missing",
-            "character_match": "wrong_identity",
-            "prop_identity_match": "prop_identity_mismatch",
-            "prop_state_match": "prop_state_mismatch",
-            "object_count_match": "object_count_mismatch",
-            "camera_axis_match": "wrong_camera_axis",
-        }[key]
-        if failure not in failures:
-            failures.append(failure)
-    return failures
+    facts = [
+        str(item).strip()
+        for item in (qa.get("contract_facts") or [])
+        if str(item).strip()
+    ]
+    if technical and technical.get("passed") is False:
+        facts.append("technical_contract_failed")
+    if qa.get("runtime_blocking") is True:
+        blocking = [
+            str(item).strip()
+            for item in (qa.get("blocking_facts") or [])
+            if str(item).strip()
+        ]
+        facts.extend(blocking or ["typed_runtime_gate_failed"])
+    return list(dict.fromkeys(facts))
 
-
-def retry_patch_for_failure(failure_type: str) -> dict[str, Any]:
-    """按失败类型定向修正建议（供 enqueue critique / 提示词附加）。"""
-    mapping = {
-        "story_repeat": {
-            "extra_negative": ["不要重演上一镜已完成的动作", "不要重复已交付剧情"],
-            "hint": "删除上一镜动作上下文；核对是否误用尾帧",
-        },
-        "future_leak": {
-            "extra_negative": ["不要提前表演下一镜内容", "不要描述下一场开场"],
-            "hint": "删除未来情节/转场描述；收窄 state_out",
-        },
-        "character_duplicate": {
-            "extra_negative": ["画面中不要出现重复人物/分身/双重人物"],
-            "hint": "移除不该出现的参考图；写明精确人数",
-        },
-        "wrong_identity": {
-            "extra_negative": ["角色身份必须与人物真值图一致，禁止换脸、换年龄或生成其他角色"],
-            "hint": "强化人物身份参考图；减少同框干扰角色",
-        },
-        "wrong_outfit": {
-            "extra_negative": ["服装款式、主色、发型和发饰必须与人物真值图一致"],
-            "hint": "锁定人物造型版本，移除冲突参考图",
-        },
-        "action_missing": {
-            "extra_negative": ["必须完整执行本镜唯一核心动作，禁止只站立、只说话或用镜头运动代替动作"],
-            "hint": "把动作收敛为一个可见事件；必要时拆镜",
-        },
-        "prop_identity_mismatch": {
-            "extra_negative": ["关键道具外形、材质、颜色和数量必须与道具真值图一致，禁止融合或变形"],
-            "hint": "注入唯一道具状态图；减少同镜道具操作数量",
-        },
-        "prop_state_mismatch": {
-            "extra_negative": ["关键道具必须从指定持有人、位置和开合状态开始并保持到动作发生"],
-            "hint": "核对道具 owner/form/location 状态链",
-        },
-        "object_count_mismatch": {
-            "extra_negative": ["画面中的人物与关键道具数量必须严格等于镜头合同"],
-            "hint": "在提示中明确人数和逐件道具数量",
-        },
-        "wrong_camera_axis": {
-            "extra_negative": ["保持既定空间轴线、人物屏幕方位和视线方向，禁止越轴"],
-            "hint": "使用上一镜尾状态约束下一镜关键帧机位",
-        },
-        "subject_occlusion": {
-            "extra_negative": ["主体脸部、手部动作和关键道具不得被遮挡"],
-            "hint": "调整构图并降低前景遮挡",
-        },
-        "geometry_guard_unverified": {
-            "extra_negative": ["固定地标、人物比例与关键道具几何关系必须清楚可见且保持稳定"],
-            "hint": "收敛构图并强化空间地标",
-        },
-        "wrong_dialogue": {
-            "extra_negative": ["不要用通用旁白替代指定角色声音", "不要改写指定台词"],
-            "hint": "强化 speaker_id + voice_canonical + lip_sync",
-        },
-        "text_error": {
-            "extra_negative": ["文字必须准确，禁止乱码缺字"],
-            "hint": "独立文字镜头、稳定构图、缩短文字",
-        },
-        "state_mismatch": {
-            "extra_negative": ["必须从指定起始状态开始并在指定结束状态收束"],
-            "hint": "核对状态链；仅连续动作使用真实尾帧",
-        },
-        "needs_crop": {
-            "extra_negative": ["整条视频必须可直接采用，不要片头片尾无效段"],
-            "hint": "收紧起势收势，禁止依赖后期裁切",
-        },
-    }
-    return mapping.get(failure_type, {
-        "extra_negative": [],
-        "hint": "按失败类型定向调整，避免完全重写提示词",
-    })

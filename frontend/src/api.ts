@@ -1786,7 +1786,14 @@ export interface Episode {
     baseline_done: boolean;
     first_evaluation_done: boolean;
     task_active: boolean;
+    can_resume_baseline?: boolean;
     can_resume_repair: boolean;
+    shard_progress?: {
+      total: number;
+      validated: number;
+      running: number;
+      failed: number;
+    };
     activation_count?: number;
     patch_count?: number;
     open_issue_count?: number;

@@ -306,8 +306,6 @@ def grade_shot_video(
 
     可传入已加载的 technical/qa，或 shot_id（读采用版/最佳成功版）。
     """
-    from app.video_issues import fatal_failure_types, is_fatal_failure_code
-
     conn = get_conn()
     row = dict(version_row) if version_row is not None else None
     rejected_fallback = _version_is_delivery_fallback(row)
@@ -360,8 +358,7 @@ def grade_shot_video(
     threshold = VIDEO_QUALITY_REVIEW_THRESHOLD
 
     hard_failures = classify_video_hard_failures(qa, technical=technical) if technical or qa else []
-    fatal = [f for f in hard_failures if is_fatal_failure_code(f)]
-    non_fatal = [f for f in hard_failures if f not in fatal]
+    runtime_blocking = bool(qa.get("runtime_blocking"))
     score = _qa_overall(qa)
     qa_recovered = bool(qa.get("qa_recovered"))
     whole_clip_usable = qa.get("whole_clip_usable")
@@ -371,30 +368,26 @@ def grade_shot_video(
     fallback_reason: str | None = None
     if not passed:
         grade = "C"
-    elif whole_clip_usable is False:
+    elif whole_clip_usable is False or runtime_blocking:
         grade = "C"
         fallback_reason = "完整片段生产合同未通过，禁止自动采用"
-    elif fatal:
-        grade = "B"
-        fallback_reason = "存在高风险质量问题：" + ",".join(fatal)
     elif continuity_degraded:
         grade = "B"
         fallback_reason = "连续性已降链（纯参考图模式），衔接可能变弱"
     elif (
-        not fatal
-        and not qa_recovered
-        and not non_fatal
+        not qa_recovered
+        and not hard_failures
         and score is not None
         and score >= threshold
     ):
         grade = "A"
-    elif passed and not fatal:
+    elif passed:
         grade = "B"
         reasons = []
         if score is None or score < threshold:
             reasons.append(f"QA {score if score is not None else 'n/a'} < 阈值 {threshold:.2f}")
-        if non_fatal:
-            reasons.append("非致命硬失败：" + ",".join(non_fatal))
+        if hard_failures:
+            reasons.append("结构化合同事实：" + ",".join(hard_failures))
         if qa_recovered:
             reasons.append("QA 结果为 recovered 占位")
         fallback_reason = "；".join(reasons) or "技术合格但未达 A 级标准"
@@ -406,36 +399,14 @@ def grade_shot_video(
         "version_id": version_id,
         "technical_passed": passed,
         "hard_failures": hard_failures,
-        "fatal_failures": fatal,
+        "runtime_blocking": runtime_blocking,
         "whole_clip_usable": whole_clip_usable,
         "qa_overall": score,
         "threshold": threshold,
         "qa_recovered": qa_recovered,
         "continuity_degraded": continuity_degraded,
         "fallback_reason": fallback_reason,
-        "fatal_failure_types": sorted(fatal_failure_types()),
     }
-
-
-_SELECTION_RISK_WEIGHTS = {
-    "character_duplicate": 0.45,
-    "wrong_identity": 0.45,
-    "action_missing": 0.40,
-    "wrong_dialogue": 0.35,
-    "future_leak": 0.30,
-    "prop_identity_mismatch": 0.28,
-    "object_count_mismatch": 0.28,
-    "prop_state_mismatch": 0.24,
-    "state_mismatch": 0.22,
-    "story_repeat": 0.30,
-    "wrong_outfit": 0.18,
-    "wrong_camera_axis": 0.16,
-    "geometry_guard_unverified": 0.14,
-    # 文字与轻裁切有确定性后期路径，不能压过错人、分身或动作缺失。
-    "text_error": 0.10,
-    "subject_occlusion": 0.10,
-    "needs_crop": 0.06,
-}
 
 
 def video_candidate_selection_score(
@@ -443,7 +414,7 @@ def video_candidate_selection_score(
 ) -> float:
     """跨 Worker/Supervisor 共用的候选排序分；不是交付门禁。"""
     base = score if score >= 0 else 0.0
-    penalty = sum(_SELECTION_RISK_WEIGHTS.get(code, 0.12) for code in set(hard_failures))
+    penalty = min(0.45, 0.08 * len(set(hard_failures)))
     if qa_recovered:
         penalty += 0.08
     return round(base - penalty, 4)
@@ -479,7 +450,7 @@ def select_best_video_candidate(
         qa = json.loads(row["qa_json"] or "{}")
         score = _qa_overall(qa)
         hard_failures = classify_video_hard_failures(qa, technical=technical)
-        if qa.get("whole_clip_usable") is False:
+        if qa.get("whole_clip_usable") is False or qa.get("runtime_blocking") is True:
             continue
         entry = {
             "id": row["id"],

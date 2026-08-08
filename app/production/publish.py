@@ -94,11 +94,28 @@ def publish_screenplay(
             raise ValueError("剧本质量评分未精确绑定当前权威输入指纹")
 
     artifact = conn.execute(
-        "SELECT status FROM artifacts WHERE id=?",
+        "SELECT status,type FROM artifacts WHERE id=?",
         (artifact_id,),
     ).fetchone()
     if artifact is None:
         raise ValueError("待发布 working Artifact 不存在")
+    if artifact["type"] != "screenplay_document":
+        raise ValueError("只能发布完整 screenplay_document，禁止发布 IR/scene shard")
+    from app.evidence import repository as evidence_repository
+
+    lineage = evidence_repository.get_lineage(artifact_id)
+    ancestor_types = {
+        str(item.get("type") or "")
+        for item in lineage.get("ancestors") or []
+    }
+    if (
+        ancestor_types.intersection({
+            "screenplay_envelope", "screenplay_scene_shard",
+            "screenplay_scene_shard_plan",
+        })
+        and "screenplay_generation_ir_merged" not in ancestor_types
+    ):
+        raise ValueError("Scene Shard 生成的完整 Document 缺少 merged IR 血缘")
     original_status = str(artifact["status"] or "")
     if original_status not in {"candidate", "working", "validated", "approved"}:
         raise ValueError("待发布 working Artifact 状态不可用")

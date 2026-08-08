@@ -15,6 +15,16 @@ from app.schemas import Bible, EpisodeScreenplay
 
 SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-2"
 
+# ``screenplay-source-authority.v1`` is an append-only serialization contract,
+# not a live dump of whichever fields the current Pydantic models expose.
+# ``Scene.forbidden_elements`` was retired from the product model after v4
+# certificates had already hashed its default value.  Keep the empty slot in
+# the authority payload so a harmless schema cleanup cannot invalidate every
+# published screenplay on the next process restart.
+_RETIRED_SCENE_AUTHORITY_DEFAULTS: dict[str, Any] = {
+    "forbidden_elements": [],
+}
+
 
 def _contract_major(contract_version: str | None) -> int:
     raw = str(contract_version or "").strip()
@@ -69,6 +79,10 @@ def screenplay_bible_payload(value: Bible | dict[str, Any]) -> dict[str, Any]:
     for scene in payload.get("scenes") or []:
         scene.pop("ref_image_path", None)
         scene.pop("scene_prompt_override", None)
+        for field, default in _RETIRED_SCENE_AUTHORITY_DEFAULTS.items():
+            # Copy mutable defaults: authority payloads are subsequently
+            # transformed while reconstructing append-only Bible history.
+            scene.setdefault(field, list(default))
     return payload
 
 

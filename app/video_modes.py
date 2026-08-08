@@ -39,7 +39,6 @@ REFERENCE_IMAGE_TYPES = {
 }
 
 # 关键帧提示词是分镜级可复用资产的一部分。升级该版本时，未经人工
-KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v11"
 KEYFRAME_PROMPT_CONTRACT_VERSION = "narrative_action_geometry_v18"
 KEYFRAME_STRUCTURAL_FALLBACK_MODE = "omit_structurally_invalid_keyframe_slots_v1"
 _KEYFRAME_LLM_PROMPT_MAX_CHARS = 1200
@@ -179,9 +178,6 @@ _SCORE_W_CONS = 0.35
 _SCORE_W_SUM = _SCORE_W_ABS + _SCORE_W_CONS  # 0.90
 _MAX_REDUNDANCY_PENALTY = 0.15
 _HARD_FAILURE_MULTIPLIER = 0.3
-_STYLE_STRUCTURAL_REJECT_REASON = "style_drift_structural"
-
-
 def _reference_runtime_blocking(asset: ReferenceImageAsset) -> bool:
     """Read the persisted typed gate; rejectReason prose has no authority."""
     return (asset.qa or {}).get("runtime_blocking") is True
@@ -255,26 +251,13 @@ def _consistency_of(asset: ReferenceImageAsset) -> float:
 
 def _hard_failures_of(asset: ReferenceImageAsset) -> list[Any]:
     qa = asset.qa or {}
-    failures: list[str] = [
+    failures = [
         str(item)
         for item in (qa.get("blocking_facts") or [])
         if qa.get("runtime_blocking") is True and str(item).strip()
     ]
     if qa.get("runtime_blocking") is True and not failures:
         failures.append("typed_runtime_gate_failed")
-    typed_checks = (
-        ("anatomy_valid", False, "anatomy_contract_failed"),
-        ("identity_matches", False, "identity_contract_failed"),
-        ("action_contract_matches", False, "action_contract_failed"),
-        ("forbidden_text_detected", True, "forbidden_text_detected"),
-        ("watermark_occluding", True, "subject_occlusion"),
-        ("style_contract_matches", False, "style_contract_failed"),
-        ("photoreal_detected", True, "photoreal_detected"),
-        ("live_action_detected", True, "live_action_detected"),
-    )
-    for field_name, failing_value, failure_name in typed_checks:
-        if qa.get(field_name) is failing_value:
-            failures.append(failure_name)
     return failures
 
 
@@ -308,7 +291,7 @@ def apply_keep_gate(asset: ReferenceImageAsset, *, threshold: float | None = Non
     del threshold
     if _reference_runtime_blocking(asset):
         asset.selectedForSeedance = False
-        asset.rejectReason = _STYLE_STRUCTURAL_REJECT_REASON
+        asset.rejectReason = "runtime_contract_blocked"
         return False
     asset.selectedForSeedance = True
     score = asset.qualityScore
@@ -2213,14 +2196,17 @@ async def _generate_reference_keep_best(*, project_id: str, episode_no: int, sho
             continue
         if skip_inline_qa:
             return asset, attempts, rejections
-        if not asset.rejectReason:
+        if asset.selectedForSeedance:
             return asset, attempts, rejections
         rejections.append({"type": ref_type, "source": "seedream_generated",
                            "reason": asset.rejectReason, "quality_score": asset.qualityScore, "qa": asset.qa})
         attempts.append(asset)
         if best is None or (asset.qualityScore or 0) > (best.qualityScore or 0):
             best = asset
-    if best is not None and (best.qualityScore or 0) < quality_floor():
+    if best is not None and (
+        _reference_runtime_blocking(best)
+        or (best.qualityScore or 0) < quality_floor()
+    ):
         return None, list(attempts), rejections
     discarded = [a for a in attempts if a is not best]
     return best, discarded, rejections
@@ -3605,15 +3591,19 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
                 winner_status = "passed"
                 winner.rejectReason = None
             else:
-                winner_status = "scored_warning"
-                winner.rejectReason = "quality_below_threshold_score_only"
-                if structural_warnings:
-                    winner.qa = {
-                        **(winner.qa or {}),
-                        "gate_retry_exhausted": True,
-                        "runtime_blocking": False,
-                    }
-        if winner not in selected:
+                winner_status = "blocked"
+                winner.selectedForSeedance = False
+                winner.purposes = [
+                    purpose
+                    for purpose in winner.purposes
+                    if purpose != PURPOSE_VIDEO_INPUT
+                ]
+                winner.rejectReason = "runtime_contract_blocked"
+                winner.qa = {
+                    **(winner.qa or {}),
+                    "gate_retry_exhausted": True,
+                }
+        if winner.selectedForSeedance and winner not in selected:
             selected.append(winner)
 
         for candidate_no, _asset in all_pairs:
@@ -4009,7 +3999,7 @@ def _apply_redundancy_penalties(assets: list[ReferenceImageAsset]) -> None:
         if a.type == "previous_shot_frame":
             pri = 0
         elif a.source == "seedream_generated":
-            pri = 1 if not a.rejectReason else 3
+            pri = 3 if _reference_runtime_blocking(a) else 1
         else:
             pri = 2
         return (pri, -(a.qualityScore or 0.0))

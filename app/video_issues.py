@@ -3,65 +3,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.db import get_setting
 from app.harness.types import Issue, IssueSeverity
 
-DEFAULT_FATAL_FAILURE_TYPES = (
-    "character_duplicate",
-    "wrong_identity",
-    "wrong_outfit",
-    "text_error",
-)
 VIDEO_QUALITY_REVIEW_THRESHOLD = 0.6
-
-# QA / classify 失败码 → Issue code。内容问题保持 WARNING，仅用于评分和排序。
-_QA_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
-    "character_duplicate": ("VIDEO_QA_CHARACTER_DUPLICATE", IssueSeverity.WARNING),
-    "text_error": ("VIDEO_QA_TEXT_ARTIFACT", IssueSeverity.WARNING),
-    "state_mismatch": ("VIDEO_QA_STATE_MISMATCH", IssueSeverity.WARNING),
-    "story_repeat": ("VIDEO_QA_STORY_REPEAT", IssueSeverity.WARNING),
-    "future_leak": ("VIDEO_QA_FUTURE_LEAK", IssueSeverity.WARNING),
-    "wrong_dialogue": ("VIDEO_QA_WRONG_DIALOGUE", IssueSeverity.WARNING),
-    "needs_crop": ("VIDEO_QA_NEEDS_CROP", IssueSeverity.WARNING),
-    "wrong_identity": ("VIDEO_QA_WRONG_IDENTITY", IssueSeverity.WARNING),
-    "wrong_outfit": ("VIDEO_QA_WRONG_OUTFIT", IssueSeverity.WARNING),
-    "subject_occlusion": ("VIDEO_QA_SUBJECT_OCCLUSION", IssueSeverity.WARNING),
-    "action_missing": ("VIDEO_QA_ACTION_MISSING", IssueSeverity.WARNING),
-    "prop_identity_mismatch": ("VIDEO_QA_PROP_IDENTITY", IssueSeverity.WARNING),
-    "prop_state_mismatch": ("VIDEO_QA_PROP_STATE", IssueSeverity.WARNING),
-    "object_count_mismatch": ("VIDEO_QA_OBJECT_COUNT", IssueSeverity.WARNING),
-    "wrong_camera_axis": ("VIDEO_QA_CAMERA_AXIS", IssueSeverity.WARNING),
-    "geometry_guard_unverified": ("VIDEO_QA_GEOMETRY", IssueSeverity.WARNING),
-}
-
-_TECHNICAL_CODE_MAP: dict[str, tuple[str, IssueSeverity]] = {
-    "FILE_MISSING": ("VIDEO_FILE_INVALID", IssueSeverity.BLOCKER),
-    "FILE_EMPTY": ("VIDEO_FILE_INVALID", IssueSeverity.BLOCKER),
-    "VIDEO_CONTAINER_INVALID": ("VIDEO_FILE_INVALID", IssueSeverity.BLOCKER),
-    "VIDEO_DURATION_CONTRACT": ("VIDEO_DURATION_CONTRACT", IssueSeverity.BLOCKER),
-    "VIDEO_PROBE_UNAVAILABLE": ("VIDEO_PROBE_UNAVAILABLE", IssueSeverity.WARNING),
-    "VIDEO_DURATION_UNVERIFIED": ("VIDEO_PROBE_UNAVAILABLE", IssueSeverity.WARNING),
-}
-
-
-def fatal_failure_types() -> set[str]:
-    raw = get_setting("video_fatal_failure_types")
-    if not raw:
-        return set(DEFAULT_FATAL_FAILURE_TYPES)
-    return {part.strip() for part in str(raw).split(",") if part.strip()} or set(DEFAULT_FATAL_FAILURE_TYPES)
-
-
-def is_fatal_failure_code(code: str) -> bool:
-    """硬失败码（classify 返回）是否致命。"""
-    return code in fatal_failure_types()
 
 
 def is_fatal(issue: Issue) -> bool:
-    """非 QA Issue 是否属于需要停止自动处理的致命类。"""
-    if issue.code.startswith("VIDEO_QA_"):
-        return issue.severity == IssueSeverity.BLOCKER
-    rule = str((issue.evidence or {}).get("rule_id") or "")
-    return bool(rule and rule in fatal_failure_types())
+    """致命性来自结构化 severity/runtime gate，不来自失败码集合。"""
+    return bool(
+        issue.severity == IssueSeverity.BLOCKER
+        and (issue.evidence or {}).get("runtime_blocking") is True
+    )
 
 
 def _mk(
@@ -76,6 +28,7 @@ def _mk(
     rule_id: str | None = None,
     repair_hint: str | None = None,
     repairable: bool = True,
+    category: str = "quality",
     extra: dict[str, Any] | None = None,
 ) -> Issue:
     evidence: dict[str, Any] = dict(extra or {})
@@ -91,6 +44,7 @@ def _mk(
     return Issue(
         code=code,
         severity=severity,
+        category=category,
         subject=shot_id,
         message=message,
         evidence=evidence,
@@ -108,62 +62,73 @@ def issues_from_qa(
     shot_no: int | None = None,
     job_id: str | None = None,
 ) -> list[Issue]:
-    """从 QA + 技术门禁翻译 Issue。"""
+    """把结构化 QA/技术合同翻译为 Issue；不解析诊断文案。"""
     from app.continuity import classify_video_hard_failures
 
     qa = qa or {}
     technical = technical or {}
     out: list[Issue] = []
-
-    # 技术门禁 Issue
     for raw in technical.get("issues") or []:
         if isinstance(raw, dict):
             tech_code = str(raw.get("code") or "")
-            msg = str(raw.get("message") or tech_code)
+            message = str(raw.get("message") or tech_code)
         else:
-            tech_code = getattr(raw, "code", "") or ""
-            msg = getattr(raw, "message", "") or tech_code
-        mapped = _TECHNICAL_CODE_MAP.get(tech_code)
-        if mapped:
-            code, sev = mapped
-            out.append(_mk(
-                code, sev, shot_id=shot_id, message=msg,
-                shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id=tech_code,
-            ))
-
-    hard = classify_video_hard_failures(qa, technical=technical)
-    for ft in hard:
-        mapped = _QA_CODE_MAP.get(ft)
-        if not mapped:
-            continue
-        code, sev = mapped
+            tech_code = str(getattr(raw, "code", "") or "")
+            message = str(getattr(raw, "message", "") or tech_code)
         out.append(_mk(
-            code, sev,
+            "VIDEO_TECHNICAL_CONTRACT_FAILED",
+            IssueSeverity.BLOCKER,
             shot_id=shot_id,
-            message=f"视频 QA 质量风险：{ft}",
-            shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id=ft,
-            repair_hint="仅供具体缺陷定位；是否重试由完整片段生产合同决定",
+            message=message or "视频技术合同未通过",
+            shot_no=shot_no,
+            version_id=version_id,
+            job_id=job_id,
+            rule_id=tech_code or "technical_contract",
+            category="operational",
+            extra={"runtime_blocking": True, "recommended_level": "L1"},
         ))
 
-    if qa.get("whole_clip_usable") is False:
+    facts = classify_video_hard_failures(qa, technical=technical)
+    for fact in facts:
+        out.append(_mk(
+            "VIDEO_QA_CONTRACT_FACT",
+            IssueSeverity.WARNING,
+            shot_id=shot_id,
+            message=f"视频 QA 结构化合同事实：{fact}",
+            shot_no=shot_no,
+            version_id=version_id,
+            job_id=job_id,
+            rule_id=fact,
+            category="quality",
+            repair_hint="依据本次结构化诊断复核镜头合同",
+        ))
+
+    if qa.get("whole_clip_usable") is False or qa.get("runtime_blocking") is True:
         out.append(_mk(
             "VIDEO_QA_CLIP_CONTRACT_FAILED",
             IssueSeverity.BLOCKER,
             shot_id=shot_id,
-            message="完整片段生产合同未通过，禁止自动采用并进入通用修复路由",
+            message="完整片段生产合同未通过，禁止自动采用",
             shot_no=shot_no,
             version_id=version_id,
             job_id=job_id,
             rule_id="whole_clip_usable",
-            repair_hint="按本次 QA 的结构化诊断重抽，不依赖失败码白名单",
+            repair_hint="按本次 QA 的结构化诊断决定是否重抽",
+            category="quality",
+            extra={"runtime_blocking": True, "recommended_level": "L1"},
         ))
 
     if qa.get("qa_recovered"):
         out.append(_mk(
-            "VIDEO_QA_UNAVAILABLE", IssueSeverity.WARNING,
+            "VIDEO_QA_UNAVAILABLE",
+            IssueSeverity.WARNING,
             shot_id=shot_id,
             message="VLM QA 不可用或已恢复占位，结果不可信",
-            shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id="qa_recovered",
+            shot_no=shot_no,
+            version_id=version_id,
+            job_id=job_id,
+            rule_id="qa_recovered",
+            category="quality",
         ))
 
     try:
@@ -171,12 +136,17 @@ def issues_from_qa(
     except (TypeError, ValueError):
         overall = None
     threshold = VIDEO_QUALITY_REVIEW_THRESHOLD
-    if overall is not None and overall < threshold and not hard:
+    if overall is not None and overall < threshold and not facts:
         out.append(_mk(
-            "VIDEO_QA_LOW_SCORE", IssueSeverity.WARNING,
+            "VIDEO_QA_LOW_SCORE",
+            IssueSeverity.WARNING,
             shot_id=shot_id,
             message=f"QA 总分 {overall:.3f} 低于阈值 {threshold:.3f}",
-            shot_no=shot_no, version_id=version_id, job_id=job_id, rule_id="low_score",
+            shot_no=shot_no,
+            version_id=version_id,
+            job_id=job_id,
+            rule_id="low_score",
+            category="quality",
             extra={"overall": overall, "threshold": threshold},
         ))
     return out
@@ -189,7 +159,7 @@ def issues_from_job_failure(
     shot_id: str | None = None,
     shot_no: int | None = None,
 ) -> list[Issue]:
-    """从失败 job / version 错误文本翻译 Issue。"""
+    """从持久化任务状态翻译 Issue；错误正文只展示，不参与分类。"""
     def _get(obj: Any, key: str, default=None):
         if obj is None:
             return default
@@ -203,113 +173,85 @@ def issues_from_job_failure(
     sid = shot_id or str(_get(job, "shot_id") or "")
     jid = str(_get(job, "id") or "") or None
     vid = str(_get(version, "id") or "") or None
-    err = str(_get(job, "error") or _get(version, "error") or "")
+    message = str(_get(job, "error") or _get(version, "error") or "")
     status = str(_get(job, "status") or "")
     stage = str(_get(job, "pipeline_stage") or "")
     reason_code = str(_get(job, "reason_code") or "")
-    provider_create_state = str(_get(job, "provider_create_state") or "")
-    lower = err.lower()
+    provider_state = str(_get(job, "provider_create_state") or "")
 
-    out: list[Issue] = []
-    if provider_create_state == "model_rejected":
-        out.append(_mk(
-            "VIDEO_PROVIDER_MODEL_REJECTED",
+    if provider_state == "model_rejected":
+        return [_mk(
+            reason_code or "VIDEO_PROVIDER_MODEL_REJECTED",
             IssueSeverity.BLOCKER,
             shot_id=sid,
-            message=err or "视频模型明确拒绝本次输入",
+            message=message or "视频模型明确拒绝本次输入",
             shot_no=shot_no,
             version_id=vid,
             job_id=jid,
-            rule_id="model_rejected",
+            rule_id=provider_state,
             repairable=False,
+            category="operational",
             extra={
-                "provider_reason_code": reason_code,
-                "provider_create_state": provider_create_state,
+                "provider_create_state": provider_state,
                 "pause_state": "PAUSED_EXTERNAL",
+                "recommended_level": "L6",
+                "runtime_blocking": True,
             },
-        ))
-        return out
+        )]
 
-    if status == "paused_budget" or "预算" in err:
-        out.append(_mk(
-            "VIDEO_BUDGET_EXHAUSTED", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "预算不足，任务暂停",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="budget",
+    if status == "paused_budget":
+        return [_mk(
+            reason_code or "VIDEO_BUDGET_PAUSED",
+            IssueSeverity.BLOCKER,
+            shot_id=sid,
+            message=message or "视频任务因预算暂停",
+            shot_no=shot_no,
+            version_id=vid,
+            job_id=jid,
+            rule_id=status,
             repairable=False,
-        ))
-        return out
+            category="operational",
+            extra={
+                "pause_state": "WAITING_AUTHORIZATION",
+                "recommended_level": "L6",
+                "runtime_blocking": True,
+            },
+        )]
 
-    if "waiting_human" in status or stage.endswith("waiting_human") or "连续性" in err or "尾帧" in err:
-        out.append(_mk(
-            "VIDEO_CHAIN_ANCHOR_BLOCKED", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "等待上一镜尾帧超时/阻塞",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="chain_anchor",
-        ))
-        return out
+    if status in {"waiting_human", "paused"} or stage.endswith("waiting_human"):
+        return [_mk(
+            reason_code or "VIDEO_OPERATION_WAITING_HUMAN",
+            IssueSeverity.BLOCKER,
+            shot_id=sid,
+            message=message or "视频任务等待人工处理",
+            shot_no=shot_no,
+            version_id=vid,
+            job_id=jid,
+            rule_id=status or stage,
+            repairable=False,
+            category="operational",
+            extra={
+                "pause_state": "WAITING_HUMAN",
+                "recommended_level": "L6",
+                "runtime_blocking": True,
+            },
+        )]
 
-    if any(k in err for k in ("内容安全", "安全审核", "safety", "敏感")):
-        out.append(_mk(
-            "VIDEO_PROVIDER_SAFETY", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "内容安全拒绝",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="safety",
-        ))
-        return out
-
-    if any(k in err for k in ("版权", "copyright")):
-        out.append(_mk(
-            "VIDEO_PROVIDER_COPYRIGHT", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "版权限制",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="copyright",
-        ))
-        return out
-
-    if any(k in lower for k in ("timeout", "超时", "max_wait", "max wait")):
-        out.append(_mk(
-            "VIDEO_PROVIDER_TIMEOUT", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "Provider 超时",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="timeout",
-        ))
-        return out
-
-    if any(k in err for k in ("下载", "download")):
-        out.append(_mk(
-            "VIDEO_DOWNLOAD_FAILED", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "视频下载失败",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="download",
-        ))
-        return out
-
-    if any(k in err for k in ("技术校验", "文件技术", "VIDEO_DURATION", "FILE_MISSING", "CONTAINER")):
-        out.append(_mk(
-            "VIDEO_FILE_INVALID", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "视频文件技术校验失败",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="technical",
-        ))
-        return out
-
-    if any(k in err for k in ("参考图", "reference", "多视角资产包", "造型版本")):
-        out.append(_mk(
-            "VIDEO_REFERENCE_UNAVAILABLE", IssueSeverity.BLOCKER,
-            shot_id=sid, message=err or "参考图生成失败",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="reference",
-        ))
-        return out
-
-    if any(k in lower for k in ("429", "5xx", "502", "503", "504", "限流", "瞬时", "网络", "超时")):
-        out.append(_mk(
-            "VIDEO_PROVIDER_TRANSIENT", IssueSeverity.WARNING,
-            shot_id=sid, message=err or "Provider 瞬时错误",
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="transient",
-        ))
-        return out
-
-    if err:
-        out.append(_mk(
-            "VIDEO_PROVIDER_TRANSIENT", IssueSeverity.WARNING,
-            shot_id=sid, message=err,
-            shot_no=shot_no, version_id=vid, job_id=jid, rule_id="unknown_failure",
-        ))
-    return out
+    severity = (
+        IssueSeverity.WARNING if status == "waiting_retry" else IssueSeverity.BLOCKER
+    )
+    return [_mk(
+        reason_code or "VIDEO_OPERATION_FAILED",
+        severity,
+        shot_id=sid,
+        message=message or "视频任务未完成",
+        shot_no=shot_no,
+        version_id=vid,
+        job_id=jid,
+        rule_id=reason_code or status or "operation_failed",
+        category="operational",
+        extra={"recommended_level": "L0" if status == "waiting_retry" else "L1"},
+    )]
 
 
 def issues_from_enqueue_error(
@@ -318,37 +260,36 @@ def issues_from_enqueue_error(
     shot_id: str,
     shot_no: int | None = None,
 ) -> list[Issue]:
-    """入队异常 → Issue（禁止静默漏镜）。"""
-    msg = str(exc) or exc.__class__.__name__
-    name = exc.__class__.__name__
-    lower = msg.lower()
+    """入队异常翻译为结构化 Issue；异常正文不参与策略选择。"""
+    from app.compiler import CompileError
 
-    if "Harness" in msg or "灰度" in msg or "隔离" in msg:
+    message = str(exc) or exc.__class__.__name__
+    retryable = bool(getattr(exc, "retryable", False))
+    failure_kind = str(getattr(exc, "failure_kind", "") or "")
+    if isinstance(exc, CompileError):
         return [_mk(
-            "VIDEO_HARNESS_DISABLED", IssueSeverity.BLOCKER,
-            shot_id=shot_id, message=msg, shot_no=shot_no, rule_id="harness",
-            repairable=False,
+            "VIDEO_PREFLIGHT_BLOCKED",
+            IssueSeverity.BLOCKER,
+            shot_id=shot_id,
+            message=message,
+            shot_no=shot_no,
+            rule_id=failure_kind or "compile_contract",
+            repair_hint="通过受控分镜候选修订解决结构合同错误",
+            category="structural",
+            extra={
+                "recommended_level": "L0" if retryable else "L5",
+                "runtime_blocking": not retryable,
+            },
         )]
-
-    if name == "CompileError" or "preflight" in lower or any(
-        k in msg for k in ("门禁", "容量", "状态链", "必填", "禁止", "口播", "动作过载")
-    ):
-        return [_mk(
-            "VIDEO_PREFLIGHT_BLOCKED", IssueSeverity.BLOCKER,
-            shot_id=shot_id, message=msg, shot_no=shot_no, rule_id="preflight",
-            repair_hint="需微调分镜或转人工",
-        )]
-
-    if "预算" in msg or "budget" in lower:
-        return [_mk(
-            "VIDEO_BUDGET_EXHAUSTED", IssueSeverity.BLOCKER,
-            shot_id=shot_id, message=msg, shot_no=shot_no, rule_id="budget",
-            repairable=False,
-        )]
-
     return [_mk(
-        "VIDEO_PREFLIGHT_BLOCKED", IssueSeverity.BLOCKER,
-        shot_id=shot_id, message=msg, shot_no=shot_no, rule_id="enqueue",
+        "VIDEO_ENQUEUE_OPERATION_FAILED",
+        IssueSeverity.WARNING if retryable else IssueSeverity.BLOCKER,
+        shot_id=shot_id,
+        message=message,
+        shot_no=shot_no,
+        rule_id=failure_kind or exc.__class__.__name__,
+        category="operational",
+        extra={"recommended_level": "L0" if retryable else "L1"},
     )]
 
 

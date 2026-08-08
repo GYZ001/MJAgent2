@@ -243,41 +243,16 @@ def _screenplay_field_diff(current, proposed) -> list[dict]:
 
 
 def _screenplay_cast_impact(conn, ep: dict, source_text: str) -> dict:
-    """纯本地预览疑似新人物；不调用模型、不写人物谱、不生成图片。"""
-    import re
-    from app.character_policy import is_functional_extra
-
+    """Pure read-only cast impact; semantic identity count remains unknown."""
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     bible = _project_bible_or_placeholder(project)
     known = {character.name for character in bible.characters}
-    generic = {
-        "旁白", "系统", "众人", "人群", "老人", "少年", "少女", "男人", "女人",
-        "第一章", "第二章", "第三章", "本章", "此时", "随后", "片刻后",
-    }
-    found: dict[str, int] = {}
-    patterns = (
-        re.compile(r"(?m)^\s*([\u3400-\u9fff]{2,8})(?:[（(][^）)]{1,12}[）)])?\s*[：:]"),
-        re.compile(r"([\u3400-\u9fff]{2,4})(?:说道|问道|答道|喊道|开口|低声道|冷笑道)"),
-    )
-    for pattern in patterns:
-        for match in pattern.finditer(source_text):
-            name = match.group(1).strip()
-            if (
-                name in known
-                or name in generic
-                or name.startswith("第")
-                or is_functional_extra(name)
-            ):
-                continue
-            found[name] = found.get(name, 0) + 1
-    candidates = [
-        {"name": name, "mentions": count, "status": "candidate"}
-        for name, count in sorted(found.items(), key=lambda item: (-item[1], item[0]))
-    ][:12]
     return {
         "known_character_count": len(known),
-        "candidate_new_characters": candidates,
-        "candidate_count": len(candidates),
+        "candidate_new_characters": [],
+        "candidate_count": None,
+        "requires_model_resolution": True,
+        "note": "新增人物数量需由来源证据模型判断；预检不使用姓名/职业/称谓词表猜测",
         "screenplay_stage": {
             "auto_add_text_cards": True,
             "generate_portraits": False,
@@ -285,7 +260,7 @@ def _screenplay_cast_impact(conn, ep: dict, source_text: str) -> dict:
         "portrait_asset_stage": {
             "deferred": True,
             "views_per_character": 3,
-            "estimated_images": len(candidates) * 3,
+            "estimated_images": None,
             "estimated_cost_cny": None,
             "note": "剧本任务不出图；实际新增人物经模型确认后，定妆包在独立资产环节确认费用并补齐",
         },
@@ -298,7 +273,10 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
     storyboard_active = task_registry.active("storyboard", ep["id"]) or ep["status"] == "scripting"
     screenplay_status = ep["screenplay_status"] or "pending"
     screenplay_ready = _screenplay_ready(ep)
-    can_resume = bool(production.get("can_resume_repair"))
+    can_resume = bool(
+        production.get("can_resume_repair")
+        or production.get("can_resume_baseline")
+    )
     checkpoint = shot_count if shot_count > 0 and ep["status"] == "script_failed" else 0
     cancelling = str(ep.get("screenplay_error") or "").startswith("CANCELLING:")
     if cancelling:
@@ -322,7 +300,11 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
     elif can_resume:
         code, message, action = (
             "workflow_paused",
-            "剧本流程已暂停，可从工作副本继续剩余阶段",
+            (
+                "剧本流程已暂停，可从已验证场次继续首版生成"
+                if production.get("can_resume_baseline")
+                else "剧本流程已暂停，可从完整工作副本继续校验"
+            ),
             "resume_screenplay",
         )
     elif screenplay_status == "ready" and not screenplay_ready:
@@ -852,14 +834,19 @@ async def _screenplay_task(
         # Delivery 状态必须与真实 production phase 一致：Baseline 尚未落库时
         # 仍是 running；已有 working baseline 时从确定性阶段继续。
         production_state = _screenplay_production_state(episode_id)
-        is_resume = production_state["operation"] == "finalize"
+        is_resume = bool(
+            production_state["operation"] == "finalize"
+            or production_state.get("can_resume_baseline")
+        )
         conn.execute(
             "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
             (
                 "running",
                 (
-                    "从工作副本继续结构校验、评分与发布"
-                    if is_resume
+                    "从完整工作副本继续结构校验、评分与发布"
+                    if production_state["operation"] == "finalize"
+                    else "从已验证场次恢复首版生成"
+                    if production_state.get("can_resume_baseline")
                     else "正在生成人物上下文与首版剧本"
                 ),
                 now(),
@@ -1298,70 +1285,40 @@ async def _recorded_screenplay_task(
             get_conn().execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone(),
         )
         production_state = _screenplay_production_state(episode_id)
-        if production_state["operation"] == "finalize":
-            # 正常 Patch 续跑复用已持久化决议，不重复花模型成本；但迁移前的
-            # legacy working artifact 若仍有未知身份，必须先补做一次剧本身份审计。
+        if (
+            production_state["operation"] == "finalize"
+            or production_state.get("can_resume_baseline")
+        ):
+            # 完整 Document 续跑复用已冻结决议；未知身份由 typed structural
+            # QA gate 暴露，禁止回到全章人物发现。
             from app.portraits import (
-                apply_screenplay_character_resolutions,
                 load_screenplay_character_resolutions,
-                normalize_screenplay_voice_ids,
-                screenplay_unknown_identity_errors,
             )
-            from app.production.patch import load_screenplay_from_artifact
-            from app.production.revision import get_active_production_revision
 
             conn = get_conn()
             persisted_resolutions = load_screenplay_character_resolutions(
                 conn, episode_id,
             )
-            ep = conn.execute(
-                "SELECT * FROM episodes WHERE id=?", (episode_id,),
-            ).fetchone()
-            project = conn.execute(
-                "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
-            ).fetchone()
-            bible = _project_bible_or_placeholder(project)
-            revision = get_active_production_revision(episode_id, "screenplay")
-            requires_legacy_audit = False
-            if bible.characters and revision and revision.working_artifact_id:
-                working_script = load_screenplay_from_artifact(
-                    revision.working_artifact_id,
-                )
-                apply_screenplay_character_resolutions(
-                    working_script, persisted_resolutions,
-                )
-                normalize_screenplay_voice_ids(working_script, bible)
-                requires_legacy_audit = bool(
-                    screenplay_unknown_identity_errors(working_script, bible)
-                )
-            if requires_legacy_audit:
-                _, preflight = await recorder.step(
-                    "character_discovery_resume_audit",
-                    lambda: _screenplay_character_discovery(
-                        episode_id,
-                        discovery_source,
-                        draft_text=working_script.model_dump_json(),
-                    ),
-                    agent_name="screenplay_character_discovery",
-                    context_manifest={
-                        "episode_id": episode_id,
-                        "source_chars": len(discovery_source),
-                        "phase": "legacy_working_artifact_audit",
-                    },
-                )
-            else:
-                preflight = {
-                    "added": [],
-                    "resolutions": persisted_resolutions,
-                    "skipped": "baseline_identity_already_resolved",
-                }
-                evidence_repository.append_event(
-                    recorder.run_id,
-                    "CHARACTER_DISCOVERY_SKIPPED",
-                    "info",
-                    "已有 Baseline，继续后续阶段时复用持久化人物决议",
-                    payload={"episode_id": episode_id},
-                )
+            preflight = {
+                "added": [],
+                "resolutions": persisted_resolutions,
+                "skipped": (
+                    "baseline_identity_already_resolved"
+                    if production_state["operation"] == "finalize"
+                    else "prebaseline_identity_checkpoint_reused"
+                ),
+            }
+            evidence_repository.append_event(
+                recorder.run_id,
+                "CHARACTER_DISCOVERY_SKIPPED",
+                "info",
+                (
+                    "已有完整 Document，继续时复用持久化人物决议"
+                    if production_state["operation"] == "finalize"
+                    else "已有首版安全检查点，继续时复用持久化人物决议"
+                ),
+                payload={"episode_id": episode_id},
+            )
         else:
             _, preflight = await recorder.step(
                 "character_discovery",
@@ -1489,16 +1446,37 @@ def _screenplay_generation_preflight(episode_id: str):
     source_text = _episode_source_text(conn, ep)
     chapters = json.loads(ep["source_chapters"] or "[]")
     cast_impact = _screenplay_cast_impact(conn, ep, source_text)
+    from app.source_excerpt import index_source_segments
+
+    source_segment_count = len(index_source_segments(source_text))
+    estimated_blueprint_shards = max(1, math.ceil(source_segment_count / 28))
+    estimated_scene_shards = max(1, math.ceil(source_segment_count / 16))
+    reusable = conn.execute(
+        """SELECT type,COUNT(*) AS count FROM artifacts
+             WHERE scope_type='episode' AND scope_id=? AND status='validated'
+               AND type IN (
+                 'screenplay_identity_discovery','screenplay_narrative_blueprint',
+                 'screenplay_identity_registry','screenplay_envelope',
+                 'screenplay_scene_shard','screenplay_generation_ir_merged'
+               ) GROUP BY type""",
+        (episode_id,),
+    ).fetchall()
     return {
         "action": "generate_screenplay",
         "episode_id": episode_id,
         "input": {
             "source_chapters": chapters,
             "source_chars": len(source_text),
+            "source_segment_count": source_segment_count,
+            "estimated_blueprint_shards": estimated_blueprint_shards,
+            "estimated_scene_writing_shards": estimated_scene_shards,
         },
         "wait_estimate": None,
         "cost_estimate_cny": None,
         "cast_impact": cast_impact,
+        "reusable_validated_artifacts": {
+            str(row["type"]): int(row["count"] or 0) for row in reusable
+        },
         "idempotency_scope": {
             "baseline": ep.get("screenplay_artifact_id") or "empty",
             "constraint_version": int(ep.get("screenplay_constraint_version") or 0),
@@ -1737,7 +1715,7 @@ def _prepare_published_screenplay_revalidation(ep: dict):
 
 @router.post("/episodes/{episode_id}/screenplay/resume")
 async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
-    """Continue deterministic stages from an existing working Baseline."""
+    """Continue either pre-Document shards or post-Document validation."""
     from app.capabilities.dispatch import ui_route
     from app.production.revision import get_active_production_revision
 
@@ -1753,13 +1731,19 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
     if ep["status"] == "scripting":
         raise HTTPException(409, "分镜正在生成中，不能同时修复剧本")
     if _screenplay_task_active(episode_id):
+        active_state = _screenplay_production_state(episode_id)
         return {
             "status": ep["screenplay_status"],
             "run_id": ep["active_screenplay_run_id"],
-            "mode": "finalize",
+            "mode": (
+                "baseline"
+                if not active_state.get("baseline_done")
+                else "finalize"
+            ),
             "deduplicated": True,
         }
     rev = get_active_production_revision(episode_id, "screenplay")
+    production_state = _screenplay_production_state(episode_id)
     if (
         rev is None
         and ep["screenplay_status"] == "ready"
@@ -1767,8 +1751,13 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         and not _screenplay_ready(ep)
     ):
         rev = _prepare_published_screenplay_revalidation(dict(ep))
-    if not rev or not rev.baseline_done or not rev.working_artifact_id:
-        raise HTTPException(409, "没有可继续的剧本工作副本；请使用「首次生成整版」")
+    can_resume_baseline = bool(production_state.get("can_resume_baseline"))
+    can_resume_repair = bool(
+        rev and rev.baseline_done and rev.working_artifact_id
+    )
+    if not rev or not (can_resume_baseline or can_resume_repair):
+        raise HTTPException(409, "没有可继续的首版检查点或完整剧本工作副本")
+    resume_mode = "baseline" if can_resume_baseline else "finalize"
 
     try:
         recorder = _new_screenplay_recorder(
@@ -1781,7 +1770,11 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             recorder,
             project_id=ep["project_id"],
             status="queued",
-            message="剧本续修已排队，等待文本生成槽位",
+            message=(
+                "首版场次续跑已排队，等待文本生成槽位"
+                if resume_mode == "baseline"
+                else "剧本续修已排队，等待文本生成槽位"
+            ),
             expected_active_run_id=ep["active_screenplay_run_id"],
         )
     except Exception as exc:
@@ -1794,7 +1787,7 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         "status": "queued",
         "run_id": recorder.run_id,
         "revision_id": rev.id,
-        "mode": "finalize",
+        "mode": resume_mode,
     }
 
 
@@ -1867,17 +1860,21 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     instance = normalize_screenplay_candidate(instance)
     bible = _project_bible_or_placeholder(project)
     if screenplay_unknown_identity_errors(instance, bible):
+        from app.identity_adjudication import (
+            adjudicate_screenplay_document_identities,
+        )
         try:
-            await _screenplay_character_discovery(
-                episode_id,
-                source_text,
-                draft_text=instance.model_dump_json(),
+            await adjudicate_screenplay_document_identities(
+                instance,
+                episode={**ep, "character_resolutions": resolutions},
+                source_text=source_text,
+                bible=bible,
             )
-        except StageError as exc:
+        except Exception as exc:
             raise HTTPException(422, {
-                "code": "screenplay_character_discovery_failed",
-                "message": "剧本人物身份预检未通过",
-                "errors": exc.errors,
+                "code": "screenplay_identity_adjudication_failed",
+                "message": "剧本未决人物身份仲裁未通过",
+                "errors": [str(exc)],
             }) from exc
         resolutions = load_screenplay_character_resolutions(conn, episode_id)
         apply_screenplay_character_resolutions(instance, resolutions)
@@ -2632,18 +2629,22 @@ async def edit_screenplay(episode_id: str, body: dict):
     instance = normalize_screenplay_candidate(instance)
     bible = _project_bible_or_placeholder(project)
     if screenplay_unknown_identity_errors(instance, bible):
-        # 手工剧本仍属于剧本阶段：新称谓在落库前由同一模型向后 10 章消歧。
+        # 手工剧本只投影 typed identity-bearing fields 与 owned SRC，禁止全章重扫。
+        from app.identity_adjudication import (
+            adjudicate_screenplay_document_identities,
+        )
         try:
-            await _screenplay_character_discovery(
-                episode_id,
-                source_text,
-                draft_text=instance.model_dump_json(),
+            await adjudicate_screenplay_document_identities(
+                instance,
+                episode={**ep, "character_resolutions": resolutions},
+                source_text=source_text,
+                bible=bible,
             )
-        except StageError as exc:
+        except Exception as exc:
             raise HTTPException(422, {
-                "code": "screenplay_character_discovery_failed",
-                "message": "剧本人物身份预检未通过",
-                "errors": exc.errors,
+                "code": "screenplay_identity_adjudication_failed",
+                "message": "剧本未决人物身份仲裁未通过",
+                "errors": [str(exc)],
             }) from exc
         resolutions = load_screenplay_character_resolutions(conn, episode_id)
         apply_screenplay_character_resolutions(instance, resolutions)

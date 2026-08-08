@@ -9,12 +9,6 @@ from app.db import get_conn
 
 
 REFERENCE_ARTIFACT_TYPES = {"character_portrait", "scene_reference"}
-SCORE_ONLY_REASONS = {
-    "missing_quality_score",
-    "quality_below_threshold_score_only",
-    "qa_unverified_score_only",
-    "cross_keyframe_identity_invariance_unverified",
-}
 REJECTED_CANDIDATE_STATUSES = {
     "blocked_deleted",
     "cleanup_pending",
@@ -26,28 +20,14 @@ REJECTED_CANDIDATE_STATUSES = {
 
 
 def qa_is_rejected(qa: Any) -> bool:
-    """Return true only for an explicit QA failure, not a low-score warning."""
-    if not isinstance(qa, dict):
-        return False
-    if str(qa.get("status") or "").lower() in {"failed", "rejected", "blocked"}:
-        return True
-    if any(str(item).strip() for item in (qa.get("hard_failures") or [])):
-        return True
-    return any(
-        isinstance(item, dict)
-        and str(item.get("severity") or "").lower() == "blocker"
-        for item in (qa.get("issues") or [])
-    )
+    """Only the persisted typed runtime gate authorizes destructive purge."""
+    return isinstance(qa, dict) and qa.get("runtime_blocking") is True
 
 
 def reference_dict_is_rejected(ref: Any) -> bool:
     if not isinstance(ref, dict):
         return False
-    reason = str(ref.get("rejectReason") or "").strip()
-    return bool(
-        ref.get("deleted")
-        or (reason and reason not in SCORE_ONLY_REASONS)
-    )
+    return bool(ref.get("deleted") or qa_is_rejected(ref.get("qa")))
 
 
 def discard_file(path: str | None) -> bool:

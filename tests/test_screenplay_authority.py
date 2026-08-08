@@ -285,6 +285,24 @@ def test_contract_v4_tracks_composed_bible_projection_separately_from_base_artif
     assert "ref_image_path" not in screenplay_bible_payload(bible)["scenes"][0]
 
 
+def test_authority_payload_keeps_retired_scene_hash_slot() -> None:
+    raw = {
+        "world": {"visual_style_canonical": "统一动画电影画风"},
+        "characters": [],
+        "scenes": [{
+            "name": "山门外",
+            "scene_canonical": "清晨山门外石阶与古树形成稳定空间结构",
+        }],
+    }
+    runtime_dump = Bible.model_validate(raw).model_dump(mode="json")
+
+    assert "forbidden_elements" not in runtime_dump["scenes"][0]
+    assert screenplay_bible_payload(raw)["scenes"][0]["forbidden_elements"] == []
+    assert screenplay_bible_payload(Bible.model_validate(raw))["scenes"][0][
+        "forbidden_elements"
+    ] == []
+
+
 def test_contract_v4_rejects_stale_runtime_bible_against_current_projection() -> None:
     _published_case()
     _seed_test_bible_authority()
