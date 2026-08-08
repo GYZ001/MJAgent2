@@ -146,20 +146,20 @@ def test_ingest_recognizes_special_and_bracketed_chapter_headings() -> None:
     ]
 
 
-def test_clean_text_keeps_story_wechat_but_removes_social_promotion() -> None:
+def test_clean_text_preserves_all_prose_regardless_of_subject_vocabulary() -> None:
     cleaned, removed = clean_text(
         "他打开微信，看见母亲发来的消息。\n"
         "关注微信公众号领取最新章节福利\n"
         "她放下手机，推门走进雨里。"
     )
 
-    assert removed == 1
+    assert removed == 0
     assert "他打开微信" in cleaned
     assert "她放下手机" in cleaned
-    assert "微信公众号" not in cleaned
+    assert "微信公众号" in cleaned
 
 
-def test_clean_text_removes_web_novel_author_promotions() -> None:
+def test_clean_text_removes_only_structural_separator_lines() -> None:
     cleaned, removed = clean_text(
         "孟浩抬头望向山门，决定继续前行。\n"
         "－－－－－－－－－－－－－\n"
@@ -170,39 +170,40 @@ def test_clean_text_removes_web_novel_author_promotions() -> None:
         "晚上还有一章，今晚八点有语音活动，新书发布会。"
     )
 
-    assert cleaned == "孟浩抬头望向山门，决定继续前行。"
-    assert removed == 4
+    assert "书生孟浩和大家见面啦" in cleaned
+    assert "新书发布会" in cleaned
+    assert removed == 1
 
 
-def test_clean_text_preserves_story_prefix_before_inline_promotion() -> None:
+def test_clean_text_does_not_split_inline_prose_by_promotion_vocabulary() -> None:
     cleaned, removed = clean_text(
         "孟浩深吸口气，淡淡开口。－－－－亲，推荐票别忘了啊\n"
         "次日，他把收藏的古籍放回书架。"
     )
 
-    assert cleaned == "孟浩深吸口气，淡淡开口。\n次日，他把收藏的古籍放回书架。"
-    assert removed == 1
+    assert "亲，推荐票别忘了啊" in cleaned
+    assert removed == 0
 
 
-def test_clean_text_removes_update_and_monthly_ticket_author_notes() -> None:
+def test_clean_text_preserves_ticket_and_update_vocabulary_equally() -> None:
     cleaned, removed = clean_text(
         "剑光落下，山谷重新安静。\n"
         "第三更送上，今天继续六更爆发，道友们月票请给力！\n"
         "她买了一张公交月票，随后走进车站。"
     )
 
-    assert "第三更送上" not in cleaned
+    assert "第三更送上" in cleaned
     assert "公交月票" in cleaned
-    assert removed == 1
+    assert removed == 0
 
 
-def test_clean_text_only_trims_trailing_serial_marker_from_story_line() -> None:
+def test_clean_text_preserves_trailing_serial_words_as_source_content() -> None:
     cleaned, removed = clean_text(
         "紫运宗参与了搜寻，却始终无人找到孟浩的踪迹。(未完待续。。)"
     )
 
-    assert cleaned == "紫运宗参与了搜寻，却始终无人找到孟浩的踪迹。"
-    assert removed == 1
+    assert cleaned == "紫运宗参与了搜寻，却始终无人找到孟浩的踪迹。(未完待续。。)"
+    assert removed == 0
 
 
 def test_clean_text_removes_orphaned_trailing_separator() -> None:
@@ -214,7 +215,7 @@ def test_clean_text_removes_orphaned_trailing_separator() -> None:
     assert removed == 2
 
 
-def test_clean_text_removes_multiline_author_note_but_keeps_following_malformed_heading() -> None:
+def test_clean_text_preserves_multiline_prose_around_malformed_heading() -> None:
     cleaned, removed = clean_text(
         "孟浩收起画轴，继续查看最后一个口袋。\n"
         "－－－－－－－－\n"
@@ -224,19 +225,16 @@ def test_clean_text_removes_multiline_author_note_but_keeps_following_malformed_
         "“这个储物袋太大了。”孟浩喃喃。"
     )
 
-    assert cleaned == (
-        "孟浩收起画轴，继续查看最后一个口袋。\n"
-        "\n"
-        "第五十三你要怎么谢我？\n"
-        "“这个储物袋太大了。”孟浩喃喃。"
-    )
-    assert removed == 3
+    assert "今天作者过生日，感谢读者一路支持。" in cleaned
+    assert "妻子准备了蛋糕，孩子也很开心。" in cleaned
+    assert "第五十三你要怎么谢我？" in cleaned
+    assert removed == 1
 
 
-def test_clean_text_preserves_story_before_inline_author_note() -> None:
+def test_clean_text_preserves_inline_author_note_as_unclassified_source() -> None:
     cleaned, removed = clean_text(
         "孟浩转身向大青山走去。－－－－这本书里的妖，是耳根想写的天地大妖。"
     )
 
-    assert cleaned == "孟浩转身向大青山走去。"
-    assert removed == 1
+    assert cleaned == "孟浩转身向大青山走去。－－－－这本书里的妖，是耳根想写的天地大妖。"
+    assert removed == 0

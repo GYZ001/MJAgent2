@@ -1178,7 +1178,7 @@ async def generate_scene_refs(
                         },
                     )
                     if not evolved:
-                        raise ContentGenerationError(f"场景状态变化版本未能创建：{sc.name}")
+                        raise SceneAssetQualityError(f"场景状态变化版本未能创建：{sc.name}")
                     sc.scene_canonical = pending_state
                     sc.pending_state_canonical = None
                     sc.pending_state_ep_start = None

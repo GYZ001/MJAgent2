@@ -17,39 +17,8 @@ CHAPTER_ID_RE = re.compile(
     rf"^(第[{_CHAPTER_NUMERALS}]+[章卷回节])(.*)$",
 )
 
-AD_MARKERS = (
-    "http://", "https://", "www.", "求收藏", "求推荐", "求月票",
-    "本章完", "天才一秒记住", "最新章节", "笔趣阁", "顶点小说", "手机阅读",
-)
-SOCIAL_AD_RE = re.compile(
-    r"(?:关注|搜索|添加|加|回复).{0,8}(?:微信公众号|微信号|微信公众平台|QQ群|qq群)"
-    r"|(?:微信公众号|微信号|QQ群|qq群).{0,12}(?:关注|搜索|添加|加入|交流|福利|领取)",
-)
-PUBLISHING_PROMO_RE = re.compile(
-    r"(?:推荐票|推荐榜|周推荐|月推荐|会员点击|起点币|新书发布会|发布\s*vip\s*章节|"
-    r"免费抽奖|大转盘抽奖|"
-    r"ipadmini|支持正版|码字|耳根)"
-    r"|(?:求|投|给|支持|呼唤|拜托|别忘|争|拼|保底|双倍|冲).{0,12}月票"
-    r"|月票.{0,24}(?:求|投|给|支持|呼唤|拜托|别忘|榜|第一|过万|爆发|订阅|双倍|保底|危机)"
-    r"|(?:收藏.{0,24}(?:新书|推荐票|抽奖|奖励|会员点击)|新书.{0,24}收藏)"
-    r"|(?:兄弟姐妹|道友们|大大们).{0,40}(?:爆发|更新|推荐|月票|订阅|活动)"
-    r"|(?:第[0-9一二三四五六七八九十百]+更|[0-9一二三四五六七八九十]+更(?:送上|爆发))"
-    r"|(?:今日|今天|凌晨|晚上|白天).{0,24}(?:爆发|更新|还有[0-9一二三四五六七八九十]+[章更])"
-    r"|(?:手游|游戏).{0,24}(?:公测|下载地址|礼包)",
-    re.IGNORECASE,
-)
-AUTHOR_NOTE_RE = re.compile(
-    r"(?:书评区|读者|书友|道友|兄弟姐妹|大大|公众(?:威信|微信|号)|公众号|起点|作者|"
-    r"写书|喜欢写|写作|文章|本书|本章|章节|更新|爆发|上架|订阅|月票|推荐|点击|收藏|抽奖|活动|"
-    r"商城|实体书|码字|老婆|女儿|生日|见面会|签售|公测|游戏)",
-    re.IGNORECASE,
-)
-PROMO_SEPARATOR_RE = re.compile(r"(?:[-_=~*]{4,}|[－—～·]{2,})")
 SEPARATOR_ONLY_RE = re.compile(r"^(?:[-_=~*]{4,}|[－—～·]{4,})$")
 TRAILING_JUNK_ONLY_RE = re.compile(r"^[;；,，:：|丨]+$")
-TRAILING_SERIAL_MARKER_RE = re.compile(
-    r"\s*[\(（]?\s*未完待续[\s。.．…·]*[\)）]?\s*$",
-)
 
 FALLBACK_CHUNK_CHARS = 3000
 STUB_CHAPTER_MAX_CHARS = 120
@@ -90,125 +59,21 @@ def validate_novel_text(text: str) -> None:
 
 
 def clean_text(text: str) -> tuple[str, int]:
-    """去广告行、归一空白。返回 (清洗后文本, 删除行数)。"""
+    """Normalize layout without deleting prose according to its vocabulary."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    kept, removed = [], 0
-
-    def drop_separator_before_ad() -> int:
-        while kept and not kept[-1]:
-            kept.pop()
-        if kept and SEPARATOR_ONLY_RE.fullmatch(kept[-1]):
-            kept.pop()
-            return 1
-        return 0
-
-    def looks_like_chapter_heading(value: str) -> bool:
-        if CHAPTER_RE.fullmatch(value):
-            return True
-        match = re.match(rf"^第[{_CHAPTER_NUMERALS}]+", value)
-        if not match:
-            return False
-        remainder = value[match.end():].strip()
-        return bool(remainder) and len(remainder) <= 48
-
-    # Remove multi-line author-note blocks introduced by a standalone separator.
-    # Stop before the next normal or malformed chapter heading so merged source
-    # chapters remain available for the splitter to recover.
-    index = 0
-    while index < len(lines):
-        if not SEPARATOR_ONLY_RE.fullmatch(lines[index].strip()):
-            index += 1
-            continue
-        end = index + 1
-        probe: list[str] = []
-        while end < len(lines):
-            candidate = lines[end].strip()
-            if candidate and looks_like_chapter_heading(candidate):
-                break
-            if candidate and len(probe) < 4:
-                probe.append(candidate)
-            end += 1
-        probe_text = "\n".join(probe)
-        if probe_text and (
-            PUBLISHING_PROMO_RE.search(probe_text) or AUTHOR_NOTE_RE.search(probe_text)
-        ):
-            removed += sum(1 for value in lines[index:end] if value.strip())
-            lines[index:end] = [""] * (end - index)
-        index = max(index + 1, end)
-
-    author_note_block = False
-
+    kept: list[str] = []
+    removed = 0
     for line in lines:
         stripped = line.strip()
-        stripped, serial_marker_count = TRAILING_SERIAL_MARKER_RE.subn("", stripped)
-        stripped = stripped.strip()
-        if author_note_block:
-            if stripped and looks_like_chapter_heading(stripped):
-                author_note_block = False
-            elif stripped and (
-                PUBLISHING_PROMO_RE.search(stripped) or AUTHOR_NOTE_RE.search(stripped)
-            ):
-                removed += 1
-                continue
-            else:
-                author_note_block = False
-        if serial_marker_count and not stripped:
-            removed += drop_separator_before_ad()
-            removed += 1
-            continue
-        is_social_ad = bool(
-            stripped and len(stripped) <= 160 and SOCIAL_AD_RE.search(stripped)
-        )
-        is_heading_line = bool(stripped and CHAPTER_RE.fullmatch(stripped))
-        is_publishing_promo = bool(
-            stripped and not is_heading_line and len(stripped) <= 800
-            and PUBLISHING_PROMO_RE.search(stripped)
-        )
-        prior_nonempty = next((item for item in reversed(kept) if item), "")
-        after_separator = bool(prior_nonempty and SEPARATOR_ONLY_RE.fullmatch(prior_nonempty))
-        inline_note_prefix = ""
-        for match in reversed(list(PROMO_SEPARATOR_RE.finditer(stripped))):
-            suffix = stripped[match.end():].strip()
-            if suffix and (
-                PUBLISHING_PROMO_RE.search(suffix) or AUTHOR_NOTE_RE.search(suffix)
-            ):
-                inline_note_prefix = stripped[:match.start()].strip()
-                break
-        is_author_note = bool(
-            stripped and len(stripped) <= 1200 and (
-                (after_separator and AUTHOR_NOTE_RE.search(stripped))
-                or inline_note_prefix
-            )
-        )
-        if stripped and (is_publishing_promo or is_author_note):
-            # Scraped chapters often append an author note after a decorative
-            # separator on the same line. Preserve the story sentence before it.
-            prefix = inline_note_prefix
-            if prefix:
-                kept.append(prefix)
-            else:
-                removed += drop_separator_before_ad()
-            removed += 1
-            author_note_block = after_separator
-            continue
         if stripped and (
-            any(marker in stripped for marker in AD_MARKERS) or is_social_ad
+            SEPARATOR_ONLY_RE.fullmatch(stripped)
+            or TRAILING_JUNK_ONLY_RE.fullmatch(stripped)
         ):
-            removed += drop_separator_before_ad()
             removed += 1
             continue
-        if serial_marker_count:
-            removed += 1
         kept.append(stripped)
-    while kept:
-        if not kept[-1]:
-            kept.pop()
-            continue
-        if SEPARATOR_ONLY_RE.fullmatch(kept[-1]) or TRAILING_JUNK_ONLY_RE.fullmatch(kept[-1]):
-            kept.pop()
-            removed += 1
-            continue
-        break
+    while kept and not kept[-1]:
+        kept.pop()
     cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
     return cleaned.strip(), removed
 

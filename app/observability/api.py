@@ -631,26 +631,47 @@ def _trace_node_detail(
             "policy_version": item.get("policy_version"),
         }
     elif kind == "job":
-        item = system_api.job_detail(raw_id, "job")
-        input_value = {
-            "kind": item.get("kind"),
-            "project_id": item.get("project_id"),
-            "episode_id": item.get("episode_id"),
-            "shot_id": item.get("shot_id"),
-            "version_id": item.get("version_id"),
-            "after_shot_id": item.get("after_shot_id"),
-            "after_version_id": item.get("after_version_id"),
-            "scene_kinds": _trace_json_value(item.get("scene_kinds")),
-        }
-        output_value = {
-            "status": item.get("status"),
-            "pipeline_stage": item.get("pipeline_stage"),
-            "stage_status": item.get("stage_status"),
-            "stage_progress": _trace_json_value(item.get("stage_progress_json")),
-            "reason_code": item.get("reason_code"),
-            "reason_text": item.get("reason_text"),
-            "error": item.get("error"),
-        }
+        detail_source = (
+            source
+            if object_type == "jobs" and raw_id == object_id
+            else "job"
+        )
+        item = system_api.job_detail(raw_id, detail_source)
+        if item.get("source") == "screenplay":
+            input_value = {
+                "kind": "screenplay",
+                "project_id": item.get("project_id"),
+                "episode_id": raw_id.removeprefix("screenplay_"),
+                "episode_no": item.get("episode_no"),
+                "title": item.get("title"),
+            }
+            output_value = {
+                "status": item.get("screenplay_status"),
+                "artifact_id": item.get("screenplay_artifact_id"),
+                "started_at": item.get("screenplay_started_at"),
+                "updated_at": item.get("screenplay_updated_at"),
+                "error": item.get("screenplay_error"),
+            }
+        else:
+            input_value = {
+                "kind": item.get("kind"),
+                "project_id": item.get("project_id"),
+                "episode_id": item.get("episode_id"),
+                "shot_id": item.get("shot_id"),
+                "version_id": item.get("version_id"),
+                "after_shot_id": item.get("after_shot_id"),
+                "after_version_id": item.get("after_version_id"),
+                "scene_kinds": _trace_json_value(item.get("scene_kinds")),
+            }
+            output_value = {
+                "status": item.get("status"),
+                "pipeline_stage": item.get("pipeline_stage"),
+                "stage_status": item.get("stage_status"),
+                "stage_progress": _trace_json_value(item.get("stage_progress_json")),
+                "reason_code": item.get("reason_code"),
+                "reason_text": item.get("reason_text"),
+                "error": item.get("error"),
+            }
         metadata = {
             "job_id": raw_id,
             "run_id": item.get("run_id"),

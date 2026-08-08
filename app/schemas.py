@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 import re
 
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 SHOT_SIZES = {"远景", "全景", "中景", "近景", "特写"}
 CAMERA_MOVES = {"固定", "推近", "拉远", "横摇", "跟随"}
@@ -119,7 +119,6 @@ class Scene(BaseModel):
     time_of_day: str = ""
     lighting: str = ""
     landmarks: list[str] = Field(default_factory=list)
-    forbidden_elements: list[str] = Field(default_factory=list)
     first_episode: int | None = None
     required_views: list[str] = Field(default_factory=list)
     discovery_sources: list[str] = Field(default_factory=list)
@@ -1325,11 +1324,23 @@ class CognitiveBridgePlan(BaseModel):
     selection_reason: str = ""
 
 
+class BlindSpontaneousRecall(BaseModel):
+    """Closed model-output contract; unknown fields fail schema validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recognized_entities: list[Any]
+    inferred_propositions: list[Any]
+    causal_hypotheses: list[Any]
+    character_goal_hypotheses: list[Any]
+    active_question_ids: list[str]
+
+
 class BlindAudienceObservation(BaseModel):
     observation_id: str
     audience_prior_id: str
     anchor: NarrativeAnchor
-    spontaneous_recall: dict = Field(default_factory=dict)
+    spontaneous_recall: BlindSpontaneousRecall
     neutral_followup_observations: list[dict | str] = Field(default_factory=list)
     noticed_attention_target_ids: list[str] = Field(default_factory=list)
     spatial_temporal_model: dict = Field(default_factory=dict)

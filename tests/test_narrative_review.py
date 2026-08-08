@@ -714,14 +714,14 @@ async def test_target_leak_is_rejected_before_observation_persistence(monkeypatc
     )
 
     async def leaking_chat(messages, **_kwargs):
-        payload = json.loads(messages[1]["content"])
+        payload, _ = json.JSONDecoder().raw_decode(messages[1]["content"])
         observation = _observation(payload)
         observation["spontaneous_recall"]["director_objective"] = "leaked target"
         return json.dumps(observation, ensure_ascii=False)
 
     monkeypatch.setattr("app.narrative_review.model_gateway.chat", leaking_chat)
 
-    with pytest.raises(NarrativeReviewError, match="BLIND_REVIEW_TARGET_LEAK"):
+    with pytest.raises(NarrativeReviewError, match="Schema"):
         await run_blind_audience_review(
             episode_id="episode-generic",
             screenplay=screenplay,

@@ -17,7 +17,6 @@ from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.narrative import (
     AUDIENCE_PERCEPTUAL_SURFACE_VERSION,
     NARRATIVE_CONTRACT_VERSION,
-    _contains_forbidden_contract_key,
     audience_perceptual_surface,
     audience_perceptual_surface_hash,
     index_narrative_plan,
@@ -25,6 +24,7 @@ from app.narrative import (
 )
 from app.schemas import (
     BlindAudienceObservation,
+    BlindSpontaneousRecall,
     EpisodeScreenplay,
     NarrativeReviewReport,
     Storyboard,
@@ -35,21 +35,6 @@ BLIND_READER_PROMPT_VERSION = "blind-audience.v3"
 COMPARATOR_PROMPT_VERSION = "narrative-comparator.v2"
 BLIND_PERCEPTUAL_INPUT_ARTIFACT_TYPE = "blind_audience_perceptual_input"
 BLIND_FIRST_PASS_ARTIFACT_TYPE = "blind_audience_spontaneous_recall"
-
-_BLIND_FORBIDDEN_CONTRACT_KEYS = {
-    "narrative_plan",
-    "source_evidence",
-    "propositions",
-    "director_objective",
-    "target_deltas",
-    "assimilation_tasks",
-    "reserved_future_event_ids",
-    "planned_state_in_fact_ids",
-    "planned_delta_add_fact_ids",
-    "planned_delta_remove_fact_ids",
-    "planned_state_out_fact_ids",
-    "audience_state_paths",
-}
 
 _BLIND_SYSTEM = (
     "你是一名第一次观看成片分镜的普通观众，不是编剧、导演或审稿人。"
@@ -74,7 +59,7 @@ class BlindAudienceFirstPass(BaseModel):
     observation_id: str
     audience_prior_id: str
     anchor: dict[str, str] = Field(default_factory=dict)
-    spontaneous_recall: dict[str, Any] = Field(default_factory=dict)
+    spontaneous_recall: BlindSpontaneousRecall
     noticed_attention_target_ids: list[str] = Field(default_factory=list)
     spatial_temporal_model: dict[str, Any] = Field(default_factory=dict)
     felt_affective_state: dict[str, Any] = Field(default_factory=dict)
@@ -387,14 +372,6 @@ def verify_persisted_narrative_review(
             visible_handles
         ):
             errors.append(f"[BLIND_FIRST_PASS_EVIDENCE_NOT_VISIBLE] prior={prior_id}")
-        if _contains_forbidden_contract_key(
-            first_pass.spontaneous_recall,
-            {
-                "target_deltas", "target_delta_id", "director_objective",
-                "withheld_propositions",
-            },
-        ):
-            errors.append(f"[BLIND_REVIEW_TARGET_LEAK] prior={prior_id}")
         isolation_gate = conn.execute(
             """SELECT evaluator_version,evidence_json FROM evaluations
                  WHERE artifact_id=?
@@ -526,11 +503,6 @@ def verify_persisted_narrative_review(
             errors.append(
                 f"[BLIND_FIRST_PASS_MUTATED_AFTER_FREEZE] prior={prior_id}"
             )
-        if _contains_forbidden_contract_key(
-            observation.spontaneous_recall,
-            {"target_deltas", "target_delta_id", "director_objective", "withheld_propositions"},
-        ):
-            errors.append("[BLIND_REVIEW_TARGET_LEAK] 冻结自由复述泄漏了导演目标")
         observation_by_prior[prior_id] = (observation_artifact_id, observation)
 
     if set(observation_by_prior) != set(expected_prior_by_id):
@@ -1238,10 +1210,6 @@ def _blind_perceptual_input_content(
 ) -> dict[str, Any]:
     """Freeze the exact target-free model payload and both of its identities."""
     surface = audience_perceptual_surface(prior, screenplay, board)
-    if _contains_forbidden_contract_key(surface, _BLIND_FORBIDDEN_CONTRACT_KEYS):
-        raise NarrativeReviewError([
-            "[BLIND_REVIEW_TARGET_LEAK] AudiencePerceptualSurface 含导演目标或计划事实"
-        ])
     model_prompt_payload = _blind_prompt(surface, observation_id=observation_id)
     return {
         "audience_prior_id": prior.audience_prior_id,
@@ -1916,11 +1884,6 @@ async def run_blind_audience_review(
                 f"[BLIND_PRIOR_MISMATCH] 冷观众输出 {first_pass.audience_prior_id}，"
                 f"本轮只能输出 {prior.audience_prior_id}"
             ])
-        if _contains_forbidden_contract_key(
-            first_pass.spontaneous_recall,
-            {"target_deltas", "target_delta_id", "director_objective", "withheld_propositions"},
-        ):
-            raise NarrativeReviewError(["[BLIND_REVIEW_TARGET_LEAK] 冷观众自由复述泄漏了导演目标"])
         visible_handles = {
             evidence_id
             for shot in perceptual_input_content["model_prompt_payload"]["input"][

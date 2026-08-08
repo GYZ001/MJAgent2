@@ -12,17 +12,15 @@ from app.harness.types import Evaluation, EvidenceArtifact
 from app.scene_policy import normalize_scene_image_qa
 
 
-def test_environment_only_prompt_removes_conflicting_human_clauses() -> None:
+def test_environment_only_prompt_preserves_approved_canonical_without_word_filtering() -> None:
     from app.scenes import environment_only_scene_canonical, scene_ref_prompt
 
     canonical = "热闹露天坊市，摊位林立，人流穿梭，周围有萧家护卫巡视，色彩明快"
     cleaned = environment_only_scene_canonical(canonical)
     assert "摊位林立" in cleaned
-    assert "人流" not in cleaned
-    assert "护卫" not in cleaned
+    assert cleaned == canonical
     prompt = scene_ref_prompt("国风厚涂", canonical, scene_name="萧家坊市")
-    assert "人流穿梭" not in prompt
-    assert "护卫巡视" not in prompt
+    assert canonical in prompt
     assert "无人物" in prompt
     assert "规范地点名称：萧家坊市" in prompt
     assert "不得替换成其他地点" in prompt
@@ -33,7 +31,7 @@ def test_environment_only_prompt_removes_conflicting_human_clauses() -> None:
     assert "再次确认：地点是「萧家坊市」，画风是「国风厚涂」" in prompt
 
 
-def test_environment_prompt_keeps_auditorium_seats_but_removes_people() -> None:
+def test_environment_prompt_keeps_the_complete_scene_contract() -> None:
     from app.scenes import environment_only_scene_canonical, scene_ref_prompt
 
     canonical = (
@@ -44,16 +42,17 @@ def test_environment_prompt_keeps_auditorium_seats_but_removes_people() -> None:
     assert "空荡观众席" in cleaned
     assert "前排台阶" in cleaned
     assert "入口通道" in cleaned
-    assert "观众等待入场" not in cleaned
+    assert "观众等待入场" in cleaned
 
     prompt = scene_ref_prompt("2D 动画厚涂", canonical, scene_name="一号厅")
     assert "空荡观众席" in prompt
     assert "前排台阶" in prompt
     assert "入口通道" in prompt
-    assert "观众等待入场" not in prompt
+    assert "观众等待入场" in prompt
+    assert "画面必须无人物" in prompt
 
 
-def test_scene_name_semantics_remain_authoritative_when_canonical_is_generic() -> None:
+def test_scene_name_does_not_trigger_hard_coded_visual_constraints() -> None:
     from app.scenes import scene_name_visual_constraints, scene_ref_prompt
 
     prompt = scene_ref_prompt(
@@ -66,18 +65,15 @@ def test_scene_name_semantics_remain_authoritative_when_canonical_is_generic() -
     assert "建筑功能、空间类型和状态限定词" in prompt
     assert "材质状态" in prompt
     assert "不得忽略或替换" in prompt
-    assert "无文字的影厅入口" in prompt
-    assert "沿两侧排列的门洞或入口" in prompt
-    assert "可见积灰与尘层" in prompt
-    assert "掉漆、破损或污渍不能替代积灰" in prompt
+    assert "无文字的影厅入口" not in prompt
+    assert "沿两侧排列的门洞或入口" not in prompt
+    assert "可见积灰与尘层" not in prompt
 
     constraints = scene_name_visual_constraints("电影院落灰长廊")
-    assert "影院功能证据" in constraints
-    assert "长廊空间" in constraints
-    assert "材质状态" in constraints
+    assert constraints == ""
 
 
-def test_auditorium_prompt_forbids_windows_and_requires_screen_seats() -> None:
+def test_auditorium_prompt_uses_only_approved_scene_contract() -> None:
     from app.scenes import scene_ref_prompt
 
     prompt = scene_ref_prompt(
@@ -86,12 +82,12 @@ def test_auditorium_prompt_forbids_windows_and_requires_screen_seats() -> None:
         scene_name="一号厅观众席",
     )
 
-    assert "封闭遮光空间" in prompt
-    assert "前方银幕、成排座椅和台阶通道" in prompt
-    assert "严禁落地窗、外窗、玻璃幕墙、城市外景或室外采光" in prompt
+    assert "室内夜晚，空荡座椅与前方银幕" in prompt
+    assert "封闭遮光空间" not in prompt
+    assert "严禁落地窗" not in prompt
 
 
-def test_cinema_lobby_prompt_keeps_rain_outside_enclosed_interior() -> None:
+def test_cinema_lobby_name_does_not_inject_a_location_template() -> None:
     from app.scenes import scene_ref_prompt
 
     prompt = scene_ref_prompt(
@@ -100,16 +96,12 @@ def test_cinema_lobby_prompt_keeps_rain_outside_enclosed_interior() -> None:
         scene_name="电影院门厅",
     )
 
-    assert "建筑内部的封闭室内大厅" in prompt
-    assert "四周使用连续无窗内墙完整包围" in prompt
-    assert "严禁画成临海公共走廊、半室外门廊" in prompt
-    assert "严禁以海洋、海岸、海堤或室外雨幕作为空间主背景" in prompt
-    assert "严禁任何对外窗、采光窗、玻璃门、落地窗或玻璃幕墙" in prompt
-    assert "雨夜氛围只能用室内冷蓝环境光与暖黄灯光的对比表达" in prompt
-    assert "不得出现可见雨滴、雨幕、室外景或玻璃表面" in prompt
+    assert "室内夜晚，复古门厅空间，充电台灯散发暖黄光晕" in prompt
+    assert "建筑内部的封闭室内大厅" not in prompt
+    assert "严禁以海洋" not in prompt
 
 
-def test_merged_corridor_is_normalized_to_dry_ticket_lobby() -> None:
+def test_generation_canonical_is_not_rewritten_from_scene_name() -> None:
     from app.scenes import scene_generation_canonical, scene_ref_prompt
 
     canonical = "室内夜晚，落满灰尘的长廊与售票窗，暖黄台灯光，雨夜湿润质感"
@@ -120,25 +112,16 @@ def test_merged_corridor_is_normalized_to_dry_ticket_lobby() -> None:
     )
 
     normalized = scene_generation_canonical("星港电影院门厅", canonical)
-    assert "雨夜湿润质感" not in normalized
-    assert "落满灰尘的长廊" not in normalized
-    assert "封闭室内门厅大厅" in normalized
-    assert "封闭室内夜景" in normalized
-    assert "内墙嵌入式封闭售票窗（带小型交易口）" in normalized
-    assert "建筑内部的封闭室内大厅" in prompt
-    assert "电影院门厅内部的封闭过渡长廊" not in prompt
-    assert "暖灰或灰褐色的薄层细粉尘" not in prompt
-    assert "嵌在连续无窗内墙中的封闭售票窗" in prompt
-    assert "空白票价框或空白海报灯箱轮廓" in prompt
-    assert "严禁开放柜台、独立服务台、吧台或住宅窗户" in prompt
+    assert normalized == canonical
+    assert canonical in prompt
+    assert "封闭室内门厅大厅" not in prompt
+    assert "内墙嵌入式封闭售票窗" not in prompt
 
     generated = scene_generation_canonical(
         "星港电影院门厅",
         "傍晚雨夜室内，门廊挂铜铃，售票窗亮暖黄台灯，落灰长廊入口",
     )
-    assert "傍晚雨夜室内" not in generated
-    assert "封闭室内夜景" in generated
-    assert "实心入口内侧上方悬挂铜铃" in generated
+    assert generated == "傍晚雨夜室内，门廊挂铜铃，售票窗亮暖黄台灯，落灰长廊入口"
 
 
 def test_scene_hard_gate_retry_prompt_is_bounded_and_hard_failure_only() -> None:
@@ -177,12 +160,11 @@ def test_scene_hard_gate_retry_prompt_is_bounded_and_hard_failure_only() -> None
     )
     assert edit_retry is not None
     assert base not in edit_retry
-    assert "必须重绘有问题的建筑与材质区域" in edit_retry
-    assert "任何对外小窗" in edit_retry
-    assert "用连续的无窗吸音内墙、实心影厅双开门与空白海报灯箱替换" in edit_retry
-    assert "清除地面和柜台上的白色积雪、冰霜、水渍与反光湿痕" in edit_retry
-    assert "带小型交易口的封闭售票窗" in edit_retry
-    assert "封闭室内夜景" in edit_retry
+    assert "依据结构化 QA 事实修复候选图" in edit_retry
+    assert "依据结构化 QA 事实修复候选图" in edit_retry
+    assert "任何对外小窗" not in edit_retry
+    assert "清除地面和柜台" not in edit_retry
+    assert "室内落灰长廊与售票窗，雨夜湿润质感" in edit_retry
     assert len(edit_retry) < 1600
     assert scene_hard_gate_retry_prompt(base, {
         "status": "warning",
@@ -284,7 +266,7 @@ def test_hard_gate_retry_uses_failed_candidate_as_edit_seed(tmp_path, monkeypatc
     assert [call["attempt"] for call in calls] == [1, 2]
     assert calls[0]["anchor_url"] is None
     assert calls[1]["anchor_url"].startswith("data:image/jpeg;base64,")
-    assert "编辑输入候选图：必须重绘有问题的建筑与材质区域" in calls[1]["prompt"]
+    assert "编辑输入候选图：依据结构化 QA 事实修复候选图" in calls[1]["prompt"]
 
 
 def _evaluation(qa: dict, *, status: str | None = None) -> Evaluation:
@@ -497,13 +479,16 @@ def test_scene_candidate_review_required_finishes_task_as_partial_not_provider_f
 
 def test_mixed_candidate_and_pack_quality_failures_are_not_provider_outages() -> None:
     from app import hiagent
-    from app.errors import ContentGenerationError
-    from app.scenes import SceneCandidateReviewRequired, _scene_failures_are_quality_only
+    from app.scenes import (
+        SceneAssetQualityError,
+        SceneCandidateReviewRequired,
+        _scene_failures_are_quality_only,
+    )
 
     assert _scene_failures_are_quality_only([
         SceneCandidateReviewRequired("高分候选待复核"),
-        hiagent.ProviderError("多视角资产包未通过：status=failed"),
-        ContentGenerationError("场景一致性检查未通过"),
+        SceneAssetQualityError("multi-view contract failed"),
+        SceneAssetQualityError("scene consistency contract failed"),
     ]) is True
     assert _scene_failures_are_quality_only([
         SceneCandidateReviewRequired("高分候选待复核"),

@@ -327,18 +327,6 @@ def _declared_change_matches(declared: Any, before: Any, after: Any) -> bool:
     return before != after and declared == after
 
 
-def _contains_forbidden_contract_key(value: Any, forbidden: set[str]) -> bool:
-    if isinstance(value, dict):
-        return any(
-            str(key) in forbidden
-            or _contains_forbidden_contract_key(item, forbidden)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return any(_contains_forbidden_contract_key(item, forbidden) for item in value)
-    return False
-
-
 @dataclass(frozen=True)
 class NarrativeIndex:
     source_evidence: dict[str, Any]
@@ -3023,17 +3011,6 @@ def validate_blind_review(
         if observation.audience_prior_id in observed_priors:
             errors.append(f"[BLIND_PRIOR_DUPLICATE] {observation.audience_prior_id} 有多份未区分轮次的观察")
         observed_priors.add(observation.audience_prior_id)
-        if _contains_forbidden_contract_key(
-            observation.spontaneous_recall,
-            {"target_deltas", "target_delta_id", "director_objective", "withheld_propositions"},
-        ):
-            errors.append(f"[BLIND_REVIEW_TARGET_LEAK] {observation_id} 的自由复述包含导演目标字段")
-        required_recall_fields = {
-            "recognized_entities", "inferred_propositions", "causal_hypotheses",
-            "character_goal_hypotheses", "active_question_ids",
-        }
-        if not required_recall_fields.issubset(observation.spontaneous_recall):
-            errors.append(f"[BLIND_RECALL_INCOMPLETE] {observation_id} 的冻结自由复述字段不完整")
         if not 0 <= observation.confidence <= 1:
             errors.append(f"[CONFIDENCE_RANGE] {observation_id}.confidence 必须在 0..1")
         _require_refs(

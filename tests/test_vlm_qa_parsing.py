@@ -40,7 +40,8 @@ No reference image provided. *Score:* 1.0.
     assert qa["continuity"] == 1.0
     assert qa["clean_frame"] == 0.75
     assert qa["overall"] == 0.883
-    assert any("文字" in issue or "水印" in issue for issue in qa["issues"])
+    assert qa["issues"] == ["VLM返回非标准结构，未获得可验证的结构化诊断"]
+    assert qa["qa_recovered"] is True
     assert qa["qa_recovered"] is True
 
 

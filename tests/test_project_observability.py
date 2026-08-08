@@ -239,8 +239,37 @@ def test_trace_routes_reject_foreign_project_before_returning_tree(scoped_db) ->
     client = TestClient(app)
 
     own = client.get("/api/projects/p1/observability/traces/runs/run-1")
+    node = client.get(
+        "/api/projects/p1/observability/traces/runs/run-1/nodes/run%3Arun-1"
+    )
     foreign = client.get("/api/projects/p1/observability/traces/runs/run-2")
     assert own.status_code == 200
     assert own.json()["selected_node_id"] == "run:run-1"
+    assert node.status_code == 200
+    assert node.json()["id"] == "run:run-1"
+    assert "input" in node.json() and "output" in node.json()
     assert foreign.status_code == 404
     assert "p2" not in foreign.text
+
+
+def test_legacy_screenplay_trace_keeps_source_specific_node_io(scoped_db) -> None:
+    scoped_db.execute(
+        """UPDATE episodes
+           SET screenplay_status='failed',screenplay_error='旧任务失败',
+               screenplay_started_at=1,screenplay_updated_at=2
+           WHERE id='e1'"""
+    )
+    scoped_db.commit()
+
+    tree = observability_api._trace_tree(
+        "p1", "jobs", "screenplay_e1", "screenplay",
+    )
+    detail = observability_api._trace_node_detail(
+        "p1", "jobs", "screenplay_e1", "job:screenplay_e1", "screenplay",
+    )
+
+    assert tree["run_id"] is None
+    assert tree["selected_node_id"] == "job:screenplay_e1"
+    assert detail["input"]["episode_id"] == "e1"
+    assert detail["output"]["status"] == "failed"
+    assert detail["output"]["error"] == "旧任务失败"

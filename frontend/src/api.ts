@@ -422,7 +422,6 @@ export const api = {
       time_of_day?: string;
       lighting?: string;
       landmarks?: string[];
-      forbidden_elements?: string[];
     },
   ) =>
     request(
@@ -2152,7 +2151,6 @@ export interface Scene {
   time_of_day?: string;
   lighting?: string;
   landmarks?: string[];
-  forbidden_elements?: string[];
   first_episode?: number | null;
   required_views?: string[];
   discovery_sources?: string[];

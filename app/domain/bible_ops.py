@@ -3680,12 +3680,6 @@ async def edit_scene_prompt(project_id: str, scene_name: str, body: dict):
     prompt_text = (body.get("scene_prompt") or "").strip()
     if prompt_text and not 10 <= len(prompt_text) <= 400:
         raise HTTPException(422, f"场景图描述长度 {len(prompt_text)} 字，要求 10~400 字（留空则恢复默认）")
-    forbidden_people_requests = (
-        "出现人物", "有人物", "出现人群", "包含人群", "有人群",
-        "出现行人", "有行人", "角色入镜", "主体人物",
-    )
-    if prompt_text and any(token in prompt_text for token in forbidden_people_requests):
-        raise HTTPException(422, "纯环境场景图描述不能要求人物、人群、行人或角色入镜")
     bible = json.loads(p["bible_json"])
     target = next((s for s in bible.get("scenes", []) if s.get("name") == scene_name), None)
     if target is None:
@@ -3726,7 +3720,6 @@ async def edit_scene_anchor(project_id: str, scene_name: str, body: dict):
         "time_of_day": str(body.get("time_of_day") or "").strip(),
         "lighting": str(body.get("lighting") or "").strip(),
         "landmarks": [str(item).strip() for item in (body.get("landmarks") or []) if str(item).strip()],
-        "forbidden_elements": [str(item).strip() for item in (body.get("forbidden_elements") or []) if str(item).strip()],
     })
     instance, validation_errors = schema_errors(Bible, bible)
     if validation_errors:

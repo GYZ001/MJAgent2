@@ -704,7 +704,6 @@ function SceneDetailModal({
               <div><dt>时段</dt><dd>{scene.time_of_day || '旧版场景信息未拆分'}</dd></div>
               <div><dt>光线</dt><dd>{scene.lighting || '旧版场景信息未拆分'}</dd></div>
               <div><dt>标志物</dt><dd>{scene.landmarks?.join('、') || '旧版场景信息未拆分'}</dd></div>
-              <div><dt>排除内容</dt><dd>{scene.forbidden_elements?.join('、') || '人物、文字、水印、Logo'}</dd></div>
             </dl>
           </section>
 
@@ -1254,7 +1253,6 @@ function SceneAnchorBlock({ projectId, scene, expectedVersion, disabled, onChang
     location_kind: scene.location_kind || '', space: scene.space || '',
     time_of_day: scene.time_of_day || '', lighting: scene.lighting || '',
     landmarks: (scene.landmarks || []).join('、'),
-    forbidden_elements: (scene.forbidden_elements || []).join('、'),
   }
   const [draft, setDraft] = useState(() => savedDraft)
   const dirty = JSON.stringify(draft) !== JSON.stringify(savedDraft)
@@ -1295,7 +1293,6 @@ function SceneAnchorBlock({ projectId, scene, expectedVersion, disabled, onChang
         <label>时段<input value={draft.time_of_day} onChange={e => setDraft(v => ({ ...v, time_of_day: e.target.value }))} /></label>
         <label>光线<input value={draft.lighting} onChange={e => setDraft(v => ({ ...v, lighting: e.target.value }))} /></label>
         <label>标志物<input value={draft.landmarks} onChange={e => setDraft(v => ({ ...v, landmarks: e.target.value }))} placeholder="用顿号分隔" /></label>
-        <label>禁用元素<input value={draft.forbidden_elements} onChange={e => setDraft(v => ({ ...v, forbidden_elements: e.target.value }))} placeholder="用顿号分隔" /></label>
       </div>
       <label>完整场景描述<textarea rows={4} value={draft.scene_canonical} onChange={e => setDraft(v => ({ ...v, scene_canonical: e.target.value }))} /></label>
       <div className={descriptionInvalid ? 'error-banner' : 'hint'}>
@@ -1313,7 +1310,7 @@ function SceneAnchorBlock({ projectId, scene, expectedVersion, disabled, onChang
             try {
               await api.editSceneAnchor(projectId, scene.name, {
                 expected_version: expectedVersion, ...draft,
-                landmarks: split(draft.landmarks), forbidden_elements: split(draft.forbidden_elements),
+                landmarks: split(draft.landmarks),
               })
               toast('场景固定信息已保存；现有图片已标记待重绘（未生成、未扣费）')
               setDiscardConfirm(false); setEditing(false); onChanged()
@@ -1349,16 +1346,12 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
   const effective = s.scene_prompt_effective || ''
   const savedPrompt = s.scene_prompt_override || effective
   const draftChanged = draft !== null && draft !== savedPrompt
-  const promptParts = effective.split('。').map(part => part.trim()).filter(Boolean)
   const promptSections = [
-    { label: '全局画风', value: promptParts[0] || '未提供' },
-    { label: '场景固定描述', value: promptParts.find(part => part.includes('场景')) || s.scene_canonical },
-    { label: '视角与构图', value: promptParts.find(part => /视角|镜头|构图|竖屏/.test(part)) || '随当前视角自动补充' },
-    { label: '排除内容', value: promptParts.filter(part => /无人物|无文字|无字幕|无水印|logo|禁止/.test(part)).join('；') || '无人物、无文字、无水印、无 Logo' },
+    { label: '场景固定描述', value: s.scene_canonical },
+    { label: '实际生成合同', value: effective || '未提供' },
   ]
   const draftLength = (draft ?? '').trim().length
-  const requestsPeople = draft !== null && /出现人物|有人物|出现人群|包含人群|有人群|出现行人|有行人|角色入镜|主体人物/.test(draft)
-  const draftInvalid = draft !== null && draftLength > 0 && (draftLength < 10 || draftLength > 400 || requestsPeople)
+  const draftInvalid = draft !== null && draftLength > 0 && (draftLength < 10 || draftLength > 400)
   const baseDisabledReason = saving
     ? '正在保存上一项修改'
     : disabled
@@ -1366,13 +1359,13 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
       : ''
   const saveAndRegenerateDisabledReason = baseDisabledReason
     || (!draftChanged ? '尚未修改场景图描述' : '')
-    || (draftInvalid ? requestsPeople ? '纯环境场景不能要求人物入镜' : '描述需为 10 至 400 字' : '')
+    || (draftInvalid ? '描述需为 10 至 400 字' : '')
   const saveOnlyDisabledReason = saving
     ? '正在保存上一项修改'
     : !draftChanged
       ? '尚未修改场景图描述'
       : draftInvalid
-        ? requestsPeople ? '纯环境场景不能要求人物入镜' : '描述需为 10 至 400 字'
+        ? '描述需为 10 至 400 字'
         : ''
   useEffect(() => { onDirtyChange(draftChanged) }, [draftChanged])
 
@@ -1395,7 +1388,7 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
           <div className="f-misc" style={{ background: 'rgba(91,114,83,0.06)', borderLeft: '3px solid var(--moss)', padding: '6px 10px', borderRadius: '0 6px 6px 0', fontSize: 12.5 }}>
             {promptSections.map(section => <p key={section.label}><b>{section.label}：</b>{section.value}</p>)}
           </div>
-          <div className="hint">生成约束与质检对照：禁人物、禁文字、无水印均为入库必检项，违反项会标红且总分不能抵消。</div>
+          <div className="hint">生成结果按结构化质检事实入库；文案不会触发关键字拦截或自动改写。</div>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <button className="btn small" disabled={disabled || saving}
               aria-label={baseDisabledReason ? `修改场景图描述，暂不可用：${baseDisabledReason}` : '修改场景图描述'}
@@ -1412,10 +1405,9 @@ function ScenePromptBlock({ projectId, scene: s, disabled, onChanged, regenerate
       ) : (
         <>
           <textarea aria-label={`${s.name}场景图描述`} rows={4} style={{ fontSize: 12.5 }} value={draft} onChange={e => setDraft(e.target.value)}
-            placeholder="描述场景定场图：画风、地点、光线时段、陈设、氛围……（10~400 字，不要出现人物）" />
+            placeholder="描述场景定场图：画风、地点、光线时段、陈设、氛围……（10~400 字）" />
           <div className={draftInvalid ? 'error-banner' : 'hint'}>{draftLength}/400 字
             {draftLength > 0 && (draftLength < 10 || draftLength > 400) ? ' · 自定义描述要求 10~400 字' : ''}
-            {requestsPeople ? ' · 纯环境场景不能要求人物/角色入镜' : ''}
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
             <button className="btn small primary" disabled={Boolean(saveAndRegenerateDisabledReason)}
