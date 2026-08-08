@@ -262,17 +262,18 @@ def test_error_context_redacts_nested_model_keys() -> None:
     assert value == {"api_key": "***", "nested": {"token": "***", "model": "ok"}}
 
 
-def test_media_probe_accepts_explicit_endpoint_type_mismatch(monkeypatch) -> None:
+def test_media_probe_uses_structured_model_catalog(monkeypatch) -> None:
     class Response:
-        is_success = False
-        status_code = 400
-        text = "Model 'video-model' is not supported for this endpoint, which expects model type 'text-generation'"
+        is_success = True
+
+        def json(self):
+            return {"data": [{"id": "video-model"}]}
 
     class Client:
         def __init__(self, **kwargs): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *args): return None
-        async def post(self, *args, **kwargs): return Response()
+        async def get(self, *args, **kwargs): return Response()
 
     monkeypatch.setattr(api.httpx, "AsyncClient", Client)
     monkeypatch.setattr(
@@ -283,7 +284,7 @@ def test_media_probe_accepts_explicit_endpoint_type_mismatch(monkeypatch) -> Non
         "https://example.com/v1", "secret", "video-model", "video"))
 
     assert result["ok"] is True
-    assert result["probe"] == "model_recognition"
+    assert result["probe"] == "model_catalog"
 
 
 def test_probe_openai_model_rejects_private_ssrf_targets() -> None:

@@ -1210,6 +1210,15 @@ async def audit_identity_coverage_from_structural_evidence(
         "任务：审计结构化蓝图/IR 中未绑定的人物引用。只处理给定引用及其 owned SRC，"
         "不得重扫全章或新增无关人物。已有人物候选：\n"
         + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+        + "\n已有角色权威投影：\n"
+        + json.dumps(
+            [
+                {"authority_id": f"bible:{character.name}", "canonical_name": character.name}
+                for character in bible.characters if character.name
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         + "\n未决结构证据：\n"
         + json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
         + "\n只输出 JSON："
@@ -1293,13 +1302,23 @@ async def discover_character_candidates(
         "existing_resolutions": existing_resolutions or [],
         "structural_evidence": structural_evidence or [],
     })
-    cached_rows = get_conn().execute(
-        """SELECT content_json FROM artifacts
-             WHERE scope_type='episode' AND scope_id=?
-               AND type='screenplay_identity_discovery' AND status='validated'
-             ORDER BY created_at DESC LIMIT 20""",
-        (artifact_scope_id,),
-    ).fetchall()
+    evidence_conn = get_conn()
+    artifacts_available = bool(
+        scope_id
+        and evidence_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifacts'"
+        ).fetchone()
+    )
+    cached_rows = (
+        evidence_conn.execute(
+            """SELECT content_json FROM artifacts
+                 WHERE scope_type='episode' AND scope_id=?
+                   AND type='screenplay_identity_discovery' AND status='validated'
+                 ORDER BY created_at DESC LIMIT 20""",
+            (artifact_scope_id,),
+        ).fetchall()
+        if artifacts_available else []
+    )
     for row in cached_rows:
         try:
             cached = json.loads(row["content_json"] or "{}")
@@ -1354,6 +1373,8 @@ async def discover_character_candidates(
         trace = current_trace()
     except Exception:  # noqa: BLE001 - evidence is optional outside workflows
         pass
+    if not artifacts_available:
+        return audited
     raw_artifact = evidence_repository.create_artifact(
         EvidenceArtifact(
             type="screenplay_identity_discovery_raw",

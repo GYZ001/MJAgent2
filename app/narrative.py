@@ -1832,49 +1832,38 @@ def _outline_as_shots(outline: StoryboardOutline) -> list[Any]:
     return list(outline.shots or [])
 
 
-_STORYBOARD_SCORE_ONLY_SCREENPLAY_CODES = frozenset({
-    "EVENT_PRECONDITION_FROM_FUTURE",
-    "INITIAL_FACT_HAS_PRODUCER",
-    "STATE_REPLAY_WITHOUT_DELTA",
-    "CHARACTER_DECISION_BINDING_INCOMPLETE",
-    "CHARACTER_DECISION_CHAIN_MISSING",
-    "AUDIENCE_EVIDENCE_FROM_FUTURE",
-    "TARGET_DELTA_TO_STATE_MISMATCH",
-    "TARGET_DELTA_STATE_MISMATCH",
-    "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
-    "SETUP_RECALL_TASK_MISSING",
-    "SCENE_DRAMATIC_DIMENSION_MISSING",
-    "SCENE_CONTRACT_COVERAGE_MISMATCH",
-})
-
-
-def _narrative_error_code(message: str) -> str:
-    text = str(message or "")
-    return text[1:text.index("]")] if text.startswith("[") and "]" in text else ""
-
-
 def validate_storyboard_screenplay_authority(
     screenplay: EpisodeScreenplay,
     *,
     expected_scope_id: str | None = None,
 ) -> list[str]:
-    """Keep publication score-only findings score-only in storyboard runtime.
+    """Validate only typed facts needed to project a published screenplay.
 
-    The screenplay QA report remains unchanged and auditable. Storyboard only
-    blocks on authority errors that prevent deterministic projection; audience
-    interpretation and authoring-quality findings cannot be repaired by
-    regenerating shots and must not be promoted into paid model retry loops.
+    Full screenplay quality belongs to its completion certificate.  Replaying
+    that evaluator here used to require a code suppression list and could turn
+    authoring findings into paid storyboard retries.  This boundary therefore
+    checks only version, scope and stable-ID uniqueness.
     """
-    return [
-        error
-        for error in validate_screenplay_narrative(
-            screenplay,
-            require=True,
-            expected_scope_id=expected_scope_id,
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return [
+            "[NARRATIVE_PLAN_MISSING] 分镜不能在缺少剧本叙事合同的情况下投影"
+        ]
+    errors: list[str] = []
+    if plan.contract_version != NARRATIVE_CONTRACT_VERSION:
+        errors.append(
+            f"[NARRATIVE_VERSION_INVALID] contract_version={plan.contract_version}，"
+            f"当前要求 {NARRATIVE_CONTRACT_VERSION}"
         )
-        if _narrative_error_code(error)
-        not in _STORYBOARD_SCORE_ONLY_SCREENPLAY_CODES
-    ]
+    if not _norm(plan.scope_id):
+        errors.append("[NARRATIVE_SCOPE_MISSING] narrative_plan.scope_id 不能为空")
+    elif expected_scope_id is not None and plan.scope_id != str(expected_scope_id):
+        errors.append(
+            f"[NARRATIVE_SCOPE_MISMATCH] narrative_plan.scope_id={plan.scope_id} "
+            f"不等于当前权威作用域 {expected_scope_id}"
+        )
+    index_narrative_plan(plan, errors)
+    return list(dict.fromkeys(errors))
 
 
 def validate_storyboard_narrative(
@@ -2971,26 +2960,7 @@ def validate_storyboard_narrative(
         ):
             errors.append(f"[COGNITIVE_BRIDGE_ADDED_SHOT_UNGROUNDED] {bridge_id} 新增镜头未直接承担所绑定认知任务")
 
-    upstream_codes = {
-        _narrative_error_code(error)
-        for error in validate_screenplay_narrative(
-            screenplay,
-            require=True,
-            expected_scope_id=expected_scope_id,
-        )
-    }
-    derived_score_only_codes: set[str] = set()
-    if upstream_codes.intersection({
-        "TARGET_DELTA_TO_STATE_MISMATCH",
-        "TARGET_DELTA_STATE_MISMATCH",
-        "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
-    }):
-        derived_score_only_codes.add("SHOT_TARGET_TO_STATE_MISMATCH")
-    return list(dict.fromkeys(
-        error
-        for error in errors
-        if _narrative_error_code(error) not in derived_score_only_codes
-    ))
+    return list(dict.fromkeys(errors))
 
 
 def validate_blind_review(

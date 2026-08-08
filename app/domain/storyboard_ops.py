@@ -4877,7 +4877,7 @@ def audit_episode_spoken_contract(episode_id: str):
     for shot in board.shots:
         status = audit_legacy_spoken_contract(shot)
         issues = [i.model_dump(mode="json") for i in validate_spoken_contract(shot)]
-        if status == "conflict" or any(i["code"] == "SPOKEN_CONTRACT_CONFLICT" for i in issues):
+        if status == "conflict":
             conflict_count += 1
             inc("spoken_contract_conflict_total", episode_id=episode_id, shot_no=shot.shot_no, source="audit")
         results.append({

@@ -2349,10 +2349,9 @@ def _portrait_artifact_candidate_payload(conn, row) -> dict:
         if isinstance(issue, dict):
             message = str(issue.get("message") or issue.get("code") or "").strip()
             severity = str(issue.get("severity") or "").lower()
-            code = str(issue.get("code") or "").upper()
             if not message:
                 continue
-            if severity in {"blocker", "critical", "error"} or code == "REFERENCE_QUALITY_THRESHOLD":
+            if severity in {"blocker", "critical", "error"}:
                 hard.append(message)
             else:
                 warnings.append(message)

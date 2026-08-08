@@ -315,6 +315,16 @@ def test_trace_routes_reject_foreign_project_before_returning_tree(scoped_db) ->
     assert "p2" not in foreign.text
 
 
+def test_legacy_run_link_resolves_to_task_queue(scoped_db) -> None:
+    resolved = observability_api.resolve_legacy_observability(run_id="run-1")
+
+    assert resolved == {
+        "project_id": "p1",
+        "section": "jobs",
+        "object_id": "run-1",
+    }
+
+
 def test_legacy_screenplay_trace_keeps_source_specific_node_io(scoped_db) -> None:
     scoped_db.execute(
         """UPDATE episodes

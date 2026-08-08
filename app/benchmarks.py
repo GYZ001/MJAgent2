@@ -332,6 +332,64 @@ def record_benchmark(
     return {"benchmark_id": benchmark_id, **result}
 
 
+def record_screenplay_benchmark(
+    *,
+    project_id: str,
+    baseline_samples: list[dict[str, Any]],
+    candidate_samples: list[dict[str, Any]],
+    attested_by: str,
+    attestation_note: str,
+    baseline_label: str = "screenplay_monolith",
+    candidate_label: str = "screenplay_scene_shards",
+    thresholds: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Persist an attested real M5 result; synthetic samples are not accepted."""
+    if not project_id.strip() or not attested_by.strip() or not attestation_note.strip():
+        raise ValueError("真实剧本双轨基准必须记录 project_id、attested_by 和说明")
+    result = compare_screenplay_tracks(
+        baseline_samples,
+        candidate_samples,
+        thresholds=thresholds,
+    )
+    benchmark_id = new_id("bench")
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO benchmark_runs(
+               id, project_id, mode, baseline_label, candidate_label, status, sample_count,
+               metrics_json, thresholds_json, regressions_json, is_real_project,
+               attested_by, attestation_note, created_at, finished_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            benchmark_id,
+            project_id,
+            "screenplay_dual_track",
+            baseline_label,
+            candidate_label,
+            "passed" if result["passed"] else "failed",
+            result["sample_count"],
+            json.dumps({
+                "baseline": result["baseline"],
+                "candidate": result["candidate"],
+                "deltas": result["deltas"],
+                "qualified_episode_count": result["qualified_episode_count"],
+                "samples": {
+                    "baseline": baseline_samples,
+                    "candidate": candidate_samples,
+                },
+            }, ensure_ascii=False),
+            json.dumps(result["thresholds"], ensure_ascii=False),
+            json.dumps(result["regressions"], ensure_ascii=False),
+            1,
+            attested_by,
+            attestation_note,
+            now(),
+            now(),
+        ),
+    )
+    conn.commit()
+    return {"benchmark_id": benchmark_id, **result}
+
+
 def release_gate_status() -> dict[str, Any]:
     """Phase 5 gate: at least three real project benchmarks must pass."""
     conn = get_conn()

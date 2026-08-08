@@ -1943,6 +1943,15 @@ def test_generation_entry_uses_compact_ir_model_and_bounded_output(
         "_semantic_review_narrative_blueprint",
         fake_review,
     )
+    original_get_setting = stages.get_setting
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: (
+            "false" if key == "screenplay_scene_shards_enabled"
+            else original_get_setting(key)
+        ),
+    )
     asyncio.run(stages.generate_screenplay(
         {
             "id": "ep-ir-1",

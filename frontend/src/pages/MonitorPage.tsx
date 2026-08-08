@@ -328,12 +328,6 @@ const CALL_KIND_LABELS: Record<string, string> = {
   storyboard_shot_prompt: "逐镜分镜生成",
   storyboard_outline_prompt: "分镜大纲生成",
 };
-const CALL_CATEGORY_LABELS = {
-  business: "业务模型调用",
-  workflow: "工作流事件",
-  internal: "指标与内部事件",
-};
-
 function nowQuery() {
   return new URLSearchParams(window.location.search);
 }
@@ -2897,9 +2891,6 @@ export default function MonitorPage({
   const [callStatus, setCallStatus] = useState(
     initial.get("call_status") || "",
   );
-  const [callCategory, setCallCategory] = useState(
-    initial.get("call_category") || "business",
-  );
   const [callModel, setCallModel] = useState(initial.get("call_model") || "");
   const [callFrom, setCallFrom] = useState(initial.get("call_from") || "");
   const [callTo, setCallTo] = useState(initial.get("call_to") || "");
@@ -2942,6 +2933,7 @@ export default function MonitorPage({
       "",
       `${pathname}${params.toString() ? `?${params}` : ""}`,
     );
+    window.dispatchEvent(new Event("manju:locationchange"));
   }, [mode]);
   const jobsSummaryPoll = usePoll<JobsSummary>(
     async () => assertProjectScope(
@@ -2998,7 +2990,7 @@ export default function MonitorPage({
     page_size: callPageSize,
     search: callSearch,
     status: callStatus,
-    category: callCategory,
+    category: "business",
     model: callModel,
     project_id: projectId ? undefined : callProject,
     function: callFunction,
@@ -3057,7 +3049,6 @@ export default function MonitorPage({
       setSelectedJobId(p.get("job_id") || p.get("run_id") || "");
       setCallSearch(p.get("call_search") || "");
       setCallStatus(p.get("call_status") || "");
-      setCallCategory(p.get("call_category") || "business");
       setCallModel(p.get("call_model") || "");
       setCallFrom(p.get("call_from") || "");
       setCallTo(p.get("call_to") || "");
@@ -3079,6 +3070,7 @@ export default function MonitorPage({
     patch: Record<string, string | null> = {},
   ) => {
     const cleanup: Record<string, string | null> = {};
+    cleanup.source = null;
     if (section !== "jobs") cleanup.job_id = null;
     if (section !== "calls") cleanup.call_id = null;
     cleanup.focus = null;
@@ -3188,7 +3180,6 @@ export default function MonitorPage({
     [
       callSearch,
       callStatus,
-      callCategory !== "business" ? callCategory : "",
       callModel,
       callFrom,
       callTo,
@@ -3495,7 +3486,6 @@ export default function MonitorPage({
                 </div>
                 <button
                   onClick={() => {
-                    setCallCategory("business");
                     setCallSearch("");
                     setCallStatus("");
                     setCallModel("");
@@ -3539,7 +3529,6 @@ export default function MonitorPage({
                         key={group.key}
                         onClick={() => {
                           setCallSearch("");
-                          setCallCategory("business");
                           setCallStatus("");
                           setCallModel("");
                           setCallFrom("");
@@ -4048,30 +4037,6 @@ export default function MonitorPage({
               />
             </label>
             <label>
-              <span>类别</span>
-              <select
-                aria-label="按调用类别筛选"
-                value={callCategory}
-                onChange={(e) => {
-                  setCallCategory(e.target.value);
-                  setCallIds("");
-                  setCallPage(1);
-                  writeQuery({
-                    call_category: e.target.value || null,
-                    call_ids: null,
-                    call_page: null,
-                  });
-                }}
-              >
-                {Object.entries(CALL_CATEGORY_LABELS).map(([key, label]) => (
-                  <option value={key} key={key}>
-                    {label}
-                  </option>
-                ))}
-                <option value="">全部类别</option>
-              </select>
-            </label>
-            <label>
               <span>状态</span>
               <select
                 aria-label="按调用状态筛选"
@@ -4220,7 +4185,6 @@ export default function MonitorPage({
               onClick={() => {
                 setCallSearch("");
                 setCallStatus("");
-                setCallCategory("business");
                 setCallModel("");
                 setCallFrom("");
                 setCallTo("");
@@ -4233,7 +4197,7 @@ export default function MonitorPage({
                   {
                     call_search: null,
                     call_status: null,
-                    call_category: "business",
+                    call_category: null,
                     call_model: null,
                     call_from: null,
                     call_to: null,
@@ -4268,7 +4232,7 @@ export default function MonitorPage({
                 <thead>
                   <tr>
                     <th>时间</th>
-                    <th>类别 / 调用目的</th>
+                    <th>调用目的</th>
                     <th>模型</th>
                     <th>状态</th>
                     <th>接口状态码</th>
@@ -4282,8 +4246,6 @@ export default function MonitorPage({
                     <tr key={call.id}>
                       <td className="mono">{fmtTime(call.ts)}</td>
                       <td>
-                        <small>{CALL_CATEGORY_LABELS[call.category]}</small>
-                        <br />
                         <button
                           type="button"
                           className="monitor-name-button"

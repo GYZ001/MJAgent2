@@ -255,6 +255,33 @@ def test_narrative_outline_projects_graph_owned_fields_deterministically() -> No
     ) == []
 
 
+def test_narrative_outline_projection_is_structurally_idempotent() -> None:
+    screenplay = _screenplay()
+    _attach_generic_action(screenplay)
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The declared event becomes visible.",
+                covers="The observable result is delivered.",
+                duration_s=5,
+            )
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+    first_ids = [shot.shot_id for shot in outline.shots]
+    first_count = len(outline.shots)
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert len(outline.shots) == first_count
+    assert [shot.shot_id for shot in outline.shots] == first_ids
+
+
 def test_narrative_outline_normalizes_unique_event_id_punctuation() -> None:
     screenplay = _screenplay()
     outline = StoryboardOutline(
@@ -701,7 +728,7 @@ def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
     assert outline_key_line_speaker_errors(outline, screenplay) == []
 
 
-def test_split_action_owner_preserves_directed_post_dialogue_result() -> None:
+def test_split_action_owner_only_backfills_missing_directing_prose() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)
     screenplay.dialogue_chains = [
@@ -732,11 +759,6 @@ def test_split_action_owner_preserves_directed_post_dialogue_result() -> None:
                 event_ids=["E-1"],
                 story_event_id="E-1",
                 primary_action_id=action.action_id,
-                state_in="The event has not started.",
-                primary_action="The actor repeats the opening speech.",
-                state_out="The opening speech is about to begin.",
-                beat="The actor repeats the opening speech.",
-                covers="The actor repeats the opening speech.",
             ),
         ],
     )
@@ -746,12 +768,12 @@ def test_split_action_owner_preserves_directed_post_dialogue_result() -> None:
     )
 
     owner = outline.shots[1]
-    assert changes == []
-    assert owner.state_in == "The event has not started."
-    assert owner.primary_action == "The actor repeats the opening speech."
-    assert owner.state_out == "The opening speech is about to begin."
-    assert owner.beat == "The actor repeats the opening speech."
-    assert owner.covers == "The actor repeats the opening speech."
+    assert changes
+    assert owner.state_in == ""
+    assert owner.primary_action == action.completion_condition
+    assert owner.state_out == action.completion_condition
+    assert owner.beat == action.completion_condition
+    assert owner.covers == action.completion_condition
 
 
 def test_narrative_outline_keeps_coarse_snapshot_until_later_deadline() -> None:

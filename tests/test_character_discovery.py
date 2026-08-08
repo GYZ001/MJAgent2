@@ -896,7 +896,7 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
     }
 
 
-def test_future_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> None:
+def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[
@@ -913,7 +913,10 @@ def test_future_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> No
         ],
     )
 
+    phases: list[str] = []
+
     async def fake_chat(messages, **kwargs):
+        phases.append(kwargs["call_meta"]["discovery_phase"])
         if kwargs["call_meta"]["discovery_phase"] == "current":
             return json.dumps({"characters": [{
                 "source_label": "孟浩",
@@ -923,7 +926,8 @@ def test_future_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> No
                 "evidence": "当前主角",
             }]}, ensure_ascii=False)
         assert "白白净净身较胖" in messages[0]["content"]
-        assert "我李富贵" in messages[0]["content"]
+        assert "SRC0001" in messages[0]["content"]
+        assert "我李富贵" not in messages[0]["content"]
         return json.dumps({"characters": [{
             "source_label": "白白净净身较胖",
             "canonical_name": "李富贵",
@@ -940,6 +944,11 @@ def test_future_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> No
         1,
         future_text="小胖子跟随孟浩。后来小胖子说：我李富贵认你这个朋友。",
         future_label="后续章节",
+        structural_evidence=[{
+            "identity_key": "unbound_person",
+            "source_segment_ids": ["SRC0001"],
+            "usage": "visible",
+        }],
     ))
 
     assert any(
@@ -948,6 +957,29 @@ def test_future_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> No
         and item["identity_kind"] == "named"
         for item in candidates
     )
+    assert phases == ["current", "coverage"]
+
+
+def test_identity_discovery_does_not_run_fixed_coverage_without_structural_evidence(
+    monkeypatch,
+) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[],
+    )
+    phases: list[str] = []
+
+    async def fake_chat(_messages, **kwargs):
+        phases.append(kwargs["call_meta"]["discovery_phase"])
+        return json.dumps({"characters": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    assert asyncio.run(portraits.discover_character_candidates(
+        "孟浩身边另一个则是白白净净身较胖。",
+        bible,
+        1,
+    )) == []
+    assert phases == ["current"]
 
 
 def test_stable_unique_title_is_accepted_as_named_identity(monkeypatch) -> None:

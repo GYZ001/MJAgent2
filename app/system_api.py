@@ -463,11 +463,30 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
     token_limits = normalize_token_limits({})
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
-                json={"model": model.strip(), "messages": [{"role": "user", "content": "Reply with OK only."}], "max_tokens": 8, "temperature": 0},
-            )
+            headers = {"Authorization": f"Bearer {api_key.strip()}"}
+            if kind in {"video", "image"}:
+                response = await client.get(f"{base_url}/models", headers=headers)
+                if response.is_success:
+                    try:
+                        catalog = response.json()
+                        model_ids = {
+                            str(item.get("id") or "").strip()
+                            for item in (catalog.get("data") or [])
+                            if isinstance(item, dict)
+                        }
+                    except (ValueError, TypeError, AttributeError) as exc:
+                        raise HTTPException(
+                            422,
+                            "模型目录已响应，但返回格式不是 OpenAI models 兼容格式",
+                        ) from exc
+                    if model.strip() not in model_ids:
+                        raise HTTPException(422, "模型目录中没有该媒体模型 ID")
+            else:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={"model": model.strip(), "messages": [{"role": "user", "content": "Reply with OK only."}], "max_tokens": 8, "temperature": 0},
+                )
             if response.is_success and kind in {"text", "vlm"}:
                 token_limits = await _discover_model_token_capabilities_with_client(
                     client, base_url, api_key, model,
@@ -476,14 +495,6 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
         raise HTTPException(422, f"连接失败：{type(exc).__name__}，请检查 Base URL 和网络") from exc
     latency_ms = int((time.perf_counter() - started) * 1000)
     if not response.is_success:
-        raw_lower = response.text.lower()
-        if kind in {"video", "image"} and response.status_code == 400 and (
-                "not supported for this endpoint" in raw_lower or "expects model type" in raw_lower):
-            return {
-                "ok": True, "latency_ms": latency_ms, "probe": "model_recognition",
-                "preview": "凭证与模型识别通过；为避免产生费用，未执行媒体生成",
-                **normalize_token_limits({}),
-            }
         if response.status_code in {401, 403}:
             message = "当前 API Key 无效，或没有访问该模型的权限"
         elif response.status_code == 404:
@@ -494,6 +505,12 @@ async def _probe_openai_model(base_url: str, api_key: str, model: str, kind: str
             detail = response.text[:180].replace(api_key, "***")
             message = f"上游返回：{detail}"
         raise HTTPException(422, f"模型测试失败（HTTP {response.status_code}）：{message}")
+    if kind in {"video", "image"}:
+        return {
+            "ok": True, "latency_ms": latency_ms, "probe": "model_catalog",
+            "preview": "凭证与模型目录识别通过；为避免产生费用，未执行媒体生成",
+            **normalize_token_limits({}),
+        }
     try:
         content = response.json()["choices"][0]["message"]["content"]
     except (ValueError, KeyError, IndexError, TypeError) as exc:

@@ -225,6 +225,11 @@ def normalize_narrative_storyboard_outline(
             event_id = owned_event_ids[0]
             base_by_event.setdefault(event_id, shot)
             bases_by_event[event_id].append(shot)
+    already_projected = any(
+        str(shot.shot_id or "").strip()
+        and shot.shot_contribution is not None
+        for shot in outline.shots
+    )
     required_events = [
         item.event_id
         for item in plan.events
@@ -484,6 +489,21 @@ def normalize_narrative_storyboard_outline(
         if base is None:
             continue
         event_bases = list(bases_by_event[event.event_id])
+        if already_projected:
+            for event_base in event_bases:
+                contribution = event_base.shot_contribution
+                role = (
+                    "support"
+                    if (
+                        contribution is not None
+                        and contribution.target_delta_ids
+                        and not event_base.primary_action_id
+                        and not event_base.key_line_ids
+                    )
+                    else "dialogue" if event_base.key_line_ids else "main"
+                )
+                nodes.append((event.event_id, role, event_base))
+            continue
         event_key_ids = key_ids_by_event.get(event.event_id) or [
             key_id
             for event_base in event_bases
@@ -574,6 +594,14 @@ def normalize_narrative_storyboard_outline(
                 > config.VIDEO_DURATION_MAX_S
             )
         )
+        support_completes_event = bool(
+            needs_support
+            and not event.action_ids
+            and not event_key_ids
+            and not event.effects_add
+            and not event.effects_remove
+            and not character_state_ids_by_event[event.event_id]
+        )
         event_nodes: list[tuple[str, str, Any]] = []
         if needs_support:
             support = base.model_copy(deep=True)
@@ -603,10 +631,36 @@ def normalize_narrative_storyboard_outline(
             support.key_line_ids = []
             support.audio_cast = []
             event_nodes.append((event.event_id, "support", support))
-        for event_base in event_bases:
+        action_delivery_texts = {
+            text
+            for action_id in event.action_ids
+            for action in [actions.get(action_id)]
+            if action is not None
+            for text in (
+                str(action.semantic_intent or "").strip(),
+                str(action.completion_condition or "").strip(),
+            )
+            if text
+        }
+        main_base_index = next(
+            (
+                index
+                for index, event_base in enumerate(event_bases)
+                if str(event_base.primary_action or "").strip()
+                in action_delivery_texts
+            ),
+            None,
+        )
+        for base_index, event_base in enumerate(event_bases):
+            if support_completes_event:
+                continue
             event_nodes.append((
                 event.event_id,
-                "dialogue" if event_base.key_line_ids else "main",
+                (
+                    "main"
+                    if base_index == main_base_index
+                    else "dialogue" if event_base.key_line_ids else "main"
+                ),
                 event_base,
             ))
         generated_dialogues: list[tuple[str, str, Any]] = []
@@ -644,14 +698,45 @@ def normalize_narrative_storyboard_outline(
                 len(event_nodes),
             )
             event_nodes[insert_at:insert_at] = generated_dialogues
-        if not any(role == "main" for _event_id, role, _shot in event_nodes):
+        completion = "；".join(dict.fromkeys(
+            str(action.completion_condition or "").strip()
+            for action_id in event.action_ids
+            for action in [actions.get(action_id)]
+            if action is not None
+            and str(action.completion_condition or "").strip()
+        ))
+        if generated_dialogues and main_base_index is None and completion:
+            directed_main = next(
+                (
+                    event_shot
+                    for _event_id, role, event_shot in reversed(event_nodes)
+                    if role == "main"
+                ),
+                None,
+            )
+            if directed_main is not None:
+                directed_main.state_in = ""
+                directed_main.primary_action = completion
+                directed_main.state_out = completion
+                directed_main.beat = completion
+                directed_main.covers = completion
+        if (
+            not support_completes_event
+            and not any(
+                role == "main"
+                for _event_id, role, _shot in event_nodes
+            )
+        ):
             main = base.model_copy(deep=True)
             main.key_line_ids = []
             main.audio_cast = []
-            if not event.action_ids:
-                main.primary_action = "人物闭口呈现本事件完成后的可见反应与状态结果"
-                main.beat = main.primary_action
-                main.covers = main.primary_action
+            main.primary_action = (
+                completion
+                or "人物闭口呈现本事件完成后的可见反应与状态结果"
+            )
+            main.state_out = main.primary_action
+            main.beat = main.primary_action
+            main.covers = main.primary_action
             event_nodes.append((event.event_id, "main", main))
         for _event_id, _role, event_shot in event_nodes:
             for field_name in (

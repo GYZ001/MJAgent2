@@ -1102,7 +1102,44 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
         prompts.append(prompt)
         return script
 
+    async def fake_blueprint(_episode, source_text, _bible):
+        source_ids = [
+            segment.segment_id
+            for segment in stages.index_source_segments(source_text)
+        ]
+        blueprint = stages.NarrativeBlueprint.model_validate({
+            "episode_no": 1,
+            "nodes": [{
+                "key": "n1",
+                "source_segment_ids": source_ids,
+                "summary": "测验结果引发回应",
+                "temporal_domain_key": "present",
+                "time_label": "日",
+                "time_relation": "episode_start",
+                "location_key": "test-room",
+                "location_label": "测验室",
+                "participants": [],
+                "action_logic": "宣布结果后众人回应",
+            }],
+        })
+        stages.derive_blueprint_scene_plans(blueprint)
+        return blueprint
+
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_loop)
+    monkeypatch.setattr(
+        stages,
+        "_generate_screenplay_narrative_blueprint",
+        fake_blueprint,
+    )
+    original_get_setting = stages.get_setting
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: (
+            "false" if key == "screenplay_scene_shards_enabled"
+            else original_get_setting(key)
+        ),
+    )
     episode = {
         "id": "ep-test",
         "episode_no": 1,
