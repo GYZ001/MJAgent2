@@ -377,6 +377,8 @@ def normalize_split_action_owner_completions(
 def normalize_narrative_storyboard_outline(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
+    *,
+    preserve_shot_ids: bool = False,
 ) -> list[dict[str, Any]]:
     """Project graph-owned fields while preserving model-authored directing text.
 
@@ -1078,7 +1080,8 @@ def normalize_narrative_storyboard_outline(
 
     for position, (_event_id, _role, shot) in enumerate(nodes, start=1):
         shot.shot_no = position
-        shot.shot_id = f"SH{position:03d}"
+        if not preserve_shot_ids:
+            shot.shot_id = f"SH{position:03d}"
 
     positions_by_event: defaultdict[str, list[int]] = defaultdict(list)
     for position, (event_id, _role, _shot) in enumerate(nodes):

@@ -262,11 +262,32 @@ def apply_semantic_outline_operations(
                 index = max(0, min(len(candidate.shots), int(target["to_index"])))
             else:
                 index = len(candidate.shots)
-            candidate.shots.insert(index, operation.value.model_copy(deep=True))
+            inserted = operation.value.model_copy(deep=True)
+            if not inserted.event_ids and not str(
+                inserted.story_event_id or ""
+            ).strip():
+                # An adjacent insertion without an explicit event relation is
+                # a structural split of its anchor, not a new authority event.
+                # Inherit only that typed relation; all cumulative graph state
+                # is rebuilt later from the published narrative plan.
+                anchor = (
+                    candidate.shots[index - 1]
+                    if index > 0
+                    else candidate.shots[index]
+                    if candidate.shots
+                    else None
+                )
+                if anchor is not None:
+                    inserted.event_ids = list(anchor.event_ids or [])
+                    inserted.story_event_id = str(
+                        anchor.story_event_id
+                        or (inserted.event_ids[0] if inserted.event_ids else "")
+                    )
+            candidate.shots.insert(index, inserted)
             events.append({
                 **event_prefix,
                 "index": index,
-                "after_shot_id": operation.value.shot_id,
+                "after_shot_id": inserted.shot_id,
             })
         elif executable_op == "delete_outline_shot":
             if len(candidate.shots) <= 1:
@@ -319,7 +340,16 @@ def reproject_semantic_outline_authority(
     from app.narrative_outline import normalize_narrative_storyboard_outline
     from app.validators import normalize_outline_dialogue_ownership
 
-    changes = normalize_narrative_storyboard_outline(outline, screenplay)
+    bridge_plans = [
+        item.model_copy(deep=True)
+        for item in outline.cognitive_bridge_plans
+    ]
+    changes = normalize_narrative_storyboard_outline(
+        outline,
+        screenplay,
+        preserve_shot_ids=True,
+    )
+    outline.cognitive_bridge_plans = bridge_plans
     changes.extend(normalize_outline_dialogue_ownership(outline, screenplay))
     return changes
 
