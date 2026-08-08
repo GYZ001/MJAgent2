@@ -319,36 +319,41 @@ async def adjudicate_screenplay_ir_identities(
     operation_id = "op_ir_identity_" + hashlib.sha256(
         prompt.encode("utf-8")
     ).hexdigest()[:32]
-    result = await model_gateway.chat_structured(
-        [{"role": "user", "content": prompt}],
-        model_type=IdentityAdjudicationResult,
-        validate=lambda value: (
-            []
-            if _validate_decisions(value, payload=payload)
-            else []
-        ),
-        operation_id=(
-            f"screenplay.identity-adjudication:{IDENTITY_ADJUDICATOR_VERSION}:"
-            f"{operation_id}"
-        ),
-        temperature=0.05,
-        max_tokens=4096,
-        format_retry_limit=1,
-        semantic_retry_limit=1,
-        call_meta={
-            "stage": "screenplay_ir_identity_adjudication",
-            "episode_id": str(episode.get("id") or ""),
-            "operation_id": operation_id,
-            "reuse_successful_operation": True,
-            "adjudicator_version": IDENTITY_ADJUDICATOR_VERSION,
-            "ambiguity_count": len(issues),
-        },
-        repair_context=json.dumps(
-            payload.get("source_segments") or [],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-    )
+    try:
+        result = await model_gateway.chat_structured(
+            [{"role": "user", "content": prompt}],
+            model_type=IdentityAdjudicationResult,
+            validate=lambda value: (
+                []
+                if _validate_decisions(value, payload=payload)
+                else []
+            ),
+            operation_id=(
+                f"screenplay.identity-adjudication:{IDENTITY_ADJUDICATOR_VERSION}:"
+                f"{operation_id}"
+            ),
+            temperature=0.05,
+            max_tokens=4096,
+            format_retry_limit=1,
+            semantic_retry_limit=1,
+            call_meta={
+                "stage": "screenplay_ir_identity_adjudication",
+                "episode_id": str(episode.get("id") or ""),
+                "operation_id": operation_id,
+                "reuse_successful_operation": True,
+                "adjudicator_version": IDENTITY_ADJUDICATOR_VERSION,
+                "ambiguity_count": len(issues),
+            },
+            repair_context=json.dumps(
+                payload.get("source_segments") or [],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+    except model_gateway.StructuredOutputError as exc:
+        # Preserve the domain-level error contract after the bounded structured
+        # retry runner has exhausted its content budget.
+        raise ContentGenerationError(str(exc)) from exc
     decisions = _validate_decisions(result, payload=payload)
 
     unresolved = [

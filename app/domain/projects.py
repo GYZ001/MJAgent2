@@ -69,29 +69,9 @@ def _delete_scope_rows(conn, table: str, *, scope_ids: Iterable[str],
 
 
 def _present_refs_error(conn, value: str | None) -> str | None:
-    """Repair the display of legacy QA failures stored as generic LLM errors.
-
-    Older runs wrapped every ``ProviderError`` as an external-service failure,
-    including the semantic message raised after two successful QA calls.  Keep
-    the immutable log handle, but show the safe workflow cause on project reads.
-    """
-    text = str(value or "").strip()
-    if not text or "错误码 LLM" not in text or "ERR-" not in text:
-        return value
-    start = text.rfind("ERR-")
-    error_id = text[start:start + 19]
-    try:
-        row = conn.execute(
-            "SELECT message FROM error_logs WHERE id=? AND action='refs_generate'",
-            (error_id,),
-        ).fetchone()
-    except Exception:  # noqa: BLE001 - compatibility with minimal/legacy schemas
-        return value
-    message = str(row["message"] if row else "").strip()
-    if "一致性检查未通过" not in message and "未通过质量校验" not in message:
-        return value
-    message = message.replace("部分定妆照失败：", "部分定妆照未通过质量校验：", 1)
-    return f"{message}（QA · {error_id}）"
+    """Legacy errors are immutable display data; prose never changes semantics."""
+    _ = conn
+    return value
 
 
 async def _read_novel_upload(file: UploadFile) -> tuple[str, bytes]:

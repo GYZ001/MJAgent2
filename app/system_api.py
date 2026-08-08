@@ -1513,14 +1513,9 @@ def retry_job(job_id: str, body: dict | None = None):
                 })
             else:
                 provider_recovery_unconfirmed = True
-        error_text = str(item.get("error") or "").lower()
         provider_terminal_failure = bool(
             has_provider_task
             and item["status"] == "failed"
-            and (
-                "seedance 任务失败" in error_text
-                or ("供应商任务" in error_text and "失败" in error_text)
-            )
         )
         if provider_terminal_failure:
             raise HTTPException(409, detail={

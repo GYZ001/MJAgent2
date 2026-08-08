@@ -179,16 +179,6 @@ def _infer_path(issue: Issue) -> str:
         return f"/shots/{shot.group(1)}"
     if node:
         return f"/nodes/{node.group(1).upper()}"
-    # dramatic contract fields
-    for field in ("stakes", "obstacle", "protagonist_goal", "dramatic_question"):
-        if field in msg.lower() or field in msg:
-            return f"/{field}"
-    if "dialogue" in msg.lower() or "对白" in msg:
-        return "/dialogue_chains"
-    if "ledger" in msg.lower() or "台账" in msg:
-        return "/information_ledger"
-    if "spine" in msg.lower() or "主线" in msg:
-        return "/plot_spine"
     return f"/{code.lower()}"
 
 

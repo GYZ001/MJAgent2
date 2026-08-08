@@ -55,10 +55,6 @@ PACK_STATUS_READY = "ready"
 PACK_STATUS_FAILED = "failed"
 PACK_STATUS_LEGACY = "legacy_partial"
 
-CHANGE_DIM_IDENTITY = {"face", "body_identity"}
-CHANGE_DIM_LOOK = {"hair", "outfit", "accessory", "injury", "age_stage"}
-
-
 def bool_setting(key: str, default: bool = True) -> bool:
     raw = (get_setting(key) or str(default)).strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -385,55 +381,19 @@ def scene_primary_is_usable(row, views: list[dict[str, Any]]) -> bool:
 # ---------- 视角选择（镜头级） ----------
 
 def select_character_view_roles(shot: Any, character_name: str) -> list[str]:
-    """按景别/朝向为角色选择 1~2 个最相关视角。"""
+    """只按结构化接触阶段选视角；画面文案不参与路由。"""
     from app.compiler import has_contact_action
 
-    size = str(getattr(shot, "shot_size", "") or "")
-    action = " ".join([
-        str(getattr(shot, "primary_action", "") or ""),
-        str(getattr(shot, "action_desc", "") or ""),
-        str(getattr(shot, "first_frame_desc", "") or ""),
-        str(getattr(shot, "last_frame_desc", "") or ""),
-        str(getattr(shot, "state_in", "") or ""),
-        str(getattr(shot, "state_out", "") or ""),
-        str(getattr(shot, "camera_angle", "") or ""),
-    ])
-    roles: list[str] = []
-    # 接触镜的侧面种子优先级高于特写/近景；否则正面定妆图会强烈诱导
-    # 图生图退化成“正面站桩 + 手部悬空”。
-    if has_contact_action(shot) or any(k in action.lower() for k in ("侧面", "侧视", "侧拍", "profile", "side view")):
-        roles.append("profile")
-        roles.append("three_quarter")
-    elif any(k in size for k in ("特写", "近景")) or any(k in action for k in ("脸", "眼神", "表情")):
-        roles.append("three_quarter")
-        if "特写" in size:
-            roles.append("face_closeup")
-    elif any(k in action for k in ("侧", "侧身", "侧面", "回头", "耳语")):
-        roles.append("profile")
-        roles.append("three_quarter")
-    elif any(k in action for k in ("背", "背影", "离开", "离去")):
-        roles.append("back_full")
-        roles.append("front_full")
-    else:
-        roles.append("front_full")
-        roles.append("three_quarter")
-    # 去重并限制 2 个；face_closeup/back_full 仅在包内存在时由调用方过滤
-    out: list[str] = []
-    for role in roles:
-        if role not in out:
-            out.append(role)
-        if len(out) >= 2:
-            break
-    return out or ["front_full"]
+    _ = character_name
+    return (
+        ["profile", "three_quarter"]
+        if has_contact_action(shot)
+        else ["front_full", "three_quarter"]
+    )
 
 
 def select_scene_view_roles(shot: Any) -> list[str]:
-    action = " ".join([
-        str(getattr(shot, "action_desc", "") or ""),
-        str(getattr(shot, "camera_move", "") or ""),
-    ])
-    if any(k in action for k in ("反打", "对视", "对话", "回头", "转身")):
-        return ["reverse_angle", "establishing"]
+    _ = shot
     return ["establishing"]
 
 
@@ -896,43 +856,22 @@ def keyframe_seed_paths(manifest: dict[str, Any]) -> list[str]:
 # ---------- 外观变化合同 ----------
 
 def normalize_appearance_change(item: dict[str, Any]) -> dict[str, Any]:
-    """扩展 screen_appearance_changes 返回合同。"""
+    """保留模型的结构化变化声明；不从正文词汇反推维度或权限。"""
     dims = item.get("change_dimensions") or item.get("changeDimensions") or []
     if isinstance(dims, str):
         dims = [dims]
     dims = [str(d).strip() for d in dims if str(d).strip()]
-    if not dims:
-        # 从 reason/new_appearance 粗推断
-        text = f"{item.get('reason') or ''} {item.get('new_appearance') or ''}"
-        if any(k in text for k in ("发型", "发色", "头发", "刘海")):
-            dims.append("hair")
-        if any(k in text for k in ("服装", "衣服", "袍", "甲", "裙", "装")):
-            dims.append("outfit")
-        if any(k in text for k in ("伤", "疤", "义眼", "残")):
-            dims.append("injury")
-        if any(k in text for k in ("老", "幼", "成年", "少年")):
-            dims.append("age_stage")
-        if not dims:
-            dims = ["outfit"]
     persistence = str(item.get("persistence") or "persistent").strip().lower()
     if persistence not in {"persistent", "episode", "shot_only"}:
         persistence = "persistent"
-    # 默认禁止 face/body_identity，除非原文明确
     reason = str(item.get("reason") or "")
     evidence = str(item.get("evidence_excerpt") or item.get("evidence") or "")
-    identity_ok = any(k in (reason + evidence) for k in ("变身", "换脸", "容貌重塑", "年龄跃迁", "重生", "异化"))
-    cleaned_dims = []
-    for d in dims:
-        if d in CHANGE_DIM_IDENTITY and not identity_ok:
-            continue
-        cleaned_dims.append(d)
-    if not cleaned_dims:
-        cleaned_dims = [d for d in dims if d not in CHANGE_DIM_IDENTITY] or ["outfit"]
     return {
         "character": item.get("character") or item.get("name") or "",
         "changed": bool(item.get("changed", True)),
         "new_appearance": (item.get("new_appearance") or "").strip(),
-        "change_dimensions": cleaned_dims,
+        "change_dimensions": list(dict.fromkeys(dims)),
+        "identity_change_authorized": item.get("identity_change_authorized") is True,
         "persistence": persistence,
         "reason": reason.strip(),
         "evidence_excerpt": evidence.strip()[:240],

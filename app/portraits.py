@@ -112,20 +112,18 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
 
 {body}
 
-判断口径（只看会改变定妆照画面的外观要素）：
-- 算明显变化：发型/发色大改、换了标志性服装造型、明显变老或变小、增加显著外观标记（疤痕/义眼/纹身/残肢等）、整体形象转变（如落魄→华服、人→异化形态）。
-- 不算明显变化：表情、姿态、临时脏污/受伤、光线、心情、所处场景，以及原文本段没有正面描写其外观时。
-- 没有把握时一律判为未明显变化，避免无意义重绘。
+判断口径：只依据原文与当前定妆照的可见、稳定、可跨镜复现差异；
+不得用姓名、题材、称谓或固定词表猜测变化。没有直接证据时 changed=false。
 
 对 changed=true 的角色，给出整合后的【新外观锚点串】new_appearance：40~60 字，沿用既有锚点未变部分，只改真正变化处；保留性别年龄感/发型发色/服装款式与颜色/标志性特征。
-- 外观锚点只允许常规完整着装、中性站姿下可直接看见、可跨镜稳定复现的静态形态；不得写性格、欲望、气质、眼神行为、对他人的注视方式、裸体、内衣、私密身体部位或必须暴露身体才能看见的特征。
+- 外观锚点只写中性站姿下直接可见、可跨镜稳定复现的静态形态，不写行为、关系或镜头状态。
 同时给出：
-- change_dimensions：变化维度数组，取值仅限 hair/outfit/accessory/injury/age_stage/face/body_identity
+- change_dimensions：开放的稳定变化维度数组，名称应直接描述本次结构化差异，不套固定分类词表
 - persistence：persistent（跨集持续）/ episode（仅本集）/ shot_only（单镜临时，不应更新人物谱）
 - evidence_excerpt：原文短片段依据
-- face/body_identity 默认禁止；仅当原文明确年龄跃迁、变身或身体永久变化时才可使用
+- identity_change_authorized：只有原文证据明确支持持久身份形态变化时为 true，否则为 false
 
-只输出一个 JSON 对象：{{"changes": [{{"name": "角色名", "changed": true/false, "new_appearance": "", "change_dimensions": ["hair"], "persistence": "persistent", "reason": "一句话依据", "evidence_excerpt": "原文短片段"}}]}}"""
+只输出一个 JSON 对象：{{"changes": [{{"name": "角色名", "changed": true/false, "new_appearance": "", "change_dimensions": [str], "identity_change_authorized": bool, "persistence": "persistent", "reason": "一句话依据", "evidence_excerpt": "原文短片段"}}]}}"""
     raw = await model_gateway.chat(
         [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=1600,
         call_meta={"stage": "screen_appearance_changes"},
@@ -150,6 +148,7 @@ async def screen_appearance_changes(entries: list[dict], ep_label: str) -> dict[
             "new_appearance": normalized["new_appearance"][:APPEARANCE_MAX],
             "reason": normalized["reason"],
             "change_dimensions": normalized["change_dimensions"],
+            "identity_change_authorized": normalized["identity_change_authorized"],
             "persistence": normalized["persistence"],
             "evidence_excerpt": normalized["evidence_excerpt"],
         }
@@ -1122,7 +1121,14 @@ async def resolve_future_identity_candidates(
     resolved_by_label = {
         str(item.get("source_label") or "").strip(): item
         for item in response.characters
-        if str(item.get("source_label") or "").strip()
+        if (
+            str(item.get("source_label") or "").strip()
+            and str(item.get("canonical_name") or "").strip()
+            and (
+                str(item.get("identity_kind") or "").strip().lower() == "named"
+                or str(item.get("canonical_name") or "").strip() in known_names
+            )
+        )
     }
     group_resolution: dict[str, dict] = {}
     candidate_by_label = {

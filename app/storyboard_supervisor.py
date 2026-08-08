@@ -2980,10 +2980,7 @@ async def run_storyboard_supervisor(
                 break
             except Exception as exc:  # noqa: BLE001
                 # Provider 类故障 → 可恢复暂停
-                msg = str(exc)
-                if _is_retryable_external_error(exc) or any(
-                    k in msg.lower() for k in ("timeout", "unavailable", "429", "503", "连接")
-                ):
+                if _is_retryable_external_error(exc):
                     return _pause_for_external_error(
                         cp,
                         conn,

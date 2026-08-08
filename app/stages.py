@@ -3239,14 +3239,13 @@ async def _repair_narrative_blueprint(
                 max(0, nearest_index - 2),
                 min(len(blueprint.nodes), nearest_index + 3),
             ))
-        if (
-            not selected_indexes
-            and any(
-                "[BLUEPRINT_FLASHBACK_UNCLOSED]" in error
-                for error in errors
-            )
-            and blueprint.nodes
-        ):
+        open_flashback_depth = 0
+        for node in blueprint.nodes:
+            if node.time_relation == "flashback_enter":
+                open_flashback_depth += 1
+            elif node.time_relation == "flashback_exit":
+                open_flashback_depth = max(0, open_flashback_depth - 1)
+        if not selected_indexes and open_flashback_depth and blueprint.nodes:
             flashback_enter_indexes = [
                 index
                 for index, node in enumerate(blueprint.nodes)
@@ -4535,6 +4534,12 @@ async def _generate_screenplay_scene_sharded_baseline(
         shard_progress,
     )
 
+    if not narrative_blueprint.scene_plans:
+        # Program-derived scene ownership is part of the Blueprint contract.
+        # Keep this guard at the orchestration boundary as well so resumed or
+        # test-injected validated nodes cannot produce an empty shard plan.
+        derive_blueprint_scene_plans(narrative_blueprint)
+
     episode_id = str(
         episode.get("id") or f"episode-{episode['episode_no']}"
     )
@@ -5685,18 +5690,8 @@ def _filter_partial_storyboard_errors(
     current_shot_no: int | None = None,
 ) -> list[str]:
     """逐镜头 QA 只拦当前镜头与前后承接问题；整集数量/全量声轨/关键内容在最后统一兜底。"""
-    prefixes = (
-        "镜头数 ",
-        "总时长 ",
-        "分镜声轨过少",
-        "分镜对白不足",
-        "完整剧本含 ",
-        "分镜丢失了剧本标记的 ",
-    )
     filtered: list[str] = []
     for error in errors:
-        if error.startswith(prefixes):
-            continue
         shot_refs = [int(m.group(1)) for m in re.finditer(r"shots\[(\d+)\]", error)]
         shot_no_refs = [
             int(m.group(1))
@@ -7879,18 +7874,14 @@ async def generate_storyboard_scene_pack(
                     for index, shot in enumerate(pack.shots, start=1)
                 ],
             )
-            errors.extend(
-                error
-                for error in validate_storyboard(
-                    temporary,
-                    planning_bible,
-                    int(episode.get("target_duration_s") or 0),
-                    narrative_authority=screenplay.narrative_plan is not None,
-                    narrative_plan=screenplay.narrative_plan,
-                    screenplay=screenplay,
-                )
-                if not error.startswith("shot_no 必须")
-            )
+            errors.extend(validate_storyboard(
+                temporary,
+                planning_bible,
+                int(episode.get("target_duration_s") or 0),
+                narrative_authority=screenplay.narrative_plan is not None,
+                narrative_plan=screenplay.narrative_plan,
+                screenplay=screenplay,
+            ))
             errors.extend(validate_storyboard_direction_contract(
                 Storyboard(
                     episode_no=episode["episode_no"],

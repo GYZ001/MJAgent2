@@ -310,7 +310,7 @@ def test_keyframe_seed_paths_use_one_view_per_identity_and_no_partial_cast(
     assert keyframe_seed_paths(partial) == [str(scene)]
 
 
-def test_normalize_appearance_change_blocks_identity_by_default() -> None:
+def test_normalize_appearance_change_preserves_open_typed_dimensions() -> None:
     out = normalize_appearance_change({
         "name": "角色A",
         "changed": True,
@@ -320,8 +320,8 @@ def test_normalize_appearance_change_blocks_identity_by_default() -> None:
         "reason": "换装",
         "evidence_excerpt": "他换上红袍",
     })
-    assert "face" not in out["change_dimensions"]
-    assert "outfit" in out["change_dimensions"]
+    assert out["change_dimensions"] == ["face", "outfit"]
+    assert out["identity_change_authorized"] is False
 
 
 def test_missing_required_views() -> None:

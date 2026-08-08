@@ -842,7 +842,7 @@ def plan_screenplay_patch(
                 )]
 
     # ledger event_id
-    if code == "LEDGER_INVALID" or "event_id" in (issue.message or ""):
+    if code == "LEDGER_INVALID":
         info_id = next((n for n in related if n.startswith("I")), "")
         event_ids = [e.event_id for e in (script.events or []) if e.event_id]
         if info_id and event_ids and not _strategy_was_tried(tried, "fix_ledger_event"):
@@ -855,17 +855,15 @@ def plan_screenplay_patch(
 
     # missing dramatic fields from message patterns
     if code == "DRAMATIC_CONTRACT_INCOMPLETE":
-        msg = issue.message or ""
-        for field in ("stakes", "obstacle", "protagonist_goal", "dramatic_question"):
-            if field in msg:
-                value = _heuristic_fill_dramatic_field(field, script)
-                if value:
-                    return [PatchOperation(
-                        op="replace_field",
-                        path=field,
-                        value=value,
-                        target={"kind": "metadata", "id": field},
-                    )]
+        field = str((issue.evidence or {}).get("path") or "").strip("/")
+        value = _heuristic_fill_dramatic_field(field, script)
+        if value:
+            return [PatchOperation(
+                op="replace_field",
+                path=field,
+                value=value,
+                target={"kind": "metadata", "id": field},
+            )]
 
     # 普通话轮的原文依据必须按报错索引精确修复。模型偶尔会写入
     # “原文叙述转为对白”之类说明性占位词；此时只能替换为本集原文中的

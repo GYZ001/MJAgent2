@@ -366,17 +366,7 @@ def evaluate_storyboard_for_confirmation(
         ep_id = episode["id"]
     except Exception:  # noqa: BLE001
         ep_id = getattr(episode, "id", "") or ""
-    # VAL-422 可观测性：确认门才首次发现的容量/口播冲突（理想应为 0）。
-    if record_metrics:
-        try:
-            from app.observability.metrics import inc
-            for err in score_warnings:
-                if "口播上限" in err or "台词纯文字" in err:
-                    inc("confirm_first_seen_capacity_error_total", episode_id=ep_id)
-                if "分叉" in err or "SPOKEN_CONTRACT" in err or "口播合同" in err:
-                    inc("confirm_first_seen_spoken_conflict_total", episode_id=ep_id)
-        except Exception:  # noqa: BLE001
-            pass
+    _ = record_metrics
     issues = issues_from_messages(
         score_warnings,
         subject=f"episode:{ep_id}",
