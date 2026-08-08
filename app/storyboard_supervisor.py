@@ -45,6 +45,7 @@ from app.stages import (
     generate_storyboard_outline,
     normalize_storyboard_direction_fields,
     normalize_storyboard_shot_candidate,
+    storyboard_planning_bible,
     storyboard_shot_authority_context,
 )
 
@@ -2732,7 +2733,7 @@ async def run_storyboard_supervisor(
                 candidate_errors = (
                     validate_storyboard(
                         candidate_board,
-                        bible,
+                        storyboard_planning_bible(bible, outline),
                         int(ep_data.get("target_duration_s") or 0),
                         narrative_authority=True,
                         narrative_plan=screenplay.narrative_plan,

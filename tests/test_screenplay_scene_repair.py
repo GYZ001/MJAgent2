@@ -110,6 +110,7 @@ def test_legacy_scene_message_is_not_inferred_as_a_shot():
 @pytest.mark.asyncio
 async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypatch):
     from app.evidence import repository as evidence_repository
+    from app.production.patch import PatchOperation
     from app.production import screenplay_authority, screenplay_repair
 
     revision = ensure_production_revision(
@@ -172,6 +173,14 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
     async def forbidden_baseline(*_args, **_kwargs):
         raise AssertionError("repair resume must not generate a second baseline")
 
+    async def semantic_scene_repair(*_args, **_kwargs):
+        return [PatchOperation(
+            op="replace_field",
+            path="story_function",
+            value="建立公开测验冲突并推动萧炎退场",
+            target={"kind": "screenplay_scene", "id": "SC01"},
+        )]
+
     monkeypatch.setattr(
         screenplay_authority,
         "screenplay_authority_fingerprint",
@@ -179,6 +188,7 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
     )
     monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", fake_qa)
     monkeypatch.setattr("app.stages.generate_screenplay_baseline", forbidden_baseline)
+    monkeypatch.setattr(screenplay_repair, "_llm_field_patch", semantic_scene_repair)
     monkeypatch.setattr(
         screenplay_repair,
         "publish_screenplay",
@@ -259,6 +269,14 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
         screenplay_repair,
         "run_screenplay_qa",
         lambda *_args, **_kwargs: ([issue], evaluation),
+    )
+    async def no_semantic_candidate(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(
+        screenplay_repair,
+        "_llm_field_patch",
+        no_semantic_candidate,
     )
     published: list[str] = []
     monkeypatch.setattr(

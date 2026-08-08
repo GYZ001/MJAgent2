@@ -7915,6 +7915,29 @@ def _hydrate_directed_scene_pack(
     )
 
 
+def storyboard_planning_bible(
+    bible: Bible,
+    outline: StoryboardOutline,
+) -> Bible:
+    """Use the episode's approved scene plan while async assets catch up."""
+    planning_bible = bible.model_copy(deep=True)
+    known_names = {scene.name for scene in planning_bible.scenes}
+    for planned_scene in outline.scene_contexts:
+        scene_name = str(planned_scene.scene_name or "").strip()
+        if not scene_name or scene_name in known_names:
+            continue
+        planning_bible.scenes.append(Scene(
+            name=scene_name,
+            scene_canonical=(
+                f"{scene_name}，{planned_scene.scene_time or '本场时间'}，"
+                "空间结构、人物站位与光线服从本场剧本上下文，保持统一画风"
+            ),
+            first_episode=outline.episode_no,
+        ))
+        known_names.add(scene_name)
+    return planning_bible
+
+
 async def generate_storyboard_scene_pack(
     episode: dict,
     source_text: str,
@@ -7941,24 +7964,7 @@ async def generate_storyboard_scene_pack(
             "场景分镜",
             [f"{scene_context.scene_id} 没有导演规划镜头"],
         )
-    planning_bible = bible.model_copy(deep=True)
-    for planned_scene in outline.scene_contexts:
-        if (
-            not planned_scene.scene_name
-            or any(
-                scene.name == planned_scene.scene_name
-                for scene in planning_bible.scenes
-            )
-        ):
-            continue
-        planning_bible.scenes.append(Scene(
-            name=planned_scene.scene_name,
-            scene_canonical=(
-                f"{planned_scene.scene_name}，{planned_scene.scene_time or '本场时间'}，"
-                "空间结构、人物站位与光线服从本场剧本上下文，保持统一画风"
-            ),
-            first_episode=int(episode.get("episode_no") or 1),
-        ))
+    planning_bible = storyboard_planning_bible(bible, outline)
     shot_nos = [int(item.shot_no) for item in briefs]
     hints = [
         scene_context.scene_name,
