@@ -42,7 +42,7 @@ def test_transition_options_include_scene_cut_styles() -> None:
     assert {"淡出淡入", "闪白", "甩镜", "遮挡转场", "匹配剪辑", "声音延续+叠化"} <= TRANSITIONS
 
 
-def test_normalize_continuity_chooses_emotional_scene_transition() -> None:
+def test_normalize_continuity_chooses_structural_scene_transition() -> None:
     board = Storyboard(
         episode_no=1,
         shots=[
@@ -54,7 +54,7 @@ def test_normalize_continuity_chooses_emotional_scene_transition() -> None:
     normalize_continuity(board)
 
     assert board.shots[0].transition == "硬切"
-    assert board.shots[1].transition == "叠化"
+    assert board.shots[1].transition == "淡出淡入"
     assert board.shots[1].continuity_from_prev is False
     assert board.shots[1].continuity_mode == "scene_change"
 

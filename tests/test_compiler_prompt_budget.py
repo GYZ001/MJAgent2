@@ -51,8 +51,8 @@ def _bible() -> Bible:
 def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
     """长锚点 + 多角色 + 台词仍须保留 START/ACTION/END 与台词原文，且不得注入章节原文。"""
     action = (
-        "石碑表面骤然亮起刺眼白光，路人丙以测验员身份抬头朝人群公布成绩，"
-        "周围人群骚动，路人甲嗤笑摇头，路人乙掩嘴窃语。萧炎按在石碑上的手收紧。"
+            "石碑表面骤然亮起刺眼白光，functional:examiner抬头朝人群公布成绩，"
+            "周围人群骚动，functional:heckler-a摇头，functional:heckler-b窃语。萧炎按在石碑上的手收紧。"
     )
     shot = Shot(
         shot_no=2,
@@ -60,19 +60,19 @@ def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
         shot_size="近景",
         camera_move="推近",
         scene_setting="日，萧家测验广场",
-        characters=["萧炎", "路人甲", "路人乙", "路人丙"],
+        characters=["萧炎", "functional:heckler-a", "functional:heckler-b", "functional:examiner"],
         action_desc=action,
-        first_frame_desc="萧炎按住石碑，路人丙低头等待结果。",
-        last_frame_desc="路人丙公布成绩，萧炎按碑的手收紧。",
-        state_in="萧炎按住石碑，路人丙低头等待结果。",
+        first_frame_desc="萧炎按住石碑，functional:examiner低头等待结果。",
+        last_frame_desc="functional:examiner公布成绩，萧炎按碑的手收紧。",
+        state_in="萧炎按住石碑，functional:examiner低头等待结果。",
         primary_action=action,
-        state_out="路人丙公布成绩，萧炎按碑的手收紧。",
+        state_out="functional:examiner公布成绩，萧炎按碑的手收紧。",
         continuity_mode="same_scene_cut",
         source_excerpt=(
             "测验员看了一眼碑上所显示出来的信息，语气漠然地将之公布了出来。"
             "中年男子话刚刚脱口，便在人头汹涌的广场上带起一阵嘲讽的骚动。" * 3
         ),
-        dialogues=[Dialogue(speaker="路人丙", line="萧炎，斗之力，三段！级别：低级！", emotion="平静")],
+        dialogues=[Dialogue(speaker="functional:examiner", line="萧炎，斗之力，三段！级别：低级！", emotion="平静")],
         continuity_from_prev=False,
     )
 
@@ -80,7 +80,7 @@ def test_long_reference_prompt_compacts_without_losing_story_anchors() -> None:
 
     assert len(prompt) <= config.PROMPT_CHAR_LIMIT
     assert "石碑表面骤然亮起刺眼白光" in prompt
-    assert "路人丙以测验员身份抬头朝人群公布成绩" in prompt
+    assert "functional:examiner抬头朝人群公布成绩" in prompt
     assert "[START STATE" in prompt and "[END STATE" in prompt
     assert "萧炎，斗之力，三段！级别：低级！" in prompt
     assert SOURCE_EXCERPT_MARKER not in prompt

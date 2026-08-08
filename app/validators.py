@@ -2328,7 +2328,9 @@ def validate_screenplay_spine_delivery(
         if _beat_is_substantially_delivered(beat):
             continue
         visible_clauses, spoken_clauses, receptive_clauses = (
-            _spine_delivery_clauses(beat.does or "")
+            ([], [], [])
+            if beat.key_line_ids or beat.information_ids
+            else _spine_delivery_clauses(beat.does or "")
         )
         visible_missing = [
             clause for clause in visible_clauses
@@ -3038,7 +3040,9 @@ def validate_spine_delivery_ledger(
                     )
                 )
                 visible_clauses, spoken_clauses, receptive_clauses = (
-                    _spine_delivery_clauses(beat.does or "")
+                    ([], [], [])
+                    if beat.key_line_ids or beat.information_ids
+                    else _spine_delivery_clauses(beat.does or "")
                 )
                 visible_missing = any(
                     _claim_clearly_absent(clause, subject_action_text)

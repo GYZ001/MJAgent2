@@ -204,13 +204,16 @@ def test_spine_mixed_visible_and_spoken_delivery_uses_the_right_evidence() -> No
                 does="在卧室现身并暗示薰儿背景不凡",
                 turn="萧炎好奇并追问",
                 must_keep=True,
+                key_line_ids=["KL01"],
             )],
             must_keep_ending="萧炎开始追问",
             drop_list=[],
         ),
+        key_lines=["药老：那小丫头，来历似乎有点不一般啊。"],
     )
     shot = _compact_shot(1)
     shot.spine_beat_ids = ["S02"]
+    shot.key_line_ids = ["KL01"]
     shot.characters = ["萧炎", "药老"]
     shot.characters_visible = ["萧炎", "药老"]
     shot.primary_action = "萧炎放下卷轴，药老现身开口提及薰儿来历"
