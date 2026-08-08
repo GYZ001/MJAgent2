@@ -773,9 +773,18 @@ def _append_compatible_historical_materials(
                 )
             except (TypeError, ValueError):
                 break
-            if not _bible_extends_by_appending_cards(
-                parent_projection,
-                child_projection,
+            if not (
+                _bible_extends_by_appending_cards(
+                    parent_projection,
+                    child_projection,
+                )
+                or _bible_extends_by_recorded_downstream_changes(
+                    parent_projection,
+                    child_projection,
+                    conn=conn,
+                    project_id=project_id,
+                    bible_artifact_id=str(parent.get("id") or ""),
+                )
             ):
                 break
             child = parent
