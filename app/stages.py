@@ -6426,6 +6426,17 @@ def _storyboard_shot_visual_identity_issues(
     task_names = list(dict.fromkeys(
         identity.display_name for identity in task_identities
     ))
+    task_audio_names = list(dict.fromkeys(
+        str(value or "").strip()
+        for value in (task.audio_cast or [])
+        if str(value or "").strip()
+    ))
+    audio_repair = (
+        f"；本镜声轨身份 {task_audio_names} 可继续保留在 audio_cast、dialogues "
+        "与 audio_timeline，但未同时属于 visible_entity_ids 的说话者必须使用 "
+        "offscreen_voice、lip_sync=false，且不得出现在动作或首尾帧画面中"
+        if task_audio_names else ""
+    )
     return [Issue(
         code="SHOT_VISIBLE_IDENTITY_NOT_GROUNDED",
         severity=IssueSeverity.BLOCKER,
@@ -6442,9 +6453,11 @@ def _storyboard_shot_visual_identity_issues(
             "unexpected_identity_ids": sorted(unexpected),
         },
         repair_hint=(
-            "让 characters、characters_visible 与角色 reference_roles 只引用本镜 "
-            "visible_entity_ids；原文中的非持久背景群体可保留在动作描述中，"
-            "不得改绑为无本镜关系的命名身份"
+            f"将 characters、characters_visible 与角色 reference_roles 精确收敛到"
+            f"本镜 visible_entity_ids 对应的 {task_names}，并从 action_desc、"
+            f"first_frame_desc、last_frame_desc 移除 {list(unexpected.values())} 的"
+            f"可见描写{audio_repair}；原文中的非持久背景群体可保留为不绑定身份的"
+            "环境动作"
         ),
         repairable=True,
     )]
@@ -8814,12 +8827,12 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
         scope_id=f"{episode.get('id') or episode['episode_no']}:{shot_no}",
         artifact_type="storyboard_shot",
         policy=AgentLoopPolicy(
-            max_iterations=2,
-            stall_rounds=2,
+            max_iterations=4,
+            stall_rounds=4,
             min_quality_gain=0.03,
-            no_gain_rounds=2,
+            no_gain_rounds=4,
             allow_warning_candidate=False,
-            repair_all_blockers=False,
+            repair_all_blockers=True,
             commit_accepted_artifact=semantic_attempt_id is None,
         ),
     )

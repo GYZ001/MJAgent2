@@ -121,6 +121,7 @@ def test_shot_visual_identity_must_belong_to_current_narrative_task() -> None:
     task = StoryboardOutlineShot(
         shot_no=1,
         visible_entity_ids=["萧炎"],
+        audio_cast=["旁场人物"],
     )
 
     issues = _storyboard_shot_visual_identity_issues(
@@ -138,6 +139,8 @@ def test_shot_visual_identity_must_belong_to_current_narrative_task() -> None:
     assert issues[0].severity == IssueSeverity.BLOCKER
     assert issues[0].evidence["task_identity_ids"] == ["萧炎"]
     assert issues[0].evidence["unexpected_identity_ids"] == ["旁场人物"]
+    assert "offscreen_voice" in issues[0].repair_hint
+    assert "lip_sync=false" in issues[0].repair_hint
 
 
 def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bool,
@@ -218,6 +221,7 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
 
     async def fake_agent_loop(*_args, **kwargs):
         captured["max_tokens"] = kwargs["max_tokens"]
+        captured["max_iterations"] = kwargs["loop"].policy.max_iterations
         captured["repair_all_blockers"] = kwargs["loop"].policy.repair_all_blockers
         return _draft(_shot(1), is_final=False)
 
@@ -241,7 +245,8 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
     assert result.shot.shot_no == 1
     assert captured["max_tokens"] == config.STORYBOARD_SHOT_MAX_TOKENS == 8192
     assert captured["max_tokens"] < 65535
-    assert captured["repair_all_blockers"] is False
+    assert captured["max_iterations"] == 4
+    assert captured["repair_all_blockers"] is True
 
 
 def test_storyboard_outline_uses_32k_output_budget() -> None:
