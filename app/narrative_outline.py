@@ -568,22 +568,33 @@ def normalize_narrative_storyboard_outline(
         reaction_s = (
             1.0 if character_state_ids_by_event[event.event_id] else 0.0
         )
-        first_dialogue_s = 0.0
-        if dialogue_groups:
-            first_dialogue_chars = sum(
+        def _spoken_seconds(key_ids: list[str]) -> float:
+            spoken_chars = sum(
                 len(
                     "".join(
                         character
-                        for character in key_line_meta[key_id][1]
+                        for character in key_line_meta.get(
+                            key_id,
+                            ("", "", ""),
+                        )[1]
                         if character.isalnum()
                     )
                 )
-                for key_id in dialogue_groups[0]
+                for key_id in key_ids
             )
-            first_dialogue_s = (
-                first_dialogue_chars
+            return (
+                spoken_chars
                 * float(config.VIDEO_DURATION_MIN_S)
                 / float(config.SPOKEN_CHARS_PER_5_SECONDS)
+            )
+
+        first_dialogue_s = 0.0
+        if dialogue_groups:
+            first_dialogue_s = _spoken_seconds(dialogue_groups[0])
+        elif event_bases:
+            first_dialogue_s = max(
+                (_spoken_seconds(list(item.key_line_ids)) for item in event_bases),
+                default=0.0,
             )
         needs_support = bool(
             processing_s > 0
@@ -631,6 +642,13 @@ def normalize_narrative_storyboard_outline(
             support.key_line_ids = []
             support.audio_cast = []
             event_nodes.append((event.event_id, "support", support))
+        completion = "；".join(dict.fromkeys(
+            str(action.completion_condition or "").strip()
+            for action_id in event.action_ids
+            for action in [actions.get(action_id)]
+            if action is not None
+            and str(action.completion_condition or "").strip()
+        ))
         action_delivery_texts = {
             text
             for action_id in event.action_ids
@@ -653,6 +671,39 @@ def normalize_narrative_storyboard_outline(
         )
         for base_index, event_base in enumerate(event_bases):
             if support_completes_event:
+                continue
+            spoken_s = _spoken_seconds(list(event_base.key_line_ids))
+            if (
+                event_base.key_line_ids
+                and spoken_s + action_s + reaction_s
+                > config.VIDEO_DURATION_MAX_S
+            ):
+                dialogue = event_base.model_copy(deep=True)
+                dialogue.primary_action_id = None
+                dialogue.supporting_action_ids = []
+                dialogue.action_phase_ids = []
+                spoken_text = "；".join(
+                    key_line_meta.get(key_id, ("", "", ""))[1]
+                    for key_id in dialogue.key_line_ids
+                    if key_line_meta.get(key_id, ("", "", ""))[1]
+                )
+                if spoken_text:
+                    dialogue.primary_action = spoken_text
+                    dialogue.beat = spoken_text
+                    dialogue.covers = spoken_text
+                    dialogue.state_out = spoken_text
+                event_nodes.append((event.event_id, "dialogue", dialogue))
+
+                main = event_base.model_copy(deep=True)
+                main.key_line_ids = []
+                main.audio_cast = []
+                if completion:
+                    main.state_in = dialogue.state_out
+                    main.primary_action = completion
+                    main.state_out = completion
+                    main.beat = completion
+                    main.covers = completion
+                event_nodes.append((event.event_id, "main", main))
                 continue
             event_nodes.append((
                 event.event_id,
@@ -698,13 +749,6 @@ def normalize_narrative_storyboard_outline(
                 len(event_nodes),
             )
             event_nodes[insert_at:insert_at] = generated_dialogues
-        completion = "；".join(dict.fromkeys(
-            str(action.completion_condition or "").strip()
-            for action_id in event.action_ids
-            for action in [actions.get(action_id)]
-            if action is not None
-            and str(action.completion_condition or "").strip()
-        ))
         if generated_dialogues and main_base_index is None and completion:
             directed_main = next(
                 (

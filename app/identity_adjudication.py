@@ -546,6 +546,20 @@ async def adjudicate_screenplay_document_identities(
         for character in bible.characters
         if str(character.name or "").strip()
     }
+    if screenplay.narrative_plan is not None:
+        known.update(
+            token
+            for contract in screenplay.narrative_plan.identity_contracts
+            for token in {
+                str(contract.identity_id or "").strip(),
+                str(contract.display_name or "").strip(),
+                *(
+                    str(voice_id or "").strip()
+                    for voice_id in (contract.voice_ids or [])
+                ),
+            }
+            if token
+        )
     for resolution in episode.get("character_resolutions") or []:
         if not isinstance(resolution, dict):
             continue

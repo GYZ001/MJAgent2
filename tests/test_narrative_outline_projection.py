@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from math import ceil
+
 from app import config
 from app.continuity import state_chain_errors
 from app.narrative import (
@@ -253,6 +255,62 @@ def test_narrative_outline_projects_graph_owned_fields_deterministically() -> No
         complete=True,
         expected_scope_id="episode-generic",
     ) == []
+
+
+def test_narrative_outline_splits_joint_dialogue_and_action_budget() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    line = "x" * ceil(config.SPOKEN_CHARS_PER_5_SECONDS * 1.9)
+    screenplay.key_lines = [f"character-1: {line}"]
+    screenplay.dialogue_chains = [
+        KeyDialogueChain(
+            chain_id="DC1",
+            topic="Joint viewing capacity",
+            turns=[
+                KeyDialogueTurn(
+                    speaker="character-1",
+                    line=line,
+                    source_text=line,
+                )
+            ],
+        )
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat=line,
+                covers=line,
+                primary_action=line,
+                key_line_ids=["KL01"],
+                characters_visible=["character-1"],
+            )
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert len(outline.shots) >= 2
+    dialogue = next(shot for shot in outline.shots if shot.key_line_ids)
+    action_owner = next(
+        shot for shot in outline.shots
+        if shot.primary_action_id == action.action_id
+    )
+    assert dialogue.key_line_ids == ["KL01"]
+    assert dialogue.primary_action_id is None
+    assert action_owner.key_line_ids == []
+    assert action_owner.primary_action_id == action.action_id
+    for shot in outline.shots:
+        budget = shot.capacity_budget.model_dump()
+        total = sum(
+            value for value in budget.values()
+            if isinstance(value, (int, float))
+        )
+        assert total <= shot.duration_s
 
 
 def test_narrative_outline_projection_is_structurally_idempotent() -> None:

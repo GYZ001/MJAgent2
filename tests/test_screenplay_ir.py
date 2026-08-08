@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -1776,6 +1777,56 @@ def test_identity_adjudication_rejects_unavailable_source_id(monkeypatch) -> Non
             bible=_bible(),
             persist_new_resolutions=False,
         ))
+
+
+def test_document_identity_adjudication_uses_only_source_backed_typed_reference(
+    monkeypatch,
+) -> None:
+    screenplay = _compile()
+    screenplay.scene_outline[0].characters.append("门卫")
+    source_text = SOURCE + "\n\n门卫推开外门，示意众人暂时不要离开。"
+    identity_key = (
+        "document_identity_"
+        + hashlib.sha256("门卫".encode("utf-8")).hexdigest()[:12]
+    )
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return json.dumps({"decisions": [{
+            "identity_key": identity_key,
+            "status": "new_functional",
+            "canonical_name": "门卫",
+            "evidence_source_ids": ["SRC0004"],
+            "rationale": "SRC0004 明确出现门卫并承担开门动作",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    friend_resolution = normalize_character_resolution({
+        "source_label": "旧友",
+        "canonical_name": "旧友",
+        "resolution": "functional_identity",
+        "identity_group": "episode:old-friend",
+    })
+    episode = {
+        "episode_no": 1,
+        "character_resolutions": [friend_resolution],
+    }
+    resolutions = asyncio.run(
+        identity_adjudication.adjudicate_screenplay_document_identities(
+            screenplay,
+            episode=episode,
+            source_text=source_text,
+            bible=_bible(),
+        )
+    )
+    assert len(prompts) == 1
+    assert "门外再次响起更重的敲门声" not in prompts[0]
+    assert "门卫推开外门" in prompts[0]
+    guard_resolution = next(
+        item for item in resolutions if item["source_label"] == "门卫"
+    )
+    assert guard_resolution["authority_id"].startswith("functional:")
 
 
 def test_shared_functional_source_label_requires_ai_before_merging_identities() -> None:
