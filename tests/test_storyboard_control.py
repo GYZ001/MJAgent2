@@ -23,7 +23,9 @@ def _db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "control.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
+    request_control("e1", "clear")
     yield
+    request_control("e1", "clear")
     monkeypatch.setattr(db._local, "conn", None, raising=False)
 
 

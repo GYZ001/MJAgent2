@@ -1,6 +1,5 @@
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
-from app.validators import (_contiguous_scene_move, _has_movement_cue, _has_transition_hint,
-                            adjacent_spoken_repeat_errors,
+from app.validators import (_contiguous_scene_move, adjacent_spoken_repeat_errors,
                             key_line_catalog, normalize_action_desc, validate_storyboard,
                             storyboard_shot_count_range,
                             validate_storyboard_preserves_key_content,
@@ -19,14 +18,6 @@ def _bible() -> Bible:
         ],
         world=World(era="玄幻古代", genre="玄幻", visual_style_canonical="国风玄幻漫剧厚涂风，暖冷对比光"),
     )
-
-
-def test_movement_cue_counts_as_transition_explanation() -> None:
-    """复现真实失败样本：动作里写了人物移动（转身离开/走到），就是承接说明；
-    但这句一个旧的固定承接词都没命中，旧实现会误判“缺少承接说明”。"""
-    action = "萧炎不愿留在广场受旁人议论，转身离开测验广场，走到外侧的小路上，左手摩挲袖中黑戒指"
-    assert _has_movement_cue(action, "")
-    assert not _has_transition_hint("日，萧家测验广场外小路", action, "", "")
 
 
 def test_contiguous_sublocation_move_is_explained() -> None:
@@ -68,8 +59,8 @@ def test_storyboard_no_false_missing_transition_for_walk_to_adjacent_area() -> N
     assert not any("缺少承接说明" in e for e in errors), errors
 
 
-def test_storyboard_still_flags_unexplained_scene_jump() -> None:
-    """同人物、同时间、非建场景别直接跳到无关地点时仍应提醒。"""
+def test_storyboard_scene_jump_does_not_depend_on_transition_words() -> None:
+    """换场由 scene fields 和 continuity_mode 判定，不扫描叙事用词。"""
     board = Storyboard(
         episode_no=1,
         shots=[
@@ -92,7 +83,7 @@ def test_storyboard_still_flags_unexplained_scene_jump() -> None:
 
     errors = validate_storyboard(board, _bible(), target_duration_s=20)
 
-    assert any("缺少承接说明" in e for e in errors), errors
+    assert not any("缺少承接说明" in e for e in errors), errors
 
 
 def test_storyboard_allows_explicit_time_jump_with_new_scene_establishing_frame() -> None:

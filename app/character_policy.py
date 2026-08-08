@@ -4,23 +4,8 @@ from __future__ import annotations
 import re
 
 
-_GENERATED_FUNCTIONAL_ID_RE = re.compile(
-    r"^(?:路人(?:甲|乙|丙|丁|[1-9]\d*)|functional:[A-Za-z0-9_.:-]+)$"
-)
-_COLLECTIVE_ROLE_EXACT = frozenset({
-    "人群", "众人", "群众", "大家", "人们", "百姓", "观众", "家族子弟", "族人", "子弟",
-})
-_COLLECTIVE_ROLE_MARKERS = (
-    "人群", "众人", "群众", "一群", "一众", "众弟子", "众族人", "围观人群", "围观众人",
-)
-_COLLECTIVE_ROLE_SUFFIXES = (
-    "们", "子弟", "人群", "群众", "百姓", "观众", "护卫队", "守卫队", "士兵队伍",
-)
-_COLLECTIVE_QUANTIFIER_RE = re.compile(
-    r"^(?:几|数|多|两|[2-9]|二|三|四|五|六|七|八|九|十)(?:名|位|个)?"
-    r"(?:族人|弟子|子弟|学生|顾客|村民|士兵|护卫|守卫|围观者|观众)$"
-)
-_SINGULAR_QUANTIFIER_RE = re.compile(r"^(?:一|1)(?:名|位|个)")
+_GENERATED_FUNCTIONAL_ID_RE = re.compile(r"^functional:[^\s:][^\s]*$")
+_GENERATED_COLLECTIVE_ID_RE = re.compile(r"^collective:[^\s:][^\s]*$")
 
 
 def is_functional_extra(name: str) -> bool:
@@ -73,21 +58,9 @@ def generic_functional_extra_role(name: str) -> str | None:
 
 
 def is_collective_role(name: str) -> bool:
-    """返回这个可见名单项是否表示群体，而不是一个需锁定身份的人。
-
-    「萧家子弟」这类 legacy 标签会出现在 characters_visible 中。如果按一个角色
-    处理，图像模型会把「众人议论」压成单人，还会错误寻找它的定妆照。
-    """
+    """只识别上游已签发的 ``collective:`` 稳定身份 ID。"""
     value = (name or "").strip()
-    if not value:
-        return False
-    if _SINGULAR_QUANTIFIER_RE.match(value):
-        return False
-    if value in _COLLECTIVE_ROLE_EXACT or _COLLECTIVE_QUANTIFIER_RE.fullmatch(value):
-        return True
-    if any(marker in value for marker in _COLLECTIVE_ROLE_MARKERS):
-        return True
-    return any(value.endswith(suffix) for suffix in _COLLECTIVE_ROLE_SUFFIXES)
+    return bool(value and _GENERATED_COLLECTIVE_ID_RE.fullmatch(value))
 
 
 def is_allowed_storyboard_character(

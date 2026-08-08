@@ -50,16 +50,16 @@ def _real_shot_2() -> Shot:
         scene_setting="日，萧家测验广场",
         characters=["萧炎"],
         action_desc=(
-            "萧炎右手仍紧贴黑色魔石碑表面，碑面骤然亮起白光；碑旁路人甲以测验员身份确认碑面信息，"
+            "萧炎右手仍紧贴黑色魔石碑表面，碑面骤然亮起白光；碑旁functional:examiner确认碑面信息，"
             "面无表情地公布成绩，萧炎听完后握紧拳头压住情绪。"
         ),
-        first_frame_desc="萧炎右手贴住黑色魔石碑，路人甲站在碑旁低头等待结果。",
-        last_frame_desc="同一机位，路人甲已经公布成绩，萧炎仍站在碑前握紧拳头。",
+        first_frame_desc="萧炎右手贴住黑色魔石碑，functional:examiner站在碑旁低头等待结果。",
+        last_frame_desc="同一机位，functional:examiner已经公布成绩，萧炎仍站在碑前握紧拳头。",
         source_excerpt="测验员看了一眼碑上所显示出来的信息，语气漠然地将之公布了出来。",
         narration="",
         dialogues=[
             Dialogue(
-                speaker="路人甲",
+                speaker="functional:examiner",
                 line="萧炎，斗之力，三段！级别：低级！",
                 emotion="平静",
             )
@@ -70,11 +70,9 @@ def _real_shot_2() -> Shot:
 
 
 def test_functional_extra_classifier_is_bounded_and_deterministic() -> None:
-    assert all(is_functional_extra(name) for name in (
-        "路人甲", "路人乙", "路人12", "functional:examiner",
-    ))
+    assert is_functional_extra("functional:examiner")
     assert all(not is_functional_extra(name) for name in (
-        "测验员", "中年测验员", "测验员甲", "族人甲", "弟子乙",
+        "路人甲", "路人乙", "路人12", "测验员", "中年测验员", "测验员甲", "族人甲", "弟子乙",
         "守卫3", "老管家", "二长老", "萧炎", "韩枫",
         "黑袍老者", "神秘黑袍老者", "绿袍男子", "青衣女子",
     ))
@@ -90,17 +88,17 @@ def test_real_shot_2_speaker_is_added_as_visible_functional_extra() -> None:
         Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50
     )
 
-    assert shot.characters == ["萧炎", "路人甲"]
-    assert shot.characters_visible == ["萧炎", "路人甲"]
-    assert shot.audio_cast == ["路人甲"]
+    assert shot.characters == ["萧炎", "functional:examiner"]
+    assert shot.characters_visible == ["萧炎", "functional:examiner"]
+    assert shot.audio_cast == ["functional:examiner"]
     assert shot.audio_timeline[0].type == "spoken_dialogue"
     assert shot.audio_timeline[0].lip_sync is True
     assert any(
-        change.get("allowed_functional_extra") == "路人甲"
+        change.get("allowed_functional_extra") == "functional:examiner"
         and change.get("source") == "dialogue_speaker"
         for change in changes
     )
-    assert not any("speaker=「路人甲」不在该镜头 characters" in error for error in errors)
+    assert not any("speaker=「functional:examiner」不在该镜头 characters" in error for error in errors)
     assert not any("既不在角色圣经" in error for error in errors)
 
 
@@ -144,9 +142,9 @@ def test_functional_extra_compiles_without_persistent_bible_asset() -> None:
     video_prompt = compile_prompt(shot, _bible())
     frame_prompt = compile_scene_prompt(shot, _bible(), kind="tail")
 
-    assert "功能性路人「路人甲」" in video_prompt
-    assert "功能性路人「路人甲」" in frame_prompt
-    assert "路人甲" in video_prompt and "萧炎，斗之力，三段" in video_prompt
+    assert "功能性路人「functional:examiner」" in video_prompt
+    assert "功能性路人「functional:examiner」" in frame_prompt
+    assert "functional:examiner" in video_prompt and "萧炎，斗之力，三段" in video_prompt
     assert "[AUDIO TIMELINE]" in video_prompt
 
 
@@ -186,13 +184,13 @@ def test_legacy_functional_name_requires_persisted_typed_voice_contract() -> Non
 
 def test_functional_extra_must_be_visibly_staged() -> None:
     shot = _real_shot_2()
-    shot.characters.append("路人乙")
+    shot.characters.append("functional:observer")
 
     errors = validate_storyboard(
         Storyboard(episode_no=1, shots=[shot]), _bible(), target_duration_s=50
     )
 
-    assert any("功能性路人「路人乙」未在 action_desc/首尾帧中明确入画" in error for error in errors)
+    assert any("功能性路人「functional:observer」未在 action_desc/首尾帧中明确入画" in error for error in errors)
 
 
 def test_named_unknown_character_still_fails_the_bible_gate() -> None:
@@ -332,7 +330,7 @@ def test_historical_shot_repair_creates_lineaged_t1_candidate(
     row = conn.execute(
         "SELECT characters, storyboard_artifact_id FROM shots WHERE id='s1'"
     ).fetchone()
-    assert json.loads(row["characters"]) == ["萧炎", "路人甲"]
+    assert json.loads(row["characters"]) == ["萧炎", "functional:examiner"]
     assert row["storyboard_artifact_id"] == artifact_ids[0]
     assert repaired["status"] == "candidate"
     assert repaired["trust_level"] == "T1"

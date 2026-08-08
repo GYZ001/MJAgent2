@@ -54,6 +54,7 @@ from app.schemas import (Bible, EpisodeScreenplay, InformationItem,
                          DELIVERY_OWNERS)
 from app.scene_contract import (
     compose_scene_setting,
+    same_scene,
     scene_name_of,
     scene_time_of,
     split_legacy_scene_setting,
@@ -91,17 +92,7 @@ ACTION_DESC_MIN_CHARS = ACTION_DESC_TARGET_MIN
 SOURCE_EXCERPT_MIN_CHARS = 8
 # 已废除「至少 2 个动作片段」硬门槛；保留符号供旧测试 import 时不崩，值为 0 表示不校验。
 VIDEO_SEGMENT_MIN_BEATS = 0
-# 显式多镜头/快切/蒙太奇标记：出现即判定为“一个镜头里塞多段”，高精度、低误伤。
-CUT_MARKERS = (
-    "切到", "切至", "切换到", "切换至", "镜头切", "画面切", "镜头转向", "镜头转到",
-    "闪回", "回忆画面", "回忆起", "蒙太奇", "分屏", "下一个镜头", "下一镜", "转场到", "→",
-)
 SCENE_SETTING_MAX_CHARS = 18        # 仅作 prompt 建议值，不再参与校验
-TRANSITION_HINTS = (
-    "次日", "第二天", "当天", "清晨", "上午", "中午", "下午", "傍晚", "深夜", "夜里",
-    "与此同时", "转场", "随后", "片刻后", "几小时后", "数小时后", "一夜后", "回到", "另一边",
-    "带着", "顺着", "接着", "继续", "仍", "还", "已经",
-)
 
 
 def _named_character_is_explicitly_offscreen(name: str, text: str) -> bool:
@@ -111,15 +102,6 @@ def _named_character_is_explicitly_offscreen(name: str, text: str) -> bool:
         re.search(rf"(?:画外|镜外|不入画|留在画外)[^，。；]{{0,12}}{escaped}", text)
         or re.search(rf"{escaped}[^，。；]{{0,12}}(?:在画外|于画外|不入画|留在画外)", text)
     )
-# 换场承接的「移动/抵达」动词：动作里出现这些即说明人物是“走过去/来到”新场景，移动本身就是承接，
-# 不该因为没用到 TRANSITION_HINTS 里那批固定承接词就误判“缺少承接”（实测高频误伤，白耗修复轮次）。
-MOVEMENT_HINTS = (
-    "走到", "走向", "走出", "走进", "走来", "走去", "走上", "走下", "走过", "来到", "回到", "返回",
-    "转身", "离开", "起身", "出门", "进门", "推门", "步入", "踏入", "迈进", "迈步", "穿过", "穿出",
-    "跑向", "跑到", "跑出", "冲向", "冲进", "赶到", "赶往", "退到", "退出", "上前", "退后", "跟上",
-    "登上", "爬上", "钻进", "前往", "折返", "驻足", "停在", "停步", "停下",
-)
-
 # 目标时长只提供初始节拍参考；剧情未完整覆盖时可继续补 5~10 秒镜头。
 SCENE_CUT_TRANSITIONS = TRANSITIONS - {"硬切"}
 SAME_SCENE_CONTINUITY_MODES = {
@@ -129,17 +111,14 @@ SAME_SCENE_CONTINUITY_MODES = {
     "insert_detail",
 }
 def default_scene_transition(prev: Shot | None, shot: Shot) -> str:
-    """根据换场关系给一个稳定默认值，交由最终编辑执行。"""
+    """只按场景字段关系选择稳定默认转场。"""
     if not prev:
         return "硬切"
-    text = f"{prev.narration or ''}{shot.narration or ''}{prev.action_desc}{shot.action_desc}"
-    if any(k in text for k in ("冲", "追", "逃", "奔", "扑", "甩")):
-        return "甩镜"
-    if any(k in text for k in ("惊", "爆", "强光", "刺眼", "斗气", "火光")):
-        return "闪白"
-    if any(k in text for k in ("回忆", "想起", "余音", "话音", "怔住", "眼眶", "沉默", "失神")):
-        return "叠化"
-    return "淡出淡入"
+    return (
+        "硬切"
+        if same_scene(prev, shot) and scene_time_of(prev) == scene_time_of(shot)
+        else "淡出淡入"
+    )
 
 
 def storyboard_shot_count_range(target_duration_s: int) -> tuple[int, int]:
@@ -197,12 +176,6 @@ def _action_beat_count(text: str) -> int:
     return max(len(parts), count_sequential_action_beats(text or ""))
 
 
-def _explicit_cut_markers(text: str | None) -> list[str]:
-    """识别 action_desc 里真正的多镜头/快切/闪回标记（而非把逗号分句当快切）。"""
-    t = text or ""
-    return [m for m in CUT_MARKERS if m in t]
-
-
 def _too_similar(a: str, b: str) -> bool:
     """首尾帧描述是否过于相似（几乎是同一句、看不出动作推进）。
 
@@ -216,17 +189,6 @@ def _too_similar(a: str, b: str) -> bool:
     if a == b:
         return True
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.85
-
-
-def _has_transition_hint(*parts: str | None) -> bool:
-    text = "".join(part or "" for part in parts)
-    return any(hint in text for hint in TRANSITION_HINTS)
-
-
-def _has_movement_cue(*parts: str | None) -> bool:
-    """动作/旁白里是否写了人物“走过去/转身离开/来到”这类移动，移动本身即换场承接说明。"""
-    text = "".join(part or "" for part in parts)
-    return any(hint in text for hint in MOVEMENT_HINTS)
 
 
 def _scene_location(scene: str) -> str:
@@ -451,12 +413,6 @@ def validate_storyboard(
             errors.extend(overdetail_errors(shot.action_desc, f"{tag}.action_desc"))
             errors.extend(overdetail_errors(shot.first_frame_desc, f"{tag}.first_frame_desc"))
             errors.extend(overdetail_errors(shot.last_frame_desc, f"{tag}.last_frame_desc"))
-        if not narrative_authority:
-            cut_markers = _explicit_cut_markers(shot.action_desc)
-            if cut_markers:
-                errors.append(
-                    f"{tag}.action_desc 出现多镜头/快切标记 {cut_markers}；单镜只拍一个连贯动作，"
-                    "请删掉切镜/闪回/分屏等跳切，把多余剧情拆到相邻镜或写入画面动作")
         # 首尾帧：必须填写且明显不同（否则生成的首图/尾图一模一样、视频没有动作）
         ff = (shot.first_frame_desc or "").strip()
         lf = (shot.last_frame_desc or "").strip()
@@ -761,12 +717,10 @@ def validate_storyboard(
             if mode == "action_continuation":
                 if shot.transition != "硬切":
                     errors.append(f"{tag}.transition=「{shot.transition}」，action_continuation 必须使用「硬切」")
-                if not narrative_authority and not shared_chars and not _has_movement_cue(
-                    prev.action_desc, prev.narration, shot.action_desc, shot.narration
-                ):
+                if not narrative_authority and not shared_chars:
                     errors.append(
-                        f"{tag}.continuity_mode=action_continuation 但与上一镜没有共同角色或可见移动承接；"
-                        "动作连续必须保留上一镜核心人物，或在 action_desc/narration 写明入场、离场、跟随等移动线索")
+                        f"{tag}.continuity_mode=action_continuation 但与上一镜没有共同角色；"
+                        "动作连续必须由同一权威身份承接")
             elif mode in SAME_SCENE_CONTINUITY_MODES:
                 if not same_scene:
                     errors.append(
@@ -791,25 +745,6 @@ def validate_storyboard(
                     errors.append(
                         f"{tag}.transition=「{shot.transition}」不适合换场；"
                         f"换场请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一")
-                dialogue_text = "".join(d.line for d in shot.dialogues)
-                # 承接说明判定（放宽，杜绝高频误伤）：满足以下任一即视为已写清承接——
-                # ① 含时间/线索类承接词；② action/state_in/首帧写了人物移动；
-                # ③ 同一片连续空间子区域移动；④ 时间明确变化；⑤ 切到另一组人物；
-                # ⑥ 远/全景重新建场。只保留“同人物同时间突然跳到无关地点”的高置信度告警。
-                move_explained = narrative_authority or (
-                    _has_transition_hint(scene, shot.action_desc, shot.narration, dialogue_text)
-                    or _has_movement_cue(shot.action_desc, shot.narration)
-                    or _has_transition_hint(shot.state_in, shot.first_frame_desc)
-                    or _has_movement_cue(shot.state_in, shot.first_frame_desc)
-                    or _contiguous_scene_move(prev_scene, scene)
-                    or time_changed
-                    or not shared_chars
-                    or shot.shot_size in {"远景", "全景"}
-                )
-                if not move_explained:
-                    errors.append(
-                        f"{tag} 从上一镜「{prev_scene}」切到「{scene}」但缺少承接说明；"
-                        "请在 state_in、首帧或画面动作中写清人物如何来到新地点，或改用远景/全景重新建场")
     # V7 shot_no 连续
     expected = list(range(1, len(shots) + 1))
     actual = [s.shot_no for s in shots]

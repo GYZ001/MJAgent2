@@ -38,11 +38,11 @@ def _contact_shot(**overrides) -> Shot:
         "camera_move": "固定",
         "camera_angle": "平视",
         "scene_setting": "日，测验广场",
-        "characters": ["萧炎", "路人甲"],
-        "characters_visible": ["萧炎", "路人甲"],
-        "action_desc": "萧炎走到黑色石碑前，抬起右手按住石碑，路人甲以测验员身份在侧方观察。",
+        "characters": ["萧炎", "functional:examiner"],
+        "characters_visible": ["萧炎", "functional:examiner"],
+        "action_desc": "萧炎走到黑色石碑前，抬起右手按住石碑，functional:examiner在侧方观察。",
         "first_frame_desc": "萧炎从人群中走出，右手尚未碰到石碑。",
-        "last_frame_desc": "萧炎右掌已贴住石碑，路人甲侧身看向接触点。",
+        "last_frame_desc": "萧炎右掌已贴住石碑，functional:examiner侧身看向接触点。",
         "state_in": "萧炎靠近石碑。",
         "primary_action": "萧炎抬手按住石碑。",
         "state_out": "萧炎右掌仍贴住石碑。",
@@ -291,7 +291,7 @@ def test_every_timeline_beat_preserves_explicit_height_difference() -> None:
 def test_functional_extra_is_kept_in_keyframe_roster_and_anchor() -> None:
     prompt = video_modes.reference_generation_prompt(_contact_shot(), _bible(), "plot_key_frame", 1)
 
-    assert "路人甲" in prompt
+    assert "functional:examiner" in prompt
     assert "Named/individual visible identities, each exactly once" in prompt
     assert "功能性路人" in prompt
 
@@ -675,8 +675,8 @@ def test_offscreen_child_does_not_disable_equal_scale_for_visible_adults() -> No
 
 def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     shot = _contact_shot(
-        characters=["萧家子弟", "萧薰儿"],
-        characters_visible=["萧家子弟", "萧薰儿"],
+        characters=["collective:萧家子弟", "萧薰儿"],
+        characters_visible=["collective:萧家子弟", "萧薰儿"],
         primary_action="几名萧家子弟交头接耳。",
         action_desc="萧家子弟们纷纷议论，其中一人回头，背景中萧薰儿沉默站立。",
         last_frame_desc="众人仍在议论，其中一人回头，背景中萧薰儿沉默站立。",
@@ -685,16 +685,17 @@ def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     contract = keyframe_visual_contract(shot, _bible())
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
 
-    assert is_collective_role("萧家子弟") is True
+    assert is_collective_role("collective:萧家子弟") is True
+    assert is_collective_role("萧家子弟") is False
     assert is_collective_role("一名观众") is False
-    assert is_collective_role("两名弟子") is True
+    assert is_collective_role("两名弟子") is False
     assert contract["individual_visible_characters"] == ["萧薰儿"]
-    assert contract["collective_visible_roles"] == ["萧家子弟"]
+    assert contract["collective_visible_roles"] == ["collective:萧家子弟"]
     assert contract["collective_presence_required"] is True
     assert contract["relative_height_policy"] == "single_subject"
-    assert "Scripted collective/group roles: 萧家子弟" in prompt
+    assert "Scripted collective/group roles: collective:萧家子弟" in prompt
     assert "never as one fixed identity" in prompt
-    assert "Named/individual visible identities, each exactly once: 萧家子弟" not in prompt
+    assert "Named/individual visible identities, each exactly once: collective:萧家子弟" not in prompt
     assert "Named/individual visible identities, each exactly once: 萧薰儿" in prompt
 
     monkeypatch.setattr(
@@ -706,7 +707,11 @@ def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     manifest = resolve_shot_asset_dependencies(
         project_id="p", episode_no=1, shot_id="s", shot=shot,
     )
-    group = next(item for item in manifest["characters"] if item["name"] == "萧家子弟")
+    group = next(
+        item
+        for item in manifest["characters"]
+        if item["name"] == "collective:萧家子弟"
+    )
     assert group["role_kind"] == "collective"
     assert group["asset_required"] is False
     assert group["selected_views"] == []

@@ -231,4 +231,3 @@ def test_real_shot_12_cover_split_avoids_tiny_tail() -> None:
 
     assert [len(_condense(chunk)) for chunk in chunks] == [14, 16]
     assert _condense("".join(chunks)) == _condense("".join(_atomize_claim(covers)))
-

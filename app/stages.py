@@ -57,7 +57,7 @@ from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenp
                          schema_errors)
 from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             defer_establishing_covers,
-                            TRANSITION_HINTS, _atomize_claim, _condense,
+                            _atomize_claim, _condense,
                             _scene_time_changed,
                             normalize_action_desc, normalize_continuity,
                             normalize_dialogue_focus_offscreen_mentions,
@@ -6123,7 +6123,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
 4d. {outline_action_capacity_rule}
 5. covers 只写本镜必须拍出/说出的具体事实（可见动作、可听台词、可感知反应、可核对信息点）；禁止用纯抽象导演意图代替可观测证据；意图写入 shot_contribution/affective_delta，可拍事实写入 beat/primary_action/state_out。
 6. {first_rule}
-7. scene_time 与 scene_name 分开填：scene_time 可为早/中/晚/黄昏/具体时刻；scene_name 必须是场景库规范名，同一物理场景不因人物走到门口/桌边而改名。scene_id 按 scene_outline 场次使用 SC01、SC02……；禁止整集复用同一个 scene_id。
+7. scene_time 与 scene_name 分开填：scene_time 直接引用本场 scene_contract 的开放文本时间或相对阶段；scene_name 必须是场景库规范名，同一物理场景不因人物走到门口/桌边而改名。scene_id 直接引用 scene_contract.scene_id，禁止整集复用同一个 scene_id。
 8. beat 必须写清人物或作用对象跨越可见性/空间边界的原因、起始条件与完成条件。
 9. continuity_mode 必须从 action_continuation / same_scene_cut / reaction_cut / reverse_angle / insert_detail / scene_change 中选择；只有 action_continuation 表示承接上一镜同一动作尾状态，其他同场景切换不得冒充动作连续。
 10. story_event_id 只写剧本事件 E*；主线节拍写 spine_beat_ids（S*）；禁止把 S* 写入 story_event_id。
@@ -6133,7 +6133,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON（不要解释、不要 Markdown）：
-{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_time": "早|中|晚|黄昏|具体时刻", "scene_name": "上方场景库规范名", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜必须拍出/说出的具体事实（禁止反差/对比等导演抽象）", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）或空", "spine_beat_ids": ["S01"], "key_line_ids": ["KL01"], "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/功能性声音，可空"]}}]}}"""
+{{"episode_no": {episode['episode_no']}, "shots": [{{"shot_no": int, "scene_time": "直接引用 scene_contract 的开放文本", "scene_name": "上方场景库规范名", "beat": "兼容字段：本镜推进的剧情一句话", "covers": "本镜任务的读者可读摘要；结构化交付以稳定 ID 与 shot_contribution 为准", "state_in": "本镜开始时人物/道具/信息状态", "primary_action": "本镜唯一主动作/主交付", "state_out": "本镜结束时的新状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "story_event_id": "对应 screenplay.events[].event_id（E*）或空", "spine_beat_ids": ["S01"], "key_line_ids": ["KL01"], "new_information_ids": ["本镜首次交付的信息ID，可空"], "duration_s": 5, "characters_visible": ["本镜画面可见角色"], "audio_cast": ["本镜发声角色/功能性声音，可空"]}}]}}"""
     log_provider_call(
         "storyboard_outline_prompt", config.MODEL_TEXT, "PROMPT_READY", None, 0,
         meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
@@ -7919,7 +7919,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_time": "早|中|晚|黄昏|具体时刻", "scene_name": "上方场景库规范名", "characters": ["画面中实际可见且受人物谱或叙事权威图定义的身份"], "characters_visible": ["本镜画面实际可见的已定义身份"], "action_desc": str, "state_in": "本镜开始的精确实体/信息状态", "primary_action": "本镜权威任务的可拍表达", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "continuity_state_in": {{"scene": {{"scene_revision_id": str, "time_of_day": str, "lighting_state": str, "axis_id": str, "landmarks": {{"landmark": "screen_side"}}}}, "characters": {{"权威身份ID": {{"look_revision_id": str, "outfit_revision_id": str, "visibility": str, "screen_side": str, "pose": str, "facing": str, "gaze_target": str, "left_hand": str, "right_hand": str}}}}, "props": {{"实体ID": {{"canonical_name": str, "revision_id": str, "owner": str, "location": str, "form": str, "visibility": "required|optional|hidden", "text_state": str, "required": bool}}}}}}, "continuity_state_out": "与 continuity_state_in 同结构，只改写本镜任务真正改变的字段", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的内部编号"], "do_not_repeat": ["只能填写已交付信息的语义内容，禁止裸 ID"], "risk_tags": ["根据当前 ShotTask 实际导演风险填写"], "audio_cast": ["本镜受权威图/voice_bible 定义的发声身份"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "引用 voice_bible.speaker_id 或 null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "当前事件实际定义的可读承载实体", "exact_text": "需要画面准确出现的文字；无则为空", "strategy": "deterministic_insert|audio_only|embedded_prop|none", "delivery_owner_shot_no": int, "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false, "max_other_text": 0, "font_role": "classical_serif", "reading_priority": "plot_critical"}}, "spatial_anchor": "continuity_state 中未被本镜动作改变的固定环境实体方位", "first_frame_desc": "本镜开始的静止画面，只呈现权威任务的起始条件", "last_frame_desc": "与首帧同机位同场景同构图，只呈现本镜 allowed state delta 与完成条件", "source_excerpt": "对应本镜头的授权来源逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据", "narration": "", "dialogues": [{{"speaker": "必须引用本镜 characters/audio_cast 中已定义的身份", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
+{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_time": "直接引用本场 scene_contract 的开放文本", "scene_name": "上方场景库规范名", "characters": ["画面中实际可见且受人物谱或叙事权威图定义的身份"], "characters_visible": ["本镜画面实际可见的已定义身份"], "action_desc": str, "state_in": "本镜开始的精确实体/信息状态", "primary_action": "本镜权威任务的可拍表达", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "continuity_state_in": {{"scene": {{"scene_revision_id": str, "time_of_day": str, "lighting_state": str, "axis_id": str, "landmarks": {{"landmark": "screen_side"}}}}, "characters": {{"权威身份ID": {{"look_revision_id": str, "outfit_revision_id": str, "visibility": str, "screen_side": str, "pose": str, "facing": str, "gaze_target": str, "left_hand": str, "right_hand": str}}}}, "props": {{"实体ID": {{"canonical_name": str, "revision_id": str, "owner": str, "location": str, "form": str, "visibility": "required|optional|hidden", "text_state": str, "required": bool}}}}}}, "continuity_state_out": "与 continuity_state_in 同结构，只改写本镜任务真正改变的字段", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的内部编号"], "do_not_repeat": ["只能填写已交付信息的语义内容，禁止裸 ID"], "risk_tags": ["根据当前 ShotTask 实际导演风险填写"], "audio_cast": ["本镜受权威图/voice_bible 定义的发声身份"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "引用 voice_bible.speaker_id 或 null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "当前事件实际定义的可读承载实体", "exact_text": "需要画面准确出现的文字；无则为空", "strategy": "deterministic_insert|audio_only|embedded_prop|none", "delivery_owner_shot_no": int, "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false, "max_other_text": 0, "font_role": "classical_serif", "reading_priority": "plot_critical"}}, "spatial_anchor": "continuity_state 中未被本镜动作改变的固定环境实体方位", "first_frame_desc": "本镜开始的静止画面，只呈现权威任务的起始条件", "last_frame_desc": "与首帧同机位同场景同构图，只呈现本镜 allowed state delta 与完成条件", "source_excerpt": "对应本镜头的授权来源逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据", "narration": "", "dialogues": [{{"speaker": "必须引用本镜 characters/audio_cast 中已定义的身份", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -8229,7 +8229,6 @@ def _storyboard_preflight_contract(
 9. 声轨按本镜信息交付与口播容量决定；同镜对白语义、dialogues 和 audio_timeline 必须一致。
 10. source_excerpt 必须是当前授权来源的可追溯证据，不得进入视频提示词。
 11. 在输出前对本镜执行状态方程、阶段时间、动作防重演、观众状态交接与窗口截止时间的联合校验。"""
-    hints = "、".join(TRANSITION_HINTS[:12])
     return f"""首轮输出前必须逐镜预检（这些就是代码校验器的具体判定条件，不要等返工）：
 1. 镜头数由完整覆盖剧情与上下文决定，不设数量上限；每条 duration_s **默认 {PREFERRED_SHOT_DURATION_S}s**，仅当口播或连续动作需要时取到 {config.VIDEO_DURATION_MAX_S}s。动作容量与视频门禁一致：5~6s≤2 个顺序节拍，7~10s≤3 个；超限在自然动作边界拆镜，每镜必须有独立作用。
 2. 第 1 镜 continuity_mode 不得为 action_continuation；第 2 镜开始逐条和上一镜比较 state_out、scene_name、scene_time 与角色可见状态。
@@ -8243,7 +8242,7 @@ def _storyboard_preflight_contract(
 4. 如果本镜 scene_name 或 scene_time 与上一镜不同：
    - continuity_mode 必须为 scene_change；
    - transition 必须选择明确的换场方式，绝不能用"硬切"；普通时空跳转优先"淡出淡入"，情绪/回忆延续优先"声音延续+叠化"，悬疑冲击用"闪黑/闪白"，动作追逐用"甩镜/遮挡转场"，有构图呼应时用"匹配剪辑"；
-   - action_desc 必须写清承接原因、时间跳跃或线索带入，建议出现：{hints} 等承接词；
+   - scene_contract、state_in 与 boundary 必须显式引用换场后的时间、地点和状态来源；自然语言用词不参与通过判定；
    - 转场由最终编辑执行；上一镜 last_frame_desc 必须保留稳定、干净的动作结果，本镜 first_frame_desc 是新时间/新地点的建立画面；两侧都不预烧叠化/闪黑/闪白效果；
    - 如果只是同一段连续动作里从房间走到门口/楼道/桌边/窗前，不要改 scene_name，把移动写进 action_desc。
 5. scene_name 是稳定的场景图身份，必须沿用库内规范名；scene_time 是独立时间维度。不要把楼道外/桌前/门口等镜头内容改写成新的 scene_name。
