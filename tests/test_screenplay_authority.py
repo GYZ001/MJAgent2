@@ -226,6 +226,26 @@ def test_resolver_recovers_legacy_storyboard_duration_contamination() -> None:
     ).fetchone()["target_duration_s"] == 60
 
 
+def test_startup_recovery_restores_valid_published_screenplay_status() -> None:
+    _screenplay_value, _artifact, _authority = _published_case()
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,"
+        "active_screenplay_run_id=NULL WHERE id='episode-generic'",
+        ("现有完成凭证未通过当前生产门禁",),
+    )
+    conn.commit()
+
+    assert api.recover_screenplay_tasks() == 0
+
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_error "
+        "FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    assert episode["screenplay_status"] == "ready"
+    assert episode["screenplay_error"] is None
+
+
 def test_contract_v4_tracks_composed_bible_projection_separately_from_base_artifact() -> None:
     _published_case()
     _seed_test_bible_authority()
@@ -456,6 +476,132 @@ def test_published_authority_survives_later_scene_discovery_updates() -> None:
             json.dumps(projection, ensure_ascii=False),
             next_artifact["id"],
         ),
+    )
+    conn.commit()
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+
+    assert resolved.artifact_id == published_artifact["id"]
+    assert resolved.input_fingerprint == published_authority.input_fingerprint
+
+
+def test_published_authority_survives_multi_step_scene_append_lineage() -> None:
+    _screenplay_value, published_artifact, _legacy_authority = _published_case()
+    bible, bible_artifact = _seed_test_bible_authority()
+    published_authority = _republish_as_screenplay_v4(published_artifact)
+    portrait_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_portrait",
+        scope_type="reference_asset",
+        scope_id="project-generic:Hero:2",
+        status="approved",
+        trust_level="T2",
+        content={
+            "character_name": "Hero",
+            "appearance": "黑发青年，深色长衣，身形挺拔，旧玉佩旁新增一道永久伤痕",
+            "episode_start": 2,
+            "change": {
+                "change_dimensions": ["body"],
+                "persistence": "persistent",
+            },
+        },
+        parent_artifact_ids=[bible_artifact["id"]],
+        contract_version="reference-1.0.0",
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id,project_id,character_name,ep_start,appearance,prompt,image_path,
+               bible_version,artifact_id,pack_status,change_json,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "portrait-hero-ep2",
+            "project-generic",
+            "Hero",
+            2,
+            portrait_artifact["content"]["appearance"],
+            "portrait prompt",
+            "/tmp/hero-ep2.png",
+            1,
+            portrait_artifact["id"],
+            "ready",
+            json.dumps(portrait_artifact["content"]["change"]),
+            2,
+        ),
+    )
+    conn.commit()
+
+    def persist_next(
+        projection: dict,
+        parent_id: str,
+        *,
+        operation: str,
+        scene_name: str,
+    ) -> dict:
+        return evidence_repository.create_artifact(EvidenceArtifact(
+            type="character_bible",
+            scope_type="project",
+            scope_id="project-generic",
+            status="approved",
+            trust_level="T2",
+            content=projection,
+            parent_artifact_ids=[parent_id],
+            contract_version="character-bible-1.0.0",
+            prompt_version="reactive-scene-bible-1.0.0",
+            model_snapshot={
+                "operation": operation,
+                "scene_name": scene_name,
+            },
+        ))
+
+    projection = json.loads(json.dumps(bible))
+    projection["characters"][0]["appearance_canonical"] = (
+        portrait_artifact["content"]["appearance"]
+    )
+    projection["scenes"].append({
+        "name": "宗门广场",
+        "scene_canonical": "清晨宗门广场石阶与主殿形成稳定空间结构",
+        "aliases": [],
+        "discovery_sources": ["分镜预取新增场景"],
+    })
+    current = persist_next(
+        projection,
+        bible_artifact["id"],
+        operation="incremental_scene_add",
+        scene_name="宗门广场",
+    )
+    projection = json.loads(json.dumps(projection))
+    projection["scenes"][0]["aliases"].append("山门广场 / 清晨")
+    current = persist_next(
+        projection,
+        current["id"],
+        operation="incremental_scene_alias",
+        scene_name="宗门广场",
+    )
+    projection = json.loads(json.dumps(projection))
+    projection["scenes"].append({
+        "name": "后山竹林",
+        "scene_canonical": "后山竹林沿石径展开，薄雾维持稳定空间层次",
+        "aliases": [],
+        "discovery_sources": ["分镜预取新增场景"],
+    })
+    current = persist_next(
+        projection,
+        current["id"],
+        operation="incremental_scene_add",
+        scene_name="后山竹林",
+    )
+    projection = json.loads(json.dumps(projection))
+    projection["scenes"][1]["aliases"].append("竹林 / 薄雾")
+    current = persist_next(
+        projection,
+        current["id"],
+        operation="incremental_scene_alias",
+        scene_name="后山竹林",
+    )
+    conn.execute(
+        "UPDATE projects SET bible_json=?,bible_artifact_id=? "
+        "WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False), current["id"]),
     )
     conn.commit()
 

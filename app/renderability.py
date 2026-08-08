@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import math
-import re
 
 # 镜头数量由剧情交付和场景上下文决定，不设产品软/硬上限。
 # ``None`` is retained as an explicit compatibility marker for older callers.

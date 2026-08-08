@@ -57,7 +57,7 @@ from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenp
                          schema_errors)
 from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             defer_establishing_covers,
-                            _atomize_claim, _condense,
+                            _condense,
                             _scene_time_changed,
                             normalize_action_desc, normalize_continuity,
                             normalize_dialogue_focus_offscreen_mentions,
@@ -106,6 +106,7 @@ from app.screenplay_ir import (
     IRSceneUnit,
     IR_VERSION,
     ScreenplayGenerationIR,
+    ScreenplayIRFidelityError,
     ScreenplayIRIdentityConflictError,
     compile_screenplay_ir,
     normalize_screenplay_ir_payload,
@@ -848,7 +849,7 @@ async def _complete_screenplay_ir_fidelity(
                 )
             return candidate
         except ValueError as exc:
-            if not _is_ir_fidelity_error(exc):
+            if not isinstance(exc, ScreenplayIRFidelityError):
                 raise
 
         context = _ir_fidelity_patch_context(candidate, source_text)
@@ -4681,7 +4682,7 @@ async def generate_screenplay_baseline(
         except (TypeError, ValueError) as exc:
             if (
                 isinstance(candidate, ScreenplayGenerationIR)
-                and _is_ir_fidelity_error(exc)
+                and isinstance(exc, ScreenplayIRFidelityError)
             ):
                 # The baseline is structurally usable. A bounded source-local
                 # expansion runs after AgentLoop instead of resending the

@@ -1953,7 +1953,7 @@ async def delete_screenplay(episode_id: str):
     routed = await ui_route("screenplay.delete", {"episode_id": episode_id})
     if routed is not None:
         return routed
-    ep = _episode_or_404(episode_id)
+    _episode_or_404(episode_id)
 
     cancelled = 0
     for kind in ("screenplay", "storyboard", "video_completion"):

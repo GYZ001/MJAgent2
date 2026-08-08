@@ -501,6 +501,111 @@ def _projection_before_recorded_bible_append(
     return projection
 
 
+def _recorded_portrait_explains_appearance(
+    *,
+    conn: Any,
+    project_id: str,
+    bible_artifact_id: str,
+    character_name: str,
+    appearance: str,
+) -> bool:
+    """Verify one downstream appearance change against its approved asset."""
+    rows = conn.execute(
+        """SELECT artifact_id,appearance,pack_status,change_json
+             FROM character_portraits
+            WHERE project_id=? AND character_name=? AND appearance=?
+              AND artifact_id IS NOT NULL
+            ORDER BY created_at DESC""",
+        (project_id, character_name, appearance),
+    ).fetchall()
+    for row in rows:
+        if str(row["pack_status"] or "") != "ready":
+            continue
+        try:
+            change = json.loads(row["change_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(change, dict) or not change:
+            continue
+        artifact = evidence_repository.get_artifact(str(row["artifact_id"]))
+        if (
+            artifact is None
+            or artifact.get("type") != "character_portrait"
+            or artifact.get("scope_type") != "reference_asset"
+            or artifact.get("status") not in {"approved", "validated"}
+            or bible_artifact_id not in (
+                artifact.get("parent_artifact_ids") or []
+            )
+        ):
+            continue
+        content = artifact.get("content") or {}
+        if (
+            isinstance(content, dict)
+            and str(content.get("character_name") or "") == character_name
+            and str(content.get("appearance") or "") == appearance
+            and isinstance(content.get("change"), dict)
+            and bool(content["change"])
+        ):
+            return True
+    return False
+
+
+def _bible_extends_by_recorded_downstream_changes(
+    base: dict[str, Any],
+    extended: dict[str, Any],
+    *,
+    conn: Any,
+    project_id: str,
+    bible_artifact_id: str,
+) -> bool:
+    """Allow append growth plus asset-backed per-episode appearance evolution."""
+    base_characters = list(base.get("characters") or [])
+    extended_characters = list(extended.get("characters") or [])
+    if len(extended_characters) < len(base_characters):
+        return False
+    normalized_characters = [
+        dict(character) if isinstance(character, dict) else character
+        for character in extended_characters
+    ]
+    found_change = False
+    for index, base_character in enumerate(base_characters):
+        extended_character = normalized_characters[index]
+        if not (
+            isinstance(base_character, dict)
+            and isinstance(extended_character, dict)
+            and str(base_character.get("name") or "")
+            == str(extended_character.get("name") or "")
+        ):
+            return False
+        base_appearance = str(
+            base_character.get("appearance_canonical") or ""
+        )
+        extended_appearance = str(
+            extended_character.get("appearance_canonical") or ""
+        )
+        if base_appearance == extended_appearance:
+            continue
+        if not _recorded_portrait_explains_appearance(
+            conn=conn,
+            project_id=project_id,
+            bible_artifact_id=bible_artifact_id,
+            character_name=str(base_character.get("name") or ""),
+            appearance=extended_appearance,
+        ):
+            return False
+        extended_character["appearance_canonical"] = base_character.get(
+            "appearance_canonical"
+        )
+        found_change = True
+    if not found_change:
+        return False
+    normalized = {
+        **extended,
+        "characters": normalized_characters,
+    }
+    return _bible_extends_by_appending_cards(base, normalized)
+
+
 def _append_compatible_historical_materials(
     episode_id: str,
     *,
@@ -618,6 +723,13 @@ def _append_compatible_historical_materials(
                 or _bible_extends_by_appending_cards(
                     artifact_projection,
                     historical_projection,
+                )
+                or _bible_extends_by_recorded_downstream_changes(
+                    artifact_projection,
+                    historical_projection,
+                    conn=conn,
+                    project_id=project_id,
+                    bible_artifact_id=str(artifact["id"]),
                 )
             ):
                 continue

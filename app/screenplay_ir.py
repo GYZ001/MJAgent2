@@ -69,6 +69,10 @@ class ScreenplayIRIdentityConflictError(ValueError):
         super().__init__(message)
 
 
+class ScreenplayIRFidelityError(ValueError):
+    """Typed signal that a structurally valid IR needs bounded fidelity repair."""
+
+
 def _structural_context_authority_id(
     episode: dict[str, Any],
     identity_key: str,
@@ -1666,7 +1670,7 @@ def compile_screenplay_ir(
             if scene_heading_has_multiple_locations(scene.scene_heading)
         ]
         if multi_location_scenes:
-            raise ValueError(
+            raise ScreenplayIRFidelityError(
                 "IR v1.3 场次标题包含多个不连续地点，需要按连续时空重新分场："
                 + "、".join(multi_location_scenes)
             )
@@ -1833,7 +1837,7 @@ def compile_screenplay_ir(
                 if source_id not in all_source_ids
             }
             if unknown_source_ids:
-                raise ValueError(
+                raise ScreenplayIRFidelityError(
                     "IR units 引用了不存在的细粒度来源段："
                     + "、".join(sorted(unknown_source_ids)[:20])
                 )
@@ -1843,7 +1847,7 @@ def compile_screenplay_ir(
                 if not unit.source_segment_ids
             ]
             if units_without_source:
-                raise ValueError(
+                raise ScreenplayIRFidelityError(
                     "IR v1.3 每个 unit 必须声明 source_segment_ids："
                     + "、".join(units_without_source[:20])
                 )
@@ -1854,7 +1858,7 @@ def compile_screenplay_ir(
             }
             missing_source_ids = expected_source_ids - owned_source_ids
             if missing_source_ids:
-                raise ValueError(
+                raise ScreenplayIRFidelityError(
                     "IR v1.3 正文 units 漏掉细粒度来源段："
                     + "、".join(sorted(missing_source_ids)[:20])
                     + (
@@ -1992,7 +1996,7 @@ def compile_screenplay_ir(
                 expected_source_ids - normalized_owned_source_ids
             )
             if normalized_missing_source_ids:
-                raise ValueError(
+                raise ScreenplayIRFidelityError(
                     "IR v1.3 正文 units 漏掉细粒度来源段："
                     + "、".join(sorted(normalized_missing_source_ids)[:20])
                     + (
@@ -2133,7 +2137,7 @@ def compile_screenplay_ir(
                 source_chars >= 200
                 and adapted_ratio < IR_MIN_ADAPTED_SOURCE_RATIO
             ):
-                raise ValueError(
+                raise ScreenplayIRFidelityError(
                     "IR v1.3 正文过度压缩："
                     f"改编净文本/原文={adapted_ratio:.1%}，"
                     f"最低要求={IR_MIN_ADAPTED_SOURCE_RATIO:.0%}"
@@ -2169,7 +2173,7 @@ def compile_screenplay_ir(
                         f"={window_ratio:.1%}"
                     )
             if weak_windows:
-                raise ValueError(
+                raise ScreenplayIRFidelityError(
                     "IR v1.3 存在局部剧情过度压缩："
                     + "、".join(weak_windows[:10])
                 )
