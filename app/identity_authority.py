@@ -57,6 +57,13 @@ def normalize_character_resolution(
     normalized["identity_group"] = str(
         normalized.get("identity_group") or ""
     ).strip()
+    source_instance_key = str(
+        normalized.get("source_instance_key") or ""
+    ).strip()
+    if source_instance_key:
+        normalized["source_instance_key"] = source_instance_key
+    else:
+        normalized.pop("source_instance_key", None)
     normalized["authority_id"] = authority_id_for_resolution(normalized)
     normalized.setdefault("authority_version", IDENTITY_AUTHORITY_VERSION)
     return normalized

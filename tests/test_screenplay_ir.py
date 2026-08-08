@@ -1386,6 +1386,83 @@ def test_identity_adjudication_creates_source_backed_functional_authority(
     ]
 
 
+def test_identity_adjudication_preserves_two_entities_with_one_source_label(
+    monkeypatch,
+) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1].update({
+        "key": "friend_a",
+        "display_name": "旧友甲",
+        "source_names": ["旧友"],
+        "authority_id": "",
+    })
+    payload["identities"].append({
+        **payload["identities"][1],
+        "key": "friend_b",
+        "display_name": "旧友乙",
+    })
+    for scene in payload["scenes"]:
+        scene["character_keys"] = [
+            "friend_a" if key == "friend" else key
+            for key in scene["character_keys"]
+        ]
+        for unit in scene["units"]:
+            if unit.get("speaker_key") == "friend":
+                unit["speaker_key"] = "friend_a"
+    payload["scenes"][2]["character_keys"].append("friend_b")
+    payload["scenes"][2]["units"][1]["speaker_key"] = "friend_b"
+    episode = {
+        "id": "ep-ir-shared-source-label",
+        "episode_no": 1,
+        "character_resolutions": [],
+    }
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({"decisions": [
+            {
+                "identity_key": "friend_a",
+                "status": "new_functional",
+                "canonical_name": "旧友甲",
+                "evidence_source_ids": ["SRC0002"],
+                "rationale": "该 identity 在 SRC0002 独立出场并开口",
+            },
+            {
+                "identity_key": "friend_b",
+                "status": "new_functional",
+                "canonical_name": "旧友乙",
+                "evidence_source_ids": ["SRC0003"],
+                "rationale": "该 identity 在 SRC0003 独立开口",
+            },
+        ]}, ensure_ascii=False)
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", fake_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        candidate,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+        persist_new_resolutions=False,
+    ))
+
+    resolved_ids = {
+        identity.authority_id
+        for identity in resolved.identities
+        if identity.key in {"friend_a", "friend_b"}
+    }
+    assert len(resolved_ids) == 2
+    assert len(episode["character_resolutions"]) == 2
+    assert {
+        item["source_label"] for item in episode["character_resolutions"]
+    } == {"旧友"}
+    assert all(
+        item["source_instance_key"] == item["authority_id"]
+        for item in episode["character_resolutions"]
+    )
+
+
 def test_identity_adjudication_fails_closed_on_insufficient_source_evidence(
     monkeypatch,
 ) -> None:

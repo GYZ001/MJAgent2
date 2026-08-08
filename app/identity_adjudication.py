@@ -148,7 +148,8 @@ def _prompt(payload: dict[str, Any]) -> str:
 1. 每个 issues 涉及的 identity_key 都必须且只能输出一个 decision。
 2. 若证据确认它属于 authority_registry 中某个实体，status=bind，authority_id 必须逐字引用该项。
 3. 若原文确认它是独立出场/开口实体，但 registry 尚无对应项，status=new_functional，
-   canonical_name 必须逐字存在于引用的 source segment；后端负责生成稳定 ID。
+   canonical_name 优先逐字引用 source segment；若同一原文称谓明确指向多个实体，必须逐字沿用
+   该 identity 当前的 display_name 作为区分显示名，后端负责生成不同的稳定 ID，禁止另造称谓。
 4. 若证据不能唯一判断，status=insufficient_evidence，禁止猜测或按字面相似合并。
 5. evidence_source_ids 只能引用输入 source_segments，且必须真正支持身份结论。
 6. 同一 authority_id 表示同一实体；两个可区分实体不得因共享“少年、男子、女子、师兄”等泛称而合并。
@@ -183,6 +184,10 @@ def _validate_decisions(
         item["source_segment_id"]: item["text"]
         for item in payload["source_segments"]
     }
+    identity_by_key = {
+        str(item.get("key") or "").strip(): item
+        for item in payload["identities"]
+    }
     for decision in result.decisions:
         key = decision.identity_key.strip()
         if key not in issue_keys or key in decisions:
@@ -200,6 +205,15 @@ def _validate_decisions(
             raise ContentGenerationError(
                 f"人物身份仲裁 {key} 缺少可验证的原文来源段"
             )
+        owned_source_ids = {
+            str(source_id or "").strip()
+            for source_id in identity_by_key[key].get("owned_source_ids") or []
+            if str(source_id or "").strip()
+        }
+        if any(source_id not in owned_source_ids for source_id in evidence_ids):
+            raise ContentGenerationError(
+                f"人物身份仲裁 {key} 引用了不属于该身份的原文来源段"
+            )
         decision.evidence_source_ids = evidence_ids
         if decision.status == "bind":
             if decision.authority_id not in valid_authorities:
@@ -208,12 +222,16 @@ def _validate_decisions(
                 )
         elif decision.status == "new_functional":
             canonical_name = decision.canonical_name.strip()
+            identity_display_name = str(
+                identity_by_key[key].get("display_name") or ""
+            ).strip()
             if not canonical_name or not any(
                 canonical_name in source_by_id[source_id]
                 for source_id in evidence_ids
-            ):
+            ) and canonical_name != identity_display_name:
                 raise ContentGenerationError(
-                    f"人物身份仲裁 {key} 的功能身份称谓不属于所引原文"
+                    f"人物身份仲裁 {key} 的功能身份称谓既不属于所引原文，"
+                    "也不是当前 IR 的稳定显示名"
                 )
             decision.canonical_name = canonical_name
         decisions[key] = decision
@@ -312,12 +330,26 @@ async def adjudicate_screenplay_ir_identities(
             ).encode("utf-8")
         ).hexdigest()[:16]
         identity.authority_id = authority_id
+        source_by_id = {
+            item["source_segment_id"]: item["text"]
+            for item in payload["source_segments"]
+        }
+        source_label = next((
+            token
+            for token in [*identity.source_names, identity.display_name]
+            if str(token or "").strip()
+            and any(
+                str(token).strip() in source_by_id[source_id]
+                for source_id in decision.evidence_source_ids
+            )
+        ), decision.canonical_name)
         new_resolutions.append(normalize_character_resolution({
-            "source_label": decision.canonical_name,
+            "source_label": source_label,
             "canonical_name": decision.canonical_name,
             "resolution": "functional_identity",
             "identity_group": authority_id,
             "authority_id": authority_id,
+            "source_instance_key": authority_id,
             "reason": "AI 根据本集原文确认独立功能身份",
             "evidence": decision.rationale[:160],
             "evidence_source_ids": decision.evidence_source_ids,

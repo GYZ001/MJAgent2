@@ -1101,6 +1101,30 @@ def test_character_resolutions_persist_and_future_identity_upgrades_route_fallba
     assert portraits.load_screenplay_character_resolutions(conn, "e1") == upgraded
 
 
+def test_character_resolution_merge_preserves_distinct_scoped_authorities() -> None:
+    merged = portraits.merge_screenplay_character_resolutions([], [
+        {
+            "source_label": "穿着绿色长袍的男",
+            "canonical_name": "绿袍修士甲",
+            "resolution": "functional_identity",
+            "authority_id": "functional:green-a",
+            "source_instance_key": "functional:green-a",
+        },
+        {
+            "source_label": "穿着绿色长袍的男",
+            "canonical_name": "绿袍修士乙",
+            "resolution": "functional_identity",
+            "authority_id": "functional:green-b",
+            "source_instance_key": "functional:green-b",
+        },
+    ])
+
+    assert [item["authority_id"] for item in merged] == [
+        "functional:green-a",
+        "functional:green-b",
+    ]
+
+
 def test_character_importance_window_remains_twenty_chapters() -> None:
     conn = _make_conn()
     _seed_project(conn, "美杜莎短暂现身。")

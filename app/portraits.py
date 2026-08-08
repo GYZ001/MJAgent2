@@ -1460,6 +1460,13 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
     for item in resolutions or []:
         if not isinstance(item, dict):
             continue
+        # Occurrence-scoped identity decisions can legitimately share one
+        # source label (for example two people both called “绿袍修士”).  Their
+        # authority_id is already bound inside the IR, so a global text
+        # replacement here would arbitrarily assign every occurrence to the
+        # first entity and corrupt the compiled identity graph.
+        if str(item.get("source_instance_key") or "").strip():
+            continue
         source_label = str(item.get("source_label") or "").strip()
         canonical_name = str(item.get("canonical_name") or "").strip()
         if not source_label or not canonical_name or source_label == canonical_name:
@@ -2175,8 +2182,7 @@ def merge_screenplay_character_resolutions(
     incoming: list[dict] | None,
 ) -> list[dict]:
     """合并模型决议：后续真名证据可升级早期路人降级，不反向覆盖。"""
-    merged: dict[str, dict] = {}
-    order: list[str] = []
+    merged: list[dict] = []
     for item in [*(existing or []), *(incoming or [])]:
         if not isinstance(item, dict):
             continue
@@ -2189,10 +2195,23 @@ def merge_screenplay_character_resolutions(
             "source_label": source_label,
             "canonical_name": canonical_name,
         })
-        current = merged.get(source_label)
+        source_instance_key = str(
+            candidate.get("source_instance_key") or ""
+        ).strip()
+        current_index = next((
+            index
+            for index, current_item in enumerate(merged)
+            if (
+                str(current_item.get("source_label") or "").strip()
+                == source_label
+                and str(
+                    current_item.get("source_instance_key") or ""
+                ).strip() == source_instance_key
+            )
+        ), None)
+        current = merged[current_index] if current_index is not None else None
         if current is None:
-            merged[source_label] = candidate
-            order.append(source_label)
+            merged.append(candidate)
             continue
         priority = {
             "functional_extra": 0,
@@ -2206,13 +2225,13 @@ def merge_screenplay_character_resolutions(
             str(candidate.get("resolution") or ""), 0,
         )
         if candidate_priority > current_priority:
-            merged[source_label] = candidate
+            merged[current_index] = candidate
         elif (
             candidate_priority == current_priority
             and current.get("canonical_name") == canonical_name
         ):
-            merged[source_label] = {**current, **candidate}
-    return [merged[label] for label in order]
+            merged[current_index] = {**current, **candidate}
+    return merged
 
 
 def load_screenplay_character_resolutions(conn, episode_id: str) -> list[dict]:
