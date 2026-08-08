@@ -37,7 +37,7 @@ def _dialogue_loop() -> AgentLoop[StoryboardShotDraft]:
             max_iterations=4,
             stall_rounds=2,
             no_gain_rounds=2,
-            repair_issue_codes=frozenset({"DIALOGUE_FRAMING_INVALID"}),
+            repair_all_blockers=True,
         ),
     )
 
@@ -361,6 +361,7 @@ def test_source_fidelity_issue_remains_a_structural_blocker() -> None:
         "code": "SOURCE_FIDELITY",
         "message": message,
         "severity": "blocker",
+        "category": "structural",
     }])
 
     assert _blocker_messages(draft) == [message]

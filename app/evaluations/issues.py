@@ -87,6 +87,7 @@ def issues_from_messages(
     *,
     subject: str,
     severity: IssueSeverity = IssueSeverity.BLOCKER,
+    category: str = "quality",
 ) -> list[Issue]:
     """Compatibility layer while legacy validators still return human-readable strings."""
     issues: list[Issue] = []
@@ -96,6 +97,7 @@ def issues_from_messages(
         issues.append(Issue(
             code=code,
             severity=severity,
+            category=category,
             subject=subject,
             message=message,
             evidence={"span": subject, "path": path, "rule_id": rule_id},

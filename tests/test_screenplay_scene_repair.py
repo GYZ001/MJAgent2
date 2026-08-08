@@ -72,6 +72,7 @@ def _script(story_function: str = "升级") -> EpisodeScreenplay:
 
 def test_scene_validator_message_is_structured_as_scene_field_issue():
     message = (
+        "[SCENE_STORY_FUNCTION_TOO_SHORT] "
         "scene_outline 第1场「日 / 萧家测验广场」.story_function "
         "过短；请说明本场戏剧功能"
     )

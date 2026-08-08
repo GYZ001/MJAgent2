@@ -52,10 +52,6 @@ class AgentLoopPolicy:
     min_quality_gain: float = 0.03
     no_gain_rounds: int = 2
     allow_warning_candidate: bool = False
-    # Some business rules are hard production contracts for a specific loop,
-    # even though Phase 3 normally records business QA as score-only.  Callers
-    # opt those codes into model repair without changing the global QA policy.
-    repair_issue_codes: frozenset[str] = field(default_factory=frozenset)
     # Authority artifacts may not downgrade business blockers to score-only
     # quality.  Their loop repairs every blocker until the contract passes or
     # fails closed.
@@ -63,10 +59,6 @@ class AgentLoopPolicy:
     # Production Repair：只跑一轮完整生成，无论 QA 是否通过都交出候选给局部 Patch Agent。
     # 禁止再用“重新输出完整 JSON”的修复轮。
     baseline_only: bool = False
-    # A parseable legacy-shaped value may still omit a contract-required
-    # authority subtree. These explicit contract codes must be repaired before
-    # baseline handoff; score-only quality findings remain non-blocking.
-    baseline_handoff_blocking_codes: frozenset[str] = field(default_factory=frozenset)
     # Isolated repair candidates must not supersede approved upstream artifacts
     # before their enclosing transaction passes the full gate.
     commit_accepted_artifact: bool = True
@@ -100,39 +92,9 @@ def _quality(issues: list[Issue]) -> float:
     return 1.0 / (1.0 + penalty)
 
 
-_STRUCTURAL_CODE_NAMES = {
-    "JSON",
-    "SCHEMA",
-    "PARSE",
-    "REQUIRED",
-    "MISSING_FIELD",
-    "TYPE_ERROR",
-    "INVALID_ENUM",
-    "CONTRACT",
-}
-_STRUCTURAL_CODE_PREFIXES = tuple(f"{name}_" for name in _STRUCTURAL_CODE_NAMES)
-_STRUCTURAL_CODE_MARKERS = (
-    "schema",
-    "json",
-    "required_field",
-    "missing_field",
-    "type_error",
-    "invalid_enum",
-    "parse",
-)
-
-
 def is_structural_issue(issue: Issue) -> bool:
-    """Return True for parse/schema/contract-shape failures only."""
-    code = (issue.code or "").strip()
-    upper_code = code.upper()
-    lower_code = code.lower()
-    return (
-        upper_code == "SOURCE_FIDELITY"
-        or upper_code in _STRUCTURAL_CODE_NAMES
-        or upper_code.startswith(_STRUCTURAL_CODE_PREFIXES)
-        or any(marker in lower_code for marker in _STRUCTURAL_CODE_MARKERS)
-    )
+    """Return the evaluator's typed issue category without reading prose/codes."""
+    return issue.category == "structural"
 
 
 def split_structural_quality_issues(issues: list[Issue]) -> tuple[list[Issue], list[Issue]]:
@@ -221,11 +183,8 @@ class AgentLoop(Generic[T]):
                 issue
                 for issue in quality_issues
                 if (
-                    issue.code in self.policy.repair_issue_codes
-                    or (
-                        self.policy.repair_all_blockers
-                        and issue.severity == IssueSeverity.BLOCKER
-                    )
+                    self.policy.repair_all_blockers
+                    and issue.severity == IssueSeverity.BLOCKER
                 )
             ]
             repair_issues = (
@@ -281,10 +240,7 @@ class AgentLoop(Generic[T]):
                 )
 
             # Baseline-only：首轮结束后立即交出可解析候选（含 blocker），交由 Production Repair。
-            baseline_handoff_blocked = any(
-                issue.code in self.policy.baseline_handoff_blocking_codes
-                for issue in issues
-            )
+            baseline_handoff_blocked = bool(structural_issues)
             if (
                 self.policy.baseline_only
                 and value is not None
@@ -342,32 +298,6 @@ class AgentLoop(Generic[T]):
                 issue for issue in last_value_issues
                 if issue.severity == IssueSeverity.BLOCKER
             ]
-            # 容量类先交给 Supervisor 尝试改规划；Supervisor 耗尽后会发布
-            # 当前最佳分镜。其他结构/内容门禁在本循环耗尽后直接降为告警。
-            needs_replan = exit_reason in {"stalled", "no_quality_gain", "max_iterations"}
-            capacity_codes = {
-                "SPOKEN_CAPACITY_EXCEEDED",
-                "ACTION_CAPACITY_EXCEEDED",
-                "SHOT_OUTLINE_COVERAGE",
-                "KEY_LINE_MISSING",
-                "SPINE_MISSING",
-            }
-            if self.policy.allow_warning_candidate and needs_replan and any(
-                issue.code in capacity_codes
-                or "口播" in issue.message
-                or "容量" in issue.message
-                or ("超过" in issue.message and "字" in issue.message)
-                for issue in blockers
-            ):
-                object.__setattr__(last_value, "disposition", "NEEDS_REPLAN")
-                return AgentLoopResult(
-                    value=last_value,
-                    status="needs_replan",
-                    exit_reason="needs_replan",
-                    issues=blockers,
-                    iterations=len(issue_history),
-                    artifact_id=last_value_artifact_id,
-                )
             if self.policy.repair_all_blockers and blockers:
                 reported: list[Issue] = []
                 seen: set[tuple[str, str]] = set()

@@ -1,6 +1,7 @@
 import asyncio
 
 from app import stages
+from app.harness.types import Issue
 from app.schemas import (Bible, Character, EpisodeScreenplay, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn, PlotSpine,
                          PlotSpineBeat, ScriptScene, StoryEvent,
@@ -1167,7 +1168,9 @@ def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> Non
     ))
 
     assert any(
-        error.startswith("[NARRATIVE_PLAN_REQUIRED]")
+        isinstance(error, Issue)
+        and error.code == "NARRATIVE_PLAN_REQUIRED"
+        and error.category == "structural"
         for error in captured["errors"]
     )
     assert captured["require_source_coverage"] is True

@@ -1225,10 +1225,14 @@ function videoSupervisorBusy(ep: Episode): boolean {
 
 /** 分集是否处于运行态（编剧/分镜/参考图视频）—— 决定是否需要高频轮询。
  *  空闲时彻底停轮询，避免反复拉取 1MB+ 的分集 payload 拖垮页面。 */
-const episodeBusy = (ep: Episode | null): boolean => {
+export const episodeBusy = (ep: Episode | null): boolean => {
   if (!ep) return true; // 首次未拿到数据时，按可能忙碌处理触发首次拉取后的轮询
   if (ep.screenplay_status === "queued" || ep.screenplay_status === "running") return true;
-  if (ep.status === "scripting" || ep.status === "drafting") return true;
+  // storyboard_status is the run-aware authority.  A stale episode.status can
+  // remain "scripting" after a FAILED run; treating that projection as live
+  // makes the board poll forever and keeps showing the old running state.
+  if (ep.storyboard_status?.state === "running") return true;
+  if (!ep.storyboard_status && (ep.status === "scripting" || ep.status === "drafting")) return true;
   if (videoSupervisorBusy(ep)) return true;
   if (
     ep.shots?.some(

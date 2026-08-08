@@ -125,7 +125,7 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
 
     async def fake_agent_loop(*_args, **kwargs):
         captured["max_tokens"] = kwargs["max_tokens"]
-        captured["repair_issue_codes"] = kwargs["loop"].policy.repair_issue_codes
+        captured["repair_all_blockers"] = kwargs["loop"].policy.repair_all_blockers
         return _draft(_shot(1), is_final=False)
 
     monkeypatch.setattr(stages, "_run_with_agent_loop", fake_agent_loop)
@@ -148,7 +148,7 @@ def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:
     assert result.shot.shot_no == 1
     assert captured["max_tokens"] == config.STORYBOARD_SHOT_MAX_TOKENS == 8192
     assert captured["max_tokens"] < 65535
-    assert captured["repair_issue_codes"] == frozenset()
+    assert captured["repair_all_blockers"] is False
 
 
 def test_storyboard_outline_uses_32k_output_budget() -> None:

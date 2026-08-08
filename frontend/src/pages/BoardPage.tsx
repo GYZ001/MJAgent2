@@ -241,6 +241,14 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
   }
 }
 
+export function storyboardEmptyCopy(status: StoryboardStatus): string {
+  if (status.state === 'no_screenplay') return '尚无可用于分镜的剧本，请先去剧本台。'
+  if (status.state === 'running') return '首批分镜正在生成与逐镜校验，通过后会自动展示。'
+  if (status.state === 'failed') return '分镜任务未完成，尚无通过校验的工作镜头；请查看原因后继续处理。'
+  if (status.state === 'paused') return '分镜任务已暂停，尚无通过校验的工作镜头。'
+  return '剧本已就绪，尚未生成分镜。'
+}
+
 export function storyboardStartPreviewCopy(preview: StartPreview): {
   title: string
   confirmLabel: string
@@ -1028,7 +1036,7 @@ export default function BoardPage() {
       {!shots.length ? (
         <div className="empty storyboard-empty">
           <div className="big">镜</div>
-          {status.state === 'no_screenplay' ? '尚无可用于分镜的剧本，请先去剧本台。' : '剧本已就绪，尚未生成分镜。'}
+          {storyboardEmptyCopy(status)}
         </div>
       ) : (
         <div className="board-workspace">

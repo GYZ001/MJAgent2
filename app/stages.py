@@ -27,6 +27,7 @@ from app.continuity import (adaptation_hook_errors, ensure_audio_timeline,
 from app.db import get_conn, get_setting, log_provider_call
 from app.evaluations.issues import issues_from_messages
 from app.harness import model_gateway
+from app.harness.types import Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.narrative_blueprint import (
     BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE,
@@ -1884,7 +1885,7 @@ async def _run_with_agent_loop(
     stage_key: str,
     user_prompt: str,
     model_cls: type[BaseModel],
-    business_validate: Callable[[BaseModel], list[str]],
+    business_validate: Callable[[BaseModel], list[str | Issue]],
     *,
     loop: AgentLoop,
     temperature: float = 0.7,
@@ -2057,6 +2058,7 @@ async def _run_with_agent_loop(
                 return None, issues_from_messages(
                     messages,
                     subject=f"{loop.scope_type}:{loop.scope_id}",
+                    category="structural",
                 )
         if model_cls is ScreenplayGenerationIR and isinstance(obj, dict):
             obj, normalizations = normalize_screenplay_ir_payload(obj)
@@ -2178,9 +2180,17 @@ async def _run_with_agent_loop(
                 )
         if instance is not None:
             messages = business_validate(instance)
+        typed_issues = [item for item in messages if isinstance(item, Issue)]
+        prose_messages = [str(item) for item in messages if not isinstance(item, Issue)]
         return (
             instance,
-            issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}"),
+            [
+                *issues_from_messages(
+                    prose_messages,
+                    subject=f"{loop.scope_type}:{loop.scope_id}",
+                ),
+                *typed_issues,
+            ],
         )
 
     try:
@@ -4548,14 +4558,10 @@ async def generate_screenplay_baseline(
             allow_warning_candidate=False,
             baseline_only=True,
             repair_all_blockers=True,
-            baseline_handoff_blocking_codes=frozenset({
-                "NARRATIVE_PLAN_REQUIRED",
-                "SCREENPLAY_IR_COMPILE_FAILED",
-            }),
         ),
     )
 
-    def _check_screenplay(s: EpisodeScreenplay) -> list[str]:
+    def _check_screenplay(s: EpisodeScreenplay) -> list[str | Issue]:
         # 身份消歧是 Baseline 构建规范化，必须在首次 QA 之前落实，
         # 避免为“绿袍男子→路人甲”浪费一轮模型修复。
         from app.portraits import (
@@ -4591,10 +4597,18 @@ async def generate_screenplay_baseline(
             functional_identity_names=functional_identity_names,
         )
         if s.narrative_plan is None:
-            errors.append(
-                "[NARRATIVE_PLAN_REQUIRED] 新生成剧本必须包含 narrative_plan；"
-                "legacy 兼容仅允许读取历史已发布产物，不得用于新生产"
-            )
+            errors.append(Issue(
+                code="NARRATIVE_PLAN_REQUIRED",
+                severity=IssueSeverity.BLOCKER,
+                category="structural",
+                subject="screenplay",
+                message=(
+                    "新生成剧本必须包含 narrative_plan；legacy 兼容仅允许读取"
+                    "历史已发布产物，不得用于新生产"
+                ),
+                evidence={"path": "/narrative_plan", "rule_id": "required"},
+                repairable=True,
+            ))
         else:
             from app.narrative import validate_screenplay_narrative
 
@@ -4640,7 +4654,19 @@ async def generate_screenplay_baseline(
             if ending:
                 errors.append(
                     "ending_hook 必须为空字符串：本集 hook/cliffhanger 均为空，禁止发明下一集钩子")
-        return list(dict.fromkeys(errors))
+        deduped_errors: list[str | Issue] = []
+        seen_errors: set[str] = set()
+        for error in errors:
+            identity = (
+                f"issue:{error.fingerprint}"
+                if isinstance(error, Issue)
+                else f"message:{error}"
+            )
+            if identity in seen_errors:
+                continue
+            seen_errors.add(identity)
+            deduped_errors.append(error)
+        return deduped_errors
 
     def _compile_candidate(
         candidate: ScreenplayGenerationIR | EpisodeScreenplay,
@@ -4658,7 +4684,7 @@ async def generate_screenplay_baseline(
 
     def _check_ir(
         candidate: ScreenplayGenerationIR | EpisodeScreenplay,
-    ) -> list[str]:
+    ) -> list[str | Issue]:
         if (
             isinstance(candidate, ScreenplayGenerationIR)
             and _narrative_blueprint is not None
@@ -4688,7 +4714,15 @@ async def generate_screenplay_baseline(
                 # expansion runs after AgentLoop instead of resending the
                 # entire chapter and candidate.
                 return []
-            return [f"[SCREENPLAY_IR_COMPILE_FAILED] {exc}"]
+            return [Issue(
+                code="SCREENPLAY_IR_COMPILE_FAILED",
+                severity=IssueSeverity.BLOCKER,
+                category="structural",
+                subject="screenplay",
+                message=str(exc),
+                evidence={"path": "$", "rule_id": "ir_compile"},
+                repairable=True,
+            )]
 
     episode_id = str(
         episode.get("id") or f"episode-{episode['episode_no']}"
@@ -6341,15 +6375,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
             min_quality_gain=0.03,
             no_gain_rounds=2,
             allow_warning_candidate=False,
-            repair_issue_codes=frozenset({
-                "OUTLINE_EMPTY",
-                "OUTLINE_HARD_LIMIT",
-                "OUTLINE_ORDER_INVALID",
-                "OUTLINE_DURATION_INVALID",
-                "OUTLINE_KEY_LINE_CAPACITY_INVALID",
-                "OUTLINE_KEY_LINE_SPEAKER_MIXED",
-            }),
-            repair_all_blockers=screenplay.narrative_plan is not None,
+            repair_all_blockers=True,
             baseline_only=False,
         ),
     )
@@ -7964,7 +7990,6 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             min_quality_gain=0.03,
             no_gain_rounds=2,
             allow_warning_candidate=False,
-            repair_issue_codes=frozenset(),
             repair_all_blockers=False,
             commit_accepted_artifact=semantic_attempt_id is None,
         ),

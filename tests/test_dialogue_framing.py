@@ -201,7 +201,7 @@ def test_dialogue_framing_issue_routes_to_current_shot_repair() -> None:
     )
 
     assert issue_code(message) == "DIALOGUE_FRAMING_INVALID"
-    assert _is_structural_storyboard_issue(issue_code(message), message) is True
+    assert _is_structural_storyboard_issue("quality") is False
     plan = route_issues(
         [message],
         validated_prefix_end=5,

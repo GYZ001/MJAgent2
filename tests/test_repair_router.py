@@ -96,7 +96,8 @@ def test_route_action_capacity_to_adjacent_split():
 
 def test_route_compiled_prompt_overflow_to_reported_shot() -> None:
     message = (
-        "Prompt 编译失败：镜头 1 必填提示词段落总长 2006 超过上限 1500；"
+        "[ACTION_CAPACITY_EXCEEDED] Prompt 编译失败："
+        "镜头 1 必填提示词段落总长 2006 超过上限 1500；"
         "说明镜头任务过载，请回到分镜阶段拆分"
     )
 

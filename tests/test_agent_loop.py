@@ -21,7 +21,12 @@ class Candidate(BaseModel):
     value: int
 
 
-def _loop(*, allow_warning: bool = False, max_iterations: int = 4) -> AgentLoop[Candidate]:
+def _loop(
+    *,
+    allow_warning: bool = False,
+    max_iterations: int = 4,
+    repair_all: bool = False,
+) -> AgentLoop[Candidate]:
     return AgentLoop(
         stage_key="screenplay",
         contract_key="screenplay",
@@ -35,6 +40,7 @@ def _loop(*, allow_warning: bool = False, max_iterations: int = 4) -> AgentLoop[
             min_quality_gain=0.03,
             no_gain_rounds=2,
             allow_warning_candidate=allow_warning,
+            repair_all_blockers=repair_all,
         ),
     )
 
@@ -44,7 +50,11 @@ def _evaluate(raw: str):
     messages = [] if value.value >= 2 else [
         "字段 value：Input should be greater than or equal to 2"
     ]
-    return value, issues_from_messages(messages, subject="episode:e1")
+    return value, issues_from_messages(
+        messages,
+        subject="episode:e1",
+        category="structural",
+    )
 
 
 def test_agent_loop_repairs_then_accepts() -> None:
@@ -348,6 +358,7 @@ def test_agent_loop_stops_when_issue_set_changes_without_quality_gain() -> None:
         return value, issues_from_messages(
             [f"字段 value：distinct schema problem {abs(value.value)}"],
             subject=f"episode:e{abs(value.value)}",
+            category="structural",
         )
 
     result = asyncio.run(_loop(allow_warning=True).run(producer, evaluate))
@@ -438,11 +449,14 @@ def test_warning_fallback_keeps_value_issues_and_artifact_from_same_iteration(
         if "value" in payload:
             value = Candidate.model_validate(payload)
             return value, issues_from_messages(
-                ["字段 value：candidate violates structural contract"], subject="episode:e1"
+                ["字段 value：candidate violates structural contract"],
+                subject="episode:e1",
+                category="structural",
             )
         return None, issues_from_messages(
             [f"字段 value：第 {payload['broken']} 次修复缺失"],
             subject=f"episode:broken-{payload['broken']}",
+            category="structural",
         )
 
     async def operation():
@@ -546,7 +560,7 @@ def test_repair_loop_can_retain_complete_task_and_candidate(monkeypatch) -> None
         lambda candidate: [] if candidate.value >= 2 else [
             "字段 value：Input should be greater than or equal to 2"
         ],
-        loop=_loop(max_iterations=2),
+        loop=_loop(max_iterations=2, repair_all=True),
         repair_user_prompt_limit=None,
         repair_candidate_limit=None,
     ))

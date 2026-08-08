@@ -15,6 +15,7 @@ class IssueSeverity(str, Enum):
 class Issue(BaseModel):
     code: str
     severity: IssueSeverity
+    category: Literal["structural", "quality", "operational"] = "quality"
     subject: str
     message: str
     evidence: dict[str, Any] = Field(default_factory=dict)

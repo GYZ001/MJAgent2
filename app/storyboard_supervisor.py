@@ -540,63 +540,32 @@ def _blocker_messages(draft) -> list[str]:
     structural = [
         i.get("message", "") for i in issues
         if isinstance(i, dict) and i.get("severity") == "blocker"
-        and _is_structural_storyboard_issue(i.get("code"), i.get("message", ""))
+        and _is_structural_storyboard_issue(i.get("category"))
     ]
     if structural:
         return structural
     if disposition == "NEEDS_REPLAN":
         # Phase 3 QA score-only: quality/capacity replanning requests are
         # warnings for the report, not a reason to delete/split/replan shots.
-        return [m for m in residual if _is_structural_storyboard_issue(None, m)]
+        return []
     blockers = [
         i.get("message", "") for i in issues
         if isinstance(i, dict) and i.get("severity") == "blocker"
-        and _is_structural_storyboard_issue(i.get("code"), i.get("message", ""))
+        and _is_structural_storyboard_issue(i.get("category"))
     ]
     if blockers:
         return blockers
     # warning-only：允许继续（非 blocker）
     if disposition == "WARNING" and residual:
-        return [m for m in residual if _is_structural_storyboard_issue(None, m)]
+        return []
     if disposition not in {"PASS", "WARNING", None}:
-        return [m for m in residual if _is_structural_storyboard_issue(None, m)]
+        return []
     return []
 
 
-def _is_structural_storyboard_issue(code: Any = None, message: Any = "") -> bool:
-    from app.evaluations.issues import issue_code
-
-    resolved_code = str(code or issue_code(str(message or "")) or "")
-    if is_structural_issue(Issue(
-        code=resolved_code,
-        severity=IssueSeverity.BLOCKER,
-        subject="storyboard",
-        message=str(message or ""),
-        repairable=True,
-    )):
-        return True
-    text = f"{code or ''} {message or ''}".lower()
-    structural_tokens = (
-        "schema",
-        "json",
-        "field",
-        "字段",
-        "必填",
-        "missing required",
-        "source_binding",
-        "原文证据",
-        "版本已变化",
-        "upstream_version_changed",
-        "artifact",
-        "id_invalid",
-        "invalid_id",
-        "dialogue_framing_invalid",
-        "多个画内说话人",
-        "单人对白",
-        "只保留说话人",
-        "正反打",
-    )
-    return any(token in text for token in structural_tokens)
+def _is_structural_storyboard_issue(category: Any = None) -> bool:
+    """Use the serialized Issue category; legacy prose has no authority."""
+    return str(category or "") == "structural"
 
 
 def _storyboard_warning_requires_auto_repair(issue: Any) -> bool:
