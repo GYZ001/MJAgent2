@@ -6701,6 +6701,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         from app.narrative import validate_storyboard_narrative
         from app.narrative_outline import (
             compile_narrative_storyboard_outline,
+            narrative_outline_action_delivery_errors,
             normalize_narrative_storyboard_outline,
         )
         from app.validators import (
@@ -6760,6 +6761,10 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         ensure_storyboard_scene_contexts(outline, screenplay, bible)
 
         errors = [
+            *narrative_outline_action_delivery_errors(
+                outline,
+                screenplay,
+            ),
             *outline_key_line_capacity_errors(outline, screenplay),
             *outline_key_line_speaker_errors(outline, screenplay),
             *outline_scene_coverage_errors(outline, screenplay, bible),
@@ -6975,6 +6980,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
             # episode-number heuristics and deterministic content transformers
             # must not rewrite an AI-authored narrative allocation.
             from app.narrative_outline import (
+                narrative_outline_action_delivery_errors,
                 normalize_narrative_storyboard_outline,
             )
 
@@ -7097,6 +7103,12 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
                         f"duration_s 必须在 {config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}"
                     )
             narrative_errors.extend(
+                narrative_outline_action_delivery_errors(
+                    o,
+                    screenplay,
+                )
+            )
+            narrative_errors.extend(
                 outline_key_line_capacity_errors(o, screenplay)
             )
             narrative_errors.extend(
@@ -7197,6 +7209,9 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
         prefill={"episode_no": episode["episode_no"]},
     )
     if screenplay.narrative_plan is not None:
+        from app.narrative_outline import (
+            narrative_outline_action_delivery_errors,
+        )
         from app.validators import (
             normalize_outline_dialogue_ownership,
             normalize_outline_spoken_durations,
@@ -7217,6 +7232,10 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
                     <= int(shot.duration_s or 0)
                     <= config.VIDEO_DURATION_MAX_S
                 )
+            ),
+            *narrative_outline_action_delivery_errors(
+                outline,
+                screenplay,
             ),
             *outline_key_line_capacity_errors(outline, screenplay),
             *outline_key_line_speaker_errors(outline, screenplay),

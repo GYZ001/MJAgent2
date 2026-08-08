@@ -19,6 +19,262 @@ from app.schemas import (
 )
 
 
+def _relation_text(value: object) -> str:
+    """Normalize text only for exact graph-relation joins."""
+    return "".join(
+        character.casefold()
+        for character in str(value or "")
+        if character.isalnum()
+    )
+
+
+def _narrative_key_line_catalog(
+    screenplay: EpisodeScreenplay,
+) -> dict[str, tuple[str, str, str]]:
+    """Return stable key-line IDs with their canonical speaker and line."""
+    catalog: dict[str, tuple[str, str, str]] = {}
+    for position, raw_line in enumerate(screenplay.key_lines or [], start=1):
+        text = str(raw_line or "").strip()
+        speaker, separator, spoken = text.partition("：")
+        if not separator:
+            speaker, separator, spoken = text.partition(":")
+        if (
+            separator
+            and speaker.strip()
+            and spoken.strip()
+            and speaker.strip() != "旁白"
+        ):
+            catalog[f"KL{position:02d}"] = (
+                speaker.strip(),
+                spoken.strip(),
+                text,
+            )
+    return catalog
+
+
+def _action_key_line_ids(
+    action_ids: list[str],
+    actions: dict[str, Any],
+    catalog: dict[str, tuple[str, str, str]],
+) -> list[str]:
+    """Join dialogue to actions by exact speaker and spoken-text relations."""
+    action_parts = [
+        text
+        for action_id in action_ids
+        for action in [actions.get(action_id)]
+        if action is not None
+        for text in (
+            str(action.semantic_intent or "").strip(),
+            str(action.completion_condition or "").strip(),
+        )
+        if text
+    ]
+    action_text = _relation_text("；".join(action_parts))
+    if not action_text:
+        return []
+    quoted_lines = {
+        _relation_text(match)
+        for part in action_parts
+        for match in re.findall(r"[「“『\"]([^」”』\"]+)[」”』\"]", part)
+        if _relation_text(match)
+    }
+    return [
+        key_id
+        for key_id, (speaker, spoken, _canonical) in catalog.items()
+        if (
+            _relation_text(speaker)
+            and _relation_text(spoken)
+            and _relation_text(speaker) in action_text
+            and _relation_text(spoken) in quoted_lines
+        )
+    ]
+
+
+def reconcile_narrative_outline_action_deliveries(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+    *,
+    infer_unprojected_event_actions: bool = False,
+) -> list[dict[str, Any]]:
+    """Keep event dialogue IDs bound to the actions that explicitly own them.
+
+    Plot-spine delivery IDs are a compatibility projection and can drift from
+    the newer narrative graph.  When an atomic action explicitly contains both
+    a canonical speaker and canonical spoken line, that exact relation is the
+    authority.  Dialogue-only capacity splits retain ownership; all other
+    stale IDs are removed from the event before duration and identity fields
+    are derived.
+    """
+    plan = screenplay.narrative_plan
+    catalog = _narrative_key_line_catalog(screenplay)
+    if plan is None or not outline.shots or not catalog:
+        return []
+    actions = {
+        action.action_id: action
+        for action in plan.atomic_actions
+    }
+    event_actions = {
+        event.event_id: list(event.action_ids)
+        for event in plan.events
+    }
+
+    def shot_event_ids(shot: StoryboardOutlineShot) -> list[str]:
+        return list(dict.fromkeys(
+            event_id
+            for event_id in [
+                *(str(value or "").strip() for value in shot.event_ids),
+                str(shot.story_event_id or "").strip(),
+            ]
+            if event_id
+        ))
+
+    shots_by_event: defaultdict[str, list[StoryboardOutlineShot]] = defaultdict(list)
+    for shot in outline.shots:
+        for event_id in shot_event_ids(shot):
+            shots_by_event[event_id].append(shot)
+
+    authoritative_ids_by_event = {
+        event_id: _action_key_line_ids(action_ids, actions, catalog)
+        for event_id, action_ids in event_actions.items()
+    }
+    authoritative_events_by_key: defaultdict[str, set[str]] = defaultdict(set)
+    for event_id, key_ids in authoritative_ids_by_event.items():
+        for key_id in key_ids:
+            authoritative_events_by_key[key_id].add(event_id)
+    exclusive_authority = {
+        key_id: next(iter(event_ids))
+        for key_id, event_ids in authoritative_events_by_key.items()
+        if len(event_ids) == 1
+    }
+
+    changes: list[dict[str, Any]] = []
+    for event_id, event_shots in shots_by_event.items():
+        authoritative_ids = authoritative_ids_by_event.get(event_id, [])
+        authoritative_set = set(authoritative_ids)
+
+        explicit_action_ids = {
+            id(shot): list(dict.fromkeys(filter(None, [
+                shot.primary_action_id,
+                *shot.supporting_action_ids,
+            ])))
+            for shot in event_shots
+        }
+        dialogue_owners: set[str] = set()
+        for shot in event_shots:
+            is_unprojected_action_owner = bool(
+                infer_unprojected_event_actions
+                and not explicit_action_ids[id(shot)]
+                and not str(shot.shot_id or "").strip()
+                and shot.shot_contribution is None
+                and event_actions.get(event_id)
+            )
+            if explicit_action_ids[id(shot)] or is_unprojected_action_owner:
+                continue
+            dialogue_owners.update(
+                str(key_id or "").strip().upper()
+                for key_id in shot.key_line_ids
+                if str(key_id or "").strip().upper() in authoritative_set
+            )
+
+        assigned_action_ids: set[str] = set(dialogue_owners)
+        for shot in event_shots:
+            action_ids = explicit_action_ids[id(shot)]
+            if (
+                not action_ids
+                and infer_unprojected_event_actions
+                and not str(shot.shot_id or "").strip()
+                and shot.shot_contribution is None
+            ):
+                action_ids = event_actions.get(event_id, [])
+            matched_ids = _action_key_line_ids(action_ids, actions, catalog)
+            if action_ids and authoritative_set:
+                desired_ids = [
+                    key_id
+                    for key_id in matched_ids
+                    if key_id not in assigned_action_ids
+                ]
+                assigned_action_ids.update(desired_ids)
+            else:
+                desired_ids = [
+                    str(key_id or "").strip().upper()
+                    for key_id in shot.key_line_ids
+                    if (
+                        (
+                            not authoritative_set
+                            or str(key_id or "").strip().upper()
+                            in authoritative_set
+                        )
+                        and exclusive_authority.get(
+                            str(key_id or "").strip().upper(),
+                            event_id,
+                        ) == event_id
+                    )
+                ]
+            current_ids = [
+                str(key_id or "").strip().upper()
+                for key_id in shot.key_line_ids
+                if str(key_id or "").strip()
+            ]
+            if current_ids == desired_ids:
+                continue
+            shot.key_line_ids = desired_ids
+            shot.audio_cast = list(dict.fromkeys(
+                catalog[key_id][0]
+                for key_id in desired_ids
+            ))
+            changes.append({
+                "shot_no": shot.shot_no,
+                "event_id": event_id,
+                "field": "key_line_ids",
+                "from": current_ids,
+                "to": desired_ids,
+                "reason": "atomic_action_dialogue_relation",
+            })
+    return changes
+
+
+def narrative_outline_action_delivery_errors(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[str]:
+    """Validate exact action-to-dialogue ownership after all outline rewrites."""
+    plan = screenplay.narrative_plan
+    catalog = _narrative_key_line_catalog(screenplay)
+    if plan is None or not outline.shots or not catalog:
+        return []
+    actions = {action.action_id: action for action in plan.atomic_actions}
+    errors: list[str] = []
+    for event in plan.events:
+        expected = _action_key_line_ids(
+            list(event.action_ids),
+            actions,
+            catalog,
+        )
+        if not expected:
+            continue
+        event_shots = [
+            shot
+            for shot in outline.shots
+            if event.event_id in {
+                *(str(value or "").strip() for value in shot.event_ids),
+                str(shot.story_event_id or "").strip(),
+            }
+        ]
+        actual = list(dict.fromkeys(
+            str(key_id or "").strip().upper()
+            for shot in event_shots
+            for key_id in shot.key_line_ids
+            if str(key_id or "").strip()
+        ))
+        if actual != expected:
+            errors.append(
+                "[OUTLINE_ACTION_DIALOGUE_RELATION_MISMATCH] "
+                f"事件 {event.event_id} 的原子动作明确绑定台词 {expected}，"
+                f"当前镜头交付为 {actual}；请按 action_id 的说话人和原句关系重投影"
+            )
+    return errors
+
+
 def normalize_split_action_owner_completions(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
@@ -229,6 +485,11 @@ def normalize_narrative_storyboard_outline(
         str(shot.shot_id or "").strip()
         and shot.shot_contribution is not None
         for shot in outline.shots
+    )
+    action_delivery_changes = reconcile_narrative_outline_action_deliveries(
+        outline,
+        screenplay,
+        infer_unprojected_event_actions=not already_projected,
     )
     required_events = [
         item.event_id
@@ -852,7 +1113,7 @@ def normalize_narrative_storyboard_outline(
                 )
         redundant_context_ids_by_event[event_id] = redundant_ids
     normalized_shots = []
-    changes: list[dict[str, Any]] = []
+    changes: list[dict[str, Any]] = list(action_delivery_changes)
 
     for position, (event_id, role, shot) in enumerate(nodes):
         event = events[event_id]
@@ -1245,6 +1506,11 @@ def compile_narrative_storyboard_outline(
             speaker, separator, _spoken = text.partition(":")
         if text and separator and speaker.strip() != "旁白":
             key_line_catalog[f"KL{key_position:02d}"] = text
+    narrative_key_lines = _narrative_key_line_catalog(screenplay)
+    actions_by_id = {
+        action.action_id: action
+        for action in plan.atomic_actions
+    }
 
     evidence_by_event: defaultdict[str, list[str]] = defaultdict(list)
     for evidence in plan.evidence:
@@ -1275,12 +1541,22 @@ def compile_narrative_storyboard_outline(
         scene_contract = scene_contracts[scene_index]
         legacy = legacy_events.get(event.event_id)
         event_beats = beats_by_event[event.event_id]
-        event_key_line_ids = list(dict.fromkeys(
+        spine_key_line_ids = list(dict.fromkeys(
             key_line_id
             for beat in event_beats
             for key_line_id in beat.key_line_ids
             if key_line_id in key_line_catalog
         ))
+        action_key_line_ids = _action_key_line_ids(
+            list(event.action_ids),
+            actions_by_id,
+            narrative_key_lines,
+        )
+        event_key_line_ids = (
+            action_key_line_ids
+            if action_key_line_ids
+            else spine_key_line_ids
+        )
         event_information_ids = list(dict.fromkeys([
             *information_by_event[event.event_id],
             *[

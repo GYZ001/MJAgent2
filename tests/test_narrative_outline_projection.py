@@ -10,8 +10,10 @@ from app.narrative import (
     validate_storyboard_narrative,
 )
 from app.narrative_outline import (
+    narrative_outline_action_delivery_errors,
     normalize_narrative_storyboard_outline,
     normalize_split_action_owner_completions,
+    reconcile_narrative_outline_action_deliveries,
 )
 from app.schemas import (
     AudioTimelineItem,
@@ -62,6 +64,98 @@ def _attach_generic_action(screenplay) -> AtomicAction:
     screenplay.narrative_plan.atomic_actions.append(action)
     screenplay.narrative_plan.events[0].action_ids = [action.action_id]
     return action
+
+
+def test_outline_rebinds_shifted_dialogue_to_atomic_action_relation() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["小晶"]
+    action.target_ids = []
+    action.semantic_intent = "小晶说出对白「喜欢……」"
+    action.completion_condition = "小晶完成回答，话轮状态向前推进"
+    screenplay.key_lines = [
+        "陈三：妈的，怎么不叫了？叫啊！",
+        "小晶：喜欢……",
+    ]
+    screenplay.dialogue_chains = []
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="陈三说出本话轮",
+                covers="陈三：妈的，怎么不叫了？叫啊！",
+                primary_action="陈三单人近景说出本话轮",
+                key_line_ids=["KL01"],
+                characters_visible=["陈三"],
+                audio_cast=["陈三"],
+            )
+        ],
+    )
+
+    changes = normalize_narrative_storyboard_outline(outline, screenplay)
+    ownership_changes = normalize_outline_dialogue_ownership(
+        outline,
+        screenplay,
+    )
+
+    assert changes
+    assert ownership_changes == []
+    dialogue_owner = next(shot for shot in outline.shots if shot.key_line_ids)
+    action_owner = next(
+        shot
+        for shot in outline.shots
+        if shot.primary_action_id == action.action_id
+    )
+    assert dialogue_owner.key_line_ids == ["KL02"]
+    assert dialogue_owner.characters_visible == ["小晶"]
+    assert dialogue_owner.audio_cast == ["小晶"]
+    assert dialogue_owner.covers == "小晶：喜欢……"
+    assert action_owner.key_line_ids == []
+    assert narrative_outline_action_delivery_errors(
+        outline,
+        screenplay,
+    ) == []
+
+
+def test_outline_action_delivery_gate_rejects_stale_projected_key_line() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["小晶"]
+    action.target_ids = []
+    action.semantic_intent = "小晶说出对白「喜欢……」"
+    screenplay.key_lines = [
+        "陈三：妈的，怎么不叫了？叫啊！",
+        "小晶：喜欢……",
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                shot_id="SH001",
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                primary_action_id=action.action_id,
+                key_line_ids=["KL01"],
+            )
+        ],
+    )
+
+    errors = narrative_outline_action_delivery_errors(outline, screenplay)
+
+    assert len(errors) == 1
+    assert "OUTLINE_ACTION_DIALOGUE_RELATION_MISMATCH" in errors[0]
+    reconcile_narrative_outline_action_deliveries(outline, screenplay)
+    assert outline.shots[0].key_line_ids == ["KL02"]
+    assert narrative_outline_action_delivery_errors(
+        outline,
+        screenplay,
+    ) == []
 
 
 def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
