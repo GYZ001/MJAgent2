@@ -6167,8 +6167,9 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
                                     outline_covers: str = "", later_planned_covers: str = "",
                                     outline_scene_name: str = "",
                                     outline_narrative_task: StoryboardOutlineShot | None = None,
-                                    source_text: str = "") -> list[str]:
+                                    source_text: str = "") -> list[str | Issue]:
     errors: list[str] = []
+    structural_issues: list[Issue] = []
     expected_narrative_authority = screenplay.narrative_plan is not None
     if narrative_authority is None:
         narrative_authority = expected_narrative_authority
@@ -6234,6 +6235,29 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     )
     errors.extend(identity_errors)
     current = board.shots[-1]
+    # A per-shot checkpoint is only safe when the exact object can already be
+    # compiled for the downstream image/video prompt.  Keep this as a typed
+    # structural issue so AgentLoop repairs it now instead of accepting a
+    # score-only candidate and discovering the same contract break at episode
+    # publication time.
+    try:
+        from app.compiler import CompileError, compile_prompt
+
+        compile_prompt(current, bible, screenplay=screenplay)
+    except CompileError as exc:
+        structural_issues.append(Issue(
+            code="SHOT_PROMPT_COMPILE_FAILED",
+            severity=IssueSeverity.BLOCKER,
+            category="structural",
+            subject=f"storyboard_checkpoint:{episode.get('id') or episode['episode_no']}:{shot_no}",
+            message=f"第 {shot_no} 镜下游 Prompt 合同不可编译：{exc}",
+            evidence={
+                "path": f"shots[{max(0, shot_no - 1)}]",
+                "rule_id": "downstream_prompt_compile",
+            },
+            repair_hint="同步本镜可见身份、声轨身份与已声明的叙事身份合同",
+            repairable=True,
+        ))
     partial_errors = (
         validate_storyboard(
             board,
@@ -6298,7 +6322,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     ))
 
     if not (draft.is_final or must_finish):
-        return list(dict.fromkeys(errors))
+        return [*list(dict.fromkeys(errors)), *structural_issues]
 
     # 收尾镜才跑整集兜底校验。必保留台词/剧情点、声轨这类"靠后续镜头分担"的缺口，
     # 在自愿收尾时不硬塞进单镜（那会让修复回路卡死），而是要求改判 is_final=false 继续补镜；
@@ -6320,7 +6344,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
                 f"本集整集必保留内容/声轨尚未达标，第 {shot_no} 镜暂不能收尾："
                 "请将 is_final 设为 false 继续补镜，在后续镜头补齐——"
                 + "；".join(episode_errors[:6]))
-    return list(dict.fromkeys(errors))
+    return [*list(dict.fromkeys(errors)), *structural_issues]
 
 
 async def _generate_episode_director_outline(

@@ -12,6 +12,8 @@ import asyncio
 import pytest
 
 from app import config, stages
+from app.compiler import CompileError
+from app.harness.types import Issue, IssueSeverity
 from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay,
                          InformationItem, Scene, Shot, StoryboardOutline,
                          StoryboardOutlineShot, World)
@@ -81,6 +83,26 @@ def test_storyboard_shot_draft_rejects_missing_production_frame(field: str) -> N
 
     with pytest.raises(ValueError, match="分镜生产必填字段"):
         StoryboardShotDraft(episode_no=2, shot=shot, is_final=False)
+
+
+def test_downstream_prompt_compile_failure_is_a_structural_loop_issue(
+    monkeypatch,
+) -> None:
+    def fail_compile(*_args, **_kwargs):
+        raise CompileError("可见身份没有 typed identity contract")
+
+    monkeypatch.setattr("app.compiler.compile_prompt", fail_compile)
+    findings = _validate(
+        _draft(_shot(1), is_final=False),
+        allow_finish=False,
+        must_finish=False,
+        screenplay=_screenplay(),
+    )
+
+    issue = next(item for item in findings if isinstance(item, Issue))
+    assert issue.code == "SHOT_PROMPT_COMPILE_FAILED"
+    assert issue.category == "structural"
+    assert issue.severity == IssueSeverity.BLOCKER
 
 
 def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bool,
