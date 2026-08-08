@@ -1067,6 +1067,56 @@ def test_narrative_scene_contexts_preserve_graph_owned_scene_ids() -> None:
     ]
 
 
+def test_narrative_scene_contexts_project_screenplay_alias_to_canonical_asset() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        scene_outline=[ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】下午 / 林家",
+            story_function="角色回家完成本场状态变化",
+            summary="角色回到家中。",
+        )],
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="e1",
+            scene_contracts=[SceneDramaticContract(scene_id="SC20")],
+        ),
+    )
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="三维动画"),
+        scenes=[Scene(
+            name="林家客厅",
+            aliases=["【场1】下午 / 林家"],
+            scene_canonical=(
+                "普通居民家室内客厅，下午自然光透窗，布艺沙发与木质茶几"
+                "形成稳定空间锚点，暖色调三维动画环境。"
+            ),
+        )],
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[StoryboardOutlineShot(
+            shot_no=1,
+            shot_id="SH001",
+            scene_id="SC20",
+            scene_name="林家",
+            scene_time="下午",
+            beat="角色回到家中。",
+        )],
+    )
+
+    changes = stages.ensure_storyboard_scene_contexts(
+        outline,
+        screenplay,
+        bible,
+    )
+
+    assert changes[0]["reason"] == "screenplay_scene_alias_authority"
+    assert outline.shots[0].scene_name == "林家客厅"
+    assert outline.shots[0].scene_setting == "下午，林家客厅"
+    assert outline.scene_contexts[0].scene_name == "林家客厅"
+
+
 def test_extra_physical_scene_does_not_shift_screenplay_context_contracts() -> None:
     screenplay = EpisodeScreenplay(
         episode_no=1,

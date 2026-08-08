@@ -7463,8 +7463,77 @@ def ensure_storyboard_scene_contexts(
     bible: Bible | None = None,
 ) -> list[dict[str, Any]]:
     """Build batch boundaries from an approved outline without another model call."""
-    if outline.scene_contexts or not outline.shots:
+    if not outline.shots:
         return []
+
+    script_scenes = sorted(
+        list(screenplay.scene_outline or []),
+        key=lambda item: int(item.scene_no or 0),
+    )
+    changes: list[dict[str, Any]] = []
+    narrative_scene_numbers = {
+        str(contract.scene_id or "").strip(): index
+        for index, contract in enumerate(
+            list(
+                screenplay.narrative_plan.scene_contracts
+                if screenplay.narrative_plan is not None
+                else []
+            ),
+            start=1,
+        )
+        if str(contract.scene_id or "").strip()
+    }
+    preserves_narrative_scene_ids = bool(narrative_scene_numbers) and all(
+        str(brief.scene_id or "").strip() in narrative_scene_numbers
+        for brief in outline.shots
+    )
+
+    if (
+        bible is not None
+        and preserves_narrative_scene_ids
+        and len(script_scenes) == len(narrative_scene_numbers)
+    ):
+        from app.scene_contract import compose_scene_setting
+
+        canonical_by_scene_id: dict[str, str] = {}
+        for scene_id, scene_no in narrative_scene_numbers.items():
+            script_scene = script_scenes[scene_no - 1]
+            canonical = match_scene_name(
+                script_scene.scene_heading,
+                list(getattr(bible, "scenes", None) or []),
+                allow_fuzzy=False,
+            )
+            if canonical:
+                canonical_by_scene_id[scene_id] = canonical
+        for brief in outline.shots:
+            scene_id = str(brief.scene_id or "").strip()
+            canonical = canonical_by_scene_id.get(scene_id)
+            if not canonical or brief.scene_name == canonical:
+                continue
+            previous = str(brief.scene_name or brief.scene_setting or "")
+            brief.scene_name = canonical
+            brief.scene_setting = compose_scene_setting(
+                str(brief.scene_time or ""),
+                canonical,
+                fallback=str(brief.scene_setting or ""),
+            )
+            changes.append({
+                "scene_id": scene_id,
+                "shot_no": int(brief.shot_no),
+                "field": "scene_name",
+                "from": previous,
+                "to": canonical,
+                "reason": "screenplay_scene_alias_authority",
+            })
+        for context in outline.scene_contexts:
+            canonical = canonical_by_scene_id.get(
+                str(context.scene_id or "").strip()
+            )
+            if canonical:
+                context.scene_name = canonical
+
+    if outline.scene_contexts:
+        return changes
 
     scene_id_bindings: defaultdict[str, set[tuple[str, str]]] = (
         defaultdict(set)
@@ -7483,23 +7552,6 @@ def ensure_storyboard_scene_contexts(
     # leaves storyboard shots pointing outside narrative_plan.scene_contracts.
     # Legacy/model-authored outlines do not have this authority relation and
     # keep the historical physical-run partitioning below.
-    narrative_scene_numbers = {
-        str(contract.scene_id or "").strip(): index
-        for index, contract in enumerate(
-            list(
-                screenplay.narrative_plan.scene_contracts
-                if screenplay.narrative_plan is not None
-                else []
-            ),
-            start=1,
-        )
-        if str(contract.scene_id or "").strip()
-    }
-    preserves_narrative_scene_ids = bool(narrative_scene_numbers) and all(
-        str(brief.scene_id or "").strip() in narrative_scene_numbers
-        for brief in outline.shots
-    )
-
     runs: list[tuple[str, list[StoryboardOutlineShot]]] = []
     for brief in outline.shots:
         scene_name = str(brief.scene_name or brief.scene_setting).strip()
@@ -7522,11 +7574,6 @@ def ensure_storyboard_scene_contexts(
             runs.append((scene_key, [brief]))
 
     contexts: list[StoryboardSceneContext] = []
-    changes: list[dict[str, Any]] = []
-    script_scenes = sorted(
-        list(screenplay.scene_outline or []),
-        key=lambda item: int(item.scene_no or 0),
-    )
     script_cursor = 0
     for run_index, (_scene_key, briefs) in enumerate(runs, start=1):
         first = briefs[0]
