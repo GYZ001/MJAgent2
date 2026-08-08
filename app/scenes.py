@@ -203,6 +203,56 @@ def scene_ref_prompt(
     )
 
 
+async def _provider_visual_scene_retry_prompt(
+    visual_style: str,
+    scene_canonical: str,
+) -> str:
+    """Re-express an approved scene contract after a technical image failure.
+
+    This is a bounded representation fallback, not a vocabulary filter: the
+    text model receives the complete approved contract and must preserve every
+    visible fact while replacing proper-name and narrative phrasing with an
+    equivalent visual description.  The generated image is still evaluated
+    against the original scene contract.
+    """
+    raw = await model_gateway.chat(
+        [{
+            "role": "user",
+            "content": f"""任务：把已批准的场景合同改写成纯视觉环境生图描述。
+
+已批准场景合同：
+{scene_canonical}
+
+要求：
+- 保留原合同中全部可见的空间类型、建筑功能、时代、时段、光线、材质、陈设、状态与氛围事实，不得增删或改换地点。
+- 只改写表达方式；用可见建筑与陈设表达地点功能，不输出地点专名、组织名、人物、剧情事件、台词或政策说明。
+- 只描述纯环境，不出现人物，不生成可读文字。
+
+只输出 JSON：{{"visual_environment": "同一场景的完整纯视觉描述"}}""",
+        }],
+        temperature=0.1,
+        max_tokens=600,
+        call_meta={
+            "stage": "scene_provider_visual_retry",
+            "asset_kind": "scene_reference",
+        },
+    )
+    payload = extract_json(raw)
+    visual_environment = str(
+        payload.get("visual_environment") or ""
+    ).strip()
+    if len(visual_environment) < SCENE_CANONICAL_MIN:
+        raise hiagent.ProviderError("场景视觉改写结果过短，无法用于技术重试")
+    from app.scene_policy import normalize_scene_prompt
+    return normalize_scene_prompt(
+        scene_visual_style_lock(visual_style) if visual_style.strip() else "",
+        "场景定场图（纯环境、画面中不出现任何人物）："
+        + visual_environment,
+        "9:16 竖屏，构图完整的环境定场镜头，空间纵深清晰，光影与色调统一，电影质感，高清",
+        "画面必须无人物；不得生成任何文字、字幕、招牌字、角标、水印或 logo",
+    )
+
+
 def _restore_approved_scene_bible(conn, project_id: str, bible_data: dict) -> bool:
     """Restore scenes lost by an older concurrent full-Bible write.
 
@@ -1636,9 +1686,11 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
     prompt = base_prompt
     qa: dict = {}
     artifact = None
-    # Score-only：只生成一次，不因 QA 带 critique 重生（PRD QA-SO）。
-    for attempt in range(1, 2):
-        prompt = base_prompt
+    retry_prompt: str | None = None
+    # Score-only：不因 QA 带 critique 重生。供应商技术失败时允许一次
+    # 纯视觉等义改写重试，结果仍按原始批准场景合同做 QA。
+    for attempt in range(1, 3):
+        prompt = retry_prompt or base_prompt
         dest = str(Path(scene_ref_path(project_id, name, ep_start)).with_name(
             f"{_safe_name(name)}__ep{ep_start}__{new_id('candidate')}.jpg"
         ))
@@ -1666,7 +1718,17 @@ async def _generate_and_register_scene(project_id: str, name: str, scene_canonic
             )
             if artifact["status"] in {"approved", "validated"}:
                 break
+            return None
         except Exception:  # noqa: BLE001 技术失败不伪装成 QA 问题
+            if attempt == 1:
+                try:
+                    retry_prompt = await _provider_visual_scene_retry_prompt(
+                        style,
+                        scene_canonical,
+                    )
+                except Exception:  # noqa: BLE001 改写失败时不扩大重试
+                    retry_prompt = None
+                    break
             continue
     if not artifact or artifact["status"] not in {"approved", "validated"}:
         return None

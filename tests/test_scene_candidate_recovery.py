@@ -12,6 +12,29 @@ from app.harness.types import Evaluation, EvidenceArtifact
 from app.scene_policy import normalize_scene_image_qa
 
 
+def test_provider_visual_retry_rephrases_without_keyword_routing(monkeypatch) -> None:
+    from app import scenes
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({
+            "visual_environment": (
+                "2000年北方小镇单位家属住宅楼内的闲置房间，晚七点半昏暗夕阳，"
+                "墙皮斑驳落灰，旧纸箱散落在积灰地板上，冷灰调清冷氛围"
+            ),
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(scenes.model_gateway, "chat", fake_chat)
+    prompt = asyncio.run(scenes._provider_visual_scene_retry_prompt(
+        "高精度3D动漫CG渲染",
+        "2000年北方小镇某单位家属楼空房，墙皮斑驳，旧纸箱散落",
+    ))
+
+    assert "单位家属住宅楼内的闲置房间" in prompt
+    assert "墙皮斑驳落灰" in prompt
+    assert "高精度3D动漫CG渲染" in prompt
+    assert "画面必须无人物" in prompt
+
+
 def test_environment_only_prompt_preserves_approved_canonical_without_word_filtering() -> None:
     from app.scenes import environment_only_scene_canonical, scene_ref_prompt
 
