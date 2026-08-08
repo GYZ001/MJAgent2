@@ -82,7 +82,6 @@ from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             validate_storyboard_direction_contract,
                             validate_storyboard_preserves_key_content,
                             validate_storyboard_soundtrack)
-from app.scene_contract import looks_like_scene_time
 from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
@@ -6567,14 +6566,11 @@ def _screenplay_scene_parts(screenplay: EpisodeScreenplay, scene_no: int) -> tup
     )
     parts = re.split(r"\s*[/／]\s*", heading, maxsplit=1)
     if len(parts) == 2:
-        first = parts[0].strip()
-        second = parts[1].strip()
-        second_time = re.sub(r"[（(].*?[）)]", "", second).strip()
-        if looks_like_scene_time(first):
-            return first, second
-        if looks_like_scene_time(second_time):
-            return second, first
-        return "", first
+        # ``scene_heading`` owns an explicit ``scene_time / scene_name``
+        # positional contract.  Do not reinterpret either side through a
+        # language whitelist: relative time labels and new locales are open
+        # vocabulary by design.
+        return parts[0].strip(), parts[1].strip()
     return "", heading
 
 

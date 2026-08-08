@@ -89,15 +89,26 @@ def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
     action.actor_ids.append("ID-CONTEXT")
     outline = StoryboardOutline(
         episode_no=1,
-        shots=[StoryboardOutlineShot(
-            shot_no=1,
-            scene_id="SC-generic",
-            story_event_id="E-1",
-            event_ids=["E-1"],
-            beat="The declared event becomes visible.",
-            covers="The observable result is delivered.",
-            characters_visible=["character-1", contextual_name],
-        )],
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The declared event begins.",
+                covers="The observable action begins.",
+                characters_visible=["character-1", contextual_name],
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The declared event becomes visible.",
+                covers="The observable result is delivered.",
+                characters_visible=["character-1", contextual_name],
+            ),
+        ],
     )
 
     normalize_narrative_storyboard_outline(outline, screenplay)
@@ -110,6 +121,7 @@ def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
         contextual_name not in shot.characters_visible
         for shot in outline.shots
     )
+    assert outline.shots[0].offscreen_action_actor_ids == []
     assert outline.shots[-1].offscreen_action_actor_ids == ["ID-CONTEXT"]
 
 

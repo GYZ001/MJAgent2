@@ -59,6 +59,12 @@ def test_scene_heading_slash_structurally_separates_open_ended_time_label() -> N
     ) == ("状态变化后即刻", "胡家客厅椅子旁")
 
 
+def test_legacy_comma_heading_uses_field_position_not_time_vocabulary() -> None:
+    assert split_legacy_scene_setting(
+        "【场5】状态变化后即刻，胡家客厅椅子旁"
+    ) == ("状态变化后即刻", "胡家客厅椅子旁")
+
+
 def test_scene_match_uses_location_alias_without_classifying_time_words() -> None:
     scenes = [
         Scene(

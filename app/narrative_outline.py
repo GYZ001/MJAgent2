@@ -701,6 +701,19 @@ def normalize_narrative_storyboard_outline(
     completed_actions: set[str] = set()
     completed_phases: set[str] = set()
     all_event_ids = list(events)
+    redundant_context_ids_by_event: dict[str, set[str]] = {}
+    for event_id, event in events.items():
+        redundant_ids: set[str] = set()
+        for action_id in event.action_ids:
+            action = actions.get(action_id)
+            if action is None:
+                continue
+            actor_ids = set(action.actor_ids)
+            if actor_ids - set(compiler_context_identity_names):
+                redundant_ids.update(
+                    actor_ids & set(compiler_context_identity_names)
+                )
+        redundant_context_ids_by_event[event_id] = redundant_ids
     normalized_shots = []
     changes: list[dict[str, Any]] = []
 
@@ -725,21 +738,12 @@ def normalize_narrative_storyboard_outline(
             for entity_id in evidence.perceivable_by
             if entity_id != "audience"
         }
-        redundant_context_ids: set[str] = set()
+        redundant_context_ids = redundant_context_ids_by_event[event_id]
         for action_id in action_ids:
             action = actions.get(action_id)
             if action is not None:
                 visible_ids.update(action.actor_ids)
                 visible_ids.update(action.target_ids)
-                explicit_actor_ids = (
-                    set(action.actor_ids)
-                    - set(compiler_context_identity_names)
-                )
-                if explicit_actor_ids:
-                    redundant_context_ids.update(
-                        set(action.actor_ids)
-                        & set(compiler_context_identity_names)
-                    )
         visible_ids.difference_update(redundant_context_ids)
         if redundant_context_ids:
             redundant_names = {
@@ -758,7 +762,9 @@ def normalize_narrative_storyboard_outline(
         shot.supporting_action_ids = supporting_action_ids
         shot.action_phase_ids = phase_ids
         shot.visible_entity_ids = sorted(visible_ids)
-        shot.offscreen_action_actor_ids = sorted(redundant_context_ids)
+        shot.offscreen_action_actor_ids = (
+            sorted(redundant_context_ids) if is_last_occurrence else []
+        )
         shot.offscreen_action_target_ids = []
 
         shot.planned_state_in_fact_ids = sorted(current_facts)

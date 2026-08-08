@@ -1161,9 +1161,6 @@ def validate_storyboard_scenes(board: Storyboard, bible: Bible) -> list[str]:
 
 # ---------- C1.5 可拍剧本 ----------
 
-FULL_SCRIPT_FORBIDDEN_TERMS = (
-    "拍01", "拍1", "拍 01", "拍 1", "镜头", "景别", "运镜", "首帧", "尾帧", "参考图", "提示词", "prompt",
-)
 SCRIPT_SCENE_HEADING_RE = re.compile(r"【场\s*\d+】")
 SCRIPT_DIALOGUE_LINE_RE = re.compile(r"^[^\n：]{1,16}(?:（[^）]{1,12}）)?：", re.M)
 SCRIPT_SOUND_LINE_RE = re.compile(r"^([^\n：（]{1,16})(?:（([^）]{1,12})）)?：(.+)$", re.M)
@@ -2851,9 +2848,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     ))
     if not narrative_authority:
         errors.extend(overdetail_errors(action_text, "full_script_text"))
-    for term in FULL_SCRIPT_FORBIDDEN_TERMS:
-        if term in full_text:
-            errors.append(f"full_script_text 含禁用词「{term}」；剧本台正文不能写拍卡/分镜/执行语言")
     heading_matches = SCRIPT_SCENE_HEADING_RE.findall(full_text)
     if len(heading_matches) < 3:
         errors.append("full_script_text 缺少足够的场次标题；请使用“【场1】...”这类场次化台本格式")

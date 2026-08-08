@@ -286,7 +286,7 @@ def test_scene_alignment_preserves_revisits_and_allows_nested_subscenes() -> Non
         scene_outline=[
             ScriptScene(
                 scene_no=index,
-                scene_heading=f"{name} / 白天",
+                scene_heading=f"白天 / {name}",
                 story_function=f"推进第{index}场",
                 summary=f"第{index}场剧情",
             )

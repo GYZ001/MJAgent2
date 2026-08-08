@@ -10,38 +10,8 @@ from typing import Any
 
 
 _SCENE_HEADING_PREFIX_RE = re.compile(r"^【场\s*\d+】\s*")
-_SCENE_TIME_LABELS = frozenset({
-    "日", "白日", "白天", "日间", "清晨", "早晨", "上午", "中午", "晌午",
-    "午后", "下午", "傍晚", "黄昏", "夜", "夜晚", "夜里", "深夜", "午夜",
-    "凌晨", "黎明", "次日", "翌日", "当日", "当天", "早", "中", "晚",
-})
-
-
-def looks_like_scene_time(value: str) -> bool:
-    """识别时间段或具体时刻，同时避免把普通地名当成时间。"""
-    compact = re.sub(r"\s+", "", value or "")
-    if compact in _SCENE_TIME_LABELS:
-        return True
-    if not compact or len(compact) > 16:
-        return False
-    if re.search(r"(?:\d{1,2}[:：]\d{2}|\d{1,2}(?:点|时)(?:\d{1,2}分?)?)", compact):
-        return True
-    if re.search(r"(?:凌晨|早上|上午|中午|下午|晚上|深夜)[一二两三四五六七八九十百零\d]+(?:点|时)", compact):
-        return True
-    return bool(
-        compact.endswith((
-            "清晨", "早晨", "上午", "中午", "晌午", "午后", "下午", "傍晚",
-            "黄昏", "夜晚", "夜里", "深夜", "午夜", "凌晨", "黎明",
-        ))
-        or (
-            "转" in compact
-            and all(part in _SCENE_TIME_LABELS for part in compact.split("转") if part)
-        )
-    )
-
-
 def split_legacy_scene_setting(value: str) -> tuple[str, str]:
-    """把旧的「时间，地点」拆开；无明确时间前缀时整体视为场景候选名。"""
+    """按旧标题合同的显式分隔符拆出 ``(scene_time, scene_name)``。"""
     raw = _SCENE_HEADING_PREFIX_RE.sub("", (value or "").strip())
     # The screenplay heading contract uses an explicit slash/pipe boundary.
     # Its left side is an open-ended temporal or state-relative label, so the
@@ -49,8 +19,11 @@ def split_legacy_scene_setting(value: str) -> tuple[str, str]:
     structured_parts = re.split(r"\s*[/|]\s*", raw, maxsplit=1)
     if len(structured_parts) == 2:
         return structured_parts[0].strip(), structured_parts[1].strip()
+    # Comma is the delimiter used by the older ``时间，地点`` contract.  Its
+    # meaning comes from field position, not from a closed vocabulary of time
+    # words; open-ended labels such as「状态变化后即刻」remain valid.
     parts = re.split(r"\s*[，,]\s*", raw, maxsplit=1)
-    if len(parts) == 2 and looks_like_scene_time(parts[0]):
+    if len(parts) == 2:
         return parts[0].strip(), parts[1].strip()
     return "", raw
 
