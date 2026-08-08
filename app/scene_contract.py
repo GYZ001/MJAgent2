@@ -43,7 +43,13 @@ def looks_like_scene_time(value: str) -> bool:
 def split_legacy_scene_setting(value: str) -> tuple[str, str]:
     """把旧的「时间，地点」拆开；无明确时间前缀时整体视为场景候选名。"""
     raw = _SCENE_HEADING_PREFIX_RE.sub("", (value or "").strip())
-    parts = re.split(r"\s*[/，,|]\s*", raw, maxsplit=1)
+    # The screenplay heading contract uses an explicit slash/pipe boundary.
+    # Its left side is an open-ended temporal or state-relative label, so the
+    # delimiter itself is authoritative and does not need a vocabulary gate.
+    structured_parts = re.split(r"\s*[/|]\s*", raw, maxsplit=1)
+    if len(structured_parts) == 2:
+        return structured_parts[0].strip(), structured_parts[1].strip()
+    parts = re.split(r"\s*[，,]\s*", raw, maxsplit=1)
     if len(parts) == 2 and looks_like_scene_time(parts[0]):
         return parts[0].strip(), parts[1].strip()
     return "", raw

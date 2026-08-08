@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import config, textmatch
 from app.character_policy import (
-    is_functional_extra,
     resolution_declares_functional_identity,
 )
 from app.identity_authority import identity_authority_registry
@@ -68,6 +67,25 @@ class ScreenplayIRIdentityConflictError(ValueError):
     ) -> None:
         self.issues = list(issues or [])
         super().__init__(message)
+
+
+def _structural_context_authority_id(
+    episode: dict[str, Any],
+    identity_key: str,
+) -> str:
+    """Mint an identity ID for compiler-created context actors, not a person guess."""
+    seed = json.dumps(
+        {
+            "episode_id": str(
+                episode.get("id") or episode.get("episode_no") or ""
+            ),
+            "identity_key": str(identity_key or "").strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "context:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
 
 def scene_heading_has_multiple_locations(heading: str) -> bool:
@@ -1075,6 +1093,25 @@ def prepare_ir_identity_authorities(
                     "authority_id": explicit,
                     "canonical_name": identity.display_name or identity.key,
                     "identity_kind": "narrator",
+                    "source_labels": list(identity.source_names),
+                }
+        if (
+            explicit
+            and authority is None
+            and identity.kind in {
+                "source_backed_scene_context_actor",
+                "event_referenced_contextual_identity",
+            }
+        ):
+            expected_context_id = _structural_context_authority_id(
+                episode,
+                identity.key,
+            )
+            if explicit == expected_context_id:
+                authority = {
+                    "authority_id": explicit,
+                    "canonical_name": identity.display_name or identity.key,
+                    "identity_kind": "functional",
                     "source_labels": list(identity.source_names),
                 }
         if explicit and authority is None and legacy_self_authority:
@@ -2362,6 +2399,10 @@ def compile_screenplay_ir(
                     )
                     value.identities.append(IRIdentity(
                         key=contextual_key,
+                        authority_id=_structural_context_authority_id(
+                            episode,
+                            contextual_key,
+                        ),
                         display_name=display,
                         kind="source_backed_scene_context_actor",
                         visual_policy="collective",
@@ -3003,6 +3044,7 @@ def compile_screenplay_ir(
             continue
         identity_by_key[name] = IRIdentity(
             key=name,
+            authority_id=f"bible:{name}",
             display_name=name,
             kind="bible_character",
             visual_policy="canonical",
@@ -3025,6 +3067,7 @@ def compile_screenplay_ir(
             raise ValueError("audience 是观众感知主体，不是剧中身份")
         identity_by_key[raw] = IRIdentity(
             key=raw,
+            authority_id=_structural_context_authority_id(episode, raw),
             display_name=raw,
             kind="event_referenced_contextual_identity",
             visual_policy="contextual",

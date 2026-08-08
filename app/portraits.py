@@ -1686,6 +1686,8 @@ def normalize_screenplay_identity_annotations(screenplay, bible: Bible) -> list[
         except Exception:
             pass
     # #endregion
+    if not resolutions:
+        return []
     return apply_screenplay_character_resolutions(screenplay, resolutions)
 
 

@@ -2056,6 +2056,12 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     conn = get_conn()
 
     labels = _collect_scene_labels(screenplay)
+    summary_by_heading = {
+        (getattr(scene, "scene_heading", "") or "").strip(): (
+            getattr(scene, "summary", "") or ""
+        )
+        for scene in (getattr(screenplay, "scene_outline", None) or [])
+    }
     unmatched = [
         lb for lb in labels
         if not match_scene_name(lb, scenes, allow_fuzzy=False)

@@ -1,5 +1,6 @@
 """场景图素材库相关校验与注入的单元测试。"""
 from app.schemas import Bible, Character, Scene, Shot, Storyboard, World
+from app.scene_contract import split_legacy_scene_setting
 from app.validators import (canonicalize_storyboard_scene, match_scene_name, validate_scene_bible,
                             validate_storyboard_scenes)
 from app.scenes import scene_refs_as_image_inputs
@@ -50,6 +51,28 @@ def test_match_scene_name_substring_and_normalized() -> None:
     assert match_scene_name("白日，宗门广场", scenes) == "宗门广场"
     # 标点/时间差异下的归一化匹配
     assert match_scene_name("夜 / 破败客栈内", scenes) == "破败客栈内"
+
+
+def test_scene_heading_slash_structurally_separates_open_ended_time_label() -> None:
+    assert split_legacy_scene_setting(
+        "【场5】状态变化后即刻 / 胡家客厅椅子旁"
+    ) == ("状态变化后即刻", "胡家客厅椅子旁")
+
+
+def test_scene_match_uses_location_alias_without_classifying_time_words() -> None:
+    scenes = [
+        Scene(
+            name="胡家六楼客厅",
+            scene_canonical="六楼客厅固定空间",
+            aliases=["高潮后即刻 / 胡家客厅椅子旁"],
+        )
+    ]
+
+    assert match_scene_name(
+        "【场5】状态变化后即刻 / 胡家客厅椅子旁",
+        scenes,
+        allow_fuzzy=False,
+    ) == "胡家六楼客厅"
 
 
 def test_match_scene_name_no_match_returns_none() -> None:

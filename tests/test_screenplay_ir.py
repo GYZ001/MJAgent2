@@ -688,6 +688,47 @@ def test_v13_aggregates_explicit_actors_across_units_before_context_fallback() -
     assert set(screenplay.scene_outline[1].characters) == {"谷言", "旧友"}
 
 
+def test_v14_compiler_context_actor_gets_structural_authority() -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    friend_resolution = normalize_character_resolution({
+        "source_label": "旧友",
+        "canonical_name": "旧友",
+        "resolution": "functional_identity",
+        "identity_group": "episode:old-friend",
+    })
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
+    scene = payload["scenes"][1]
+    scene["character_keys"] = []
+    scene["units"] = [{
+        "kind": "action",
+        "text": "门口有人把钥匙放到桌面上。",
+        "event_key": "context-event",
+        "source_segment_ids": ["SRC0002"],
+    }]
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+
+    compile_screenplay_ir(
+        candidate,
+        episode={
+            "id": "ep-ir-v14-context",
+            "episode_no": 1,
+            "character_resolutions": [friend_resolution],
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    context_actors = [
+        identity
+        for identity in candidate.identities
+        if identity.key.startswith("context_actor_")
+    ]
+    assert len(context_actors) == 1
+    assert context_actors[0].authority_id.startswith("context:")
+
+
 def test_v13_rejects_event_key_reused_across_scenes() -> None:
     payload = _v13_payload()
     payload["scenes"][1]["units"][0]["event_key"] = "e1"
@@ -1208,6 +1249,14 @@ def test_ir_identity_resolution_defers_conflicting_exact_authorities_to_ai() -> 
         "role_type": "functional_character",
         "rationale": "杂役处管理者，原文称谓马脸师兄",
     })
+    for scene in payload["scenes"]:
+        scene["character_keys"] = [
+            "malian" if key == "friend" else key
+            for key in scene["character_keys"]
+        ]
+        for unit in scene["units"]:
+            if unit.get("speaker_key") == "friend":
+                unit["speaker_key"] = "malian"
     ir = ScreenplayGenerationIR.model_validate(payload)
 
     with pytest.raises(ScreenplayIRIdentityConflictError) as exc_info:
@@ -1632,6 +1681,16 @@ def test_shared_functional_source_label_requires_ai_before_merging_identities() 
             "role_type": "functional_character",
         },
     ]
+    for scene in payload["scenes"]:
+        scene["character_keys"] = [
+            "guard_a" if key == "g" else "guard_b"
+            for key in scene["character_keys"]
+        ]
+        for unit in scene["units"]:
+            if unit.get("speaker_key") == "g":
+                unit["speaker_key"] = "guard_a"
+            elif unit.get("speaker_key") == "friend":
+                unit["speaker_key"] = "guard_b"
     ir = ScreenplayGenerationIR.model_validate(payload)
 
     with pytest.raises(ScreenplayIRIdentityConflictError) as exc_info:
