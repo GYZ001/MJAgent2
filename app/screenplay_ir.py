@@ -17,7 +17,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import config, textmatch
-from app.character_policy import is_functional_extra
+from app.character_policy import (
+    is_functional_extra,
+    resolution_declares_functional_identity,
+)
 from app.identity_authority import identity_authority_registry
 from app.schemas import (
     Bible,
@@ -714,7 +717,7 @@ def _normalize_duplicate_ir_identity_displays(
         for item in (episode.get("character_resolutions") or [])
         if (
             isinstance(item, dict)
-            and item.get("resolution") == "functional_extra"
+            and resolution_declares_functional_identity(item)
             and str(item.get("source_label") or "").strip()
             and str(item.get("canonical_name") or "").strip()
         )
@@ -1186,7 +1189,7 @@ def recover_complete_screenplay_ir_prefix(raw: str) -> dict[str, Any] | None:
 def screenplay_ir_prompt_contract() -> str:
     """Compact output contract included in the generation prompt."""
     return """{
-  "format_version":"screenplay-generation-ir.v1.3",
+  "format_version":"screenplay-generation-ir.v1.4",
   "episode_no":1,
   "metadata":{
     "title":"", "logline":"", "script_format_note":"场次化台本稿",
@@ -1198,7 +1201,8 @@ def screenplay_ir_prompt_contract() -> str:
     "approved_adaptations":[], "forbidden_additions":[]
   },
   "identities":[{
-    "key":"person_a", "display_name":"人物谱准确姓名或功能身份",
+    "key":"person_a", "authority_id":"bible:人物名或预检提供的 authority_id",
+    "display_name":"人物谱准确姓名或功能身份",
     "source_names":["该身份在本集原文中的逐字称谓"],
     "kind":"当前来源定义的开放身份语义",
     "visual_policy":"canonical|contextual|collective|offscreen_only",
@@ -1514,9 +1518,10 @@ def compile_screenplay_ir(
     if not value.scenes:
         raise ValueError("IR scenes 不能为空")
     format_version = str(value.format_version or "")
-    strict_unit_ownership = format_version.startswith(
-        "screenplay-generation-ir.v1.3"
-    )
+    strict_unit_ownership = format_version.startswith((
+        "screenplay-generation-ir.v1.3",
+        "screenplay-generation-ir.v1.4",
+    ))
     segments_list = (
         index_compact_source_segments(source_text)
         if format_version.startswith("screenplay-generation-ir.v1.2")

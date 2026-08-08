@@ -110,6 +110,7 @@ from app.screenplay_ir import (
     IRSceneUnit,
     IR_VERSION,
     ScreenplayGenerationIR,
+    ScreenplayIRIdentityConflictError,
     compile_screenplay_ir,
     normalize_screenplay_ir_payload,
     recover_complete_screenplay_ir_prefix,
@@ -125,7 +126,7 @@ SYSTEM_PREFIX = (
     "所有内容使用简体中文。"
 )
 
-SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.4.0"
+SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.0"
 SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.2.1"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
@@ -252,8 +253,9 @@ def _recover_screenplay_ir_candidate(
              JOIN step_runs sr ON sr.id=a.created_by_step_run_id
              JOIN workflow_runs wr ON wr.id=sr.run_id
             WHERE a.scope_type='episode' AND a.scope_id=?
-              AND a.prompt_version=?
-              AND a.contract_version=?
+              AND a.contract_version IN (
+                    ?, 'screenplay-generation-ir.v1.3'
+              )
               AND a.type IN (
                     'screenplay_generation_ir',
                     'screenplay_generation_ir_raw',
@@ -261,14 +263,19 @@ def _recover_screenplay_ir_candidate(
               )
               AND wr.input_fingerprint=?
               AND wr.id IN ({lineage_marks})
-            ORDER BY a.created_at DESC
+            ORDER BY CASE
+                         WHEN a.prompt_version=? AND a.contract_version=?
+                         THEN 0 ELSE 1
+                     END,
+                     a.created_at DESC
             LIMIT 20""",
         (
             episode_id,
-            SCREENPLAY_BASELINE_PROMPT_VERSION,
             IR_VERSION,
             input_fingerprint,
             *lineage_run_ids,
+            SCREENPLAY_BASELINE_PROMPT_VERSION,
+            IR_VERSION,
         ),
     ).fetchall()
     for row in rows:
@@ -633,6 +640,7 @@ def _ir_fidelity_patch_context(
             {
                 "key": identity.key,
                 "display_name": identity.display_name,
+                "authority_id": identity.authority_id,
                 "voice_canonical": identity.voice_canonical,
             }
             for identity in candidate.identities
@@ -803,6 +811,14 @@ async def _complete_screenplay_ir_fidelity(
     from app.evidence import repository as evidence_repository
     from app.harness.types import EvidenceArtifact
     from app.observability.tracing import current_trace
+    from app.identity_adjudication import adjudicate_screenplay_ir_identities
+
+    candidate = await adjudicate_screenplay_ir_identities(
+        candidate,
+        episode=episode,
+        source_text=source_text,
+        bible=bible,
+    )
 
     patched = False
     consecutive_empty_patches = 0
@@ -2520,26 +2536,23 @@ def _render_screenplay_source(source_text: str, budget: int = SCREENPLAY_SOURCE_
 
 def _character_resolution_prompt_block(episode: dict) -> str:
     """把剧本预检的姓名消歧结果转成生产硬合同。"""
-    rows: list[str] = []
-    for item in episode.get("character_resolutions") or []:
-        if not isinstance(item, dict):
-            continue
-        source_label = str(item.get("source_label") or "").strip()
-        canonical_name = str(item.get("canonical_name") or "").strip()
-        if not source_label or not canonical_name or source_label == canonical_name:
-            continue
-        kind = "后文真名" if item.get("resolution") == "future_identity" else "一次性路人"
-        rows.append(f"- 原文称谓「{source_label}」 → {kind}「{canonical_name}」")
+    from app.identity_authority import normalize_character_resolutions
+
+    rows = normalize_character_resolutions(
+        episode.get("character_resolutions") or [],
+    )
     if not rows:
-        return "【角色身份预解析】本集没有需要替换的过渡称谓。"
+        return (
+            "【角色身份预解析】本集没有额外称谓决议；人物谱角色的 "
+            "authority_id 使用 bible:<人物谱准确姓名>。"
+        )
     return (
         "【角色身份预解析·剧本发布硬门禁】\n"
-        + "\n".join(rows)
-        + "\n除 dialogue_chains[*].turns[*].source_text 等必须逐字保留的原文证据外，"
-          "scene_outline.characters、对白 speaker、voice_bible、information_ledger.speaker_id "
-          "和 full_script_text 中的角色称谓必须全部使用箭头右侧名称；"
-          "禁止再把箭头左侧称谓当成新角色。"
-          "后续章节只用于确认姓名，严禁在本集泄露其任何剧情。"
+        + json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+        + "\n每个 identities[*].authority_id 必须逐字引用上述 authority_id；"
+          "人物谱准确姓名使用 bible:<姓名>。不得自行改写或猜测 authority_id。"
+          "除 source_text 等逐字原文证据外，所有展示姓名必须使用对应 canonical_name。"
+          "后续章节只用于确认身份，严禁在本集泄露其剧情。"
     )
 
 
@@ -4432,7 +4445,9 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
    均由后端根据 units 顺序、resulting_state、speaker_key、原文锚点和动作文本确定性生成。
 6. 复杂动作的自然阶段直接写成同一 event_key 下有序的多个 action unit；
    后端据此建立 action_phases 和可跨镜边界。
-7. identities 覆盖所有可见身份和说话人。人物谱角色 display_name 必须逐字使用人物谱姓名；
+7. identities 覆盖所有可见身份和说话人。每项必须填写 authority_id：人物谱角色使用
+   bible:<人物谱准确姓名>，过渡称谓与功能身份逐字引用下方身份预解析合同中的 authority_id。
+   人物谱角色 display_name 必须逐字使用人物谱姓名；
    其他身份只要原文有明确称谓，就必须把原文逐字称谓写入 source_names，display_name 使用
    source_names[0]，key 作为全篇稳定实体 ID；不得把原文可区分实体改写成路人编号、
    英文占位符或其他临时名字。原文确实未命名的群众才用地点+职责构成稳定
@@ -4653,6 +4668,11 @@ async def generate_screenplay_baseline(
                 return blueprint_errors
         try:
             return _check_screenplay(_compile_candidate(candidate))
+        except ScreenplayIRIdentityConflictError:
+            # Exact binding cannot decide this semantic identity.  Preserve the
+            # otherwise usable baseline and run the bounded AI adjudicator
+            # before the first fidelity compile instead of regenerating it.
+            return []
         except (TypeError, ValueError) as exc:
             if (
                 isinstance(candidate, ScreenplayGenerationIR)
