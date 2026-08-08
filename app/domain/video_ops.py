@@ -2266,7 +2266,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
             str(observed_state_out),
         )
     reason = str(body.get("reason") or "").strip()
-    if len(reason) < 4 or reason in {"人工横向比较后采用", "默认", "同意"}:
+    if len(reason) < 4:
         raise HTTPException(422, "请填写有效的采用理由（至少 4 个字，说明质量、成本或版本比较）")
     evidence_repository.commit_artifact(
         None,

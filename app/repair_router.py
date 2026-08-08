@@ -170,14 +170,14 @@ def route_issues(
     messages = [issue.message for issue in normalized if issue.message]
     diagnosis = dict(semantic_diagnosis or {})
 
-    # These are execution-state facts, not story semantics.  Prefer structured
-    # evidence and retain legacy codes only as a transport compatibility layer.
+    # These are execution-state facts, not story semantics.  They must arrive
+    # as structured evidence; an issue code never changes the repair route.
     operational_kind = next((
         str(issue.evidence.get("operational_kind") or "")
         for issue in normalized
         if issue.evidence.get("operational_kind")
     ), "")
-    if operational_kind == "provider_unavailable" or any(c == "PROVIDER_UNAVAILABLE" for c in codes):
+    if operational_kind == "provider_unavailable":
         return RepairPlan(
             level="L5",
             strategy="waiting_retry",
@@ -188,7 +188,7 @@ def route_issues(
             reason="provider_unavailable",
             pause_state="PAUSED_EXTERNAL",
         )
-    if operational_kind == "upstream_version_changed" or any(c == "UPSTREAM_VERSION_CHANGED" for c in codes):
+    if operational_kind == "upstream_version_changed":
         return RepairPlan(
             level="L5",
             strategy="waiting_authorization",

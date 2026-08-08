@@ -376,10 +376,6 @@ def max_character_reference_images() -> int:
     return max(1, int_setting("video_reference_max_character_images", 1))
 
 
-def _contains_any(text: str, words: list[str]) -> bool:
-    return any(w.lower() in text for w in words)
-
-
 def _parse_ref_prompts(raw: Any) -> list[dict[str, str]]:
     """归一化模型给出的「新参考图」提示词列表。每项保留合法的 type 与非空 prompt。"""
     if not isinstance(raw, list):

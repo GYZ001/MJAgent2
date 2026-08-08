@@ -250,7 +250,7 @@ export function locationFor(
   if (view === "monitor") return "/monitor";
   if (!projectId) return "/workspaces";
   const project = `/projects/${encodeURIComponent(projectId)}`;
-  if (view === "observability") return `${project}/observability/runs`;
+  if (view === "observability") return `${project}/observability/jobs`;
   if (view === "reader") return `${project}/reader/${chapterIdx ?? 1}`;
   if (
     view === "script" ||
@@ -689,8 +689,8 @@ export default function App() {
     if (nextProjectId === projectId) return;
     const intent = new URLSearchParams(window.location.search);
     if (view === "studio" && intent.get("intent") === "observability") {
-      const requestedTab = intent.get("tab") || "runs";
-      const tab = ["runs", "jobs", "calls"].includes(requestedTab) ? requestedTab : "runs";
+      const requestedTab = intent.get("tab") || "jobs";
+      const tab = ["jobs", "calls"].includes(requestedTab) ? requestedTab : "jobs";
       const target = `/projects/${encodeURIComponent(nextProjectId)}/observability/${tab}`;
       requestNavigation(target, () => {
         window.history.pushState({}, "", target);
@@ -700,7 +700,7 @@ export default function App() {
     }
     if (view === "observability") {
       const currentTab = window.location.pathname.split("/").filter(Boolean).at(-1);
-      const tab = ["runs", "jobs", "calls"].includes(currentTab || "") ? currentTab : "runs";
+      const tab = ["jobs", "calls"].includes(currentTab || "") ? currentTab : "jobs";
       const target = `/projects/${encodeURIComponent(nextProjectId)}/observability/${tab}`;
       requestNavigation(target, () => {
         window.history.pushState({}, "", target);
@@ -1048,16 +1048,23 @@ function LegacyMonitorRedirect({
       void api.get(`/observability/resolve?${objectQuery}`).then((result: {
         project_id: string;
         section: "runs" | "jobs" | "calls";
+        object_id: string;
       }) => {
         params.delete("section");
-        move(`/projects/${encodeURIComponent(result.project_id)}/observability/${result.section}${params.toString() ? `?${params}` : ""}`);
+        const section = result.section === "runs" ? "jobs" : result.section;
+        if (result.section === "runs") {
+          params.delete("run_id");
+          params.set("job_id", result.object_id);
+          params.set("source", "run");
+        }
+        move(`/projects/${encodeURIComponent(result.project_id)}/observability/${section}${params.toString() ? `?${params}` : ""}`);
       }).catch((error) => {
         toast(`旧观测链接无法迁移：${(error as Error).message}`, true);
         move("/workspaces");
       });
       return;
     }
-    const nextSection = ["runs", "jobs", "calls"].includes(section) ? section : "runs";
+    const nextSection = ["jobs", "calls"].includes(section) ? section : "jobs";
     move(`/workspaces?intent=observability&tab=${nextSection}`);
   }, [loaded, toast]);
   return <div className="empty route-loading" role="status">正在迁移旧观测链接…</div>;

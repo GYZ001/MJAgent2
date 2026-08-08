@@ -912,14 +912,6 @@ def _recover_outline_from_current_artifact(
         )
         if value
     }
-    repairable_outline_codes = {
-        "OUTLINE_EMPTY",
-        "OUTLINE_HARD_LIMIT",
-        "OUTLINE_ORDER_INVALID",
-        "OUTLINE_DURATION_INVALID",
-        "OUTLINE_KEY_LINE_CAPACITY_INVALID",
-        "OUTLINE_KEY_LINE_SPEAKER_MIXED",
-    }
     from app.loops.base import is_structural_issue
 
     for artifact_id in dict.fromkeys(candidate_ids):
@@ -968,9 +960,8 @@ def _recover_outline_from_current_artifact(
                 except (TypeError, ValueError):
                     requires_format_repair = True
                     break
-                if (
-                    issue.code in repairable_outline_codes
-                    or is_structural_issue(issue)
+                if is_structural_issue(issue) or bool(
+                    (issue.evidence or {}).get("requires_regeneration", False)
                 ):
                     requires_format_repair = True
                     break

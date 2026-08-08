@@ -12,9 +12,9 @@ import json
 import math
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from app.db import get_conn, get_setting
 from app.evidence import repository as evidence_repository
@@ -96,25 +96,15 @@ class ScreenplayEnvelopeExperience(BaseModel):
 
 
 class ScreenplayEnvelopeIR(BaseModel):
-    contract_version: str = SCREENPLAY_ENVELOPE_VERSION
+    contract_version: Literal["screenplay-envelope.v1"] = SCREENPLAY_ENVELOPE_VERSION
     episode_no: int
     metadata: ScreenplayEnvelopeMetadata
     experience: ScreenplayEnvelopeExperience
     blueprint_hash: str
     identity_registry_hash: str
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_contract(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        normalized = dict(value)
-        normalized["contract_version"] = SCREENPLAY_ENVELOPE_VERSION
-        return normalized
-
-
 class ScreenplaySceneShardPlan(BaseModel):
-    contract_version: str = SCREENPLAY_SHARD_PLAN_VERSION
+    contract_version: Literal["screenplay-scene-shard-plan.v1"] = SCREENPLAY_SHARD_PLAN_VERSION
     shard_id: str
     scene_plan_keys: list[str]
     source_segment_ids: list[str]
@@ -137,7 +127,7 @@ class UnresolvedParticipant(BaseModel):
 
 
 class ScreenplaySceneShardIR(BaseModel):
-    contract_version: str = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v1"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
@@ -148,16 +138,6 @@ class ScreenplaySceneShardIR(BaseModel):
     boundary_hash: str = ""
     blueprint_hash: str = ""
     identity_registry_hash: str = ""
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_contract(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        normalized = dict(value)
-        normalized["contract_version"] = SCREENPLAY_SCENE_SHARD_VERSION
-        return normalized
-
 
 class ScreenplaySceneShardError(ValueError):
     def __init__(self, shard_id: str, errors: list[str]):
@@ -170,6 +150,24 @@ class ScreenplaySceneMergeError(ValueError):
     def __init__(self, errors: list[str]):
         self.errors = list(errors)
         super().__init__("；".join(errors[:20]))
+
+
+class ScreenplaySceneShardOwnershipLost(RuntimeError):
+    """A provider response returned after another run acquired the episode."""
+
+
+def _assert_episode_owner(episode_id: str) -> None:
+    trace = current_trace()
+    if not trace.run_id:
+        return
+    row = get_conn().execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if row and row["active_screenplay_run_id"] not in {None, trace.run_id}:
+        raise ScreenplaySceneShardOwnershipLost(
+            "场次分片返回时剧集 owner 已变化，旧 worker 不得持久化结果"
+        )
 
 
 def blueprint_content_hash(blueprint: NarrativeBlueprint) -> str:
@@ -376,8 +374,8 @@ def validate_screenplay_scene_shard(
             + "、".join(item.source_label for item in shard.unresolved_participants)
         )
     actual_consumed: list[str] = []
-    seen_event_keys: set[str] = set()
-    seen_chain_keys: set[str] = set()
+    event_owner: dict[str, str] = {}
+    chain_owner: dict[str, str] = {}
     for scene in shard.scenes:
         expected_scene = scene_plans.get(scene.key)
         if expected_scene is None:
@@ -402,12 +400,13 @@ def validate_screenplay_scene_shard(
             if unit.event_key:
                 # Reuse inside a scene denotes phases of one event; reuse across
                 # scenes is not allowed before global namespacing.
-                scoped_event = f"{scene.key}:{unit.event_key}"
-                if scoped_event in seen_event_keys and scene.key not in scoped_event:
+                previous_owner = event_owner.setdefault(unit.event_key, scene.key)
+                if previous_owner != scene.key:
                     errors.append(f"跨场 event_key 重复：{unit.event_key}")
-                seen_event_keys.add(scoped_event)
             if unit.chain_key:
-                seen_chain_keys.add(f"{scene.key}:{unit.chain_key}")
+                previous_owner = chain_owner.setdefault(unit.chain_key, scene.key)
+                if previous_owner != scene.key:
+                    errors.append(f"跨场 chain_key 重复：{unit.chain_key}")
         missing_for_scene = [
             source_id for source_id in expected_scene.source_segment_ids
             if source_id not in {
@@ -419,8 +418,8 @@ def validate_screenplay_scene_shard(
             errors.append(
                 f"{scene.key} 未消费来源：{','.join(missing_for_scene)}"
             )
-    if set(shard.consumed_source_ids) != set(actual_consumed):
-        errors.append("consumed_source_ids 必须等于 units 的实际来源并集")
+    if shard.consumed_source_ids != actual_consumed:
+        errors.append("consumed_source_ids 必须按首次消费顺序等于 units 的实际来源并集")
     for field, expected in (
         ("source_hash", plan.source_hash),
         ("boundary_hash", plan.boundary_hash),
@@ -428,7 +427,7 @@ def validate_screenplay_scene_shard(
         ("identity_registry_hash", plan.identity_registry_hash),
     ):
         actual = str(getattr(shard, field) or "")
-        if actual and actual != expected:
+        if actual != expected:
             errors.append(f"{field} 不匹配")
     return errors
 
@@ -441,15 +440,18 @@ def _namespace_shard_scene_keys(
         event_map: dict[str, str] = {}
         chain_map: dict[str, str] = {}
         data = scene.model_dump(mode="json")
+        scene_namespace = re.sub(r"[^A-Za-z0-9_]+", "_", scene.key).strip("_").lower()
         for unit in data.get("units") or []:
             event_key = str(unit.get("event_key") or "event")
             unit["event_key"] = event_map.setdefault(
-                event_key, f"{shard.shard_id.lower()}_{event_key}"
+                event_key,
+                f"{shard.shard_id.lower()}_{scene_namespace}_{event_key}",
             )
             chain_key = str(unit.get("chain_key") or "")
             if chain_key:
                 unit["chain_key"] = chain_map.setdefault(
-                    chain_key, f"{shard.shard_id.lower()}_{chain_key}"
+                    chain_key,
+                    f"{shard.shard_id.lower()}_{scene_namespace}_{chain_key}",
                 )
         scenes.append(IRScene.model_validate(data))
     return scenes
@@ -560,6 +562,7 @@ async def generate_screenplay_envelope(
     identity_artifact_id: str | None = None,
 ) -> tuple[ScreenplayEnvelopeIR, str]:
     episode_id = str(episode.get("id") or f"episode-{episode['episode_no']}")
+    _assert_episode_owner(episode_id)
     blueprint_hash = blueprint_content_hash(blueprint)
     cached = _latest_validated_artifact(
         episode_id=episode_id,
@@ -623,6 +626,7 @@ async def generate_screenplay_envelope(
             errors.append("本集无 cliffhanger，ending_hook 必须为空")
         return errors
 
+    attempts: list[dict[str, Any]] = []
     envelope = await model_gateway.chat_structured(
         [{"role": "user", "content": prompt}],
         model_type=ScreenplayEnvelopeIR,
@@ -647,7 +651,9 @@ async def generate_screenplay_envelope(
             "input_chars": len(prompt),
             "source_count": 0,
         },
+        on_attempt=attempts.append,
     )
+    _assert_episode_owner(episode_id)
     trace = current_trace()
     raw_artifact = evidence_repository.create_artifact(
         EvidenceArtifact(
@@ -660,7 +666,7 @@ async def generate_screenplay_envelope(
                 "operation_id": (
                     f"screenplay.envelope:{blueprint_hash}:{identity_registry_hash}"
                 ),
-                "validated_payload": envelope.model_dump(mode="json"),
+                "attempts": attempts,
             },
             parent_artifact_ids=[
                 value for value in (blueprint_artifact_id, identity_artifact_id) if value
@@ -770,6 +776,7 @@ async def generate_screenplay_scene_shards(
     async def generate_one(
         plan: ScreenplaySceneShardPlan,
     ) -> tuple[ScreenplaySceneShardIR, str]:
+        _assert_episode_owner(episode_id)
         cached = _latest_validated_artifact(
             episode_id=episode_id,
             artifact_type="screenplay_scene_shard",
@@ -808,8 +815,8 @@ async def generate_screenplay_scene_shards(
             plan=plan,
             blueprint_scene_plans=selected_scene_plans,
             blueprint_nodes=[
-                node_map[key].model_dump(mode="json")
-                for key in selected_node_keys if key in node_map
+                node.model_dump(mode="json")
+                for node in blueprint.nodes if node.key in selected_node_keys
             ],
             source_by_id=source_by_id,
             identity_registry=identity_registry,
@@ -828,6 +835,7 @@ async def generate_screenplay_scene_shards(
                 "status": "running", "attempt": 1,
             })
             emit_progress()
+            attempts: list[dict[str, Any]] = []
             shard = await model_gateway.chat_structured(
                 [{"role": "user", "content": prompt}],
                 model_type=ScreenplaySceneShardIR,
@@ -864,7 +872,9 @@ async def generate_screenplay_scene_shards(
                     source_id: source_by_id.get(source_id, "")
                     for source_id in plan.source_segment_ids
                 }, ensure_ascii=False, separators=(",", ":")),
+                on_attempt=attempts.append,
             )
+        _assert_episode_owner(episode_id)
         trace = current_trace()
         parents = [
             value for value in (blueprint_artifact_id, identity_artifact_id) if value
@@ -881,7 +891,7 @@ async def generate_screenplay_scene_shards(
                     "operation_id": (
                         f"screenplay.scene-shard:{plan.source_hash}:{plan.boundary_hash}"
                     ),
-                    "validated_payload": shard.model_dump(mode="json"),
+                    "attempts": attempts,
                 },
                 parent_artifact_ids=parents,
                 contract_version=SCREENPLAY_SCENE_SHARD_VERSION,

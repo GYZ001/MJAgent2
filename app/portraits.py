@@ -728,6 +728,10 @@ async def _discover_character_candidates_legacy(
                 "kind": "mentioned" if item.get("kind") == "mentioned" else "onscreen",
                 "evidence": str(item.get("evidence") or "").strip()[:80],
                 "future_evidence": future_evidence[:120],
+                "source_segment_id": str(
+                    item.get("source_segment_id") or ""
+                ).strip(),
+                "source_quote": str(item.get("source_quote") or "").strip()[:240],
                 "model_source_label": (
                     model_source_label
                     if model_source_label != source_label else ""
@@ -991,9 +995,16 @@ def _attach_candidate_source_evidence(
 ) -> list[dict]:
     """Bind candidate labels to one owned SRC without guessing from vocabulary."""
     segments = index_source_segments(source_text)
+    by_id = {segment.segment_id: segment for segment in segments}
     for candidate in candidates:
         label = str(candidate.get("source_label") or "").strip()
-        owned = [segment for segment in segments if label and label in segment.text]
+        cited_id = str(candidate.get("source_segment_id") or "").strip()
+        cited = by_id.get(cited_id)
+        owned = (
+            [cited]
+            if cited is not None and label and label in cited.text
+            else [segment for segment in segments if label and label in segment.text]
+        )
         # A short label is accepted only when the cited source span has one
         # occurrence.  Ambiguous spans remain unresolved for structural audit.
         if len(owned) == 1 and (
@@ -1001,7 +1012,12 @@ def _attach_candidate_source_evidence(
             or owned[0].text.count(label) == 1
         ):
             candidate["source_segment_id"] = owned[0].segment_id
-            candidate["source_quote"] = owned[0].text
+            model_quote = str(candidate.get("source_quote") or "").strip()
+            candidate["source_quote"] = (
+                model_quote
+                if model_quote and model_quote in owned[0].text and label in model_quote
+                else owned[0].text
+            )
         else:
             candidate["source_segment_id"] = ""
             candidate["source_quote"] = ""
@@ -1258,41 +1274,108 @@ async def discover_character_candidates(
     future_label: str = "",
     existing_resolutions: list[dict] | None = None,
     structural_evidence: list[dict] | None = None,
+    scope_id: str | None = None,
 ) -> list[dict]:
     """Targeted identity pipeline: current, unresolved future, typed audit."""
-    current = await extract_current_identity_candidates(
-        source_text,
-        bible,
-        episode_no,
-        draft_text=draft_text,
-        existing_resolutions=existing_resolutions,
-    )
-    resolved = await resolve_future_identity_candidates(
-        current,
-        source_text=source_text,
-        future_text=future_text,
-        bible=bible,
-        episode_no=episode_no,
-        future_label=future_label,
-    )
-    audited = await audit_identity_coverage_from_structural_evidence(
-        resolved,
-        structural_evidence=structural_evidence,
-        source_text=source_text,
-        bible=bible,
-        episode_no=episode_no,
-    )
+    artifact_scope_id = str(scope_id or f"episode-{episode_no}")
+    targeted = str(
+        get_setting("screenplay_targeted_identity_enabled") or "true"
+    ).strip().lower() not in {"0", "false", "off", "no"}
+    input_hash = evidence_repository.content_hash({
+        "contract_version": "screenplay-identity-discovery.v2",
+        "mode": "targeted" if targeted else "legacy",
+        "episode_no": episode_no,
+        "source_text": source_text,
+        "draft_text": draft_text,
+        "future_text": future_text,
+        "future_label": future_label,
+        "bible": bible.model_dump(mode="json"),
+        "existing_resolutions": existing_resolutions or [],
+        "structural_evidence": structural_evidence or [],
+    })
+    cached_rows = get_conn().execute(
+        """SELECT content_json FROM artifacts
+             WHERE scope_type='episode' AND scope_id=?
+               AND type='screenplay_identity_discovery' AND status='validated'
+             ORDER BY created_at DESC LIMIT 20""",
+        (artifact_scope_id,),
+    ).fetchall()
+    for row in cached_rows:
+        try:
+            cached = json.loads(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            cached.get("contract_version") == "screenplay-identity-discovery.v2"
+            and cached.get("input_hash") == input_hash
+            and isinstance(cached.get("candidates"), list)
+        ):
+            return [dict(item) for item in cached["candidates"] if isinstance(item, dict)]
+
+    if targeted:
+        current = await extract_current_identity_candidates(
+            source_text,
+            bible,
+            episode_no,
+            draft_text=draft_text,
+            existing_resolutions=existing_resolutions,
+        )
+        resolved = await resolve_future_identity_candidates(
+            current,
+            source_text=source_text,
+            future_text=future_text,
+            bible=bible,
+            episode_no=episode_no,
+            future_label=future_label,
+        )
+        audited = await audit_identity_coverage_from_structural_evidence(
+            resolved,
+            structural_evidence=structural_evidence,
+            source_text=source_text,
+            bible=bible,
+            episode_no=episode_no,
+        )
+    else:
+        audited = _attach_candidate_source_evidence(
+            await _discover_character_candidates_legacy(
+                source_text,
+                bible,
+                episode_no,
+                draft_text=draft_text,
+                future_text=future_text,
+                future_label=future_label,
+                existing_resolutions=existing_resolutions,
+            ),
+            source_text,
+        )
     trace = None
     try:
         from app.observability.tracing import current_trace
         trace = current_trace()
     except Exception:  # noqa: BLE001 - evidence is optional outside workflows
         pass
+    raw_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_identity_discovery_raw",
+            scope_type="episode",
+            scope_id=artifact_scope_id,
+            status="candidate",
+            trust_level="T0",
+            content={
+                "contract_version": "screenplay-identity-discovery.v2",
+                "input_hash": input_hash,
+                "mode": "targeted" if targeted else "legacy",
+                "model_candidates": audited,
+            },
+            contract_version="screenplay-identity-discovery.v2",
+        ),
+        step_run_id=getattr(trace, "step_run_id", None),
+    )
     evidence_repository.create_artifact(
         EvidenceArtifact(
             type="screenplay_identity_discovery",
             scope_type="episode",
-            scope_id=str(getattr(trace, "scope_id", "") or f"episode-{episode_no}"),
+            scope_id=artifact_scope_id,
             status="validated",
             trust_level="T1",
             content={
@@ -1300,7 +1383,10 @@ async def discover_character_candidates(
                 "episode_no": episode_no,
                 "candidates": audited,
                 "source_hash": evidence_repository.content_hash(source_text),
+                "input_hash": input_hash,
+                "mode": "targeted" if targeted else "legacy",
             },
+            parent_artifact_ids=[raw_artifact["id"]],
             contract_version="screenplay-identity-discovery.v2",
         ),
         step_run_id=getattr(trace, "step_run_id", None),
@@ -2572,6 +2658,7 @@ async def ensure_cards_for_text(
     *,
     draft_text: str = "",
     generate_portraits: bool = True,
+    _precomputed_candidates: list[dict] | None = None,
 ) -> dict:
     """发现并补人物卡；同时输出供剧本使用的姓名消歧表。"""
     conn = get_conn()
@@ -2591,10 +2678,15 @@ async def ensure_cards_for_text(
     future_text, future_label = _future_chapter_context(
         conn, project_id, episode_no,
     )
-    candidates = await discover_character_candidates(
-        source_text, bible, episode_no, draft_text=draft_text,
-        future_text=future_text, future_label=future_label,
-        existing_resolutions=existing_resolutions,
+    candidates = (
+        [dict(item) for item in _precomputed_candidates]
+        if _precomputed_candidates is not None
+        else await discover_character_candidates(
+            source_text, bible, episode_no, draft_text=draft_text,
+            future_text=future_text, future_label=future_label,
+            existing_resolutions=existing_resolutions,
+            scope_id=str(episode_row["id"]) if episode_row else None,
+        )
     )
     known = {c.name for c in bible.characters}
     unknown_by_name: dict[str, list[dict]] = {}
@@ -2712,6 +2804,194 @@ async def ensure_cards_for_text(
         "errors": errors,
         "warnings": warnings,
     }
+
+
+async def ensure_structural_identity_coverage(
+    project_id: str,
+    episode_id: str,
+    episode_no: int,
+    source_text: str,
+    bible: Bible,
+    structural_evidence: list[dict],
+) -> dict:
+    """Materialize only identity gaps evidenced by a validated Blueprint/IR.
+
+    This is the replacement for the old unconditional third full-chapter scan:
+    current/future candidates are reused from the normalized discovery Artifact,
+    and the model sees only unresolved typed references plus their owned SRC.
+    """
+    conn = get_conn()
+    structural_hash = evidence_repository.content_hash(structural_evidence)
+    rows = conn.execute(
+        """SELECT id,content_json FROM artifacts
+             WHERE scope_type='episode' AND scope_id=?
+               AND type='screenplay_identity_discovery' AND status='validated'
+             ORDER BY created_at DESC LIMIT 20""",
+        (episode_id,),
+    ).fetchall()
+    base_candidates: list[dict] = []
+    parent_artifact_id = ""
+    for row in rows:
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            payload.get("mode") == "structural_coverage"
+            and payload.get("structural_evidence_hash") == structural_hash
+            and isinstance(payload.get("candidates"), list)
+        ):
+            return {
+                "checked": 0,
+                "candidates": payload["candidates"],
+                "added": [],
+                "resolutions": load_screenplay_character_resolutions(
+                    conn, episode_id
+                ),
+                "errors": [],
+                "warnings": [],
+                "reused": True,
+            }
+        if isinstance(payload.get("candidates"), list):
+            base_candidates = [
+                dict(item) for item in payload["candidates"]
+                if isinstance(item, dict)
+            ]
+            parent_artifact_id = str(row["id"])
+            break
+    audited = await audit_identity_coverage_from_structural_evidence(
+        base_candidates,
+        structural_evidence=structural_evidence,
+        source_text=source_text,
+        bible=bible,
+        episode_no=episode_no,
+    )
+    base_keys = {
+        (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+        )
+        for item in base_candidates
+    }
+    additions = [
+        item for item in audited
+        if (
+            str(item.get("source_label") or "").strip(),
+            str(item.get("identity_group") or "").strip(),
+        ) not in base_keys
+    ]
+    if not additions:
+        trace = None
+        try:
+            from app.observability.tracing import current_trace
+
+            trace = current_trace()
+        except Exception:  # noqa: BLE001
+            pass
+        raw_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_identity_discovery_raw",
+                scope_type="episode",
+                scope_id=episode_id,
+                status="candidate",
+                trust_level="T0",
+                content={
+                    "mode": "structural_coverage",
+                    "structural_evidence_hash": structural_hash,
+                    "model_candidates": [],
+                },
+                parent_artifact_ids=[parent_artifact_id] if parent_artifact_id else [],
+                contract_version="screenplay-identity-discovery.v2",
+            ),
+            step_run_id=getattr(trace, "step_run_id", None),
+        )
+        evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_identity_discovery",
+                scope_type="episode",
+                scope_id=episode_id,
+                status="validated",
+                trust_level="T1",
+                content={
+                    "contract_version": "screenplay-identity-discovery.v2",
+                    "episode_no": episode_no,
+                    "mode": "structural_coverage",
+                    "candidates": audited,
+                    "source_hash": evidence_repository.content_hash(source_text),
+                    "structural_evidence_hash": structural_hash,
+                },
+                parent_artifact_ids=[raw_artifact["id"]],
+                contract_version="screenplay-identity-discovery.v2",
+            ),
+            step_run_id=getattr(trace, "step_run_id", None),
+        )
+        return {
+            "checked": 0,
+            "candidates": audited,
+            "added": [],
+            "resolutions": [],
+            "errors": [],
+            "warnings": [],
+        }
+    result = await ensure_cards_for_text(
+        project_id,
+        episode_no,
+        source_text,
+        bible,
+        generate_portraits=False,
+        _precomputed_candidates=additions,
+    )
+    persisted = persist_screenplay_character_resolutions(
+        conn,
+        episode_id,
+        result.get("resolutions") or [],
+    )
+    result["resolutions"] = persisted
+    trace = None
+    try:
+        from app.observability.tracing import current_trace
+
+        trace = current_trace()
+    except Exception:  # noqa: BLE001
+        pass
+    raw_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_identity_discovery_raw",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="candidate",
+            trust_level="T0",
+            content={
+                "mode": "structural_coverage",
+                "structural_evidence_hash": structural_hash,
+                "model_candidates": additions,
+            },
+            parent_artifact_ids=[parent_artifact_id] if parent_artifact_id else [],
+            contract_version="screenplay-identity-discovery.v2",
+        ),
+        step_run_id=getattr(trace, "step_run_id", None),
+    )
+    evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_identity_discovery",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T1",
+            content={
+                "contract_version": "screenplay-identity-discovery.v2",
+                "episode_no": episode_no,
+                "mode": "structural_coverage",
+                "candidates": audited,
+                "source_hash": evidence_repository.content_hash(source_text),
+                "structural_evidence_hash": structural_hash,
+            },
+            parent_artifact_ids=[raw_artifact["id"]],
+            contract_version="screenplay-identity-discovery.v2",
+        ),
+        step_run_id=getattr(trace, "step_run_id", None),
+    )
+    return result
 
 
 def _candidate_requires_identity_card(item: dict, known_names: set[str]) -> bool:

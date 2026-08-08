@@ -9,7 +9,6 @@ import {
 import { api } from "../api";
 import { useNav, usePoll } from "../App";
 import type { NavigationGuardPrompt } from "../App";
-import RunCenter from "../components/harness/RunCenter";
 import JsonViewer from "../components/JsonViewer";
 import SearchField from "../components/SearchField";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -241,7 +240,6 @@ const SECTIONS: Array<{
   description: string;
 }> = [
   { key: "overview", label: "总览", description: "关键状态与异常" },
-  { key: "runs", label: "运行中心", description: "步骤与人工确认" },
   { key: "jobs", label: "任务队列", description: "生成任务与失败" },
   { key: "models", label: "模型中心", description: "模型分配与连接" },
   { key: "calls", label: "调用日志", description: "分类、摘要与详情" },
@@ -347,9 +345,11 @@ function assertProjectScope<T extends { scope?: { project_id?: string } }>(paylo
 }
 function querySection() {
   const tail = window.location.pathname.split("/").filter(Boolean).at(-1);
+  if (tail === "runs") return "jobs";
   if (tail && VALID_SECTIONS.has(tail as MonitorSection))
     return tail as MonitorSection;
   const raw = nowQuery().get("section") as MonitorSection | null;
+  if (raw === "runs") return "jobs";
   return raw && VALID_SECTIONS.has(raw) ? raw : "overview";
 }
 function queryTarget(patch: Record<string, string | null>) {
@@ -690,55 +690,20 @@ function Pagination({
   );
 }
 
-function JsonSection({
-  label,
-  raw,
-  size,
-}: {
-  label: string;
-  raw?: string;
-  size: number;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <section className="call-json-section">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span>{label}</span>
-        <small>
-          {size.toLocaleString()} 字节 · {open ? "收起" : "展开并渲染"}
-        </small>
-      </button>
-      {open && (
-        <div className="call-json-body">
-          <JsonViewer raw={raw} collapsed={false} maxHeight="45vh" />
-        </div>
-      )}
-    </section>
-  );
-}
-
 function CallDrawer({
   call,
   projectId,
   onClose,
-  onRun,
 }: {
   call: Call | CallDetail;
   projectId?: string;
   onClose: () => void;
-  onRun: (id: string) => void;
 }) {
   const [detail, setDetail] = useState<CallDetail | null>(
     "request_json_size" in call ? call : null,
   );
+  const [tab, setTab] = useState<"input" | "output">("input");
   const [error, setError] = useState("");
-  const [copied, setCopied] = useState("");
-  const [downloadError, setDownloadError] = useState("");
-  const [downloading, setDownloading] = useState(false);
   const drawerRef = useFocusTrap(true, onClose);
   const load = useCallback(async () => {
     setError("");
@@ -765,35 +730,9 @@ function CallDrawer({
     if ("request_json_size" in call) setDetail(call);
     else void load();
   }, [call, load]);
-  const copy = async (label: string, value?: string) => {
-    try {
-      await navigator.clipboard.writeText(value || "");
-      setCopied(
-        `${label}已复制（${projectId ? "完整原始数据" : "系统脱敏版本"}）`,
-      );
-    } catch {
-      setCopied("复制失败，请手动选择文本");
-    }
-  };
-  const download = async () => {
-    setDownloading(true);
-    setDownloadError("");
-    try {
-      const blob = await api.download(projectId
-        ? `/projects/${encodeURIComponent(projectId)}/observability/calls/${call.id}/download`
-        : `/system/calls/${call.id}/download`);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `provider-call-${call.id}-${projectId ? "raw" : "masked"}.json`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setDownloadError((e as Error).message);
-    } finally {
-      setDownloading(false);
-    }
-  };
+  const outputRaw = detail?.response_json || (
+    detail?.error ? JSON.stringify({ error: detail.error }, null, 2) : undefined
+  );
   return (
     <div
       className="monitor-drawer-backdrop"
@@ -803,7 +742,7 @@ function CallDrawer({
       }}
     >
       <aside
-        className="monitor-drawer call-drawer"
+        className="monitor-drawer call-drawer call-io-drawer"
         role="dialog"
         aria-modal="true"
         aria-labelledby="call-title"
@@ -813,18 +752,16 @@ function CallDrawer({
       >
         <header>
           <div>
-            <span className="eyebrow">调用详情</span>
-            <h3 id="call-title">{callPurpose(call)}</h3>
+            <span className="eyebrow">单次模型调用</span>
+            <h3 id="call-title">
+              {call.model_label || call.model || "未记录模型"}
+            </h3>
           </div>
           <button onClick={onClose} aria-label="关闭调用详情">
             ×
           </button>
         </header>
-        <div className="call-summary-grid">
-          <div>
-            <span>模型</span>
-            <b>{call.model_label || call.model || "未记录模型"}</b>
-          </div>
+        <div className="call-io-summary">
           <div>
             <span>状态</span>
             <b>{callStatusLabel(call.effective_status)}</b>
@@ -833,54 +770,12 @@ function CallDrawer({
             <span>耗时</span>
             <b>{(call.latency_ms / 1000).toFixed(1)} 秒</b>
           </div>
+          <div><span>开始时间</span><b>{fmtTime(call.ts)}</b></div>
           <div>
-            <span>输入规模</span>
-            <b>
-              {detail
-                ? `${detail.request_json_size.toLocaleString()} 字节`
-                : "详情加载后显示"}
-            </b>
-          </div>
-          <div>
-            <span>错误阶段</span>
-            <b>{call.context?.error_stage || "未记录"}</b>
-          </div>
-          <div>
-            <span>重试关系</span>
-            <b>
-              {call.supersedes_call_id
-                ? `续接 #${call.supersedes_call_id}`
-                : call.superseded_by_call_id
-                  ? `续跑为 #${call.superseded_by_call_id}`
-                  : "首次尝试"}
-            </b>
-          </div>
-          <div>
-            <span>下一步</span>
-            <b>
-              {call.run_id
-                ? "查看关联运行任务"
-                : call.error
-                  ? "按错误建议处理"
-                  : "无需处理"}
-            </b>
+            <span>结束时间</span>
+            <b>{fmtTime(call.ts + call.latency_ms / 1000)}</b>
           </div>
         </div>
-        {call.error && (
-          <div className="monitor-impact">
-            <b>当前影响：</b>
-            <span>{callNextStep(call)}</span>
-            <details className="monitor-error-details">
-              <summary>查看错误详情</summary>
-              <pre>{call.error}</pre>
-            </details>
-          </div>
-        )}
-        {call.run_id && (
-          <button className="btn small" onClick={() => onRun(call.run_id!)}>
-            查看关联运行任务
-          </button>
-        )}
         {error && (
           <div className="monitor-state error" role="alert">
             <b>调用详情加载失败</b>
@@ -893,54 +788,40 @@ function CallDrawer({
           </div>
         )}
         {!detail && !error && (
-          <div className="monitor-loading">
-            正在按需加载{projectId ? "完整原始" : "系统脱敏"}详情…
-          </div>
+          <div className="monitor-loading">正在加载模型输入输出…</div>
         )}
         {detail && (
-          <>
-            <div className="monitor-state ready">
-              {projectId
-                ? "当前展示项目观测账本中的完整原始数据，未做文字替换、星号遮罩或字段省略。"
-                : "系统级调用详情继续遵循全局脱敏策略。"}
-            </div>
-            <JsonSection
-              label="发送内容"
-              raw={detail.request_json}
-              size={detail.request_json_size}
-            />
-            <JsonSection
-              label="接收内容"
-              raw={detail.response_json}
-              size={detail.response_json_size}
-            />
-            <JsonSection
-              label="元信息"
-              raw={detail.meta}
-              size={detail.meta_size}
-            />
-            <div className="monitor-drawer-actions">
-              <span role="status">{copied}</span>
+          <div className="call-io-workspace">
+            <nav className="call-io-tabs" aria-label="模型调用数据">
               <button
-                onClick={() =>
-                  void copy("详情", JSON.stringify(detail, null, 2))
-                }
+                type="button"
+                className={tab === "input" ? "active" : ""}
+                aria-current={tab === "input" ? "page" : undefined}
+                onClick={() => setTab("input")}
               >
-                复制{projectId ? "完整原始" : "脱敏"}详情
+                输入
               </button>
-              <button disabled={downloading} onClick={() => void download()}>
-                {downloading
-                  ? "下载中…"
-                  : `下载${projectId ? "完整原始" : "脱敏"} JSON`}
+              <button
+                type="button"
+                className={tab === "output" ? "active" : ""}
+                aria-current={tab === "output" ? "page" : undefined}
+                onClick={() => setTab("output")}
+              >
+                输出
               </button>
+            </nav>
+            <div className="call-io-json">
+              {(tab === "input" ? detail.request_json : outputRaw) ? (
+                <JsonViewer
+                  raw={tab === "input" ? detail.request_json : outputRaw}
+                  collapsed={false}
+                  maxHeight="calc(100vh - 280px)"
+                />
+              ) : (
+                <div className="empty">本次调用没有记录{tab === "input" ? "输入" : "输出"}</div>
+              )}
             </div>
-            {downloadError && (
-              <div className="monitor-state error" role="alert">
-                下载失败：{downloadError}
-                <button onClick={() => void download()}>重试下载</button>
-              </div>
-            )}
-          </>
+          </div>
         )}
       </aside>
     </div>
@@ -952,13 +833,11 @@ function JobDrawer({
   projectId,
   onClose,
   onChanged,
-  onRun,
 }: {
   job: Job;
   projectId?: string;
   onClose: () => void;
   onChanged: () => void;
-  onRun: (id: string) => void;
 }) {
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
@@ -1140,9 +1019,6 @@ function JobDrawer({
             >
               复制错误码
             </button>
-          )}
-          {job.run_id && (
-            <button onClick={() => onRun(job.run_id!)}>查看运行详情</button>
           )}
           {sourceUrl && (
             <button
@@ -2984,11 +2860,11 @@ export default function MonitorPage({
   const { go, toast, registerNavigationGuard, requestNavigation } = useNav();
   const initial = nowQuery();
   const allowedSections = useMemo(() => mode === "project"
-    ? SECTIONS.filter((item) => ["runs", "jobs", "calls"].includes(item.key))
+    ? SECTIONS.filter((item) => ["jobs", "calls"].includes(item.key))
     : mode === "system"
       ? SECTIONS.filter((item) => ["overview", "models", "settings"].includes(item.key))
       : SECTIONS, [mode]);
-  const defaultSection: MonitorSection = mode === "project" ? "runs" : "overview";
+  const defaultSection: MonitorSection = mode === "project" ? "jobs" : "overview";
   const initialSection = querySection();
   const [activeSection, setActiveSection] =
     useState<MonitorSection>(allowedSections.some((item) => item.key === initialSection)
@@ -2999,7 +2875,7 @@ export default function MonitorPage({
   const pageTitle = mode === "system" ? activeSectionMeta.label : "观测台";
   const pageDescription = mode === "system"
     ? SYSTEM_SECTION_DESCRIPTIONS[activeSection] || activeSectionMeta.description
-    : "仅展示当前项目的运行、任务与调用数据";
+    : "仅展示当前项目的任务与模型调用数据";
   const [urlNotice, setUrlNotice] = useState("");
   const [jobSearch, setJobSearch] = useState(initial.get("job_search") || "");
   const [jobStatus, setJobStatus] = useState(initial.get("job_status") || "");
@@ -3050,10 +2926,6 @@ export default function MonitorPage({
   );
   const [traceTarget, setTraceTarget] = useState<TraceTarget | null>(null);
   const [objectLoadError, setObjectLoadError] = useState("");
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(
-    initial.get("run_id"),
-  );
-  const [focusToken, setFocusToken] = useState(initial.get("focus") || "");
   const [refreshingSection, setRefreshingSection] = useState<MonitorSection | "">("");
   const observabilityBase = projectId
     ? `/projects/${encodeURIComponent(projectId)}/observability`

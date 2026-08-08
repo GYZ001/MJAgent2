@@ -61,7 +61,6 @@ def strategy_for_level(
     chain_position: int = 0,
 ) -> RepairStrategy:
     issues = issues or []
-    codes = {i.code for i in issues}
     if level == "L0":
         return "requeue_no_charge"
     if level == "L1":

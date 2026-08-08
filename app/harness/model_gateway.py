@@ -254,6 +254,7 @@ async def chat_structured(
     temperature: float = 0.1,
     call_meta: dict[str, Any] | None = None,
     repair_context: str = "",
+    on_attempt: Callable[[dict[str, Any]], Any] | None = None,
 ) -> T:
     """Run one typed model operation with separate format/semantic budgets.
 
@@ -312,9 +313,29 @@ async def chat_structured(
             except (TypeError, ValueError, ValidationError) as exc:
                 parse_error = exc
                 continue
-            local_recovery = candidate_no > 0 or not last_raw.lstrip().startswith("{")
+            try:
+                direct_payload = json.loads(last_raw.strip())
+            except (TypeError, ValueError, json.JSONDecodeError):
+                direct_payload = None
+            local_recovery = bool(
+                local_recovery
+                or candidate_no > 0
+                or not isinstance(direct_payload, dict)
+                or direct_payload != payload
+            )
             break
         if parsed is None:
+            if on_attempt is not None:
+                on_attempt({
+                    **meta,
+                    "outcome": "format_error",
+                    "raw_response": last_raw,
+                    "output_chars": len(last_raw),
+                    "local_recovery": local_recovery,
+                    "validation_errors": [
+                        str(parse_error or "找不到完整 JSON 对象")
+                    ],
+                })
             if format_attempt >= max(0, int(format_retry_limit)):
                 detail = str(parse_error or "找不到完整 JSON 对象")
                 raise StructuredFormatError(
@@ -342,7 +363,25 @@ async def chat_structured(
             validation_result = [str(exc)]
         semantic_errors = _validation_messages(validation_result)
         if not semantic_errors:
+            if on_attempt is not None:
+                on_attempt({
+                    **meta,
+                    "outcome": "validated",
+                    "raw_response": last_raw,
+                    "output_chars": len(last_raw),
+                    "local_recovery": local_recovery,
+                    "validation_errors": [],
+                })
             return parsed
+        if on_attempt is not None:
+            on_attempt({
+                **meta,
+                "outcome": "semantic_error",
+                "raw_response": last_raw,
+                "output_chars": len(last_raw),
+                "local_recovery": local_recovery,
+                "validation_errors": semantic_errors[:20],
+            })
         if semantic_attempt >= max(0, int(semantic_retry_limit)):
             raise StructuredSemanticError(
                 f"{operation_id} 业务校验失败：" + "；".join(semantic_errors[:10])

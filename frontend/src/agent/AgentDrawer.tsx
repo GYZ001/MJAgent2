@@ -517,12 +517,12 @@ export default function AgentDrawer({
                 if (context.project_id) go("observability", context.project_id, null);
                 else go("monitor");
                 const params = new URLSearchParams({
-                  run_id: runId,
-                  focus: String(Date.now()),
+                  job_id: runId,
+                  source: "run",
                 });
                 window.history.replaceState({}, "", context.project_id
-                  ? `/projects/${encodeURIComponent(context.project_id)}/observability/runs?${params}`
-                  : `/monitor?section=runs&${params}`);
+                  ? `/projects/${encodeURIComponent(context.project_id)}/observability/jobs?${params}`
+                  : `/monitor?section=jobs&${params}`);
                 window.dispatchEvent(new PopStateEvent("popstate"));
               }}
               onOpenEvidence={(id) => {

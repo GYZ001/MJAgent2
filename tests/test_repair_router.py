@@ -162,12 +162,13 @@ def test_frontier_from_message():
     assert frontier <= 5
 
 
-def test_provider_pauses_external():
+def test_provider_code_alone_does_not_pause_external():
     plan = route_issues([
         _issue("PROVIDER_UNAVAILABLE", "provider timeout", 3),
     ], validated_prefix_end=2)
-    assert plan.pause_state == "PAUSED_EXTERNAL"
-    assert plan.strategy == "waiting_retry"
+    assert plan.pause_state is None
+    assert plan.strategy == "repair_window"
+    assert plan.needs_semantic_selection is True
 
 
 def test_structured_operational_state_pauses_without_story_code_mapping():
