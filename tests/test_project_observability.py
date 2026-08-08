@@ -215,8 +215,12 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
     by_id = {item["id"]: item for item in tree["nodes"]}
     assert tree["scope"]["project_id"] == "p1"
     assert by_id["step:step-1"]["parent_id"] == "run:run-1"
+    assert by_id["step:step-1"]["node_role"] == "business_stage"
     assert by_id["job:job-trace"]["parent_id"] == "step:step-1"
     assert by_id["call:1"]["parent_id"] == "step:step-1"
+    assert by_id["call:1"]["node_role"] == "model_processing"
+    assert by_id["call:1"]["name"] == "生成文本内容"
+    assert by_id["call:1"]["subtitle"] == "模型处理 · 文本生成模型"
 
     step = observability_api._trace_node_detail(
         "p1", "runs", "run-1", "step:step-1", "auto",
@@ -228,9 +232,33 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
     call = observability_api._trace_node_detail(
         "p1", "calls", "1", "call:1", "auto",
     )
-    assert call["input"]["api_key"] == "***"
-    assert "sk-secret-value" not in json.dumps(call, ensure_ascii=False)
+    assert call["input"]["api_key"] == "sk-secret-value"
+    assert call["input"]["prompt"] == "原始提示词"
+    assert "已隐藏" not in json.dumps(call, ensure_ascii=False)
+    assert "***" not in json.dumps(call, ensure_ascii=False)
     assert call["output"]["response"]["result"] == "完成"
+
+
+def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
+    assert observability_api._trace_step_label("character_discovery") == "识别剧本角色"
+    assert (
+        observability_api._trace_step_label("storyboard_shot_12.iteration", 2)
+        == "生成第12镜分镜"
+    )
+    assert observability_api._trace_step_label("unknown_internal_step") == "执行程序处理"
+
+    name, role, method = observability_api._trace_call_semantics("val422_metric")
+    assert (name, role, method) == (
+        "记录结构校验指标",
+        "program_processing",
+        "程序处理 · 本地结构校验",
+    )
+    name, role, method = observability_api._trace_call_semantics("future_prompt")
+    assert (name, role, method) == (
+        "生成业务内容",
+        "model_processing",
+        "模型处理 · 业务生成模型",
+    )
 
 
 def test_trace_routes_reject_foreign_project_before_returning_tree(scoped_db) -> None:

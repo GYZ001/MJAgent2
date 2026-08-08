@@ -705,12 +705,6 @@ async def _screenplay_character_discovery(
     )
 
     try:
-        # #region debug-point A:character-discovery-entry
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"A","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:entry","msg":"[DEBUG] Character discovery entry","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"sourceChars":len(source_text or ""),"draftChars":len(draft_text or ""),"bibleCharacters":len(bible.characters)},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
         result = await ensure_cards_for_text(
             ep["project_id"],
             ep["episode_no"],
@@ -722,12 +716,6 @@ async def _screenplay_character_discovery(
     except StageError:
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转成剧本阶段可恢复诊断
-        # #region debug-point C:character-discovery-exception
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"C","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:exception","msg":"[DEBUG] Character discovery failed","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"draftPresent":bool(draft_text),"errorType":type(exc).__name__,"errorChars":len(str(exc))},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
         from app.errors import code_ref
 
         public = code_ref(
@@ -739,18 +727,6 @@ async def _screenplay_character_discovery(
             "新人物发现",
             [f"人物身份模型暂未完成本集预检，请在剧本阶段重试（{public}）"],
         ) from exc
-    # #region debug-point B:character-discovery-result
-    try:
-        import json as _dbg_json, urllib.request as _dbg_request; _dbg_request.urlopen(_dbg_request.Request("http://127.0.0.1:7777/event", data=_dbg_json.dumps({"sessionId":"ten-episode-script-failure","runId":"post-fix","hypothesisId":"B","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:result","msg":"[DEBUG] Character discovery result","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"draftPresent":bool(draft_text),"candidateCount":len(result.get("candidates") or []),"resolutionCount":len(result.get("resolutions") or []),"addedCount":len(result.get("added") or []),"errorCount":len(result.get("errors") or [])},"ts":int(__import__("time").time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.5).read()
-    except Exception:
-        pass
-    # #endregion
-    # #region debug-point A-C:character-discovery-details
-    try:
-        import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"A,C","location":"app/domain/screenplay_ops.py:_screenplay_character_discovery:result","msg":"[DEBUG] Character discovery candidates and resolutions","data":{"episodeId":episode_id,"episodeNo":ep["episode_no"],"draftPresent":bool(draft_text),"candidates":[{"sourceLabel":str(item.get("source_label") or ""),"name":str(item.get("name") or ""),"identityKind":str(item.get("identity_kind") or ""),"identityGroup":str(item.get("identity_group") or "")} for item in (result.get("candidates") or []) if isinstance(item,dict)],"resolutions":[{"sourceLabel":str(item.get("source_label") or ""),"canonicalName":str(item.get("canonical_name") or ""),"resolution":str(item.get("resolution") or "")} for item in (result.get("resolutions") or []) if isinstance(item,dict)]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
-    except Exception:
-        pass
-    # #endregion
     if result.get("errors"):
         raise StageError("新人物发现", list(result["errors"]))
     result["resolutions"] = persist_screenplay_character_resolutions(

@@ -4280,30 +4280,66 @@ table.runs-ledger tbody tr.selected {
 .trace-tree li {
   position: relative;
 }
-.trace-tree li > button {
+.trace-node-row {
   position: relative;
   z-index: 1;
-  display: grid;
+  display: flex;
   width: 100%;
   min-height: 54px;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
   padding-top: 7px;
   padding-right: 12px;
   padding-bottom: 7px;
-  border: 0;
-  background: transparent;
   color: #313a45;
-  text-align: left;
-  cursor: pointer;
 }
-.trace-tree li > button:hover {
+.trace-node-row:hover {
   background: #f1f5fb;
 }
-.trace-tree li > button.active {
+.trace-node-row.active {
   background: #eaf2ff;
   box-shadow: inset 3px 0 #4787ea;
+}
+.trace-node-task > .trace-node-row,
+.trace-node-business_stage > .trace-node-row {
+  min-height: 60px;
+}
+.trace-node-task > .trace-node-row {
+  background: #f5f8fc;
+}
+.trace-node-business_stage > .trace-node-row {
+  border-top: 1px solid #eef1f5;
+}
+.trace-node-toggle,
+.trace-node-toggle-placeholder {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 28px;
+}
+.trace-node-toggle {
+  border: 0;
+  background: transparent;
+  color: #687582;
+  font: 700 18px/1 var(--ui);
+  text-align: center;
+  cursor: pointer;
+}
+.trace-node-toggle:hover {
+  color: #3378df;
+  background: rgba(71, 135, 234, 0.08);
+}
+.trace-node-main {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 .trace-node-status {
   display: inline-grid;
@@ -4352,6 +4388,11 @@ table.runs-ledger tbody tr.selected {
 }
 .trace-node-copy b {
   font-size: 12.5px;
+}
+.trace-node-task > .trace-node-row .trace-node-copy b,
+.trace-node-business_stage > .trace-node-row .trace-node-copy b {
+  font-size: 13px;
+  font-weight: 650;
 }
 .trace-node-copy small {
   color: #8a939e;
@@ -4425,6 +4466,14 @@ table.runs-ledger tbody tr.selected {
   border-bottom-color: #4787ea;
   color: #3378df;
   font-weight: 600;
+}
+.trace-raw-notice {
+  flex: 0 0 auto;
+  padding: 8px 18px;
+  border-bottom: 1px solid #e6e9ee;
+  background: rgba(71, 135, 234, 0.055);
+  color: #566574;
+  font-size: 10.5px;
 }
 .trace-json {
   min-height: 0;

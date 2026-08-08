@@ -13,79 +13,6 @@ from typing import Any, Iterable
 
 PORTRAIT_SEED_THRESHOLD = 0.6
 
-_PRESENTATION_TOKENS = (
-    "表情", "眼神", "目光", "微笑", "笑容", "神态", "气质", "妩媚", "虚荣",
-    "爱慕", "轻浮", "戏谑", "清冷", "温和", "姿态", "站姿", "身姿", "动作",
-    "expression", "gaze", "smile", "temperament", "pose",
-)
-_ANCHOR_COMPARISON_TOKENS = (
-    "锚点", "设定", "要求", "未提及", "未要求", "不符合", "不一致", "实际为",
-    "anchor", "brief", "requested", "not specified", "mismatch",
-)
-_FLEXIBLE_APPEARANCE_TOKENS = (
-    "年龄", "视觉年龄", "服装", "衣着", "上衣", "长裤", "裙", "颜色", "发型",
-    "发箍", "发饰", "头饰", "装饰", "莲花", "花瓣", "配饰",
-    "age", "outfit", "clothing", "dress", "color", "hair", "accessory", "decoration",
-)
-_STABLE_TOKENS = (
-    "年龄", "性别", "身份", "脸", "五官", "发型", "发色", "服装", "衣着", "体型",
-    "材质", "透明", "半透明", "魂体", "幽灵", "非实体", "悬浮", "漂浮", "道具",
-    "空间关系", "多余人物", "肢体", "畸形", "崩坏", "全身", "缺失", "裁切", "水印",
-    "文字", "logo", "age", "gender", "identity", "face", "hair", "outfit", "body",
-    "transparent", "floating", "prop", "deform", "watermark", "text",
-)
-_DETERMINISTIC_HARD_TOKENS = (
-    "性别不符", "身份错误", "错误角色", "不是同一角色", "明显换人",
-    "多余人物", "额外人物", "肢体畸形", "五官崩坏", "全身未完整", "主体不完整",
-    "裁切", "水印", "文字", "logo", "未呈现透明", "未呈现半透明", "魂体缺失",
-    "未悬浮", "未漂浮", "道具缺失", "age mismatch", "wrong gender", "wrong identity",
-    "extra person", "deform", "watermark", "forbidden text", "cropped",
-)
-_WATERMARK_TOKENS = ("watermark", "logo", "水印", "ai生成", "页面文字")
-_OCCLUSION_TOKENS = (
-    "occlud", "cover the subject", "遮挡", "遮住", "覆盖主体", "覆盖人物",
-    "干扰主体", "影响识别",
-)
-_NON_OCCLUSION_TOKENS = (
-    "not occlud", "non-occlud", "does not cover", "未遮挡", "不遮挡",
-    "没有遮挡", "非遮挡", "未遮住", "不影响主体", "未影响识别",
-)
-_MINOR_CROP_TOKENS = (
-    "轻微裁切", "轻微截断", "minor crop", "slightly cropped",
-    "脚尖", "脚部", "鞋尖", "鞋底", "衣摆", "裙摆", "发梢",
-    "toes", "feet", "shoe tip", "hem",
-)
-_CROP_SIGNAL_TOKENS = (
-    "裁", "截", "未完全", "不完整", "缺失", "未展示", "不可见",
-    "crop", "cut off", "missing", "not visible",
-)
-_MAJOR_CROP_TOKENS = (
-    "半身", "腰部以上", "膝盖以上", "头部被截", "脸部被截",
-    "下半身缺失", "上半身缺失", "主体大面积", "half body",
-    "cropped at the waist", "cropped above the knee", "head cropped",
-)
-_NEGATED_DEFECT_PHRASES = (
-    "全身完整无裁切，无水印、文字等遮挡元素",
-    "无裁切，无水印、文字等遮挡元素",
-    "无水印、文字等遮挡元素",
-    "无水印、无遮挡文字/logo",
-    "无水印、无文字或logo遮挡",
-    "无遮挡文字/logo",
-    "无遮挡文字或logo",
-    "全身完整无水印文字遮挡",
-    "全身完整且无遮挡",
-    "无水印文字遮挡",
-    "无水印或文字遮挡",
-    "无水印", "没有水印", "未检测到水印",
-    "无文字", "没有文字", "未检测到文字",
-    "无裁切", "没有裁切", "未发现裁切",
-    "无遮挡", "未遮挡", "没有遮挡",
-    "无畸形", "没有畸形", "未发现畸形",
-    "全身完整", "主体完整", "解剖结构正常", "无硬违规内容",
-    "no watermark", "no text", "not occluded", "no occlusion",
-    "full body visible", "anatomy valid", "no hard violation",
-)
-
 
 def string_list(value: Any) -> list[str]:
     if isinstance(value, list):
@@ -99,81 +26,6 @@ def unique_messages(items: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
 
 
-def presentation_only_issue(message: str) -> bool:
-    lower = str(message or "").strip().lower()
-    return (
-        any(token in lower for token in _PRESENTATION_TOKENS)
-        and not any(token in lower for token in _STABLE_TOKENS)
-    )
-
-
-def flexible_anchor_issue(message: str) -> bool:
-    """Treat subjective text-to-image styling differences as review notes.
-
-    A seed portrait has no prior visual identity to drift from. Differences in
-    perceived age, costume details, hair accessories, or decorative motifs
-    should therefore not discard an otherwise usable design.
-    """
-    lower = str(message or "").strip().lower()
-    return (
-        any(token in lower for token in _FLEXIBLE_APPEARANCE_TOKENS)
-        and (
-            any(token in lower for token in _ANCHOR_COMPARISON_TOKENS)
-            or any(token in lower for token in ("视觉年龄", "发箍", "发饰", "头饰", "莲花", "花瓣"))
-        )
-    )
-
-
-def non_occluding_watermark_issue(message: str) -> bool:
-    """Treat a provider corner mark as a warning unless it obscures the subject."""
-    lower = str(message or "").strip().lower()
-    return (
-        any(token in lower for token in _WATERMARK_TOKENS)
-        and (
-            any(token in lower for token in _NON_OCCLUSION_TOKENS)
-            or not any(token in lower for token in _OCCLUSION_TOKENS)
-        )
-    )
-
-
-def minor_crop_issue(message: str) -> bool:
-    """Recognise harmless edge crops without accepting half-body portraits."""
-    lower = str(message or "").strip().lower()
-    return (
-        any(token in lower for token in _MINOR_CROP_TOKENS)
-        and any(token in lower for token in _CROP_SIGNAL_TOKENS)
-        and not any(token in lower for token in _MAJOR_CROP_TOKENS)
-    )
-
-
-def permitted_portrait_warning(message: str) -> bool:
-    return (
-        presentation_only_issue(message)
-        or flexible_anchor_issue(message)
-        or non_occluding_watermark_issue(message)
-        or minor_crop_issue(message)
-    )
-
-
-def split_portrait_hard_failures(messages: Any) -> tuple[list[str], list[str]]:
-    """Return (real hard failures, demoted presentation/minor warnings)."""
-    hard: list[str] = []
-    warnings: list[str] = []
-    for message in string_list(messages):
-        (warnings if permitted_portrait_warning(message) else hard).append(message)
-    return unique_messages(hard), unique_messages(warnings)
-
-
-def deterministic_hard_issue(message: str) -> bool:
-    lower = str(message or "").strip().lower()
-    if permitted_portrait_warning(lower):
-        return False
-    defect_evidence = lower
-    for phrase in sorted(_NEGATED_DEFECT_PHRASES, key=len, reverse=True):
-        defect_evidence = defect_evidence.replace(phrase, "")
-    return any(token in defect_evidence for token in _DETERMINISTIC_HARD_TOKENS)
-
-
 def _score(value: Any) -> float | None:
     try:
         return max(0.0, min(1.0, float(value)))
@@ -182,39 +34,19 @@ def _score(value: Any) -> float | None:
 
 
 def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
-    """Normalize one model-sheet view into an enforceable QA contract."""
+    """Normalize one view from typed observations; prose never controls routing."""
     result = dict(qa or {})
     identity = _score(result.get("identity_match"))
     presentation = _score(result.get("presentation_match"))
     clean = _score(result.get("clean_frame"))
     recovered = bool(result.get("qa_recovered"))
-    hard, demoted = split_portrait_hard_failures(result.get("hard_failures"))
+    hard: list[str] = []
     raw_issues = string_list(result.get("issues"))
     crop_severity = str(result.get("crop_severity") or "").strip().lower()
-
-    def raw_issue_is_hard(message: str) -> bool:
-        lower = str(message or "").lower()
-        structured_minor_crop = (
-            crop_severity == "minor"
-            and any(token in lower for token in _CROP_SIGNAL_TOKENS)
-            and not any(token in lower for token in _MAJOR_CROP_TOKENS)
-        )
-        structured_non_occluding_watermark = (
-            result.get("watermark_detected") is True
-            and result.get("watermark_occluding") is False
-            and any(token in lower for token in _WATERMARK_TOKENS)
-        )
-        return (
-            not structured_minor_crop
-            and not structured_non_occluding_watermark
-            and deterministic_hard_issue(message)
-        )
-
-    hard.extend(message for message in raw_issues if raw_issue_is_hard(message))
     warnings = unique_messages([
-        *(message for message in raw_issues if not raw_issue_is_hard(message)),
+        *raw_issues,
+        *string_list(result.get("hard_failures")),
         *string_list(result.get("soft_warnings")),
-        *demoted,
     ])
 
     if identity is None:
@@ -228,12 +60,8 @@ def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
     if presentation is None:
         presentation = 1.0
 
-    all_messages = [*string_list(result.get("hard_failures")), *raw_issues]
-    minor_crop = crop_severity == "minor" or any(minor_crop_issue(item) for item in all_messages)
-    major_crop = crop_severity == "major" or any(
-        any(token in str(item).lower() for token in _MAJOR_CROP_TOKENS)
-        for item in all_messages
-    )
+    minor_crop = crop_severity == "minor"
+    major_crop = crop_severity == "major"
 
     person_count = result.get("person_count")
     if isinstance(person_count, (int, float)) and int(person_count) != 1:
@@ -245,36 +73,24 @@ def normalize_portrait_seed_qa(qa: dict[str, Any] | None) -> dict[str, Any]:
             hard.append("主体全身未完整可见")
     if result.get("anatomy_valid") is False:
         hard.append("人物肢体或五官存在明显异常")
+    if result.get("stable_identity_matches") is False:
+        hard.append("结构化身份观察确认角色稳定特征不一致")
     if result.get("watermark_detected") is True:
         watermark_occluding = result.get("watermark_occluding")
-        reported_occlusion = any(
-            any(token in str(item).lower() for token in _OCCLUSION_TOKENS)
-            and not any(token in str(item).lower() for token in _NON_OCCLUSION_TOKENS)
-            for item in all_messages
-        )
-        # An explicit structured false is authoritative. Fall back to message
-        # inference only when the evaluator omitted the occlusion field.
-        if watermark_occluding is True or (
-            watermark_occluding is None and reported_occlusion
-        ):
+        if watermark_occluding is True:
             hard.append("水印或 Logo 遮挡人物主体")
-        else:
+        elif watermark_occluding is False:
             warnings.append("画面存在未遮挡主体的角落水印或 Logo")
+        else:
+            recovered = True
+            hard.append("无法确认水印是否遮挡人物主体")
     if result.get("forbidden_text_detected") is True:
-        # Some evaluators classify the provider's corner watermark as both a
-        # watermark and forbidden text. A confirmed non-occluding watermark is
-        # still score-only; separate captions/body text remain a hard failure.
-        only_non_occluding_watermark = (
+        provider_mark_only = (
             result.get("watermark_detected") is True
             and result.get("watermark_occluding") is False
-            and not string_list(result.get("hard_failures"))
-            and not any(
-                deterministic_hard_issue(message)
-                and not non_occluding_watermark_issue(message)
-                for message in raw_issues
-            )
+            and result.get("forbidden_text_is_provider_mark") is True
         )
-        if only_non_occluding_watermark:
+        if provider_mark_only:
             warnings.append("角落水印含文字，但未遮挡主体，已按带提示可用处理")
         else:
             hard.append("画面检测到不允许的文字")

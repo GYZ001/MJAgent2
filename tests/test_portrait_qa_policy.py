@@ -53,7 +53,7 @@ def test_character_pack_qa_demotes_acting_direction_and_scores_stable_views(
     assert result["body_consistency"] == 0.92
     assert result["views"][0]["overall"] == 0.92
     assert result["views"][1]["overall"] == 0.9
-    assert all(view["status"] == "ready" for view in result["views"])
+    assert all(view["status"] == "warning" for view in result["views"])
     assert "整体表情不够妩媚" in result["issues"]
 
 
@@ -300,6 +300,7 @@ def test_seed_qa_does_not_double_count_corner_watermark_as_forbidden_text() -> N
         "watermark_detected": True,
         "watermark_occluding": False,
         "forbidden_text_detected": True,
+        "forbidden_text_is_provider_mark": True,
         "full_body_visible": True,
         "crop_severity": "minor",
         "anatomy_valid": True,
@@ -342,13 +343,15 @@ def test_seed_qa_still_blocks_an_explicitly_wrong_character() -> None:
         "person_count": 1,
         "full_body_visible": True,
         "anatomy_valid": True,
+        "stable_identity_matches": False,
         "hard_failures": ["明显生成成其他人物，属于错误角色"],
     })
 
     assert result["status"] == "failed"
     assert result["hard_gate_passed"] is False
     assert result["overall"] == 0.1
-    assert "明显生成成其他人物，属于错误角色" in result["hard_failures"]
+    assert "结构化身份观察确认角色稳定特征不一致" in result["hard_failures"]
+    assert "明显生成成其他人物，属于错误角色" in result["issues"]
 
 
 def test_character_pack_qa_demotes_non_occluding_provider_watermark(
@@ -387,5 +390,5 @@ def test_character_pack_qa_demotes_non_occluding_provider_watermark(
 
     assert result["status"] == "warning"
     assert result["hard_failures"] == []
-    assert result["views"][2]["status"] == "ready"
+    assert result["views"][2]["status"] == "warning"
     assert "存在页面文字水印" in result["views"][2]["issues"]

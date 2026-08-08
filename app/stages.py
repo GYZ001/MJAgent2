@@ -7496,12 +7496,6 @@ async def generate_storyboard_scene_pack(
                     scene_contexts=[scene_context],
                 ),
             ))
-        # #region debug-point B,E:scene-pack-validation-scope
-        try:
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/storyboard-semantic-outline-failure.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","storyboard-semantic-outline-failure"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"B,E","location":"app/stages.py:generate_storyboard_scene_pack._validate","msg":"[DEBUG] Scene pack validation scope","data":{"sceneId":scene_context.scene_id,"briefShotNos":[int(item.shot_no) for item in briefs],"errorCount":len(errors),"errors":[str(item)[:260] for item in errors[:20]]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
-        except Exception:
-            pass
-        # #endregion
         return list(dict.fromkeys(errors))
 
     loop = AgentLoop(
@@ -8509,9 +8503,9 @@ async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
 - overall 只按 identity_match 与 clean_frame 的较低值给分，不计 presentation_match。
 - 锚点没有要求的火焰、斗气光环或其他主体属于硬失败。
 
-还要输出观察事实：person_count（人物数或 null）、watermark_detected、watermark_occluding（水印是否遮挡人物主体）、forbidden_text_detected、full_body_visible、crop_severity（none/minor/major）、anatomy_valid（不能确认用 null）。
+还要输出观察事实：person_count（人物数或 null）、watermark_detected、watermark_occluding（水印是否遮挡人物主体）、forbidden_text_detected、forbidden_text_is_provider_mark（禁止文字是否仅来自该非遮挡供应商角标）、full_body_visible、crop_severity（none/minor/major）、anatomy_valid（不能确认用 null）、stable_identity_matches（稳定身份特征是否匹配；不能确认用 null）、presentation_only_difference（差异是否仅为表情/姿态展示；不能确认用 null）。
 
-只输出 JSON：{{"identity_match": float, "presentation_match": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "watermark_occluding": bool|null, "forbidden_text_detected": bool|null, "full_body_visible": bool|null, "crop_severity": "none|minor|major", "anatomy_valid": bool|null, "soft_warnings": [str], "hard_failures": [str], "issues": [str]}}"""
+只输出 JSON：{{"identity_match": float, "presentation_match": float, "clean_frame": float, "overall": float, "person_count": int|null, "watermark_detected": bool|null, "watermark_occluding": bool|null, "forbidden_text_detected": bool|null, "forbidden_text_is_provider_mark": bool|null, "full_body_visible": bool|null, "crop_severity": "none|minor|major", "anatomy_valid": bool|null, "stable_identity_matches": bool|null, "presentation_only_difference": bool|null, "soft_warnings": [str], "hard_failures": [str], "issues": [str]}}"""
     raw = await hiagent.vlm_check(
         [image_b64],
         expectation,
@@ -8531,8 +8525,10 @@ async def review_portrait_image(image_b64: str, appearance_anchor: str) -> dict:
         raw_result = {}
     for key in (
         "person_count", "watermark_detected", "watermark_occluding",
-        "forbidden_text_detected", "full_body_visible", "crop_severity",
-        "anatomy_valid", "soft_warnings", "hard_failures",
+        "forbidden_text_detected", "forbidden_text_is_provider_mark",
+        "full_body_visible", "crop_severity", "anatomy_valid",
+        "stable_identity_matches", "presentation_only_difference",
+        "soft_warnings", "hard_failures",
     ):
         if key in raw_result:
             result[key] = raw_result[key]

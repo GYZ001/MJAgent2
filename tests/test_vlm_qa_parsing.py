@@ -110,7 +110,8 @@ def test_portrait_qa_uses_anchor_specific_nonhuman_rules(monkeypatch) -> None:
         assert call_meta["asset_kind"] == "portrait"
         return (
             '{"identity_match": 0.35, "presentation_match": 0.9, "clean_frame": 1, '
-            '"overall": 0.9, "hard_failures": ["未呈现透明悬浮形态"], "issues": []}'
+            '"overall": 0.9, "stable_identity_matches": false, '
+            '"hard_failures": ["未呈现透明悬浮形态"], "issues": []}'
         )
 
     monkeypatch.setattr(hiagent, "vlm_check", fake_vlm_check)
@@ -118,7 +119,8 @@ def test_portrait_qa_uses_anchor_specific_nonhuman_rules(monkeypatch) -> None:
 
     assert qa["overall"] == 0.35
     assert qa["hard_gate_passed"] is False
-    assert "未呈现透明悬浮形态" in qa["hard_failures"]
+    assert "结构化身份观察确认角色稳定特征不一致" in qa["hard_failures"]
+    assert "未呈现透明悬浮形态" in qa["issues"]
 
 
 def test_portrait_qa_keeps_expression_mismatch_as_soft_warning(monkeypatch) -> None:

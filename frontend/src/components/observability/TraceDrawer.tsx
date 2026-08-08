@@ -17,6 +17,11 @@ export interface TraceNode {
   id: string;
   parent_id: string | null;
   kind: "run" | "step" | "job" | "call";
+  node_role:
+    | "task"
+    | "business_stage"
+    | "model_processing"
+    | "program_processing";
   name: string;
   subtitle: string;
   status: string;
@@ -71,10 +76,16 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const KIND_LABELS: Record<TraceNode["kind"], string> = {
-  run: "运行",
-  step: "步骤",
-  job: "任务",
-  call: "模型调用",
+  run: "总任务",
+  step: "业务步骤",
+  job: "异步任务",
+  call: "处理记录",
+};
+const ROLE_LABELS: Record<TraceNode["node_role"], string> = {
+  task: "总任务",
+  business_stage: "业务环节",
+  model_processing: "模型处理",
+  program_processing: "程序处理",
 };
 
 function statusLabel(status: string) {
@@ -99,6 +110,62 @@ export function traceRoots(nodes: TraceNode[]) {
   return nodes.filter((node) => !node.parent_id || !ids.has(node.parent_id));
 }
 
+export interface TraceNodeSummary {
+  total: number;
+  stages: number;
+  models: number;
+  programs: number;
+}
+
+export function traceNodeSummaries(nodes: TraceNode[]) {
+  const children = new Map<string, TraceNode[]>();
+  for (const node of nodes) {
+    if (!node.parent_id) continue;
+    const group = children.get(node.parent_id) || [];
+    group.push(node);
+    children.set(node.parent_id, group);
+  }
+  const summaries = new Map<string, TraceNodeSummary>();
+  const visit = (nodeId: string, visiting = new Set<string>()): TraceNodeSummary => {
+    if (summaries.has(nodeId)) return summaries.get(nodeId)!;
+    if (visiting.has(nodeId))
+      return { total: 0, stages: 0, models: 0, programs: 0 };
+    visiting.add(nodeId);
+    const result = { total: 0, stages: 0, models: 0, programs: 0 };
+    for (const child of children.get(nodeId) || []) {
+      result.total += 1;
+      if (child.node_role === "business_stage") result.stages += 1;
+      if (child.node_role === "model_processing") result.models += 1;
+      if (child.node_role === "program_processing") result.programs += 1;
+      const nested = visit(child.id, visiting);
+      result.total += nested.total;
+      result.stages += nested.stages;
+      result.models += nested.models;
+      result.programs += nested.programs;
+    }
+    visiting.delete(nodeId);
+    summaries.set(nodeId, result);
+    return result;
+  };
+  nodes.forEach((node) => visit(node.id));
+  return summaries;
+}
+
+export function traceInitialExpandedIds(nodes: TraceNode[], selectedId: string) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const expanded = new Set(
+    traceRoots(nodes)
+      .filter((node) => node.node_role === "task")
+      .map((node) => node.id),
+  );
+  let current = byId.get(selectedId);
+  while (current?.parent_id) {
+    expanded.add(current.parent_id);
+    current = byId.get(current.parent_id);
+  }
+  return expanded;
+}
+
 function statusTone(status: string) {
   const normalized = status.toLowerCase();
   if (["succeeded", "success", "ok", "recovered"].includes(normalized))
@@ -113,44 +180,78 @@ function statusTone(status: string) {
 function TraceTreeNode({
   node,
   childrenByParent,
+  summaries,
+  expandedIds,
   selectedId,
   onSelect,
+  onToggle,
   depth = 0,
 }: {
   node: TraceNode;
   childrenByParent: Map<string, TraceNode[]>;
+  summaries: Map<string, TraceNodeSummary>;
+  expandedIds: Set<string>;
   selectedId: string;
   onSelect: (node: TraceNode) => void;
+  onToggle: (nodeId: string) => void;
   depth?: number;
 }) {
   const children = childrenByParent.get(node.id) || [];
+  const expanded = expandedIds.has(node.id);
+  const summary = summaries.get(node.id);
+  const processingSummary =
+    summary && (summary.models || summary.programs)
+      ? `${expanded ? "包含" : "已合并"}：模型处理 ${summary.models} 项 · 程序处理 ${summary.programs} 项`
+      : summary?.stages
+        ? `${expanded ? "包含" : "已合并"}：${summary.stages} 个业务环节`
+        : "";
   return (
-    <li>
-      <button
-        type="button"
-        className={node.id === selectedId ? "active" : ""}
-        style={{ paddingLeft: `${12 + depth * 18}px` }}
-        aria-current={node.id === selectedId ? "true" : undefined}
-        onClick={() => onSelect(node)}
+    <li className={`trace-node-${node.node_role}`}>
+      <div
+        className={`trace-node-row${node.id === selectedId ? " active" : ""}`}
+        style={{ paddingLeft: `${8 + depth * 18}px` }}
       >
-        <span className={`trace-node-status ${statusTone(node.status)}`} aria-hidden="true" />
-        <span className="trace-node-copy">
-          <b>{node.name}</b>
-          <small>
-            {KIND_LABELS[node.kind]} · {node.subtitle}
-          </small>
-        </span>
-        <span className="trace-node-duration">{formatDuration(node.latency_ms)}</span>
-      </button>
-      {children.length > 0 && (
+        {children.length > 0 ? (
+          <button
+            type="button"
+            className="trace-node-toggle"
+            aria-label={`${expanded ? "折叠" : "展开"}${node.name}下的处理节点`}
+            aria-expanded={expanded}
+            onClick={() => onToggle(node.id)}
+          >
+            {expanded ? "⌄" : "›"}
+          </button>
+        ) : (
+          <span className="trace-node-toggle-placeholder" aria-hidden="true" />
+        )}
+        <button
+          type="button"
+          className="trace-node-main"
+          aria-current={node.id === selectedId ? "true" : undefined}
+          onClick={() => onSelect(node)}
+        >
+          <span className={`trace-node-status ${statusTone(node.status)}`} aria-hidden="true" />
+          <span className="trace-node-copy">
+            <b>{node.name}</b>
+            <small>
+              {ROLE_LABELS[node.node_role]} · {processingSummary || node.subtitle}
+            </small>
+          </span>
+          <span className="trace-node-duration">{formatDuration(node.latency_ms)}</span>
+        </button>
+      </div>
+      {children.length > 0 && expanded && (
         <ul>
           {children.map((child) => (
             <TraceTreeNode
               key={child.id}
               node={child}
               childrenByParent={childrenByParent}
+              summaries={summaries}
+              expandedIds={expandedIds}
               selectedId={selectedId}
               onSelect={onSelect}
+              onToggle={onToggle}
               depth={depth + 1}
             />
           ))}
@@ -171,6 +272,7 @@ export default function TraceDrawer({
 }) {
   const [trace, setTrace] = useState<TraceView | null>(null);
   const [selectedId, setSelectedId] = useState("");
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<TraceNodeDetail | null>(null);
   const [tab, setTab] = useState<DetailTab>("input");
   const [loading, setLoading] = useState(true);
@@ -222,6 +324,15 @@ export default function TraceDrawer({
         const nextSelected = next.nodes.some((node) => node.id === selectedId)
           ? selectedId
           : next.selected_node_id;
+        const validIds = new Set(next.nodes.map((node) => node.id));
+        const requiredExpanded = traceInitialExpandedIds(
+          next.nodes,
+          nextSelected,
+        );
+        setExpandedIds((current) => new Set([
+          ...[...current].filter((id) => validIds.has(id)),
+          ...requiredExpanded,
+        ]));
         await loadNode(nextSelected);
       } catch (reason) {
         setError((reason as Error).message);
@@ -237,6 +348,7 @@ export default function TraceDrawer({
     setTrace(null);
     setDetail(null);
     setSelectedId("");
+    setExpandedIds(new Set());
     setTab("input");
     void loadTrace();
     // The target path is the lifecycle boundary; selection changes must not reload the tree.
@@ -254,9 +366,21 @@ export default function TraceDrawer({
     return groups;
   }, [trace?.nodes]);
   const roots = useMemo(() => traceRoots(trace?.nodes || []), [trace?.nodes]);
+  const summaries = useMemo(
+    () => traceNodeSummaries(trace?.nodes || []),
+    [trace?.nodes],
+  );
   const selectedNode = trace?.nodes.find((node) => node.id === selectedId);
   const detailValue =
     tab === "input" ? detail?.input : tab === "output" ? detail?.output : detail?.metadata;
+  const toggleNode = (nodeId: string) => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  };
 
   return (
     <div
@@ -345,8 +469,11 @@ export default function TraceDrawer({
                       key={node.id}
                       node={node}
                       childrenByParent={childrenByParent}
+                      summaries={summaries}
+                      expandedIds={expandedIds}
                       selectedId={selectedId}
                       onSelect={(next) => void loadNode(next.id)}
+                      onToggle={toggleNode}
                     />
                   ))}
                 </ul>
@@ -354,7 +481,11 @@ export default function TraceDrawer({
               <section className="trace-detail-panel" aria-live="polite">
                 <div className="trace-detail-head">
                   <div>
-                    <span>{selectedNode ? KIND_LABELS[selectedNode.kind] : "节点"}</span>
+                    <span>
+                      {selectedNode
+                        ? ROLE_LABELS[selectedNode.node_role] || KIND_LABELS[selectedNode.kind]
+                        : "节点"}
+                    </span>
                     <h4>{selectedNode?.name || "请选择链路节点"}</h4>
                   </div>
                   {selectedNode && (
@@ -387,6 +518,9 @@ export default function TraceDrawer({
                     </button>
                   ))}
                 </nav>
+                <div className="trace-raw-notice" role="note">
+                  当前展示项目观测账本中的完整原始数据，未做文字替换、星号遮罩或字段省略。
+                </div>
                 {detailLoading && (
                   <div className="monitor-loading" role="status">
                     正在加载节点{tab === "input" ? "输入" : tab === "output" ? "输出" : "元数据"}…

@@ -1145,23 +1145,34 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
         "服装款式、发饰或审美装饰上有差异，也只属于 issues，不得判为 hard_failures。"
         '输出 JSON：{"overall":0~1,"face_consistency":0~1,"outfit_consistency":0~1,'
         '"hair_consistency":0~1,"body_consistency":0~1,'
+        '"identity_consistent":bool|null,'
         '"views":[{"view_role":str,"identity_match":0~1,"presentation_match":0~1,'
-        '"clean_frame":0~1,"overall":0~1,'
+        '"clean_frame":0~1,"overall":0~1,"person_count":int|null,'
+        '"stable_identity_matches":bool|null,"full_body_visible":bool|null,'
+        '"crop_severity":"none|minor|major","anatomy_valid":bool|null,'
+        '"watermark_detected":bool|null,"watermark_occluding":bool|null,'
+        '"forbidden_text_detected":bool|null,"forbidden_text_is_provider_mark":bool|null,'
         '"issues":[str],"hard_failures":[str]}],"issues":[str],"hard_failures":[str]}'
     )
     try:
         raw = await hiagent.vlm_check(frames, expectation, call_meta={"initiator_label": "人物多视角整包QA"})
         from app.schemas import extract_json
-        from app.portrait_policy import split_portrait_hard_failures, unique_messages
+        from app.portrait_policy import normalize_portrait_seed_qa, unique_messages
         data = extract_json(raw)
+        reported_group_hard = _qa_string_list(data.get("hard_failures"))
         for key in ("overall", "face_consistency", "outfit_consistency", "hair_consistency", "body_consistency"):
             try:
                 data[key] = max(0.0, min(1.0, float(data.get(key, 0))))
             except (TypeError, ValueError):
                 data[key] = 0.0
-        group_hard, group_demoted = split_portrait_hard_failures(data.get("hard_failures"))
+        group_hard: list[str] = []
+        if data.get("identity_consistent") is False:
+            group_hard.append("结构化整包观察确认角色身份跨视角不一致")
         data["hard_failures"] = group_hard
-        data["issues"] = unique_messages([*_qa_string_list(data.get("issues")), *group_demoted])
+        data["issues"] = unique_messages([
+            *_qa_string_list(data.get("issues")),
+            *reported_group_hard,
+        ])
         reported = {
             str(item.get("view_role") or ""): item
             for item in (data.get("views") or []) if isinstance(item, dict)
@@ -1170,26 +1181,7 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
         for role in roles:
             item = dict(reported.get(role) or {})
             item["view_role"] = role
-            try:
-                item["overall"] = max(0.0, min(1.0, float(item.get("overall"))))
-            except (TypeError, ValueError):
-                item["overall"] = None
-            try:
-                stable_view_score = min(
-                    max(0.0, min(1.0, float(item["identity_match"]))),
-                    max(0.0, min(1.0, float(item["clean_frame"]))),
-                )
-                item["overall"] = round(stable_view_score, 3)
-            except (KeyError, TypeError, ValueError):
-                pass
-            view_hard, view_demoted = split_portrait_hard_failures(item.get("hard_failures"))
-            item["issues"] = unique_messages([*_qa_string_list(item.get("issues")), *view_demoted])
-            item["hard_failures"] = view_hard
-            item["status"] = (
-                "ready" if item["overall"] is not None and item["overall"] >= 0.6
-                and not item["hard_failures"] else "failed"
-            )
-            normalized_views.append(item)
+            normalized_views.append(normalize_portrait_seed_qa(item))
         data["views"] = normalized_views
         data["issues"] = unique_messages([
             *data["issues"],
@@ -1202,7 +1194,7 @@ async def review_character_pack_consistency(views: list[dict[str, Any]], appeara
         passed = (
             float(data.get("overall") or 0) >= 0.75
             and not data["hard_failures"]
-            and all(item["status"] == "ready" for item in normalized_views)
+            and all(item["status"] in {"ready", "warning"} for item in normalized_views)
         )
         data["status"] = "warning" if passed and data["issues"] else ("ready" if passed else "failed")
         return data

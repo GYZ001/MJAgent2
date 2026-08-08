@@ -7,6 +7,7 @@ object back to one project before returning data or dispatching an action.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import Counter
 from typing import Any
@@ -168,6 +169,7 @@ _TRACE_WORKFLOW_LABELS = {
     "scene_generation": "关键帧生成",
     "video_generation": "视频生成",
     "episode_video_completion": "全片视频补齐",
+    "project_video_completion_queue": "全项目视频补齐",
     "delivery": "交付",
     "delivery_package": "交付候选生成",
 }
@@ -182,28 +184,151 @@ _TRACE_STEP_LABELS = {
     "apply_delivery_gate": "应用交付决定",
     "character_references": "生成人物参考图",
     "media_generation": "媒体生成",
+    "character_discovery": "识别剧本角色",
+    "character_discovery_resume_audit": "核对角色识别恢复状态",
+    "character_bible": "生成人物设定",
+    "scene_bible": "生成场景设定",
+    "scene_references": "生成场景参考图",
+    "video_generation": "生成镜头视频",
 }
 _TRACE_CALL_LABELS = {
-    "chat": "文本模型调用",
-    "vlm": "视觉模型调用",
-    "vlm_qa": "视频质检",
-    "video_create": "创建视频任务",
-    "video_poll": "轮询视频结果",
-    "image": "图片生成",
-    "image_generate": "图片生成",
-    "image_edit": "图片编辑",
-    "scene_image": "关键帧生成",
-    "screenplay_prompt": "剧本生成",
-    "plan_prompt": "分集规划",
-    "bible_prompt": "人物谱生成",
-    "references_prompt": "参考图规划",
-    "storyboard_shot_prompt": "逐镜分镜生成",
-    "storyboard_outline_prompt": "分镜大纲生成",
+    "chat": "生成文本内容",
+    "vlm": "理解画面内容",
+    "vlm_qa": "检查视频画面质量",
+    "video_create": "提交视频生成",
+    "video_poll": "查询视频生成进度",
+    "image": "生成图片",
+    "image_generate": "生成图片",
+    "image_edit": "编辑图片",
+    "scene_image": "生成关键帧",
+    "screenplay_prompt": "生成剧本内容",
+    "plan_prompt": "规划分集内容",
+    "bible_prompt": "生成人物设定",
+    "references_prompt": "规划参考图",
+    "storyboard_shot_prompt": "生成逐镜分镜",
+    "storyboard_outline_prompt": "生成分镜大纲",
+    "val422_metric": "记录结构校验指标",
+    "storyboard_candidate_normalization": "规范化分镜候选",
+    "screenplay_ir_local_recompile": "本地重编译剧本",
+    "reference_keyframe_checkpoint_auto_repair": "自动修复关键帧检查点",
+    "screenplay_blueprint_shard_local_recompile": "本地重编译剧本分片",
+    "storyboard_outline_local_compile": "本地编译分镜大纲",
+    "reference_keyframe_gate_repair_required": "检查关键帧修复要求",
+    "episode_video_mode_plan_normalization": "规范化视频生成方案",
+    "episode_video_boundary_strategy": "规划镜头衔接策略",
+    "storyboard_outline_split": "拆分分镜大纲",
+    "screenplay_ir_candidate_normalization": "规范化剧本候选",
+    "provider_cache_hit": "复用已有模型结果",
+    "screenplay_blueprint_local_recompile": "本地重编译剧本蓝图",
+    "storyboard_source_evidence_repair": "修复分镜原文证据",
+    "storyboard_outline_spoken_duration": "计算分镜口播时长",
+    "reference_keyframe_gate_exhausted_fallback": "执行关键帧门禁降级",
+    "storyboard_outline_authority_projection": "投影分镜权威数据",
+    "storyboard_outline_action_completion_projection": "补充分镜动作结果",
+    "episode_video_mode_plan_cache": "复用视频生成方案",
+    "storyboard_repair_field_preservation": "保留分镜修复字段",
+    "character_bible_candidate_normalization": "规范化人物设定候选",
+    "screenplay_candidate_normalization": "规范化剧本候选",
+    "storyboard_outline_semantic_split": "按语义拆分分镜大纲",
+    "场景分镜_loop": "执行场景分镜自动修复",
+    "分镜脚本_loop": "执行分镜脚本自动修复",
+    "剧本首次整版 Baseline_loop": "执行剧本初稿自动修复",
+    "分镜大纲_loop": "执行分镜大纲自动修复",
+    "角色圣经_loop": "执行人物设定自动修复",
+}
+_TRACE_MODEL_CALL_KINDS = {
+    "chat", "vlm", "vlm_qa", "video_create", "image", "image_generate",
+    "image_edit", "scene_image", "screenplay_prompt", "plan_prompt",
+    "bible_prompt", "references_prompt", "storyboard_shot_prompt",
+    "storyboard_outline_prompt",
+}
+_TRACE_CALL_METHODS = {
+    "chat": "模型处理 · 文本生成模型",
+    "vlm": "模型处理 · 视觉理解模型",
+    "vlm_qa": "模型处理 · 视觉理解模型",
+    "video_create": "模型处理 · 视频生成模型",
+    "image": "模型处理 · 图像生成模型",
+    "image_generate": "模型处理 · 图像生成模型",
+    "image_edit": "模型处理 · 图像生成模型",
+    "scene_image": "模型处理 · 图像生成模型",
+    "screenplay_prompt": "模型处理 · 文本生成模型",
+    "plan_prompt": "模型处理 · 文本生成模型",
+    "bible_prompt": "模型处理 · 文本生成模型",
+    "references_prompt": "模型处理 · 文本生成模型",
+    "storyboard_shot_prompt": "模型处理 · 文本生成模型",
+    "storyboard_outline_prompt": "模型处理 · 文本生成模型",
+    "video_poll": "程序处理 · 视频平台接口",
+    "val422_metric": "程序处理 · 本地结构校验",
+    "provider_cache_hit": "程序处理 · 本地缓存",
+}
+_TRACE_JOB_LABELS = {
+    "video": "执行镜头视频生成",
+    "scene": "执行关键帧生成",
+    "image": "执行图片生成",
+    "reference": "执行参考图生成",
 }
 
 
 def _trace_label(value: str | None, labels: dict[str, str], fallback: str) -> str:
-    return labels.get(str(value or ""), str(value or "") or fallback)
+    return labels.get(str(value or ""), fallback)
+
+
+def _trace_step_label(step_key: str | None, iteration_no: int | None = None) -> str:
+    key = str(step_key or "")
+    if key in _TRACE_STEP_LABELS:
+        return _TRACE_STEP_LABELS[key]
+    patterns = (
+        (r"screenplay\.iteration", "执行第{iteration}轮剧本生成"),
+        (r"character_bible\.iteration", "执行第{iteration}轮人物设定生成"),
+        (r"scene_bible\.iteration", "执行第{iteration}轮场景设定生成"),
+        (r"storyboard_outline\.iteration", "执行第{iteration}轮分镜大纲生成"),
+        (r"storyboard_scene_(\d+)\.iteration", "生成第{number}个场景分镜"),
+        (r"storyboard_shot_(\d+)\.iteration", "生成第{number}镜分镜"),
+    )
+    for pattern, template in patterns:
+        match = re.fullmatch(pattern, key)
+        if match:
+            return template.format(
+                iteration=max(1, int(iteration_no or 1)),
+                number=match.group(1) if match.groups() else "",
+            )
+    return "执行程序处理"
+
+
+def _trace_call_semantics(kind: str | None) -> tuple[str, str, str]:
+    key = str(kind or "")
+    node_role = (
+        "model_processing"
+        if key in _TRACE_MODEL_CALL_KINDS
+        else "program_processing"
+    )
+    name = _TRACE_CALL_LABELS.get(key)
+    if not name:
+        if key.endswith("_prompt"):
+            node_role = "model_processing"
+            name = "生成业务内容"
+        elif key.endswith("_loop"):
+            name = "执行自动修复循环"
+        elif "normalization" in key:
+            name = "规范化业务数据"
+        elif "compile" in key or "recompile" in key:
+            name = "本地编译业务数据"
+        elif "metric" in key:
+            name = "记录运行指标"
+        else:
+            name = "执行程序处理"
+    method = _TRACE_CALL_METHODS.get(key)
+    if not method:
+        method = (
+            "模型处理 · 业务生成模型"
+            if node_role == "model_processing"
+            else "程序处理 · 本地业务规则"
+        )
+    return name, node_role, method
+
+
+def _trace_job_label(kind: str | None) -> str:
+    return _TRACE_JOB_LABELS.get(str(kind or ""), "执行异步任务")
 
 
 def _trace_run_id(
@@ -308,12 +433,13 @@ def _trace_tree(
                 "id": f"job:{object_id}",
                 "parent_id": None,
                 "kind": "job",
+                "node_role": "business_stage",
                 "name": _trace_label(
                     source_row.get("workflow_type") or source_row.get("kind"),
                     _TRACE_WORKFLOW_LABELS,
-                    "任务",
+                    "执行历史业务任务",
                 ),
-                "subtitle": "未关联持久化 Run",
+                "subtitle": "业务环节 · 历史任务记录",
                 "status": source_row.get("status") or "unknown",
                 "started_at": source_row.get("created_at"),
                 "finished_at": source_row.get("updated_at"),
@@ -329,14 +455,16 @@ def _trace_tree(
                 ),
             })
         else:
+            call_name, call_role, call_method = _trace_call_semantics(
+                source_row.get("kind"),
+            )
             nodes.append({
                 "id": f"call:{object_id}",
                 "parent_id": None,
                 "kind": "call",
-                "name": _trace_label(
-                    source_row.get("kind"), _TRACE_CALL_LABELS, "模型调用",
-                ),
-                "subtitle": source_row.get("model") or "未记录模型",
+                "node_role": call_role,
+                "name": call_name,
+                "subtitle": call_method,
                 "status": source_row.get("status") or "unknown",
                 "started_at": source_row.get("ts"),
                 "finished_at": float(source_row.get("ts") or 0)
@@ -415,10 +543,19 @@ def _trace_tree(
             "id": f"run:{run_id}",
             "parent_id": parent_id,
             "kind": "run",
-            "name": _trace_label(
-                run.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "运行",
+            "node_role": (
+                "task"
+                if run_id == primary_run_id
+                else "business_stage"
             ),
-            "subtitle": "主运行" if run_id == primary_run_id else "关联运行",
+            "name": _trace_label(
+                run.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "执行业务任务",
+            ),
+            "subtitle": (
+                "总任务 · 汇总全部业务环节"
+                if run_id == primary_run_id
+                else "业务环节 · 关联执行任务"
+            ),
             "status": run.get("status") or "unknown",
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
@@ -439,6 +576,7 @@ def _trace_tree(
         })
     for step in steps:
         parent_step = str(step.get("parent_step_run_id") or "")
+        is_business_stage = parent_step not in step_ids
         nodes.append({
             "id": f"step:{step['id']}",
             "parent_id": (
@@ -447,13 +585,18 @@ def _trace_tree(
                 else f"run:{step['run_id']}"
             ),
             "kind": "step",
-            "name": _trace_label(
-                step.get("step_key"), _TRACE_STEP_LABELS, "执行步骤",
+            "node_role": (
+                "business_stage"
+                if is_business_stage
+                else "program_processing"
+            ),
+            "name": _trace_step_label(
+                step.get("step_key"), step.get("iteration_no"),
             ),
             "subtitle": (
-                f"第 {step.get('iteration_no') or 1} 次执行"
-                if int(step.get("iteration_no") or 1) > 1
-                else step.get("agent_name") or "工作流步骤"
+                "业务环节 · 组织模型与程序处理"
+                if is_business_stage
+                else "程序处理 · 智能体执行流程"
             ),
             "status": step.get("status") or "unknown",
             "started_at": step.get("started_at"),
@@ -467,10 +610,9 @@ def _trace_tree(
             "id": f"job:{job['id']}",
             "parent_id": f"step:{step_id}" if step_id in step_ids else f"run:{run_id}",
             "kind": "job",
-            "name": _trace_label(
-                job.get("kind"), _TRACE_WORKFLOW_LABELS, "媒体任务",
-            ),
-            "subtitle": job.get("pipeline_stage") or "异步任务",
+            "node_role": "program_processing",
+            "name": _trace_job_label(job.get("kind")),
+            "subtitle": "程序处理 · 持久化异步任务",
             "status": job.get("stage_status") or job.get("status") or "unknown",
             "started_at": job.get("stage_started_at") or job.get("created_at"),
             "finished_at": job.get("stage_updated_at") or job.get("updated_at"),
@@ -488,14 +630,16 @@ def _trace_tree(
     for call in calls:
         step_id = str(call.get("step_run_id") or "")
         run_id = str(call.get("run_id") or primary_run_id)
+        call_name, call_role, call_method = _trace_call_semantics(
+            call.get("kind"),
+        )
         nodes.append({
             "id": f"call:{call['id']}",
             "parent_id": f"step:{step_id}" if step_id in step_ids else f"run:{run_id}",
             "kind": "call",
-            "name": _trace_label(
-                call.get("kind"), _TRACE_CALL_LABELS, "模型调用",
-            ),
-            "subtitle": call.get("model") or "未记录模型",
+            "node_role": call_role,
+            "name": call_name,
+            "subtitle": call_method,
             "status": call.get("status") or "unknown",
             "started_at": call.get("ts"),
             "finished_at": float(call.get("ts") or 0)
@@ -507,7 +651,7 @@ def _trace_tree(
         "source": {"type": object_type, "id": object_id},
         "run_id": primary_run_id,
         "title": _trace_label(
-            primary.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "运行链路",
+            primary.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "业务执行链路",
         ),
         "status": primary.get("status") or "unknown",
         "started_at": primary.get("started_at"),
@@ -685,11 +829,13 @@ def _trace_node_detail(
             "state_revision": item.get("state_revision"),
         }
     elif kind == "call":
-        item = system_api._call_detail_payload(int(raw_id))
+        item = _call_row(int(raw_id))
+        if not item:
+            raise HTTPException(404, "调用节点不存在")
         input_value = _trace_json_value(item.get("request_json"))
         output_value = {
             "response": _trace_json_value(item.get("response_json")),
-            "status": item.get("effective_status"),
+            "status": system_api._effective_call_status(item),
             "http_status": item.get("http_status"),
             "error": item.get("error"),
         }
@@ -707,13 +853,11 @@ def _trace_node_detail(
         }
     else:
         raise HTTPException(404, "链路节点类型不存在")
-    from app.monitoring import redact_monitor_value
-
     return {
         **node,
-        "input": redact_monitor_value(input_value),
-        "output": redact_monitor_value(output_value),
-        "metadata": redact_monitor_value(metadata),
+        "input": input_value,
+        "output": output_value,
+        "metadata": metadata,
     }
 
 
