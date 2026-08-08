@@ -445,10 +445,12 @@ def test_manual_screenplay_edit_uses_model_identity_resolution_before_publish(mo
     ).fetchone()
     published = json.loads(row["screenplay_json"])
     resolutions = json.loads(row["screenplay_character_resolutions"])
-    assert "青衣人" not in published["scene_outline"][0]["characters"]
-    assert "路人甲" in published["scene_outline"][0]["characters"]
+    assert "青衣人" in published["scene_outline"][0]["characters"]
+    assert "路人甲" not in published["scene_outline"][0]["characters"]
     assert resolutions[0]["source_label"] == "青衣人"
-    assert resolutions[0]["canonical_name"] == "路人甲"
+    assert resolutions[0]["canonical_name"] == "青衣人"
+    assert resolutions[0]["resolution"] == "functional_identity"
+    assert resolutions[0]["authority_id"].startswith("functional:")
 
 
 def test_unchanged_legacy_screenplay_is_canonicalized_before_noop_return(monkeypatch) -> None:

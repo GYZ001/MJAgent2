@@ -26,6 +26,7 @@ from app.schemas import (
     KeyDialogueChain,
     KeyDialogueTurn,
     NarrativeEvent,
+    NarrativeIdentityContract,
     SceneDramaticContract,
     ScriptScene,
     StoryboardOutline,
@@ -69,6 +70,47 @@ def _attach_generic_action(screenplay) -> AtomicAction:
     screenplay.narrative_plan.atomic_actions.append(action)
     screenplay.narrative_plan.events[0].action_ids = [action.action_id]
     return action
+
+
+def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    contextual_name = "Home scene unnamed participant"
+    screenplay.narrative_plan.identity_contracts.append(
+        NarrativeIdentityContract(
+            identity_id="ID-CONTEXT",
+            display_name=contextual_name,
+            kind="source_backed_scene_context_actor",
+            visual_policy="collective",
+            visual_canonical="An event-local compiler fallback participant.",
+            asset_requirement="optional",
+        )
+    )
+    action.actor_ids.append("ID-CONTEXT")
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[StoryboardOutlineShot(
+            shot_no=1,
+            scene_id="SC-generic",
+            story_event_id="E-1",
+            event_ids=["E-1"],
+            beat="The declared event becomes visible.",
+            covers="The observable result is delivered.",
+            characters_visible=["character-1", contextual_name],
+        )],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert all(
+        "ID-CONTEXT" not in shot.visible_entity_ids
+        for shot in outline.shots
+    )
+    assert all(
+        contextual_name not in shot.characters_visible
+        for shot in outline.shots
+    )
+    assert outline.shots[-1].offscreen_action_actor_ids == ["ID-CONTEXT"]
 
 
 def test_outline_dialogue_ownership_repairs_split_fragments_and_duplicates() -> None:

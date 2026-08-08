@@ -106,6 +106,11 @@ def normalize_narrative_storyboard_outline(
 
     events = {item.event_id: item for item in plan.events}
     actions = {item.action_id: item for item in plan.atomic_actions}
+    compiler_context_identity_names = {
+        identity.identity_id: identity.display_name
+        for identity in plan.identity_contracts
+        if identity.kind == "source_backed_scene_context_actor"
+    }
     event_aliases: defaultdict[str, list[str]] = defaultdict(list)
     for event_id in events:
         alias = "".join(
@@ -720,11 +725,32 @@ def normalize_narrative_storyboard_outline(
             for entity_id in evidence.perceivable_by
             if entity_id != "audience"
         }
+        redundant_context_ids: set[str] = set()
         for action_id in action_ids:
             action = actions.get(action_id)
             if action is not None:
                 visible_ids.update(action.actor_ids)
                 visible_ids.update(action.target_ids)
+                explicit_actor_ids = (
+                    set(action.actor_ids)
+                    - set(compiler_context_identity_names)
+                )
+                if explicit_actor_ids:
+                    redundant_context_ids.update(
+                        set(action.actor_ids)
+                        & set(compiler_context_identity_names)
+                    )
+        visible_ids.difference_update(redundant_context_ids)
+        if redundant_context_ids:
+            redundant_names = {
+                compiler_context_identity_names[identity_id]
+                for identity_id in redundant_context_ids
+            }
+            shot.characters_visible = [
+                name
+                for name in shot.characters_visible
+                if name not in redundant_names
+            ]
 
         shot.event_ids = [event_id]
         shot.story_event_id = event_id
@@ -732,7 +758,7 @@ def normalize_narrative_storyboard_outline(
         shot.supporting_action_ids = supporting_action_ids
         shot.action_phase_ids = phase_ids
         shot.visible_entity_ids = sorted(visible_ids)
-        shot.offscreen_action_actor_ids = []
+        shot.offscreen_action_actor_ids = sorted(redundant_context_ids)
         shot.offscreen_action_target_ids = []
 
         shot.planned_state_in_fact_ids = sorted(current_facts)
