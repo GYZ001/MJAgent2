@@ -296,6 +296,69 @@ def repair_db(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_storyboard_bible_snapshot_uses_checkpoint_artifact(monkeypatch) -> None:
+    current = Bible(
+        characters=[],
+        world=World(visual_style_canonical="current-style"),
+    )
+    frozen = Bible(
+        characters=[],
+        world=World(visual_style_canonical="frozen-style"),
+    )
+    cp = SupervisorCheckpoint(
+        episode_id="e1",
+        input_versions={"bible_artifact_id": "bible-frozen"},
+    )
+    monkeypatch.setattr(
+        evidence_repository,
+        "get_artifact",
+        lambda _artifact_id: {
+            "type": "character_bible",
+            "scope_type": "project",
+            "scope_id": "p1",
+            "content": frozen.model_dump(mode="json"),
+        },
+    )
+
+    snapshot = _storyboard_bible_snapshot(
+        {"id": "p1", "bible_json": current.model_dump_json()},
+        cp,
+    )
+
+    assert snapshot.world.visual_style_canonical == "frozen-style"
+
+
+def test_storyboard_recorder_fingerprint_tracks_bible_artifact(
+    repair_db,
+    monkeypatch,
+) -> None:
+    conn, _screenplay = repair_db
+    captured: list[str] = []
+
+    def fake_create(_cls, **kwargs):
+        captured.append(kwargs["input_fingerprint"])
+        return SimpleNamespace(run_id=f"run-{len(captured)}")
+
+    monkeypatch.setattr(
+        WorkflowRecorder,
+        "create",
+        classmethod(fake_create),
+    )
+    conn.execute(
+        "UPDATE projects SET bible_artifact_id='bible-v1' WHERE id='p1'"
+    )
+    conn.commit()
+    _new_storyboard_recorder("e1")
+    conn.execute(
+        "UPDATE projects SET bible_artifact_id='bible-v2' WHERE id='p1'"
+    )
+    conn.commit()
+    _new_storyboard_recorder("e1")
+
+    assert len(captured) == 2
+    assert captured[0] != captured[1]
+
+
 def _shot(number: int, *, action: str | None = None) -> Shot:
     return Shot(
         shot_no=number,

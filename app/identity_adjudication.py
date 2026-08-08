@@ -152,6 +152,8 @@ def _prompt(payload: dict[str, Any]) -> str:
    该 identity 当前的 display_name 作为区分显示名，后端负责生成不同的稳定 ID，禁止另造称谓。
 4. 若证据不能唯一判断，status=insufficient_evidence，禁止猜测或按字面相似合并。
 5. evidence_source_ids 只能引用输入 source_segments，且必须真正支持身份结论。
+   每个 decision 只能从该 identity 的 owned_source_ids 中选择；若 owned_source_ids 为空，
+   必须 status=insufficient_evidence，禁止借用其他 identity 的来源段。
 6. 同一 authority_id 表示同一实体；两个可区分实体不得因共享“少年、男子、女子、师兄”等泛称而合并。
 
 输入：

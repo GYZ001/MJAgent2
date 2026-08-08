@@ -8,6 +8,7 @@ from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.orchestration.engine import WorkflowRecorder, fingerprint
 from app.orchestration.state_machine import StateConflict, transition_run
+from app.observability.tracing import bind_trace, current_trace, detached_trace
 
 
 def _fresh_database(tmp_path, monkeypatch):
@@ -15,6 +16,15 @@ def _fresh_database(tmp_path, monkeypatch):
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
     return db.get_conn()
+
+
+def test_detached_trace_does_not_inherit_parent_workflow() -> None:
+    with bind_trace("run-parent", "step-parent", "trace-parent"):
+        assert current_trace().run_id == "run-parent"
+        with detached_trace():
+            assert current_trace().run_id is None
+            assert current_trace().step_run_id is None
+        assert current_trace().run_id == "run-parent"
 
 
 def test_workflow_recorder_persists_trace_evidence_and_commit(tmp_path, monkeypatch) -> None:

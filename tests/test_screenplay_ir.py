@@ -688,6 +688,19 @@ def test_v13_aggregates_explicit_actors_across_units_before_context_fallback() -
     assert set(screenplay.scene_outline[1].characters) == {"谷言", "旧友"}
 
 
+def test_v13_rejects_event_key_reused_across_scenes() -> None:
+    payload = _v13_payload()
+    payload["scenes"][1]["units"][0]["event_key"] = "e1"
+
+    with pytest.raises(ValueError, match="event_key 必须在本集唯一"):
+        compile_screenplay_ir(
+            ScreenplayGenerationIR.model_validate(payload),
+            episode={"id": "ep-ir-v13-duplicate-event", "episode_no": 1},
+            source_text=SOURCE,
+            bible=_bible(),
+        )
+
+
 def test_compiler_rejects_repeated_spine_action_and_turn() -> None:
     payload = _ir_payload()
     payload["beats"][0]["turn"] = payload["beats"][0]["does"]
@@ -1302,6 +1315,51 @@ def test_identity_adjudication_skips_ai_when_exact_authorities_are_complete(
 
     assert screenplay.id == "ep-ir-exact"
     assert resolved.identities[1].authority_id == friend_resolution["authority_id"]
+
+
+def test_identity_adjudication_prunes_unreferenced_identity_without_ai(
+    monkeypatch,
+) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    friend_resolution = normalize_character_resolution({
+        "source_label": "旧友",
+        "canonical_name": "旧友",
+        "resolution": "functional_identity",
+        "identity_group": "episode:old-friend",
+    })
+    payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
+    payload["identities"].append({
+        **payload["identities"][1],
+        "key": "unused_extra",
+        "display_name": "未引用路人",
+        "source_names": [],
+        "authority_id": "",
+    })
+
+    async def forbidden_chat(*_args, **_kwargs):
+        raise AssertionError("完全未被引用的身份应结构性删除，不应交给 AI 猜测")
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", forbidden_chat)
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        candidate,
+        episode={
+            "id": "ep-ir-orphan",
+            "episode_no": 1,
+            "character_resolutions": [friend_resolution],
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+        persist_new_resolutions=False,
+    ))
+
+    assert "unused_extra" not in {item.key for item in resolved.identities}
+    assert any(
+        item.get("operation") == "remove_unreferenced_identity"
+        for item in resolved.normalization_log
+    )
 
 
 def test_identity_adjudication_calls_ai_once_for_conflicting_exact_authorities(

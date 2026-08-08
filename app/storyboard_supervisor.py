@@ -1991,6 +1991,7 @@ async def run_storyboard_supervisor(
         _reconcile_storyboard_scene_projection(conn, episode_id, bible)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     ep_data = dict(ep)
+    ep_data["bible_artifact_id"] = cp.input_versions.get("bible_artifact_id")
     source_text = (
         resolved_screenplay_authority.source_text
         if resolved_screenplay_authority is not None

@@ -988,6 +988,56 @@ def prepare_ir_identity_authorities(
     audit: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply exact bindings and return unresolved semantic cases for AI."""
+    referenced_identity_keys = {
+        key
+        for scene in value.scenes
+        for key in [
+            *scene.character_keys,
+            *(
+                unit.speaker_key
+                for unit in scene.units
+                if unit.speaker_key
+            ),
+        ]
+        if key
+    }
+    referenced_identity_keys.update(
+        key
+        for event in value.events
+        for key in [
+            *event.actor_keys,
+            *event.target_keys,
+            *(
+                perceiver_key
+                for perceiver_key in event.perceivable_by
+                if perceiver_key != "audience"
+            ),
+        ]
+        if key
+    )
+    orphan_identities = [
+        identity
+        for identity in value.identities
+        if identity.key not in referenced_identity_keys
+        and not any(
+            str(beat.who or "").strip()
+            in {identity.key, identity.display_name}
+            for beat in value.beats
+        )
+    ]
+    if orphan_identities:
+        orphan_keys = {identity.key for identity in orphan_identities}
+        value.identities = [
+            identity
+            for identity in value.identities
+            if identity.key not in orphan_keys
+        ]
+        for identity in orphan_identities:
+            audit.append({
+                "path": f"identities.{identity.key}",
+                "operation": "remove_unreferenced_identity",
+                "reason": "identity_has_no_structural_scene_dialogue_event_or_beat_reference",
+            })
     registry = identity_authority_registry(
         bible,
         episode.get("character_resolutions") or [],
@@ -2260,9 +2310,19 @@ def compile_screenplay_ir(
         explicit_actor_keys_by_event: defaultdict[tuple[str, str], list[str]] = (
             defaultdict(list)
         )
+        event_scene_owners: dict[str, str] = {}
         for unit_index, (scene, unit) in enumerate(flat_units, start=1):
             event_key = unit.event_key.strip() or f"derived-event-{unit_index}"
             unit.event_key = event_key
+            previous_scene_key = event_scene_owners.setdefault(
+                event_key,
+                scene.key,
+            )
+            if previous_scene_key != scene.key:
+                raise ValueError(
+                    "IR scenes.units event_key 必须在本集唯一；"
+                    f"{event_key} 同时出现在 {previous_scene_key} 与 {scene.key}"
+                )
             normalized_event_keys[(scene.key, unit_index)] = event_key
             mentioned = [
                 key
