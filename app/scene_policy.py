@@ -85,9 +85,9 @@ def normalize_scene_image_qa(qa: dict[str, Any] | None, *, environment_only: boo
         uncertain.append("无法确认画面无禁止文字")
     if space_type_matches is None:
         uncertain.append("无法确认场景空间类型")
-    if layout_detail_matches is None:
+    if "layout_detail_matches" in result and layout_detail_matches is None:
         uncertain.append("无法确认场景布局细节")
-    if material_contract_matches is None:
+    if "material_contract_matches" in result and material_contract_matches is None:
         uncertain.append("无法确认场景材质合同")
     if result.get("qa_recovered"):
         uncertain.append("QA 结果由非标准输出恢复，必须复核")

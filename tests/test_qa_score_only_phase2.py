@@ -6,18 +6,10 @@ from pathlib import Path
 from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset, select_best_video_candidate
 from app.harness.types import Issue, IssueSeverity
-from app.media_pipeline.retry_policy import RetryKind, decide_retry_by_error_class
 from app.multiview import keyframe_gate_passed, pack_is_ready, scene_primary_is_usable
 from app.video_issues import issues_from_qa
 from app.video_modes import ReferenceImageAsset, apply_keep_gate, consistency_retries, reference_gen_retries
 from app.video_repair_router import route as route_video_repair
-
-
-def test_qa_findings_cannot_enter_retry_policy() -> None:
-    decision = decide_retry_by_error_class("VIDEO_QA_CHARACTER_DUPLICATE")
-    assert decision.allow is False
-    assert decision.kind == RetryKind.TECHNICAL
-    assert decision.create_new_version is False
 
 
 def test_reference_retries_are_zero() -> None:

@@ -125,27 +125,43 @@ def test_outline_key_line_capacity_blocks_overload():
 
 
 def test_issue_code_spoken_capacity():
-    assert issue_code("第 9 镜口播超过 10 秒上限 36 字") == "SPOKEN_CAPACITY_EXCEEDED"
+    assert issue_code(
+        "[SPOKEN_CAPACITY_EXCEEDED] 第 9 镜口播超过 10 秒上限 36 字"
+    ) == "SPOKEN_CAPACITY_EXCEEDED"
 
 
 def test_issue_code_distinguishes_action_capacity_from_spoken_capacity():
-    message = "shot_no=8 含约 4 个顺序动作节拍，超过 5s 镜头容量上限 2；请拆镜"
+    message = (
+        "[ACTION_CAPACITY_EXCEEDED] shot_no=8 含约 4 个顺序动作节拍，"
+        "超过 5s 镜头容量上限 2；请拆镜"
+    )
     assert issue_code(message) == "ACTION_CAPACITY_EXCEEDED"
 
 
 def test_issue_code_spoken_contract_conflict_is_not_capacity():
     assert issue_code(
-        "shot_no=15 dialogues 与 audio_timeline 的口播内容分叉；同一镜头只能有一套有效口播"
+        "[SPOKEN_CONTRACT_CONFLICT] shot_no=15 dialogues 与 audio_timeline "
+        "的口播内容分叉；同一镜头只能有一套有效口播"
     ) == "SPOKEN_CONTRACT_CONFLICT"
 
 
 def test_issue_code_spoken_timeline_errors_are_not_capacity():
-    assert issue_code("shot_no=3 口播时间段在 2.0s 处与上一段非法重叠") == "SPOKEN_TIMELINE_OVERLAP"
-    assert issue_code("shot_no=3 口播时间段 [0, 11] 超出本镜 10s 时长") == "SPOKEN_TIMELINE_OUT_OF_RANGE"
+    assert issue_code(
+        "[SPOKEN_TIMELINE_OVERLAP] shot_no=3 口播时间段在 2.0s 处与上一段非法重叠"
+    ) == "SPOKEN_TIMELINE_OVERLAP"
+    assert issue_code(
+        "[SPOKEN_TIMELINE_OUT_OF_RANGE] shot_no=3 口播时间段 [0, 11] 超出本镜 10s 时长"
+    ) == "SPOKEN_TIMELINE_OUT_OF_RANGE"
 
 
 def test_issue_code_dialogue_context_break_is_key_line_failure():
-    assert issue_code("主线对白上下文断裂：角色突然冒出一句回应") == "KEY_LINE_MISSING"
+    assert issue_code(
+        "[KEY_LINE_MISSING] 主线对白上下文断裂：角色突然冒出一句回应"
+    ) == "KEY_LINE_MISSING"
+
+
+def test_issue_code_does_not_infer_from_prose() -> None:
+    assert issue_code("主线对白上下文断裂：角色突然冒出一句回应") == "BUSINESS_RULE_FAILED"
 
 
 def test_retryable_provider_failure_survives_orchestration_wrapping():
@@ -166,7 +182,7 @@ def test_warning_candidate_policy_rejects_blocker_concept():
     此处验证 issues_from_messages 产生 blocker，以及路由会把它当成需修复问题。
     """
     issues = issues_from_messages(
-        ["shot_no=9 口播 65 字，超过 10s 上限 36 字"],
+        ["[SPOKEN_CAPACITY_EXCEEDED] shot_no=9 口播 65 字，超过 10s 上限 36 字"],
         subject="shot:9",
         severity=IssueSeverity.BLOCKER,
     )

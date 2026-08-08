@@ -318,7 +318,8 @@ def dialogue_framing_errors(
         return []
     if len(speakers) > 1:
         return [
-            f"shot_no={shot.shot_no} 同一镜包含多个画内说话人 {speakers}；"
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            f"同一镜包含多个画内说话人 {speakers}；"
             "优秀漫剧对白应按话轮拆成相邻正反打，每镜只保留一位画内说话人"
         ]
 
@@ -327,14 +328,16 @@ def dialogue_framing_errors(
     errors: list[str] = []
     if speaker not in visible:
         errors.append(
-            f"shot_no={shot.shot_no} 画内说话人「{speaker}」不在 characters_visible；"
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            f"画内说话人「{speaker}」不在 characters_visible；"
             "需要口型的说话人必须入画，画外说话请改为 offscreen_voice"
         )
         return errors
     if dialogue_two_shot_required(shot, narrative_authority=narrative_authority):
         if len(visible) > 2:
             errors.append(
-                f"shot_no={shot.shot_no} 虽有双人肢体互动，但画面声明了 {len(visible)} 人；"
+                f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+                f"虽有双人肢体互动，但画面声明了 {len(visible)} 人；"
                 "对白双人镜最多保留说话人与直接互动对象，其余人物留在画外"
             )
         return errors
@@ -347,13 +350,15 @@ def dialogue_framing_errors(
         # 其他可见角色可作为无台词的直接互动对象/背景关系存在。
         if staging_kind == "spatial" and shot.shot_size not in {"远景", "全景", "中景"}:
             errors.append(
-                f"shot_no={shot.shot_no} 的对白同时包含走位/离场等大形体动作，"
+                f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+                "的对白同时包含走位/离场等大形体动作，"
                 f"shot_size 应为中景、全景或远景，当前为「{shot.shot_size}」；"
                 "必须完整拍出动作，不能用单人大近景替代"
             )
         elif staging_kind == "prop" and shot.shot_size == "特写":
             errors.append(
-                f"shot_no={shot.shot_no} 的对白同时包含剧情道具操作，shot_size 不得为特写；"
+                f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+                "的对白同时包含剧情道具操作，shot_size 不得为特写；"
                 "请至少使用近景并完整保留双手、道具和接触关系"
             )
         return errors
@@ -361,17 +366,20 @@ def dialogue_framing_errors(
         return errors
     if visible != [speaker]:
         errors.append(
-            f"shot_no={shot.shot_no} 是「{speaker}」的对白镜头，但画面可见角色为 {visible}；"
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            f"是「{speaker}」的对白镜头，但画面可见角色为 {visible}；"
             "请只保留说话人，听者和人群留在画外，下一话轮再切反打/反应镜"
         )
     if shot.shot_size not in DIALOGUE_CLOSEUP_SHOT_SIZES:
         errors.append(
-            f"shot_no={shot.shot_no} 是单人对白镜头，shot_size 应为近景或特写，"
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            "是单人对白镜头，shot_size 应为近景或特写，"
             f"当前为「{shot.shot_size}」"
         )
     if shot.camera_move not in DIALOGUE_CLOSEUP_CAMERA_MOVES:
         errors.append(
-            f"shot_no={shot.shot_no} 是单人对白镜头，camera_move 应为固定或推近，"
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            "是单人对白镜头，camera_move 应为固定或推近，"
             f"当前为「{shot.camera_move}」"
         )
     return errors
@@ -896,7 +904,8 @@ def action_capacity_errors(
     limit = action_capacity_limit(getattr(shot, "duration_s", 5))
     if beats > limit:
         errors.append(
-            f"shot_no={shot.shot_no} 含约 {beats} 个顺序动作节拍，超过 {shot.duration_s}s 镜头容量上限 {limit}；"
+            f"[ACTION_CAPACITY_EXCEEDED] shot_no={shot.shot_no} 含约 {beats} "
+            f"个顺序动作节拍，超过 {shot.duration_s}s 镜头容量上限 {limit}；"
             "请删减超纲动作，优先保留单一主线动作；确需拆镜时最多 +1 相邻镜，禁止无限拆碎"
         )
     return errors
@@ -923,7 +932,7 @@ def speech_capacity_errors(shot: Shot) -> list[str]:
     errors: list[str] = []
     capacity = capacity_issue(shot)
     if capacity is not None:
-        errors.append(capacity.message)
+        errors.append(f"[{capacity.code}] {capacity.message}")
     return errors
 
 
@@ -955,7 +964,8 @@ def implicit_speech_without_dialogue_errors(shot: Shot) -> list[str]:
 def spoken_contract_coherence_errors(shot: Shot) -> list[str]:
     """口播字段一致性与时间轴合法性；容量由 speech_capacity_errors 单独负责，避免重复报告。"""
     return [
-        issue.message for issue in validate_spoken_contract(shot)
+        f"[{issue.code}] {issue.message}"
+        for issue in validate_spoken_contract(shot)
         if issue.rule_id != RULE_SPOKEN_CAPACITY
     ]
 

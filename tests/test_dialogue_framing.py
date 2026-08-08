@@ -196,7 +196,7 @@ def test_two_visible_speakers_must_split_into_reverse_shots() -> None:
 
 def test_dialogue_framing_issue_routes_to_current_shot_repair() -> None:
     message = (
-        "shot_no=6 同一镜包含多个画内说话人 ['甲', '乙']；"
+        "[DIALOGUE_FRAMING_INVALID] shot_no=6 同一镜包含多个画内说话人 ['甲', '乙']；"
         "请按话轮拆成相邻正反打"
     )
 
@@ -221,12 +221,12 @@ def test_dialogue_framing_issue_routes_to_current_shot_repair() -> None:
     "message, shot_no",
     [
         (
-            "shot_no=11 的对白同时包含剧情道具操作，shot_size 不得为特写；"
+            "[DIALOGUE_FRAMING_INVALID] shot_no=11 的对白同时包含剧情道具操作，shot_size 不得为特写；"
             "请至少使用近景并完整保留双手、道具和接触关系",
             11,
         ),
         (
-            "shot_no=13 的对白同时包含走位/离场等大形体动作，shot_size 应为中景、"
+            "[DIALOGUE_FRAMING_INVALID] shot_no=13 的对白同时包含走位/离场等大形体动作，shot_size 应为中景、"
             "全景或远景，当前为「近景」；必须完整拍出动作，不能用单人大近景替代",
             13,
         ),

@@ -2669,54 +2669,49 @@ async def run_storyboard_supervisor(
                 ), None)
 
         if scene_pack_mode:
-            pending_batches = [
+            # Only generate the contiguous frontier chunk.  The old implementation
+            # scheduled every remaining scene and awaited one giant gather before
+            # committing anything.  A 142-shot outline could therefore spend many
+            # minutes creating candidate artifacts while the UI correctly saw zero
+            # persisted shots; one bad scene also wasted every later scene call.
+            # Each chunk is already bounded (normally <= 8 shots), so generate,
+            # validate and commit it before advancing to the next chunk.
+            frontier_batch = next((
                 batch
                 for batch in scene_pack_batches
+                if int(batch["end"]) > len(completed)
+            ), None)
+            pending_batches = (
+                [frontier_batch]
                 if (
-                    int(batch["end"]) > len(completed)
-                    and str(batch["key"])
+                    frontier_batch is not None
+                    and str(frontier_batch["key"])
                     not in cp.scene_pack_candidates
                 )
-            ]
+                else []
+            )
             if pending_batches:
+                batch = pending_batches[0]
+                context = batch["context"]
                 try:
-                    scene_parallelism = max(
-                        1,
-                        int(get_setting("storyboard_concurrency") or 2),
+                    result = await generate_storyboard_scene_pack(
+                        ep_data,
+                        source_text,
+                        bible,
+                        screenplay,
+                        outline,
+                        batch["context"],
+                        shot_nos=set(batch["shot_nos"]),
                     )
-                except (TypeError, ValueError):
-                    scene_parallelism = 2
-                scene_gate = asyncio.Semaphore(scene_parallelism)
-
-                async def _generate_scene_batch(batch):
-                    async with scene_gate:
-                        return await generate_storyboard_scene_pack(
-                            ep_data,
-                            source_text,
-                            bible,
-                            screenplay,
-                            outline,
-                            batch["context"],
-                            shot_nos=set(batch["shot_nos"]),
-                        )
-
-                generated = await asyncio.gather(
-                    *[
-                        _generate_scene_batch(batch)
-                        for batch in pending_batches
-                    ],
-                    return_exceptions=True,
-                )
+                except Exception as exc:  # noqa: BLE001 - isolate this chunk
+                    result = exc
                 if not _run_has_write_ownership():
                     return cp
-                for batch, result in zip(pending_batches, generated):
-                    context = batch["context"]
-                    if isinstance(result, BaseException):
-                        failed_scene_ids.add(context.scene_id)
-                        failed_batch_ends.append(int(batch["end"]))
-                        if scene_pack_failure is None:
-                            scene_pack_failure = result
-                        continue
+                if isinstance(result, BaseException):
+                    failed_scene_ids.add(context.scene_id)
+                    failed_batch_ends.append(int(batch["end"]))
+                    scene_pack_failure = result
+                else:
                     cp.scene_pack_candidates[str(batch["key"])] = (
                         result.model_dump(mode="json")
                     )
@@ -2843,6 +2838,7 @@ async def run_storyboard_supervisor(
                 cp.scene_pack_candidates.pop(batch_key, None)
                 cp.phase = "GENERATING_SHOTS"
                 cp.expected_total = len(outline.shots)
+                cp.validated_prefix_end = len(completed)
                 cp.next_shot_no = len(completed) + 1
                 save_checkpoint(cp, run_id=run_id)
                 if run_id:
@@ -2859,6 +2855,20 @@ async def run_storyboard_supervisor(
                             "shot_end": scene_end,
                         },
                     )
+
+            if scene_pack_failure is None and any(
+                int(batch["end"]) > len(completed)
+                for batch in scene_pack_batches
+            ):
+                # Commit progress is now visible to the UI.  Re-enter the outer
+                # loop to generate the next bounded chunk instead of falling into
+                # the legacy per-shot path for every remaining scene.
+                cp.phase = "GENERATING_SHOTS"
+                cp.expected_total = len(outline.shots)
+                cp.validated_prefix_end = len(completed)
+                cp.next_shot_no = len(completed) + 1
+                save_checkpoint(cp, run_id=run_id)
+                continue
 
             if scene_pack_failure is not None:
                 if _is_retryable_external_error(scene_pack_failure):
@@ -2989,7 +2999,11 @@ async def run_storyboard_supervisor(
                 )
                 if not _run_has_write_ownership():
                     return cp
-                cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
+                cp = _apply_repair(
+                    cp, plan, conn, episode_id, completed, outline,
+                    repair_screenplay=screenplay,
+                    narrative_repair_active=narrative_authority,
+                )
                 if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                     if cp.outcome in {
                         "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
@@ -3046,7 +3060,11 @@ async def run_storyboard_supervisor(
                         f"已选择修复策略：{plan.strategy}，回退至第 {plan.invalidation_frontier} 镜",
                         payload=plan.model_dump(mode="json"),
                 )
-                cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
+                cp = _apply_repair(
+                    cp, plan, conn, episode_id, completed, outline,
+                    repair_screenplay=screenplay,
+                    narrative_repair_active=narrative_authority,
+                )
                 if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                     reason = (cp.last_repair or {}).get("reason") or plan.reason
                     if cp.outcome in {
@@ -3279,6 +3297,8 @@ async def run_storyboard_supervisor(
                     return cp
                 cp = _apply_repair(
                     cp, retry_plan, conn, episode_id, list(official_board.shots), outline,
+                    repair_screenplay=screenplay,
+                    narrative_repair_active=narrative_authority,
                 )
                 if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                     if cp.outcome in {
@@ -3430,7 +3450,11 @@ async def run_storyboard_supervisor(
             )
             if not _run_has_write_ownership():
                 return cp
-            cp = _apply_repair(cp, plan, conn, episode_id, completed, outline)
+            cp = _apply_repair(
+                cp, plan, conn, episode_id, completed, outline,
+                repair_screenplay=screenplay,
+                narrative_repair_active=narrative_authority,
+            )
             if cp.phase in {"WAITING_HUMAN", "WAITING_AUTHORIZATION", "PAUSED_EXTERNAL"}:
                 if cp.outcome in {
                     "REPAIR_FAILED_STRATEGIES_EXHAUSTED",
@@ -3726,6 +3750,8 @@ async def run_storyboard_supervisor(
                         return cp
                     cp = _apply_repair(
                         cp, plan, conn, episode_id, list(evaluation.board.shots), outline,
+                        repair_screenplay=screenplay,
+                        narrative_repair_active=narrative_authority,
                     )
                     cp.last_repair = {
                         **(cp.last_repair or {}),
@@ -3844,6 +3870,9 @@ def _apply_repair(
     episode_id: str,
     completed: list[Shot],
     outline: StoryboardOutline | None,
+    *,
+    repair_screenplay: EpisodeScreenplay | None = None,
+    narrative_repair_active: bool | None = None,
 ) -> SupervisorCheckpoint:
     """规划一个非破坏式候选窗口；此函数绝不删除正式 shots。"""
     from app.observability.metrics import inc
@@ -3967,14 +3996,15 @@ def _apply_repair(
     ).fetchone()
     if episode_row is None:
         raise StageError("分镜修复", ["剧集不存在"])
-    from app.production.screenplay_authority import resolve_downstream_screenplay
+    if repair_screenplay is None or narrative_repair_active is None:
+        from app.production.screenplay_authority import resolve_downstream_screenplay
 
-    try:
-        repair_context = resolve_downstream_screenplay(episode_id, conn=conn)
-    except ValueError as exc:
-        raise StageError("分镜修复", [f"剧本权威链无效：{exc}"]) from exc
-    repair_screenplay = repair_context.screenplay
-    narrative_repair_active = repair_context.narrative_authority_required
+        try:
+            repair_context = resolve_downstream_screenplay(episode_id, conn=conn)
+        except ValueError as exc:
+            raise StageError("分镜修复", [f"剧本权威链无效：{exc}"]) from exc
+        repair_screenplay = repair_context.screenplay
+        narrative_repair_active = repair_context.narrative_authority_required
     if candidate_outline is not None and bridge is not None:
         # Candidate isolation: a semantic bridge is only a proposed repair
         # until the merged storyboard passes the complete gate.  Keep it in

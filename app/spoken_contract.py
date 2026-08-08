@@ -412,7 +412,7 @@ def validate_spoken_contract(shot: Shot) -> list[SpokenIssue]:
 
 def spoken_contract_errors(shot: Shot) -> list[str]:
     """兼容现有 `list[str]` 校验管线的文案视图。"""
-    return [issue.message for issue in validate_spoken_contract(shot)]
+    return [f"[{issue.code}] {issue.message}" for issue in validate_spoken_contract(shot)]
 
 
 # ---------- 同步 ----------

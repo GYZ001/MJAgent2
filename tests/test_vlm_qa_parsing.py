@@ -180,10 +180,8 @@ def test_scene_reference_qa_treats_empty_environment_as_required(monkeypatch) ->
         assert "画面无人是合格要求" in expectation
         assert "不要要求角色、人物动作、姿态、表情或互动" in expectation
         assert "space_type_matches 只判断室内外和地点大类" in expectation
-        assert "售票口大小、柜台形式、内部通道是否完全封闭" in expectation
-        assert "不得因此把 space_type_matches 设为 false" in expectation
-        assert "输出必须自洽" in expectation
-        assert "不得一边声明错地点，一边返回 true" in expectation
+        assert "layout_detail_matches 单独判断布局、陈设与结构细节" in expectation
+        assert "material_contract_matches 单独判断画面材质" in expectation
         assert call_meta["initiator_label"] == "场景资产主图QA"
         return (
             '{"expectation_match": 0.9, "continuity": 1, "clean_frame": 1, '
@@ -207,7 +205,8 @@ def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch
         return (
             '{"expectation_match": 0.92, "continuity": 1, "clean_frame": 0.3, '
             '"overall": 0.3, "person_count": 0, "watermark_detected": true, '
-            '"forbidden_text_detected": true, "space_type_matches": true, '
+            '"watermark_occluding": false, "forbidden_text_detected": true, '
+            '"forbidden_text_is_provider_mark": true, "space_type_matches": true, '
             '"issues": ["画面右下角带有AI生成水印"]}'
         )
 
@@ -218,9 +217,9 @@ def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch
         environment_only=True,
     ))
 
-    assert qa["clean_frame"] == 1.0
-    assert qa["overall"] == 0.92
-    assert qa["issues"] == []
+    assert qa["clean_frame"] == 0.3
+    assert qa["overall"] == 0.3
+    assert qa["issues"] == ["画面右下角带有AI生成水印"]
     assert qa["hard_gate_passed"] is True
     assert qa["status"] == "warning"
     assert qa["watermark_detected"] is True
@@ -228,7 +227,7 @@ def test_scene_reference_qa_ignores_non_occluding_provider_watermark(monkeypatch
     assert "实用质量模式" in qa["warnings"][0]
 
 
-def test_scene_reference_qa_uses_provider_mark_issue_when_boolean_conflicts(monkeypatch) -> None:
+def test_scene_reference_qa_never_overrides_structured_facts_from_issue_prose(monkeypatch) -> None:
     async def fake_vlm_check(images, expectation, *, call_meta=None):
         return (
             '{"expectation_match":0.72,"continuity":1,"clean_frame":0.7,"overall":0.7,'
@@ -245,11 +244,10 @@ def test_scene_reference_qa_uses_provider_mark_issue_when_boolean_conflicts(monk
         environment_only=True,
     ))
 
-    assert qa["watermark_detected"] is True
-    assert qa["forbidden_text_is_provider_mark"] is True
-    assert qa["hard_gate_passed"] is True
-    assert qa["status"] == "warning"
-    assert qa["issues"] == ["画风偏写实，与二维厚涂要求有差异"]
+    assert qa["watermark_detected"] is False
+    assert qa["forbidden_text_is_provider_mark"] is False
+    assert qa["hard_gate_passed"] is False
+    assert qa["status"] == "failed"
 
 
 def test_scene_reference_qa_allows_corner_mark_over_partial_edge_environment(monkeypatch) -> None:
@@ -257,7 +255,8 @@ def test_scene_reference_qa_allows_corner_mark_over_partial_edge_environment(mon
         return (
             '{"expectation_match":0.9,"continuity":1,"clean_frame":0.8,"overall":0.9,'
             '"person_count":0,"watermark_detected":true,'
-            '"forbidden_text_detected":true,"space_type_matches":true,'
+            '"watermark_occluding":false,"forbidden_text_detected":true,'
+            '"forbidden_text_is_provider_mark":true,"space_type_matches":true,'
             '"issues":["右下角存在AI生成文字水印，遮挡了部分台阶区域"]}'
         )
 
@@ -270,7 +269,7 @@ def test_scene_reference_qa_allows_corner_mark_over_partial_edge_environment(mon
 
     assert qa["hard_gate_passed"] is True
     assert qa["status"] == "warning"
-    assert qa["issues"] == []
+    assert qa["issues"] == ["右下角存在AI生成文字水印，遮挡了部分台阶区域"]
     assert qa["non_occluding_provider_watermark"] is True
 
 
@@ -279,7 +278,8 @@ def test_scene_reference_qa_rejects_watermark_over_critical_structure(monkeypatc
         return (
             '{"expectation_match":0.9,"continuity":1,"clean_frame":0.4,"overall":0.4,'
             '"person_count":0,"watermark_detected":true,'
-            '"forbidden_text_detected":true,"space_type_matches":true,'
+            '"watermark_occluding":true,"forbidden_text_detected":true,'
+            '"forbidden_text_is_provider_mark":true,"space_type_matches":true,'
             '"issues":["右下角水印大面积遮挡场景主体和关键楼梯结构"]}'
         )
 
@@ -299,7 +299,8 @@ def test_scene_reference_qa_keeps_real_overlay_text_as_hard_failure(monkeypatch)
         return (
             '{"expectation_match":0.9,"continuity":1,"clean_frame":0.7,"overall":0.7,'
             '"person_count":0,"watermark_detected":true,'
-            '"forbidden_text_detected":true,"space_type_matches":true,'
+            '"watermark_occluding":false,"forbidden_text_detected":true,'
+            '"forbidden_text_is_provider_mark":false,"space_type_matches":true,'
             '"issues":["右下角AI生成水印","画面中央有剧情字幕叠字"]}'
         )
 

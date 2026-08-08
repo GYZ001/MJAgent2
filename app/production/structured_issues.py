@@ -122,9 +122,10 @@ def issues_from_validator_messages(
             continue
         scene_no = int(scene_field.group(1))
         field = scene_field.group(2).lower()
+        explicit_code = issue_code(message)
         code = (
-            "SCENE_STORY_FUNCTION_TOO_SHORT"
-            if field == "story_function" and "过短" in message
+            explicit_code
+            if explicit_code != "BUSINESS_RULE_FAILED"
             else "SCENE_FIELD_INVALID"
         )
         issues.append(structured_issue(

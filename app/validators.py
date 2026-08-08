@@ -2463,7 +2463,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         if len((scene.scene_heading or "").strip()) < 4:
             errors.append(f"{tag}.scene_heading 过短；请写成可读的场次标题")
         if len((scene.story_function or "").strip()) < 6:
-            errors.append(f"{tag}.story_function 过短；请说明本场戏剧功能")
+            errors.append(
+                f"[SCENE_STORY_FUNCTION_TOO_SHORT] {tag}.story_function "
+                "过短；请说明本场戏剧功能"
+            )
         if len((scene.summary or "").strip()) < 16:
             errors.append(f"{tag}.summary 过短；请概括本场具体戏剧内容")
         if len((scene.turn or "").strip()) < 4:
@@ -2703,7 +2706,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if orphan_responses:
         shown = "；".join(orphan_responses[:KEY_CONTENT_MAX_REPORT])
         errors.append(
-            f"主线对白上下文断裂：{shown}；这类回答/安慰/反驳依赖前文，"
+            f"[KEY_LINE_MISSING] 主线对白上下文断裂：{shown}；"
+            "该话轮依赖前文，"
             "必须把同一场前两轮内另一角色的触发台词也列入 key_lines，"
             "让下游整组保留，不能让主要角色突然冒出一句回应"
         )
@@ -4334,13 +4338,37 @@ def validate_storyboard_direction_contract(
     for index in range(1, len(board.shots)):
         previous = board.shots[index - 1]
         current = board.shots[index]
+        previous_delivery = {
+            *list(previous.spine_beat_ids or []),
+            *list(previous.context_requirement_ids or []),
+            *list(previous.key_line_ids or []),
+            *list(previous.information_ids or []),
+        }
+        current_delivery = {
+            *list(current.spine_beat_ids or []),
+            *list(current.context_requirement_ids or []),
+            *list(current.key_line_ids or []),
+            *list(current.information_ids or []),
+        }
         same_delivery = (
-            set(previous.spine_beat_ids or []) == set(current.spine_beat_ids or [])
-            and set(previous.context_requirement_ids or [])
-            == set(current.context_requirement_ids or [])
+            bool(previous_delivery)
+            and previous_delivery == current_delivery
             and _too_similar(previous.resulting_change, current.resulting_change)
         )
-        if same_delivery and not current.repeat_of_shot_id:
+        split_action_continuation = bool(
+            current.continuity_mode == "action_continuation"
+            and (previous.primary_action or "").strip()
+            and (current.primary_action or "").strip()
+            and not _too_similar(previous.primary_action, current.primary_action)
+            and (previous.state_out or "").strip()
+            and (current.state_in or "").strip()
+            and _too_similar(previous.state_out, current.state_in)
+        )
+        if (
+            same_delivery
+            and not current.repeat_of_shot_id
+            and not split_action_continuation
+        ):
             errors.append(
                 f"第 {previous.shot_no} 与第 {current.shot_no} 镜交付内容和结果几乎相同；"
                 "请合并，或显式填写 repeat_of_shot_id/repeat_gain 说明新作用"

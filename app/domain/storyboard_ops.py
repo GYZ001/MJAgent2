@@ -1637,9 +1637,12 @@ async def _storyboard_task(
                 )
             ):
                 return
-        # Supervisor 已把 WAITING_* 写为 scripted+script_error；此处只处理未捕获异常
+        # Supervisor 已把 WAITING_* 写为 scripted+script_error；此处只处理未捕获异常。
+        # ``scripting+script_error`` 仍可能只是更早的场景包降级提示，不能据此吞掉
+        # 当前异常，否则 Step 会被误记为 SUCCEEDED，Run 却在外层被判为 FAILED，
+        # 同时真正异常也会被旧提示遮蔽。
         ep_now = conn.execute("SELECT status, script_error FROM episodes WHERE id=?", (episode_id,)).fetchone()
-        if ep_now and ep_now["status"] in {"scripted", "confirmed", "scripting"} and ep_now["script_error"]:
+        if ep_now and ep_now["status"] in {"scripted", "confirmed"} and ep_now["script_error"]:
             return
         if saved:
             try:
@@ -2069,7 +2072,19 @@ async def _recorded_storyboard_task(
         ):
             recorder.succeed("分镜已完成，等待人工确认")
         else:
-            recorder.fail(RuntimeError(result["script_error"] if result else "分镜生成失败"))
+            message = (
+                str(result["script_error"] or "分镜 Supervisor 未进入可恢复终态")
+                if result else "分镜生成失败"
+            )
+            # Run 终态与页面投影必须在同一收尾路径收敛。否则 finally 只清活动
+            # 指针而遗留 status=scripting，分镜台会在任务中心已经 FAILED 后仍显示运行。
+            conn.execute(
+                "UPDATE episodes SET status='script_failed',script_error=? "
+                "WHERE id=? AND active_storyboard_run_id=?",
+                (message[:800], episode_id, recorder.run_id),
+            )
+            conn.commit()
+            recorder.fail(RuntimeError(message))
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，分镜运行等待自动续做")
@@ -3165,13 +3180,10 @@ def _storyboard_status_snapshot(
     final_valid = bool(shots and shots[-1].get("is_final"))
     phase = str((supervisor or {}).get("phase") or "")
     active_run_live = _storyboard_generation_is_live(ep)
-    running = ep.get("status") == "scripting" and (
-        active_run_live
-        or phase not in {
-            "PAUSED_EXTERNAL", "PAUSED_BUDGET", "WAITING_HUMAN",
-            "WAITING_AUTHORIZATION", "CANCELLED",
-        }
-    )
+    # ``episodes.status`` 是业务投影，不是任务存活证明。Run 已 FAILED/CANCELLED
+    # 或活动指针已清理后，即使旧 checkpoint 仍停在 GENERATING_SHOTS，也绝不能
+    # 继续向前端报告 running。
+    running = ep.get("status") == "scripting" and active_run_live
     incomplete_terminal_checkpoint = bool(
         phase == "SUCCEEDED"
         and (
