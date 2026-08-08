@@ -9,7 +9,6 @@ from typing import Any
 from app.renderability import (
     PREFERRED_SHOT_DURATION_S,
     SPINE_BEATS_MIN,
-    find_overdetail_hits,
 )
 
 
@@ -39,14 +38,6 @@ def score_renderability_sample(
     total_dur = sum(int(s.get("duration_s") or 0) for s in shots)
     gt5 = [s for s in shots if int(s.get("duration_s") or 0) > PREFERRED_SHOT_DURATION_S]
 
-    overdetail_hits: list[str] = []
-    for s in shots:
-        for field in ("action_desc", "first_frame_desc", "last_frame_desc"):
-            overdetail_hits.extend(find_overdetail_hits(s.get(field)))
-    full_text = (screenplay or {}).get("full_script_text") or ""
-    overdetail_hits.extend(find_overdetail_hits(full_text))
-    overdetail_hits = list(dict.fromkeys(overdetail_hits))
-
     # drop 回流粗检：drop 文案大段出现在分镜 action/covers
     board_text = "\n".join(
         f"{s.get('action_desc') or ''} {s.get('covers') or ''} {s.get('beat') or ''}"
@@ -74,8 +65,6 @@ def score_renderability_sample(
         "drop_list_count": len(drops),
         "duration_gt5_count": len(gt5),
         "preferred_duration_s": PREFERRED_SHOT_DURATION_S,
-        "overdetail_hit_count": len(overdetail_hits),
-        "overdetail_hits": overdetail_hits[:12],
         "drop_reappear_count": len(drop_reappear),
         "spine_uncovered_count": len(uncovered),
         "spine_uncovered": uncovered[:8],
@@ -85,7 +74,6 @@ def score_renderability_sample(
     gates = {
         "shot_count_within_hard_max": True,
         "spine_beats_in_range": len(beats) >= SPINE_BEATS_MIN,
-        "no_overdetail": len(overdetail_hits) == 0,
         "no_drop_reappear": len(drop_reappear) == 0,
         "spine_fully_covered": len(uncovered) == 0 and bool(must_keep),
     }
@@ -93,7 +81,6 @@ def score_renderability_sample(
         gates[k] for k in (
             "shot_count_within_hard_max",
             "spine_beats_in_range",
-            "no_overdetail",
             "no_drop_reappear",
         )
     )

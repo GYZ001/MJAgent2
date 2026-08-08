@@ -1092,7 +1092,7 @@ def test_repair_plan_does_not_delete_or_mutate_official_shots(repair_db) -> None
     before = [tuple(row) for row in conn.execute(
         "SELECT id,shot_no,action_desc FROM shots ORDER BY shot_no"
     ).fetchall()]
-    plan = route_issues(["第 2 镜首帧画面含超纲细节词：衣角，请删除"])
+    plan = route_issues(["[FRAME_STATE_INVALID] 第 2 镜首帧与 planned_state_in 不一致"])
     checkpoint = SupervisorCheckpoint(
         episode_id="e1",
         planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
@@ -1782,7 +1782,7 @@ def test_validated_projection_does_not_leak_unrelated_derived_fields(repair_db) 
 def test_repair_feedback_is_localized_to_target_shot() -> None:
     messages = [
         "shots[9](shot_no=10).camera_move=「环绕」不在合法枚举中",
-        "第 13 镜首帧画面含超纲细节词：衣角、指节",
+        "[FRAME_STATE_INVALID] 第 13 镜首帧与 planned_state_in 不一致",
     ]
 
     assert _repair_feedback_for_shot(messages, 10) == [messages[0]]
@@ -1837,7 +1837,7 @@ def test_candidate_without_any_resolved_target_is_not_progress() -> None:
 
 def test_candidate_can_resolve_one_target_from_combined_spine_issue() -> None:
     conflict = "shot_no=16 dialogues 与 audio_timeline 的口播内容分叉"
-    warning = "shots[1](shot_no=2).last_frame_desc 含超纲细节词：眼泪"
+    warning = "[FRAME_STATE_INVALID] shots[1](shot_no=2).last_frame_desc 与 planned_state_out 不一致"
     combined_spine = (
         "主线节拍主体已入画但未完成对应动作/对白交付："
         "S01/李富贵:一路哭闹抱怨；S02/路人丙:交代杂役规则并发放凝气卷"

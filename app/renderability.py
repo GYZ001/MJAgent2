@@ -30,90 +30,15 @@ ACTION_DESC_TARGET_MAX = 55
 SCENE_OUTLINE_MIN = 1
 SCENE_OUTLINE_MAX: int | None = None
 
-# 超纲词表（命中 → 校验失败；修复方向是删细节，不是补细）
-OVERDETAIL_TERMS: tuple[str, ...] = (
-    "轻轻颤抖",
-    "泪珠",
-    "眼泪",
-    "泪水",
-    "指节",
-    "衣角",
-    "发丝",
-    "瞳孔",
-    "绣纹",
-    "纹理",
-    "逐个",
-    "同时说道",
-    "分屏",
-    "闪回",
-)
-
 _RENDERABILITY_PROMPT_BLOCK = """【Renderability First·视频模型能力边界】
-你在为 AI 视频短剧写作，不是写话剧精排场刊。当代视频模型画不稳微表情、复杂手指与群戏。
-稳定可做：1~2 个主体的大形体（走/停/转身/伸手/开口）、单句短对白、大方向情绪（怒/惊/冷/喜）、一次简单道具接触、固定或轻推运镜。
-禁止写入：微表情/微动作、手部精细、材质服饰堆砌、同镜多节拍、群戏轮流说话、小字长文、抽象文学比喻。
-禁止用词示例：轻轻颤抖、泪珠/眼泪、指节、衣角、发丝、瞳孔、绣纹、纹理、逐个、同时说道、分屏、闪回。
-修复方向永远是删除超纲细节、合并碎镜、回到主线骨架——禁止「写得更细」。"""
+逐镜可拍性由 ShotTask 的动作阶段、capacity_budget、可见身份、连续性状态差与
+required_text 合同决定。自然语言中的物件、动作、情绪或题材词不参与通过判定。
+若任务超出时长或可读窗口，应在 AtomicAction.splittable_boundaries 上重分配阶段，
+不得扫描文案词汇后删除内容。"""
 
 
 def renderability_prompt_block() -> str:
     return _RENDERABILITY_PROMPT_BLOCK
-
-
-def find_overdetail_hits(text: str | None) -> list[str]:
-    """返回文本中命中的超纲词（去重、保序）。"""
-    raw = text or ""
-    if not raw:
-        return []
-    hits: list[str] = []
-    for term in OVERDETAIL_TERMS:
-        if term in raw and term not in hits:
-            hits.append(term)
-    return hits
-
-
-def overdetail_errors(text: str | None, field_path: str) -> list[str]:
-    hits = find_overdetail_hits(text)
-    if not hits:
-        return []
-    shown = "、".join(hits[:8])
-    extra = f"（另有 {len(hits) - 8} 个从略）" if len(hits) > 8 else ""
-    return [
-        f"{field_path} 含超纲细节词：{shown}{extra}；"
-        "请删除微表情/手指/衣褶/材质级描写，只保留大形体可读动作，不要改写得更细"
-    ]
-
-
-def overdetail_issue_is_active(message: str | None) -> bool:
-    """Return whether a persisted overdetail issue still violates today's policy."""
-    raw = str(message or "")
-    marker = "含超纲细节词"
-    if marker not in raw:
-        return True
-    listed = raw.split(marker, 1)[1].lstrip("：:").split("；", 1)[0]
-    return any(term in listed for term in OVERDETAIL_TERMS)
-
-
-def storyboard_repair_issue_is_active(message: str | None) -> bool:
-    """Hide persisted repair issues whose policy has since been retired."""
-    raw = str(message or "")
-    if (
-        "连续 3 个镜头景别" in raw
-        or "连续三个镜头景别" in raw
-        or "软预算" in raw
-    ):
-        return False
-    return overdetail_issue_is_active(raw)
-
-
-def strip_overdetail_terms(text: str) -> str:
-    """编译层第二道闸：剥离超纲词（根治仍在上游合同）。"""
-    out = text or ""
-    for term in OVERDETAIL_TERMS:
-        out = out.replace(term, "")
-    out = re.sub(r"[ \t]{2,}", " ", out)
-    out = re.sub(r"。{2,}", "。", out)
-    return out.strip()
 
 
 def shot_count_budget_errors(n_shots: int, *, context: str = "分镜") -> list[str]:

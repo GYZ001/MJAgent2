@@ -16,7 +16,6 @@ from app.production.screenplay_document import (
     ScreenplayDocument,
     apply_field_patch,
     document_to_screenplay,
-    normalize_overdetail_text_fields,
     rederive_projections,
     screenplay_to_document,
     split_dialogue_chain_by_scene,
@@ -68,16 +67,6 @@ def apply_patch_operation_to_document(
     """Execute one operation on an isolated document using the production path."""
     if operation.op == "rederive":
         return rederive_projections(document), ["rederive"]
-    if operation.op == "normalize_overdetail":
-        raw_terms = (
-            operation.value.get("terms")
-            if isinstance(operation.value, dict)
-            else []
-        )
-        return normalize_overdetail_text_fields(
-            document,
-            terms=[str(term) for term in (raw_terms or [])],
-        )
     if operation.op == "split_dialogue_chain_by_scene":
         chain_id = str(
             (operation.target or {}).get("chain_id")

@@ -47,7 +47,7 @@ from app.production.structured_issues import (
     structured_issue,
 )
 from app.schemas import Bible, EpisodeScreenplay
-from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX, OVERDETAIL_TERMS
+from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX
 
 
 MAX_REPAIR_ACTIVATION_PATCHES = 12
@@ -149,8 +149,6 @@ def _patch_strategy_key(ops: list[PatchOperation]) -> str:
     kind = str((op.target or {}).get("kind") or "")
     if op.op == "rederive":
         return "rederive"
-    if op.op == "normalize_overdetail":
-        return "normalize_overdetail"
     if op.op == "split_dialogue_chain_by_scene":
         return f"split_dialogue_chain_{(op.target or {}).get('chain_id') or 'unknown'}"
     if kind == "metadata":
@@ -1625,16 +1623,6 @@ def plan_screenplay_patch(
         and not _strategy_was_tried(tried, "rederive")
     ):
         return [PatchOperation(op="rederive")]
-
-    # 可拍性细节词不值得再次调用模型；只清理画面描述字段，保留对白和原文证据。
-    if code == "OVERDETAIL" and not _strategy_was_tried(tried, "normalize_overdetail"):
-        terms = [term for term in OVERDETAIL_TERMS if term in (issue.message or "")]
-        if terms:
-            return [PatchOperation(
-                op="normalize_overdetail",
-                target={"kind": "renderability_text"},
-                value={"terms": terms},
-            )]
 
     return ops
 

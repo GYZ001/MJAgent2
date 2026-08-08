@@ -39,7 +39,6 @@ _CODE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("DROP_LIST_REINTRODUCED", re.compile(r"drop_list|又拍回了", re.I)),
     ("PLAN_EXHAUSTED_NOT_FINAL", re.compile(r"计划.*跑完|is_final|收束|未收束", re.I)),
     ("PLOT_SPINE_INVALID", re.compile(r"must_keep_ending|主线骨架", re.I)),
-    ("OVERDETAIL", re.compile(r"超纲细节|衣角|指节|泪珠|写细", re.I)),
     ("LEDGER_INVALID", re.compile(r"information_ledger|events\[|event_id", re.I)),
     ("SHOT_BUDGET", re.compile(r"软预算|硬上限|镜头数|合并反应镜", re.I)),
     ("CHARACTER_CONSISTENCY", re.compile(r"人物谱|角色圣经|角色名|说话人|characters", re.I)),

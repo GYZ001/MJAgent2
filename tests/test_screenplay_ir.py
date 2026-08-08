@@ -1595,6 +1595,13 @@ def test_identity_adjudication_preserves_two_entities_with_one_source_label(
         item["source_instance_key"] == item["authority_id"]
         for item in episode["character_resolutions"]
     )
+    screenplay = compile_screenplay_ir(
+        resolved,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+    assert screenplay.id == "ep-ir-shared-source-label"
 
 
 def test_identity_adjudication_fails_closed_on_insufficient_source_evidence(

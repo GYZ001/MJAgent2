@@ -25,7 +25,6 @@ from app.schemas import (
     StoryEvent,
     VoiceCanonical,
 )
-from app.renderability import OVERDETAIL_TERMS
 
 
 class DialogueTurnNode(BaseModel):
@@ -933,65 +932,6 @@ def apply_field_patch(
     _set_by_dotted(data, path, value)
     touched.append(path.split(".")[0] or path)
     return ScreenplayDocument.model_validate(data), touched
-
-
-def normalize_overdetail_text_fields(
-    doc: ScreenplayDocument,
-    *,
-    terms: list[str] | None = None,
-) -> tuple[ScreenplayDocument, list[str]]:
-    """删除结构化画面描述中的不可拍细节词，绝不改对白或原文证据。"""
-    requested = list(dict.fromkeys(terms or list(OVERDETAIL_TERMS)))
-    selected = [term for term in requested if term in OVERDETAIL_TERMS]
-    if not selected:
-        return doc, []
-
-    data = copy.deepcopy(doc.model_dump(mode="json"))
-    touched: list[str] = []
-
-    def clean(value: Any) -> Any:
-        if not isinstance(value, str):
-            return value
-        result = value
-        for term in selected:
-            result = result.replace(term, "")
-        result = re.sub(r"[ \t]{2,}", " ", result)
-        result = re.sub(r"。{2,}", "。", result)
-        return result.strip()
-
-    for block in data.get("scene_blocks") or []:
-        scene_id = str(block.get("scene_id") or "")
-        for field in ("summary", "conflict", "turn"):
-            before = block.get(field)
-            after = clean(before)
-            if after != before:
-                block[field] = after
-                touched.append(scene_id)
-        for action in block.get("action_blocks") or []:
-            before = action.get("text")
-            after = clean(before)
-            if after != before:
-                action["text"] = after
-                touched.extend([str(action.get("action_id") or ""), scene_id])
-
-    spine = data.get("plot_spine") or {}
-    for beat in spine.get("spine_beats") or []:
-        for field in ("does", "turn"):
-            before = beat.get(field)
-            after = clean(before)
-            if after != before:
-                beat[field] = after
-                touched.append(str(beat.get("beat_id") or "plot_spine"))
-
-    for event in data.get("story_events") or []:
-        for field in ("state_in", "visible_change", "state_out"):
-            before = event.get(field)
-            after = clean(before)
-            if after != before:
-                event[field] = after
-                touched.append(str(event.get("event_id") or "story_event"))
-
-    return ScreenplayDocument.model_validate(data), list(dict.fromkeys(filter(None, touched)))
 
 
 def split_dialogue_chain_by_scene(

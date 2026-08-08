@@ -8232,7 +8232,7 @@ def _storyboard_preflight_contract(
    - 如果只是同一段连续动作里从房间走到门口/楼道/桌边/窗前，不要改 scene_name，把移动写进 action_desc。
 5. scene_name 是稳定的场景图身份，必须沿用库内规范名；scene_time 是独立时间维度。不要把楼道外/桌前/门口等镜头内容改写成新的 scene_name。
 6. characters 只写本镜头实际可见/在场且已交代入画原因的人；允许第 13 条定义的功能性路人，具体姓名仍必须来自角色圣经。屏幕发信人、纸条落款、新闻里提到的人、AI 软件名不算 characters。
-7. 每条 action_desc 必须显式写出 characters 中角色姓名与这一个大形体主动作（{ACTION_DESC_TARGET_MIN}~{ACTION_DESC_TARGET_MAX} 字）；禁止超纲细节词与切镜词。
+7. 每条 action_desc 必须显式落实本镜 primary_action_id/action_phase_ids，并让 characters 中承担动作的权威身份可见；是否超容只看 capacity_budget 与动作阶段时长，不扫描文案词汇。
 8. 每条 shot 的 source_excerpt 必填（≥{SOURCE_EXCERPT_MIN_CHARS} 字），可与相邻镜共享主线段落；仅作审计，不得进入 Seedance。
 9. 声轨预检：若完整剧本对应段落有“角色名：台词”且本镜负责交付该信息，必须写 dialogues；内心独白禁止写进 narration（narration 必须为空），改用画面姿态表达；人群嘲讽/恭维写进 action_desc。是否发声服从本镜信息交付与口播容量，禁止为比例凑对白。
 9b. 对白构图预检：统计 spoken_dialogue 的唯一说话人。超过 1 人必须按话轮拆镜。正好 1 人且只有台词/表情交付时，characters/characters_visible 只含说话人，shot_size=近景或特写，camera_move=固定或推近；若台词同时包含走位、离场或剧情道具操作，改用中景/全景并写 dialogue_action_staging，完整保留动作路径；双人接触动作写 dialogue_two_shot_required。

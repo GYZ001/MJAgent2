@@ -3213,17 +3213,25 @@ def _storyboard_status_snapshot(
         int(value) for value in (repair.get("touched_shot_nos") or [])
         if str(value).isdigit()
     }
-    from app.renderability import storyboard_repair_issue_is_active
-
     raw_repair_errors = [
         str(message) for message in (repair.get("issue_messages") or [])
         if str(message).strip()
     ]
-    active_repair_errors = [] if phase == "SUCCEEDED" else [
-        message for message in raw_repair_errors
-        if storyboard_repair_issue_is_active(message)
+    # Only typed repair records are current authority. Historical records that
+    # contain prose messages without issue codes predate the structural gates
+    # and must be re-evaluated instead of interpreted through a word blacklist.
+    repair_issue_codes = [
+        str(code) for code in (repair.get("issue_codes") or [])
+        if str(code).strip()
     ]
-    obsolete_policy_repair = bool(raw_repair_errors and not active_repair_errors)
+    active_repair_errors = (
+        []
+        if phase == "SUCCEEDED" or not repair_issue_codes
+        else raw_repair_errors
+    )
+    obsolete_policy_repair = bool(
+        raw_repair_errors and not repair_issue_codes
+    )
     if (
         not active_repair_errors
         and paused

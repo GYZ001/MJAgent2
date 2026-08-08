@@ -73,7 +73,6 @@ from app.renderability import (
     SCENE_OUTLINE_MIN,
     SPINE_BEATS_MIN,
     duration_gt5_errors,
-    overdetail_errors,
     shot_count_budget_errors,
     shot_duration_should_prefer_five,
 )
@@ -409,10 +408,6 @@ def validate_storyboard(
             errors.append(
                 f"{tag}.source_excerpt 仅 {source_len} 字；每个分镜必须带对应小说原文摘录，"
                 f"请从本集原文中逐字摘录至少 {SOURCE_EXCERPT_MIN_CHARS} 字作为上游改编证据与审核追溯，不得送入 Seedance")
-        if not narrative_authority:
-            errors.extend(overdetail_errors(shot.action_desc, f"{tag}.action_desc"))
-            errors.extend(overdetail_errors(shot.first_frame_desc, f"{tag}.first_frame_desc"))
-            errors.extend(overdetail_errors(shot.last_frame_desc, f"{tag}.last_frame_desc"))
         # 首尾帧：必须填写且明显不同（否则生成的首图/尾图一模一样、视频没有动作）
         ff = (shot.first_frame_desc or "").strip()
         lf = (shot.last_frame_desc or "").strip()
@@ -2127,9 +2122,6 @@ def validate_plot_spine(
             )
         if beat.must_keep:
             must_keep_count += 1
-        if not narrative_authority:
-            errors.extend(overdetail_errors(
-                f"{beat.who}{beat.does}{beat.turn}", tag))
     if beats and must_keep_count < 1:
         errors.append(
             "plot_spine 至少需要一条 must_keep=true 的实际剧情交付节拍"
@@ -2506,9 +2498,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         if unknown and (narrative_authority or bible_names):
             contract_name = "叙事权威图" if narrative_authority else "角色圣经"
             errors.append(f"{tag}.characters 含{contract_name}外角色：{unknown}")
-        if not narrative_authority:
-            errors.extend(overdetail_errors(
-                f"{scene.summary}{scene.conflict}{scene.turn}", tag))
     full_text = (script.full_script_text or "").strip()
     spine_n = len((script.plot_spine.spine_beats if script.plot_spine else None) or [])
     min_script_chars = max(160, spine_n * 36 if spine_n else max(160, expected_beats * 30))
@@ -2518,8 +2507,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             f"full_script_text 过短；当前仅 {len(full_text)} 字，至少需要 {min_script_chars} 字"
             "（只演主线骨架，勿注水细节）"
         )
-    # 可拍性词表只约束画面动作，不约束角色说出的原文台词。过去直接扫描全文会把
-    # 必保留台词里的“微微”等词也误判成不可拍细节，造成无意义的修复死循环。
     action_text = "\n".join(
         line for line in full_text.splitlines()
         if not SCRIPT_DIALOGUE_LINE_RE.match(line.strip())
@@ -2529,8 +2516,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         script,
         action_text=action_text,
     ))
-    if not narrative_authority:
-        errors.extend(overdetail_errors(action_text, "full_script_text"))
     heading_matches = SCRIPT_SCENE_HEADING_RE.findall(full_text)
     if len(heading_matches) < 3:
         errors.append("full_script_text 缺少足够的场次标题；请使用“【场1】...”这类场次化台本格式")
@@ -2741,9 +2726,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         for field in ("state_in", "visible_change", "state_out"):
             if len((getattr(event, field, "") or "").strip()) < 4:
                 errors.append(f"{tag}.{field} 缺失或过短；事件必须写清状态输入、可见变化和状态输出")
-        if not narrative_authority:
-            errors.extend(overdetail_errors(
-                f"{event.visible_change}{event.state_in}{event.state_out}", tag))
     info_ids: set[str] = set()
     if not script.information_ledger:
         errors.append("information_ledger 不能为空；必须为观众需要获得的剧情信息建立中文交付台账")

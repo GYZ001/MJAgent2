@@ -844,12 +844,7 @@ def _apply_authoritative_ir_identity_resolutions(
     if issues:
         first = issues[0]
         reason = str(first.get("reason") or "identity_authority_unresolved")
-        if reason == "duplicate_display_authority":
-            message = (
-                "身份 token 指向多个实体："
-                + str(first.get("display_name") or "")
-            )
-        elif reason == "multiple_exact_authorities":
+        if reason == "multiple_exact_authorities":
             message = (
                 f"IR 身份 {first.get('identity_key')} 命中冲突的身份权威："
                 + "、".join(first.get("candidate_authority_ids") or [])
@@ -2990,21 +2985,26 @@ def compile_screenplay_ir(
             })
 
     bible_by_name = {item.name: item for item in bible.characters}
-    identity_token_to_key: dict[str, str] = {}
+    # Identity keys are the structural reference contract.  A display name is
+    # only a compatibility alias when it names exactly one identity.  Distinct
+    # authority IDs may legitimately share the same source/display wording;
+    # merely declaring them must not recreate a word-based identity conflict.
+    identity_token_to_key: dict[str, str] = {
+        key: key for key in identity_by_key
+    }
+    display_token_candidates: defaultdict[str, set[str]] = defaultdict(set)
     for key, identity in identity_by_key.items():
-        for token in (key, identity.display_name):
-            if token and token in identity_token_to_key and identity_token_to_key[token] != key:
-                raise ScreenplayIRIdentityConflictError(
-                    f"身份 token 指向多个实体：{token}",
-                    issues=[{
-                        "identity_key": key,
-                        "reason": "duplicate_display_authority",
-                        "display_name": token,
-                        "identity_keys": [identity_token_to_key[token], key],
-                    }],
-                )
-            if token:
-                identity_token_to_key[token] = key
+        display_name = str(identity.display_name or "").strip()
+        if display_name:
+            display_token_candidates[display_name].add(key)
+    ambiguous_display_tokens: dict[str, list[str]] = {}
+    for token, keys in display_token_candidates.items():
+        if token in identity_by_key:
+            continue
+        if len(keys) == 1:
+            identity_token_to_key[token] = next(iter(keys))
+        else:
+            ambiguous_display_tokens[token] = sorted(keys)
     for name, character in bible_by_name.items():
         if name in identity_token_to_key:
             continue
@@ -3027,6 +3027,16 @@ def compile_screenplay_ir(
         key = identity_token_to_key.get(raw)
         if key:
             return key
+        if raw in ambiguous_display_tokens:
+            raise ScreenplayIRIdentityConflictError(
+                f"IR 身份引用未使用唯一 identity_key：{raw}",
+                issues=[{
+                    "identity_key": "",
+                    "reason": "ambiguous_identity_reference",
+                    "display_name": raw,
+                    "identity_keys": ambiguous_display_tokens[raw],
+                }],
+            )
         if not raw:
             raise ValueError("IR 引用了空身份")
         if raw == "audience":

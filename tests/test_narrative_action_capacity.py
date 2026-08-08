@@ -257,7 +257,6 @@ def test_authority_role_and_action_are_not_blocked_by_legacy_word_lists() -> Non
     )
 
     assert not any("功能性路人" in error or "角色圣经中" in error for error in errors)
-    assert not any("超纲细节词" in error for error in errors)
     assert not any("NARRATIVE_CHARACTER_REF_MISSING" in error for error in errors)
 
 

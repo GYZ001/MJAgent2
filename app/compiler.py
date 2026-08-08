@@ -15,7 +15,6 @@ from app.character_policy import (
     is_collective_role,
     typed_functional_identity_names,
 )
-from app.renderability import strip_overdetail_terms
 from app.schemas import Bible, EpisodeScreenplay, Shot
 from app.spoken_contract import SPOKEN_DELIVERIES
 
@@ -312,7 +311,6 @@ def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
             if old:
                 body = body.replace(old, new)
     body = _rewrite_sensitive_terms(body, aggressive=aggressive)
-    body = strip_overdetail_terms(body)
     if aggressive:
         body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；\n]*[。；\n]?", "", body)
         body = re.sub(

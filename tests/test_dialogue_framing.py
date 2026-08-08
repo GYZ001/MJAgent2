@@ -251,7 +251,7 @@ def test_action_dialogue_framing_messages_route_to_targeted_repair(
 
 
 def test_storyboard_issue_localization_does_not_prefix_match_shot_numbers() -> None:
-    message = "shots[9](shot_no=10).action_desc 含超纲细节词：衣角"
+    message = "[FRAME_STATE_INVALID] shots[9](shot_no=10).last_frame_desc 与 planned_state_out 不一致"
 
     assert _storyboard_issue_targets_shot(message, index=9, shot_no=10) is True
     assert _storyboard_issue_targets_shot(message, index=0, shot_no=1) is False
