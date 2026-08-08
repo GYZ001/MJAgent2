@@ -359,6 +359,40 @@ def test_storyboard_recorder_fingerprint_tracks_bible_artifact(
     assert captured[0] != captured[1]
 
 
+def test_resumed_storyboard_recorder_keeps_checkpoint_bible_fingerprint(
+    repair_db,
+    monkeypatch,
+) -> None:
+    conn, _screenplay = repair_db
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        input_versions={
+            "screenplay_artifact_id": "sp1",
+            "bible_artifact_id": "bible-frozen",
+        },
+    ))
+    captured: list[str] = []
+
+    def fake_create(_cls, **kwargs):
+        captured.append(kwargs["input_fingerprint"])
+        return SimpleNamespace(run_id=f"run-{len(captured)}")
+
+    monkeypatch.setattr(
+        WorkflowRecorder,
+        "create",
+        classmethod(fake_create),
+    )
+    for current_artifact in ("bible-current-v2", "bible-current-v3"):
+        conn.execute(
+            "UPDATE projects SET bible_artifact_id=? WHERE id='p1'",
+            (current_artifact,),
+        )
+        conn.commit()
+        _new_storyboard_recorder("e1", resume=True)
+
+    assert captured[0] == captured[1]
+
+
 def _shot(number: int, *, action: str | None = None) -> Shot:
     return Shot(
         shot_no=number,

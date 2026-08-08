@@ -1670,6 +1670,10 @@ async def _storyboard_task(
             conn.execute("UPDATE episodes SET status='script_failed', script_error=? WHERE id=?",
                          (rec.public, episode_id))
         conn.commit()
+        # Persist the recoverable episode projection, then preserve the
+        # exception boundary so WorkflowRecorder marks both the step and run
+        # as failed. Returning here would falsely record STEP_SUCCEEDED.
+        raise
 
 
 def recover_storyboard_tasks() -> int:
@@ -1706,7 +1710,8 @@ def recover_storyboard_tasks() -> int:
         recorder = None
         try:
             recorder = _new_storyboard_recorder(
-                episode_id, requested_by="system", trigger_type="resume",
+                episode_id, resume=True,
+                requested_by="system", trigger_type="resume",
                 parent_run_id=parent["id"] if parent else None,
             )
             installed = conn.execute(
@@ -1892,6 +1897,7 @@ def _shot_adopted_assets_stale(conn, shot_row, version_row) -> bool:
 def _new_storyboard_recorder(
     episode_id: str,
     *,
+    resume: bool = False,
     requested_by: str = "user",
     trigger_type: str = "manual",
     parent_run_id: str | None = None,
@@ -1906,6 +1912,12 @@ def _new_storyboard_recorder(
         "SELECT bible_artifact_id FROM projects WHERE id=?",
         (ep["project_id"],),
     ).fetchone()
+    bible_artifact_id = _storyboard_bound_bible_artifact_id(
+        episode_id,
+        ep,
+        project["bible_artifact_id"] if project else None,
+        resume=resume,
+    )
     contract = get_contract("storyboard")
     return WorkflowRecorder.create(
         workflow_type="storyboard",
@@ -1913,7 +1925,7 @@ def _new_storyboard_recorder(
         scope_id=episode_id,
         input_fingerprint=fingerprint(
             ep["screenplay_artifact_id"],
-            project["bible_artifact_id"] if project else None,
+            bible_artifact_id,
             ep["storyboard_outline_json"],
             checkpoints,
         ),
@@ -1936,6 +1948,30 @@ def _new_storyboard_recorder(
     )
 
 
+def _storyboard_bound_bible_artifact_id(
+    episode_id: str,
+    episode_row,
+    current_artifact_id: str | None,
+    *,
+    resume: bool,
+) -> str | None:
+    """Use the checkpoint Bible on resume when its screenplay still matches."""
+    if not resume:
+        return current_artifact_id
+    from app.storyboard_supervisor import load_latest_checkpoint
+
+    cp = load_latest_checkpoint(episode_id)
+    if cp is None:
+        return current_artifact_id
+    bound_screenplay = str(
+        cp.input_versions.get("screenplay_artifact_id") or ""
+    )
+    current_screenplay = str(episode_row["screenplay_artifact_id"] or "")
+    if bound_screenplay and bound_screenplay != current_screenplay:
+        return current_artifact_id
+    return cp.input_versions.get("bible_artifact_id") or current_artifact_id
+
+
 async def _recorded_storyboard_task(
     episode_id: str,
     recorder: WorkflowRecorder,
@@ -1948,9 +1984,15 @@ async def _recorded_storyboard_task(
         conn = get_conn()
         ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
         project = conn.execute("SELECT bible_artifact_id FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
+        bible_artifact_id = _storyboard_bound_bible_artifact_id(
+            episode_id,
+            ep,
+            project["bible_artifact_id"] if project else None,
+            resume=resume,
+        )
         input_ids = [
             artifact_id for artifact_id in (
-                project["bible_artifact_id"] if project else None,
+                bible_artifact_id,
                 ep["screenplay_artifact_id"],
             ) if artifact_id
         ]
@@ -2267,6 +2309,7 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
     try:
         recorder = _new_storyboard_recorder(
             episode_id,
+            resume=True,
             trigger_type="resume",
             parent_run_id=parent["id"] if parent else None,
         )
