@@ -729,6 +729,37 @@ def test_board_read_repairs_legacy_cancelled_run_without_losing_shots(storyboard
     assert detail["supervisor"]["phase"] == "CANCELLED"
 
 
+def test_failed_run_never_projects_running_from_stale_generating_checkpoint(
+    storyboard_db,
+):
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="failed-status-projection",
+    )
+    recorder.start()
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="GENERATING_SHOTS",
+        validated_prefix_end=0,
+        next_shot_no=1,
+        expected_total=8,
+    ), run_id=recorder.run_id)
+    recorder.fail(RuntimeError("当前分镜生成失败"))
+    storyboard_db.execute(
+        "UPDATE episodes SET status='scripting',script_error=?,active_storyboard_run_id=NULL "
+        "WHERE id='e1'",
+        ("当前分镜生成失败",),
+    )
+    storyboard_db.commit()
+
+    detail = api.episode_detail("e1", view="board")
+
+    assert detail["storyboard_status"]["state"] == "failed"
+    assert detail["storyboard_status"]["recommended_action"] == "resume_storyboard"
+
+
 def test_active_storyboard_run_can_clear_its_repair_window_only(storyboard_db):
     from app.artifacts import clear_shot_artifacts
 

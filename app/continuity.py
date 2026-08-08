@@ -43,41 +43,10 @@ from app.spoken_contract import (
     validate_spoken_contract,
 )
 
-# 多动作过载：5 秒镜头超过 2 个独立顺序节拍即拒绝（PRD §7.1 / §14.1）
-_SEQUENTIAL_ACTION_SPLITTERS = re.compile(
-    r"[，,；;、]|然后|接着|随后|之后|再|又|紧接着|同时"
-)
-_DISTINCT_ACTION_VERBS = (
-    "走出", "走进", "跑出", "跑向", "走向", "走到", "上前", "离开", "伸手", "触碰", "按住",
-    "穿过", "行至", "退到", "停下", "闭上", "睁开", "亮起", "显现", "宣布", "喊出", "点名",
-    "翻开", "合拢", "抬头", "收回", "触摸", "点头", "自我介绍", "微笑", "惊叹", "倒吸",
-    "窃笑", "转身", "跪下", "站起", "举起", "放下", "拔出", "插入",
-)
-
 DIALOGUE_FOCUS_RISK_TAG = "dialogue_speaker_closeup"
 DIALOGUE_TWO_SHOT_RISK_TAG = "dialogue_two_shot_required"
 DIALOGUE_CLOSEUP_SHOT_SIZES = frozenset({"近景", "特写"})
 DIALOGUE_CLOSEUP_CAMERA_MOVES = frozenset({"固定", "推近"})
-_DIALOGUE_TWO_SHOT_INTERACTION_RE = re.compile(
-    r"搀扶|扶住|抱住|拥抱|握住|抓住|拉住|按住|推开|挡住|托住|"
-    r"递给|递出|接过|抢夺|碰杯|亲吻|背起|抱起|交手|对打|扭打|"
-    r"共同(?:握住|托住|抬起|推动|按住)|同时(?:握住|托住|抬起|推动|按住)"
-)
-_IMPLICIT_SPEECH_RE = re.compile(
-    r"开口|说出|说完|说话|问话|打招呼|询问|"
-    r"宣读|宣布|告知|解释|质问|反问|承诺|喊出|呼喊|"
-    r"念出|念道|嘀咕|喃喃|自语|台词|口型|"
-    r"(?<!准备)(?<!正要)(?<!打算)(?<!即将)(?:提出|发出|说出)"
-    r"[^，。；！？]{0,8}请求|"
-    r"(?:开口|出声)[^，。；！？]{0,6}(?:回答|回应)|"
-    r"(?:回答|回应)(?:道|说|问题|问话)|"
-    r"嘴(?:巴|唇)[^，。；！？]{0,8}(?:张开|微张|开合|翕动)"
-)
-_EXPLICIT_SILENCE_RE = re.compile(
-    r"(?:所有人物|人物|角色|全程)?"
-    r"(?:保持)?(?:闭口|不说话|没(?:有)?说话|不出声|无台词|没有台词|"
-    r"不做说话口型|无说话口型|不张嘴)"
-)
 
 def _scene_time_context(value: Any) -> str:
     """Use the same broad time buckets as storyboard validation."""
@@ -218,36 +187,8 @@ def dialogue_two_shot_required(
     narrative_authority: bool = False,
 ) -> bool:
     """仅真实双人肢体互动允许对白镜头保留第二个可见人物。"""
-    if narrative_authority:
-        # The model classifies the actor/target visibility intent from the
-        # authority graph.  Do not re-infer it from a language-specific list of
-        # contact verbs.
-        return DIALOGUE_TWO_SHOT_RISK_TAG in (shot.risk_tags or [])
-    speakers = onscreen_dialogue_speakers(shot)
-    visible = raw_characters_visible(shot)
-    if len(speakers) != 1 or len(visible) < 2:
-        return False
-    visual_text = "；".join(
-        str(value or "")
-        for value in (
-            shot.primary_action,
-            shot.action_desc,
-            shot.first_frame_desc,
-            shot.last_frame_desc,
-        )
-    )
-    speaker = speakers[0]
-    others = [name for name in visible if name != speaker]
-    for clause in re.split(r"[，,。；;！？\n]", visual_text):
-        if not _DIALOGUE_TWO_SHOT_INTERACTION_RE.search(clause):
-            continue
-        if speaker not in clause:
-            continue
-        if any(name in clause for name in others):
-            return True
-        if len(visible) == 2 and re.search(r"对方|他|她|其手|其肩|彼此", clause):
-            return True
-    return False
+    _ = narrative_authority
+    return DIALOGUE_TWO_SHOT_RISK_TAG in (shot.risk_tags or [])
 
 
 def dialogue_action_staging_kind(
@@ -651,59 +592,13 @@ def normalize_board_continuity(board: Storyboard) -> None:
 
 
 def count_sequential_action_beats(text: str) -> int:
-    """估算顺序动作节拍数：独立动词短语数量（不是逗号分句数）。"""
-    raw = (text or "").strip()
-    if not raw:
-        return 0
-    verbs = [v for v in _DISTINCT_ACTION_VERBS if v in raw]
-    # 去重相邻重复
-    unique: list[str] = []
-    for v in verbs:
-        if not unique or unique[-1] != v:
-            unique.append(v)
-    if len(unique) >= 2:
-        return len(unique)
-    parts = [p.strip() for p in _SEQUENTIAL_ACTION_SPLITTERS.split(raw) if p.strip()]
-    # 只有一个动作但描写充分：返回 1；空动作返回 0
-    return max(1 if raw else 0, min(len(parts), len(unique) or 1))
+    """Legacy prose has no reliable action cardinality; typed phases own it."""
+    return 1 if str(text or "").strip() else 0
 
 
 def action_capacity_limit(duration_s: int | None) -> int:
     """Return the shared storyboard/video limit for sequential action beats."""
     return 2 if int(duration_s or 5) <= 6 else 3
-
-
-def split_sequential_action_text(text: str) -> tuple[str, str] | None:
-    """Split an overloaded action near its middle distinct verb.
-
-    This is deliberately the structural counterpart of
-    :func:`count_sequential_action_beats`: the storyboard planner and the paid
-    video preflight use the same verb vocabulary, so a plan split cannot drift
-    from the later provider gate.  Subject carry-over is handled by the outline
-    layer, which knows the visible cast.
-    """
-    raw = (text or "").strip()
-    if not raw:
-        return None
-    matches: list[tuple[int, int]] = []
-    for verb in _DISTINCT_ACTION_VERBS:
-        start = raw.find(verb)
-        if start >= 0:
-            matches.append((start, start + len(verb)))
-    matches.sort()
-    non_overlapping: list[tuple[int, int]] = []
-    for start, end in matches:
-        if non_overlapping and start < non_overlapping[-1][1]:
-            continue
-        non_overlapping.append((start, end))
-    if len(non_overlapping) < 2:
-        return None
-    split_at = non_overlapping[len(non_overlapping) // 2][0]
-    front = raw[:split_at].rstrip(" 　，,；;、。然后接着随后之后再又紧接着同时")
-    back = raw[split_at:].lstrip(" 　，,；;、。")
-    if not front or not back:
-        return None
-    return front, back
 
 
 def narrative_action_capacity_profile(
@@ -893,22 +788,7 @@ def action_capacity_errors(
                 f"超过镜头时长 {shot.duration_s}s"
             )
         return list(dict.fromkeys(errors))
-
-    # primary_action 常被模型压成一句摘要，真正会交给视频模型执行的细节仍在
-    # action_desc。容量必须取两者中节拍更多的一份，否则“穿过人群→停下→开口”
-    # 会以单动作摘要绕过门禁，最终只剩静态口型。
-    action_candidates = [
-        text.strip() for text in (effective_primary_action(shot), shot.action_desc or "") if text.strip()
-    ]
-    beats = max((count_sequential_action_beats(text) for text in action_candidates), default=0)
-    limit = action_capacity_limit(getattr(shot, "duration_s", 5))
-    if beats > limit:
-        errors.append(
-            f"[ACTION_CAPACITY_EXCEEDED] shot_no={shot.shot_no} 含约 {beats} "
-            f"个顺序动作节拍，超过 {shot.duration_s}s 镜头容量上限 {limit}；"
-            "请删减超纲动作，优先保留单一主线动作；确需拆镜时最多 +1 相邻镜，禁止无限拆碎"
-        )
-    return errors
+    return []
 
 
 def speech_capacity_budget(duration_s: int, *, lead_in: float = 0.3, lead_out: float = 0.3,
@@ -937,28 +817,9 @@ def speech_capacity_errors(shot: Shot) -> list[str]:
 
 
 def implicit_speech_without_dialogue_errors(shot: Shot) -> list[str]:
-    """Reject visual instructions that force a silent shot to invent speech."""
-    if effective_spoken_segments(shot):
-        return []
-    conflicts: list[str] = []
-    for field in (
-        "primary_action",
-        "action_desc",
-        "first_frame_desc",
-        "last_frame_desc",
-    ):
-        value = str(getattr(shot, field, "") or "").strip()
-        searchable = _EXPLICIT_SILENCE_RE.sub("", value)
-        if _IMPLICIT_SPEECH_RE.search(searchable):
-            conflicts.append(f"{field}=「{value[:48]}」")
-    if not conflicts:
-        return []
-    return [
-        f"shot_no={shot.shot_no} 没有有效 dialogues/audio_timeline 口播，"
-        f"但画面合同要求人物说话（{'；'.join(conflicts)}）；"
-        "禁止让视频模型自行发明台词。请补入有原文/剧本依据的准确台词，"
-        "或把本镜改为明确闭口的非语言动作/反应镜"
-    ]
+    """Spoken delivery is represented only by the typed audio contract."""
+    _ = shot
+    return []
 
 
 def spoken_contract_coherence_errors(shot: Shot) -> list[str]:

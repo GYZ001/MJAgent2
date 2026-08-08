@@ -92,8 +92,8 @@ def test_negated_speech_does_not_trigger_implicit_speech_gate() -> None:
     assert implicit_speech_without_dialogue_errors(shot) == []
 
 
-def test_actual_implicit_speech_still_requires_dialogue() -> None:
+def test_action_prose_does_not_invent_a_spoken_contract() -> None:
     shot = _shot(1)
     shot.action_desc = "萧炎转身走向门口，开口询问门外来人。"
 
-    assert implicit_speech_without_dialogue_errors(shot)
+    assert implicit_speech_without_dialogue_errors(shot) == []

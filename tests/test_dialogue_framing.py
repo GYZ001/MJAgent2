@@ -271,7 +271,7 @@ def test_partial_filter_drops_prior_shot_no_errors() -> None:
     ) == errors[1:]
 
 
-def test_physical_interaction_allows_exactly_two_people() -> None:
+def test_typed_two_shot_contract_allows_exactly_two_people() -> None:
     shot = _shot(
         shot_size="中景",
         characters=["甲", "乙"],
@@ -280,6 +280,7 @@ def test_physical_interaction_allows_exactly_two_people() -> None:
         first_frame_desc="甲在画面左侧伸手靠近乙的手腕，乙身体朝门口转去。",
         last_frame_desc="同一机位，甲已经拉住乙的手腕，乙停下脚步回头。",
         primary_action="甲拉住乙并要求她留下。",
+        risk_tags=["dialogue_two_shot_required"],
     )
 
     assert dialogue_focus_subject(shot) is None

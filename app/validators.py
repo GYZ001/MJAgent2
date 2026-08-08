@@ -29,7 +29,6 @@ from app.continuity import (
     action_capacity_limit,
     count_sequential_action_beats,
     narrative_action_capacity_profile,
-    split_sequential_action_text,
     dialogue_focus_subject,
     dialogue_framing_errors,
     dialogue_two_shot_required,
@@ -168,11 +167,6 @@ def adjacent_spoken_repeat_errors(board: Storyboard) -> list[str]:
                     "请删除重复台词并改为无台词反应镜，或改写为新的有效信息"
                 )
     return errors
-
-
-def _action_beat_count(text: str) -> int:
-    parts = [p.strip() for p in re.split(r"[，。；;、\n]+", text) if len(p.strip()) >= 4]
-    return max(len(parts), count_sequential_action_beats(text or ""))
 
 
 def _too_similar(a: str, b: str) -> bool:
@@ -3844,15 +3838,6 @@ def _split_outline_action_text(
     raw = (text or "").strip()
     if not raw:
         return None
-    beats = count_sequential_action_beats(raw)
-    if beats > limit or force:
-        by_verbs = split_sequential_action_text(raw)
-        if (
-            by_verbs is not None
-            and _outline_quotes_balanced(by_verbs[0])
-            and _outline_quotes_balanced(by_verbs[1])
-        ):
-            return by_verbs
     atoms = _split_outline_text_outside_quotes(
         raw,
         separators="；;。.！!？?，,、\n",
@@ -3872,15 +3857,7 @@ def split_outline_over_action_capacity(
     narrative_authority: bool = False,
     narrative_plan: NarrativeContinuityPlan | None = None,
 ) -> list[dict]:
-    """Split action-heavy outline nodes before per-shot generation.
-
-    The threshold comes from the same helper used by the paid-video preflight:
-    up to two sequential beats for 5-6 seconds and three for 7-10 seconds.  A
-    source node is split at most once (``动作容量拆分`` marker), preserving the
-    existing event/spine allocation while moving dialogue and newly delivered
-    information to the latter half.  ``force`` is used only by the local repair
-    router after a detailed shot expands beyond its compact outline wording.
-    """
+    """Apply an explicitly requested structural split to a legacy outline."""
     from app.schemas import StoryboardOutlineShot
 
     if narrative_authority:
@@ -3891,6 +3868,9 @@ def split_outline_over_action_capacity(
         # candidate allocation instead.  ``narrative_plan`` is accepted here
         # to make accidental authority-path calls explicit and auditable.
         _ = narrative_plan
+        return []
+
+    if not force:
         return []
 
     if not outline.shots or len(outline.shots) >= max_shots:

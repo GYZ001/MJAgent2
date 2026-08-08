@@ -664,10 +664,14 @@ def test_scene_pack_failure_preserves_successful_later_batch(
         return outline
 
     pack_calls: list[str] = []
+    persisted_before_pack: dict[str, int] = {}
 
     async def fake_scene_pack(*_args, **_kwargs):
         context = _args[-1]
         pack_calls.append(context.scene_id)
+        persisted_before_pack[context.scene_id] = int(conn.execute(
+            "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+        ).fetchone()["c"])
         if context.scene_id == "SC002":
             raise StageError("场景分镜", ["模拟第二场批量格式失败"])
         return packed_shot(context.scene_no)
@@ -720,6 +724,8 @@ def test_scene_pack_failure_preserves_successful_later_batch(
 
     assert checkpoint.phase == "SUCCEEDED"
     assert pack_calls == ["SC001", "SC002", "SC003"]
+    # 场景包按连续前沿逐批提交：第二场开始前，第一场已经可被前端读取。
+    assert persisted_before_pack == {"SC001": 0, "SC002": 1, "SC003": 2}
     assert shot_calls == [2]
     assert [
         row["shot_no"]

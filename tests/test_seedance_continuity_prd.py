@@ -84,7 +84,7 @@ def _shot(**overrides) -> Shot:
     return Shot(**data)
 
 
-def test_5s_multi_action_rejected_by_capacity_and_preflight() -> None:
+def test_legacy_action_prose_does_not_drive_capacity_or_preflight() -> None:
     shot = _shot(
         duration_s=5,
         action_desc="林风走进山门，然后伸手触碰石碑，接着转身喊出名字，随后举起短剑。",
@@ -94,8 +94,8 @@ def test_5s_multi_action_rejected_by_capacity_and_preflight() -> None:
     direct = action_capacity_errors(shot)
     preflight = preflight_seedance_gates(shot)
 
-    assert any("顺序动作节拍" in err for err in direct)
-    assert any("顺序动作节拍" in err for err in preflight)
+    assert direct == []
+    assert not any("顺序动作节拍" in err for err in preflight)
 
 
 def test_short_primary_action_uses_complete_action_desc_for_generation() -> None:
@@ -114,7 +114,7 @@ def test_short_primary_action_uses_complete_action_desc_for_generation() -> None
     )
 
 
-def test_silent_shot_cannot_require_character_to_invent_dialogue() -> None:
+def test_silent_shot_prose_does_not_create_an_audio_contract() -> None:
     shot = _shot(
         action_desc="林风看向苏婉，开口主动和她打招呼。",
         primary_action="林风开口打招呼并等待回应。",
@@ -126,9 +126,9 @@ def test_silent_shot_cannot_require_character_to_invent_dialogue() -> None:
 
     errors = preflight_seedance_gates(shot)
 
-    assert any("禁止让视频模型自行发明台词" in error for error in errors)
-    with pytest.raises(CompileError, match="没有有效 dialogues/audio_timeline"):
-        compile_prompt(shot, _bible())
+    assert not any("发明台词" in error for error in errors)
+    prompt = compile_prompt(shot, _bible())
+    assert "所有人物全程闭口" in prompt
 
 
 def test_silent_prompt_explicitly_forbids_speech_and_lip_motion() -> None:
@@ -274,7 +274,7 @@ def test_compile_prompt_locks_scene_canonical_and_persistent_landmark_geometry()
     assert "头部突然放大或幼态大头" in prompt
 
 
-def test_action_capacity_uses_detailed_action_not_only_primary_summary() -> None:
+def test_legacy_action_detail_does_not_infer_typed_phase_count() -> None:
     shot = _shot(
         duration_s=5,
         primary_action="林风完成测试并退场。",
@@ -283,7 +283,7 @@ def test_action_capacity_uses_detailed_action_not_only_primary_summary() -> None
 
     errors = action_capacity_errors(shot)
 
-    assert any("顺序动作节拍" in error for error in errors)
+    assert errors == []
 
 
 def test_required_text_defaults_to_deterministic_insert_and_keeps_raw_video_textless() -> None:

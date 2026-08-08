@@ -127,6 +127,69 @@ def _outline() -> StoryboardOutline:
     )
 
 
+def test_direction_contract_allows_valid_split_action_continuation() -> None:
+    boundary = "钟成抬手准备敲门完成，准备承接检查门窗的后续动作"
+    first = _shot(
+        1,
+        focus="action",
+        size="中景",
+        move="跟随",
+    ).model_copy(update={
+        "primary_action": "钟成走到门前并抬手准备敲门",
+        "state_out": boundary,
+        "resulting_change": "钟成到达门前并开始确认屋内是否有人",
+    })
+    second = _shot(
+        2,
+        focus="action",
+        size="中景",
+        move="跟随",
+    ).model_copy(update={
+        "primary_action": "钟成拧动门把并抬眼检查紧闭的窗帘",
+        "state_in": boundary,
+        "state_out": "钟成确认门窗紧闭但屋内有人",
+        "continuity_mode": "action_continuation",
+        "resulting_change": "钟成到达门前并开始确认屋内是否有人",
+    })
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=shot.shot_no,
+                shot_id=shot.shot_id,
+                scene_id="SC001",
+                beat=f"动作容量拆分第 {shot.shot_no} 段",
+                purpose=shot.purpose,
+                resulting_change=shot.resulting_change,
+                readability_focus="action",
+                camera_size="中景",
+                camera_angle=shot.camera_angle,
+                camera_movement="跟随",
+                camera_motivation=shot.camera_motivation,
+                spine_beat_ids=["S01"],
+            )
+            for shot in (first, second)
+        ],
+        scene_contexts=[StoryboardSceneContext(
+            scene_id="SC001",
+            scene_no=1,
+            scene_name="咖啡厅",
+            scene_time="夜",
+            entry_state="钟成来到门前准备确认屋内情况",
+            exit_state="钟成确认门窗紧闭但屋内有人",
+            transition_from_previous="沿钟成的行进动作进入门前",
+            spatial_axis="钟成、门把与窗户保持同一横向轴线",
+        )],
+    )
+
+    errors = validate_storyboard_direction_contract(
+        Storyboard(episode_no=1, shots=[first, second]),
+        outline,
+    )
+
+    assert not any("交付内容和结果几乎相同" in error for error in errors)
+
+
 def test_source_coverage_is_exhaustive_and_round_trips() -> None:
     source = "第一段发生关键事件。\n\n第二段补充人物关系。"
     screenplay = EpisodeScreenplay(

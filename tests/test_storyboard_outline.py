@@ -65,7 +65,7 @@ def test_valid_outline_passes() -> None:
     assert validate_storyboard_outline(outline, _screenplay(), 50) == []
 
 
-def test_action_heavy_outline_is_split_to_video_capacity() -> None:
+def test_legacy_outline_prose_is_not_split_by_action_words() -> None:
     outline = StoryboardOutline(
         episode_no=1,
         shots=[
@@ -97,18 +97,11 @@ def test_action_heavy_outline_is_split_to_video_capacity() -> None:
 
     events = split_outline_over_action_capacity(outline, max_shots=16)
 
-    assert len(events) == 1
-    assert len(outline.shots) == 3
-    front, back = outline.shots[:2]
-    assert "动作容量拆分：前段" in front.beat
-    assert "动作容量拆分：后段" in back.beat
-    assert front.state_out == back.state_in
-    assert front.key_line_ids == [] and back.key_line_ids == ["KL06"]
-    assert front.information_ids == [] and back.information_ids == ["I6"]
-    assert front.audio_cast == [] and back.audio_cast == ["萧薰儿"]
-    assert back.continuity_mode == "action_continuation"
-    assert [shot.shot_no for shot in outline.shots] == [1, 2, 3]
-    # 同一来源节点只允许 +1 相邻镜，重复运行不得继续碎拆。
+    assert events == []
+    assert len(outline.shots) == 2
+    assert outline.shots[0].key_line_ids == ["KL06"]
+    assert outline.shots[0].information_ids == ["I6"]
+    assert outline.shots[0].audio_cast == ["萧薰儿"]
     assert split_outline_over_action_capacity(outline, max_shots=16) == []
 
 
@@ -128,8 +121,7 @@ def test_action_split_can_be_forced_when_detailed_shot_expands_outline() -> None
         )],
     )
 
-    # 紧凑大纲本身只显式命中两个词表动作；逐镜补写“走出人群”后若被硬门禁拦截，
-    # Repair Router 可强制把当前节点拆为“到碑前触碑 → 石碑亮起”。
+    # 只有语义修复明确选择拆分能力时，执行器才按结构边界拆成相邻两镜。
     events = split_outline_over_action_capacity(
         outline, max_shots=16, shot_nos={1}, force=True,
     )

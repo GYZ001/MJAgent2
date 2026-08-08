@@ -5,6 +5,7 @@ import {
   isStoryboardProblemShot,
   storyboardGateIssueLabel,
   storyboardDeleteUsesFullClear,
+  storyboardEmptyCopy,
   storyboardCharacterFilterOptions,
   storyboardProgressCopy,
   storyboardSaveDisabledReason,
@@ -40,6 +41,11 @@ function storyboardStatus(overrides: Partial<StoryboardStatus> = {}): Storyboard
 }
 
 describe('分镜台结构化 diff 与问题筛选', () => {
+  it('零镜头时按真实任务终态解释空白区', () => {
+    expect(storyboardEmptyCopy(storyboardStatus({ state: 'running' }))).toContain('正在生成')
+    expect(storyboardEmptyCopy(storyboardStatus({ state: 'failed' }))).toContain('任务未完成')
+  })
+
   it('no-op 不产生任何保存字段', () => {
     const baseline = shot()
     expect(buildStoryboardChanges(baseline, structuredClone(baseline), null)).toEqual({})
