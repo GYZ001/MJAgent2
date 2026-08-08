@@ -1155,7 +1155,7 @@ def test_ir_source_names_override_short_terms_inside_rationale() -> None:
     assert ir.identities[1].display_name == "八岁少年"
 
 
-def test_ir_identity_resolution_prefers_explicit_display_and_stable_group() -> None:
+def test_ir_identity_resolution_defers_conflicting_exact_authorities_to_ai() -> None:
     payload = _v13_payload()
     payload["identities"][1].update({
         "key": "malian",
@@ -1166,33 +1166,34 @@ def test_ir_identity_resolution_prefers_explicit_display_and_stable_group() -> N
     })
     ir = ScreenplayGenerationIR.model_validate(payload)
 
-    _apply_authoritative_ir_identity_resolutions(
-        ir,
-        episode={"character_resolutions": [
-            {
-                "source_label": "马脸青年",
-                "canonical_name": "马脸青年",
-                "resolution": "functional_identity",
-                "identity_group": "existing:马脸青年",
-            },
-            {
-                "source_label": "马脸师兄",
-                "canonical_name": "马脸青年",
-                "resolution": "functional_identity",
-                "identity_group": "existing:马脸青年",
-            },
-            {
-                "source_label": "杂役处的师兄",
-                "canonical_name": "杂役处的师兄",
-                "resolution": "functional_identity",
-                "identity_group": "current-1:F1",
-            },
-        ]},
-        bible=_bible(),
-        audit=[],
-    )
+    with pytest.raises(ScreenplayIRIdentityConflictError) as exc_info:
+        _apply_authoritative_ir_identity_resolutions(
+            ir,
+            episode={"character_resolutions": [
+                {
+                    "source_label": "马脸青年",
+                    "canonical_name": "马脸青年",
+                    "resolution": "functional_identity",
+                    "identity_group": "existing:马脸青年",
+                },
+                {
+                    "source_label": "马脸师兄",
+                    "canonical_name": "马脸青年",
+                    "resolution": "functional_identity",
+                    "identity_group": "existing:马脸青年",
+                },
+                {
+                    "source_label": "杂役处的师兄",
+                    "canonical_name": "杂役处的师兄",
+                    "resolution": "functional_identity",
+                    "identity_group": "current-1:F1",
+                },
+            ]},
+            bible=_bible(),
+            audit=[],
+        )
 
-    assert ir.identities[1].display_name == "马脸青年"
+    assert exc_info.value.issues[0]["reason"] == "multiple_exact_authorities"
 
 
 def test_ir_identity_conflict_has_generation_error_classification() -> None:
@@ -1230,7 +1231,7 @@ def test_ir_identity_conflict_has_generation_error_classification() -> None:
     ) == ("generation", "GEN")
 
 
-def test_shared_functional_source_label_does_not_merge_distinct_ir_identities() -> None:
+def test_shared_functional_source_label_requires_ai_before_merging_identities() -> None:
     payload = _v13_payload()
     payload["identities"] = [
         {
@@ -1250,20 +1251,22 @@ def test_shared_functional_source_label_does_not_merge_distinct_ir_identities() 
     ]
     ir = ScreenplayGenerationIR.model_validate(payload)
 
-    _apply_authoritative_ir_identity_resolutions(
-        ir,
-        episode={"character_resolutions": [{
-            "source_label": "两个绿袍修士",
-            "canonical_name": "两个绿袍修士",
-            "resolution": "functional_identity",
-        }]},
-        bible=_bible(),
-        audit=[],
-    )
+    with pytest.raises(ScreenplayIRIdentityConflictError) as exc_info:
+        _apply_authoritative_ir_identity_resolutions(
+            ir,
+            episode={"character_resolutions": [{
+                "source_label": "两个绿袍修士",
+                "canonical_name": "两个绿袍修士",
+                "resolution": "functional_identity",
+            }]},
+            bible=_bible(),
+            audit=[],
+        )
 
-    assert [item.display_name for item in ir.identities] == [
-        "绿袍修士甲", "绿袍修士乙",
-    ]
+    assert any(
+        issue["reason"] == "shared_inferred_authority"
+        for issue in exc_info.value.issues
+    )
 
 
 def test_bible_context_includes_character_named_by_resolution() -> None:
@@ -1400,8 +1403,8 @@ def test_generation_entry_uses_compact_ir_model_and_bounded_output(
 
     assert captured["model_cls"] is ScreenplayGenerationIR
     assert captured["max_tokens"] == stages.SCREENPLAY_IR_MIN_TOKENS == 20480
-    assert captured["prefill"]["format_version"] == "screenplay-generation-ir.v1.3"
-    assert '"format_version":"screenplay-generation-ir.v1.3"' in captured["prompt"]
+    assert captured["prefill"]["format_version"] == "screenplay-generation-ir.v1.4"
+    assert '"format_version":"screenplay-generation-ir.v1.4"' in captured["prompt"]
     assert '"source_names":["该身份在本集原文中的逐字称谓"]' in captured["prompt"]
     assert '"resulting_state":"该动作完成后新成立的局势' in captured["prompt"]
     assert "所有 SRC 必须至少被一个正文 unit 消费" in captured["prompt"]

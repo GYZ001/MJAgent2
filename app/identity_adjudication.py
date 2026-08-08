@@ -230,6 +230,7 @@ async def adjudicate_screenplay_ir_identities(
     episode: dict[str, Any],
     source_text: str,
     bible: Bible,
+    persist_new_resolutions: bool = True,
 ) -> ScreenplayGenerationIR:
     """Resolve only semantic cases that exact structural binding cannot decide."""
     deterministic_audit: list[dict[str, Any]] = []
@@ -334,7 +335,7 @@ async def adjudicate_screenplay_ir_identities(
             new_resolutions,
         )
         episode_id = str(episode.get("id") or "").strip()
-        if episode_id:
+        if episode_id and persist_new_resolutions:
             from app.db import get_conn
 
             conn = get_conn()

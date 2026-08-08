@@ -1675,6 +1675,45 @@ def _remove_unmatched_root_level_closer(
     return text
 
 
+def _escape_json_control_chars_in_strings(text: str) -> str:
+    """Escape raw control characters only while inside JSON strings."""
+    replacements = {
+        "\b": "\\b",
+        "\f": "\\f",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+    }
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+                repaired.append(char)
+                continue
+            if char == "\\":
+                escaped = True
+                repaired.append(char)
+                continue
+            if char == '"':
+                in_string = False
+                repaired.append(char)
+                continue
+            if ord(char) < 0x20:
+                repaired.append(
+                    replacements.get(char, f"\\u{ord(char):04x}")
+                )
+                continue
+            repaired.append(char)
+            continue
+        if char == '"':
+            in_string = True
+        repaired.append(char)
+    return "".join(repaired)
+
+
 def extract_json(
     text: str,
     *,
@@ -1683,6 +1722,13 @@ def extract_json(
 ) -> dict:
     """从模型输出中提取第一个完整 JSON 对象。失败抛 ValueError（含原文摘要）。"""
     cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE).replace("```", "").strip()
+    think_markers = list(
+        re.finditer(r"</think[^>]*>", cleaned, flags=re.IGNORECASE)
+    )
+    if think_markers:
+        formal_payload = cleaned[think_markers[-1].end():].strip()
+        if "{" in formal_payload:
+            cleaned = formal_payload
     first_start = cleaned.find("{")
     if first_start == -1:
         raise ValueError(f"输出中找不到 JSON 对象。原文开头：{text[:200]}")
@@ -1701,6 +1747,7 @@ def extract_json(
             cleaned[start:],
             repair_singleton_string_object_fields,
         )
+        candidate = _escape_json_control_chars_in_strings(candidate)
         try:
             obj, _ = json.JSONDecoder().raw_decode(candidate)
         except json.JSONDecodeError as exc:

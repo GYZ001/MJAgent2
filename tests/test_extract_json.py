@@ -108,6 +108,26 @@ def test_extract_json_closes_array_before_next_object_field() -> None:
     }
 
 
+def test_extract_json_escapes_raw_newline_inside_string() -> None:
+    text = '{"characters":[{"evidence":"第一行\n第二行"}]}'
+
+    assert extract_json(text) == {
+        "characters": [{"evidence": "第一行\n第二行"}],
+    }
+
+
+def test_extract_json_uses_formal_payload_after_think_marker() -> None:
+    text = (
+        '{"characters":[{"broken":"模型思考\n仍在继续"}]}\n'
+        '</think_never_used_deadbeef>'
+        '{"characters":[{"source_label":"老头"}]}'
+    )
+
+    assert extract_json(text) == {
+        "characters": [{"source_label": "老头"}],
+    }
+
+
 def test_extract_json_does_not_guess_multiple_missing_closers() -> None:
     text = '{"episode_no": 9, "events": [{"event_id": "E1"'
 

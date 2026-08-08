@@ -728,6 +728,8 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         "evidence": "绿袍男子拦路呵斥",
         "future_evidence": "众人认出他正是丁力",
         "identity_group": "current-1:绿袍男子",
+            "authority_id": "bible:丁力",
+            "authority_version": "screenplay-identity-authority.v1",
     }]
 
 

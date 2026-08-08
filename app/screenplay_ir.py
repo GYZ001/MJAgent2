@@ -932,16 +932,27 @@ def _rewrite_ir_identity_key(
 def _merge_ir_identities_with_same_authority(
     value: ScreenplayGenerationIR,
     *,
+    explicit_identity_keys: set[str],
     audit: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     by_authority: defaultdict[str, list[IRIdentity]] = defaultdict(list)
     for identity in value.identities:
         if identity.authority_id:
             by_authority[identity.authority_id].append(identity)
     removed: set[str] = set()
     changes: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
     for authority_id, identities in by_authority.items():
         if len(identities) < 2:
+            continue
+        identity_keys = {identity.key for identity in identities}
+        if not identity_keys.issubset(explicit_identity_keys):
+            issues.append({
+                "identity_key": identities[0].key,
+                "identity_keys": [identity.key for identity in identities],
+                "reason": "shared_inferred_authority",
+                "candidate_authority_ids": [authority_id],
+            })
             continue
         keeper = identities[0]
         for duplicate in identities[1:]:
@@ -966,7 +977,7 @@ def _merge_ir_identities_with_same_authority(
             identity for identity in value.identities
             if identity.key not in removed
         ]
-    return changes
+    return changes, issues
 
 
 def prepare_ir_identity_authorities(
@@ -991,11 +1002,55 @@ def prepare_ir_identity_authorities(
         for character in bible.characters
         if str(character.name or "").strip()
     }
+    legacy_self_authority = bool(
+        not str(value.format_version or "").startswith(
+            "screenplay-generation-ir.v1.4"
+        )
+        and not (episode.get("character_resolutions") or [])
+    )
     changes: list[dict[str, Any]] = []
     issues: list[dict[str, Any]] = []
+    explicit_identity_keys = {
+        identity.key
+        for identity in value.identities
+        if str(identity.authority_id or "").strip()
+    }
     for identity in value.identities:
         explicit = str(identity.authority_id or "").strip()
         authority = by_id.get(explicit) if explicit else None
+        if explicit and authority is None and identity.role_type == "narrator":
+            expected_narrator_id = f"narrator:{identity.key}"
+            if explicit == expected_narrator_id:
+                authority = {
+                    "authority_id": explicit,
+                    "canonical_name": identity.display_name or identity.key,
+                    "identity_kind": "narrator",
+                    "source_labels": list(identity.source_names),
+                }
+        if explicit and authority is None and legacy_self_authority:
+            legacy_seed = json.dumps(
+                {
+                    "key": identity.key,
+                    "display_name": identity.display_name,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected_legacy_id = "legacy:" + hashlib.sha256(
+                legacy_seed.encode("utf-8")
+            ).hexdigest()[:16]
+            if explicit == expected_legacy_id:
+                authority = {
+                    "authority_id": explicit,
+                    "canonical_name": identity.display_name or identity.key,
+                    "identity_kind": (
+                        "named"
+                        if identity.role_type == "named_character"
+                        else "functional"
+                    ),
+                    "source_labels": list(identity.source_names),
+                }
         if explicit and authority is None:
             issues.append({
                 "identity_key": identity.key,
@@ -1043,13 +1098,38 @@ def prepare_ir_identity_authorities(
                 })
                 continue
             else:
-                issues.append({
-                    "identity_key": identity.key,
-                    "reason": "missing_exact_authority",
-                    "tokens": sorted(tokens),
-                    "candidate_authority_ids": [],
-                })
-                continue
+                if legacy_self_authority:
+                    legacy_seed = json.dumps(
+                        {
+                            "key": identity.key,
+                            "display_name": identity.display_name,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    authority = {
+                        "authority_id": "legacy:" + hashlib.sha256(
+                            legacy_seed.encode("utf-8")
+                        ).hexdigest()[:16],
+                        "canonical_name": (
+                            identity.display_name or identity.key
+                        ),
+                        "identity_kind": (
+                            "named"
+                            if identity.role_type == "named_character"
+                            else "functional"
+                        ),
+                        "source_labels": list(identity.source_names),
+                    }
+                else:
+                    issues.append({
+                        "identity_key": identity.key,
+                        "reason": "missing_exact_authority",
+                        "tokens": sorted(tokens),
+                        "candidate_authority_ids": [],
+                    })
+                    continue
         change = _bind_ir_identity_authority(
             identity,
             authority,
@@ -1059,10 +1139,13 @@ def prepare_ir_identity_authorities(
         if change:
             changes.append(change)
 
-    changes.extend(_merge_ir_identities_with_same_authority(
+    merge_changes, merge_issues = _merge_ir_identities_with_same_authority(
         value,
+        explicit_identity_keys=explicit_identity_keys,
         audit=audit,
-    ))
+    )
+    changes.extend(merge_changes)
+    issues.extend(merge_issues)
     duplicate_displays: defaultdict[str, list[IRIdentity]] = defaultdict(list)
     for identity in value.identities:
         display_name = str(identity.display_name or "").strip()
