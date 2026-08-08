@@ -1947,212 +1947,6 @@ def validate_dialogue_chains(
 # 会拉低覆盖率，故只在"整件事几乎零命中"时才算漏，容忍同义改写，专拦真正被整段略过的事实。
 COVERS_ATOM_ABSENT_RUN = 0.3
 COVERS_ATOM_ABSENT_COVERAGE = 0.25
-# 方案 B：抽象概括词→具体同义改写兜底。covers 原子常写概括词（"引发全场哄笑与贬损议论"），
-# 模型在 action_desc/narration 里写成具体动作（"人群哄笑轰然炸开""摇头嗤声""耳语"），2-gram 覆盖率会被
-# 连接词拉低而误判缺失。这里给高频抽象词配同义词组：covers 原子含触发词、shot_text 含任一同义具体词
-# 即视为落实。只救同义改写，不救核心动作整段缺失。
-# 覆盖范围：人群声（哄笑/议论/嘲讽）、追捧赞叹、成绩段位、震惊错愕——这些是 covers 最常写抽象、
-# 模型最常具象化的高频词。新题材出现新抽象词时，按同样格式追加组即可。
-COVERS_CROWD_SEMANTIC_GROUPS = (
-    (("哄笑", "哄堂", "大笑"), ("哄笑", "大笑", "拍膝", "哗然", "轰然", "爆笑", "哄堂", "笑声", "哄笑")),
-    (("议论", "贬损", "非议"), ("议论", "耳语", "指点", "低语", "私语", "纷纷", "交头接耳", "窃窃私语", "指点", "议论")),
-    (("嘲讽", "嗤笑", "嘲笑", "讥笑", "耻笑"), ("嘲讽", "嗤笑", "嘲笑", "讥笑", "耻笑", "讥讽", "冷笑", "嗤声", "讥笑声")),
-    # 追捧/赞叹类：covers 写"引发追捧"，模型写成"赞叹""欢呼""喝彩""真了不起"
-    (("追捧", "赞颂", "称赞", "夸赞"), ("追捧", "赞叹", "欢呼", "喝彩", "叫好", "称赞", "夸赞", "赞颂", "了不起", "种子级")),
-    # 成绩/段位类：covers 写"七段成绩"，模型写成"测出七段""斗之气七段""七段！"
-    (("成绩", "结果", "测定"), ("成绩", "结果", "测出", "测得", "测定", "段位", "段", "级", "评")),
-    # 震惊/错愕类：covers 写"引发震惊"，模型写成"愕然""倒吸凉气""哗然""瞳孔骤缩"
-    (("震惊", "惊愕", "错愕", "惊诧"), ("震惊", "惊愕", "错愕", "惊诧", "愕然", "倒吸", "哗然", "瞳孔", "骤缩", "失色")),
-)
-
-# 方案 A/C 共用：covers 里"角色开口宣告"的动词与"人群声"的名词。
-# 用于判定某镜 covers 是否"不可单镜完成"——同时要求角色开口+人群声时，两类声轨叠加易超单镜口播上限；
-# 依赖非路人的圣经外角色开口时，会与 characters 合同相互锁死；功能性路人由独立合同承载。
-COVERS_SPOKEN_VERBS = ("宣告", "宣布", "宣读", "宣判", "公布")
-COVERS_CROWD_WORDS = ("哄笑", "哄堂", "嘲讽", "议论", "嗤笑", "嘲笑", "讥笑", "耻笑", "哗然", "群嘲",
-                      "私语", "耳语", "窃窃", "起哄", "喝彩", "欢呼", "惊呼", "惊叹", "赞叹", "唏嘘")
-
-# P0/P1：导演抽象词不得作为 covers 原子。covers 只承载可拍/可念/可核对事实；
-# 「反差/对比/衬托」等意图应写进 beat/primary_action/state_out，否则逐镜词匹配会死循环
-# （实测镜05：「与萧炎形成反差」反复修仍无质量提升）。
-COVERS_ABSTRACT_DIRECTING_TERMS = (
-    "形成反差", "形成对比", "形成对照", "相互映衬", "彼此映衬",
-    "反差", "对比", "对照", "衬托", "呼应", "烘托",
-    "强调", "暗示", "渲染氛围", "营造氛围", "氛围感",
-)
-COVERS_ABSTRACT_FILLERS = (
-    "形成", "产生", "造成", "之间", "彼此", "相互", "互相",
-    "的", "与", "和", "并", "而", "来", "去", "出",
-)
-COVERS_ABSTRACT_REWRITE_DIRECTIVE = (
-    "（导演意图不得写在 covers：请把反差/对比写成双方可见状态——"
-    "如「甲测出七段、人群赞叹；乙低头不语握拳」，写入 action_desc/narration/dialogues）"
-)
-# 逐镜软放行：正文同时出现「落势」与「高势」状态线索，视为抽象反差已具象落实。
-COVERS_CONTRAST_LOW_CUES = (
-    "低头", "不语", "沉默", "落寞", "握拳", "屈辱", "咬牙", "黯然",
-    "冷脸", "垂眸", "攥紧", "咬唇", "后退", "避开",
-)
-COVERS_CONTRAST_HIGH_CUES = (
-    "赞叹", "欢呼", "喝彩", "亮起", "得意", "微笑", "骄傲", "惊呼",
-    "高光", "七段", "叫好", "光芒", "起立", "簇拥",
-)
-
-
-def _covers_has_spoken(covers: str) -> bool:
-    return any(v in covers for v in COVERS_SPOKEN_VERBS)
-
-
-def _covers_has_crowd(covers: str) -> bool:
-    return any(w in covers for w in COVERS_CROWD_WORDS)
-
-
-def _strip_abstract_directing_phrases(text: str) -> str:
-    """从 covers 文本剥离导演抽象短语，保留可拍事实残段。"""
-    out = text or ""
-    for term in sorted(COVERS_ABSTRACT_DIRECTING_TERMS, key=len, reverse=True):
-        out = out.replace(term, "")
-    out = re.sub(r"[；;]{2,}", "；", out)
-    out = re.sub(r"[，,]{2,}", "，", out)
-    out = out.strip(" \t\r\n；;，,、")
-    out = re.sub(r"^[与和并对而的]+", "", out)
-    out = re.sub(r"[与和并对而的]+$", "", out)
-    return out.strip(" \t\r\n；;，,、")
-
-
-def _is_abstract_directing_atom(atom: str) -> bool:
-    """原子是否几乎全是导演抽象意图（剥离抽象词后几乎无具体事实）。"""
-    text = (atom or "").strip()
-    if not text or not any(t in text for t in COVERS_ABSTRACT_DIRECTING_TERMS):
-        return False
-    remainder = _strip_abstract_directing_phrases(text)
-    for filler in COVERS_ABSTRACT_FILLERS:
-        remainder = remainder.replace(filler, "")
-    return len(_condense(remainder)) < 4
-
-
-def _covers_abstract_atoms(covers: str) -> list[str]:
-    return [a for a in _atomize_claim(covers) if _is_abstract_directing_atom(a)]
-
-
-def _shot_shows_contrast_states(shot_text: str) -> bool:
-    """正文是否同时含落势与高势可见状态——用作抽象反差 covers 的具象落实证据。"""
-    text = shot_text or ""
-    return (
-        any(c in text for c in COVERS_CONTRAST_LOW_CUES)
-        and any(c in text for c in COVERS_CONTRAST_HIGH_CUES)
-    )
-
-
-def _abstract_contrast_realized_in_shot(atom: str, shot_text: str) -> bool:
-    """P1 兜底：抽象反差/对比原子若正文已写出双方可见状态对比，视为已落实。"""
-    if not any(t in (atom or "") for t in COVERS_ABSTRACT_DIRECTING_TERMS):
-        return False
-    return _shot_shows_contrast_states(shot_text)
-
-
-def rewrite_outline_abstract_covers(outline: StoryboardOutline) -> list[dict]:
-    """P1：确定性剥离 covers 中的导演抽象原子/短语，并写入 beat 改写指引。
-
-    - 纯抽象原子整段删除（避免逐镜词匹配「形成反差」死循环）；
-    - 混合原子剥离抽象短语、保留具体事实残段；
-    - beat 追加可拍改写模板（幂等，不重复追加）。
-    就地修改 outline，返回改写记录供监控日志。
-    """
-    changed: list[dict] = []
-    for s in outline.shots:
-        covers = (s.covers or "").strip()
-        if not covers or not any(t in covers for t in COVERS_ABSTRACT_DIRECTING_TERMS):
-            continue
-        atoms = _atomize_claim(covers)
-        kept: list[str] = []
-        removed: list[str] = []
-        for atom in atoms:
-            if _is_abstract_directing_atom(atom):
-                removed.append(atom)
-                continue
-            if any(t in atom for t in COVERS_ABSTRACT_DIRECTING_TERMS):
-                cleaned = _strip_abstract_directing_phrases(atom)
-                removed.append(atom)
-                if cleaned and len(_condense(cleaned)) >= 2:
-                    kept.append(cleaned)
-            else:
-                kept.append(atom)
-        new_covers = "；".join(kept)
-        if not removed and new_covers == covers:
-            # 句读未切开、但仍含抽象短语：整段剥离一次。
-            cleaned_all = _strip_abstract_directing_phrases(covers)
-            if cleaned_all == covers:
-                continue
-            new_covers = cleaned_all
-            removed = [covers]
-        if new_covers == covers:
-            continue
-        before = covers
-        s.covers = new_covers
-        if COVERS_ABSTRACT_REWRITE_DIRECTIVE not in (s.beat or ""):
-            s.beat = (s.beat or "").rstrip() + COVERS_ABSTRACT_REWRITE_DIRECTIVE
-        changed.append({
-            "shot_no": s.shot_no,
-            "before": before[:80],
-            "after": new_covers[:80],
-            "removed": [r[:40] for r in removed[:4]],
-        })
-    return changed
-
-
-# 被动宣告句式「被X（当众/高声）宣告」：group(1)=宣告者，group(2)=宣告动词。
-# 判定（_covers_outside_spoken）与改写（downgrade_outline_offbible_spoken）共用此正则，口径必然一致。
-# 角色名用非贪婪 {2,6}?，避免把后面的「当众/高声」等修饰词吞进角色名（否则圣经内角色「萧战当众」
-# 会被误判为圣经外、进而被误降级）。
-_OUTSIDE_SPOKEN_RE = re.compile(
-    r"被([一-龥]{2,6}?)(?:当众|高声|大声|公然)?(宣告|宣布|宣读|宣判|公布)")
-
-
-def downgrade_outline_offbible_spoken(outline: StoryboardOutline,
-                                      bible: Bible | None) -> list[dict]:
-    """把不属于角色圣经、也不是功能性路人的宣告者降级为旁白转述。
-
-    根因：原文常有"测验员"等次要角色开口的关键台词，但其不在角色圣经里。covers 若写成
-    "被测验员宣布为低级"，逐镜阶段会卡在"保留测验员→characters 校验失败 / 删测验员→covers
-    落实不了"之间死循环（修复停滞根因）。与其反复要求模型自己 reroute（实测会连刷多轮同一错误
-    直至修复停滞兜底），不如在校验前就地改写：
-    - covers 里"被{圣经外角色}{宣告动词}"去掉角色名（及当众/高声等修饰）→ "被{宣告动词}"，
-      事实保留、不再要求该角色开口；改写后判定正则不再命中，方案 A 的硬性报错自然不再触发；
-    - 同时在 beat 末尾追加一句旁白转述指令，让逐镜阶段把该宣告交给旁白、不安排该角色出镜。
-    角色圣经成员与功能性路人（如测验员）都可合法出镜开口，原样保留。
-    就地修改 outline，返回已改写镜头记录（供监控日志）。
-    """
-    bible_names = {c.name for c in bible.characters} if bible else set()
-    if not bible_names:
-        return []
-    changed: list[dict] = []
-    for s in outline.shots:
-        covers = s.covers or ""
-        if not covers:
-            continue
-        outside: list[str] = []
-
-        def _sub(m: "re.Match") -> str:
-            name, verb = m.group(1), m.group(2)
-            if name in bible_names or is_functional_extra(name):
-                return m.group(0)
-            outside.append(name)
-            return "被" + verb     # 去掉圣经外角色名与修饰，仅留被动宣告
-
-        new_covers = _OUTSIDE_SPOKEN_RE.sub(_sub, covers)
-        if not outside:
-            continue
-        names = "/".join(dict.fromkeys(outside))  # 去重保序
-        s.covers = new_covers
-        directive = f"（{names}不在角色圣经：相关宣告改由旁白转述交代，勿安排其出镜或开口）"
-        if directive not in (s.beat or ""):
-            s.beat = (s.beat or "").rstrip() + directive
-        changed.append({"shot_no": s.shot_no, "names": list(dict.fromkeys(outside)),
-                        "before": covers[:80], "after": new_covers[:80]})
-    return changed
-
-
 def defer_establishing_covers(outline: StoryboardOutline, episode_no: int) -> list[dict]:
     """减重试 #2：第一集第 1 镜被 _first_shot_rule 强制为「开场建场镜」——只交代世界观/主角处境、
     动作克制、不抛核心冲突。但大纲常把判决/反转类 covers（如「全场最低」）也派给第 1 镜，于是逐镜
@@ -2198,41 +1992,11 @@ def defer_establishing_covers(outline: StoryboardOutline, episode_no: int) -> li
     }]
 
 
-def _covers_outside_spoken(covers: str, bible_names: set[str]) -> list[str]:
-    """返回既不在角色圣经、也不是功能性路人的宣告者。
-
-    只看被动句「被X（当众）宣告」——「被」之后的 X 几乎总是人名，精度高、误伤低；
-    主动句「X宣告」里的 X 可能是「石碑/天空/系统」等非人名，不校验。
-    用于在大纲阶段拦截'依赖圣经外角色开口'的不可拍 covers，避免逐镜阶段 characters 校验与
-    covers 落实相互锁死。
-    """
-    if not bible_names or not covers:
-        return []
-    found = {m.group(1) for m in _OUTSIDE_SPOKEN_RE.finditer(covers)}
-    return [n for n in found if n not in bible_names and not is_functional_extra(n)]
-
-
-def _crowd_semantic_hit(atom: str, haystack: str) -> bool:
-    """方案 B：covers 原子含人群声概括词（哄笑/议论/嘲讽），shot_text 含任一同义具体词即算落实。
-
-    专治"引发全场哄笑与贬损议论"→"人群哄笑轰然炸开...摇头嗤声...耳语"这类同义改写误判——
-    2-gram 覆盖率会被连接词拉低，但"哄笑/嗤声/耳语"确实是"哄笑与议论"的具体化，不该判缺失。
-    """
-    for triggers, synonyms in COVERS_CROWD_SEMANTIC_GROUPS:
-        if any(t in atom for t in triggers):
-            if any(s in haystack for s in synonyms):
-                return True
-    return False
-
-
 def _claim_clearly_absent(atom: str, haystack: str) -> bool:
     """这条原子在文本里是否"几乎完全没出现"——主干连续命中和 2-gram 覆盖都低于宽松下限才算缺失。"""
     core = _strip_speaker(atom)
     if (_longest_run_ratio(core, haystack) >= COVERS_ATOM_ABSENT_RUN
             or _bigram_coverage(core, haystack) >= COVERS_ATOM_ABSENT_COVERAGE):
-        return False
-    # 方案 B：人群声概括→具体同义改写兜底（哄笑/议论/嘲讽）
-    if _crowd_semantic_hit(core, haystack):
         return False
     return True
 
@@ -3529,12 +3293,10 @@ def validate_storyboard_shot_covers_outline(
 
     这比收尾时才跑整集必保留校验更早发现漏戏，避免模型第 6 镜才被告知第 2 镜漏了"低级"。
 
-    covers 是模型自写的复合事实改写（"测出三段，被宣告低级，引发哄笑"），按句读拆成原子逐条核对。
+    covers 是模型自写的复合事实改写，旧数据按句读拆成原子逐条核对。
     判定务实优先、只拦"整件事彻底没拍"：用更宽的"明显缺失"阈值（_claim_clearly_absent），
-    某条原子在本镜+前序里几乎零命中才算漏——避免"宣告→宣读"这类同义改写把本已落实的一拍卡死。
-    同义词组兜底（_crowd_semantic_hit）覆盖哄笑/议论/嘲讽/追捧赞叹/成绩段位/震惊错愕等高频抽象词，
-    模型把"成绩"写成"测出七段"、"追捧"写成"赞叹欢呼"都算落实。报错只点名真正缺失的那条。
-    P1 兜底：纯导演抽象（反差/对比）若正文已写出双方可见状态对比，视为已落实，避免修复死循环。
+    某条原子在本镜+前序里几乎零命中才算漏。新叙事权威路径不解释 covers 文案，
+    而是由事件、动作、证据与台词稳定 ID 完成覆盖校验。
     两类"承接"不算本镜漏戏：
     - 向前承接：该原子已在前序已通过镜头（prior_text）里体现；
     - 向后承接：大纲把同一事实也排给了后续镜头（later_planned_covers），留给后面拍。
@@ -3559,8 +3321,6 @@ def validate_storyboard_shot_covers_outline(
         atom for atom in atoms
         if _claim_clearly_absent(atom, realized_text)
         and not (later and not _claim_clearly_absent(atom, later))
-        # P1 兜底：抽象反差/对比若正文已写出双方可见状态，不再当漏戏硬拦。
-        and not _abstract_contrast_realized_in_shot(atom, shot_text)
     ]
     if not missing:
         return []
@@ -4575,11 +4335,8 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     """校验分镜大纲：镜头数在范围内、shot_no 连续、每镜有推进、相邻镜不停留在同一节拍，
     且全集必保留关键台词/剧情点都被分配到某一镜（防止规划阶段就把剧情铺一半、后段漏戏）。
 
-    方案 A：新增 covers 可拍性预检——某镜 covers 若依赖角色圣经外角色开口（被X宣告），或同时要求
-    角色开口+人群声（两类声轨叠加必超单镜口播上限），直接在大纲阶段拦下并要求拆成相邻镜头。
-    避免逐镜阶段陷入'删角色→covers 落实不了 / 保留角色→characters 校验失败'的死循环（镜03 根因）。
-    P0：covers 含纯导演抽象（反差/对比/衬托等）时硬拦，要求改成双方可见状态等可拍事实。
-    bible 为空时跳过角色一致性校验（务实优先，旧数据放行）。
+    新叙事权威路径只依据稳定 ID、动作关系和容量合同；不按 covers 中的角色名、
+    动词、题材词或修辞词决定通过、改写或拆镜。
     """
     errors: list[str] = []
     shots = outline.shots
@@ -4594,33 +4351,9 @@ def validate_storyboard_outline(outline: StoryboardOutline, screenplay: EpisodeS
     actual = [s.shot_no for s in shots]
     if actual != list(range(1, len(shots) + 1)):
         errors.append(f"大纲 shot_no 必须为连续递增 1..{len(shots)}，当前为 {actual}")
-    bible_names = {c.name for c in bible.characters} if bible else set()
     for i, s in enumerate(shots):
         if len((s.beat or "").strip()) < 6:
             errors.append(f"大纲第 {i + 1} 镜 beat 过短或缺失；请用一句话写清本镜推进的剧情（谁做了什么/局势如何变化）")
-        # 方案 A：covers 可拍性预检
-        covers = (s.covers or "").strip()
-        if covers:
-            outside = _covers_outside_spoken(covers, bible_names)
-            if outside:
-                errors.append(
-                    f"大纲第 {i + 1} 镜 covers 依赖角色圣经外角色「{'/'.join(outside)}」开口宣告；"
-                    "请把该角色补入角色圣经，或改由圣经角色完成该宣告，或拆给相邻镜头用 narration 转述，"
-                    "不要让逐镜阶段在'删角色→covers 落实不了 / 保留角色→characters 校验失败'之间卡死")
-            if _covers_has_spoken(covers) and _covers_has_crowd(covers):
-                errors.append(
-                    f"大纲第 {i + 1} 镜 covers 同时要求角色开口宣告和人群哄笑议论，两类声轨叠加易超单镜口播上限"
-                    f"（最长 {config.VIDEO_DURATION_MAX_S}s 最多 {config.MAX_SPOKEN_CHARS_PER_SHOT} 字）；"
-                    "请拆成相邻 2 镜分担：一镜落实宣告，下一镜落实哄笑议论")
-            # P0：纯导演抽象不得进 covers（rewrite_outline_abstract_covers 会先剥离；此处拦残余）
-            abstract = _covers_abstract_atoms(covers)
-            if abstract:
-                shown = "；".join(abstract[:3])
-                errors.append(
-                    f"大纲第 {i + 1} 镜 covers 含导演抽象意图「{shown}」；"
-                    "covers 只写可拍/可念/可核对的具体事实（动作、台词、可见反应、信息点），"
-                    "反差/对比/衬托/呼应/强调等意图请写入 beat/primary_action/state_out，"
-                    "并改成双方可见状态（如「薰儿测出七段、人群赞叹；萧炎低头不语」）")
     # 反停留：相邻两镜的 beat 几乎逐字相同 = 停在同一节拍上空转，必须推进到新剧情。
     for i in range(1, len(shots)):
         if _too_similar(shots[i - 1].beat, shots[i].beat):
@@ -4865,17 +4598,6 @@ def strip_all_narration(board: Storyboard) -> list[dict]:
             # 确保字段为规范化空值
             shot.narration = ""
     return changes
-
-
-def _narration_is_crowd_ambient(narration: str) -> bool:
-    """旁白是否是'人群声/环境声'类（哄笑/议论/嘲讽/惊呼…）而非角色内心OS或全知收尾钩。
-    这类声音本是环境氛围，不必占用人物口播——可降级成 action_desc 的画面描写，信息仍在画面里。"""
-    n = (narration or "").strip()
-    if not n:
-        return False
-    if any(m in n for m in INNER_VOICE_MARKERS):
-        return False
-    return _covers_has_crowd(n)
 
 
 def relieve_spoken_overflow(board: Storyboard) -> list[dict]:

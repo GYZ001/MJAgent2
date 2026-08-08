@@ -1173,8 +1173,8 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
                               persisted_total: int) -> tuple[int, int, str] | None:
     """让落库大纲成为唯一事实源，消除"规划十几镜却分镜24"的困惑。
 
-    逐镜阶段大纲会被就地改写：①covers 不可单镜完成时 _maybe_split_outline_covers 会插入新节拍；
-    ②模型判断单镜超过 10 秒仍演不完而继续拆镜、镜头数超出计划长度。两种情况下内存 outline 都会领先于
+    逐镜阶段若模型判断单镜超过 10 秒仍演不完而继续拆镜、镜头数超出计划长度，
+    内存 outline 会领先于
     落库的 storyboard_outline_json，导致前端 storyboard_planned_shots 显示陈旧的初始估算。
 
     本函数在每提交一镜后把当前计划追平实际镜头数并回写 DB，使规划数随逐镜细化实时自更新、

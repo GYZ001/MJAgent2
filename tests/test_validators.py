@@ -432,36 +432,17 @@ def test_shot_covers_tolerates_synonym_paraphrase() -> None:
     assert errors == [], errors
 
 
-def test_shot_covers_tolerates_abstract_to_concrete_paraphrase() -> None:
-    """covers 写抽象概括词（成绩/追捧），本镜拍成具体场景（测出七段/人群赞叹）——
-    同义改写不应判漏戏。这是镜03死循环的根因：模型把"萧媚七段成绩引发追捧"正确具象化为
-    "测出七段+人群赞叹"，但 2-gram 字面匹配认不出，误判为未落实 covers，反复重试到上限。"""
+def test_narrative_authority_does_not_interpret_covers_vocabulary() -> None:
+    """权威路径由稳定 ID 和证据关系校验，不从 covers 词汇推断语义。"""
     shot = _board_preserving_key_content().shots[0]
     shot.action_desc = "萧媚小跑上前触摸魔石碑，碑面亮起'斗之气：七段！'，人群赞叹声浪骤起"
     errors = validate_storyboard_shot_covers_outline(
-        shot, "萧媚七段成绩引发追捧", shot.shot_no)
-    assert errors == [], errors
-
-
-def test_shot_covers_soft_passes_abstract_contrast_when_states_present() -> None:
-    """P1：covers 残留「与萧炎形成反差」，但正文已写出落势+高势可见状态——软放行。"""
-    shot = _board_preserving_key_content().shots[0]
-    shot.action_desc = (
-        "萧薰儿触碑后碑面亮起七段光芒，人群赞叹欢呼；"
-        "萧炎低头不语握拳，立于人群外侧沉默"
+        shot,
+        "任意开放词汇均不作为控制协议",
+        shot.shot_no,
+        narrative_authority=True,
     )
-    errors = validate_storyboard_shot_covers_outline(
-        shot, "与萧炎形成反差", shot.shot_no)
-    assert errors == [], errors
-
-
-def test_shot_covers_still_flags_abstract_contrast_without_states() -> None:
-    """抽象反差 covers 且正文无双方状态对比线索——仍报未落实。"""
-    shot = _board_preserving_key_content().shots[0]
-    shot.action_desc = "萧炎站在测验台前，目光平视前方，未发一言"
-    errors = validate_storyboard_shot_covers_outline(
-        shot, "与萧炎形成反差", shot.shot_no)
-    assert any("未落实本镜大纲 covers" in e and "反差" in e for e in errors), errors
+    assert errors == []
 
 
 def test_scene_contiguity_key_ignores_sublocation_suffix() -> None:

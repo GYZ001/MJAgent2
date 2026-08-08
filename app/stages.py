@@ -57,10 +57,7 @@ from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenp
                          schema_errors)
 from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
                             defer_establishing_covers,
-                            downgrade_outline_offbible_spoken,
-                            rewrite_outline_abstract_covers,
-                            TRANSITION_HINTS, _atomize_claim, _condense, _covers_has_crowd,
-                            _covers_has_spoken, _covers_outside_spoken,
+                            TRANSITION_HINTS, _atomize_claim, _condense,
                             _scene_time_changed,
                             normalize_action_desc, normalize_continuity,
                             normalize_dialogue_focus_offscreen_mentions,
@@ -6142,9 +6139,6 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
         meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
               "target_duration_s": target, "shot_range": [min_shots, max_shots],
               "prompt_chars": len(prompt), "contract_version": "renderability_v1"})
-    logged_downgrades: set[tuple[int, str]] = set()
-    logged_abstract_rewrites: set[tuple[int, str]] = set()
-
     def _check(o: StoryboardOutline) -> list[str]:
         if screenplay.narrative_plan is not None:
             # New artifacts are governed by the authority graph.  Keep this
@@ -6302,27 +6296,6 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
                 ),
             ))
             return list(dict.fromkeys(narrative_errors))
-        # 方案 A2：校验前先确定性降级——把 covers 里"被圣经外角色开口宣告"改写为旁白转述，
-        # 从源头消灭"删角色↔保留角色"死循环，让模型不必反复 reroute（避免修复停滞）。再做大纲校验。
-        for c in downgrade_outline_offbible_spoken(o, bible):
-            key = (c["shot_no"], c["after"])
-            if key in logged_downgrades:  # 跨修复轮去重，避免同一改写反复刷日志
-                continue
-            logged_downgrades.add(key)
-            log_provider_call(
-                "storyboard_outline_downgrade", config.MODEL_TEXT, "COVERS_DOWNGRADED", None, 0,
-                meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
-                      "stage": "分镜大纲", **c})
-        # P1：剥离 covers 导演抽象（反差/对比等），写入 beat 可拍改写指引，避免逐镜词匹配死循环。
-        for c in rewrite_outline_abstract_covers(o):
-            key = (c["shot_no"], c["after"])
-            if key in logged_abstract_rewrites:
-                continue
-            logged_abstract_rewrites.add(key)
-            log_provider_call(
-                "storyboard_outline_abstract_covers", config.MODEL_TEXT, "COVERS_ABSTRACT_REWRITTEN", None, 0,
-                meta={"episode_id": episode.get("id"), "episode_no": episode.get("episode_no"),
-                      "stage": "分镜大纲", **c})
         # VAL-422：回填 KL*/S*，并在超容时确定性拆镜，再跑大纲校验。
         from app.validators import (
             assign_outline_delivery_ids,
@@ -7630,68 +7603,6 @@ def _split_atoms_to_content_budget(atoms: list[str], budget: int) -> list[str]:
     return ["；".join(group) for group in groups]
 
 
-def _maybe_split_outline_covers(outline: StoryboardOutline | None, shot_no: int,
-                                bible: Bible, max_shots: int) -> bool:
-    """只保留语义拆分；禁止按字符长度机械拆成“自动拆分自第X镜”碎片。"""
-    if not outline or not outline.shots:
-        return False
-    if not (1 <= shot_no <= len(outline.shots)):
-        return False
-    if len(outline.shots) >= max_shots:
-        return False
-    current = outline.shots[shot_no - 1]
-    covers = (current.covers or "").strip()
-    if not covers:
-        return False
-    bible_names = {c.name for c in bible.characters}
-    outside = _covers_outside_spoken(covers, bible_names)
-    both_tracks = _covers_has_spoken(covers) and _covers_has_crowd(covers)
-    over_budget = len(_condense(covers)) > config.MAX_SPOKEN_CHARS_PER_SHOT
-    if not outside and not both_tracks:
-        # 仅因文本/口播字符超预算时不再自动拆分；交给容量校验或人工调整。
-        return False
-    atoms = _atomize_claim(covers)
-    if not atoms:
-        return False
-    if len(atoms) < 2:
-        return False
-    # 尽量让角色宣告落前半、人群反馈落后半；找不到则按中点拆。
-    split_at = len(atoms) // 2
-    for idx in range(1, len(atoms)):
-        front = "".join(atoms[:idx])
-        back = "".join(atoms[idx:])
-        if _covers_has_spoken(front) and _covers_has_crowd(back):
-            split_at = idx
-            break
-    chunks = ["；".join(atoms[:split_at]), "；".join(atoms[split_at:])]
-    chunks = [chunk for chunk in chunks if chunk]
-    if len(chunks) < 2:
-        return False
-    if len(outline.shots) + len(chunks) - 1 > max_shots:
-        return False
-    current.covers = chunks[0]
-    for offset, chunk in enumerate(chunks[1:], start=1):
-        outline.shots.insert(
-            shot_no - 1 + offset,
-            StoryboardOutlineShot(
-                shot_no=shot_no + offset,
-                scene_time=current.scene_time,
-                scene_name=current.scene_name,
-                scene_setting=current.scene_setting,
-                beat=f"（语义拆分：第{shot_no}镜后续状态变化）{chunk}",
-                covers=chunk,
-            ),
-        )
-    for i, s in enumerate(outline.shots):
-        s.shot_no = i + 1
-    log_provider_call(
-        "storyboard_outline_split", config.MODEL_TEXT, "COVERS_SPLIT", None, 0,
-        meta={"shot_no": shot_no, "outside": outside, "both_tracks": both_tracks,
-              "over_budget": over_budget, "chunks": [chunk[:80] for chunk in chunks],
-              "new_total": len(outline.shots)})
-    return True
-
-
 async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: Bible,
                                         prev_ending: str, screenplay: EpisodeScreenplay,
                                         completed_shots: list[Shot],
@@ -7731,11 +7642,6 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
     scene_library_block = _scene_library_block(bible, screenplay)
     min_shots, max_shots = storyboard_shot_count_range(episode["target_duration_s"])
     shot_no = len(completed_shots) + 1
-    # 方案 C：当前镜大纲 covers 若"不可单镜完成"（依赖圣经外角色开口 或 同时要求角色开口+人群声），
-    # 在调用 LLM 前自动拆成足够多段并插入相邻节拍，让本镜只落实当前段，避免逐镜修复打转。
-    # 拆分后 outline.shots 变长，下方 expected_total / allow_finish / must_finish 自动按新长度计算。
-    if not narrative_authority:
-        _maybe_split_outline_covers(outline, shot_no, bible, max_shots)
     # VAL-422：关键台词字数超单镜容量时，在逐镜生成前拆镜并重排 shot_no。
     if outline is not None and not narrative_authority:
         from app.validators import (

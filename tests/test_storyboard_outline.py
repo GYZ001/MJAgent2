@@ -6,12 +6,9 @@
 
 from app.schemas import (Bible, Character, EpisodeScreenplay, StoryboardOutline,
                          StoryboardOutlineShot, World)
-from app.stages import (_maybe_split_outline_covers, _outline_brief,
-                        _split_atoms_to_content_budget,
+from app.stages import (_outline_brief, _split_atoms_to_content_budget,
                         _render_storyboard_outline)
-from app.validators import (_atomize_claim, _condense, _covers_outside_spoken,
-                            downgrade_outline_offbible_spoken,
-                            rewrite_outline_abstract_covers,
+from app.validators import (_atomize_claim, _condense,
                             split_outline_over_action_capacity,
                             validate_storyboard_outline)
 
@@ -212,80 +209,6 @@ def test_outline_brief_lookup() -> None:
     assert _outline_brief(None, 1) is None
 
 
-def test_functional_extra_spoken_is_preserved_in_outline() -> None:
-    """已签发的合成功能身份可开口，不应被降级为旁白。"""
-    bible = _bible_with("萧炎", "萧薰儿")
-    names = {c.name for c in bible.characters}
-    outline = _outline(_valid_beats(),
-                       covers={3: "萧炎测验斗之气仅三段，被路人甲宣布为低级"})
-    assert _covers_outside_spoken(outline.shots[2].covers, names) == []
-
-    changed = downgrade_outline_offbible_spoken(outline, bible)
-    assert changed == []
-    assert outline.shots[2].covers == "萧炎测验斗之气仅三段，被路人甲宣布为低级"
-    assert validate_storyboard_outline(outline, _screenplay(), 50, bible=bible) == []
-
-
-def test_downgrade_preserves_inbible_speaker_and_is_idempotent() -> None:
-    """圣经内角色的"被X当众宣告"合法可拍，不应被降级；非贪婪匹配不把"当众"吞进角色名。
-    二次运行不再改写，beat 指令不重复追加。"""
-    bible = _bible_with("萧炎", "萧战")
-    names = {c.name for c in bible.characters}
-    outline = _outline(_valid_beats(),
-                       covers={3: "萧炎被萧战当众宣告为废物"})
-    assert _covers_outside_spoken(outline.shots[2].covers, names) == []  # 萧战 在圣经内
-
-    changed = downgrade_outline_offbible_spoken(outline, bible)
-    assert changed == []
-    assert outline.shots[2].covers == "萧炎被萧战当众宣告为废物"  # 原样保留
-
-    # 既非圣经角色、也非功能性路人的具体人物仍会降级，且重复运行幂等。
-    off = _bible_with("萧炎")
-    o2 = _outline(_valid_beats(), covers={3: "萧炎被黑袍老者当众宣告为低级"})
-    assert downgrade_outline_offbible_spoken(o2, off)  # 首次有改写
-    assert o2.shots[2].covers == "萧炎被宣告为低级"
-    assert downgrade_outline_offbible_spoken(o2, off) == []  # 再跑无改写
-    assert o2.shots[2].beat.count("改由旁白转述") == 1
-
-
-def test_over_budget_covers_are_not_mechanically_split() -> None:
-    """PRD：废除按文本长度机械拆镜；仅超口播字数时不得自动插入无状态碎片。"""
-    covers = (
-        "萧炎低声说我会查清真相；他回望测验台；族人仍在哄笑；"
-        "萧薰儿穿过人群走来；她让众人闭嘴；萧炎压下怒意；"
-        "他转身离开广场；心中立誓夺回失去的斗气"
-    )
-    outline = _outline(
-        ["萧炎承受嘲讽并离开", "下一段原有剧情"],
-        covers={1: covers},
-    )
-    before = len(outline.shots)
-
-    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎", "萧薰儿"), 20) is False
-    assert len(outline.shots) == before
-    assert outline.shots[0].covers == covers
-
-
-def test_semantic_spoken_and_crowd_covers_can_still_split() -> None:
-    """语义原因（角色开口 + 人群声同镜）仍允许拆分，不属于字符机械拆镜。"""
-    covers = "萧炎公布斗之气三段；周围人群哄笑嘲讽四起"
-    outline = _outline(["萧炎成绩公布", "下一段原有剧情"], covers={1: covers})
-
-    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎"), 20)
-    assert len(outline.shots) >= 3
-    assert [shot.shot_no for shot in outline.shots] == list(range(1, len(outline.shots) + 1))
-
-
-def test_single_long_cover_atom_is_not_char_split() -> None:
-    covers = "萧炎" + "握紧拳头凝视石碑决心查清斗气消失真相" * 3
-    outline = _outline(["萧炎立誓", "下一段原有剧情"], covers={1: covers})
-    before = len(outline.shots)
-
-    assert _maybe_split_outline_covers(outline, 1, _bible_with("萧炎"), 20) is False
-    assert len(outline.shots) == before
-    assert outline.shots[0].covers == covers
-
-
 def test_outline_allows_large_storyboards_when_every_shot_advances() -> None:
     beats = [f"主线推进节拍第{i}镜发生独立局势变化" for i in range(1, 51)]
     outline = _outline(beats, covers={50: KEY_LINE})
@@ -309,41 +232,3 @@ def test_real_shot_12_cover_split_avoids_tiny_tail() -> None:
     assert [len(_condense(chunk)) for chunk in chunks] == [14, 16]
     assert _condense("".join(chunks)) == _condense("".join(_atomize_claim(covers)))
 
-
-def test_outline_rejects_abstract_directing_covers() -> None:
-    """P0：covers 写纯导演抽象（与萧炎形成反差）必须在大纲阶段硬拦。"""
-    outline = _outline(_valid_beats(), covers={5: "与萧炎形成反差"})
-    errors = validate_storyboard_outline(outline, _screenplay(), 50)
-    assert any("导演抽象" in e and "反差" in e for e in errors), errors
-
-
-def test_rewrite_outline_abstract_covers_strips_and_is_idempotent() -> None:
-    """P1：确定性剥离纯抽象 covers，写入 beat 改写指引；二次运行幂等。"""
-    outline = _outline(
-        _valid_beats(),
-        covers={5: f"{KEY_LINE}；与萧炎形成反差"},
-    )
-    changed = rewrite_outline_abstract_covers(outline)
-    assert changed
-    # atomize 会按句号切开，covers 重拼后可能无句末标点；比 condensed 内容即可。
-    assert _condense(outline.shots[4].covers) == _condense(KEY_LINE)
-    assert "反差" not in outline.shots[4].covers
-    assert "导演意图不得写在 covers" in outline.shots[4].beat
-    assert "双方可见状态" in outline.shots[4].beat
-    assert rewrite_outline_abstract_covers(outline) == []
-    assert validate_storyboard_outline(outline, _screenplay(), 50) == []
-
-
-def test_rewrite_outline_abstract_covers_keeps_concrete_residue() -> None:
-    """混合 covers：剥离「形成反差」后保留具体事实残段。"""
-    outline = _outline(
-        _valid_beats(),
-        covers={4: "薰儿测出七段并与萧炎形成反差"},
-    )
-    # 关键台词仍需覆盖，挂在第 5 镜。
-    outline.shots[4].covers = KEY_LINE
-    changed = rewrite_outline_abstract_covers(outline)
-    assert changed
-    assert "形成反差" not in outline.shots[3].covers
-    assert "薰儿测出七段" in outline.shots[3].covers
-    assert validate_storyboard_outline(outline, _screenplay(), 50) == []
