@@ -6030,6 +6030,61 @@ def _project_shot_scene_from_outline(
     return bool(canonicalize_storyboard_scene(shot, bible))
 
 
+def _expand_short_storyboard_source_excerpt(
+    aligned: AlignedExcerpt,
+    source_text: str,
+) -> AlignedExcerpt:
+    """Expand a proven short quote with contiguous authorized line context.
+
+    One-character dialogue such as ``说！`` can be the exact delivery owned by
+    a shot, but the audit contract intentionally requires a longer excerpt so
+    reviewers can identify its source unambiguously.  The expansion is purely
+    positional inside the authorized episode source; it does not rewrite text
+    or classify dialogue content.
+    """
+    if len(_condense(aligned.excerpt)) >= SOURCE_EXCERPT_MIN_CHARS:
+        return aligned
+    source = source_text or ""
+    if not source:
+        return aligned
+
+    start = max(0, int(aligned.start_offset))
+    end = min(len(source), int(aligned.end_offset))
+    line_start = source.rfind("\n", 0, start) + 1
+    next_break = source.find("\n", end)
+    line_end = len(source) if next_break < 0 else next_break
+    start, end = line_start, line_end
+
+    while len(_condense(source[start:end])) < SOURCE_EXCERPT_MIN_CHARS:
+        next_start = end + 1 if end < len(source) else len(source)
+        next_end = source.find("\n", next_start)
+        if next_start < len(source):
+            end = len(source) if next_end < 0 else next_end
+            continue
+        previous_break = source.rfind("\n", 0, max(0, start - 1))
+        if start > 0:
+            start = previous_break + 1
+            continue
+        break
+
+    raw = source[start:end]
+    leading = len(raw) - len(raw.lstrip())
+    trailing = len(raw) - len(raw.rstrip())
+    start += leading
+    if trailing:
+        end -= trailing
+    excerpt = source[start:end]
+    if len(_condense(excerpt)) < SOURCE_EXCERPT_MIN_CHARS:
+        return aligned
+    return AlignedExcerpt(
+        excerpt=excerpt,
+        start_offset=start,
+        end_offset=end,
+        match_chars=len(_condense(excerpt)),
+        exact=True,
+    )
+
+
 def align_storyboard_source_evidence(
     shot: Shot,
     source_text: str,
@@ -6130,13 +6185,13 @@ def align_storyboard_source_evidence(
             start_offset = (
                 segment.start_offset + max(0, local_offset)
             )
-            return AlignedExcerpt(
+            return _expand_short_storyboard_source_excerpt(AlignedExcerpt(
                 excerpt=excerpt,
                 start_offset=start_offset,
                 end_offset=start_offset + len(excerpt),
                 match_chars=len(_condense(excerpt)),
                 exact=True,
-            )
+            ), source_text)
     authoritative_matches = [
         match
         for event_id in event_ids
@@ -7422,6 +7477,29 @@ def ensure_storyboard_scene_contexts(
                 str(brief.scene_time or "").strip(),
             ))
 
+    # Narrative scene IDs are immutable graph references.  A physical scene may
+    # legitimately change its open-vocabulary time/name wording inside one
+    # dramatic scene contract; splitting on that wording and minting SC15+
+    # leaves storyboard shots pointing outside narrative_plan.scene_contracts.
+    # Legacy/model-authored outlines do not have this authority relation and
+    # keep the historical physical-run partitioning below.
+    narrative_scene_numbers = {
+        str(contract.scene_id or "").strip(): index
+        for index, contract in enumerate(
+            list(
+                screenplay.narrative_plan.scene_contracts
+                if screenplay.narrative_plan is not None
+                else []
+            ),
+            start=1,
+        )
+        if str(contract.scene_id or "").strip()
+    }
+    preserves_narrative_scene_ids = bool(narrative_scene_numbers) and all(
+        str(brief.scene_id or "").strip() in narrative_scene_numbers
+        for brief in outline.shots
+    )
+
     runs: list[tuple[str, list[StoryboardOutlineShot]]] = []
     for brief in outline.shots:
         scene_name = str(brief.scene_name or brief.scene_setting).strip()
@@ -7431,7 +7509,10 @@ def ensure_storyboard_scene_contexts(
             f"id:{scene_id}"
             if (
                 scene_id
-                and len(scene_id_bindings[scene_id]) == 1
+                and (
+                    preserves_narrative_scene_ids
+                    or len(scene_id_bindings[scene_id]) == 1
+                )
             )
             else f"scene:{scene_name}:{scene_time}"
         )
@@ -7489,7 +7570,12 @@ def ensure_storyboard_scene_contexts(
         script_scene_no = int(
             getattr(script_scene, "scene_no", run_index) or run_index
         )
-        scene_id = f"SC{run_index:02d}"
+        scene_id = (
+            str(first.scene_id or "").strip()
+            if preserves_narrative_scene_ids
+            else f"SC{run_index:02d}"
+        )
+        context_scene_no = narrative_scene_numbers.get(scene_id, run_index)
         heading_time, heading_name = _screenplay_scene_parts(
             screenplay,
             script_scene_no,
@@ -7527,7 +7613,7 @@ def ensure_storyboard_scene_contexts(
                 brief.scene_name = scene_name
         context = StoryboardSceneContext(
             scene_id=scene_id,
-            scene_no=run_index,
+            scene_no=context_scene_no,
             scene_name=scene_name,
             scene_time=scene_time,
             entry_state=(
@@ -8110,6 +8196,14 @@ def _hydrate_directed_scene_pack(
                 continue
             setattr(shot, field, deepcopy(getattr(brief, field)))
         shot.capacity_budget = deepcopy(brief.capacity_budget)
+        if len(_condense(shot.source_excerpt)) < SOURCE_EXCERPT_MIN_CHARS:
+            aligned = align_storyboard_source_evidence(
+                shot,
+                source_text,
+                screenplay=screenplay,
+            )
+            if aligned is not None:
+                shot.source_excerpt = aligned.excerpt
         _normalize_scene_pack_camera(shot)
         ensure_audio_timeline(shot, screenplay.voice_bible)
         shots.append(shot)
@@ -8240,6 +8334,8 @@ async def generate_storyboard_scene_pack(
 
 导演规则：
 1. 每镜只完成规划中的一个连续动作或观看任务，不得改写任务与结果方向。
+   action_desc 必须控制在 {ACTION_DESC_TARGET_MIN}~{ACTION_DESC_TARGET_MAX} 字，
+   只保留主体、单一动作路径和可见结果。
 2. 每镜必须输出景别 shot_size、角度 camera_angle、运动 camera_move，并用 camera_motivation
    解释三者如何服务上下文、动作、情绪、对白、证据或转场。
 3. 动作任务用中景/全景/远景配合跟随或横摇，
@@ -8350,8 +8446,8 @@ async def generate_storyboard_scene_pack(
         scope_id=f"{episode.get('id') or episode['episode_no']}:{scene_context.scene_id}",
         artifact_type="storyboard_scene_pack",
         policy=AgentLoopPolicy(
-            max_iterations=2,
-            stall_rounds=2,
+            max_iterations=3,
+            stall_rounds=3,
             min_quality_gain=0.03,
             no_gain_rounds=2,
             allow_warning_candidate=False,
