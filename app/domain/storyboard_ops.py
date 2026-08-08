@@ -309,30 +309,8 @@ def _reconcile_storyboard_scene_projection(conn, episode_id: str, bible: Bible) 
     if not scenes:
         return {"shots": 0, "outline_shots": 0}
 
-    shot_changes = 0
-    rows = conn.execute(
-        "SELECT id,scene_time,scene_setting,scene_name FROM shots WHERE episode_id=?",
-        (episode_id,),
-    ).fetchall()
-    for row in rows:
-        target = SimpleNamespace(
-            scene_time=str(row["scene_time"] or ""),
-            scene_setting=str(row["scene_setting"] or ""),
-            scene_name=str(row["scene_name"] or ""),
-        )
-        before = (target.scene_time, target.scene_setting, target.scene_name)
-        if not canonicalize_storyboard_scene(target, bible):
-            continue
-        after = (target.scene_time, target.scene_setting, target.scene_name)
-        if after == before:
-            continue
-        conn.execute(
-            "UPDATE shots SET scene_time=?,scene_setting=?,scene_name=? WHERE id=?",
-            (*after, row["id"]),
-        )
-        shot_changes += 1
-
     outline_changes = 0
+    outline_by_no: dict[int, StoryboardOutlineShot] = {}
     episode = conn.execute(
         "SELECT storyboard_outline_json FROM episodes WHERE id=?", (episode_id,),
     ).fetchone()
@@ -347,6 +325,7 @@ def _reconcile_storyboard_scene_projection(conn, episode_id: str, bible: Bible) 
                 before = (brief.scene_time, brief.scene_setting, brief.scene_name)
                 if not canonicalize_storyboard_scene(brief, bible):
                     continue
+                outline_by_no[int(brief.shot_no)] = brief
                 if (brief.scene_time, brief.scene_setting, brief.scene_name) != before:
                     outline_changes += 1
             if outline_changes:
@@ -354,6 +333,43 @@ def _reconcile_storyboard_scene_projection(conn, episode_id: str, bible: Bible) 
                     "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
                     (outline.model_dump_json(), episode_id),
                 )
+
+    shot_changes = 0
+    rows = conn.execute(
+        "SELECT id,shot_no,scene_time,scene_setting,scene_name FROM shots WHERE episode_id=?",
+        (episode_id,),
+    ).fetchall()
+    for row in rows:
+        brief = outline_by_no.get(int(row["shot_no"]))
+        target = SimpleNamespace(
+            scene_time=str(
+                (brief.scene_time if brief is not None else row["scene_time"])
+                or ""
+            ),
+            scene_setting=str(
+                (brief.scene_setting if brief is not None else row["scene_setting"])
+                or ""
+            ),
+            scene_name=str(
+                (brief.scene_name if brief is not None else row["scene_name"])
+                or ""
+            ),
+        )
+        before = (
+            str(row["scene_time"] or ""),
+            str(row["scene_setting"] or ""),
+            str(row["scene_name"] or ""),
+        )
+        if not canonicalize_storyboard_scene(target, bible):
+            continue
+        after = (target.scene_time, target.scene_setting, target.scene_name)
+        if after == before:
+            continue
+        conn.execute(
+            "UPDATE shots SET scene_time=?,scene_setting=?,scene_name=? WHERE id=?",
+            (*after, row["id"]),
+        )
+        shot_changes += 1
 
     if shot_changes or outline_changes:
         conn.commit()

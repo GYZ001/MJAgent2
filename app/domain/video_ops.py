@@ -305,7 +305,7 @@ def evaluate_storyboard_for_confirmation(
         )
     score_warnings: list[str] = []
     if screenplay is not None:
-        score_warnings.extend(
+        structural_errors.extend(
             validate_storyboard_screenplay_scene_alignment(board, screenplay, bible)
         )
         if screenplay.narrative_plan is not None:

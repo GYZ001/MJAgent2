@@ -2783,8 +2783,13 @@ async def run_storyboard_supervisor(
             if peek_control(episode_id):
                 break
             try:
+                generation_bible = (
+                    storyboard_planning_bible(bible, generation_outline)
+                    if generation_outline is not None
+                    else bible
+                )
                 draft = await generate_storyboard_next_shot(
-                    ep_data, source_text, bible,
+                    ep_data, source_text, generation_bible,
                     prev_ending=prev["cliffhanger"] if prev else "",
                     screenplay=screenplay,
                     completed_shots=completed,
@@ -3211,8 +3216,17 @@ async def run_storyboard_supervisor(
                     "已从批准大纲确定性补齐分镜导演字段",
                     payload={"repairs": direction_repairs},
                 )
+        evaluation_bible = (
+            storyboard_planning_bible(bible, outline)
+            if outline is not None
+            else bible
+        )
         evaluation = evaluate_storyboard_for_confirmation(
-            ep_data, full_board, screenplay, bible, has_real_bible=has_real_bible,
+            ep_data,
+            full_board,
+            screenplay,
+            evaluation_bible,
+            has_real_bible=has_real_bible,
         )
         repair_required_warnings = [
             issue for issue in (evaluation.issues or [])
@@ -3221,10 +3235,13 @@ async def run_storyboard_supervisor(
         # The broad aesthetic QA remains score-only. Director-scene invariants
         # are structural: missing context, an empty-purpose shot, or an
         # unreadable action/emotion camera plan cannot be published.
-        runtime_blocking_errors = validate_storyboard_direction_contract(
-            evaluation.board,
-            outline,
-        )
+        runtime_blocking_errors = [
+            *evaluation.errors,
+            *validate_storyboard_direction_contract(
+                evaluation.board,
+                outline,
+            ),
+        ]
         if runtime_blocking_errors:
             repair_warning_messages = [
                 str(getattr(issue, "message", "") or "")

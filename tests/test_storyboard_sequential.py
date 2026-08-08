@@ -11,9 +11,10 @@ import asyncio
 
 from app import config, stages
 from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay,
-                         InformationItem, Shot, StoryboardOutline,
+                         InformationItem, Scene, Shot, StoryboardOutline,
                          StoryboardOutlineShot, World)
 from app.stages import (StoryboardShotDraft, _storyboard_progress_block,
+                        _project_shot_scene_from_outline,
                         _relevant_text_windows, _render_completed_shots_context,
                         _validate_storyboard_shot_draft)
 
@@ -118,6 +119,30 @@ def test_relevant_text_windows_keeps_current_hint_and_caps_context() -> None:
 
     assert "储物柜钥匙" in result
     assert len(result) <= 1850  # 含窗口之间的省略标记
+
+
+def test_per_shot_fallback_projects_scene_from_approved_outline() -> None:
+    bible = _bible()
+    bible.scenes.append(Scene(
+        name="萧家广场",
+        scene_canonical="萧家广场固定石碑、观众席与青石地面空间锚点",
+    ))
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        scene_time="白天",
+        scene_name="萧家广场",
+        scene_setting="白天，萧家广场",
+        beat="萧炎在石碑前攥拳",
+    )
+    shot = _shot(1)
+    shot.scene_time = ""
+    shot.scene_name = ""
+    shot.scene_setting = ""
+
+    assert _project_shot_scene_from_outline(shot, brief, bible)
+    assert shot.scene_time == "白天"
+    assert shot.scene_name == "萧家广场"
+    assert shot.scene_setting == "白天，萧家广场"
 
 
 def test_next_shot_uses_bounded_single_shot_output_budget(monkeypatch) -> None:

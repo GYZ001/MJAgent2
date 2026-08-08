@@ -8,8 +8,8 @@ from app.domain.video_ops import (ConfirmationEvaluation,
                                   _storyboard_operational_projection_errors,
                                   _storyboard_structural_errors,
                                   evaluate_storyboard_for_confirmation)
-from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay, Shot,
-                         Storyboard, StoryEvent, World)
+from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay, Scene,
+                         ScriptScene, Shot, Storyboard, StoryEvent, World)
 from app.validators import validate_storyboard_preserves_key_content
 
 
@@ -174,3 +174,38 @@ def test_dialogue_composition_is_score_warning_not_confirmation_blocker() -> Non
 
     assert not any("只保留说话人" in error for error in result.errors)
     assert any("只保留说话人" in warning for warning in result.warnings)
+
+
+def test_episode_scene_alignment_is_confirmation_blocker() -> None:
+    bible = _minimal_bible()
+    bible.scenes.extend([
+        Scene(name="萧家广场", scene_canonical="石碑与青石地面固定空间锚点"),
+        Scene(name="萧家后山", scene_canonical="山崖与树林固定空间锚点"),
+    ])
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="白天 / 萧家广场",
+                story_function="萧炎完成斗气测验",
+                summary="萧炎在广场石碑前接受测验。",
+            ),
+        ],
+    )
+    shot = _shot(
+        scene_time="白天",
+        scene_name="萧家后山",
+        scene_setting="白天，萧家后山",
+    )
+
+    result = evaluate_storyboard_for_confirmation(
+        {"id": "ep1", "target_duration_s": 50},
+        Storyboard(episode_no=1, shots=[shot]),
+        screenplay,
+        bible,
+        has_real_bible=False,
+    )
+
+    assert not result.passed
+    assert any("与本集剧本不一致" in error for error in result.errors)

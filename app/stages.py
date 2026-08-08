@@ -58,6 +58,7 @@ from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenp
                          extract_json, normalize_screenplay_json_shape,
                          schema_errors)
 from app.validators import (SOURCE_EXCERPT_MIN_CHARS,
+                            canonicalize_storyboard_scene,
                             defer_establishing_covers,
                             _condense,
                             _scene_time_changed,
@@ -5990,6 +5991,31 @@ def _normalized_candidate_board(episode_no: int, completed_shots: list[Shot], sh
     return board, []
 
 
+def _project_shot_scene_from_outline(
+    shot: Shot,
+    brief: StoryboardOutlineShot | None,
+    bible: Bible,
+) -> bool:
+    """Project the approved scene task onto a generated shot.
+
+    Scene identity is planning authority, not creative model output.  The
+    per-shot fallback therefore follows the same projection contract as a
+    directed scene pack, including after a validator-normalized candidate is
+    returned by the agent loop.
+    """
+    if brief is not None:
+        if not any(str(value or "").strip() for value in (
+            brief.scene_time,
+            brief.scene_setting,
+            brief.scene_name,
+        )):
+            return True
+        shot.scene_time = str(brief.scene_time or "").strip()
+        shot.scene_setting = str(brief.scene_setting or "").strip()
+        shot.scene_name = str(brief.scene_name or "").strip()
+    return bool(canonicalize_storyboard_scene(shot, bible))
+
+
 def align_storyboard_source_evidence(
     shot: Shot,
     source_text: str,
@@ -6151,6 +6177,16 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     if must_finish and not draft.is_final:
         errors.append(
             f"当前已到本集收束位（大纲末镜/技术硬上限），第 {shot_no} 镜必须收束到尾钩并设置 is_final=true"
+        )
+
+    if outline_narrative_task is not None and not _project_shot_scene_from_outline(
+        draft.shot,
+        outline_narrative_task,
+        bible,
+    ):
+        errors.append(
+            f"[STORYBOARD_SCENE_AUTHORITY_UNRESOLVED] 第 {shot_no} 镜的批准大纲场景"
+            "无法投影到本集场景库"
         )
 
     aligned_excerpt = align_storyboard_source_evidence(
@@ -8685,6 +8721,15 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
         },
         semantic_attempt_id=semantic_attempt_id,
     )
+    if brief is not None and not _project_shot_scene_from_outline(
+        draft.shot,
+        brief,
+        bible,
+    ):
+        raise StageError(
+            "分镜场景权威投影",
+            [f"第 {shot_no} 镜的批准大纲场景无法投影到本集场景库"],
+        )
     if not narrative_authority:
         sync_shot_continuity_fields(draft.shot, completed_shots[-1] if completed_shots else None)
     ensure_audio_timeline(draft.shot, screenplay.voice_bible)
