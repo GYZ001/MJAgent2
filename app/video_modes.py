@@ -894,14 +894,6 @@ def timeline_keyframe_plan(shot: Shot) -> dict[str, Any]:
         signals.append("explicit_state_transition")
     if shot.primary_action and shot.emotion_beat and _different(shot.primary_action, shot.emotion_beat):
         signals.append("action_then_reaction")
-    sequence_text = "；".join(
-        part for part in (shot.primary_action, shot.action_desc, shot.state_out) if str(part or "").strip()
-    )
-    if any(marker in sequence_text for marker in (
-        "随后", "然后", "接着", "继而", "最后", "之后", "读完", "说完", "转身离开", "起身离开",
-    )):
-        signals.append("explicit_sequential_action")
-
     return {
         "count": 2 if signals else 1,
         "duration_s": duration_s,
@@ -917,7 +909,7 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
     opening/state_in → 起势 → 动作进展 → 决定性时刻 → 反应 → state_out/closing。
     ``narrative_keyframe`` 旧槽名专门留给决定性 master beat，兼容恢复链路。
     """
-    from app.compiler import narrative_keyframe_target
+    from app.compiler import narrative_keyframe_target, shot_contact_phase
     from app.multiview import NARRATIVE_KEYFRAME_SLOT
 
     count = max(1, min(int(count), _MAX_TIMELINE_KEYFRAMES))
@@ -952,6 +944,7 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
             pass
 
     beats: list[dict[str, Any]] = []
+    declared_contact_phase = shot_contact_phase(shot)
     decisive_position = min(range(len(ratios)), key=lambda i: abs(ratios[i] - decisive_ratio))
     if decisive_ratio_adjusted:
         ratios[decisive_position] = decisive_ratio
@@ -996,6 +989,21 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
             target = ending
             source = "last_frame_desc_or_state_out"
             slot_key = f"{NARRATIVE_KEYFRAME_SLOT}_{beat_index:02d}"
+        if declared_contact_phase == "established":
+            beat_contact_phase = (
+                "none" if phase == "opening"
+                else "approach" if phase in {"onset", "progress"}
+                else "established"
+            )
+        elif declared_contact_phase == "separated":
+            beat_contact_phase = (
+                "separated" if phase in {"decisive", "reaction", "closing"}
+                else "established"
+            )
+        elif declared_contact_phase == "approach":
+            beat_contact_phase = "none" if phase == "opening" else "approach"
+        else:
+            beat_contact_phase = "none"
         beats.append({
             "slot_key": slot_key,
             "beat_index": beat_index,
@@ -1003,6 +1011,7 @@ def narrative_keyframe_beats(shot: Shot, count: int) -> list[dict[str, Any]]:
             "time_ratio": round(ratio, 4),
             "time_s": round(float(shot.duration_s or 0) * ratio, 3),
             "phase": phase,
+            "contact_phase": beat_contact_phase,
             "target_desc": target,
             "target_source": source,
             "prompt_intent": (
@@ -1029,9 +1038,18 @@ def _shot_for_keyframe_beat(shot: Shot, beat: dict[str, Any] | None) -> Shot:
     }
     phase = str(beat.get("phase") or "").strip()
     if phase:
+        inherited_tags = [
+            tag for tag in (shot.risk_tags or [])
+            if not str(tag).startswith("contact_phase:")
+        ]
+        beat_contact_phase = str(beat.get("contact_phase") or "none")
         update["risk_tags"] = _dedupe_str([
-            *(shot.risk_tags or []),
+            *inherited_tags,
             f"timeline_keyframe_phase:{phase}",
+            *(
+                [f"contact_phase:{beat_contact_phase}"]
+                if beat_contact_phase != "none" else []
+            ),
         ])
     height_evidence = explicit_height_difference_evidence(shot)
     if height_evidence:

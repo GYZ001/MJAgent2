@@ -48,6 +48,7 @@ def _contact_shot(**overrides) -> Shot:
         "state_out": "萧炎右掌仍贴住石碑。",
         "source_excerpt": "他走到石碑之前，缓缓把手掌贴在冰冷的石面上。",
         "dialogues": [],
+        "risk_tags": ["contact_phase:established"],
     }
     data.update(overrides)
     return Shot(**data)
@@ -215,6 +216,7 @@ def test_explicit_story_height_difference_is_preserved_without_forced_perspectiv
         characters_visible=["萧炎", "萧薰儿"],
         action_desc="萧薰儿仰头看向高她一头的萧炎，伸手扶住他的手臂。",
         last_frame_desc="萧薰儿仍仰头，手已扶住萧炎手臂。",
+        risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
 
@@ -258,7 +260,7 @@ def test_every_timeline_beat_of_contact_shot_inherits_side_axis() -> None:
         for beat in beats
     ]
 
-    assert all(contract["camera_angle"] == "侧面视角" for contract in contracts)
+    assert all(contract["camera_angle"] == "侧面" for contract in contracts)
     assert all(contract["contact_camera_required"] is True for contract in contracts)
     # 开场帧本身没有接触事实：只继承侧面轴，不得被伪判成已接触。
     assert contracts[0]["contact_axis_inherited"] is True
@@ -274,6 +276,7 @@ def test_every_timeline_beat_preserves_explicit_height_difference() -> None:
         primary_action="萧薰儿仰头看向高她一头的萧炎，伸手扶住他的手臂。",
         state_out="两人转身看向石碑。",
         last_frame_desc="两人并肩看向石碑。",
+        risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
 
     contracts = [
@@ -523,73 +526,14 @@ def test_independent_geometry_guard_overrides_false_high_height_score(
     assert keyframe_gate_passed(qa) is True
 
 
-@pytest.mark.parametrize(
-    "text,expected",
-    [
-        ("手没有真正碰到石碑", "approach"),
-        ("还没能碰到对方", "approach"),
-        ("差一点碰到石碑", "approach"),
-        ("几乎碰到他的手", "approach"),
-        ("即将触碰石碑", "approach"),
-        ("试图抓住对方", "approach"),
-        ("禁止触碰石碑", "none"),
-        ("两人牵着手", "established"),
-        ("她靠在他肩头", "established"),
-        ("毫不费力抓住对方", "established"),
-        ("忍不住抓住对方", "established"),
-        ("手掌紧贴石碑", "established"),
-        ("手掌贴着石碑", "established"),
-        ("椅子靠在墙边", "none"),
-        ("并不触碰石碑", "approach"),
-        ("未触及石碑", "approach"),
-        ("没有退缩便抓住对方", "established"),
-        ("他想也不想便抓住她", "established"),
-        ("他想都没想便抓住她", "established"),
-        ("她靠着他肩头", "established"),
-        ("接触到事情的真相", "none"),
-        ("手掌悬停在他肩前", "approach"),
-        ("她握紧他的手", "established"),
-        ("她握着他的手", "established"),
-        ("她牵着他的手", "established"),
-        ("她抱起受伤的他", "established"),
-        ("她攥住他的手腕", "established"),
-        ("她拽住他的衣袖", "established"),
-        ("她打了他一巴掌", "established"),
-        ("她揪住他的衣领", "established"),
-        ("她扣住他的手腕", "established"),
-        ("她踩住他的脚", "established"),
-        ("她托起他的下巴", "established"),
-        ("她捧着他的脸", "established"),
-        ("她扑进他怀里", "established"),
-        ("她吻上他的嘴唇", "established"),
-        ("她抓着他的手", "established"),
-        ("她抱着他", "established"),
-        ("她搂着他的肩", "established"),
-        ("她推了对方一把", "established"),
-        ("一拳打在对方胸口", "established"),
-        ("他一巴掌扇在对方脸上", "established"),
-        ("他一巴掌扇向对方", "approach"),
-        ("他踢中对方膝盖", "established"),
-        ("她把手搭在他肩上", "established"),
-        ("他掐住对方的脖子", "established"),
-        ("他背起受伤的同伴", "established"),
-        ("她抓住他后又松开手", "separated"),
-        ("她松开原本握住他的手", "separated"),
-        ("她不肯放开他的手", "established"),
-        ("她不愿松开他的手", "established"),
-        ("她紧紧抓住他，绝不放开", "established"),
-        ("她甩开他的手", "separated"),
-        ("她缩回手", "separated"),
-        ("她撤回手", "separated"),
-        ("她抽出被握住的手", "separated"),
-        ("阳光打在她脸上", "none"),
-        ("灯光投影打在墙上", "none"),
-        ("雨点打在窗上", "none"),
-        ("他背着书包走进教室", "none"),
-    ],
-)
-def test_contact_phase_does_not_turn_attempts_into_established_contact(text: str, expected: str) -> None:
-    assert contact_action_phase(text) == expected
+def test_contact_phase_is_never_inferred_from_prose() -> None:
+    for text in (
+        "手没有真正碰到石碑",
+        "两人牵着手",
+        "她抓住他后又松开手",
+        "接触到事情的真相",
+    ):
+        assert contact_action_phase(text) == "none"
 
 
 def test_aborted_contact_keeps_visible_gap_and_side_camera() -> None:
@@ -598,6 +542,7 @@ def test_aborted_contact_keeps_visible_gap_and_side_camera() -> None:
         action_desc="萧炎伸手抓向令牌，但未能接住。",
         last_frame_desc="令牌从萧炎指尖前落下，他仍未碰到它。",
         state_out="萧炎的手与令牌仍有清晰缝隙。",
+        risk_tags=["contact_phase:approach"],
     )
     contract = keyframe_visual_contract(shot, _bible())
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
@@ -615,6 +560,7 @@ def test_release_end_state_beats_earlier_established_contact() -> None:
         action_desc="萧炎先抓住对方，随后松开手。",
         last_frame_desc="萧炎已松开对方的手，两手之间留有空隙。",
         state_out="两人的手已分开。",
+        risk_tags=["contact_phase:separated"],
     )
     contract = keyframe_visual_contract(shot, _bible())
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
@@ -633,6 +579,7 @@ def test_incidental_start_contact_does_not_hijack_new_keyframe() -> None:
         state_in="萧炎仍握着茶杯坐在桌前。",
         last_frame_desc="萧炎已站在窗前看雨。",
         state_out="萧炎站在窗前。",
+        risk_tags=[],
     )
     contract = keyframe_visual_contract(shot, _bible())
 
@@ -656,6 +603,7 @@ def test_height_evidence_requires_a_real_relative_height_relation() -> None:
         characters=["萧炎", "萧薰儿"], characters_visible=["萧炎", "萧薰儿"],
         action_desc="萧炎比萧薰儿高一头。", primary_action="两人并肩站立。",
         last_frame_desc="两人并肩站立。",
+        risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
     assert explicit_height_difference_evidence(taller, _bible())
 
@@ -717,7 +665,7 @@ def test_collective_roster_is_a_group_not_one_identity(monkeypatch) -> None:
     assert group["selected_views"] == []
 
 
-def test_background_crowd_permission_is_not_a_false_presence_requirement() -> None:
+def test_collective_presence_comes_only_from_typed_roster() -> None:
     optional = _contact_shot(
         characters=["萧炎"], characters_visible=["萧炎"],
         scene_setting="萧炎当众站在广场上。",
@@ -727,39 +675,23 @@ def test_background_crowd_permission_is_not_a_false_presence_requirement() -> No
         state_out="萧炎独自站在石碑前。",
     )
     optional_contract = keyframe_visual_contract(optional, _bible())
-    assert optional_contract["anonymous_background_allowed"] is True
+    assert optional_contract["anonymous_background_allowed"] is False
     assert optional_contract["collective_presence_required"] is False
 
-    required = optional.model_copy(update={"last_frame_desc": "众人围观中，萧炎站在石碑前。"})
+    required = optional.model_copy(update={
+        "characters": ["萧炎", "collective:background_crowd"],
+        "characters_visible": ["萧炎", "collective:background_crowd"],
+        "last_frame_desc": "众人围观中，萧炎站在石碑前。",
+    })
     required_contract = keyframe_visual_contract(required, _bible())
     required_prompt = video_modes.reference_generation_prompt(required, _bible(), "plot_key_frame", 1)
     assert required_contract["collective_presence_required"] is True
-    assert "anonymous crowd is REQUIRED" in required_prompt
+    assert "collective:background_crowd" in required_prompt
 
-    real_shot_wording = optional.model_copy(update={
+    prose_only = optional.model_copy(update={
         "last_frame_desc": "身后族人纷纷跟着发出嘲笑声，萧炎仍站在石碑前。",
     })
-    assert keyframe_visual_contract(real_shot_wording, _bible())["collective_presence_required"] is True
-
-    for wording in (
-        "萧炎站立，身后密集的家族子弟交头接耳。",
-        "萧炎站立，周围族人跟着发出嘲笑声。",
-    ):
-        variant = optional.model_copy(update={"last_frame_desc": wording})
-        variant_contract = keyframe_visual_contract(variant, _bible())
-        variant_prompt = video_modes.reference_generation_prompt(variant, _bible(), "plot_key_frame", 1)
-        assert variant_contract["collective_presence_required"] is True
-        assert "No additional recognizable person." not in variant_prompt
-
-    for wording in (
-        "一群族人站在萧炎身后。",
-        "几名弟子站在门口。",
-        "身后站着几名弟子。",
-        "周围站满了族人。",
-        "族人列队站在两侧。",
-    ):
-        variant = optional.model_copy(update={"last_frame_desc": wording})
-        assert keyframe_visual_contract(variant, _bible())["collective_presence_required"] is True
+    assert keyframe_visual_contract(prose_only, _bible())["collective_presence_required"] is False
 
 
 @pytest.mark.parametrize(
@@ -777,6 +709,7 @@ def test_absent_offscreen_or_remembered_crowd_is_forbidden_not_required(wording:
         characters=["萧炎"], characters_visible=["萧炎"],
         primary_action="萧炎独立。", action_desc=wording,
         last_frame_desc=wording, state_out=wording,
+        risk_tags=["contact_phase:established", "collective_presence_forbidden"],
     )
     contract = keyframe_visual_contract(shot, _bible())
     prompt = video_modes.reference_generation_prompt(shot, _bible(), "plot_key_frame", 1)
@@ -795,6 +728,8 @@ def test_real_group_wording_is_a_required_qa_diagnostic(monkeypatch) -> None:
         return json.dumps({
             "action_match": 0.9, "body_proportion": 0.9,
             "collective_presence_match": 0.2,
+            "side_view_match": 0.9, "contact_visibility": 0.9,
+            "contact_phase_match": 0.9, "relative_height_match": 0.9,
             "face_identity": 0.9, "outfit_match": 0.9, "hair_match": 0.9,
             "scene_match": 0.9, "hard_failures": [], "issues": [],
         })
@@ -802,7 +737,8 @@ def test_real_group_wording_is_a_required_qa_diagnostic(monkeypatch) -> None:
     monkeypatch.setattr("app.hiagent.vlm_check", fake_vlm)
     monkeypatch.setattr("app.multiview.visual_evidence_qa_enabled", lambda: True)
     shot = _contact_shot(
-        characters=["萧炎"], characters_visible=["萧炎"],
+        characters=["萧炎", "collective:background_crowd"],
+        characters_visible=["萧炎", "collective:background_crowd"],
         primary_action="萧炎沉默地站在石碑前。",
         action_desc="萧炎沉默地站在石碑前，族人从身后走来。",
         last_frame_desc="身后族人纷纷跟着发出嘲笑声，萧炎仍站在石碑前。",

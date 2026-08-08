@@ -92,6 +92,13 @@ function businessName(raw?: string | null, map = WORKFLOW_LABELS) {
   if (!raw) return "未命名流程";
   return map[raw] || "其他业务步骤";
 }
+function runStampClass(status: string) {
+  if (status === "SUCCEEDED") return "green";
+  if (["FAILED", "PARTIAL", "PAUSED_BUDGET", "PAUSED_EXTERNAL"].includes(status))
+    return "red";
+  if (status === "CANCELLED") return "grey";
+  return "gold";
+}
 export function runFailureGuidance(status?: string | null) {
   if (status === "PAUSED_BUDGET") return "预算不足，查看范围和已耗费用后再决定是否恢复。";
   if (status === "PAUSED_EXTERNAL") return "外部服务中断，可查看原因并从安全检查点恢复。";
@@ -426,6 +433,7 @@ export default function RunCenter({
   const [listError, setListError] = useState("");
   const [pageNotice, setPageNotice] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState<string | null>(
     selectedRunId || initial.get("run_id"),
   );
@@ -516,8 +524,6 @@ export default function RunCenter({
   }, [projectId]);
   useEffect(() => {
     void refreshRuns();
-    const timer = window.setInterval(() => void refreshRuns(true), 4000);
-    return () => window.clearInterval(timer);
   }, [queryPath]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!runs) return;
@@ -530,8 +536,6 @@ export default function RunCenter({
   }, [runs?.server_time]);
   useEffect(() => {
     void refreshGates();
-    const timer = window.setInterval(refreshGates, 5000);
-    return () => window.clearInterval(timer);
   }, [refreshGates]);
   useEffect(() => {
     if (!openGate || !gates) return;
@@ -686,17 +690,34 @@ export default function RunCenter({
       toTime &&
       new Date(fromTime).getTime() > new Date(toTime).getTime(),
   );
+  const refreshAll = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await Promise.all([refreshRuns(true), refreshGates()]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
   return (
     <section className="card run-center" aria-busy={loading}>
-      <div className="run-center-head">
+      <div className="monitor-section-head compact run-center-head">
         <div>
           <span className="eyebrow">可处理任务</span>
-          <h3>运行中心</h3>
-          <p>默认聚焦运行中、待人工、失败与可恢复任务；成功历史可按需查询。</p>
+          <h2>运行中心</h2>
         </div>
-        <span className="stamp gold">
-          {runs ? `共 ${runs.total} 次` : "读取中"}
-        </span>
+        <div className="monitor-section-actions">
+          <p>{runs ? `共 ${runs.total} 次运行` : "正在读取运行记录"}</p>
+          <button
+            type="button"
+            className="monitor-refresh"
+            disabled={refreshing}
+            onClick={() => void refreshAll()}
+          >
+            <span aria-hidden="true">↻</span>
+            {refreshing ? "刷新中…" : "刷新"}
+          </button>
+        </div>
       </div>
       <div className="monitor-toolbar">
         <label className="monitor-search">
@@ -967,35 +988,77 @@ export default function RunCenter({
       )}
       {runs && runs.total > 0 && (
         <>
-          <div className="run-center-grid">
-            <div className="run-list">
-              {runs.items.map((run) => {
-                return (
-                  <button
-                    ref={run.id === selected ? selectedRowRef : undefined}
-                    type="button"
-                    key={run.id}
-                    className={run.id === selected ? "active" : ""}
-                    onClick={() => choose(run.id)}
-                    aria-pressed={run.id === selected}
-                  >
-                    <b>
-                      {businessName(run.workflow_type)}
-                      {run.shot_no != null ? ` · 镜${run.shot_no}` : ""}
-                    </b>
-                    <span>
-                      {STATUS_LABELS[run.status] || "状态待确认"} ·{" "}
-                      {formatTime(run.updated_at)}
-                    </span>
-                    <small>
-                      {run.project_name || "上下文未关联"}
-                      {run.episode_no ? ` · 第${run.episode_no}集` : ""}
-                      {run.failure_message ? ` · ${runFailureGuidance(run.status)}` : ""}
-                    </small>
-                  </button>
-                );
-              })}
-            </div>
+          <div className="monitor-table-wrap">
+            <table className="ledger monitor-ledger runs-ledger">
+              <thead>
+                <tr>
+                  <th>更新时间</th>
+                  <th>项目</th>
+                  <th>运行名称</th>
+                  <th>状态</th>
+                  <th>当前步骤 / 影响</th>
+                  <th>费用</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runs.items.map((run) => (
+                  <tr key={run.id} className={run.id === selected ? "selected" : ""}>
+                    <td className="mono">{formatTime(run.updated_at)}</td>
+                    <td>{run.project_name || "上下文未关联"}</td>
+                    <td>
+                      <button
+                        ref={run.id === selected ? selectedRowRef : undefined}
+                        type="button"
+                        className={`run-name-button${run.id === selected ? " active" : ""}`}
+                        onClick={() => choose(run.id)}
+                        aria-pressed={run.id === selected}
+                      >
+                        {businessName(run.workflow_type)}
+                        {run.shot_no != null ? ` · 镜${run.shot_no}` : ""}
+                      </button>
+                      <small className="monitor-cell-sub">
+                        {run.episode_no ? `第${run.episode_no}集` : "项目级运行"}
+                      </small>
+                    </td>
+                    <td>
+                      <span className={`stamp ${runStampClass(run.status)}`}>
+                        {STATUS_LABELS[run.status] || "状态待确认"}
+                      </span>
+                    </td>
+                    <td className="monitor-error-cell">
+                      <span>
+                        {businessName(run.current_step_key, STEP_LABELS)}
+                      </span>
+                      {run.failure_message && (
+                        <>
+                          <small className="monitor-cell-sub">
+                            {runFailureGuidance(run.status)}
+                          </small>
+                          <details className="monitor-error-details">
+                            <summary>错误详情</summary>
+                            <pre>{run.failure_message}</pre>
+                          </details>
+                        </>
+                      )}
+                    </td>
+                    <td>¥ {Number(run.cost_cny || 0).toFixed(2)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn small"
+                        onClick={() => choose(run.id)}
+                        aria-label={`查看${businessName(run.workflow_type)}详情`}
+                      >
+                        详情 / 处理
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {selected && (
             <div className="run-detail">
               {detailError && (
                 <div className="monitor-state error" role="alert">
@@ -1166,7 +1229,7 @@ export default function RunCenter({
                 </>
               )}
             </div>
-          </div>
+          )}
           <div className="monitor-pagination">
             <span>共 {runs.total} 条真实记录</span>
             <label>

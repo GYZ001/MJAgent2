@@ -53,6 +53,7 @@ def _contact_shot(**kwargs) -> Shot:
         primary_action="萧炎抬手按住冰冷石碑，碑面光纹扩散。",
         state_out="萧炎手掌仍按住石碑，碑面亮起。",
         continuity_mode="same_scene_cut",
+        risk_tags=["contact_phase:established"],
         source_excerpt="萧炎抬起手掌，轻轻按在了那块黑色石碑之上。",
     )
     base.update(kwargs)
@@ -68,6 +69,7 @@ def test_has_contact_action_detects_press() -> None:
         state_out="萧炎仍站在广场中央。",
         first_frame_desc="萧炎站在广场中央。",
         last_frame_desc="萧炎环顾四周。",
+        risk_tags=[],
     )) is False
 
 
@@ -81,10 +83,10 @@ def test_compile_prompt_forces_side_view_for_contact() -> None:
     assert shot.camera_angle == "侧面"
 
 
-def test_compile_prompt_keeps_explicit_side_angle() -> None:
+def test_compile_prompt_normalizes_typed_contact_to_side_axis() -> None:
     shot = _contact_shot(camera_angle="侧面俯视")
     compile_prompt(shot, _bible())
-    assert shot.camera_angle == "侧面俯视"
+    assert shot.camera_angle == "侧面"
 
 
 def test_compile_prompt_equal_height_for_multi_character() -> None:
@@ -99,6 +101,7 @@ def test_compile_prompt_skips_equal_height_when_diff_stated() -> None:
         action_desc="萧薰儿仰头看高他一头的萧炎，伸手扶住他手臂。",
         first_frame_desc="萧薰儿仰头看高他一头的萧炎。",
         last_frame_desc="萧薰儿手扶住萧炎手臂。",
+        risk_tags=["contact_phase:established", "explicit_height_difference"],
     )
     assert has_explicit_height_difference(shot, _bible()) is True
     prompt = compile_prompt(shot, _bible())

@@ -1113,6 +1113,7 @@ export function usePoll<T>(
   fetcher: () => Promise<T>,
   intervalMs: PollInterval<T>,
   deps: unknown[] = [],
+  options: { refreshOnFocus?: boolean } = {},
 ) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1157,8 +1158,10 @@ export function usePoll<T>(
     const catchUp = () => {
       if (document.visibilityState === "visible") void poller.refresh();
     };
-    window.addEventListener("focus", catchUp);
-    document.addEventListener("visibilitychange", catchUp);
+    if (options.refreshOnFocus !== false) {
+      window.addEventListener("focus", catchUp);
+      document.addEventListener("visibilitychange", catchUp);
+    }
     return () => {
       window.removeEventListener("focus", catchUp);
       document.removeEventListener("visibilitychange", catchUp);

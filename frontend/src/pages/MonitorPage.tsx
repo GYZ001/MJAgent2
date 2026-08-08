@@ -3042,6 +3042,7 @@ export default function MonitorPage({
     initial.get("run_id"),
   );
   const [focusToken, setFocusToken] = useState(initial.get("focus") || "");
+  const [refreshingSection, setRefreshingSection] = useState<MonitorSection | "">("");
   const observabilityBase = projectId
     ? `/projects/${encodeURIComponent(projectId)}/observability`
     : "";
@@ -3050,8 +3051,9 @@ export default function MonitorPage({
       await api.get(projectId ? `${observabilityBase}/jobs?page_size=100` : "/system/jobs") as JobsSummary,
       projectId,
     ),
-    4000,
+    0,
     [mode === "system" ? null : mode, projectId || mode],
+    { refreshOnFocus: false },
   );
   const settingsPoll = usePoll<SettingsView>(
     () => api.get("/settings?include_schema=true"),
@@ -3090,8 +3092,9 @@ export default function MonitorPage({
         : `/system/jobs/query?${jobQuery}`) as JobsPage,
       projectId,
     ),
-    activeSection === "jobs" ? 4000 : 0,
+    0,
     [mode === "system" ? null : mode, activeSection, jobQuery, projectId || mode],
+    { refreshOnFocus: false },
   );
   const callQuery = encodeQuery({
     page: callPage,
@@ -3114,8 +3117,9 @@ export default function MonitorPage({
         : `/system/calls/query?${callQuery}`) as CallsPage,
       projectId,
     ),
-    activeSection === "calls" || activeSection === "overview" ? 6000 : 0,
+    0,
     [mode === "system" ? null : mode, activeSection, callQuery, projectId || mode],
+    { refreshOnFocus: false },
   );
   useEffect(() => {
     if (!jobsPagePoll.data || jobPage <= jobsPagePoll.data.page_count) return;
@@ -3306,6 +3310,24 @@ export default function MonitorPage({
       callTo &&
       new Date(callFrom).getTime() > new Date(callTo).getTime(),
   );
+  const refreshJobs = async () => {
+    if (refreshingSection) return;
+    setRefreshingSection("jobs");
+    try {
+      await Promise.all([jobsPagePoll.refresh(), jobsSummaryPoll.refresh()]);
+    } finally {
+      setRefreshingSection("");
+    }
+  };
+  const refreshCalls = async () => {
+    if (refreshingSection) return;
+    setRefreshingSection("calls");
+    try {
+      await callsPagePoll.refresh();
+    } finally {
+      setRefreshingSection("");
+    }
+  };
   useEffect(() => {
     if (activeSection !== "jobs" || !selectedJobId) return;
     setObjectLoadError("");
@@ -3801,11 +3823,22 @@ export default function MonitorPage({
               <span className="eyebrow">任务队列</span>
               <h2>任务队列</h2>
             </div>
-            <p>
-              {nowQuery().get("source") === "overview"
-                ? "来自总览 · 已清除冲突筛选"
-                : "系统全量查询与真实总数"}
-            </p>
+            <div className="monitor-section-actions">
+              <p>
+                {nowQuery().get("source") === "overview"
+                  ? "来自总览 · 已清除冲突筛选"
+                  : "数据按需加载，不会自动刷新"}
+              </p>
+              <button
+                type="button"
+                className="monitor-refresh"
+                disabled={refreshingSection === "jobs"}
+                onClick={() => void refreshJobs()}
+              >
+                <span aria-hidden="true">↻</span>
+                {refreshingSection === "jobs" ? "刷新中…" : "刷新"}
+              </button>
+            </div>
           </div>
           <div className="monitor-toolbar">
             <label className="monitor-search">
@@ -4085,11 +4118,22 @@ export default function MonitorPage({
               <span className="eyebrow">模型调用</span>
               <h2>调用日志</h2>
             </div>
-            <p>
-              {nowQuery().get("source") === "overview"
-                ? "来自总览 · 与异常聚合共享口径"
-                : "摘要优先，正文按需加载"}
-            </p>
+            <div className="monitor-section-actions">
+              <p>
+                {nowQuery().get("source") === "overview"
+                  ? "来自总览 · 与异常聚合共享口径"
+                  : "数据按需加载，不会自动刷新"}
+              </p>
+              <button
+                type="button"
+                className="monitor-refresh"
+                disabled={refreshingSection === "calls"}
+                onClick={() => void refreshCalls()}
+              >
+                <span aria-hidden="true">↻</span>
+                {refreshingSection === "calls" ? "刷新中…" : "刷新"}
+              </button>
+            </div>
           </div>
           <div className="monitor-toolbar">
             <label className="monitor-search">
