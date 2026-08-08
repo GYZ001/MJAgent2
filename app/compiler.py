@@ -227,87 +227,16 @@ def _split_video_args(prompt_text: str, duration: int | None = None) -> tuple[st
     return normalized.strip(), args
 
 
-def _replace_age(match: re.Match) -> str:
-    suffix = match.group(2) or ""
-    if suffix in {"少女", "女孩"}:
-        return "年轻女性角色"
-    if suffix in {"男孩", "少年", "少男"}:
-        return "少年感年轻角色"
-    return "年轻角色"
-
-
-# 通用安全降级（题材无关，首发即生效）：脏话软化 + 未成年/年龄安全归一。
-# 这些不改变场景与情绪语义，只规避平台审核与未成年风险。
-_ALWAYS_REPLACEMENTS = (
-    ("我草", "可恶"),
-    ("卧槽", "可恶"),
-    ("我操", "可恶"),
-    ("他妈的", "可恶"),
-    ("他妈", "可恶"),
-    ("妈的", "可恶"),
-    ("该死", "可恶"),
-    ("骂了一句", "低声抱怨一句"),
-)
-# 题材专用的措辞降级（修真/玄幻语境的场景与情绪改写）。这些会篡改画面场景（卧室→修炼静室）
-# 与人物情绪（愤怒→不甘），对都市/言情/悬疑等题材是降质的——因此【默认不启用】，
-# 只在平台已返回 InputTextSensitiveContentDetected 后的 aggressive 重提里启用。
-_AGGRESSIVE_REPLACEMENTS = (
-    ("床榻上", "修炼蒲团上"),
-    ("床榻", "修炼蒲团"),
-    ("床上", "室内蒲团上"),
-    ("卧室", "修炼静室"),
-    ("口鼻钻入体内", "从周围缓缓汇聚并融入经脉"),
-    ("钻入体内", "融入经脉"),
-    ("涌入体内", "汇入经脉"),
-    ("进入体内", "融入经脉"),
-    ("吸收殆尽", "悄然吸收"),
-    ("死死捏紧拳头", "用力握拳"),
-    ("死死攥紧拳头", "用力握拳"),
-    ("死死", "用力"),
-    ("愤怒地", "神情不甘地"),
-    ("愤怒", "不甘"),
-    ("暴怒", "强烈不甘"),
-    ("诡异", "神秘"),
-    ("邪异", "神秘"),
-)
-
-
-def _rewrite_sensitive_terms(text: str, *, aggressive: bool = False) -> str:
-    out = text
-    for old, new in _ALWAYS_REPLACEMENTS:
-        out = out.replace(old, new)
-    if aggressive:
-        for old, new in _AGGRESSIVE_REPLACEMENTS:
-            out = out.replace(old, new)
-    # 年龄/未成年安全归一始终生效（与题材无关的合规护栏）
-    out = re.sub(r"(?:\d{1,3}|[一二两三四五六七八九十]{1,4})岁(清秀|稚嫩|年少)?(少年|少女|男孩|女孩|少男)?", _replace_age, out)
-    out = re.sub(r"未成年(?:人)?", "年轻角色", out)
-    out = re.sub(r"草([！!。,.，、？?])", r"可恶\1", out)
-    return out
-
-
 def sanitize_seedance_prompt(prompt_text: str, *, aggressive: bool = False,
                              extra_terms: tuple[tuple[str, str], ...] | None = None) -> str:
-    """降低 Seedance 文本安全误拦截概率。
+    """Normalize layout and video arguments without rewriting story content.
 
-    普通模式只做确定性措辞降级；aggressive=True 用于平台已经返回
-    InputTextSensitiveContentDetected 后的自动重提，会移除原文兜底和露骨台词原句。
-    extra_terms：额外的字面替换（如版权角色专名→中性代称），用于版权限制后的重提。
+    ``aggressive`` and ``extra_terms`` remain as compatibility parameters for
+    historical callers.  They intentionally do not trigger word-list based
+    mutation or retry behaviour.
     """
+    _ = aggressive, extra_terms
     body, args = _split_video_args(prompt_text)
-    if extra_terms:
-        for old, new in extra_terms:
-            if old:
-                body = body.replace(old, new)
-    body = _rewrite_sensitive_terms(body, aggressive=aggressive)
-    if aggressive:
-        body = re.sub(rf"{re.escape(SOURCE_EXCERPT_MARKER)}[^。；\n]*[。；\n]?", "", body)
-        body = re.sub(
-            r"台词信息：[^。\n]{0,220}",
-            "台词信息：角色以短促口型和压抑情绪表达懊恼，不生成字幕文字",
-            body,
-        )
-        body = re.sub(r"[^。；\n]{0,18}低声[^。；\n]{0,80}可恶[^。；\n]{0,30}", "角色低声表达懊恼", body)
     # 保留段落换行（新 Seedance 分段协议）；仅压缩行内空白与多余空行
     if "[" in body and "]" in body and "\n" in body:
         lines = []

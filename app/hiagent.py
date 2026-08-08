@@ -12,7 +12,6 @@ import base64
 import binascii
 import inspect
 import json
-import re
 import sqlite3
 import shutil
 import subprocess
@@ -110,11 +109,12 @@ class ProviderError(Exception):
     """对外调用失败。message 面向 UI，包含分类结论 + 原始报文摘要。"""
 
     def __init__(self, message: str, *, retryable: bool = False, raw: str = "",
-                 timeout_phase: str | None = None):
+                 timeout_phase: str | None = None, failure_kind: str = ""):
         super().__init__(message)
         self.retryable = retryable
         self.raw = raw[:500]
         self.timeout_phase = timeout_phase
+        self.failure_kind = failure_kind
 
 
 def _channel_semaphore(
@@ -226,61 +226,32 @@ async def _prepare_image_data_urls(values: list[str]) -> tuple[list[str], dict[s
     return prepared, stats
 
 
-_INPUT_TEXT_SAFETY_MARKERS = (
-    "inputtextsensitivecontentdetected",
-    "input text may contain sensitive information",
-    "输入文本可能包含敏感",
-)
-
-# 只在供应商明确拒绝输入文本后启用。这里把容易误触审核的身份词改写为
-# 等价的可视特征，避免改变正常请求，也避免对同一敏感文本做无效重放。
-_IMAGE_SAFETY_REPLACEMENTS = (
-    (r"中国人民武装警察部队", "纪律严明的守护团队"),
-    (r"(?:武警|特警|军警)(?:队员|人员)?气质", "身姿挺拔、干练沉稳的气质"),
-    (r"(?:军人|军官|警察|警员)气质", "身姿挺拔、沉稳可靠的气质"),
-    (r"(?:武警|特警|军警)(?:队员|人员)?", "守护者"),
-    (r"军靴", "深色系带长靴"),
-    (r"(?:军装|警服)", "利落的深色制服"),
-)
-
-
-def _is_input_text_safety_rejection(value: str | ProviderError | None) -> bool:
-    if isinstance(value, ProviderError):
-        text = f"{value}\n{value.raw}".lower()
-    else:
-        text = str(value or "").lower()
-    return any(marker in text for marker in _INPUT_TEXT_SAFETY_MARKERS)
-
-
-def _sanitize_image_prompt_for_safety_retry(prompt: str) -> str:
-    sanitized = prompt
-    for pattern, replacement in _IMAGE_SAFETY_REPLACEMENTS:
-        sanitized = re.sub(pattern, replacement, sanitized)
-    return sanitized
-
-
 def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KEY") -> ProviderError:
-    lowered = body.lower()
     if status in (401, 403):
-        if "no access to model" in lowered:
-            return ProviderError(f"凭证有效，但模型未授权/未开通（HTTP {status}）：{body[:300]}", raw=body)
-        return ProviderError(f"鉴权失败，请检查 .env 中的 {key_name}（HTTP {status}）：{body[:300]}", raw=body)
-    if status == 400 and "outputimagesensitivecontentdetected" in lowered:
         return ProviderError(
-            f"图片输出被安全审核拦截（HTTP 400），将重新生成：{body[:300]}",
-            retryable=True,
+            f"鉴权失败，请检查 .env 中的 {key_name}（HTTP {status}）：{body[:300]}",
             raw=body,
-        )
-    if status == 400 and _is_input_text_safety_rejection(body):
-        return ProviderError(
-            f"输入文本被安全审核拦截（HTTP 400）：{body[:300]}",
-            raw=body,
+            failure_kind="authentication",
         )
     if status == 429:
-        return ProviderError(f"网关限流（HTTP 429）：{body[:200]}", retryable=True, raw=body)
+        return ProviderError(
+            f"网关限流（HTTP 429）：{body[:200]}",
+            retryable=True,
+            raw=body,
+            failure_kind="rate_limited",
+        )
     if status >= 500:
-        return ProviderError(f"网关/上游故障（HTTP {status}）：{body[:300]}", retryable=True, raw=body)
-    return ProviderError(f"请求被拒绝（HTTP {status}）：{body[:300]}", raw=body)
+        return ProviderError(
+            f"网关/上游故障（HTTP {status}）：{body[:300]}",
+            retryable=True,
+            raw=body,
+            failure_kind="upstream_unavailable",
+        )
+    return ProviderError(
+        f"请求被拒绝（HTTP {status}）：{body[:300]}",
+        raw=body,
+        failure_kind="provider_rejected",
+    )
 
 
 def _headers() -> dict[str, str]:
@@ -1615,6 +1586,7 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
         "video_url": _absolute_provider_url((data.get("content") or {}).get("video_url", ""), base_url),
         "last_frame_url": _absolute_provider_url((data.get("content") or {}).get("last_frame_url", ""), base_url),
         "error": error_obj.get("message", ""),
+        "failure_kind": "provider_rejected" if status == "failed" else "",
     }
 
 
@@ -1745,28 +1717,11 @@ async def generate_image(prompt: str, *, size: str = "1024x1024",
                                 write=config.TIMEOUT_IMAGE_WRITE, pool=10)
         async with _image_semaphore():
             async with httpx.AsyncClient(timeout=timeout) as client:
-                try:
-                    data = await _post_json(
-                        client, f"{base_url}/images/generations", payload,
-                        kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
-                        meta=request_meta,
-                        idempotency_key=operation_id)
-                except ProviderError as exc:
-                    if not _is_input_text_safety_rejection(exc):
-                        raise
-                    sanitized_prompt = _sanitize_image_prompt_for_safety_retry(prompt)
-                    if sanitized_prompt == prompt:
-                        raise
-                    retry_payload = {**payload, "prompt": sanitized_prompt}
-                    data = await _post_json(
-                        client, f"{base_url}/images/generations", retry_payload,
-                        kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
-                        meta={
-                            **request_meta,
-                            "input_safety_retry": True,
-                            "input_safety_reason": str(exc)[:240],
-                        },
-                        idempotency_key=f"{operation_id}-input-safety-1")
+                data = await _post_json(
+                    client, f"{base_url}/images/generations", payload,
+                    kind=kind, model=model, headers=model_headers, key_name=f"model:{model}",
+                    meta=request_meta,
+                    idempotency_key=operation_id)
     items = data.get("data") or []
     if not items:
         raise ProviderError(f"图像生成响应为空：{json.dumps(data, ensure_ascii=False)[:300]}")

@@ -13,14 +13,6 @@ from app.narrative_outline import (
     normalize_narrative_storyboard_outline,
     normalize_split_action_owner_completions,
 )
-from app.production.patch import apply_patch_operation_to_document
-from app.production.policy import assert_patch_ops_allowed
-from app.production.screenplay_document import (
-    document_to_screenplay,
-    screenplay_to_document,
-)
-from app.production.screenplay_repair import plan_screenplay_patch
-from app.production.structured_issues import issues_from_validator_messages
 from app.schemas import (
     AudioTimelineItem,
     AtomicAction,
@@ -36,13 +28,11 @@ from app.schemas import (
     TargetDelta,
     VoiceCanonical,
 )
-from app.spoken_contract import content_char_count
 from app.validators import (
     normalize_outline_dialogue_ownership,
     outline_scene_coverage_errors,
     outline_key_line_capacity_errors,
     outline_key_line_speaker_errors,
-    validate_dialogue_chains,
     normalize_screenplay_dialogue_chains,
 )
 from tests.test_narrative_continuity import _board, _screenplay

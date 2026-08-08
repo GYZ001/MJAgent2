@@ -1356,6 +1356,7 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
             ok=False,
             before_artifact_id=request.expected_artifact_id,
             error="no-op Patch 已拒绝",
+            failure_kind="no_op",
         )
 
     monkeypatch.setattr(screenplay_repair, "plan_screenplay_patch", fake_plan)

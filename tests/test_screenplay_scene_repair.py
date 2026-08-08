@@ -10,11 +10,6 @@ from app.production.revision import (
     mark_first_evaluation,
     save_checkpoint,
 )
-from app.production.screenplay_document import (
-    apply_field_patch,
-    document_to_screenplay,
-    screenplay_to_document,
-)
 from app.production.structured_issues import (
     enrich_issues,
     issues_from_validator_messages,

@@ -1,135 +1,55 @@
-from app.compiler import SOURCE_EXCERPT_MARKER, sanitize_seedance_prompt
-from app.worker import (
-    _is_seedance_copyright_restricted,
-    _is_seedance_input_image_sensitive,
-    _is_seedance_text_sensitive,
-    _video_model_rejection_guidance,
-)
+from app.compiler import sanitize_seedance_prompt
+from app.hiagent import ProviderError
+from app.worker import _video_model_rejection_guidance
 
 
-def test_sanitize_nonaggressive_only_softens_safety_terms() -> None:
-    """普通（非 aggressive）模式只做题材无关的安全降级：未成年/年龄归一 + 脏话软化。
-    修真/玄幻专用的场景与情绪改写（床榻→蒲团、愤怒→不甘、诡异→神秘）默认【不启用】——
-    它们会篡改非修真题材的画面与情绪，是降质项，仅在平台返回敏感后的 aggressive 重提里才用。"""
+def test_seedance_normalization_preserves_story_content() -> None:
     prompt = (
-        "画面主体：十五岁清秀少年。镜头动作：萧炎闭目盘腿坐在床榻上，"
-        "淡淡的白色气流顺着口鼻钻入体内，古朴黑戒指诡异发光将气流吸收殆尽，"
-        "萧炎愤怒地死死捏紧拳头。我草！"
-        "--ratio 9:16 --dur 5"
+        "镜头动作：十五岁少年在卧室床榻上愤怒地说：我草！\n"
+        "画面结果：黑戒指诡异发光。 --ratio 9:16 --dur 5"
     )
 
-    safe = sanitize_seedance_prompt(prompt)
+    normalized = sanitize_seedance_prompt(prompt)
 
-    # 始终生效：年龄/未成年安全归一 + 脏话软化
-    assert "十五岁" not in safe
-    assert "少年感年轻角色" in safe
-    assert "我草" not in safe
-    assert "可恶" in safe
-    # 默认保留：场景/情绪/修真措辞不被改写（避免对非修真题材降质）
-    assert "床榻" in safe
-    assert "钻入体内" in safe
-    assert "吸收殆尽" in safe
-    assert "诡异" in safe
-    assert "愤怒" in safe
-    assert "死死" in safe
-    assert safe.endswith("--ratio 9:16 --dur 5")
+    assert "十五岁少年" in normalized
+    assert "卧室床榻" in normalized
+    assert "愤怒地说：我草" in normalized
+    assert "黑戒指诡异发光" in normalized
+    assert normalized.endswith("--ratio 9:16 --dur 5")
 
 
-def test_sanitize_preserves_model_selected_duration() -> None:
-    safe = sanitize_seedance_prompt("镜头动作：角色缓慢起身。--ratio 9:16 --dur 8")
+def test_legacy_retry_parameters_do_not_mutate_content() -> None:
+    prompt = "镜头动作：萧薰儿追上萧炎。 --ratio 9:16 --dur 8"
 
-    assert safe.endswith("--ratio 9:16 --dur 8")
-
-
-def test_aggressive_sanitize_rewrites_genre_terms() -> None:
-    """aggressive 模式（平台已判敏感后的重提）才启用题材专用措辞降级。"""
-    prompt = (
-        "镜头动作：萧炎闭目盘腿坐在床榻上，气流顺着口鼻钻入体内，"
-        "黑戒指诡异发光将气流吸收殆尽，萧炎愤怒地死死捏紧拳头。"
-        "--ratio 9:16 --dur 5"
+    normalized = sanitize_seedance_prompt(
+        prompt,
+        aggressive=True,
+        extra_terms=(("萧薰儿", "角色甲"), ("萧炎", "角色乙")),
     )
 
-    safe = sanitize_seedance_prompt(prompt, aggressive=True)
-
-    assert "床榻" not in safe
-    assert "修炼蒲团" in safe
-    assert "钻入体内" not in safe
-    assert "吸收殆尽" not in safe
-    assert "诡异" not in safe
-    assert "愤怒" not in safe
-    assert "死死" not in safe
-    assert safe.endswith("--ratio 9:16 --dur 5")
+    assert "萧薰儿追上萧炎" in normalized
+    assert "角色甲" not in normalized
+    assert "角色乙" not in normalized
+    assert normalized.endswith("--ratio 9:16 --dur 8")
 
 
-def test_aggressive_sanitize_removes_source_excerpt_and_direct_dialogue() -> None:
-    prompt = (
-        "台词信息：萧炎说「好不容易修炼而来的斗之气，又在消失……我草！」。"
-        f"{SOURCE_EXCERPT_MARKER}手指上那古朴的黑色戒指，再次诡异的微微发光。"
-        "--ratio 9:16 --dur 5"
-    )
-
-    safe = sanitize_seedance_prompt(prompt, aggressive=True)
-
-    assert SOURCE_EXCERPT_MARKER not in safe
-    assert "我草" not in safe
-    assert "萧炎说" not in safe
-    assert "短促口型" in safe
-
-
-def test_seedance_sensitive_error_detection() -> None:
-    assert _is_seedance_text_sensitive("InputTextSensitiveContentDetected")
-    assert _is_seedance_text_sensitive("The request failed because the input text may contain sensitive information")
-    assert _is_seedance_text_sensitive("输入文本可能包含敏感信息")
-    assert not _is_seedance_text_sensitive("轮询超出 15 分钟预算")
-
-
-def test_seedance_input_image_privacy_detection() -> None:
-    assert _is_seedance_input_image_sensitive(
-        "InputImageSensitiveContentDetected.PrivacyInformation"
-    )
-    assert _is_seedance_input_image_sensitive(
-        "the input image 'content[1]' may contain real person"
-    )
-    assert _is_seedance_input_image_sensitive(
-        "输入图片可能包含真人隐私信息"
-    )
-    assert not _is_seedance_input_image_sensitive(
-        "InputTextSensitiveContentDetected"
-    )
-    assert not _is_seedance_text_sensitive(
-        "输入图片可能包含真人隐私信息"
-    )
-
-
-def test_seedance_privacy_rejection_keeps_planned_mode_and_points_to_models() -> None:
+def test_video_rejection_guidance_uses_typed_provider_state_only() -> None:
+    arbitrary_message = "任意未来供应商报文，不应由词语决定分类"
     guidance = _video_model_rejection_guidance(
         {"mode": "FIRST_LAST_FRAME_MODE"},
-        "the input image 'content[1]' may contain real person",
+        ProviderError(arbitrary_message, failure_kind="provider_rejected"),
     )
 
     assert guidance is not None
-    assert guidance[0] == "VIDEO_INPUT_PRIVACY_REJECTED"
+    assert guidance[0] == "VIDEO_PROVIDER_MODEL_REJECTED"
     assert "FIRST_LAST_FRAME_MODE" in guidance[1]
-    assert "更换视频模型" in guidance[1]
+    assert "没有改写内容" in guidance[1]
 
 
-def test_seedance_copyright_error_detection() -> None:
-    assert _is_seedance_copyright_restricted(
-        "The request failed because the output video may be related to copyright restrictions.")
-    assert _is_seedance_copyright_restricted("输出视频可能涉及版权限制")
-    assert not _is_seedance_copyright_restricted("InputTextSensitiveContentDetected")
-    assert not _is_seedance_copyright_restricted("轮询超出 15 分钟预算")
+def test_untyped_provider_failure_does_not_become_model_rejection() -> None:
+    guidance = _video_model_rejection_guidance(
+        {"mode": "REFERENCE_IMAGE_MODE"},
+        ProviderError("文本看起来像拒绝，但没有结构化状态"),
+    )
 
-
-def test_extra_terms_genericize_copyright_names() -> None:
-    """版权重提：用中性代称替换角色专名，降低输出与原 IP 的相似度。"""
-    prompt = "镜头动作：萧薰儿快步追上萧炎，走到他身侧。--ratio 9:16 --dur 5"
-
-    safe = sanitize_seedance_prompt(
-        prompt, aggressive=True, extra_terms=(("萧薰儿", "角色甲"), ("萧炎", "角色乙")))
-
-    assert "萧薰儿" not in safe
-    assert "萧炎" not in safe
-    assert "角色甲" in safe
-    assert "角色乙" in safe
-    assert safe.endswith("--ratio 9:16 --dur 5")
+    assert guidance is None

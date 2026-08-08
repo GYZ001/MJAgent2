@@ -1157,82 +1157,19 @@ def _set_version(version_id: str, **fields) -> None:
     conn.commit()
 
 
-def _is_seedance_text_sensitive(message: str | None) -> bool:
-    text = (message or "").lower()
-    if (
-        "inputimagesensitivecontentdetected" in text
-        or "input image" in text
-        or "输入图片" in (message or "")
-        or "输入图像" in (message or "")
-    ):
-        return False
-    return (
-        "inputtextsensitivecontentdetected" in text
-        or "sensitive information" in text
-        or "sensitive content" in text
-        or "输入文本" in (message or "")
-        or "敏感" in (message or "")
-    )
-
-
-def _is_seedance_input_image_sensitive(message: str | None) -> bool:
-    text = (message or "").lower()
-    original = message or ""
-    return (
-        "inputimagesensitivecontentdetected" in text
-        or (
-            "input image" in text
-            and (
-                "real person" in text
-                or "privacyinformation" in text
-                or "privacy information" in text
-            )
-        )
-        or (
-            ("输入图片" in original or "输入图像" in original)
-            and ("真人" in original or "隐私" in original or "敏感" in original)
-        )
-    )
-
-
 def _video_model_rejection_guidance(
     meta: dict[str, Any],
-    message: str,
+    exc: ProviderError,
 ) -> tuple[str, str] | None:
-    """Return an actionable public error only for an explicit model rejection."""
+    """Build guidance from a typed provider outcome, never from error prose."""
+    if exc.failure_kind != "provider_rejected":
+        return None
     mode = str(meta.get("mode") or meta.get("planned_mode") or "")
-    if _is_seedance_input_image_sensitive(message):
-        mode_label = {
-            video_modes.FIRST_LAST_FRAME_MODE: "首尾帧",
-            video_modes.REFERENCE_IMAGE_MODE: "参考图",
-            video_modes.VIDEO_INPUT_MODE: "参考视频",
-        }.get(mode, "视觉")
-        return (
-            "VIDEO_INPUT_PRIVACY_REJECTED",
-            f"当前视频模型拒绝了{mode_label}输入，系统已保持 {mode or '原计划模式'} "
-            "失败且没有切换生成方式。请到「系统设置 → 模型中心」更换视频模型后重试。",
-        )
-    if _is_seedance_text_sensitive(message):
-        return (
-            "VIDEO_TEXT_REJECTED",
-            f"当前视频模型拒绝了文本输入，系统已保持 {mode or '原计划模式'} "
-            "失败且没有切换生成方式。请修订输入或更换视频模型后重试。",
-        )
-    if _is_seedance_copyright_restricted(message):
-        return (
-            "VIDEO_COPYRIGHT_REJECTED",
-            f"当前视频模型终态拒绝了生成请求，系统已保持 {mode or '原计划模式'} "
-            "失败且没有切换生成方式。请更换视频模型或处理版权输入后重试。",
-        )
-    return None
-
-
-_SEEDANCE_COPYRIGHT_MAX_RETRIES = 2
-
-
-def _is_seedance_copyright_restricted(message: str | None) -> bool:
-    text = (message or "").lower()
-    return "copyright" in text or "版权" in (message or "")
+    return (
+        "VIDEO_PROVIDER_MODEL_REJECTED",
+        f"当前视频模型明确拒绝了本次输入，系统已保持 {mode or '原计划模式'} "
+        "失败且没有改写内容或切换生成方式。请检查供应商原始证据或更换视频模型后重试。",
+    )
 
 
 def _provider_submitted_at(conn, job, task_id: str) -> float:
@@ -1460,23 +1397,6 @@ def _persist_video_resubmit(
         (operation_id, now(), job_id),
     )
     conn.commit()
-
-
-def _ip_genericization_terms(conn, project_id: str) -> tuple[tuple[str, str], ...]:
-    """把版权角色专名替换成中性代称（角色甲/乙…），降低 Seedance 输出版权误判概率。
-    仅在平台已返回版权限制后的自动重提里使用。"""
-    project = conn.execute("SELECT bible_json FROM projects WHERE id=?", (project_id,)).fetchone()
-    if not project or not project["bible_json"]:
-        return ()
-    try:
-        chars = json.loads(project["bible_json"]).get("characters", [])
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ()
-    labels = "甲乙丙丁戊己庚辛壬癸"
-    names = sorted({(c.get("name") or "").strip() for c in chars if (c.get("name") or "").strip()},
-                   key=len, reverse=True)  # 先长后短，避免短名先替换截断长名
-    return tuple((name, f"角色{labels[i]}" if i < len(labels) else f"角色{i + 1}")
-                 for i, name in enumerate(names))
 
 
 def _video_image_inputs_from_meta(meta: dict) -> list[tuple[str, str]]:
@@ -2977,8 +2897,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 task.add_done_callback(_retry_tasks.discard)
                 return
 
-        safety_retry_used = bool(meta.get("seedance_safety_retry"))
-        copyright_retries = int(meta.get("seedance_copyright_retries") or 0)
         image_inputs: list[tuple[str, str]] | None = None
         video_inputs: list[tuple[str, str]] | None = None
 
@@ -3140,51 +3058,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         ),
                     )
                     conn.commit()
-                    if (
-                        not exc.retryable
-                        and _is_seedance_text_sensitive(str(exc))
-                        and not safety_retry_used
-                    ):
-                        prompt_text = sanitize_seedance_prompt(prompt_text, aggressive=True)
-                        safety_retry_used = True
-                        provider_operation_id = f"video-create-{version['id']}-safety-1"
-                        meta["seedance_safety_retry"] = True
-                        meta["seedance_safety_reason"] = str(exc)[:300]
-                        if not _reserve_or_pause_video_resubmit(
-                            job, version, shot, owner,
-                        ):
-                            return
-                        _persist_video_resubmit(
-                            conn, job_id=job_id, version_id=version["id"],
-                            prompt_text=prompt_text, meta=meta,
-                            operation_id=provider_operation_id,
-                        )
-                        continue
-                    if (
-                        not exc.retryable
-                        and _is_seedance_copyright_restricted(str(exc))
-                        and copyright_retries < _SEEDANCE_COPYRIGHT_MAX_RETRIES
-                    ):
-                        copyright_retries += 1
-                        provider_operation_id = (
-                            f"video-create-{version['id']}-copyright-{copyright_retries}"
-                        )
-                        if copyright_retries == 1:
-                            prompt_text = sanitize_seedance_prompt(
-                                prompt_text, aggressive=True,
-                                extra_terms=_ip_genericization_terms(conn, job["project_id"]))
-                        meta["seedance_copyright_retries"] = copyright_retries
-                        meta["seedance_copyright_reason"] = str(exc)[:300]
-                        if not _reserve_or_pause_video_resubmit(
-                            job, version, shot, owner,
-                        ):
-                            return
-                        _persist_video_resubmit(
-                            conn, job_id=job_id, version_id=version["id"],
-                            prompt_text=prompt_text, meta=meta,
-                            operation_id=provider_operation_id,
-                        )
-                        continue
                     raise
                 # Persist the paid provider handle and the non-cancellable flag in
                 # one local transaction. The stable Idempotency-Key covers the
@@ -3297,46 +3170,11 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 raise LeaseLost(f"provider poll defer lost lease: {job_id} / {owner}")
             if result["status"] == "failed":
                 error_text = result["error"][:400]
-                if _is_seedance_text_sensitive(error_text) and not safety_retry_used:
-                    prompt_text = sanitize_seedance_prompt(prompt_text, aggressive=True)
-                    safety_retry_used = True
-                    task_id = None
-                    provider_operation_id = f"video-create-{version['id']}-safety-1"
-                    meta["seedance_safety_retry"] = True
-                    meta["seedance_safety_reason"] = error_text
-                    if not _reserve_or_pause_video_resubmit(
-                        job, version, shot, owner,
-                    ):
-                        return
-                    _persist_video_resubmit(
-                        conn, job_id=job_id, version_id=version["id"],
-                        prompt_text=prompt_text, meta=meta,
-                        operation_id=provider_operation_id,
-                    )
-                    continue
-                if _is_seedance_copyright_restricted(error_text) and copyright_retries < _SEEDANCE_COPYRIGHT_MAX_RETRIES:
-                    copyright_retries += 1
-                    provider_operation_id = (
-                        f"video-create-{version['id']}-copyright-{copyright_retries}"
-                    )
-                    if copyright_retries == 1:  # 首次重提：去掉版权专名 + 激进改写，降低输出与原 IP 相似度
-                        prompt_text = sanitize_seedance_prompt(
-                            prompt_text, aggressive=True,
-                            extra_terms=_ip_genericization_terms(conn, job["project_id"]))
-                    task_id = None  # 再次重提靠重新生成的随机性（同一镜其它版本可成功即说明判定是概率性的）
-                    meta["seedance_copyright_retries"] = copyright_retries
-                    meta["seedance_copyright_reason"] = error_text
-                    if not _reserve_or_pause_video_resubmit(
-                        job, version, shot, owner,
-                    ):
-                        return
-                    _persist_video_resubmit(
-                        conn, job_id=job_id, version_id=version["id"],
-                        prompt_text=prompt_text, meta=meta,
-                        operation_id=provider_operation_id,
-                    )
-                    continue
-                raise ProviderError(f"Seedance 任务失败：{error_text}")
+                raise ProviderError(
+                    f"Seedance 任务失败：{error_text}",
+                    raw=error_text,
+                    failure_kind=str(result.get("failure_kind") or "provider_rejected"),
+                )
             break
 
         _assert_job_lease(job_id, owner)
@@ -3635,7 +3473,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             exc, action="shot_video_generate",
             context={"shot_id": job["shot_id"], "version_id": version["id"], "job_id": job_id})
         guidance = (
-            _video_model_rejection_guidance(meta, str(exc))
+            _video_model_rejection_guidance(meta, exc)
             if isinstance(exc, ProviderError)
             else None
         )

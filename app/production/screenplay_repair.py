@@ -3507,7 +3507,7 @@ async def run_screenplay_production(
             strategy_history.setdefault(issue.fingerprint, []).append(
                 f"fail:{strategy_key}:{(result.error or 'patch failed')[:160]}"
             )
-            if "no-op" in (result.error or ""):
+            if result.failure_kind == "no_op":
                 prev_issue_fps = current_fps
                 save_checkpoint(rev.id, {
                     **checkpoint,
@@ -3541,7 +3541,7 @@ async def run_screenplay_production(
                     )
                 continue
             # CAS 冲突：重新观察
-            if "CAS" in (result.error or "") or "hash" in (result.error or "").lower():
+            if result.failure_kind == "cas_conflict":
                 continue
             raise RuntimeError(result.error or "patch failed")
 

@@ -185,7 +185,7 @@ def test_harness_chat_429_is_not_immediately_replayed(monkeypatch) -> None:
     assert attempts == 1
 
 
-def test_output_image_safety_rejection_retries_and_can_recover(monkeypatch) -> None:
+def test_http_400_rejection_is_not_replayed_by_error_text(monkeypatch) -> None:
     attempts = 0
 
     class OutputSafetyResponse:
@@ -216,31 +216,33 @@ def test_output_image_safety_rejection_retries_and_can_recover(monkeypatch) -> N
 
     monkeypatch.setattr(hiagent.asyncio, "sleep", no_sleep)
 
-    result = asyncio.run(hiagent._post_json(
-        RecoveringImageClient(),
-        "https://example.invalid/images/generations",
-        {"prompt": "ordinary character portrait"},
-        kind="image_generate",
-        model="test-model",
-        headers={"x": "y"},
-        retries=2,
-    ))
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent._post_json(
+            RecoveringImageClient(),
+            "https://example.invalid/images/generations",
+            {"prompt": "ordinary character portrait"},
+            kind="image_generate",
+            model="test-model",
+            headers={"x": "y"},
+            retries=2,
+        ))
 
-    assert attempts == 2
-    assert result["data"][0]["url"].endswith("image.jpg")
+    assert attempts == 1
+    assert caught.value.failure_kind == "provider_rejected"
 
 
-def test_input_text_safety_rejection_remains_non_retryable() -> None:
+def test_http_400_rejection_is_typed_without_parsing_body_words() -> None:
     error = hiagent._classify_http_error(
         400,
         '{"error":{"code":"InputTextSensitiveContentDetected"}}',
     )
 
     assert error.retryable is False
-    assert "输入文本被安全审核拦截" in str(error)
+    assert error.failure_kind == "provider_rejected"
+    assert "请求被拒绝" in str(error)
 
 
-def test_image_input_safety_rejection_sanitizes_and_retries_once(monkeypatch) -> None:
+def test_image_rejection_does_not_rewrite_or_replay_prompt(monkeypatch) -> None:
     calls: list[dict] = []
 
     class Client:
@@ -252,37 +254,29 @@ def test_image_input_safety_rejection_sanitizes_and_retries_once(monkeypatch) ->
 
     async def fake_post_json(_client, _url, payload, **kwargs):
         calls.append({"payload": payload, **kwargs})
-        if len(calls) == 1:
-            raise hiagent.ProviderError(
-                "输入文本被安全审核拦截（HTTP 400）",
-                raw='{"error":{"code":"InputTextSensitiveContentDetected"}}',
-            )
-        return {"data": [{"url": "https://provider/image.jpg"}]}
+        raise hiagent.ProviderError(
+            "供应商拒绝请求（HTTP 400）",
+            raw='{"error":{"code":"AnyFutureProviderCode"}}',
+            failure_kind="provider_rejected",
+        )
 
     monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
     monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
     monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {"x": "y"}))
     monkeypatch.setattr(hiagent, "active_model", lambda *_args: "image-model")
 
-    result = asyncio.run(hiagent.generate_image(
-        "男，深色夹克军靴，高大帅气武警气质",
-        call_meta={"asset_kind": "portrait", "character_name": "钟成"},
-    ))
+    prompt = "男，深色夹克军靴，高大帅气武警气质"
+    with pytest.raises(hiagent.ProviderError):
+        asyncio.run(hiagent.generate_image(
+            prompt,
+            call_meta={"asset_kind": "portrait", "character_name": "钟成"},
+        ))
 
-    assert result["url"].endswith("image.jpg")
-    assert len(calls) == 2
-    assert calls[0]["payload"]["prompt"] == "男，深色夹克军靴，高大帅气武警气质"
-    retry_prompt = calls[1]["payload"]["prompt"]
-    assert "武警" not in retry_prompt
-    assert "军靴" not in retry_prompt
-    assert "身姿挺拔、干练沉稳" in retry_prompt
-    assert "深色系带长靴" in retry_prompt
-    assert calls[1]["meta"]["input_safety_retry"] is True
-    assert calls[0]["meta"]["operation_id"] == calls[1]["meta"]["operation_id"]
-    assert calls[0]["idempotency_key"] != calls[1]["idempotency_key"]
+    assert len(calls) == 1
+    assert calls[0]["payload"]["prompt"] == prompt
 
 
-def test_image_input_safety_rejection_without_safe_rewrite_is_not_replayed(monkeypatch) -> None:
+def test_arbitrary_image_provider_rejection_is_not_replayed(monkeypatch) -> None:
     attempts = 0
 
     class Client:
@@ -296,8 +290,9 @@ def test_image_input_safety_rejection_without_safe_rewrite_is_not_replayed(monke
         nonlocal attempts
         attempts += 1
         raise hiagent.ProviderError(
-            "输入文本被安全审核拦截（HTTP 400）",
-            raw='{"error":{"code":"InputTextSensitiveContentDetected"}}',
+            "任意未来供应商拒绝",
+            raw='{"error":{"code":"AnyFutureProviderCode"}}',
+            failure_kind="provider_rejected",
         )
 
     monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
@@ -305,7 +300,7 @@ def test_image_input_safety_rejection_without_safe_rewrite_is_not_replayed(monke
     monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {"x": "y"}))
     monkeypatch.setattr(hiagent, "active_model", lambda *_args: "image-model")
 
-    with pytest.raises(hiagent.ProviderError, match="安全审核"):
+    with pytest.raises(hiagent.ProviderError, match="任意未来供应商拒绝"):
         asyncio.run(hiagent.generate_image("普通角色立绘"))
 
     assert attempts == 1

@@ -53,6 +53,7 @@ class PatchResult(BaseModel):
     diff: dict[str, Any] = Field(default_factory=dict)
     needs_full_qa: bool = True
     error: str | None = None
+    failure_kind: str = ""
     patch_artifact_id: str | None = None
 
 
@@ -116,6 +117,7 @@ def apply_screenplay_patch(
             ok=False,
             before_artifact_id=request.expected_artifact_id,
             error="production revision 不存在",
+            failure_kind="not_found",
         )
     try:
         assert_patch_ops_allowed([op.model_dump(mode="json") for op in request.operations])
@@ -124,6 +126,7 @@ def apply_screenplay_patch(
             ok=False,
             before_artifact_id=request.expected_artifact_id,
             error=str(exc),
+            failure_kind="policy_denied",
         )
 
     before = evidence_repository.get_artifact(request.expected_artifact_id)
@@ -132,6 +135,7 @@ def apply_screenplay_patch(
             ok=False,
             before_artifact_id=request.expected_artifact_id,
             error="expected artifact 不存在",
+            failure_kind="not_found",
         )
     before_hash = _artifact_content_hash(before)
     if request.expected_hash and before_hash != request.expected_hash:
@@ -140,6 +144,7 @@ def apply_screenplay_patch(
             before_artifact_id=request.expected_artifact_id,
             before_hash=before_hash,
             error="expected_hash 不匹配（CAS 冲突）",
+            failure_kind="cas_conflict",
         )
     if rev.working_artifact_id and rev.working_artifact_id != request.expected_artifact_id:
         return PatchResult(
@@ -147,6 +152,7 @@ def apply_screenplay_patch(
             before_artifact_id=request.expected_artifact_id,
             before_hash=before_hash,
             error="expected_artifact_id 不是当前 working 链头",
+            failure_kind="cas_conflict",
         )
 
     content = before.get("content") or {}
@@ -163,6 +169,7 @@ def apply_screenplay_patch(
             before_artifact_id=request.expected_artifact_id,
             before_hash=before_hash,
             error=f"无法解析工作 Artifact: {exc}",
+            failure_kind="invalid_artifact",
         )
 
     touched: list[str] = []
@@ -176,6 +183,7 @@ def apply_screenplay_patch(
                 before_artifact_id=request.expected_artifact_id,
                 before_hash=before_hash,
                 error=str(exc),
+                failure_kind="policy_denied",
             )
         touched.extend(nodes)
 
@@ -203,6 +211,7 @@ def apply_screenplay_patch(
             before_hash=before_hash,
             after_hash=after_hash,
             error="no-op Patch 已拒绝",
+            failure_kind="no_op",
         )
 
     local_issues: list[Issue] = []
@@ -265,6 +274,7 @@ def apply_screenplay_patch(
             before_artifact_id=request.expected_artifact_id,
             before_hash=before_hash,
             error=str(exc),
+            failure_kind="cas_conflict",
         )
 
     record_patch(
