@@ -338,6 +338,7 @@ def test_outline_capacity_split_moves_key_lines() -> None:
         shots=[
             StoryboardOutlineShot(
                 shot_no=1,
+                scene_id="SC-authority",
                 beat="对白过载",
                 covers="甲开口长台词；乙再接长台词",
                 key_line_ids=["KL01", "KL02"],
@@ -360,6 +361,7 @@ def test_outline_capacity_split_moves_key_lines() -> None:
     events = split_outline_over_key_line_capacity(outline, sp, max_shots=16)
     assert events, "应触发容量拆镜"
     assert len(outline.shots) >= 3
+    assert outline.shots[1].scene_id == "SC-authority"
     after = outline_key_line_capacity_errors(outline, sp)
     assert not after, after
 

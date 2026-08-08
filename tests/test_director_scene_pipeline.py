@@ -16,6 +16,7 @@ from app.schemas import (
     NarrativeContinuityPlan,
     PlotSpine,
     PlotSpineBeat,
+    SceneDramaticContract,
     Scene,
     ScriptScene,
     ShotCapacityBudget,
@@ -648,6 +649,81 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
     assert shot.is_final is True
 
 
+def test_scene_pack_expands_short_owned_dialogue_to_auditable_source_context() -> None:
+    source = (
+        "陈三继续逼问小晶，要求她立刻回答。\n\n"
+        "“说！”\n\n"
+        "小晶低声回应，房间重新陷入沉默。"
+    )
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        events=[{"event_id": "E1", "source_span": "SRC0002"}],
+        narrative_plan=NarrativeContinuityPlan(scope_id="e1"),
+    )
+    bible = Bible(
+        characters=[
+            Character(
+                name="陈三",
+                role="角色",
+                appearance_canonical="成年男性，黑色短发，深色常服，外观稳定清晰",
+            )
+        ],
+        world=World(visual_style_canonical="都市国漫画风"),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                shot_id="SH001",
+                scene_id="SC001",
+                event_ids=["E1"],
+                story_event_id="E1",
+                characters_visible=["陈三"],
+                visible_entity_ids=["陈三"],
+                scene_time="下午",
+                scene_name="房间",
+                beat="陈三说！",
+                covers="陈三说！",
+                primary_action="陈三说！",
+                state_in="陈三等待回应",
+                state_out="陈三完成催促",
+                continuity_mode="scene_change",
+                duration_s=5,
+            )
+        ],
+    )
+    draft = stages.DirectedScenePackDraft(
+        episode_no=1,
+        scene_id="SC001",
+        shots=[
+            stages.DirectedSceneShotDraft(
+                shot_no=1,
+                shot_size="近景",
+                camera_angle="平视",
+                camera_move="固定",
+                camera_motivation="聚焦陈三完成简短催促后的状态",
+                action_desc="陈三眉头紧皱，面向小晶的方向厉声催促，随后停住等待回应。",
+                first_frame_desc="陈三皱眉看向画外的小晶，保持原位。",
+                last_frame_desc="同一机位，陈三完成催促后仍看向画外。",
+            )
+        ],
+    )
+
+    pack = stages._hydrate_directed_scene_pack(
+        draft,
+        outline=outline,
+        source_text=source,
+        screenplay=screenplay,
+        bible=bible,
+    )
+
+    excerpt = pack.shots[0].source_excerpt
+    assert "“说！”" in excerpt
+    assert excerpt in source
+    assert len(stages._condense(excerpt)) >= stages.SOURCE_EXCERPT_MIN_CHARS
+
+
 def test_scene_pack_preserves_offscreen_voice_without_forcing_speaker_visible() -> None:
     screenplay = EpisodeScreenplay(
         episode_no=1,
@@ -864,6 +940,69 @@ def test_scene_batches_follow_contiguous_scene_name_and_time_not_stale_id() -> N
     ]
     assert [shot.scene_id for shot in outline.shots] == [
         "SC01", "SC01", "SC02", "SC02", "SC03",
+    ]
+
+
+def test_narrative_scene_contexts_preserve_graph_owned_scene_ids() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        scene_outline=[
+            ScriptScene(
+                scene_no=1,
+                scene_heading="【场1】傍晚 / 餐厅",
+                story_function="完成餐厅内连续事件",
+                summary="角色在同一戏剧场完成用餐与谈话。",
+            ),
+            ScriptScene(
+                scene_no=2,
+                scene_heading="【场2】夜晚 / 家中",
+                story_function="承接回家后的状态变化",
+                summary="角色回家后进入下一段事件。",
+            ),
+        ],
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="e1",
+            scene_contracts=[
+                SceneDramaticContract(scene_id="SC09"),
+                SceneDramaticContract(scene_id="SC10"),
+            ],
+        ),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC09",
+                scene_name="餐厅",
+                scene_time="傍晚",
+                beat="角色开始用餐",
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_id="SC09",
+                scene_name="餐厅门口",
+                scene_time="夜晚",
+                beat="角色结束谈话走到门口",
+            ),
+            StoryboardOutlineShot(
+                shot_no=3,
+                scene_id="SC10",
+                scene_name="家中",
+                scene_time="夜晚",
+                beat="角色回到家中",
+            ),
+        ],
+    )
+
+    stages.ensure_storyboard_scene_contexts(outline, screenplay)
+
+    assert [context.scene_id for context in outline.scene_contexts] == [
+        "SC09", "SC10",
+    ]
+    assert [context.scene_no for context in outline.scene_contexts] == [1, 2]
+    assert [shot.scene_id for shot in outline.shots] == [
+        "SC09", "SC09", "SC10",
     ]
 
 

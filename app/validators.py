@@ -3489,6 +3489,7 @@ def split_outline_on_speaker_changes(
             else:
                 target = StoryboardOutlineShot(
                     shot_no=shot.shot_no + group_index,
+                    scene_id=shot.scene_id,
                     scene_time=shot.scene_time,
                     scene_name=shot.scene_name,
                     scene_setting=shot.scene_setting,
@@ -3938,6 +3939,7 @@ def split_outline_over_action_capacity(
             index + 1,
             StoryboardOutlineShot(
                 shot_no=original_no + 1,
+                scene_id=shot.scene_id,
                 scene_time=shot.scene_time,
                 scene_name=shot.scene_name,
                 scene_setting=shot.scene_setting,
@@ -4045,6 +4047,7 @@ def split_outline_over_key_line_capacity(
             insert_at,
             StoryboardOutlineShot(
                 shot_no=current.shot_no + 1,
+                scene_id=current.scene_id,
                 scene_time=current.scene_time,
                 scene_name=current.scene_name,
                 scene_setting=current.scene_setting,

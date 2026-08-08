@@ -454,6 +454,7 @@ def test_outline_splits_every_speaker_change() -> None:
         shots=[
             StoryboardOutlineShot(
                 shot_no=1,
+                scene_id="SC-authority",
                 scene_setting="日，议事厅",
                 beat="甲要求乙留下，乙拒绝后甲结束谈话",
                 covers="甲：你留下；乙：我拒绝；甲：那就到此为止",
@@ -485,6 +486,9 @@ def test_outline_splits_every_speaker_change() -> None:
     ]
     assert [shot.characters_visible for shot in outline.shots] == [["甲"], ["乙"], ["甲"]]
     assert [shot.audio_cast for shot in outline.shots] == [["甲"], ["乙"], ["甲"]]
+    assert [shot.scene_id for shot in outline.shots] == [
+        "SC-authority", "SC-authority", "SC-authority",
+    ]
     assert [shot.continuity_mode for shot in outline.shots] == [
         "same_scene_cut",
         "reverse_angle",
