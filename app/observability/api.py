@@ -157,6 +157,545 @@ def _scope(payload: dict[str, Any], project: dict[str, Any]) -> dict[str, Any]:
     return {**payload, "scope": {"type": "project", "project_id": project["id"], "project_name": project["name"]}}
 
 
+_TRACE_WORKFLOW_LABELS = {
+    "character_bible": "人物谱生成",
+    "character_references": "人物定妆照",
+    "scene_bible": "场景设定",
+    "scene_references": "场景参考图",
+    "episode_mapping": "分集规划",
+    "screenplay": "剧本生成",
+    "storyboard": "分镜生成",
+    "scene_generation": "关键帧生成",
+    "video_generation": "视频生成",
+    "episode_video_completion": "全片视频补齐",
+    "delivery": "交付",
+    "delivery_package": "交付候选生成",
+}
+_TRACE_STEP_LABELS = {
+    "generate": "生成内容",
+    "validate": "校验内容",
+    "evaluate": "质量评估",
+    "repair": "定向修复",
+    "screenplay": "生成剧本",
+    "storyboard": "生成分镜",
+    "build_delivery_snapshot": "生成交付快照",
+    "apply_delivery_gate": "应用交付决定",
+    "character_references": "生成人物参考图",
+    "media_generation": "媒体生成",
+}
+_TRACE_CALL_LABELS = {
+    "chat": "文本模型调用",
+    "vlm": "视觉模型调用",
+    "vlm_qa": "视频质检",
+    "video_create": "创建视频任务",
+    "video_poll": "轮询视频结果",
+    "image": "图片生成",
+    "image_generate": "图片生成",
+    "image_edit": "图片编辑",
+    "scene_image": "关键帧生成",
+    "screenplay_prompt": "剧本生成",
+    "plan_prompt": "分集规划",
+    "bible_prompt": "人物谱生成",
+    "references_prompt": "参考图规划",
+    "storyboard_shot_prompt": "逐镜分镜生成",
+    "storyboard_outline_prompt": "分镜大纲生成",
+}
+
+
+def _trace_label(value: str | None, labels: dict[str, str], fallback: str) -> str:
+    return labels.get(str(value or ""), str(value or "") or fallback)
+
+
+def _trace_run_id(
+    project_id: str,
+    object_type: str,
+    object_id: str,
+    source: str,
+) -> tuple[str | None, dict[str, Any]]:
+    if object_type == "runs":
+        _assert_scope(project_id, _run_project(object_id), "运行")
+        run = repository.get_run(object_id)
+        if not run:
+            raise HTTPException(404, "运行不存在")
+        return object_id, run
+    if object_type == "jobs":
+        summary = _job_summary(object_id, source)
+        _assert_scope(project_id, _job_project(object_id, source), "任务")
+        if not summary:
+            raise HTTPException(404, "任务不存在")
+        run_id = summary.get("run_id")
+        if not run_id and summary.get("step_run_id"):
+            row = get_conn().execute(
+                "SELECT run_id FROM step_runs WHERE id=?",
+                (summary["step_run_id"],),
+            ).fetchone()
+            run_id = row["run_id"] if row else None
+        if not run_id:
+            run_id = summary.get("owner_run_id")
+        return str(run_id) if run_id else None, summary
+    if object_type == "calls":
+        try:
+            call_id = int(object_id)
+        except ValueError as exc:
+            raise HTTPException(422, "调用记录标识无效") from exc
+        row = _call_row(call_id)
+        _assert_scope(project_id, _call_project(call_id), "调用记录")
+        if not row:
+            raise HTTPException(404, "调用记录不存在")
+        run_id = row.get("run_id")
+        if not run_id and row.get("step_run_id"):
+            step = get_conn().execute(
+                "SELECT run_id FROM step_runs WHERE id=?",
+                (row["step_run_id"],),
+            ).fetchone()
+            run_id = step["run_id"] if step else None
+        return str(run_id) if run_id else None, row
+    raise HTTPException(404, "链路对象类型不存在")
+
+
+def _trace_related_runs(project_id: str, primary_run_id: str) -> set[str]:
+    """Include child/recovery/media runs while preserving the project boundary."""
+    conn = get_conn()
+    run_ids = {primary_run_id}
+    while True:
+        marks = ",".join("?" for _ in run_ids)
+        related = {
+            str(row["id"])
+            for row in conn.execute(
+                f"SELECT id FROM workflow_runs WHERE parent_run_id IN ({marks})",
+                tuple(run_ids),
+            ).fetchall()
+        }
+        related.update(
+            str(row["run_id"])
+            for row in conn.execute(
+                f"""SELECT DISTINCT run_id FROM jobs
+                    WHERE owner_run_id IN ({marks}) AND run_id IS NOT NULL""",
+                tuple(run_ids),
+            ).fetchall()
+            if row["run_id"]
+        )
+        related = {
+            run_id
+            for run_id in related
+            if run_id not in run_ids and _run_project(run_id) == project_id
+        }
+        if not related:
+            return run_ids
+        run_ids.update(related)
+
+
+def _trace_tree(
+    project_id: str,
+    object_type: str,
+    object_id: str,
+    source: str = "auto",
+) -> dict[str, Any]:
+    primary_run_id, source_row = _trace_run_id(
+        project_id, object_type, object_id, source,
+    )
+    selected_node_id = (
+        f"run:{primary_run_id}"
+        if object_type == "runs" or (object_type == "jobs" and source_row.get("source") == "run")
+        else f"job:{object_id}"
+        if object_type == "jobs"
+        else f"call:{object_id}"
+    )
+    nodes: list[dict[str, Any]] = []
+    if not primary_run_id:
+        if object_type == "jobs":
+            nodes.append({
+                "id": f"job:{object_id}",
+                "parent_id": None,
+                "kind": "job",
+                "name": _trace_label(
+                    source_row.get("workflow_type") or source_row.get("kind"),
+                    _TRACE_WORKFLOW_LABELS,
+                    "任务",
+                ),
+                "subtitle": "未关联持久化 Run",
+                "status": source_row.get("status") or "unknown",
+                "started_at": source_row.get("created_at"),
+                "finished_at": source_row.get("updated_at"),
+                "latency_ms": max(
+                    0,
+                    int(
+                        (
+                            float(source_row.get("updated_at") or 0)
+                            - float(source_row.get("created_at") or 0)
+                        )
+                        * 1000
+                    ),
+                ),
+            })
+        else:
+            nodes.append({
+                "id": f"call:{object_id}",
+                "parent_id": None,
+                "kind": "call",
+                "name": _trace_label(
+                    source_row.get("kind"), _TRACE_CALL_LABELS, "模型调用",
+                ),
+                "subtitle": source_row.get("model") or "未记录模型",
+                "status": source_row.get("status") or "unknown",
+                "started_at": source_row.get("ts"),
+                "finished_at": float(source_row.get("ts") or 0)
+                + float(source_row.get("latency_ms") or 0) / 1000,
+                "latency_ms": int(source_row.get("latency_ms") or 0),
+            })
+        return _scope({
+            "source": {"type": object_type, "id": object_id},
+            "run_id": None,
+            "title": nodes[0]["name"],
+            "status": nodes[0]["status"],
+            "selected_node_id": selected_node_id,
+            "nodes": nodes,
+            "server_time": time.time(),
+        }, _project(project_id))
+
+    run_ids = _trace_related_runs(project_id, primary_run_id)
+    conn = get_conn()
+    run_marks = ",".join("?" for _ in run_ids)
+    runs = [
+        repository.get_run(run_id)
+        for run_id in run_ids
+    ]
+    runs = [run for run in runs if run]
+    steps = [
+        step
+        for run_id in run_ids
+        for step in repository.get_steps(run_id)
+    ]
+    step_ids = {str(step["id"]) for step in steps}
+    jobs = [
+        dict(row)
+        for row in conn.execute(
+            f"""SELECT * FROM jobs
+                WHERE run_id IN ({run_marks}) OR owner_run_id IN ({run_marks})
+                ORDER BY created_at,id""",
+            (*run_ids, *run_ids),
+        ).fetchall()
+    ]
+    call_clauses = [f"run_id IN ({run_marks})"]
+    call_params: list[Any] = list(run_ids)
+    if step_ids:
+        step_marks = ",".join("?" for _ in step_ids)
+        call_clauses.append(f"step_run_id IN ({step_marks})")
+        call_params.extend(step_ids)
+    calls = [
+        dict(row)
+        for row in conn.execute(
+            f"""SELECT id,ts,kind,model,status,http_status,latency_ms,error,run_id,
+                       step_run_id,trace_id,operation_id,attempt_no
+                FROM provider_calls
+                WHERE {' OR '.join(call_clauses)}
+                ORDER BY ts,id""",
+            tuple(call_params),
+        ).fetchall()
+    ]
+    owner_parent: dict[str, str] = {}
+    for job in jobs:
+        if job.get("run_id") and job.get("owner_run_id"):
+            owner_parent[str(job["run_id"])] = str(job["owner_run_id"])
+    for run in sorted(
+        runs,
+        key=lambda item: (
+            str(item["id"]) != primary_run_id,
+            float(item.get("started_at") or item.get("updated_at") or 0),
+        ),
+    ):
+        run_id = str(run["id"])
+        parent_run_id = run.get("parent_run_id") or owner_parent.get(run_id)
+        parent_id = (
+            f"run:{parent_run_id}"
+            if parent_run_id in run_ids and run_id != primary_run_id
+            else None
+        )
+        nodes.append({
+            "id": f"run:{run_id}",
+            "parent_id": parent_id,
+            "kind": "run",
+            "name": _trace_label(
+                run.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "运行",
+            ),
+            "subtitle": "主运行" if run_id == primary_run_id else "关联运行",
+            "status": run.get("status") or "unknown",
+            "started_at": run.get("started_at"),
+            "finished_at": run.get("finished_at"),
+            "latency_ms": max(
+                0,
+                int(
+                    (
+                        float(
+                            run.get("finished_at")
+                            or run.get("updated_at")
+                            or time.time()
+                        )
+                        - float(run.get("started_at") or run.get("updated_at") or 0)
+                    )
+                    * 1000
+                ),
+            ),
+        })
+    for step in steps:
+        parent_step = str(step.get("parent_step_run_id") or "")
+        nodes.append({
+            "id": f"step:{step['id']}",
+            "parent_id": (
+                f"step:{parent_step}"
+                if parent_step in step_ids
+                else f"run:{step['run_id']}"
+            ),
+            "kind": "step",
+            "name": _trace_label(
+                step.get("step_key"), _TRACE_STEP_LABELS, "执行步骤",
+            ),
+            "subtitle": (
+                f"第 {step.get('iteration_no') or 1} 次执行"
+                if int(step.get("iteration_no") or 1) > 1
+                else step.get("agent_name") or "工作流步骤"
+            ),
+            "status": step.get("status") or "unknown",
+            "started_at": step.get("started_at"),
+            "finished_at": step.get("finished_at"),
+            "latency_ms": int(step.get("latency_ms") or 0),
+        })
+    for job in jobs:
+        step_id = str(job.get("step_run_id") or "")
+        run_id = str(job.get("run_id") or job.get("owner_run_id") or primary_run_id)
+        nodes.append({
+            "id": f"job:{job['id']}",
+            "parent_id": f"step:{step_id}" if step_id in step_ids else f"run:{run_id}",
+            "kind": "job",
+            "name": _trace_label(
+                job.get("kind"), _TRACE_WORKFLOW_LABELS, "媒体任务",
+            ),
+            "subtitle": job.get("pipeline_stage") or "异步任务",
+            "status": job.get("stage_status") or job.get("status") or "unknown",
+            "started_at": job.get("stage_started_at") or job.get("created_at"),
+            "finished_at": job.get("stage_updated_at") or job.get("updated_at"),
+            "latency_ms": max(
+                0,
+                int(
+                    (
+                        float(job.get("stage_updated_at") or job.get("updated_at") or 0)
+                        - float(job.get("stage_started_at") or job.get("created_at") or 0)
+                    )
+                    * 1000
+                ),
+            ),
+        })
+    for call in calls:
+        step_id = str(call.get("step_run_id") or "")
+        run_id = str(call.get("run_id") or primary_run_id)
+        nodes.append({
+            "id": f"call:{call['id']}",
+            "parent_id": f"step:{step_id}" if step_id in step_ids else f"run:{run_id}",
+            "kind": "call",
+            "name": _trace_label(
+                call.get("kind"), _TRACE_CALL_LABELS, "模型调用",
+            ),
+            "subtitle": call.get("model") or "未记录模型",
+            "status": call.get("status") or "unknown",
+            "started_at": call.get("ts"),
+            "finished_at": float(call.get("ts") or 0)
+            + float(call.get("latency_ms") or 0) / 1000,
+            "latency_ms": int(call.get("latency_ms") or 0),
+        })
+    primary = next(run for run in runs if str(run["id"]) == primary_run_id)
+    return _scope({
+        "source": {"type": object_type, "id": object_id},
+        "run_id": primary_run_id,
+        "title": _trace_label(
+            primary.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "运行链路",
+        ),
+        "status": primary.get("status") or "unknown",
+        "started_at": primary.get("started_at"),
+        "finished_at": primary.get("finished_at"),
+        "latency_ms": next(
+            (node["latency_ms"] for node in nodes if node["id"] == f"run:{primary_run_id}"),
+            0,
+        ),
+        "cost_cny": float(primary.get("cost_cny") or 0),
+        "selected_node_id": (
+            selected_node_id
+            if any(node["id"] == selected_node_id for node in nodes)
+            else f"run:{primary_run_id}"
+        ),
+        "nodes": nodes,
+        "server_time": time.time(),
+    }, _project(project_id))
+
+
+def _trace_json_value(raw: Any) -> Any:
+    if raw is None or not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _trace_artifact(artifact_id: str | None) -> dict[str, Any] | None:
+    if not artifact_id:
+        return None
+    artifact = repository.get_artifact(artifact_id)
+    if not artifact:
+        return {"id": artifact_id, "missing": True}
+    return {
+        "id": artifact["id"],
+        "type": artifact.get("type"),
+        "version": artifact.get("version"),
+        "status": artifact.get("status"),
+        "trust_level": artifact.get("trust_level"),
+        "content_hash": artifact.get("content_hash"),
+        "content": artifact.get("content"),
+    }
+
+
+def _trace_node_detail(
+    project_id: str,
+    object_type: str,
+    object_id: str,
+    node_id: str,
+    source: str,
+) -> dict[str, Any]:
+    tree = _trace_tree(project_id, object_type, object_id, source)
+    node = next((item for item in tree["nodes"] if item["id"] == node_id), None)
+    if not node:
+        raise HTTPException(404, "链路节点不存在")
+    try:
+        kind, raw_id = node_id.split(":", 1)
+    except ValueError as exc:
+        raise HTTPException(422, "链路节点标识无效") from exc
+    if kind == "run":
+        row = repository.get_run(raw_id)
+        if not row:
+            raise HTTPException(404, "运行节点不存在")
+        input_value = {
+            "workflow_type": row.get("workflow_type"),
+            "scope": {"type": row.get("scope_type"), "id": row.get("scope_id")},
+            "requested_by": row.get("requested_by"),
+            "trigger_type": row.get("trigger_type"),
+            "input_fingerprint": row.get("input_fingerprint"),
+            "policy_snapshot": row.get("policy_snapshot"),
+            "config_snapshot": row.get("config_snapshot"),
+        }
+        output_value = {
+            "status": row.get("status"),
+            "current_step_key": row.get("current_step_key"),
+            "cost_cny": row.get("cost_cny"),
+            "failure_code": row.get("failure_code"),
+            "failure_message": row.get("failure_message"),
+            "resume_from_step": row.get("resume_from_step"),
+        }
+        metadata = {
+            "run_id": raw_id,
+            "parent_run_id": row.get("parent_run_id"),
+            "started_at": row.get("started_at"),
+            "updated_at": row.get("updated_at"),
+            "finished_at": row.get("finished_at"),
+            "budget_limit_cny": row.get("budget_limit_cny"),
+        }
+    elif kind == "step":
+        row = get_conn().execute(
+            "SELECT * FROM step_runs WHERE id=?", (raw_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "步骤节点不存在")
+        item = dict(row)
+        input_ids = _trace_json_value(item.get("input_artifact_ids_json")) or []
+        input_value = {
+            "context_manifest": _trace_json_value(item.get("context_manifest_json")),
+            "artifacts": [
+                _trace_artifact(str(artifact_id))
+                for artifact_id in input_ids
+            ],
+        }
+        output_value = {
+            "artifact": _trace_artifact(item.get("output_artifact_id")),
+            "decision": item.get("decision"),
+            "exit_reason": item.get("exit_reason"),
+            "error_code": item.get("error_code"),
+            "error_message": item.get("error_message"),
+        }
+        metadata = {
+            "step_run_id": raw_id,
+            "run_id": item.get("run_id"),
+            "step_key": item.get("step_key"),
+            "iteration_no": item.get("iteration_no"),
+            "parent_step_run_id": item.get("parent_step_run_id"),
+            "agent_name": item.get("agent_name"),
+            "contract_version": item.get("contract_version"),
+            "prompt_version": item.get("prompt_version"),
+            "policy_version": item.get("policy_version"),
+        }
+    elif kind == "job":
+        item = system_api.job_detail(raw_id, "job")
+        input_value = {
+            "kind": item.get("kind"),
+            "project_id": item.get("project_id"),
+            "episode_id": item.get("episode_id"),
+            "shot_id": item.get("shot_id"),
+            "version_id": item.get("version_id"),
+            "after_shot_id": item.get("after_shot_id"),
+            "after_version_id": item.get("after_version_id"),
+            "scene_kinds": _trace_json_value(item.get("scene_kinds")),
+        }
+        output_value = {
+            "status": item.get("status"),
+            "pipeline_stage": item.get("pipeline_stage"),
+            "stage_status": item.get("stage_status"),
+            "stage_progress": _trace_json_value(item.get("stage_progress_json")),
+            "reason_code": item.get("reason_code"),
+            "reason_text": item.get("reason_text"),
+            "error": item.get("error"),
+        }
+        metadata = {
+            "job_id": raw_id,
+            "run_id": item.get("run_id"),
+            "owner_run_id": item.get("owner_run_id"),
+            "step_run_id": item.get("step_run_id"),
+            "provider_operation_id": item.get("provider_operation_id"),
+            "retry_count": item.get("retry_count"),
+            "max_retries": item.get("max_retries"),
+            "scheduler_lane": item.get("scheduler_lane"),
+            "priority_class": item.get("priority_class"),
+            "state_revision": item.get("state_revision"),
+        }
+    elif kind == "call":
+        item = system_api._call_detail_payload(int(raw_id))
+        input_value = _trace_json_value(item.get("request_json"))
+        output_value = {
+            "response": _trace_json_value(item.get("response_json")),
+            "status": item.get("effective_status"),
+            "http_status": item.get("http_status"),
+            "error": item.get("error"),
+        }
+        metadata = {
+            "call_id": item.get("id"),
+            "kind": item.get("kind"),
+            "model": item.get("model"),
+            "run_id": item.get("run_id"),
+            "step_run_id": item.get("step_run_id"),
+            "trace_id": item.get("trace_id"),
+            "operation_id": item.get("operation_id"),
+            "attempt_no": item.get("attempt_no"),
+            "received_chars": item.get("received_chars"),
+            "meta": _trace_json_value(item.get("meta")),
+        }
+    else:
+        raise HTTPException(404, "链路节点类型不存在")
+    from app.monitoring import redact_monitor_value
+
+    return {
+        **node,
+        "input": redact_monitor_value(input_value),
+        "output": redact_monitor_value(output_value),
+        "metadata": redact_monitor_value(metadata),
+    }
+
+
 @router.get("/projects/{project_id}/observability/runs")
 def scoped_runs(
     project_id: str, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
@@ -273,6 +812,29 @@ def scoped_call(project_id: str, call_id: int):
 def scoped_call_download(project_id: str, call_id: int):
     _assert_scope(project_id, _call_project(call_id), "调用记录")
     return system_api.download_call_detail(call_id)
+
+
+@router.get("/projects/{project_id}/observability/traces/{object_type}/{object_id}")
+def scoped_trace(
+    project_id: str,
+    object_type: str,
+    object_id: str,
+    source: str = "auto",
+):
+    return _trace_tree(project_id, object_type, object_id, source)
+
+
+@router.get("/projects/{project_id}/observability/traces/{object_type}/{object_id}/nodes/{node_id}")
+def scoped_trace_node(
+    project_id: str,
+    object_type: str,
+    object_id: str,
+    node_id: str,
+    source: str = "auto",
+):
+    return _trace_node_detail(
+        project_id, object_type, object_id, node_id, source,
+    )
 
 
 @router.get("/projects/{project_id}/observability/gates")

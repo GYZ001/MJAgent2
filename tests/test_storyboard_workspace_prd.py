@@ -19,7 +19,7 @@ from app.storyboard_supervisor import (
     load_latest_checkpoint,
     save_checkpoint,
 )
-from app.domain.storyboard_ops import _recorded_storyboard_task
+from app.domain.storyboard_ops import _recorded_storyboard_task, _storyboard_task
 
 
 @pytest.fixture()
@@ -222,7 +222,7 @@ def test_snapshot_version_is_monotonic_and_action_is_unique(storyboard_db):
     storyboard_db.commit()
     second = api.episode_detail("e1", view="board")["storyboard_status"]
     assert second["snapshot_version"] > first["snapshot_version"]
-    assert second["recommended_action"] == "view_progress"
+    assert second["recommended_action"] == "refresh_status"
     assert second["confirmable"] is False
 
 
@@ -693,6 +693,51 @@ def test_recorded_storyboard_task_releases_terminal_write_pointer(storyboard_db,
         "SELECT active_storyboard_run_id FROM episodes WHERE id='e1'",
     ).fetchone()
     assert row["active_storyboard_run_id"] is None
+
+
+def test_storyboard_task_does_not_mask_current_failure_with_stale_fallback(
+    storyboard_db,
+    monkeypatch,
+):
+    screenplay = EpisodeScreenplay.model_validate_json(storyboard_db.execute(
+        "SELECT screenplay_json FROM episodes WHERE id='e1'"
+    ).fetchone()["screenplay_json"])
+
+    monkeypatch.setattr(
+        "app.production.screenplay_authority.resolve_downstream_screenplay",
+        lambda *_args, **_kwargs: type("ScreenplayContext", (), {
+            "screenplay": screenplay,
+            "narrative_authority_required": False,
+        })(),
+    )
+    monkeypatch.setattr(
+        task_registry,
+        "active",
+        lambda kind, _episode_id: kind == "storyboard_assets",
+    )
+
+    async def failed_supervisor(*_args, **_kwargs):
+        storyboard_db.execute(
+            "UPDATE episodes SET status='scripting',script_error=? WHERE id='e1'",
+            ("旧的场景包降级提示",),
+        )
+        storyboard_db.commit()
+        raise RuntimeError("本轮真实权威链异常")
+
+    monkeypatch.setattr(
+        "app.storyboard_supervisor.run_storyboard_supervisor",
+        failed_supervisor,
+    )
+
+    with pytest.raises(RuntimeError, match="本轮真实权威链异常"):
+        asyncio.run(_storyboard_task("e1", resume=False))
+
+    episode = storyboard_db.execute(
+        "SELECT status,script_error FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["status"] == "scripted"
+    assert "本轮真实权威链异常" in episode["script_error"]
+    assert "旧的场景包降级提示" not in episode["script_error"]
 
 
 @pytest.mark.asyncio

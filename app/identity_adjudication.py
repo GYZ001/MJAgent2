@@ -23,7 +23,7 @@ from app.screenplay_ir import (
 from app.source_excerpt import index_source_segments
 
 
-IDENTITY_ADJUDICATOR_VERSION = "screenplay-ir-identity-adjudicator.v1"
+IDENTITY_ADJUDICATOR_VERSION = "screenplay-ir-identity-adjudicator.v2"
 
 
 class IdentityAdjudicationDecision(BaseModel):
@@ -37,6 +37,15 @@ class IdentityAdjudicationDecision(BaseModel):
 
 class IdentityAdjudicationResult(BaseModel):
     decisions: list[IdentityAdjudicationDecision] = Field(default_factory=list)
+
+
+class IdentityAdjudicationIssue(BaseModel):
+    """Minimal semantic issue surface exposed across the model boundary."""
+
+    identity_key: str = ""
+    identity_keys: list[str] = Field(default_factory=list)
+    reason: str = ""
+    candidate_authority_ids: list[str] = Field(default_factory=list)
 
 
 def _identity_source_evidence(
@@ -95,6 +104,15 @@ def _adjudication_payload(
     issues: list[dict[str, Any]],
 ) -> dict[str, Any]:
     owned, segment_text = _identity_source_evidence(candidate, source_text)
+    authority_registry = identity_authority_registry(
+        bible,
+        episode.get("character_resolutions") or [],
+    )
+    valid_authority_ids = {
+        str(item.get("authority_id") or "").strip()
+        for item in authority_registry
+        if str(item.get("authority_id") or "").strip()
+    }
     issue_keys = {
         str(key or "").strip()
         for issue in issues
@@ -104,6 +122,26 @@ def _adjudication_payload(
         ]
         if str(key or "").strip()
     }
+    model_issues = [
+        IdentityAdjudicationIssue(
+            identity_key=str(issue.get("identity_key") or "").strip(),
+            identity_keys=[
+                key
+                for value in issue.get("identity_keys") or []
+                if (key := str(value or "").strip())
+            ],
+            reason=str(issue.get("reason") or "").strip(),
+            candidate_authority_ids=[
+                authority_id
+                for value in issue.get("candidate_authority_ids") or []
+                if (
+                    (authority_id := str(value or "").strip())
+                    in valid_authority_ids
+                )
+            ],
+        ).model_dump(mode="json", exclude_defaults=True)
+        for issue in issues
+    ]
     relevant_source_ids = list(dict.fromkeys(
         source_id
         for identity_key in issue_keys
@@ -115,7 +153,9 @@ def _adjudication_payload(
             "display_name": identity.display_name,
             "source_names": list(identity.source_names),
             "role_type": identity.role_type,
-            "authority_id": identity.authority_id,
+            "authority_id": (
+                "" if identity.key in issue_keys else identity.authority_id
+            ),
             "rationale": identity.rationale,
             "owned_source_ids": owned.get(identity.key, []),
         }
@@ -124,12 +164,9 @@ def _adjudication_payload(
     return {
         "contract_version": IDENTITY_ADJUDICATOR_VERSION,
         "episode_id": str(episode.get("id") or ""),
-        "issues": issues,
+        "issues": model_issues,
         "identities": identities,
-        "authority_registry": identity_authority_registry(
-            bible,
-            episode.get("character_resolutions") or [],
-        ),
+        "authority_registry": authority_registry,
         "source_segments": [
             {"source_segment_id": source_id, "text": segment_text[source_id]}
             for source_id in relevant_source_ids
@@ -147,6 +184,7 @@ def _prompt(payload: dict[str, Any]) -> str:
 规则：
 1. 每个 issues 涉及的 identity_key 都必须且只能输出一个 decision。
 2. 若证据确认它属于 authority_registry 中某个实体，status=bind，authority_id 必须逐字引用该项。
+   identities 中留空的 authority_id 表示未决输入，不构成任何既有身份权威。
 3. 若原文确认它是独立出场/开口实体，但 registry 尚无对应项，status=new_functional，
    canonical_name 优先逐字引用 source segment；若同一原文称谓明确指向多个实体，必须逐字沿用
    该 identity 当前的 display_name 作为区分显示名，后端负责生成不同的稳定 ID，禁止另造称谓。

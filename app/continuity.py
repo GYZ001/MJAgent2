@@ -49,24 +49,8 @@ DIALOGUE_CLOSEUP_SHOT_SIZES = frozenset({"近景", "特写"})
 DIALOGUE_CLOSEUP_CAMERA_MOVES = frozenset({"固定", "推近"})
 
 def _scene_time_context(value: Any) -> str:
-    """Use the same broad time buckets as storyboard validation."""
-    raw = scene_time_of(value)
-    if any(
-        token in raw
-        for token in ("凌晨", "清晨", "早晨", "上午", "白天", "日间", "日")
-    ):
-        return "day"
-    if any(
-        token in raw
-        for token in ("中午", "午后", "下午", "傍晚", "黄昏")
-    ):
-        return "late_day"
-    if any(
-        token in raw
-        for token in ("夜晚", "夜里", "深夜", "午夜", "夜")
-    ):
-        return "night"
-    return re.sub(r"\s+", "", raw).lower()
+    """Compare the explicit scene-time contract without semantic bucketing."""
+    return re.sub(r"\s+", "", scene_time_of(value)).casefold()
 
 
 def raw_characters_visible(shot: Shot) -> list[str]:

@@ -8,6 +8,7 @@ import {
 } from "../../api";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { statusLabel } from "../../lib/statusLabels";
+import TraceDrawer from "../observability/TraceDrawer";
 
 interface RunItem extends RunSummary {
   project_id?: string | null;
@@ -444,6 +445,7 @@ export default function RunCenter({
   const [gates, setGates] = useState<GateArtifact[] | null>(null);
   const [gateError, setGateError] = useState("");
   const [openGate, setOpenGate] = useState<GateArtifact | null>(null);
+  const [traceRun, setTraceRun] = useState<RunItem | null>(null);
   const [actionBusy, setActionBusy] = useState("");
   const [actionError, setActionError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
@@ -496,10 +498,6 @@ export default function RunCenter({
         setRuns(next);
         setListError("");
         setLoading(false);
-        if (!selected && !selectedRunId && next.items[0]) {
-          setSelected(next.items[0].id);
-          onSelect?.(next.items[0].id);
-        }
         if (page > next.page_count) {
           setPage(next.page_count);
           setUrlParams({ run_page: String(next.page_count) });
@@ -510,7 +508,7 @@ export default function RunCenter({
         setLoading(false);
       }
     },
-    [onSelect, page, queryPath, runs, selected, selectedRunId],
+    [page, queryPath, runs],
   );
   const refreshGates = useCallback(async () => {
     try {
@@ -1010,9 +1008,12 @@ export default function RunCenter({
                       <button
                         ref={run.id === selected ? selectedRowRef : undefined}
                         type="button"
-                        className={`run-name-button${run.id === selected ? " active" : ""}`}
-                        onClick={() => choose(run.id)}
-                        aria-pressed={run.id === selected}
+                        className={`run-name-button${run.id === traceRun?.id ? " active" : ""}`}
+                        onClick={() => {
+                          if (projectId) setTraceRun(run);
+                          else choose(run.id);
+                        }}
+                        aria-haspopup={projectId ? "dialog" : undefined}
                       >
                         {businessName(run.workflow_type)}
                         {run.shot_no != null ? ` · 镜${run.shot_no}` : ""}
@@ -1281,6 +1282,17 @@ export default function RunCenter({
           projectId={projectId}
           onClose={() => setOpenGate(null)}
           onDone={() => void Promise.all([refreshGates(), refreshRuns(true)])}
+        />
+      )}
+      {traceRun && projectId && (
+        <TraceDrawer
+          projectId={projectId}
+          target={{
+            type: "runs",
+            id: traceRun.id,
+            title: businessName(traceRun.workflow_type),
+          }}
+          onClose={() => setTraceRun(null)}
         />
       )}
     </section>

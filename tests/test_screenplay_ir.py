@@ -26,10 +26,12 @@ from app.screenplay_ir import (
     _normalize_duplicate_ir_identity_displays,
     compile_screenplay_ir,
     normalize_screenplay_ir_payload,
+    prepare_ir_identity_authorities,
     recover_complete_screenplay_ir_prefix,
     scene_heading_has_multiple_locations,
     screenplay_beat_fields_repeat,
     screenplay_ir_bible_context,
+    screenplay_ir_prompt_contract,
 )
 from app.source_excerpt import (
     index_compact_source_segments,
@@ -1364,6 +1366,112 @@ def test_identity_adjudication_skips_ai_when_exact_authorities_are_complete(
 
     assert screenplay.id == "ep-ir-exact"
     assert resolved.identities[1].authority_id == friend_resolution["authority_id"]
+
+
+def test_identity_adjudication_normalizes_backend_owned_narrator_without_ai(
+    monkeypatch,
+) -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    friend_resolution = normalize_character_resolution({
+        "source_label": "旧友",
+        "canonical_name": "旧友",
+        "resolution": "functional_identity",
+        "identity_group": "episode:old-friend",
+    })
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1]["authority_id"] = friend_resolution["authority_id"]
+    payload["identities"].append({
+        **payload["identities"][1],
+        "key": "narrator",
+        "display_name": "旁白",
+        "source_names": [],
+        "kind": "narrator",
+        "visual_policy": "offscreen_only",
+        "visual_canonical": "",
+        "asset_requirement": "forbidden",
+        "role_type": "narrator",
+        "authority_id": "functional:narrator",
+    })
+    payload["scenes"][0]["character_keys"].append("narrator")
+    episode = {
+        "id": "ep-ir-narrator-authority",
+        "episode_no": 1,
+        "character_resolutions": [friend_resolution],
+    }
+
+    async def forbidden_chat(*_args, **_kwargs):
+        raise AssertionError("后端拥有的纯旁白 authority 不应调用 AI")
+
+    monkeypatch.setattr(identity_adjudication.model_gateway, "chat", forbidden_chat)
+    resolved = asyncio.run(adjudicate_screenplay_ir_identities(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+        persist_new_resolutions=False,
+    ))
+
+    narrator = next(item for item in resolved.identities if item.key == "narrator")
+    assert narrator.authority_id == "narrator:narrator"
+    assert narrator.role_type == "narrator"
+    assert any(
+        item.get("path") == "identities.narrator"
+        and item.get("operation") == "bind_backend_owned_identity_authority"
+        and item.get("from", {}).get("authority_id") == "functional:narrator"
+        and item.get("to", {}).get("authority_id") == "narrator:narrator"
+        for item in resolved.normalization_log
+    )
+
+
+def test_identity_adjudication_does_not_expose_unverified_authority_to_model() -> None:
+    payload = _v13_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.4"
+    payload["identities"][0]["authority_id"] = "bible:谷言"
+    payload["identities"][1]["authority_id"] = "model-proposed:friend"
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    episode = {
+        "id": "ep-ir-unverified-authority",
+        "episode_no": 1,
+        "character_resolutions": [],
+    }
+    _changes, issues = prepare_ir_identity_authorities(
+        candidate,
+        episode=episode,
+        bible=_bible(),
+        audit=[],
+    )
+
+    model_payload = identity_adjudication._adjudication_payload(
+        candidate,
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+        issues=issues,
+    )
+    unresolved_identity = next(
+        item for item in model_payload["identities"]
+        if item["key"] == "friend"
+    )
+
+    assert unresolved_identity["authority_id"] == ""
+    assert model_payload["issues"] == [{
+        "identity_key": "friend",
+        "reason": "unknown_explicit_authority",
+    }]
+    assert "model-proposed:friend" not in json.dumps(
+        model_payload,
+        ensure_ascii=False,
+    )
+
+
+def test_screenplay_ir_prompt_delegates_pure_narrator_authority_to_backend() -> None:
+    contract = screenplay_ir_prompt_contract()
+
+    assert "authority_id 只允许逐字引用人物谱或身份预解析中已有 ID" in contract
+    assert "没有精确已登记 authority 的身份必须留空" in contract
+    assert "role_type=narrator 的纯旁白也必须留空" in contract
+    assert "由后端根据 identity.key 确定性生成" in contract
 
 
 def test_identity_adjudication_prunes_unreferenced_identity_without_ai(

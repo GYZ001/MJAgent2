@@ -187,3 +187,60 @@ def test_http_contract_keeps_scope_on_list_and_hides_foreign_detail(scoped_db) -
     assert listing.json()["scope"]["project_id"] == "p1"
     assert [item["id"] for item in listing.json()["items"]] == ["run-1"]
     assert client.get("/api/projects/p1/observability/runs/run-2").status_code == 404
+
+
+def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
+    scoped_db.execute(
+        """INSERT INTO step_runs(
+               id,run_id,step_key,status,input_artifact_ids_json,context_manifest_json,
+               output_artifact_id,started_at,finished_at,latency_ms
+           ) VALUES('step-1','run-1','generate','SUCCEEDED','["art-1"]',
+                    '{"instruction":"生成剧本"}','art-1',1,2,1000)"""
+    )
+    scoped_db.execute(
+        """INSERT INTO jobs(
+               id,kind,project_id,episode_id,status,created_at,updated_at,run_id,step_run_id
+           ) VALUES('job-trace','video','p1','e1','succeeded',1,2,'run-1','step-1')"""
+    )
+    scoped_db.execute(
+        """UPDATE provider_calls
+           SET step_run_id='step-1',
+               request_json='{"api_key":"sk-secret-value","prompt":"原始提示词"}',
+               response_json='{"result":"完成"}'
+           WHERE id=1"""
+    )
+    scoped_db.commit()
+
+    tree = observability_api._trace_tree("p1", "runs", "run-1")
+    by_id = {item["id"]: item for item in tree["nodes"]}
+    assert tree["scope"]["project_id"] == "p1"
+    assert by_id["step:step-1"]["parent_id"] == "run:run-1"
+    assert by_id["job:job-trace"]["parent_id"] == "step:step-1"
+    assert by_id["call:1"]["parent_id"] == "step:step-1"
+
+    step = observability_api._trace_node_detail(
+        "p1", "runs", "run-1", "step:step-1", "auto",
+    )
+    assert step["input"]["context_manifest"]["instruction"] == "生成剧本"
+    assert step["input"]["artifacts"][0]["id"] == "art-1"
+    assert step["output"]["artifact"]["id"] == "art-1"
+
+    call = observability_api._trace_node_detail(
+        "p1", "calls", "1", "call:1", "auto",
+    )
+    assert call["input"]["api_key"] == "***"
+    assert "sk-secret-value" not in json.dumps(call, ensure_ascii=False)
+    assert call["output"]["response"]["result"] == "完成"
+
+
+def test_trace_routes_reject_foreign_project_before_returning_tree(scoped_db) -> None:
+    app = FastAPI()
+    app.include_router(observability_api.router)
+    client = TestClient(app)
+
+    own = client.get("/api/projects/p1/observability/traces/runs/run-1")
+    foreign = client.get("/api/projects/p1/observability/traces/runs/run-2")
+    assert own.status_code == 200
+    assert own.json()["selected_node_id"] == "run:run-1"
+    assert foreign.status_code == 404
+    assert "p2" not in foreign.text

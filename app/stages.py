@@ -116,6 +116,7 @@ from app.screenplay_ir import (
     screenplay_ir_bible_context,
     screenplay_ir_prompt_contract,
 )
+from app.identity_authority import model_identity_authority_prompt_rule
 
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
@@ -124,7 +125,7 @@ SYSTEM_PREFIX = (
     "所有内容使用简体中文。"
 )
 
-SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.0"
+SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
 SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.2.1"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
@@ -2539,14 +2540,15 @@ def _character_resolution_prompt_block(episode: dict) -> str:
         return (
             "【角色身份预解析】本集没有额外称谓决议；人物谱角色的 "
             "authority_id 使用 bible:<人物谱准确姓名>。"
+            + model_identity_authority_prompt_rule()
         )
     return (
         "【角色身份预解析·剧本发布硬门禁】\n"
         + json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
-        + "\n每个 identities[*].authority_id 必须逐字引用上述 authority_id；"
-          "人物谱准确姓名使用 bible:<姓名>。不得自行改写或猜测 authority_id。"
-          "除 source_text 等逐字原文证据外，所有展示姓名必须使用对应 canonical_name。"
-          "后续章节只用于确认身份，严禁在本集泄露其剧情。"
+        + "\n人物谱准确姓名使用 bible:<姓名>。"
+        + model_identity_authority_prompt_rule()
+        + "除 source_text 等逐字原文证据外，所有展示姓名必须使用对应 canonical_name。"
+        + "后续章节只用于确认身份，严禁在本集泄露其剧情。"
     )
 
 
@@ -4462,8 +4464,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
    均由后端根据 units 顺序、resulting_state、speaker_key、原文锚点和动作文本确定性生成。
 6. 复杂动作的自然阶段直接写成同一 event_key 下有序的多个 action unit；
    后端据此建立 action_phases 和可跨镜边界。
-7. identities 覆盖所有可见身份和说话人。每项必须填写 authority_id：人物谱角色使用
-   bible:<人物谱准确姓名>，过渡称谓与功能身份逐字引用下方身份预解析合同中的 authority_id。
+7. identities 覆盖所有可见身份和说话人。{model_identity_authority_prompt_rule()}
    人物谱角色 display_name 必须逐字使用人物谱姓名；
    其他身份只要原文有明确称谓，就必须把原文逐字称谓写入 source_names，display_name 使用
    source_names[0]，key 作为全篇稳定实体 ID；不得把原文可区分实体改写成路人编号、
@@ -8300,18 +8301,6 @@ def _extract_score_from_text(raw: str, key: str) -> float | None:
     return None
 
 
-def _issues_from_text(raw: str) -> list[str]:
-    lower = raw.lower()
-    issues: list[str] = []
-    if any(word in lower for word in ("watermark", "ai生成", "text", "logo")) or any(word in raw for word in ("水印", "文字", "字幕", "标识")):
-        issues.append("画面可能含文字/水印，请人工确认")
-    if any(word in lower for word in ("extra person", "extra character")) or any(word in raw for word in ("多余人物", "额外人物")):
-        issues.append("画面可能出现多余人物")
-    if any(word in lower for word in ("deform", "distort", "merged joints", "finger")) or any(word in raw for word in ("畸形", "崩坏", "手指")):
-        issues.append("画面可能存在肢体或五官异常")
-    return issues
-
-
 def _normalize_issues(value, fallback: list[str] | None = None) -> list[str]:
     if isinstance(value, list):
         items = [str(v).strip() for v in value if str(v).strip()]
@@ -8329,12 +8318,6 @@ def _bool_or_default(value, default: bool = True) -> bool:
         return value
     if isinstance(value, (int, float)):
         return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "yes", "1", "pass", "passed", "是", "通过"}:
-            return True
-        if lowered in {"false", "no", "0", "fail", "failed", "否", "不通过"}:
-            return False
     return default
 
 
@@ -8366,9 +8349,10 @@ def _normalize_qa_object(obj: dict, score_keys: list[str], *, raw: str = "",
     if overall is None:
         overall = round(sum(known_scores) / len(known_scores), 3) if known_scores else 0.0
     out["overall"] = max(0.0, min(1.0, overall))
-    fallback_issues = _issues_from_text(raw) if raw else []
-    if recovered and not fallback_issues:
-        fallback_issues = ["VLM返回了非标准JSON，已按保守规则恢复评分"]
+    fallback_issues = (
+        ["VLM返回非标准结构，未获得可验证的结构化诊断"]
+        if recovered or incomplete else []
+    )
     out["issues"] = _normalize_issues(obj.get("issues"), fallback_issues)
     out["failure_types"] = _normalize_issues(obj.get("failure_types"))
     out["observed_state_out"] = str(obj.get("observed_state_out") or "").strip()

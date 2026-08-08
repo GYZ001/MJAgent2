@@ -92,20 +92,14 @@ class SceneCandidateReviewRequired(Exception):
     """
 
 
+class SceneAssetQualityError(ContentGenerationError):
+    """A scene asset exists or was evaluated, but its typed QA contract failed."""
+
+
 def _scene_failures_are_quality_only(failures: list[Exception]) -> bool:
-    """Return whether a batch stopped on inspectable assets, not a provider outage."""
+    """Classify by exception type; error prose never participates in routing."""
     return bool(failures) and all(
-        isinstance(exc, (SceneCandidateReviewRequired, ContentGenerationError))
-        or (
-            isinstance(exc, ValueError)
-            and any(marker in str(exc) for marker in (
-                "候选整包未通过", "整包硬门禁", "场景图一致性检查未通过",
-            ))
-        )
-        or (
-            isinstance(exc, hiagent.ProviderError)
-            and "多视角资产包未通过" in str(exc)
-        )
+        isinstance(exc, (SceneCandidateReviewRequired, SceneAssetQualityError))
         for exc in failures
     )
 
@@ -123,134 +117,21 @@ def scene_ref_path(project_id: str, scene_name: str, ep_start: int | None = None
     return str(_scene_dir(project_id) / f"{_safe_name(scene_name)}{suffix}.jpg")
 
 
-_SCENE_HUMAN_MENTION_RE = re.compile(
-    r"(人物|角色|人群|人流|行人|路人|顾客|客人|观众(?!席)|护卫|巡逻|"
-    r"弟子|士兵|摊贩|店主|侍者|工人|百姓|村民|学生|老师|男子|女子|少年|少女)"
-)
-_SCENE_EXPLICIT_EMPTY_RE = re.compile(r"(无人|没有人|空无一人|纯环境)")
-
-
 def environment_only_scene_canonical(scene_canonical: str) -> str:
-    """从旧场景锚点中只提取环境可视信息，避免把“人流/护卫”与“无人”同时喂给生图模型。
-
-    Bible 原文仍保留用于展示和审计；这里只生成纯环境任务的派生输入。
-    """
-    raw = str(scene_canonical or "").strip()
-    if not raw:
-        return raw
-    segments = [part.strip() for part in re.split(r"[，,;；。\n]+", raw) if part.strip()]
-    kept = [
-        part for part in segments
-        if not (_SCENE_HUMAN_MENTION_RE.search(part) and not _SCENE_EXPLICIT_EMPTY_RE.search(part))
-    ]
-    # 防止极端老数据全是剧情/人物句时又把矛盾原文塞回去。
-    return "，".join(kept) or "保留该地点的建筑、陈设、光线、材质与空间布局"
+    """Return the approved scene contract without vocabulary-based rewriting."""
+    return str(scene_canonical or "").strip()
 
 
 def scene_generation_canonical(scene_name: str, scene_canonical: str) -> str:
-    """Resolve prompt-only contradictions without mutating the approved Bible."""
-    canonical = environment_only_scene_canonical(scene_canonical)
-    cinema_lobby = (
-        "门厅" in f"{scene_name} {canonical}"
-        and any(token in f"{scene_name} {canonical}" for token in ("电影院", "影院"))
-    )
-    if cinema_lobby:
-        # Scene Bible occasionally merges the lobby and dusty corridor into one
-        # asset. For image generation, lobby identity wins; corridor/dust remain
-        # valid only when they are an independent canonical scene.
-        canonical = re.sub(
-            r"(?:落满灰尘的?|落灰|积灰|尘封|灰尘覆盖的?)?(?:长廊|走廊)",
-            "封闭室内门厅大厅",
-            canonical,
-        )
-        canonical = re.sub(
-            r"(?:傍晚)?雨夜(?:室内)?(?:柔光|潮湿|湿润)?(?:氛围|质感)?",
-            "封闭室内夜景",
-            canonical,
-        )
-        canonical = re.sub(
-            r"门廊挂(?:有)?铜铃",
-            "实心入口内侧上方悬挂铜铃",
-            canonical,
-        ).replace(
-            "铜铃门廊",
-            "实心入口内侧铜铃",
-        ).replace(
-            "售票窗",
-            "内墙嵌入式封闭售票窗（带小型交易口）",
-        )
-    identity = f"{scene_name} {canonical}"
-    indoor = "室内" in identity or any(
-        token in scene_name for token in ("门厅", "长廊", "走廊", "放映室", "影厅", "号厅")
-    )
-    dusty = any(token in identity for token in ("落灰", "积灰", "尘封", "灰尘"))
-    if indoor and dusty:
-        canonical = re.sub(
-            r"(?:雨夜)?湿润(?:的)?质感",
-            "室内干燥的暖灰积尘质感",
-            canonical,
-        )
-    elif cinema_lobby:
-        canonical = re.sub(
-            r"(?:雨夜)?湿润(?:的)?质感",
-            "封闭室内干燥材质",
-            canonical,
-        )
-    if "门厅" in identity:
-        canonical = canonical.replace(
-            "窗外冷蓝雨夜微光",
-            "入口边缘传入的冷蓝雨夜微光",
-        )
-    return canonical
+    """Use the approved canonical as generation authority, independent of its name."""
+    _ = scene_name
+    return environment_only_scene_canonical(scene_canonical)
 
 
 def scene_name_visual_constraints(scene_name: str, scene_canonical: str = "") -> str:
-    """Expand stable place-name semantics into deterministic visual constraints."""
-    identity = f"{scene_name} {scene_canonical}".strip()
-    constraints: list[str] = []
-    cinema = any(token in identity for token in ("电影院", "影院"))
-    lobby = "门厅" in identity and cinema
-    corridor = (
-        any(token in identity for token in ("长廊", "走廊"))
-        and not lobby
-    )
-    if cinema:
-        constraints.append(
-            "影院功能证据必须可见：使用无文字的影厅入口、空白海报框或灯箱轮廓、"
-            "吸音墙面与影院通道照明，让画面无需文字也能识别为电影院"
-        )
-    if lobby:
-        constraints.append(
-            "电影院门厅必须是建筑内部的封闭室内大厅，四周使用连续无窗内墙完整包围；"
-            "唯一对外入口是关闭的实心双开门，售票区、等候区和影厅入口均位于室内"
-        )
-        constraints.append(
-            "严禁画成临海公共走廊、半室外门廊，严禁以海洋、海岸、海堤或室外雨幕作为空间主背景，"
-            "严禁任何对外窗、采光窗、玻璃门、落地窗或玻璃幕墙。雨夜氛围只能用室内冷蓝环境光"
-            "与暖黄灯光的对比表达；画面中不得出现可见雨滴、雨幕、室外景或玻璃表面"
-        )
-    if corridor:
-        constraints.append(
-            "长廊空间必须有明确纵深通道和沿两侧排列的门洞或入口，不得画成普通房间、门廊或室外街巷"
-        )
-    if any(token in identity for token in ("落灰", "积灰", "尘封", "灰尘")):
-        constraints.append(
-            "材质状态必须直接表现为地面、墙角和陈设表面的可见积灰与尘层；"
-            "积灰必须是暖灰或灰褐色的薄层细粉尘，不得画成白色积雪、冰霜、泡沫、水渍或盐碱痕；"
-            "仅有墙面掉漆、破损或污渍不能替代积灰"
-        )
-    if any(token in identity for token in ("售票窗", "售票区", "售票厅")):
-        constraints.append(
-            "售票功能必须通过嵌在连续无窗内墙中的封闭售票窗清晰呈现，窗口只保留一个小型交易口，"
-            "并配合空白票价框或空白海报灯箱轮廓；严禁开放柜台、独立服务台、吧台或住宅窗户"
-        )
-    numbered_hall = bool(re.search(r"[一二三四五六七八九十0-9]+号厅", identity))
-    if numbered_hall or any(token in identity for token in ("观众席", "影厅", "放映厅")):
-        constraints.append(
-            "影厅观众区必须是封闭遮光空间，前方银幕、成排座椅和台阶通道清晰可见；"
-            "严禁落地窗、外窗、玻璃幕墙、城市外景或室外采光"
-        )
-    return "。".join(constraints)
+    """Legacy entrypoint kept empty; visual semantics belong to the scene contract."""
+    _ = (scene_name, scene_canonical)
+    return ""
 
 
 def scene_hard_gate_retry_prompt(
@@ -273,34 +154,11 @@ def scene_hard_gate_retry_prompt(
     from app.scene_policy import normalize_scene_prompt
     if scene_name or scene_canonical or visual_style:
         issue_text = "；".join(details)
-        actions: list[str] = []
-        if any(token in issue_text for token in (
-            "玻璃", "落地窗", "室外", "雨幕", "海洋", "海岸", "海堤",
-        )):
-            actions.append(
-                "把候选图中的落地窗、玻璃幕墙、对外玻璃门、任何对外小窗和室外雨景完整移除，"
-                "用连续的无窗吸音内墙、实心影厅双开门与空白海报灯箱替换原位置"
-            )
-        if any(token in issue_text for token in (
-            "积雪", "冰霜", "水渍", "积灰", "粉尘", "尘层",
-        )):
-            actions.append(
-                "清除地面和柜台上的白色积雪、冰霜、水渍与反光湿痕，"
-                "改成干燥地面；仅在墙角和陈设表面保留暖灰或灰褐色薄层细粉尘"
-            )
-        if any(token in f"{scene_name} {scene_canonical} {issue_text}" for token in (
-            "电影院", "影院", "门厅", "售票",
-        )):
-            actions.append(
-                "移除普通柜台、电梯窗口和开放服务台，在连续无窗内墙中嵌入带小型交易口的封闭售票窗，"
-                "并增加无文字影厅入口、吸音墙和空白海报框，使其一眼可识别为老电影院门厅"
-            )
         return normalize_scene_prompt(
-            "编辑输入候选图：必须重绘有问题的建筑与材质区域，不得原样复制候选构图",
+            "编辑输入候选图：依据结构化 QA 事实修复候选图，不得原样复制失败区域",
             f"唯一地点：{scene_name or '原场景'}",
             f"目标环境：{scene_generation_canonical(scene_name, scene_canonical)}",
             f"必须保持画风：{visual_style}" if visual_style else "",
-            *actions,
             "必须修复的观察事实：" + issue_text[:700],
             "纯环境、无人、无剧情文字；供应商固定角落标识无需重绘，禁止新增其他文字或 Logo",
         )
@@ -1468,7 +1326,7 @@ async def generate_scene_refs(
                         qa=qa,
                     )
                     if artifact["status"] not in {"approved", "validated"}:
-                        last_error = ContentGenerationError(
+                        last_error = SceneAssetQualityError(
                             f"场景图技术校验未通过：{sc.name}"
                         )
                         retry_prompt = scene_hard_gate_retry_prompt(
@@ -1541,7 +1399,7 @@ async def generate_scene_refs(
                             optional_views=[role for role in (sc.required_views or []) if role == "action_zone"],
                         )
                         if not pack_result_ok(pack):
-                            raise ContentGenerationError(
+                            raise SceneAssetQualityError(
                                 f"场景多视角资产包结构不完整：{sc.name}"
                             )
                     if is_atomic_replacement and old_current:
@@ -1953,7 +1811,7 @@ async def _ensure_reactive_scene_image(
                             style,
                         )
                         if not pack_result_ok(pack):
-                            raise hiagent.ProviderError(
+                            raise SceneAssetQualityError(
                                 f"场景多视角资产包结构不完整：{scene.name}"
                             )
                     except Exception as exc:
@@ -2022,7 +1880,7 @@ async def _ensure_reactive_scene_image(
                     project_id, scene.name, episode_no, style,
                 )
                 if not pack_result_ok(pack):
-                    raise hiagent.ProviderError(
+                    raise SceneAssetQualityError(
                         f"场景多视角资产包结构不完整：{scene.name}"
                     )
         except Exception as exc:
@@ -2492,7 +2350,7 @@ async def _refresh_scene_on_state_change(
         if not pack_result_ok(pack):
             from app.rejected_media import purge_scene_reference
             purge_scene_reference(conn, new_scene_id)
-            raise hiagent.ProviderError(
+            raise SceneAssetQualityError(
                 f"场景多视角资产包未通过，无法切换版本：{name}（waiting_asset_review）"
             )
         conn.execute("UPDATE scene_references SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))

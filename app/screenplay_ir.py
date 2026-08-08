@@ -20,7 +20,11 @@ from app import config, textmatch
 from app.character_policy import (
     resolution_declares_functional_identity,
 )
-from app.identity_authority import identity_authority_registry
+from app.identity_authority import (
+    backend_owned_identity_authority,
+    identity_authority_registry,
+    model_identity_authority_prompt_rule,
+)
 from app.schemas import (
     Bible,
     EpisodeScreenplay,
@@ -912,10 +916,16 @@ def _bind_ir_identity_authority(
         return None
     change = {
         "path": f"identities.{identity.key}",
-        "operation": "bind_exact_identity_authority",
+        "operation": str(
+            authority.get("binding_operation")
+            or "bind_exact_identity_authority"
+        ),
         "from": before,
         "to": after,
-        "reason": "explicit_or_unique_exact_authority_reference",
+        "reason": str(
+            authority.get("binding_reason")
+            or "explicit_or_unique_exact_authority_reference"
+        ),
     }
     audit.append(change)
     return change
@@ -1085,15 +1095,13 @@ def prepare_ir_identity_authorities(
     for identity in value.identities:
         explicit = str(identity.authority_id or "").strip()
         authority = by_id.get(explicit) if explicit else None
-        if explicit and authority is None and identity.role_type == "narrator":
-            expected_narrator_id = f"narrator:{identity.key}"
-            if explicit == expected_narrator_id:
-                authority = {
-                    "authority_id": explicit,
-                    "canonical_name": identity.display_name or identity.key,
-                    "identity_kind": "narrator",
-                    "source_labels": list(identity.source_names),
-                }
+        if authority is None:
+            authority = backend_owned_identity_authority(
+                identity_key=identity.key,
+                display_name=identity.display_name,
+                role_type=identity.role_type,
+                source_names=identity.source_names,
+            )
         if (
             explicit
             and authority is None
@@ -1144,13 +1152,6 @@ def prepare_ir_identity_authorities(
                 "authority_id": explicit,
             })
             continue
-        if authority is None and identity.role_type == "narrator":
-            authority = {
-                "authority_id": f"narrator:{identity.key}",
-                "canonical_name": identity.display_name or identity.key,
-                "identity_kind": "narrator",
-                "source_labels": list(identity.source_names),
-            }
         if authority is None:
             tokens = {
                 str(identity.display_name or "").strip(),
@@ -1352,7 +1353,7 @@ def screenplay_ir_prompt_contract() -> str:
     "approved_adaptations":[], "forbidden_additions":[]
   },
   "identities":[{
-    "key":"person_a", "authority_id":"bible:人物名或预检提供的 authority_id",
+    "key":"person_a", "authority_id":"__IDENTITY_AUTHORITY_CONTRACT__",
     "display_name":"人物谱准确姓名或功能身份",
     "source_names":["该身份在本集原文中的逐字称谓"],
     "kind":"当前来源定义的开放身份语义",
@@ -1381,7 +1382,10 @@ def screenplay_ir_prompt_contract() -> str:
     "director_objective":"", "satisfaction_criteria":"",
     "required_processing_s":1.0, "forbidden_misconceptions":[]
   }
-}"""
+}""".replace(
+        "__IDENTITY_AUTHORITY_CONTRACT__",
+        model_identity_authority_prompt_rule(),
+    )
 
 
 def screenplay_ir_bible_context(

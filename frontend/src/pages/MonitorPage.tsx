@@ -14,6 +14,9 @@ import JsonViewer from "../components/JsonViewer";
 import SearchField from "../components/SearchField";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import DecisionDialog from "../components/DecisionDialog";
+import TraceDrawer, {
+  type TraceTarget,
+} from "../components/observability/TraceDrawer";
 
 type MonitorSection =
   | "overview"
@@ -3037,6 +3040,7 @@ export default function MonitorPage({
   const [selectedCallId, setSelectedCallId] = useState(
     Number(initial.get("call_id") || 0),
   );
+  const [traceTarget, setTraceTarget] = useState<TraceTarget | null>(null);
   const [objectLoadError, setObjectLoadError] = useState("");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(
     initial.get("run_id"),
@@ -3199,6 +3203,7 @@ export default function MonitorPage({
     requestNavigation(target, () => {
       const source = nowQuery().get("section") || "overview";
       setObjectLoadError("");
+      setTraceTarget(null);
       if (section !== "jobs") {
         setSelectedJob(null);
         setSelectedJobId("");
@@ -3224,6 +3229,15 @@ export default function MonitorPage({
     setFocusToken(focus);
     track("deep_link", { source: activeSection, target_type: "run" }, runId);
     openSection("runs", { run_id: runId, focus });
+  };
+  const openTrace = (target: TraceTarget) => {
+    setSelectedJob(null);
+    setSelectedJobId("");
+    setSelectedCall(null);
+    setSelectedCallId(0);
+    setObjectLoadError("");
+    setTraceTarget(target);
+    writeQuery({ job_id: null, call_id: null }, false);
   };
   const jobsStatus = blockStatus(
     jobsSummaryPoll.loading,
@@ -4050,7 +4064,23 @@ export default function MonitorPage({
                     <tr key={`${job.source}-${job.id}`}>
                       <td className="mono">{fmtTime(job.updated_at)}</td>
                       <td>{job.project_name || "上下文未关联"}</td>
-                      <td>{jobWorkLabel(job)}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="monitor-name-button"
+                          aria-haspopup="dialog"
+                          onClick={() =>
+                            openTrace({
+                              type: "jobs",
+                              id: job.id,
+                              title: jobWorkLabel(job),
+                              source: job.source,
+                            })
+                          }
+                        >
+                          {jobWorkLabel(job)}
+                        </button>
+                      </td>
                       <td>
                         <span className={`stamp ${stampClass(job.status)}`}>
                           {jobStatusLabel(job.status)}
@@ -4394,7 +4424,20 @@ export default function MonitorPage({
                       <td>
                         <small>{CALL_CATEGORY_LABELS[call.category]}</small>
                         <br />
-                        {callPurpose(call)}
+                        <button
+                          type="button"
+                          className="monitor-name-button"
+                          aria-haspopup="dialog"
+                          onClick={() =>
+                            openTrace({
+                              type: "calls",
+                              id: String(call.id),
+                              title: callBusinessLabel(call),
+                            })
+                          }
+                        >
+                          {callPurpose(call)}
+                        </button>
                       </td>
                       <td>
                         {call.model_label || call.model || "未记录模型"}
@@ -4539,6 +4582,13 @@ export default function MonitorPage({
             ])
           }
           onRun={openRun}
+        />
+      )}
+      {traceTarget && projectId && (
+        <TraceDrawer
+          projectId={projectId}
+          target={traceTarget}
+          onClose={() => setTraceTarget(null)}
         />
       )}
     </div>

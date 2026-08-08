@@ -1665,6 +1665,7 @@ async def _storyboard_task(
                 note = (
                     f"追加镜生成失败，已保留前 {saved} 个 QA 通过镜头，"
                     "可人工补写最后一镜、修改后确认，或重新生成分镜。"
+                    f"本轮失败原因：{rec.message}"
                     f"（{rec.code} · {rec.error_id}）"
                 )
             conn.execute("UPDATE episodes SET status='scripted', script_error=? WHERE id=?",

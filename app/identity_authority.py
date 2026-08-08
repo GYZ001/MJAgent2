@@ -13,6 +13,52 @@ from typing import Any, Iterable
 
 
 IDENTITY_AUTHORITY_VERSION = "screenplay-identity-authority.v1"
+BACKEND_OWNED_IDENTITY_AUTHORITY_VERSION = (
+    "screenplay-backend-owned-identity-authority.v1"
+)
+
+
+def backend_owned_identity_authority(
+    *,
+    identity_key: str,
+    display_name: str,
+    role_type: str,
+    source_names: Iterable[str] | None = None,
+) -> dict[str, Any] | None:
+    """Return authority that follows directly from the typed IR contract.
+
+    This boundary is intentionally structural: it does not inspect names,
+    titles, professions, appearance, source prose, or any vocabulary list.
+    A pure narrator is an episode-local voice identity owned by the compiler,
+    so a provider-supplied ID must not turn it into a semantic adjudication.
+    """
+    if str(role_type or "").strip() != "narrator":
+        return None
+    key = str(identity_key or "").strip()
+    if not key:
+        return None
+    return {
+        "authority_id": f"narrator:{key}",
+        "canonical_name": str(display_name or "").strip() or key,
+        "identity_kind": "narrator",
+        "source_labels": [
+            label
+            for value in (source_names or [])
+            if (label := str(value or "").strip())
+        ],
+        "authority_version": BACKEND_OWNED_IDENTITY_AUTHORITY_VERSION,
+        "binding_operation": "bind_backend_owned_identity_authority",
+        "binding_reason": "typed_role_contract_is_compiler_owned",
+    }
+
+
+def model_identity_authority_prompt_rule() -> str:
+    """Keep provider, registry, adjudicator, and compiler authority in sync."""
+    return (
+        "authority_id 只允许逐字引用人物谱或身份预解析中已有 ID，模型不得自行生成；"
+        "没有精确已登记 authority 的身份必须留空，交由后端根据 owned source evidence 条件式仲裁；"
+        "role_type=narrator 的纯旁白也必须留空，由后端根据 identity.key 确定性生成。"
+    )
 
 
 def authority_id_for_resolution(value: dict[str, Any]) -> str:

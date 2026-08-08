@@ -38,6 +38,27 @@ def _empty_bible() -> Bible:
     )
 
 
+def test_character_resolution_prompt_delegates_narrator_authority_to_backend() -> None:
+    blocks = [
+        stages._character_resolution_prompt_block({"character_resolutions": []}),
+        stages._character_resolution_prompt_block({
+            "character_resolutions": [{
+                "source_label": "旧友",
+                "canonical_name": "旧友",
+                "resolution": "functional_identity",
+                "identity_group": "episode:old-friend",
+            }],
+        }),
+    ]
+
+    assert all(
+        "没有精确已登记 authority 的身份必须留空" in block
+        and "role_type=narrator 的纯旁白也必须留空" in block
+        for block in blocks
+    )
+    assert all("每个 identities[*].authority_id" not in block for block in blocks)
+
+
 def _scene(no: int, heading: str, summary: str) -> ScriptScene:
     return ScriptScene(
         scene_no=no,

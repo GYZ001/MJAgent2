@@ -207,15 +207,8 @@ def _contiguous_scene_move(prev_scene: str, scene: str) -> bool:
 
 
 def _scene_time_key(scene_time: str) -> str:
-    """Normalize an explicit, independent scene time label."""
-    raw = (scene_time or "").strip()
-    if any(token in raw for token in ("凌晨", "清晨", "早晨", "上午", "白天", "日间", "日")):
-        return "day"
-    if any(token in raw for token in ("中午", "午后", "下午", "傍晚", "黄昏")):
-        return "late_day"
-    if any(token in raw for token in ("夜晚", "夜里", "深夜", "午夜", "夜")):
-        return "night"
-    return _normalize_scene_label(raw)
+    """Normalize only formatting; time semantics remain an open contract."""
+    return _normalize_scene_label(scene_time or "").casefold()
 
 
 def _scene_time_changed(prev_time: str, scene_time: str) -> bool:
