@@ -179,54 +179,12 @@ _SCORE_W_CONS = 0.35
 _SCORE_W_SUM = _SCORE_W_ABS + _SCORE_W_CONS  # 0.90
 _MAX_REDUNDANCY_PENALTY = 0.15
 _HARD_FAILURE_MULTIPLIER = 0.3
-_SCORE_ONLY_REJECT_REASONS = {
-    "missing_quality_score",
-    "qa_unverified_score_only",
-    "quality_below_threshold_score_only",
-    "cross_keyframe_identity_invariance_unverified",
-}
-_STRUCTURAL_REFERENCE_HARD_FAILURES = frozenset({
-    "style_drift",
-    "photoreal_style",
-    "live_action_style",
-})
 _STYLE_STRUCTURAL_REJECT_REASON = "style_drift_structural"
 
 
-def _is_score_only_reject_reason(reason: str | None) -> bool:
-    return bool(reason) and reason in _SCORE_ONLY_REJECT_REASONS
-
-
-def _normalize_reference_hard_failure(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    normalized = text.lower().replace("-", "_").replace(" ", "_")
-    if (
-        ("style" in normalized and "drift" in normalized)
-        or any(token in text for token in ("风格漂移", "画风漂移", "风格不符", "画风不符"))
-    ):
-        return "style_drift"
-    if (
-        "photoreal" in normalized
-        or "photo_real" in normalized
-        or any(token in text for token in ("照片写实", "写真质感", "真实照片", "真人照片"))
-    ):
-        return "photoreal_style"
-    if (
-        "live_action" in normalized
-        or "liveaction" in normalized
-        or any(token in text for token in ("真人实拍", "真人摄影", "真人风", "实拍质感", "live-action"))
-    ):
-        return "live_action_style"
-    return text
-
-
-def _reference_structural_reject_reason(asset: ReferenceImageAsset) -> str | None:
-    hard_failures = set(_hard_failures_of(asset))
-    if hard_failures & _STRUCTURAL_REFERENCE_HARD_FAILURES:
-        return _STYLE_STRUCTURAL_REJECT_REASON
-    return None
+def _reference_runtime_blocking(asset: ReferenceImageAsset) -> bool:
+    """Read the persisted typed gate; rejectReason prose has no authority."""
+    return (asset.qa or {}).get("runtime_blocking") is True
 
 
 def _clamp01(value: float) -> float:
@@ -297,43 +255,27 @@ def _consistency_of(asset: ReferenceImageAsset) -> float:
 
 def _hard_failures_of(asset: ReferenceImageAsset) -> list[Any]:
     qa = asset.qa or {}
-    raw = qa.get("hard_failures")
-    if isinstance(raw, list) and raw:
-        items = [
-            normalized
-            for x in raw
-            if (normalized := _normalize_reference_hard_failure(x)) is not None
-        ]
-    else:
-        issues = qa.get("issues") or []
-        if not isinstance(issues, list):
-            return []
-        # 仅把明显硬伤词视为一票否决因子；普通 issues 不压 hard_multiplier
-        markers = ("broken", "畸形", "extra limb", "多余肢体", "severe_anatomy",
-                   "wrong_identity", "duplicate_character", "action_missing")
-        items = [x for x in issues if any(m in str(x).lower() for m in markers)]
-        for issue in issues:
-            normalized = _normalize_reference_hard_failure(issue)
-            if normalized in _STRUCTURAL_REFERENCE_HARD_FAILURES:
-                items.append(normalized)
-    from app.multiview import watermark_qa_mode
-    if watermark_qa_mode() == "ignore_unless_occluding":
-        cleaned = []
-        for item in items:
-            s = str(item).lower()
-            if "watermark" in s or "水印" in s or s in {"logo", "字幕", "subtitle"}:
-                if "occlusion" in s or "遮挡" in s or "subject_occlusion" in s:
-                    cleaned.append("subject_occlusion")
-                continue
-            normalized = _normalize_reference_hard_failure(item)
-            if normalized:
-                cleaned.append(normalized)
-        return cleaned
-    return [
-        normalized
-        for item in items
-        if (normalized := _normalize_reference_hard_failure(item)) is not None
+    failures: list[str] = [
+        str(item)
+        for item in (qa.get("blocking_facts") or [])
+        if qa.get("runtime_blocking") is True and str(item).strip()
     ]
+    if qa.get("runtime_blocking") is True and not failures:
+        failures.append("typed_runtime_gate_failed")
+    typed_checks = (
+        ("anatomy_valid", False, "anatomy_contract_failed"),
+        ("identity_matches", False, "identity_contract_failed"),
+        ("action_contract_matches", False, "action_contract_failed"),
+        ("forbidden_text_detected", True, "forbidden_text_detected"),
+        ("watermark_occluding", True, "subject_occlusion"),
+        ("style_contract_matches", False, "style_contract_failed"),
+        ("photoreal_detected", True, "photoreal_detected"),
+        ("live_action_detected", True, "live_action_detected"),
+    )
+    for field_name, failing_value, failure_name in typed_checks:
+        if qa.get(field_name) is failing_value:
+            failures.append(failure_name)
+    return failures
 
 
 def recompose_asset_score(asset: ReferenceImageAsset, *, consistency: float | None = None,
@@ -364,10 +306,9 @@ def apply_keep_gate(asset: ReferenceImageAsset, *, threshold: float | None = Non
     但真人/照片写实/画风漂移属于结构性错误，必须从视频输入里移除。
     """
     del threshold
-    structural_reason = _reference_structural_reject_reason(asset)
-    if structural_reason:
+    if _reference_runtime_blocking(asset):
         asset.selectedForSeedance = False
-        asset.rejectReason = structural_reason
+        asset.rejectReason = _STYLE_STRUCTURAL_REJECT_REASON
         return False
     asset.selectedForSeedance = True
     score = asset.qualityScore
@@ -1661,11 +1602,9 @@ async def review_reference_image(
         },
         "checks": [
             "character consistency", "clothing consistency", "hair consistency", "core props",
-            "scene match", "no broken anatomy", "no wrong text", "no watermark",
-            "style consistency with the episode canon", "not photoreal or live-action",
-            "suitable as Seedance reference image",
+            "scene match", "anatomy", "text", "watermark occlusion",
+            "style contract", "rendering medium", "Seedance reference fitness",
         ],
-        "hard_failures_enum": ["style_drift", "photoreal_style", "live_action_style"],
         "output_schema": {
             "character_match": 0.0,
             "costume_match": 0.0,
@@ -1676,6 +1615,14 @@ async def review_reference_image(
             "style_match": 0.0,
             "seedance_reference_fit": 0.0,
             "overall": 0.0,
+            "identity_matches": None,
+            "anatomy_valid": None,
+            "action_contract_matches": None,
+            "forbidden_text_detected": None,
+            "watermark_occluding": None,
+            "style_contract_matches": None,
+            "photoreal_detected": None,
+            "live_action_detected": None,
             "hard_failures": [],
             "issues": [],
         },
@@ -1710,20 +1657,22 @@ async def review_reference_image(
         data["overall"] = round(sum(float(data.get(k, 0)) for k in overall_keys) / len(overall_keys), 3)
     if not isinstance(data.get("issues"), list):
         data["issues"] = [str(data.get("issues"))]
-    raw_hard_failures = data.get("hard_failures")
-    if not isinstance(raw_hard_failures, list):
-        raw_hard_failures = [raw_hard_failures] if raw_hard_failures else []
-    data["hard_failures"] = [
-        normalized
-        for item in raw_hard_failures
-        if (normalized := _normalize_reference_hard_failure(item)) is not None
-    ]
-    if data.get("style_match") is not None and float(data["style_match"]) < 0.7:
-        if "style_drift" not in data["hard_failures"]:
-            data["hard_failures"].append("style_drift")
-        style_issue = "画风漂移，或出现真人/照片写实/实拍质感"
-        if style_issue not in data["issues"]:
-            data["issues"].append(style_issue)
+    reported_hard = data.get("hard_failures")
+    if not isinstance(reported_hard, list):
+        reported_hard = [reported_hard] if reported_hard else []
+    data["issues"] = list(dict.fromkeys([
+        *data["issues"],
+        *(str(item) for item in reported_hard if str(item).strip()),
+    ]))
+    typed_asset = ReferenceImageAsset(
+        id="qa", url="", type=ref_type, source="review", qa=data,
+    )
+    data["hard_failures"] = _hard_failures_of(typed_asset)
+    data["runtime_blocking"] = any((
+        data.get("style_contract_matches") is False,
+        data.get("photoreal_detected") is True,
+        data.get("live_action_detected") is True,
+    ))
     return data
 
 
@@ -2872,7 +2821,7 @@ async def build_reference_assets(*, conn: Any, project_id: str, episode_no: int,
             if PURPOSE_VIDEO_INPUT in (asset.purposes or []) or asset.type == "previous_shot_frame":
                 asset.selectedForSeedance = (
                     not asset.deleted
-                    and (asset.rejectReason is None or _is_score_only_reject_reason(asset.rejectReason))
+                    and not _reference_runtime_blocking(asset)
                 )
             else:
                 asset.selectedForSeedance = False
@@ -3999,7 +3948,7 @@ async def assemble_continuity_tail(
         stale_video_candidate = (
             PURPOSE_VIDEO_INPUT in asset.purposes and not asset.selectedForSeedance
         )
-        structural_reject = asset.rejectReason and not _is_score_only_reject_reason(asset.rejectReason)
+        structural_reject = _reference_runtime_blocking(asset)
         if asset.deleted or structural_reject or stale_video_candidate:
             asset.selectedForSeedance = False
             if rejected_out is not None and asset not in rejected_out:

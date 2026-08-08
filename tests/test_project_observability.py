@@ -206,7 +206,8 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
         """UPDATE provider_calls
            SET step_run_id='step-1',
                request_json='{"api_key":"sk-secret-value","prompt":"原始提示词"}',
-               response_json='{"result":"完成"}'
+               response_json='{"result":"完成"}',
+               meta='{"stage":"discover_character_candidates","discovery_phase":"current"}'
            WHERE id=1"""
     )
     scoped_db.commit()
@@ -219,8 +220,8 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
     assert by_id["job:job-trace"]["parent_id"] == "step:step-1"
     assert by_id["call:1"]["parent_id"] == "step:step-1"
     assert by_id["call:1"]["node_role"] == "model_processing"
-    assert by_id["call:1"]["name"] == "生成文本内容"
-    assert by_id["call:1"]["subtitle"] == "模型处理 · 文本生成模型"
+    assert by_id["call:1"]["name"] == "提取本集人物候选"
+    assert by_id["call:1"]["subtitle"] == "通过文本生成模型"
 
     step = observability_api._trace_node_detail(
         "p1", "runs", "run-1", "step:step-1", "auto",
@@ -258,13 +259,40 @@ def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
     assert (name, role, method) == (
         "记录结构校验指标",
         "program_processing",
-        "程序处理 · 本地结构校验",
+        "通过本地结构校验",
     )
     name, role, method = observability_api._trace_call_semantics("future_prompt")
     assert (name, role, method) == (
         "生成业务内容",
         "model_processing",
-        "模型处理 · 业务生成模型",
+        "通过业务生成模型",
+    )
+
+    name, role, method = observability_api._trace_call_semantics(
+        "chat",
+        {
+            "stage": "剧本时空因果蓝图分片",
+            "shard_index": 2,
+            "shard_count": 5,
+            "attempt": 3,
+        },
+        "生成剧本",
+    )
+    assert (name, role, method) == (
+        "生成剧本时空因果蓝图（第 2/5 片，第 3 次尝试）",
+        "model_processing",
+        "通过文本生成模型",
+    )
+
+    name, role, method = observability_api._trace_call_semantics(
+        "val422_metric",
+        {"metric": "repair_activation_total"},
+        "生成剧本",
+    )
+    assert (name, role, method) == (
+        "记录剧本修复启动次数",
+        "program_processing",
+        "通过本地结构校验",
     )
 
 

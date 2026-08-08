@@ -1952,19 +1952,6 @@ KEYFRAME_SCORE_WEIGHTS = {
     "scene_match": 0.10,
 }
 
-KEYFRAME_HARD_FAILURES = {
-    "wrong_identity", "duplicate_character", "severe_anatomy",
-    "wrong_outfit", "action_missing", "subject_occlusion",
-    "wrong_camera_angle", "contact_missing", "relative_scale_mismatch", "character_missing",
-    "contact_phase_mismatch", "collective_group_missing", "required_text_error", "diagnostic_missing",
-    "geometry_guard_unverified", "style_drift", "photoreal_style", "live_action_style",
-}
-
-# 分数仍只用于三选一排序；但这些结构性错误会直接污染视频，不能再以
-# “三张里相对最好”为理由放行。
-KEYFRAME_RUNTIME_BLOCKING_FAILURES = frozenset(KEYFRAME_HARD_FAILURES)
-
-
 def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) -> float | None:
     """只对适用维度（非 None / 非 N/A）归一化。"""
     usable: list[tuple[float, float]] = []
@@ -1987,8 +1974,14 @@ def compute_weighted_overall(scores: dict[str, Any], weights: dict[str, float]) 
 
 
 def keyframe_runtime_blocking_failures(qa: dict[str, Any]) -> set[str]:
-    failures = {str(item) for item in (qa.get("hard_failures") or [])}
-    return failures & KEYFRAME_RUNTIME_BLOCKING_FAILURES
+    if qa.get("runtime_blocking") is not True:
+        return set()
+    facts = {
+        str(item).strip()
+        for item in (qa.get("blocking_facts") or [])
+        if str(item).strip()
+    }
+    return facts or {"typed_runtime_gate_failed"}
 
 
 def keyframe_gate_passed(qa: dict[str, Any]) -> bool:
@@ -2338,7 +2331,6 @@ async def review_keyframe_with_evidence(
             "scene_match": "几何标志物机位方向状态光线合理",
         },
         "watermark_policy": wm_note,
-        "hard_failures_enum": sorted(KEYFRAME_HARD_FAILURES),
         "output_schema": {
             "action_match": 0.0,
             "body_proportion": 0.0,
@@ -2393,6 +2385,10 @@ async def review_keyframe_with_evidence(
                 ],
                 "unexpected_recognizable_people": 0,
             },
+            "anatomy_valid": None,
+            "watermark_occluding": None,
+            "photoreal_detected": None,
+            "live_action_detected": None,
             "overall": 0.0,
             "hard_failures": [],
             "issues": [],
@@ -2429,6 +2425,8 @@ async def review_keyframe_with_evidence(
             "hair_match": None,
             "scene_match": None,
             "identity_contract_passed": False,
+            "runtime_blocking": True,
+            "blocking_facts": ["qa_unverified"],
             "hard_failures": [],
             "issues": [f"关键帧 QA 未完成：{type(exc).__name__}"],
             "qa_recovered": True,
@@ -2561,8 +2559,11 @@ async def review_keyframe_with_evidence(
             issue += "：" + ",".join(missing_diagnostics)
         data["issues"] = list(data.get("issues") or []) + [issue]
         data["hard_failures"] = list(data.get("hard_failures") or [])
-        if missing_diagnostics and "diagnostic_missing" not in data["hard_failures"]:
-            data["hard_failures"].append("diagnostic_missing")
+        data["runtime_blocking"] = True
+        data["blocking_facts"] = [
+            *(f"{key}_missing" for key in missing_diagnostics),
+            *(("required_score_missing",) if missing_required else ()),
+        ]
         data["image_manifest"] = image_manifest
         data["rule_version"] = "keyframe_geometry_qa_v3"
         data["geometry_requirements"] = geometry_requirements
@@ -2605,47 +2606,26 @@ async def review_keyframe_with_evidence(
         data["issues"] = [str(data.get("issues"))] if data.get("issues") else []
     if not isinstance(data.get("hard_failures"), list):
         data["hard_failures"] = []
-    # 水印降级：从 hard_failures 移除纯水印项
-    if watermark_qa_mode() == "ignore_unless_occluding":
-        cleaned = []
-        for item in data["hard_failures"]:
-            s = str(item).lower()
-            if "watermark" in s or "水印" in s or s == "logo":
-                if "occlusion" in s or "遮挡" in s or "subject_occlusion" in s:
-                    cleaned.append("subject_occlusion")
-                continue
-            cleaned.append(str(item))
-        data["hard_failures"] = cleaned
-    diagnostic_failures = (
-        ("side_view_match", "wrong_camera_angle", "接触镜未使用强制侧面机位"),
-        ("contact_visibility", "contact_missing", "接触点不清晰或肢体未真实接触"),
-        ("contact_phase_match", "contact_phase_mismatch", "关键帧已接触/未接触阶段与目标不符"),
-        ("relative_height_match", "relative_scale_mismatch", "同框人物相对身高/透视尺度不符合约束"),
-        ("required_text_match", "required_text_error", "指定画面文字缺失、错误或出现额外乱码"),
-        ("collective_presence_match", "collective_group_missing", "叙事群体缺失或被错画成单人"),
-        ("style_match", "style_drift", "关键帧画风漂移，或切换成真人/照片写实/实拍质感"),
-    )
-    for score_key, failure_code, issue in diagnostic_failures:
-        if score_key == "side_view_match" and not contract.get("contact_camera_required"):
-            continue
-        if score_key == "contact_visibility" and not contract.get("established_contact_required"):
-            continue
-        if score_key == "contact_phase_match" and not contact_phase_required:
-            continue
-        if score_key == "relative_height_match" and contract.get("relative_height_policy") == "single_subject":
-            continue
-        if score_key == "required_text_match" and not required_text_expected:
-            continue
-        if score_key == "collective_presence_match" and not (
-            contract.get("collective_presence_required") or contract.get("collective_presence_forbidden")
-        ):
-            continue
+    reported_hard = [str(item) for item in data.get("hard_failures") or []]
+    data["issues"] = list(dict.fromkeys([*data["issues"], *reported_hard]))
+    blocking_facts: list[str] = []
+    if not identity_contract_passed:
+        blocking_facts.append("identity_contract_failed")
+    for score_key in ["action_match", "body_proportion", *required_diagnostics, "style_match"]:
         score = data.get(score_key)
-        if score is not None and score < 0.7:
-            if failure_code not in data["hard_failures"]:
-                data["hard_failures"].append(failure_code)
-            if issue not in data["issues"]:
-                data["issues"].append(issue)
+        if score is not None and float(score) < 0.7:
+            blocking_facts.append(f"{score_key}_below_contract")
+    if data.get("anatomy_valid") is False:
+        blocking_facts.append("anatomy_contract_failed")
+    if data.get("watermark_occluding") is True:
+        blocking_facts.append("watermark_occludes_subject")
+    if data.get("photoreal_detected") is True:
+        blocking_facts.append("photoreal_medium_detected")
+    if data.get("live_action_detected") is True:
+        blocking_facts.append("live_action_medium_detected")
+    data["blocking_facts"] = list(dict.fromkeys(blocking_facts))
+    data["runtime_blocking"] = bool(data["blocking_facts"])
+    data["hard_failures"] = list(data["blocking_facts"])
     data["status"] = "scored"
     data["image_manifest"] = image_manifest
     data["rule_version"] = "keyframe_geometry_qa_v3"

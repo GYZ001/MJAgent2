@@ -208,16 +208,14 @@ def test_pack_purpose_helper_excludes_unselected_video_purpose() -> None:
 
 
 def test_watermark_not_hard_failure_unless_occluding() -> None:
-    from app.db import set_setting
-    set_setting("watermark_qa_mode", "ignore_unless_occluding")
     asset = ReferenceImageAsset(
         id="a", url="x", type="plot_key_frame", source="seedream_generated",
-        qa={"issues": ["small watermark in corner"], "hard_failures": ["watermark"]},
+        qa={"watermark_detected": True, "watermark_occluding": False},
     )
     assert _hard_failures_of(asset) == []
     asset2 = ReferenceImageAsset(
         id="b", url="x", type="plot_key_frame", source="seedream_generated",
-        qa={"hard_failures": ["watermark_subject_occlusion"]},
+        qa={"watermark_detected": True, "watermark_occluding": True},
     )
     assert "subject_occlusion" in _hard_failures_of(asset2)
 

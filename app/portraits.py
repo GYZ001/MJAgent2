@@ -22,7 +22,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app import config, hiagent, textmatch
 from app.atomic_io import atomic_write_bytes
@@ -48,7 +48,7 @@ from app.refs import (
     production_appearance_anchor,
 )
 from app.schemas import Bible, Character, EpisodeScreenplay, extract_json
-from app.source_excerpt import align_source_excerpt
+from app.source_excerpt import align_source_excerpt, index_source_segments
 
 FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
@@ -482,21 +482,9 @@ def _future_identity_context(
         block = f"【章节边界身份交接】\n{boundary[:remaining]}"
         blocks.append(block)
         remaining -= len(block)
-    for name in known:
-        if remaining <= 0 or name not in future_text:
-            continue
-        fragments = _distributed_identity_fragments(
-            future_text,
-            name,
-            known_names=known,
-            window=180,
-            budget=min(420, remaining),
-        )
-        if not fragments:
-            continue
-        block = f"【人物谱真名：{name}】\n{fragments}"
-        blocks.append(block)
-        remaining -= len(block)
+    # Do not search and resend every known Bible name.  Candidate authorities
+    # are projected separately; future prose is limited to unresolved labels
+    # and the chapter-boundary handoff that can actually resolve them.
     for source_label in dict.fromkeys(source_labels):
         if remaining <= 0:
             break
@@ -549,7 +537,7 @@ def _source_identity_contexts(source_text: str, *, budget: int) -> list[str]:
     return chunks or [text]
 
 
-async def discover_character_candidates(
+async def _discover_character_candidates_legacy(
     source_text: str,
     bible: Bible,
     episode_no: int,
@@ -764,12 +752,20 @@ async def discover_character_candidates(
    - 否则填写本次响应内的不透明分组 ID（如 F1、F2）；不同 source_label 若明确是同一人必须共用同一 ID。
    - 无法确认是否同一人时必须使用不同 ID，禁止根据称谓字面相似猜测。
 8. evidence 只描述身份依据，不复述与人物身份无关的剧情。
+9. source_segment_id/source_quote 必须引用当前输入中实际承载该称谓的最小来源段；
+   source_quote 必须逐字来自该段。短称谓只有在该段内唯一时才可输出。
 
 只输出 JSON：
-{{"characters": [{{"source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "functional_identity_key": "已有稳定ID或本次响应内分组ID", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
+{{"characters": [{{"source_segment_id":"SRC0001","source_quote":"原文逐字短句","source_label": "本集称谓", "canonical_name": "真名或空串", "identity_kind": "named|functional", "functional_identity_key": "已有稳定ID或本次响应内分组ID", "kind": "onscreen|mentioned", "evidence": "本集依据", "future_evidence": "同一性依据或空串"}}]}}"""
 
-        raw = await model_gateway.chat(
+        response = await model_gateway.chat_structured(
             [{"role": "user", "content": prompt}],
+            model_type=_IdentityCandidateResponse,
+            validate=None,
+            operation_id=(
+                f"screenplay.identity.current.v2:{episode_no}:{current_batch}:"
+                + evidence_repository.content_hash(source_context)
+            ),
             temperature=0.1,
             max_tokens=8192,
             call_meta={
@@ -781,6 +777,7 @@ async def discover_character_candidates(
                 "reuse_successful_operation": True,
             },
         )
+        raw = response.model_dump_json()
         collect(
             raw,
             identity_haystack=current_haystack,
@@ -969,6 +966,299 @@ async def discover_character_candidates(
         resolved,
         key=lambda item: current_haystack.find(item["source_label"]),
     )
+
+
+class _IdentityCandidateResponse(BaseModel):
+    characters: list[dict] = Field(default_factory=list)
+
+
+def _attach_candidate_source_evidence(
+    candidates: list[dict],
+    source_text: str,
+) -> list[dict]:
+    """Bind candidate labels to one owned SRC without guessing from vocabulary."""
+    segments = index_source_segments(source_text)
+    for candidate in candidates:
+        label = str(candidate.get("source_label") or "").strip()
+        owned = [segment for segment in segments if label and label in segment.text]
+        # A short label is accepted only when the cited source span has one
+        # occurrence.  Ambiguous spans remain unresolved for structural audit.
+        if len(owned) == 1 and (
+            len(textmatch.condense(label)) > 3
+            or owned[0].text.count(label) == 1
+        ):
+            candidate["source_segment_id"] = owned[0].segment_id
+            candidate["source_quote"] = owned[0].text
+        else:
+            candidate["source_segment_id"] = ""
+            candidate["source_quote"] = ""
+    return candidates
+
+
+async def extract_current_identity_candidates(
+    source_text: str,
+    bible: Bible,
+    episode_no: int,
+    *,
+    draft_text: str = "",
+    existing_resolutions: list[dict] | None = None,
+) -> list[dict]:
+    """Extract current-episode identities without future or coverage prompts."""
+    candidates = await _discover_character_candidates_legacy(
+        source_text,
+        bible,
+        episode_no,
+        draft_text=draft_text,
+        future_text="",
+        existing_resolutions=existing_resolutions,
+    )
+    return _attach_candidate_source_evidence(candidates, source_text)
+
+
+async def resolve_future_identity_candidates(
+    candidates: list[dict],
+    *,
+    source_text: str,
+    future_text: str,
+    bible: Bible,
+    episode_no: int,
+    future_label: str = "",
+) -> list[dict]:
+    """Resolve only current unresolved identities from bounded future windows."""
+    unresolved = [
+        dict(item) for item in candidates
+        if item.get("identity_kind") == "functional"
+        and item.get("kind") == "onscreen"
+    ]
+    if not unresolved or not str(future_text or "").strip():
+        return candidates
+    known_names = [character.name for character in bible.characters if character.name]
+    future_context = _future_identity_context(
+        future_text,
+        [str(item.get("source_label") or "") for item in unresolved],
+        known_names=known_names,
+        current_text=source_text,
+    )
+    if not future_context:
+        return candidates
+    authority_projection = [
+        {"authority_id": f"bible:{name}", "canonical_name": name}
+        for name in known_names
+    ]
+    prompt = f"""任务：只为当前集尚未确认的身份做后续姓名消歧。
+当前未决身份（不可新增列表外人物）：
+{json.dumps(unresolved, ensure_ascii=False, separators=(',', ':'))}
+候选人物权威（只用于精确绑定，不发送其未来剧情窗口）：
+{json.dumps(authority_projection, ensure_ascii=False, separators=(',', ':'))}
+后续局部窗口（{future_label or '后续章节'}）：
+{future_context}
+规则：source_label 必须逐字引用当前未决列表；只有窗口或权威投影存在唯一同一性证据时才输出 named；
+不得输出只在后续出场的人。只输出 JSON：
+{{"characters":[{{"source_label":"","canonical_name":"","identity_kind":"named","future_evidence":""}}]}}"""
+
+    def validate_response(value: _IdentityCandidateResponse) -> list[str]:
+        allowed = {str(item.get("source_label") or "") for item in unresolved}
+        errors: list[str] = []
+        for item in value.characters:
+            source_label = str(item.get("source_label") or "").strip()
+            canonical_name = str(item.get("canonical_name") or "").strip()
+            if source_label not in allowed:
+                errors.append(f"source_label 越界：{source_label}")
+            if not canonical_name or (
+                canonical_name not in future_context
+                and canonical_name not in known_names
+            ):
+                errors.append(f"canonical_name 无证据：{canonical_name}")
+        return errors
+
+    response = await model_gateway.chat_structured(
+        [{"role": "user", "content": prompt}],
+        model_type=_IdentityCandidateResponse,
+        validate=validate_response,
+        operation_id=(
+            f"screenplay.identity.future.v2:{episode_no}:"
+            + evidence_repository.content_hash({
+                "unresolved": unresolved,
+                "future_context": future_context,
+            })
+        ),
+        max_tokens=4096,
+        temperature=0.1,
+        call_meta={
+            "stage": "discover_character_candidates",
+            "stage_key": "screenplay_character_discovery",
+            "substage": "future_identity",
+            "episode_no": episode_no,
+        },
+        repair_context=future_context,
+    )
+    resolved_by_label = {
+        str(item.get("source_label") or "").strip(): item
+        for item in response.characters
+        if str(item.get("source_label") or "").strip()
+    }
+    merged: list[dict] = []
+    for item in candidates:
+        resolution = resolved_by_label.get(str(item.get("source_label") or ""))
+        if not resolution:
+            merged.append(item)
+            continue
+        canonical_name = str(resolution.get("canonical_name") or "").strip()
+        merged.append({
+            **item,
+            "name": canonical_name,
+            "identity_kind": "named",
+            "future_evidence": str(
+                resolution.get("future_evidence") or ""
+            )[:120],
+        })
+    return merged
+
+
+async def audit_identity_coverage_from_structural_evidence(
+    candidates: list[dict],
+    *,
+    structural_evidence: list[dict] | None,
+    source_text: str,
+    bible: Bible,
+    episode_no: int,
+) -> list[dict]:
+    """Audit only typed Blueprint/IR references that lack identity ownership."""
+    evidence = [item for item in (structural_evidence or []) if isinstance(item, dict)]
+    if not evidence:
+        return candidates
+    source_by_id = {
+        segment.segment_id: segment.text
+        for segment in index_source_segments(source_text)
+    }
+    minimal = []
+    for item in evidence:
+        source_ids = [
+            str(value) for value in item.get("source_segment_ids") or []
+            if str(value) in source_by_id
+        ]
+        minimal.append({
+            **item,
+            "source_segment_ids": source_ids,
+            "source_segments": {
+                source_id: source_by_id[source_id] for source_id in source_ids
+            },
+        })
+    prompt = (
+        "任务：审计结构化蓝图/IR 中未绑定的人物引用。只处理给定引用及其 owned SRC，"
+        "不得重扫全章或新增无关人物。已有人物候选：\n"
+        + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+        + "\n未决结构证据：\n"
+        + json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+        + "\n只输出 JSON："
+        '{"characters":[{"source_label":"原文逐字称谓","canonical_name":"真名或空串",'
+        '"identity_kind":"named|functional","identity_group":"稳定分组",'
+        '"kind":"onscreen","evidence":"依据"}]}'
+    )
+    response = await model_gateway.chat_structured(
+        [{"role": "user", "content": prompt}],
+        model_type=_IdentityCandidateResponse,
+        validate=None,
+        operation_id=(
+            f"screenplay.identity.coverage.v2:{episode_no}:"
+            + evidence_repository.content_hash(minimal)
+        ),
+        max_tokens=4096,
+        temperature=0.05,
+        call_meta={
+            "stage": "discover_character_candidates",
+            "stage_key": "screenplay_character_discovery",
+            "substage": "structural_coverage",
+            "episode_no": episode_no,
+        },
+    )
+    existing = {
+        (str(item.get("source_label") or ""), str(item.get("identity_group") or ""))
+        for item in candidates
+    }
+    additions: list[dict] = []
+    owned_text = "\n".join(
+        text for item in minimal for text in item.get("source_segments", {}).values()
+    )
+    for raw in response.characters:
+        label = str(raw.get("source_label") or "").strip()
+        if not label or label not in owned_text:
+            continue
+        identity_kind = str(raw.get("identity_kind") or "functional")
+        canonical_name = str(raw.get("canonical_name") or "").strip()
+        group = str(raw.get("identity_group") or f"structural:{label}")
+        if (label, group) in existing:
+            continue
+        additions.append({
+            "name": canonical_name or label,
+            "source_label": label,
+            "identity_kind": identity_kind if identity_kind in {"named", "functional"} else "functional",
+            "identity_group": group,
+            "kind": "onscreen",
+            "evidence": str(raw.get("evidence") or "")[:80],
+            "future_evidence": "",
+        })
+    return _attach_candidate_source_evidence([*candidates, *additions], source_text)
+
+
+async def discover_character_candidates(
+    source_text: str,
+    bible: Bible,
+    episode_no: int,
+    *,
+    draft_text: str = "",
+    future_text: str = "",
+    future_label: str = "",
+    existing_resolutions: list[dict] | None = None,
+    structural_evidence: list[dict] | None = None,
+) -> list[dict]:
+    """Targeted identity pipeline: current, unresolved future, typed audit."""
+    current = await extract_current_identity_candidates(
+        source_text,
+        bible,
+        episode_no,
+        draft_text=draft_text,
+        existing_resolutions=existing_resolutions,
+    )
+    resolved = await resolve_future_identity_candidates(
+        current,
+        source_text=source_text,
+        future_text=future_text,
+        bible=bible,
+        episode_no=episode_no,
+        future_label=future_label,
+    )
+    audited = await audit_identity_coverage_from_structural_evidence(
+        resolved,
+        structural_evidence=structural_evidence,
+        source_text=source_text,
+        bible=bible,
+        episode_no=episode_no,
+    )
+    trace = None
+    try:
+        from app.observability.tracing import current_trace
+        trace = current_trace()
+    except Exception:  # noqa: BLE001 - evidence is optional outside workflows
+        pass
+    evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_identity_discovery",
+            scope_type="episode",
+            scope_id=str(getattr(trace, "scope_id", "") or f"episode-{episode_no}"),
+            status="validated",
+            trust_level="T1",
+            content={
+                "contract_version": "screenplay-identity-discovery.v2",
+                "episode_no": episode_no,
+                "candidates": audited,
+                "source_hash": evidence_repository.content_hash(source_text),
+            },
+            contract_version="screenplay-identity-discovery.v2",
+        ),
+        step_run_id=getattr(trace, "step_run_id", None),
+    )
+    return audited
 
 
 def _identity_resolution(

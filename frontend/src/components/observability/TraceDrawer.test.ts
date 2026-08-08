@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  traceDisplayNames,
   traceInitialExpandedIds,
   traceNodeSummaries,
+  traceNodeRole,
   traceRoots,
   type TraceNode,
 } from "./TraceDrawer";
@@ -70,5 +72,37 @@ describe("调用树根节点识别", () => {
       models: 1,
       programs: 2,
     });
+  });
+
+  it("兼容旧后端返回时也不在左树暴露技术英文或笼统模型名称", () => {
+    const nodes = [
+      { ...node("run:main", null, "task"), name: "screenplay" },
+      {
+        ...node("step:discovery", "run:main", undefined),
+        node_role: undefined,
+        name: "character_discovery",
+        subtitle: "screenplay_character_discovery",
+      },
+      {
+        ...node("call:1", "step:discovery", undefined),
+        node_role: undefined,
+        name: "文本模型调用",
+        subtitle: "模型调用 · d71l5c8nfdb167kligqg",
+      },
+      {
+        ...node("call:2", "run:main", undefined),
+        node_role: undefined,
+        name: "val422_metric",
+        subtitle: "d2a5n9rnvvm49eucvnvg",
+      },
+    ];
+
+    const names = traceDisplayNames(nodes);
+    expect(names.get("run:main")).toBe("生成剧本");
+    expect(names.get("step:discovery")).toBe("识别剧本角色");
+    expect(names.get("call:1")).toBe("为“识别剧本角色”生成业务内容");
+    expect(names.get("call:2")).toBe("记录结构校验指标");
+    expect(traceNodeRole(nodes[2])).toBe("model_processing");
+    expect(traceNodeRole(nodes[3])).toBe("program_processing");
   });
 });

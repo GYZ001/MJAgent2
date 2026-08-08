@@ -1019,6 +1019,8 @@ def test_all_three_structurally_invalid_keyframes_keep_best_after_retry_exhausti
             **_passing_reference_qa(),
             "overall": 0.9,
             "relative_height_match": 0.1,
+            "runtime_blocking": True,
+            "blocking_facts": ["relative_height_match_below_contract"],
             "hard_failures": ["relative_scale_mismatch"],
         }
 
@@ -1075,6 +1077,8 @@ def test_multi_character_height_contract_keeps_best_when_all_keyframes_fail(monk
             **_passing_reference_qa(),
             "overall": 0.9,
             "relative_height_match": 0.1,
+            "runtime_blocking": True,
+            "blocking_facts": ["relative_height_match_below_contract"],
             "hard_failures": ["relative_scale_mismatch"],
         }
 
@@ -2485,7 +2489,12 @@ def test_structural_style_drift_is_rejected_even_with_high_score() -> None:
     asset = ReferenceImageAsset(
         id="g2", url="u", type="plot_key_frame", source="seedream_generated",
         path="/tmp/g2.jpg", qualityScore=0.95,
-        qa={"overall": 0.95, "absolute_quality": 0.95, "hard_failures": ["style_drift"]},
+        qa={
+            "overall": 0.95,
+            "absolute_quality": 0.95,
+            "style_contract_matches": False,
+            "runtime_blocking": True,
+        },
     )
 
     assert video_modes.apply_keep_gate(asset) is False

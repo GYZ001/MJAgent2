@@ -263,29 +263,61 @@ _TRACE_MODEL_CALL_KINDS = {
     "storyboard_outline_prompt",
 }
 _TRACE_CALL_METHODS = {
-    "chat": "模型处理 · 文本生成模型",
-    "vlm": "模型处理 · 视觉理解模型",
-    "vlm_qa": "模型处理 · 视觉理解模型",
-    "video_create": "模型处理 · 视频生成模型",
-    "image": "模型处理 · 图像生成模型",
-    "image_generate": "模型处理 · 图像生成模型",
-    "image_edit": "模型处理 · 图像生成模型",
-    "scene_image": "模型处理 · 图像生成模型",
-    "screenplay_prompt": "模型处理 · 文本生成模型",
-    "plan_prompt": "模型处理 · 文本生成模型",
-    "bible_prompt": "模型处理 · 文本生成模型",
-    "references_prompt": "模型处理 · 文本生成模型",
-    "storyboard_shot_prompt": "模型处理 · 文本生成模型",
-    "storyboard_outline_prompt": "模型处理 · 文本生成模型",
-    "video_poll": "程序处理 · 视频平台接口",
-    "val422_metric": "程序处理 · 本地结构校验",
-    "provider_cache_hit": "程序处理 · 本地缓存",
+    "chat": "通过文本生成模型",
+    "vlm": "通过视觉理解模型",
+    "vlm_qa": "通过视觉理解模型",
+    "video_create": "通过视频生成模型",
+    "image": "通过图像生成模型",
+    "image_generate": "通过图像生成模型",
+    "image_edit": "通过图像生成模型",
+    "scene_image": "通过图像生成模型",
+    "screenplay_prompt": "通过文本生成模型",
+    "plan_prompt": "通过文本生成模型",
+    "bible_prompt": "通过文本生成模型",
+    "references_prompt": "通过文本生成模型",
+    "storyboard_shot_prompt": "通过文本生成模型",
+    "storyboard_outline_prompt": "通过文本生成模型",
+    "video_poll": "通过视频平台接口",
+    "val422_metric": "通过本地结构校验",
+    "provider_cache_hit": "通过本地缓存",
 }
 _TRACE_JOB_LABELS = {
     "video": "执行镜头视频生成",
     "scene": "执行关键帧生成",
     "image": "执行图片生成",
     "reference": "执行参考图生成",
+}
+_TRACE_DISCOVERY_PHASE_LABELS = {
+    "current": "提取本集人物候选",
+    "future_identity": "解析候选人物真实身份",
+    "coverage_audit": "复核人物识别完整性",
+}
+_TRACE_STAGE_PURPOSE_LABELS = {
+    "discover_character_candidates": "识别本集人物",
+    "剧本首次整版 Baseline": "生成剧本完整初稿",
+    "剧本时空因果蓝图分片": "生成剧本时空因果蓝图",
+    "剧本蓝图语义审稿": "审核剧本蓝图语义",
+    "narrative_repair_diagnosis": "诊断叙事修复方案",
+    "screenplay_narrative_patch": "修补剧本叙事结构",
+    "分镜脚本": "生成分镜脚本",
+    "场景分镜": "生成场景分镜",
+    "剧本蓝图局部语义修复": "修复剧本蓝图局部语义",
+    "screenplay_ir_identity_adjudication": "裁定剧本角色身份",
+    "剧本来源保真局部补写": "补写剧本来源保真内容",
+    "分镜大纲": "生成分镜大纲",
+    "episode_video_mode_plan": "规划本集视频生成方式",
+    "screen_appearance_changes": "识别人物外观变化",
+    "screen_scene_state_changes": "识别场景状态变化",
+    "assess_new_scene": "评估新增场景",
+    "assess_new_character": "评估新增人物",
+    "角色圣经": "生成人物设定",
+}
+_TRACE_METRIC_PURPOSE_LABELS = {
+    "repair_activation_total": "记录剧本修复启动次数",
+    "baseline_generation_calls_total": "记录剧本初稿生成次数",
+    "production_repair_patch_total": "记录剧本局部修复次数",
+    "time_to_completion_certificate_seconds": "记录剧本验收耗时",
+    "certified_screenplay_delivery_rate": "记录剧本交付通过率",
 }
 
 
@@ -315,14 +347,59 @@ def _trace_step_label(step_key: str | None, iteration_no: int | None = None) -> 
     return "执行程序处理"
 
 
-def _trace_call_semantics(kind: str | None) -> tuple[str, str, str]:
+def _trace_meta(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _trace_call_suffix(meta: dict[str, Any]) -> str:
+    parts: list[str] = []
+    shard_index = meta.get("shard_index")
+    shard_count = meta.get("shard_count")
+    if shard_index is not None and shard_count is not None:
+        parts.append(f"第 {shard_index}/{shard_count} 片")
+    source_batch = meta.get("source_batch")
+    source_batches = meta.get("source_batches")
+    if source_batch is not None and source_batches and int(source_batches) > 1:
+        parts.append(f"第 {source_batch}/{source_batches} 批")
+    attempt = int(meta.get("attempt") or 0)
+    if attempt > 1:
+        parts.append(f"第 {attempt} 次尝试")
+    repair_round = int(meta.get("repair_round") or 0)
+    if repair_round > 0:
+        parts.append(f"第 {repair_round} 轮修复")
+    return f"（{'，'.join(parts)}）" if parts else ""
+
+
+def _trace_call_semantics(
+    kind: str | None,
+    raw_meta: Any = None,
+    business_stage_name: str | None = None,
+) -> tuple[str, str, str]:
     key = str(kind or "")
+    meta = _trace_meta(raw_meta)
     node_role = (
         "model_processing"
         if key in _TRACE_MODEL_CALL_KINDS
         else "program_processing"
     )
-    name = _TRACE_CALL_LABELS.get(key)
+    discovery_phase = str(meta.get("discovery_phase") or "")
+    stage = str(meta.get("stage") or "")
+    metric = str(meta.get("metric") or "")
+    name = _TRACE_DISCOVERY_PHASE_LABELS.get(discovery_phase)
+    if not name and key == "val422_metric":
+        name = _TRACE_METRIC_PURPOSE_LABELS.get(metric, "记录结构校验指标")
+    if not name:
+        name = _TRACE_STAGE_PURPOSE_LABELS.get(stage)
+    if not name:
+        name = _TRACE_CALL_LABELS.get(key)
     if not name:
         if key.endswith("_prompt"):
             node_role = "model_processing"
@@ -336,13 +413,19 @@ def _trace_call_semantics(kind: str | None) -> tuple[str, str, str]:
         elif "metric" in key:
             name = "记录运行指标"
         else:
-            name = "执行程序处理"
+            name = (
+                f"为“{business_stage_name}”生成业务内容"
+                if node_role == "model_processing" and business_stage_name
+                else "执行程序处理"
+            )
+    if node_role == "model_processing":
+        name += _trace_call_suffix(meta)
     method = _TRACE_CALL_METHODS.get(key)
     if not method:
         method = (
-            "模型处理 · 业务生成模型"
+            "通过业务生成模型"
             if node_role == "model_processing"
-            else "程序处理 · 本地业务规则"
+            else "通过本地业务规则"
         )
     return name, node_role, method
 
@@ -459,7 +542,7 @@ def _trace_tree(
                     _TRACE_WORKFLOW_LABELS,
                     "执行历史业务任务",
                 ),
-                "subtitle": "业务环节 · 历史任务记录",
+                "subtitle": "历史任务记录",
                 "status": source_row.get("status") or "unknown",
                 "started_at": source_row.get("created_at"),
                 "finished_at": source_row.get("updated_at"),
@@ -477,6 +560,7 @@ def _trace_tree(
         else:
             call_name, call_role, call_method = _trace_call_semantics(
                 source_row.get("kind"),
+                source_row.get("meta"),
             )
             nodes.append({
                 "id": f"call:{object_id}",
@@ -515,6 +599,12 @@ def _trace_tree(
         for step in repository.get_steps(run_id)
     ]
     step_ids = {str(step["id"]) for step in steps}
+    step_labels = {
+        str(step["id"]): _trace_step_label(
+            step.get("step_key"), step.get("iteration_no"),
+        )
+        for step in steps
+    }
     jobs = [
         dict(row)
         for row in conn.execute(
@@ -534,7 +624,7 @@ def _trace_tree(
         dict(row)
         for row in conn.execute(
             f"""SELECT id,ts,kind,model,status,http_status,latency_ms,error,run_id,
-                       step_run_id,trace_id,operation_id,attempt_no
+                       step_run_id,trace_id,operation_id,attempt_no,meta
                 FROM provider_calls
                 WHERE {' OR '.join(call_clauses)}
                 ORDER BY ts,id""",
@@ -572,9 +662,9 @@ def _trace_tree(
                 run.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "执行业务任务",
             ),
             "subtitle": (
-                "总任务 · 汇总全部业务环节"
+                "汇总全部业务环节"
                 if run_id == primary_run_id
-                else "业务环节 · 关联执行任务"
+                else "关联执行任务"
             ),
             "status": run.get("status") or "unknown",
             "started_at": run.get("started_at"),
@@ -614,9 +704,9 @@ def _trace_tree(
                 step.get("step_key"), step.get("iteration_no"),
             ),
             "subtitle": (
-                "业务环节 · 组织模型与程序处理"
+                "组织模型与程序处理"
                 if is_business_stage
-                else "程序处理 · 智能体执行流程"
+                else "通过智能体执行流程"
             ),
             "status": step.get("status") or "unknown",
             "started_at": step.get("started_at"),
@@ -632,7 +722,7 @@ def _trace_tree(
             "kind": "job",
             "node_role": "program_processing",
             "name": _trace_job_label(job.get("kind")),
-            "subtitle": "程序处理 · 持久化异步任务",
+            "subtitle": "通过持久化异步任务",
             "status": job.get("stage_status") or job.get("status") or "unknown",
             "started_at": job.get("stage_started_at") or job.get("created_at"),
             "finished_at": job.get("stage_updated_at") or job.get("updated_at"),
@@ -652,6 +742,8 @@ def _trace_tree(
         run_id = str(call.get("run_id") or primary_run_id)
         call_name, call_role, call_method = _trace_call_semantics(
             call.get("kind"),
+            call.get("meta"),
+            step_labels.get(step_id),
         )
         nodes.append({
             "id": f"call:{call['id']}",

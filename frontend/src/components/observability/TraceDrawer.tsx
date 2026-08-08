@@ -13,15 +13,17 @@ export interface TraceTarget {
   source?: string;
 }
 
+export type TraceNodeRole =
+  | "task"
+  | "business_stage"
+  | "model_processing"
+  | "program_processing";
+
 export interface TraceNode {
   id: string;
   parent_id: string | null;
   kind: "run" | "step" | "job" | "call";
-  node_role:
-    | "task"
-    | "business_stage"
-    | "model_processing"
-    | "program_processing";
+  node_role?: TraceNodeRole;
   name: string;
   subtitle: string;
   status: string;
@@ -81,12 +83,77 @@ const KIND_LABELS: Record<TraceNode["kind"], string> = {
   job: "异步任务",
   call: "处理记录",
 };
-const ROLE_LABELS: Record<TraceNode["node_role"], string> = {
+const ROLE_LABELS: Record<TraceNodeRole, string> = {
   task: "总任务",
   business_stage: "业务环节",
   model_processing: "模型处理",
   program_processing: "程序处理",
 };
+const LEGACY_NODE_LABELS: Record<string, string> = {
+  character_discovery: "识别剧本角色",
+  screenplay: "生成剧本",
+  storyboard: "生成分镜",
+  video_generation: "生成镜头视频",
+  scene_references: "生成场景参考图",
+  character_references: "生成人物参考图",
+  character_bible: "生成人物设定",
+  scene_bible: "生成场景设定",
+  val422_metric: "记录结构校验指标",
+};
+
+export function traceNodeRole(node: TraceNode): TraceNodeRole {
+  if (node.node_role) return node.node_role;
+  if (node.kind === "run") return "task";
+  if (node.kind === "step") return "business_stage";
+  if (node.kind === "job") return "program_processing";
+  return /metric|normalization|compile|recompile|cache|repair_required/i.test(node.name)
+    ? "program_processing"
+    : "model_processing";
+}
+
+function legacyNodeName(node: TraceNode, parentName?: string) {
+  const mapped = LEGACY_NODE_LABELS[node.name];
+  if (mapped) return mapped;
+  const scene = node.name.match(/^storyboard_scene_(\d+)\.iteration$/);
+  if (scene) return `生成第${scene[1]}个场景分镜`;
+  const shot = node.name.match(/^storyboard_shot_(\d+)\.iteration$/);
+  if (shot) return `生成第${shot[1]}镜分镜`;
+  if (node.name === "screenplay.iteration") return "执行剧本生成";
+  if (["文本模型调用", "模型调用"].includes(node.name))
+    return parentName ? `为“${parentName}”生成业务内容` : "生成业务内容";
+  if (/[A-Za-z_]/.test(node.name)) {
+    const role = traceNodeRole(node);
+    return role === "model_processing" ? "生成业务内容" : "执行程序处理";
+  }
+  return node.name;
+}
+
+export function traceDisplayNames(nodes: TraceNode[]) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const names = new Map<string, string>();
+  const resolve = (node: TraceNode, visiting = new Set<string>()): string => {
+    const known = names.get(node.id);
+    if (known) return known;
+    if (visiting.has(node.id)) return legacyNodeName(node);
+    visiting.add(node.id);
+    const parent = node.parent_id ? byId.get(node.parent_id) : undefined;
+    const name = legacyNodeName(node, parent ? resolve(parent, visiting) : undefined);
+    visiting.delete(node.id);
+    names.set(node.id, name);
+    return name;
+  };
+  nodes.forEach((node) => resolve(node));
+  return names;
+}
+
+function traceDisplaySubtitle(node: TraceNode) {
+  if (node.subtitle && !/[A-Za-z_]/.test(node.subtitle)) return node.subtitle;
+  const role = traceNodeRole(node);
+  if (role === "task") return "汇总全部业务环节";
+  if (role === "business_stage") return "组织模型与程序处理";
+  if (role === "model_processing") return "通过文本生成模型";
+  return "通过本地业务规则";
+}
 
 function statusLabel(status: string) {
   return STATUS_LABELS[status] || "状态待确认";
@@ -134,9 +201,10 @@ export function traceNodeSummaries(nodes: TraceNode[]) {
     const result = { total: 0, stages: 0, models: 0, programs: 0 };
     for (const child of children.get(nodeId) || []) {
       result.total += 1;
-      if (child.node_role === "business_stage") result.stages += 1;
-      if (child.node_role === "model_processing") result.models += 1;
-      if (child.node_role === "program_processing") result.programs += 1;
+      const role = traceNodeRole(child);
+      if (role === "business_stage") result.stages += 1;
+      if (role === "model_processing") result.models += 1;
+      if (role === "program_processing") result.programs += 1;
       const nested = visit(child.id, visiting);
       result.total += nested.total;
       result.stages += nested.stages;
@@ -155,7 +223,7 @@ export function traceInitialExpandedIds(nodes: TraceNode[], selectedId: string) 
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const expanded = new Set(
     traceRoots(nodes)
-      .filter((node) => node.node_role === "task")
+      .filter((node) => traceNodeRole(node) === "task")
       .map((node) => node.id),
   );
   let current = byId.get(selectedId);
@@ -180,6 +248,7 @@ function statusTone(status: string) {
 function TraceTreeNode({
   node,
   childrenByParent,
+  displayNames,
   summaries,
   expandedIds,
   selectedId,
@@ -189,6 +258,7 @@ function TraceTreeNode({
 }: {
   node: TraceNode;
   childrenByParent: Map<string, TraceNode[]>;
+  displayNames: Map<string, string>;
   summaries: Map<string, TraceNodeSummary>;
   expandedIds: Set<string>;
   selectedId: string;
@@ -197,6 +267,8 @@ function TraceTreeNode({
   depth?: number;
 }) {
   const children = childrenByParent.get(node.id) || [];
+  const role = traceNodeRole(node);
+  const displayName = displayNames.get(node.id) || node.name;
   const expanded = expandedIds.has(node.id);
   const summary = summaries.get(node.id);
   const processingSummary =
@@ -206,7 +278,7 @@ function TraceTreeNode({
         ? `${expanded ? "包含" : "已合并"}：${summary.stages} 个业务环节`
         : "";
   return (
-    <li className={`trace-node-${node.node_role}`}>
+    <li className={`trace-node-${role}`}>
       <div
         className={`trace-node-row${node.id === selectedId ? " active" : ""}`}
         style={{ paddingLeft: `${8 + depth * 18}px` }}
@@ -215,7 +287,7 @@ function TraceTreeNode({
           <button
             type="button"
             className="trace-node-toggle"
-            aria-label={`${expanded ? "折叠" : "展开"}${node.name}下的处理节点`}
+            aria-label={`${expanded ? "折叠" : "展开"}${displayName}下的处理节点`}
             aria-expanded={expanded}
             onClick={() => onToggle(node.id)}
           >
@@ -232,9 +304,9 @@ function TraceTreeNode({
         >
           <span className={`trace-node-status ${statusTone(node.status)}`} aria-hidden="true" />
           <span className="trace-node-copy">
-            <b>{node.name}</b>
+            <b>{displayName}</b>
             <small>
-              {ROLE_LABELS[node.node_role]} · {processingSummary || node.subtitle}
+              {ROLE_LABELS[role]} · {processingSummary || traceDisplaySubtitle(node)}
             </small>
           </span>
           <span className="trace-node-duration">{formatDuration(node.latency_ms)}</span>
@@ -247,6 +319,7 @@ function TraceTreeNode({
               key={child.id}
               node={child}
               childrenByParent={childrenByParent}
+              displayNames={displayNames}
               summaries={summaries}
               expandedIds={expandedIds}
               selectedId={selectedId}
@@ -366,6 +439,10 @@ export default function TraceDrawer({
     return groups;
   }, [trace?.nodes]);
   const roots = useMemo(() => traceRoots(trace?.nodes || []), [trace?.nodes]);
+  const displayNames = useMemo(
+    () => traceDisplayNames(trace?.nodes || []),
+    [trace?.nodes],
+  );
   const summaries = useMemo(
     () => traceNodeSummaries(trace?.nodes || []),
     [trace?.nodes],
@@ -469,6 +546,7 @@ export default function TraceDrawer({
                       key={node.id}
                       node={node}
                       childrenByParent={childrenByParent}
+                      displayNames={displayNames}
                       summaries={summaries}
                       expandedIds={expandedIds}
                       selectedId={selectedId}
@@ -483,10 +561,14 @@ export default function TraceDrawer({
                   <div>
                     <span>
                       {selectedNode
-                        ? ROLE_LABELS[selectedNode.node_role] || KIND_LABELS[selectedNode.kind]
+                        ? ROLE_LABELS[traceNodeRole(selectedNode)] || KIND_LABELS[selectedNode.kind]
                         : "节点"}
                     </span>
-                    <h4>{selectedNode?.name || "请选择链路节点"}</h4>
+                    <h4>
+                      {selectedNode
+                        ? displayNames.get(selectedNode.id) || selectedNode.name
+                        : "请选择链路节点"}
+                    </h4>
                   </div>
                   {selectedNode && (
                     <dl>

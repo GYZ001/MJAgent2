@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import heapq
 import weakref
 from collections.abc import Awaitable, Callable
@@ -17,6 +18,11 @@ PRIORITY_RECOVERY = 10
 PRIORITY_BATCH = 20
 DEFAULT_TEXT_GENERATION_CONCURRENCY = 10
 MAX_TEXT_GENERATION_CONCURRENCY = 16
+
+_generation_priority: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "generation_priority",
+    default=PRIORITY_INTERACTIVE,
+)
 
 
 @dataclass
@@ -77,15 +83,24 @@ _loop_gates: weakref.WeakKeyDictionary[
 
 def _resource_key(workflow_type: str) -> str:
     if workflow_type in {"screenplay", "storyboard"}:
-        return "text_generation"
+        return "text_generation_workflows"
+    if workflow_type in {"text_provider", "text_provider_calls"}:
+        return "text_provider_calls"
     return workflow_type
 
 
-def _configured_limit(_workflow_type: str) -> int:
-    raw = (
-        get_setting("text_generation_concurrency")
-        or get_setting("storyboard_concurrency")
-    )
+def _configured_limit(workflow_type: str) -> int:
+    resource = _resource_key(workflow_type)
+    if resource == "text_generation_workflows":
+        raw = (
+            get_setting("text_generation_workflow_concurrency")
+            or get_setting("text_generation_concurrency")
+            or get_setting("storyboard_concurrency")
+        )
+    elif resource == "text_provider_calls":
+        raw = get_setting("text_generation_concurrency")
+    else:
+        raw = get_setting(f"{resource}_concurrency")
     try:
         return max(
             1,
@@ -151,6 +166,34 @@ async def run_with_generation_slot(
     """Run an operation under the process-wide priority-aware concurrency limit."""
     gate = gate_for(workflow_type)
     await gate.acquire(priority)
+    priority_token = _generation_priority.set(int(priority))
+    try:
+        return await operation()
+    finally:
+        _generation_priority.reset(priority_token)
+        gate.release()
+
+
+def current_generation_priority() -> int:
+    """Return the workflow priority inherited by nested provider requests."""
+    return int(_generation_priority.get())
+
+
+async def run_with_provider_call_slot(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    priority: int | None = None,
+) -> T:
+    """Limit actual text-provider requests independently from active workflows.
+
+    A workflow releases this slot between provider retries and while performing
+    local validation.  Scene shards can therefore run concurrently without
+    multiplying the global provider concurrency configured by operators.
+    """
+    gate = gate_for("text_provider_calls")
+    await gate.acquire(
+        current_generation_priority() if priority is None else int(priority)
+    )
     try:
         return await operation()
     finally:
