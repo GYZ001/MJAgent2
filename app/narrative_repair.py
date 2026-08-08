@@ -303,6 +303,27 @@ def apply_semantic_outline_operations(
     return candidate, events
 
 
+def reproject_semantic_outline_authority(
+    outline: StoryboardOutline,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, Any]]:
+    """Restore graph-owned fields after applying a bounded semantic edit.
+
+    The semantic planner authors directing choices inside a local shot, but its
+    bounded context only contains summaries of cumulative episode state.  A
+    full replacement node can therefore carry a truncated action ledger even
+    though that ledger is not part of the proposed directing change.  Rebuild
+    all graph-owned relations from the published narrative plan before the
+    candidate is validated or published.
+    """
+    from app.narrative_outline import normalize_narrative_storyboard_outline
+    from app.validators import normalize_outline_dialogue_ownership
+
+    changes = normalize_narrative_storyboard_outline(outline, screenplay)
+    changes.extend(normalize_outline_dialogue_ownership(outline, screenplay))
+    return changes
+
+
 def _compact_context(
     issues: list[Issue],
     screenplay: EpisodeScreenplay,
@@ -893,6 +914,10 @@ async def diagnose_narrative_repair(
                     candidate_outline, _events = apply_semantic_outline_operations(
                         outline,
                         selected.outline_operations,
+                    )
+                    reproject_semantic_outline_authority(
+                        candidate_outline,
+                        screenplay,
                     )
                     from app.narrative import validate_storyboard_narrative
 

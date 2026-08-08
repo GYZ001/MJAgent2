@@ -11,7 +11,9 @@ from app.narrative_repair import (
     SemanticRepairDiagnosis,
     _compact_context,
     _focus_operation_errors,
+    apply_semantic_outline_operations,
     diagnose_narrative_repair,
+    reproject_semantic_outline_authority,
     route_narrative_issues,
     validate_semantic_diagnosis,
 )
@@ -128,6 +130,87 @@ def test_semantic_diagnosis_requires_multiple_candidates_and_preserves_open_dime
         "repair_current": pytest.approx(0.7),
         "insert_shot": pytest.approx(0.1),
     }
+
+
+def test_semantic_outline_reprojection_restores_graph_owned_ledgers() -> None:
+    screenplay = _screenplay()
+    outline = _outline()
+    reproject_semantic_outline_authority(outline, screenplay)
+    authoritative = outline.shots[0].model_copy(deep=True)
+    replacement_payload = authoritative.model_dump(mode="json")
+    replacement_payload["completed_before_action_ids"] = ["A-bounded-summary"]
+    replacement = StoryboardOutlineShot.model_validate(replacement_payload)
+
+    candidate, _events = apply_semantic_outline_operations(
+        outline,
+        [SemanticOutlineOperation(
+            op="repair-visible-assimilation",
+            executor="replace_outline_shot",
+            target={"shot_id": authoritative.shot_id},
+            value=replacement,
+        )],
+    )
+
+    assert candidate.shots[0].completed_before_action_ids == [
+        "A-bounded-summary"
+    ]
+    reproject_semantic_outline_authority(candidate, screenplay)
+    assert candidate.shots[0].completed_before_action_ids == (
+        authoritative.completed_before_action_ids
+    )
+
+
+@pytest.mark.asyncio
+async def test_diagnosis_validates_reprojected_semantic_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    screenplay = _screenplay()
+    outline = _outline()
+    reproject_semantic_outline_authority(outline, screenplay)
+    replacement_payload = outline.shots[0].model_dump(mode="json")
+    replacement_payload["completed_before_action_ids"] = ["A-bounded-summary"]
+    selected = SemanticCandidateAssessment(
+        strategy="repair_current",
+        expected_narrative_gain=0.8,
+        destructive_cost=0.1,
+        satisfies_gap_test=True,
+        passes_deletion_test=True,
+        passes_marginal_gain_test=True,
+        preserves_invariants=True,
+        rationale="The local directing change closes the measured audience gap.",
+        outline_operations=[SemanticOutlineOperation(
+            op="repair-visible-assimilation",
+            executor="replace_outline_shot",
+            target={"shot_id": outline.shots[0].shot_id},
+            value=StoryboardOutlineShot.model_validate(replacement_payload),
+        )],
+    )
+    diagnosis = _diagnosis(assessments=[
+        selected,
+        _assessment("insert_shot", gain=0.4, cost=0.3),
+    ])
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps(diagnosis.model_dump(mode="json"), ensure_ascii=False)
+
+    monkeypatch.setattr("app.narrative_repair.model_gateway.chat", fake_chat)
+    result = await diagnose_narrative_repair(
+        episode_id="episode-generic",
+        issues=[Issue(
+            code="AUDIENCE_TARGET_MISSED",
+            severity=IssueSeverity.BLOCKER,
+            subject="shot:1",
+            message="The visible assimilation target was missed.",
+            repairable=True,
+        )],
+        screenplay=screenplay,
+        board=_board(),
+        outline=outline,
+        focus_shot_no=1,
+        validated_prefix_end=0,
+    )
+
+    assert result.selected_strategy == "repair_current"
 
 
 def test_public_split_alias_normalizes_its_candidate_score_only() -> None:

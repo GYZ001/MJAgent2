@@ -3885,6 +3885,14 @@ def _apply_repair(
                     raw_outline_operations,
                 )
             )
+            from app.narrative_repair import (
+                reproject_semantic_outline_authority,
+            )
+
+            reproject_semantic_outline_authority(
+                candidate_outline,
+                repair_screenplay,
+            )
             semantic_changed_window = _outline_changed_window(
                 before_semantic_outline,
                 candidate_outline,
