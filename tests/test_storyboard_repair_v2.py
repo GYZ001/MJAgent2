@@ -13,6 +13,7 @@ from app.domain.storyboard_ops import (
     _ensure_current_storyboard_shot_artifacts,
     _finalize_storyboard_evidence,
     _insert_storyboard_shot,
+    _new_storyboard_recorder,
     _storyboard_shot_evidence_requires_rebind,
     _storyboard_calibration_mode_is_publishable,
 )
@@ -61,6 +62,7 @@ from app.storyboard_supervisor import (
     _retarget_spine_repair_brief,
     _retarget_spine_repair_shot,
     _shot_checkpoint_payload,
+    _storyboard_bible_snapshot,
     _storyboard_generation_is_complete,
     _storyboard_hash,
     _validated_candidate_projection,

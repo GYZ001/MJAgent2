@@ -1214,6 +1214,16 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
 
 async def _prepare_storyboard_assets_background(episode_id: str) -> None:
     """Fill portrait/scene assets without blocking screenplay-to-storyboard text work."""
+    from app.observability.tracing import detached_trace
+
+    # asyncio tasks copy ContextVars when spawned. Asset discovery is an
+    # independent lifecycle, so do not attribute its later provider calls to
+    # the storyboard text step that happened to schedule it.
+    with detached_trace():
+        await _prepare_storyboard_assets_background_detached(episode_id)
+
+
+async def _prepare_storyboard_assets_background_detached(episode_id: str) -> None:
     conn = get_conn()
     ep = conn.execute(
         "SELECT * FROM episodes WHERE id=?", (episode_id,),
@@ -1892,13 +1902,20 @@ def _new_storyboard_recorder(
         "SELECT shot_no, storyboard_artifact_id FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,),
     ).fetchall())
+    project = conn.execute(
+        "SELECT bible_artifact_id FROM projects WHERE id=?",
+        (ep["project_id"],),
+    ).fetchone()
     contract = get_contract("storyboard")
     return WorkflowRecorder.create(
         workflow_type="storyboard",
         scope_type="episode",
         scope_id=episode_id,
         input_fingerprint=fingerprint(
-            ep["screenplay_artifact_id"], ep["storyboard_outline_json"], checkpoints
+            ep["screenplay_artifact_id"],
+            project["bible_artifact_id"] if project else None,
+            ep["storyboard_outline_json"],
+            checkpoints,
         ),
         requested_by=requested_by,
         trigger_type=trigger_type,

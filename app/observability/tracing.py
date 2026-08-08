@@ -23,6 +23,17 @@ def current_trace() -> TraceContext:
 
 
 @contextmanager
+def detached_trace() -> Iterator[TraceContext]:
+    """Run independent background work without inheriting a parent workflow."""
+    context = TraceContext()
+    token = _TRACE.set(context)
+    try:
+        yield context
+    finally:
+        _TRACE.reset(token)
+
+
+@contextmanager
 def bind_trace(run_id: str, step_run_id: str, trace_id: str | None = None) -> Iterator[TraceContext]:
     context = TraceContext(
         run_id=run_id,

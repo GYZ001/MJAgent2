@@ -661,6 +661,33 @@ def test_v13_unit_resulting_state_drives_distinct_spine_turn() -> None:
     assert not screenplay_beat_fields_repeat(first.does, first.turn)
 
 
+def test_v13_aggregates_explicit_actors_across_units_before_context_fallback() -> None:
+    payload = _v13_payload()
+    scene = payload["scenes"][1]
+    scene["character_keys"] = []
+    scene["units"][0]["text"] = "二人从座位两侧同时起身。"
+    scene["units"].insert(1, {
+        "kind": "action",
+        "text": "谷言伸手接住旧友递来的钥匙。",
+        "event_key": "e2",
+        "source_segment_ids": ["SRC0002"],
+    })
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+
+    screenplay = compile_screenplay_ir(
+        candidate,
+        episode={"id": "ep-ir-v13-event-actors", "episode_no": 1},
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    assert not any(
+        identity.key.startswith("context_actor_")
+        for identity in candidate.identities
+    )
+    assert set(screenplay.scene_outline[1].characters) == {"谷言", "旧友"}
+
+
 def test_compiler_rejects_repeated_spine_action_and_turn() -> None:
     payload = _ir_payload()
     payload["beats"][0]["turn"] = payload["beats"][0]["does"]

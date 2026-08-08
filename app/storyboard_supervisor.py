@@ -27,6 +27,7 @@ from app.repair_router import (
     route_issues,
 )
 from app.schemas import (
+    Bible,
     CognitiveBridgePlan,
     Shot,
     Storyboard,
@@ -1810,6 +1811,29 @@ def _apply_storyboard_planning_target(
     conn.commit()
 
 
+def _storyboard_bible_snapshot(project_row: Any, cp: SupervisorCheckpoint) -> Bible:
+    """Resolve the immutable Bible artifact bound to this supervisor run."""
+    from app.domain.common import _project_bible_or_placeholder
+
+    current = _project_bible_or_placeholder(project_row)
+    artifact_id = str(cp.input_versions.get("bible_artifact_id") or "").strip()
+    if not artifact_id:
+        return current
+    artifact = evidence_repository.get_artifact(artifact_id)
+    project_id = str(project_row["id"] or "") if project_row else ""
+    if (
+        artifact is None
+        or artifact.get("type") != "character_bible"
+        or artifact.get("scope_type") != "project"
+        or str(artifact.get("scope_id") or "") != project_id
+    ):
+        return current
+    try:
+        return Bible.model_validate(artifact.get("content") or {})
+    except (TypeError, ValueError):
+        return current
+
+
 async def run_storyboard_supervisor(
     episode_id: str,
     *,
@@ -1822,7 +1846,6 @@ async def run_storyboard_supervisor(
     from app.domain.common import (
         _compact_episode_target,
         _episode_source_text,
-        _project_bible_or_placeholder,
         _storyboard_target_for_source,
     )
     from app.validators import (
@@ -1949,7 +1972,21 @@ async def run_storyboard_supervisor(
         )
 
     p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-    bible = _project_bible_or_placeholder(p)
+    cp = load_latest_checkpoint(episode_id) if resume else None
+    if cp is None:
+        cp = SupervisorCheckpoint(
+            episode_id=episode_id,
+            input_versions={
+                "screenplay_artifact_id": ep["screenplay_artifact_id"],
+                "bible_artifact_id": p["bible_artifact_id"] if p else None,
+            },
+            phase="PREFLIGHT",
+            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        )
+    else:
+        cp = _migrate_checkpoint(cp)
+    bible = _storyboard_bible_snapshot(p, cp)
+    has_real_bible = bool((p["bible_json"] or "").strip()) if p else False
     if not published_storyboard_authority:
         _reconcile_storyboard_scene_projection(conn, episode_id, bible)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -1973,19 +2010,6 @@ async def run_storyboard_supervisor(
                 payload={"episode_id": episode_id},
             )
 
-    cp = load_latest_checkpoint(episode_id) if resume else None
-    if cp is None:
-        cp = SupervisorCheckpoint(
-            episode_id=episode_id,
-            input_versions={
-                "screenplay_artifact_id": ep["screenplay_artifact_id"],
-                "bible_artifact_id": p["bible_artifact_id"] if p else None,
-            },
-            phase="PREFLIGHT",
-            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
-        )
-    else:
-        cp = _migrate_checkpoint(cp)
     if new_activation:
         _withdraw_legacy_failed_publication(conn, episode_id, ep, cp)
         cp = _begin_repair_activation(cp)
@@ -2012,6 +2036,7 @@ async def run_storyboard_supervisor(
                 },
                 phase="PREFLIGHT",
             )
+            bible = _storyboard_bible_snapshot(p, cp)
             resume = False
             if run_id:
                 evidence_repository.append_event(
@@ -3215,9 +3240,6 @@ async def run_storyboard_supervisor(
                 return cp
             candidate_board = _merge_repair_candidate(official_board, cp)
             mode = str(repair.get("mode") or "replace")
-            p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-            bible = _project_bible_or_placeholder(p)
-            has_real_bible = bool((p["bible_json"] or "").strip()) if p else False
             candidate_evaluation = evaluate_storyboard_for_confirmation(
                 ep_data, candidate_board, screenplay, bible,
                 has_real_bible=has_real_bible,
@@ -3337,9 +3359,6 @@ async def run_storyboard_supervisor(
             cp.outcome = "WAITING_RETRY_NO_STORYBOARD_ARTIFACT"
             save_checkpoint(cp, run_id=run_id)
             return cp
-        p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
-        bible = _project_bible_or_placeholder(p)
-        has_real_bible = bool((p["bible_json"] or "").strip()) if p else False
         direction_repairs = (
             normalize_storyboard_direction_fields(
                 full_board,

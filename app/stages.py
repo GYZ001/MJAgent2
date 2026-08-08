@@ -3190,6 +3190,29 @@ async def _repair_narrative_blueprint(
                 max(0, nearest_index - 2),
                 min(len(blueprint.nodes), nearest_index + 3),
             ))
+        if (
+            not selected_indexes
+            and any(
+                "[BLUEPRINT_FLASHBACK_UNCLOSED]" in error
+                for error in errors
+            )
+            and blueprint.nodes
+        ):
+            flashback_enter_indexes = [
+                index
+                for index, node in enumerate(blueprint.nodes)
+                if node.time_relation == "flashback_enter"
+            ]
+            if flashback_enter_indexes:
+                enter_index = flashback_enter_indexes[-1]
+                selected_indexes.update(range(
+                    max(0, enter_index - 1),
+                    min(len(blueprint.nodes), enter_index + 2),
+                ))
+            selected_indexes.update(range(
+                max(0, len(blueprint.nodes) - 3),
+                len(blueprint.nodes),
+            ))
         if not selected_indexes:
             raise ValueError(
                 "蓝图错误无法映射到可局部替换的时间线节点："

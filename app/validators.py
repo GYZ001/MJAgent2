@@ -4483,6 +4483,54 @@ def outline_scene_coverage_errors(
     """Require every screenplay scene to own an ordered outline shot."""
     if not screenplay.scene_outline:
         return []
+
+    scene_contracts = list(
+        getattr(getattr(screenplay, "narrative_plan", None), "scene_contracts", None)
+        or []
+    )
+    expected_scene_ids = [
+        str(contract.scene_id or "").strip()
+        for contract in scene_contracts
+    ]
+    shot_scene_ids = [
+        str(shot.scene_id or "").strip()
+        for shot in outline.shots
+    ]
+    stable_scene_contract = (
+        len(expected_scene_ids) == len(screenplay.scene_outline)
+        and all(expected_scene_ids)
+        and len(set(expected_scene_ids)) == len(expected_scene_ids)
+    )
+    if stable_scene_contract and any(shot_scene_ids):
+        errors: list[str] = []
+        search_from = 0
+        for scene, expected_scene_id in zip(
+            screenplay.scene_outline,
+            expected_scene_ids,
+            strict=True,
+        ):
+            matched_index = next(
+                (
+                    index
+                    for index in range(search_from, len(shot_scene_ids))
+                    if shot_scene_ids[index] == expected_scene_id
+                ),
+                None,
+            )
+            if matched_index is None:
+                errors.append(
+                    "[OUTLINE_SCENE_COVERAGE_MISSING] "
+                    f"剧本第 {scene.scene_no} 场「{scene.scene_heading}」"
+                    f"（scene_id={expected_scene_id}）没有按剧情顺序分配任何镜头；"
+                    "不得用同一物理地点的其他场次替代该戏剧场次"
+                )
+                continue
+            search_from = matched_index + 1
+        return errors
+
+    # Legacy outlines do not carry a dramatic scene identity. Retain their
+    # location-based compatibility check, but never use mutable Bible aliases
+    # to reinterpret a modern outline that already carries stable scene IDs.
     bible_scenes = list(getattr(bible, "scenes", None) or [])
 
     def canonical_scene(value: str) -> str:

@@ -484,6 +484,49 @@ def test_new_screenplay_scene_is_ai_adopted_and_hidden_from_human_queue(tmp_path
     assert change["decided_by"] == "ai_scene_preflight"
 
 
+def test_scene_discovery_receives_spatial_context_without_plot_summary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    bible = _bible("萧家迎客大厅")
+    _fresh_project(tmp_path, monkeypatch, bible)
+    generated: list[str] = []
+    _install_fake_scene_generator(tmp_path, monkeypatch, generated)
+    received: list[str] = []
+
+    async def fake_assess(_label, spatial_context, **_kwargs):
+        received.append(spatial_context)
+        return {
+            "important": True,
+            "existing_scene_name": "",
+            "reason": "本集真实开拍的新地点",
+            "name": "蛇人族大殿",
+            "scene_canonical": (
+                "蛇人族核心大殿内部，深色石柱与蛇纹火盆环绕，"
+                "冷绿色天光压低空间，无人物"
+            ),
+            "location_kind": "室内",
+        }
+
+    monkeypatch.setattr(scenes, "assess_new_scene", fake_assess)
+    monkeypatch.setattr(
+        scenes,
+        "screen_scene_state_changes",
+        lambda *_args, **_kwargs: {},
+    )
+    one_scene = _screenplay().model_copy(
+        update={"scene_outline": [_screenplay().scene_outline[0]]}
+    )
+
+    result = asyncio.run(
+        scenes.ensure_scenes_for_storyboard("p1", 209, one_scene, bible)
+    )
+
+    assert result["blocking_errors"] == []
+    assert received == ["蛇人族大殿内"]
+    assert one_scene.scene_outline[0].summary not in received[0]
+
+
 def test_new_interior_scene_is_not_collapsed_to_generic_exterior_alias(
     tmp_path,
     monkeypatch,

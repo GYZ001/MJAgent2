@@ -2256,19 +2256,20 @@ def compile_screenplay_ir(
             identity.key: identity.display_name
             for identity in value.identities
         }
-        derived_by_key: dict[str, IREvent] = {}
-        for unit_index, ((scene, unit), segment_index) in enumerate(
-            zip(flat_units, assigned_indices, strict=True),
-            start=1,
-        ):
+        normalized_event_keys: dict[tuple[str, int], str] = {}
+        explicit_actor_keys_by_event: defaultdict[tuple[str, str], list[str]] = (
+            defaultdict(list)
+        )
+        for unit_index, (scene, unit) in enumerate(flat_units, start=1):
             event_key = unit.event_key.strip() or f"derived-event-{unit_index}"
             unit.event_key = event_key
+            normalized_event_keys[(scene.key, unit_index)] = event_key
             mentioned = [
                 key
                 for key, aliases in identity_aliases.items()
                 if any(alias and alias in unit.text for alias in aliases)
             ]
-            actor_keys = list(dict.fromkeys([
+            explicit = list(dict.fromkeys([
                 *(
                     [unit.speaker_key]
                     if unit.kind == "dialogue" and unit.speaker_key
@@ -2276,6 +2277,20 @@ def compile_screenplay_ir(
                 ),
                 *mentioned,
             ]))
+            event_actors = explicit_actor_keys_by_event[(scene.key, event_key)]
+            event_actors.extend(
+                key for key in explicit
+                if key not in event_actors
+            )
+        derived_by_key: dict[str, IREvent] = {}
+        for unit_index, ((scene, unit), segment_index) in enumerate(
+            zip(flat_units, assigned_indices, strict=True),
+            start=1,
+        ):
+            event_key = normalized_event_keys[(scene.key, unit_index)]
+            actor_keys = list(
+                explicit_actor_keys_by_event[(scene.key, event_key)]
+            )
             contextual_actor = False
             if not actor_keys and unit.kind == "action":
                 contextual_key = f"context_actor_{scene.key}"

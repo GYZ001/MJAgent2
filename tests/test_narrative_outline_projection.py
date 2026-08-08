@@ -26,6 +26,7 @@ from app.schemas import (
     KeyDialogueChain,
     KeyDialogueTurn,
     NarrativeEvent,
+    SceneDramaticContract,
     ScriptScene,
     StoryboardOutline,
     StoryboardOutlineShot,
@@ -352,6 +353,95 @@ def test_outline_scene_coverage_requires_repeated_scenes_in_story_order() -> Non
         complete,
         screenplay,
     ) == []
+
+
+def test_outline_scene_coverage_uses_stable_scene_ids_for_repeated_location() -> None:
+    screenplay = _screenplay()
+    screenplay.scene_outline = [
+        ScriptScene(
+            scene_no=1,
+            scene_heading="Home",
+            story_function="Opening",
+            summary="The story starts at home.",
+        ),
+        ScriptScene(
+            scene_no=2,
+            scene_heading="Home",
+            story_function="Return",
+            summary="A later dramatic scene returns home.",
+        ),
+    ]
+    screenplay.narrative_plan.scene_contracts = [
+        SceneDramaticContract(scene_id="SC01"),
+        SceneDramaticContract(scene_id="SC02"),
+    ]
+    complete = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC01",
+                scene_name="Mutable alias A",
+                beat="Opening event.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_id="SC02",
+                scene_name="Mutable alias B",
+                beat="Return event.",
+            ),
+        ],
+    )
+
+    assert outline_scene_coverage_errors(complete, screenplay) == []
+
+
+def test_outline_scene_coverage_reports_missing_stable_scene_id() -> None:
+    screenplay = _screenplay()
+    screenplay.scene_outline = [
+        ScriptScene(
+            scene_no=1,
+            scene_heading="Home",
+            story_function="Opening",
+            summary="The story starts at home.",
+        ),
+        ScriptScene(
+            scene_no=2,
+            scene_heading="Home",
+            story_function="Return",
+            summary="A later dramatic scene returns home.",
+        ),
+    ]
+    screenplay.narrative_plan.scene_contracts = [
+        SceneDramaticContract(scene_id="SC01"),
+        SceneDramaticContract(scene_id="SC02"),
+    ]
+    missing_second_contract = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC01",
+                scene_name="Home",
+                beat="Opening event.",
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_id="SC01",
+                scene_name="Home",
+                beat="A location-only duplicate cannot replace SC02.",
+            ),
+        ],
+    )
+
+    errors = outline_scene_coverage_errors(
+        missing_second_contract,
+        screenplay,
+    )
+
+    assert len(errors) == 1
+    assert "第 2 场" in errors[0]
+    assert "scene_id=SC02" in errors[0]
 
 
 def test_screenplay_qa_records_scene_contract_coverage_mismatch() -> None:

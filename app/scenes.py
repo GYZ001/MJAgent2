@@ -1620,7 +1620,7 @@ async def generate_scene_refs(
 
 # ---------- 分镜阶段反应式发现新场景（对照 portraits.ensure_character_card 的新角色路径） ----------
 
-async def assess_new_scene(label: str, context: str, *, style: str,
+async def assess_new_scene(label: str, spatial_context: str, *, style: str,
                            known_names: list[str], ep_label: str) -> dict:
     """把已确认剧本场次解析为新场景或已有场景别名，并产出自动建库字段。"""
     known = "、".join(known_names) or "（无）"
@@ -1630,8 +1630,8 @@ async def assess_new_scene(label: str, context: str, *, style: str,
 已有规范场景（若「{label}」其实是这些场景的同一地点/别称，则 important=false，并在 existing_scene_name 返回下列某个完整名称）：
 {known}
 
-本场景相关剧本上下文（{ep_label}）：
-{context[:4000]}
+本场景的空间信息（{ep_label}）：
+{spatial_context[:1000]}
 
 判定口径：
 - 这是已确认剧本中真实开拍的场次，不得因一次性过场而省略场景。
@@ -2056,10 +2056,6 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     conn = get_conn()
 
     labels = _collect_scene_labels(screenplay)
-    summary_by_heading = {
-        (getattr(sc, "scene_heading", "") or "").strip(): (getattr(sc, "summary", "") or "")
-        for sc in (getattr(screenplay, "scene_outline", None) or [])
-    }
     unmatched = [
         lb for lb in labels
         if not match_scene_name(lb, scenes, allow_fuzzy=False)
@@ -2070,10 +2066,12 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
     errors: list[str] = []
     blocking_errors: list[str] = []
     for label in unmatched:
-        context = f"{label}：{summary_by_heading.get(label, '')}".strip()
+        _scene_time, location = split_legacy_scene_setting(label)
+        spatial_context = location or label
         try:
             verdict = await assess_new_scene(
-                label, context, style=style, known_names=[s.name for s in scenes],
+                label, spatial_context, style=style,
+                known_names=[s.name for s in scenes],
                 ep_label=f"第 {episode_no} 集")
         except Exception as exc:  # noqa: BLE001
             message = f"{label}：场景识别失败" + code_ref(
@@ -2106,7 +2104,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             "scene_canonical": verdict["scene_canonical"],
             "location_kind": verdict["location_kind"],
             "first_episode": episode_no,
-            "discovery_sources": [context[:500]],
+            "discovery_sources": [spatial_context[:500]],
             "aliases": [label] if label != name else [],
         }
         queued = _queue_scene_auto_change(
@@ -2114,7 +2112,7 @@ async def ensure_scenes_for_storyboard(project_id: str, episode_no: int, screenp
             reason=verdict["reason"], payload={
                 "scene": scene_payload,
                 "source_episode": episode_no, "source_episode_label": f"第 {episode_no} 集",
-                "evidence_fragments": [context[:500]],
+                "evidence_fragments": [spatial_context[:500]],
                 "duplicate_candidates": [s.name for s in scenes if name in s.name or s.name in name],
             },
         )
