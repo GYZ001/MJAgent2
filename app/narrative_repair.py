@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import re
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,6 +34,32 @@ _OUTLINE_EXECUTOR_OPS = {
     "delete_outline_shot",
     "move_outline_shot",
 }
+
+
+def _bounded_context_value(value: Any) -> Any:
+    """Bound large authority payloads without classifying their semantics."""
+    if isinstance(value, dict):
+        return {
+            key: _bounded_context_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        if len(value) > 12:
+            return {
+                "encoding": "bounded_sequence_summary",
+                "count": len(value),
+                "head": [_bounded_context_value(item) for item in value[:4]],
+                "tail": [_bounded_context_value(item) for item in value[-4:]],
+            }
+        return [_bounded_context_value(item) for item in value]
+    if isinstance(value, str) and len(value) > 1800:
+        return {
+            "encoding": "bounded_text_summary",
+            "chars": len(value),
+            "head": value[:1400],
+            "tail": value[-300:],
+        }
+    return value
 
 
 class SemanticOutlineTarget(BaseModel):
@@ -200,8 +227,20 @@ def apply_semantic_outline_operations(
             if operation.value is None:
                 raise ValueError("replace_outline_shot missing value")
             index = _outline_target_index(candidate, target)
-            before_id = candidate.shots[index].shot_id
-            candidate.shots[index] = operation.value.model_copy(deep=True)
+            previous = candidate.shots[index]
+            before_id = previous.shot_id
+            replacement = operation.value.model_copy(deep=True)
+            # Model repair responses may intentionally omit unchanged fields.
+            # Preserve every omitted field generically from the authoritative
+            # outline node; no story category or field-name policy is used.
+            for field in StoryboardOutlineShot.model_fields:
+                if field not in operation.value.model_fields_set:
+                    setattr(
+                        replacement,
+                        field,
+                        getattr(previous, field),
+                    )
+            candidate.shots[index] = replacement
             events.append({
                 **event_prefix,
                 "index": index,
@@ -269,11 +308,124 @@ def _compact_context(
     screenplay: EpisodeScreenplay,
     board: Storyboard,
     outline: StoryboardOutline | None,
+    *,
+    focus_shot_no: int | None = None,
 ) -> dict[str, Any]:
     from app.validators import key_line_catalog
 
     plan = screenplay.narrative_plan
     index = index_narrative_plan(plan) if plan else None
+    focus_nos: set[int] = {
+        int(focus_shot_no)
+        for focus_shot_no in [focus_shot_no]
+        if focus_shot_no is not None and int(focus_shot_no) > 0
+    }
+    for issue in issues:
+        path = str((issue.evidence or {}).get("path") or "")
+        for match in re.finditer(r"shots\[(\d+)\]", path):
+            focus_nos.add(int(match.group(1)) + 1)
+        for pattern in (
+            r"第\s*(\d+)\s*镜",
+            r"镜头\s*(\d+)",
+            r"shot_no\s*=\s*(\d+)",
+        ):
+            focus_nos.update(
+                int(match.group(1))
+                for match in re.finditer(pattern, issue.message or "")
+            )
+
+    if focus_nos:
+        local_nos = {
+            shot_no + offset
+            for shot_no in focus_nos
+            for offset in range(-2, 3)
+            if shot_no + offset > 0
+        }
+    elif len(board.shots) <= 12:
+        local_nos = {int(shot.shot_no) for shot in board.shots}
+    else:
+        # A global failure still receives bounded beginning/end evidence. The
+        # full authority graph remains in persistent artifacts and can be
+        # requested by a later targeted repair; it must not overflow the first
+        # semantic diagnosis call.
+        local_nos = {
+            *[int(shot.shot_no) for shot in board.shots[:4]],
+            *[int(shot.shot_no) for shot in board.shots[-4:]],
+        }
+
+    local_shots = [
+        shot for shot in board.shots if int(shot.shot_no) in local_nos
+    ]
+    local_outline_shots = [
+        shot for shot in (outline.shots if outline else [])
+        if int(shot.shot_no) in local_nos
+    ]
+    event_ids = {
+        str(value or "").strip()
+        for shot in [*local_shots, *local_outline_shots]
+        for value in [
+            str(getattr(shot, "story_event_id", "") or ""),
+            *(getattr(shot, "event_ids", None) or []),
+        ]
+        if str(value or "").strip()
+    }
+    if plan:
+        event_by_id = {item.event_id: item for item in plan.events}
+        event_ids.update(
+            relation_id
+            for event_id in list(event_ids)
+            for event in [event_by_id.get(event_id)]
+            if event is not None
+            for relation_id in [
+                *(event.causal_parent_ids or []),
+                *(event.downstream_dependency_event_ids or []),
+            ]
+        )
+        graph_events = [
+            item for item in plan.events if item.event_id in event_ids
+        ]
+    else:
+        graph_events = []
+    action_ids = {
+        str(value or "").strip()
+        for shot in [*local_shots, *local_outline_shots]
+        for value in [
+            str(getattr(shot, "primary_action_id", "") or ""),
+            *(getattr(shot, "supporting_action_ids", None) or []),
+        ]
+        if str(value or "").strip()
+    }
+    action_ids.update(
+        action_id
+        for event in graph_events
+        for action_id in (event.action_ids or [])
+    )
+    experience_intent_ids = {
+        value
+        for shot in local_shots
+        for value in (
+            shot.shot_contribution.experience_intent_ids
+            if shot.shot_contribution else []
+        )
+    }
+    assimilation_task_ids = {
+        value
+        for shot in local_shots
+        for value in (
+            shot.shot_contribution.assimilation_task_ids
+            if shot.shot_contribution else []
+        )
+    }
+    readability_window_ids = {
+        value
+        for shot in [*local_shots, *local_outline_shots]
+        for value in (getattr(shot, "readability_window_ids", None) or [])
+    }
+    local_scene_ids = {
+        str(getattr(shot, "scene_id", "") or "").strip()
+        for shot in local_outline_shots
+        if str(getattr(shot, "scene_id", "") or "").strip()
+    }
     return {
         "violated_invariants": [
             {
@@ -285,15 +437,42 @@ def _compact_context(
             for issue in issues
         ],
         "narrative_graph": ({
-            "events": [item.model_dump(mode="json") for item in plan.events],
-            "actions": [item.model_dump(mode="json") for item in plan.atomic_actions],
-            "experience_intents": [item.model_dump(mode="json") for item in plan.experience_intents],
-            "assimilation_tasks": [item.model_dump(mode="json") for item in plan.assimilation_tasks],
-            "readability_windows": [item.model_dump(mode="json") for item in plan.readability_windows],
+            "events": [
+                _bounded_context_value(item.model_dump(mode="json"))
+                for item in graph_events
+            ],
+            "actions": [
+                _bounded_context_value(item.model_dump(mode="json"))
+                for item in plan.atomic_actions
+                if item.action_id in action_ids
+            ],
+            "experience_intents": [
+                _bounded_context_value(item.model_dump(mode="json"))
+                for item in plan.experience_intents
+                if item.experience_intent_id in experience_intent_ids
+            ],
+            "assimilation_tasks": [
+                _bounded_context_value(item.model_dump(mode="json"))
+                for item in plan.assimilation_tasks
+                if item.assimilation_task_id in assimilation_task_ids
+            ],
+            "readability_windows": [
+                _bounded_context_value(item.model_dump(mode="json"))
+                for item in plan.readability_windows
+                if item.readability_window_id in readability_window_ids
+            ],
             "known_ids": {
-                "events": list(index.events),
-                "actions": list(index.actions),
-                "target_deltas": list(index.deltas),
+                "events": sorted(event_ids & set(index.events)),
+                "actions": sorted(action_ids & set(index.actions)),
+                "target_deltas": sorted({
+                    value
+                    for shot in local_shots
+                    for value in (
+                        shot.shot_contribution.target_delta_ids
+                        if shot.shot_contribution else []
+                    )
+                    if value in index.deltas
+                }),
             },
         } if plan and index else {}),
         "shots": [
@@ -309,9 +488,30 @@ def _compact_context(
                 "audience_paths": [item.model_dump(mode="json") for item in shot.audience_state_paths],
                 "duration_s": shot.duration_s,
             }
-            for shot in board.shots
+            for shot in local_shots
         ],
-        "outline": outline.model_dump(mode="json") if outline else None,
+        "outline": ({
+            "episode_no": outline.episode_no,
+            "shots": [
+                _bounded_context_value(shot.model_dump(mode="json"))
+                for shot in local_outline_shots
+            ],
+            "scene_contexts": [
+                scene.model_dump(mode="json")
+                for scene in outline.scene_contexts
+                if scene.scene_id in local_scene_ids
+            ],
+        } if outline else None),
+        "context_scope": {
+            "focus_shot_nos": sorted(focus_nos),
+            "included_shot_nos": sorted(local_nos),
+            "total_board_shots": len(board.shots),
+            "total_outline_shots": len(outline.shots) if outline else 0,
+            "encoding": (
+                "large lists and text are bounded summaries; omitted fields in "
+                "replace operations are preserved from the authoritative node"
+            ),
+        },
         "key_line_catalog": key_line_catalog(screenplay),
         "outline_local_hard_errors": (
             _outline_local_hard_errors(outline, screenplay)
@@ -516,7 +716,13 @@ async def diagnose_narrative_repair(
     """
     prompt = {
         "task": "诊断叙事缺口并比较多个最小修复候选；问题码只说明不变量，不代表修复动作",
-        "context": _compact_context(issues, screenplay, board, outline),
+        "context": _compact_context(
+            issues,
+            screenplay,
+            board,
+            outline,
+            focus_shot_no=focus_shot_no,
+        ),
         "repair_focus": {
             "focus_shot_no": focus_shot_no,
             "validated_prefix_end": max(0, int(validated_prefix_end)),
@@ -584,6 +790,10 @@ async def diagnose_narrative_repair(
             ),
             "删除/移动必须证明因果、状态、角色信念、观众路径与铺垫兑现不变量",
             "outline_operations 只能引用当前权威图的稳定 ID；新建/替换节点必须输出完整字段",
+            (
+                "context 中 bounded_sequence_summary / bounded_text_summary 只表示被截断的权威值；"
+                "不得把摘要对象写回字段。replace 未输出的字段由后端从原节点原样保留"
+            ),
             "未预设的 strategy/op 必须绑定当前可用 executor；需要新执行器能力时不得猜测或降级",
             "操作后必须仍满足事件拓扑、状态方程、唯一 owner、deadline、readability window 互指与不重放动作",
             (

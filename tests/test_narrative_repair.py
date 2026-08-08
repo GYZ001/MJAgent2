@@ -9,12 +9,13 @@ from app.narrative_repair import (
     SemanticCandidateAssessment,
     SemanticOutlineOperation,
     SemanticRepairDiagnosis,
+    _compact_context,
     _focus_operation_errors,
     diagnose_narrative_repair,
     route_narrative_issues,
     validate_semantic_diagnosis,
 )
-from app.schemas import StoryboardOutline, StoryboardOutlineShot
+from app.schemas import Storyboard, StoryboardOutline, StoryboardOutlineShot
 from tests.test_narrative_continuity import (
     _board,
     _screenplay,
@@ -67,6 +68,41 @@ def _outline() -> StoryboardOutline:
             for window in screenplay.narrative_plan.readability_windows
         ],
     )
+
+
+def test_semantic_repair_context_is_bounded_to_the_focus_window() -> None:
+    shots = [
+        _shot().model_copy(update={"shot_no": number, "shot_id": f"SH-{number}"})
+        for number in range(1, 21)
+    ]
+    board = Storyboard(episode_no=1, shots=shots)
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot.model_validate(shot.model_dump(mode="json"))
+            for shot in shots
+        ],
+    )
+    issue = Issue(
+        code="SHOT_PROMPT_COMPILE_FAILED",
+        severity=IssueSeverity.BLOCKER,
+        category="structural",
+        subject="storyboard",
+        message="第 15 镜下游 Prompt 合同不可编译",
+        evidence={"path": "shots[14]"},
+        repairable=True,
+    )
+
+    context = _compact_context(
+        [issue],
+        _screenplay(),
+        board,
+        outline,
+        focus_shot_no=15,
+    )
+
+    assert context["context_scope"]["included_shot_nos"] == [13, 14, 15, 16, 17]
+    assert [shot["shot_no"] for shot in context["shots"]] == [13, 14, 15, 16, 17]
 
 
 def test_semantic_diagnosis_requires_multiple_candidates_and_preserves_open_dimensions() -> None:
