@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from copy import deepcopy
 import hashlib
@@ -3432,7 +3433,68 @@ async def _semantic_review_narrative_blueprint(
         ):
             return blueprint
 
-    for review_round in range(1, 7):
+    targeted_review = str(
+        get_setting("screenplay_targeted_blueprint_review_enabled") or "true"
+    ).strip().lower() not in {"0", "false", "off", "no"}
+
+    def review_projection() -> tuple[dict[str, Any], str, list[str]]:
+        nodes = blueprint.nodes
+        risky: set[int] = set()
+        for index, node in enumerate(nodes):
+            previous = nodes[index - 1] if index else None
+            if (
+                node.time_relation not in {"episode_start", "continuous"}
+                or (previous is not None and (
+                    node.temporal_domain_key != previous.temporal_domain_key
+                    or node.location_key != previous.location_key
+                ))
+                or (node.decision is not None and node.decision.impact == "major")
+                or bool(node.released_constraints_for)
+                or bool(node.state_requirements)
+                or node.dramatic_load >= 3
+            ):
+                risky.add(index)
+        if not risky and nodes:
+            risky.update({0, len(nodes) - 1})
+        selected = {
+            neighbor
+            for index in risky
+            for neighbor in range(max(0, index - 1), min(len(nodes), index + 2))
+        }
+        selected_nodes = [nodes[index] for index in sorted(selected)]
+        selected_keys = {node.key for node in selected_nodes}
+        source_ids = list(dict.fromkeys(
+            source_id
+            for node in selected_nodes
+            for source_id in node.source_segment_ids
+        ))
+        indexed = {
+            segment.segment_id: segment.text
+            for segment in index_source_segments(source_text)
+        }
+        projected = {
+            "format_version": blueprint.format_version,
+            "episode_no": blueprint.episode_no,
+            "nodes": [node.model_dump(mode="json") for node in selected_nodes],
+            "scene_plans": [
+                plan.model_dump(mode="json")
+                for plan in blueprint.scene_plans
+                if selected_keys.intersection(plan.node_keys)
+            ],
+            "review_scope": {
+                "risk_node_keys": [nodes[index].key for index in sorted(risky)],
+                "included_neighbor_node_keys": [node.key for node in selected_nodes],
+                "total_blueprint_nodes": len(nodes),
+            },
+        }
+        source_projection = "\n".join(
+            f"[{source_id}] {indexed[source_id]}"
+            for source_id in source_ids
+            if source_id in indexed
+        )
+        return projected, source_projection, [node.key for node in selected_nodes]
+
+    for review_round in range(1, 5):
         current_blueprint_hash = hashlib.sha256(
             json.dumps(
                 blueprint.model_dump(mode="json"),
@@ -3441,6 +3503,15 @@ async def _semantic_review_narrative_blueprint(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        projected_blueprint, projected_source, projected_node_keys = (
+            review_projection()
+            if targeted_review
+            else (
+                blueprint.model_dump(mode="json"),
+                _render_screenplay_source(render_indexed_source(source_text)),
+                [node.key for node in blueprint.nodes],
+            )
+        )
         prompt = (
             "你是漫剧叙事蓝图的独立语义审稿人。只找会导致观众理解错误、"
             "人物瞬移、状态矛盾、因果跳跃或动机突变的可证实问题；不改稿，"
@@ -3463,12 +3534,12 @@ async def _semantic_review_narrative_blueprint(
             " source_segment_ids。只输出 must_fix=true 的确定问题，禁止泛泛建议。"
             "\n\n蓝图：\n"
             + json.dumps(
-                blueprint.model_dump(mode="json"),
+                projected_blueprint,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
             + "\n\n带稳定 ID 的原文：\n"
-            + _render_screenplay_source(render_indexed_source(source_text))
+            + projected_source
             + "\n\n输出 Schema：\n"
             + json.dumps(
                 BlueprintSemanticReview.model_json_schema(),
@@ -3478,69 +3549,92 @@ async def _semantic_review_narrative_blueprint(
         trace = current_trace()
         reviews: list[BlueprintSemanticReview] = []
         review_artifact_ids: list[str] = []
-        for sample_no in range(1, 3):
-            review: BlueprintSemanticReview | None = None
-            for review_attempt in range(1, 3):
-                try:
-                    raw = await model_gateway.chat(
-                        [
-                            {"role": "system", "content": SYSTEM_PREFIX},
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"{prompt}\n独立审稿样本编号："
-                                    f"{sample_no}"
-                                ),
-                            },
-                        ],
-                        temperature=0.1,
-                        max_tokens=8192,
-                        call_meta={
-                            "stage": "剧本蓝图语义审稿",
-                            "stage_key": "screenplay_blueprint_review",
-                            "call_role": "stage_critic",
-                            "call_role_label": "蓝图独立语义审稿",
-                            "review_round": review_round,
-                            "review_sample": sample_no,
-                            "review_attempt": review_attempt,
-                            "episode_id": str(episode.get("id") or ""),
-                            "contract_version": BLUEPRINT_VERSION,
-                            "expected_json": True,
-                            "reuse_successful_operation": True,
-                        },
-                    )
-                    candidate_review = (
-                        BlueprintSemanticReview.model_validate(
-                            extract_json(
-                                raw,
-                                repair_unescaped_inner_quotes=True,
-                            ),
-                        )
-                    )
-                    review_errors = validate_blueprint_semantic_review(
-                        candidate_review,
-                        blueprint,
-                        source_text,
-                    )
-                    if review_errors:
-                        raise ValueError(
-                            "蓝图语义审稿引用无效："
-                            + "；".join(review_errors[:10])
-                        )
-                    candidate_review.issues = [
-                        issue
+        async def run_reviewer(sample_no: int) -> BlueprintSemanticReview:
+            def validate_review(candidate_review: BlueprintSemanticReview) -> list[str]:
+                errors = validate_blueprint_semantic_review(
+                    candidate_review,
+                    blueprint,
+                    source_text,
+                )
+                if targeted_review:
+                    allowed = set(projected_node_keys)
+                    errors.extend(
+                        f"风险审稿引用了范围外节点：{node_key}"
                         for issue in candidate_review.issues
-                        if not blueprint_semantic_issue_is_resolved(
-                            issue,
-                            blueprint,
-                        )
-                    ]
-                    review = candidate_review
-                    break
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-            if review is None:
+                        for node_key in issue.node_keys
+                        if node_key not in allowed
+                    )
+                return errors
+
+            review = await model_gateway.chat_structured(
+                [
+                    {"role": "system", "content": SYSTEM_PREFIX},
+                    {
+                        "role": "user",
+                        "content": f"{prompt}\n独立审稿样本编号：{sample_no}",
+                    },
+                ],
+                model_type=BlueprintSemanticReview,
+                validate=validate_review,
+                operation_id=(
+                    f"screenplay.blueprint.review:{BLUEPRINT_VERSION}:"
+                    f"{current_blueprint_hash}:{review_round}:{sample_no}:"
+                    f"{'targeted' if targeted_review else 'full'}"
+                ),
+                temperature=0.1,
+                max_tokens=8192,
+                format_retry_limit=int(
+                    get_setting("screenplay_format_retry_limit") or 1
+                ),
+                semantic_retry_limit=int(
+                    get_setting("screenplay_semantic_retry_limit") or 1
+                ),
+                call_meta={
+                    "stage": "剧本蓝图语义审稿",
+                    "stage_key": "screenplay_blueprint_review",
+                    "call_role": "stage_critic",
+                    "call_role_label": "蓝图独立语义审稿",
+                    "review_round": review_round,
+                    "review_sample": sample_no,
+                    "episode_id": str(episode.get("id") or ""),
+                    "contract_version": BLUEPRINT_VERSION,
+                    "substage": "risk_nodes" if targeted_review else "full",
+                    "source_count": len(projected_source.splitlines()),
+                },
+                repair_context=projected_source,
+            )
+            review.issues = [
+                issue
+                for issue in review.issues
+                if not blueprint_semantic_issue_is_resolved(
+                    issue,
+                    blueprint,
+                )
+            ]
+            return review
+
+        results = await asyncio.gather(
+            run_reviewer(1),
+            run_reviewer(2),
+            return_exceptions=True,
+        )
+        for sample_no, result in enumerate(results, start=1):
+            if isinstance(result, BaseException):
+                evidence_repository.append_event(
+                    trace.run_id,
+                    "BLUEPRINT_REVIEWER_UNAVAILABLE",
+                    "warning",
+                    "蓝图独立审稿样本不可用，已按 operational fail-closed 处理",
+                    step_run_id=trace.step_run_id,
+                    trace_id=trace.trace_id,
+                    payload={
+                        "review_round": review_round,
+                        "review_sample": sample_no,
+                        "error_type": type(result).__name__,
+                    },
+                ) if trace.run_id else None
                 continue
+            review = result
             reviews.append(review)
             artifact = evidence_repository.create_artifact(
                 EvidenceArtifact(
@@ -3567,7 +3661,7 @@ async def _semantic_review_narrative_blueprint(
                     type="screenplay_narrative_blueprint_review_consensus",
                     scope_type="episode",
                     scope_id=str(episode.get("id") or ""),
-                    status="validated",
+                    status="needs_revision",
                     trust_level="T1",
                     content={
                         "review_round": review_round,
@@ -3585,7 +3679,9 @@ async def _semantic_review_narrative_blueprint(
                 ),
                 step_run_id=trace.step_run_id,
             )
-            return blueprint
+            raise RuntimeError(
+                "蓝图语义审稿人不足两份，已停止而非静默视为无问题"
+            )
 
         issue_maps = [
             {

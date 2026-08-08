@@ -1119,6 +1119,39 @@ def test_repair_plan_does_not_delete_or_mutate_official_shots(repair_db) -> None
     assert planned.repair_candidate_shots == []
 
 
+def test_repair_plan_reuses_pinned_screenplay_authority(
+    repair_db,
+    monkeypatch,
+) -> None:
+    conn, screenplay = repair_db
+    plan = route_issues([
+        "[FRAME_STATE_INVALID] 第 2 镜首帧与 planned_state_in 不一致"
+    ])
+    monkeypatch.setattr(
+        "app.production.screenplay_authority.resolve_downstream_screenplay",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("修复阶段不应重新解析已锁定的剧本权威链")
+        ),
+    )
+
+    planned = _apply_repair(
+        SupervisorCheckpoint(
+            episode_id="e1",
+            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+            validated_prefix_end=3,
+        ),
+        plan,
+        conn,
+        "e1",
+        list(_current_board(conn).shots),
+        None,
+        repair_screenplay=screenplay,
+        narrative_repair_active=False,
+    )
+
+    assert planned.last_repair["status"] == "candidate_pending"
+
+
 def test_cognitive_bridge_is_isolated_until_candidate_commit(
     repair_db, monkeypatch,
 ) -> None:

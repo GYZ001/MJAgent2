@@ -1273,11 +1273,11 @@ def source_excerpt_overlap_spans(
     return spans
 
 
-def forbidden_prompt_content_errors(prompt_text: str, shot: Shot) -> list[str]:
-    """最终提示词不得含原文/完整前镜动作/未来剧情。
+def prompt_source_provenance_errors(prompt_text: str, shot: Shot) -> list[str]:
+    """验证最终提示词没有携带未授权的原文载荷。
 
     台词与画面必现字可以与 source_excerpt 重合；从 prompt 中剔除这些允许文本后，
-    扫描原文任意位置的长连续片段。
+    再比较来源文本的连续片段。这里验证数据来源边界，不按内容词汇判定。
     """
     errors: list[str] = []
     text = prompt_text or ""
@@ -1400,7 +1400,7 @@ def preflight_seedance_gates(
 
     if prompt_text:
         errors.extend(required_text_conflict_errors(shot, prompt_text))
-        errors.extend(forbidden_prompt_content_errors(prompt_text, shot))
+        errors.extend(prompt_source_provenance_errors(prompt_text, shot))
         # 仅对新协议分段提示词检查必填段落；兼容测试/人工 override 的短 prompt
         if "[FORMAT]" in prompt_text or "[ONE CURRENT ACTION]" in prompt_text:
             for marker in ("[START STATE", "[ONE CURRENT ACTION]", "[END STATE"):

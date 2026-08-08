@@ -90,7 +90,16 @@ class CompileError(ValueError):
     继承 ValueError 让单镜生成路由按 409 业务冲突返回，而不是被全局异常处理器
     误报为 500 系统内部错误。
     """
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        failure_kind: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = bool(retryable)
+        self.failure_kind = failure_kind
 
 
 def _shot_character_contract_names(shot: Shot) -> list[str]:

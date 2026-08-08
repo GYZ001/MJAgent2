@@ -550,6 +550,24 @@ class ScreenplayGenerationIR(BaseModel):
         return normalized
 
 
+def merge_scene_shards(**kwargs: Any) -> ScreenplayGenerationIR:
+    """Merge only validated scene-shard models into the compiler's full IR.
+
+    The implementation lives in the pre-document shard module; this lazy
+    boundary keeps ``ScreenplayGenerationIR`` as the sole compiler input while
+    avoiding a module import cycle.
+    """
+    from app.screenplay_scene_shards import (
+        ScreenplaySceneShardIR,
+        merge_screenplay_scene_shards,
+    )
+
+    shards = kwargs.get("shards") or []
+    if not all(isinstance(shard, ScreenplaySceneShardIR) for shard in shards):
+        raise TypeError("merge_scene_shards only accepts validated typed shards")
+    return merge_screenplay_scene_shards(**kwargs)
+
+
 def normalize_screenplay_ir_payload(
     value: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
