@@ -809,175 +809,276 @@ def _apply_authoritative_ir_identity_resolutions(
     bible: Bible,
     audit: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Bind IR display names to preflight authority before token indexing."""
-    resolutions = [
-        item
-        for item in (episode.get("character_resolutions") or [])
-        if (
-            isinstance(item, dict)
-            and str(item.get("source_label") or "").strip()
-            and str(item.get("canonical_name") or "").strip()
+    """Bind IR identities through exact authority references only.
+
+    The function intentionally performs no semantic inference.  Missing or
+    conflicting bindings are surfaced to the async AI adjudication stage.
+    """
+    changes, issues = prepare_ir_identity_authorities(
+        value,
+        episode=episode,
+        bible=bible,
+        audit=audit,
+    )
+    if issues:
+        first = issues[0]
+        reason = str(first.get("reason") or "identity_authority_unresolved")
+        if reason == "duplicate_display_authority":
+            message = (
+                "身份 token 指向多个实体："
+                + str(first.get("display_name") or "")
+            )
+        elif reason == "multiple_exact_authorities":
+            message = (
+                f"IR 身份 {first.get('identity_key')} 命中冲突的身份权威："
+                + "、".join(first.get("candidate_authority_ids") or [])
+            )
+        else:
+            message = (
+                f"IR 身份 {first.get('identity_key')} 缺少可验证的身份权威"
+            )
+        raise ScreenplayIRIdentityConflictError(message, issues=issues)
+    return changes
+
+
+def _bind_ir_identity_authority(
+    identity: IRIdentity,
+    authority: dict[str, Any],
+    *,
+    bible_by_name: dict[str, Any],
+    audit: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    authority_id = str(authority.get("authority_id") or "").strip()
+    canonical_name = str(authority.get("canonical_name") or "").strip()
+    if not authority_id or not canonical_name:
+        return None
+    before = {
+        "authority_id": identity.authority_id,
+        "display_name": identity.display_name,
+        "source_names": list(identity.source_names),
+        "role_type": identity.role_type,
+    }
+    identity.authority_id = authority_id
+    identity.display_name = canonical_name
+    identity.source_names = list(dict.fromkeys([
+        *identity.source_names,
+        *(
+            str(value or "").strip()
+            for value in authority.get("source_labels") or []
+            if str(value or "").strip()
+        ),
+    ]))
+    character = bible_by_name.get(canonical_name)
+    if character is not None:
+        identity.kind = character.role or identity.kind
+        identity.visual_policy = "canonical"
+        identity.visual_canonical = character.appearance_canonical
+        identity.asset_requirement = "required"
+        identity.voice_canonical = (
+            character.speech_style
+            or character.personality
+            or identity.voice_canonical
         )
-    ]
-    if not resolutions:
-        return []
-    bible_by_name = {character.name: character for character in bible.characters}
-    changes: list[dict[str, Any]] = []
+        identity.role_type = "named_character"
+    elif str(authority.get("identity_kind") or "") == "functional":
+        identity.role_type = "functional_character"
+    after = {
+        "authority_id": identity.authority_id,
+        "display_name": identity.display_name,
+        "source_names": list(identity.source_names),
+        "role_type": identity.role_type,
+    }
+    if before == after:
+        return None
+    change = {
+        "path": f"identities.{identity.key}",
+        "operation": "bind_exact_identity_authority",
+        "from": before,
+        "to": after,
+        "reason": "explicit_or_unique_exact_authority_reference",
+    }
+    audit.append(change)
+    return change
+
+
+def _rewrite_ir_identity_key(
+    value: ScreenplayGenerationIR,
+    old_key: str,
+    new_key: str,
+) -> None:
+    def replace(tokens: list[str]) -> list[str]:
+        return list(dict.fromkeys(
+            new_key if token == old_key else token
+            for token in tokens
+        ))
+
+    for scene in value.scenes:
+        scene.character_keys = replace(scene.character_keys)
+        for unit in scene.units:
+            if unit.speaker_key == old_key:
+                unit.speaker_key = new_key
+    for event in value.events:
+        event.actor_keys = replace(event.actor_keys)
+        event.target_keys = replace(event.target_keys)
+        event.perceivable_by = replace(event.perceivable_by)
+    for beat in value.beats:
+        if beat.who == old_key:
+            beat.who = new_key
+
+
+def _merge_ir_identities_with_same_authority(
+    value: ScreenplayGenerationIR,
+    *,
+    audit: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_authority: defaultdict[str, list[IRIdentity]] = defaultdict(list)
     for identity in value.identities:
-        tokens = {
-            str(identity.display_name or "").strip(),
-            *(
-                str(name or "").strip()
-                for name in identity.source_names
-            ),
-        }
-        exact_matches = [
-            resolution
-            for resolution in resolutions
-            if (
-                str(resolution.get("source_label") or "").strip()
-                in tokens
-            )
-        ]
-        matched = exact_matches
-        if not matched and identity.role_type == "functional_character":
-            rationale_matches = [
-                resolution
-                for resolution in resolutions
-                if str(resolution.get("source_label") or "").strip()
-                in str(identity.rationale or "")
-            ]
-            if rationale_matches:
-                longest = max(
-                    len(str(item.get("source_label") or "").strip())
-                    for item in rationale_matches
-                )
-                matched = [
-                    item
-                    for item in rationale_matches
-                    if len(str(item.get("source_label") or "").strip())
-                    == longest
-                ]
-        canonical_names = {
-            str(item.get("canonical_name") or "").strip()
-            for item in matched
-        }
-        canonical_names.discard("")
-        if len(canonical_names) > 1:
-            future_matches = [
-                item
-                for item in matched
-                if str(item.get("resolution") or "") == "future_identity"
-            ]
-            future_names = {
-                str(item.get("canonical_name") or "").strip()
-                for item in future_matches
-                if str(item.get("canonical_name") or "").strip()
-            }
-            display_name = str(identity.display_name or "").strip()
-            display_matches = [
-                item
-                for item in matched
-                if (
-                    display_name
-                    and str(item.get("canonical_name") or "").strip()
-                    == display_name
-                )
-            ]
-            if len(future_names) == 1:
-                matched = future_matches
-            elif display_matches:
-                matched = display_matches
-            else:
-                matches_by_group: defaultdict[str, list[dict[str, Any]]] = (
-                    defaultdict(list)
-                )
-                for item in matched:
-                    group = str(item.get("identity_group") or "").strip()
-                    if group:
-                        matches_by_group[group].append(item)
-                ranked_groups = sorted(
-                    matches_by_group.items(),
-                    key=lambda pair: len(pair[1]),
-                    reverse=True,
-                )
-                if (
-                    ranked_groups
-                    and (
-                        len(ranked_groups) == 1
-                        or len(ranked_groups[0][1])
-                        > len(ranked_groups[1][1])
-                    )
-                ):
-                    group_names = {
-                        str(item.get("canonical_name") or "").strip()
-                        for item in ranked_groups[0][1]
-                        if str(item.get("canonical_name") or "").strip()
-                    }
-                    if len(group_names) == 1:
-                        matched = ranked_groups[0][1]
-            canonical_names = {
-                str(item.get("canonical_name") or "").strip()
-                for item in matched
-                if str(item.get("canonical_name") or "").strip()
-            }
-        if len(canonical_names) > 1:
-            raise ScreenplayIRIdentityConflictError(
-                f"IR 身份 {identity.key} 命中冲突的预检真名："
-                + "、".join(sorted(canonical_names))
-            )
-        if not canonical_names:
+        if identity.authority_id:
+            by_authority[identity.authority_id].append(identity)
+    removed: set[str] = set()
+    changes: list[dict[str, Any]] = []
+    for authority_id, identities in by_authority.items():
+        if len(identities) < 2:
             continue
-        canonical_name = next(iter(canonical_names))
-        resolution_kinds = {
-            str(item.get("resolution") or "")
-            for item in matched
-        }
-        source_names = list(dict.fromkeys([
-            *identity.source_names,
-            *(
-                str(item.get("source_label") or "").strip()
-                for item in matched
-            ),
-        ]))
-        before = str(identity.display_name or "").strip()
-        identity.source_names = source_names
-        replace_display_name = bool(
-            "future_identity" in resolution_kinds
-            or "functional_extra" in resolution_kinds
-            or not before
-            or before in {
-                str(item.get("source_label") or "").strip()
-                for item in matched
-            }
-            or is_functional_extra(before)
-        )
-        if replace_display_name:
-            identity.display_name = canonical_name
-        character = bible_by_name.get(canonical_name)
-        if character is not None and replace_display_name:
-            identity.kind = character.role or identity.kind
-            identity.visual_policy = "canonical"
-            identity.visual_canonical = character.appearance_canonical
-            identity.asset_requirement = "required"
-            identity.voice_canonical = (
-                character.speech_style
-                or character.personality
-                or identity.voice_canonical
-            )
-            identity.role_type = "named_character"
-        if replace_display_name and before != canonical_name:
+        keeper = identities[0]
+        for duplicate in identities[1:]:
+            _rewrite_ir_identity_key(value, duplicate.key, keeper.key)
+            keeper.source_names = list(dict.fromkeys([
+                *keeper.source_names,
+                *duplicate.source_names,
+            ]))
+            removed.add(duplicate.key)
             change = {
-                "path": f"identities.{identity.key}.display_name",
-                "operation": "apply_preflight_identity_authority",
-                "from": before,
-                "to": canonical_name,
-                "source_names": source_names,
-                "reason": "screenplay_character_resolution_is_authoritative",
+                "path": f"identities.{duplicate.key}",
+                "operation": "merge_same_identity_authority",
+                "from": duplicate.key,
+                "to": keeper.key,
+                "authority_id": authority_id,
+                "reason": "identical_explicit_authority_reference",
             }
             changes.append(change)
             audit.append(change)
+    if removed:
+        value.identities = [
+            identity for identity in value.identities
+            if identity.key not in removed
+        ]
     return changes
+
+
+def prepare_ir_identity_authorities(
+    value: ScreenplayGenerationIR,
+    *,
+    episode: dict[str, Any],
+    bible: Bible,
+    audit: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply exact bindings and return unresolved semantic cases for AI."""
+    registry = identity_authority_registry(
+        bible,
+        episode.get("character_resolutions") or [],
+    )
+    by_id = {
+        str(item.get("authority_id") or "").strip(): item
+        for item in registry
+        if str(item.get("authority_id") or "").strip()
+    }
+    bible_by_name = {
+        str(character.name or "").strip(): character
+        for character in bible.characters
+        if str(character.name or "").strip()
+    }
+    changes: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    for identity in value.identities:
+        explicit = str(identity.authority_id or "").strip()
+        authority = by_id.get(explicit) if explicit else None
+        if explicit and authority is None:
+            issues.append({
+                "identity_key": identity.key,
+                "reason": "unknown_explicit_authority",
+                "authority_id": explicit,
+            })
+            continue
+        if authority is None and identity.role_type == "narrator":
+            authority = {
+                "authority_id": f"narrator:{identity.key}",
+                "canonical_name": identity.display_name or identity.key,
+                "identity_kind": "narrator",
+                "source_labels": list(identity.source_names),
+            }
+        if authority is None:
+            tokens = {
+                str(identity.display_name or "").strip(),
+                *(
+                    str(name or "").strip()
+                    for name in identity.source_names
+                    if str(name or "").strip()
+                ),
+            }
+            candidate_ids = {
+                str(item.get("authority_id") or "").strip()
+                for item in registry
+                if (
+                    str(item.get("canonical_name") or "").strip() in tokens
+                    or bool(tokens.intersection({
+                        str(label or "").strip()
+                        for label in item.get("source_labels") or []
+                        if str(label or "").strip()
+                    }))
+                )
+            }
+            candidate_ids.discard("")
+            if len(candidate_ids) == 1:
+                authority = by_id[next(iter(candidate_ids))]
+            elif len(candidate_ids) > 1:
+                issues.append({
+                    "identity_key": identity.key,
+                    "reason": "multiple_exact_authorities",
+                    "tokens": sorted(tokens),
+                    "candidate_authority_ids": sorted(candidate_ids),
+                })
+                continue
+            else:
+                issues.append({
+                    "identity_key": identity.key,
+                    "reason": "missing_exact_authority",
+                    "tokens": sorted(tokens),
+                    "candidate_authority_ids": [],
+                })
+                continue
+        change = _bind_ir_identity_authority(
+            identity,
+            authority,
+            bible_by_name=bible_by_name,
+            audit=audit,
+        )
+        if change:
+            changes.append(change)
+
+    changes.extend(_merge_ir_identities_with_same_authority(
+        value,
+        audit=audit,
+    ))
+    duplicate_displays: defaultdict[str, list[IRIdentity]] = defaultdict(list)
+    for identity in value.identities:
+        display_name = str(identity.display_name or "").strip()
+        if display_name:
+            duplicate_displays[display_name].append(identity)
+    for display_name, identities in duplicate_displays.items():
+        authority_ids = {
+            str(identity.authority_id or "").strip()
+            for identity in identities
+        }
+        if len(identities) > 1 and len(authority_ids) > 1:
+            issues.append({
+                "identity_key": identities[0].key,
+                "identity_keys": [identity.key for identity in identities],
+                "reason": "duplicate_display_authority",
+                "display_name": display_name,
+                "candidate_authority_ids": sorted(authority_ids),
+            })
+    return changes, issues
 
 
 def recover_complete_screenplay_ir_prefix(raw: str) -> dict[str, Any] | None:
@@ -2210,6 +2311,13 @@ def compile_screenplay_ir(
                 "reason": "identity_source_name_is_directly_authorized",
             })
             identity.display_name = source_names[0]
+    _apply_authoritative_ir_identity_resolutions(
+        value,
+        episode=episode,
+        bible=bible,
+        audit=compiler_audit,
+    )
+    identity_by_key = _unique_by_key(value.identities, "identities")
     units_by_event: defaultdict[str, list[IRSceneUnit]] = defaultdict(list)
     for scene in value.scenes:
         for unit in scene.units:
@@ -2711,25 +2819,20 @@ def compile_screenplay_ir(
                 "reason": "deterministic_event_projection",
             })
 
-    _apply_authoritative_ir_identity_resolutions(
-        value,
-        episode=episode,
-        bible=bible,
-        audit=compiler_audit,
-    )
-    _normalize_duplicate_ir_identity_displays(
-        value,
-        episode=episode,
-        source_text=source_text,
-        bible=bible,
-        audit=compiler_audit,
-    )
     bible_by_name = {item.name: item for item in bible.characters}
     identity_token_to_key: dict[str, str] = {}
     for key, identity in identity_by_key.items():
         for token in (key, identity.display_name):
             if token and token in identity_token_to_key and identity_token_to_key[token] != key:
-                raise ValueError(f"身份 token 指向多个实体：{token}")
+                raise ScreenplayIRIdentityConflictError(
+                    f"身份 token 指向多个实体：{token}",
+                    issues=[{
+                        "identity_key": key,
+                        "reason": "duplicate_display_authority",
+                        "display_name": token,
+                        "identity_keys": [identity_token_to_key[token], key],
+                    }],
+                )
             if token:
                 identity_token_to_key[token] = key
     for name, character in bible_by_name.items():
