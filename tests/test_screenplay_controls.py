@@ -64,7 +64,8 @@ def test_production_state_resumes_post_baseline_stages() -> None:
     assert finalize["baseline_done"] is True
     assert finalize["can_resume_repair"] is True
     assert [item["label"] for item in finalize["stages"]] == [
-        "人物识别", "生成首版", "结构校验", "质量评分", "原子发布", "已完成",
+        "人物识别", "叙事蓝图", "身份冻结", "全局包络", "场次写作",
+        "全局编译", "结构校验", "质量评分", "原子发布", "已完成",
     ]
 
     save_checkpoint(revision.id, {
@@ -80,6 +81,38 @@ def test_production_state_resumes_post_baseline_stages() -> None:
     assert all(item["status"] == "completed" for item in completed["stages"])
     assert completed["quality_score"] == 42.0
     assert completed["quality_issue_count"] == 3
+
+
+def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    save_checkpoint(revision.id, {
+        "phase": "SCENE_SHARD_GENERATION",
+        "blueprint_artifact_id": "art-blueprint",
+        "identity_artifact_id": "art-identity",
+        "envelope_artifact_id": "art-envelope",
+        "yield_reason": "user_cancelled",
+        "shards": [
+            {"shard_id": "SS001", "status": "validated"},
+            {"shard_id": "SS002", "status": "failed"},
+            {"shard_id": "SS003", "status": "pending"},
+        ],
+    })
+    state = screenplay_production_state("e1")
+    assert state["operation"] == "baseline"
+    assert state["baseline_done"] is False
+    assert state["can_resume_baseline"] is True
+    assert state["can_resume_repair"] is False
+    assert state["shard_progress"] == {
+        "total": 3,
+        "validated": 1,
+        "running": 0,
+        "failed": 1,
+    }
+    assert state["yield_reason"] == "user_cancelled"
 
 
 def test_resume_route_has_a_distinct_capability() -> None:

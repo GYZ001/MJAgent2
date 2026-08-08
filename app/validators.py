@@ -4323,10 +4323,36 @@ def validate_storyboard_direction_contract(
             *list(current.key_line_ids or []),
             *list(current.information_ids or []),
         }
+        previous_contribution = (
+            previous.shot_contribution.model_dump(mode="json")
+            if previous.shot_contribution is not None else {}
+        )
+        current_contribution = (
+            current.shot_contribution.model_dump(mode="json")
+            if current.shot_contribution is not None else {}
+        )
+        previous_contribution.pop("shot_contribution_id", None)
+        current_contribution.pop("shot_contribution_id", None)
+
+        def _has_structured_gain() -> bool:
+            """Detect a real graph delivery that the legacy ID set cannot express."""
+            for field, value in current_contribution.items():
+                previous_value = previous_contribution.get(field)
+                if isinstance(value, list):
+                    if set(value) - set(previous_value or []):
+                        return True
+                elif isinstance(value, dict):
+                    if value and value != (previous_value or {}):
+                        return True
+                elif value not in (None, "", 0, 0.0, False) and value != previous_value:
+                    return True
+            return False
+
         same_delivery = (
             bool(previous_delivery)
             and previous_delivery == current_delivery
             and _too_similar(previous.resulting_change, current.resulting_change)
+            and not _has_structured_gain()
         )
         split_action_continuation = bool(
             current.continuity_mode == "action_continuation"

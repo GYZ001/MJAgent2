@@ -444,8 +444,12 @@ def test_keyframe_qa_contract_checks_side_contact_height_and_target(monkeypatch)
     assert "站直基准身高、头身比和骨架尺度必须一致" in requirements
     assert captured["shot"]["target_keyframe_desc"] == shot.last_frame_desc
     assert {
-        "wrong_camera_angle", "contact_missing", "contact_phase_mismatch", "relative_scale_mismatch",
-    } <= set(qa["hard_failures"])
+        "side_view_match_below_contract",
+        "contact_visibility_below_contract",
+        "contact_phase_match_below_contract",
+        "relative_height_match_below_contract",
+    } <= set(qa["blocking_facts"])
+    assert qa["runtime_blocking"] is True
     assert qa["rule_version"] == "keyframe_geometry_qa_v3"
 
 
@@ -522,8 +526,9 @@ def test_independent_geometry_guard_overrides_false_high_height_score(
     assert len(calls) == 2
     assert qa["geometry_guard"]["passed"] is False
     assert qa["relative_height_match"] == 0.2
-    assert "relative_scale_mismatch" in qa["hard_failures"]
-    assert keyframe_gate_passed(qa) is True
+    assert "geometry_guard_failed" in qa["blocking_facts"]
+    assert "relative_height_match_below_contract" in qa["blocking_facts"]
+    assert keyframe_gate_passed(qa) is False
 
 
 def test_contact_phase_is_never_inferred_from_prose() -> None:
@@ -751,7 +756,8 @@ def test_real_group_wording_is_a_required_qa_diagnostic(monkeypatch) -> None:
 
     assert captured["shot"]["collective_presence_required"] is True
     assert captured["output_schema"]["collective_presence_match"] == 0.0
-    assert "collective_group_missing" in qa["hard_failures"]
+    assert "collective_presence_match_below_contract" in qa["blocking_facts"]
+    assert qa["runtime_blocking"] is True
 
 
 def test_required_text_is_only_forced_when_active_at_target_instant() -> None:
@@ -886,4 +892,10 @@ def test_missing_geometry_diagnostics_are_unverified(monkeypatch) -> None:
 
     assert qa["status"] == "unverified"
     assert qa["overall"] is None
-    assert "diagnostic_missing" in qa["hard_failures"]
+    assert {
+        "side_view_match_missing",
+        "contact_visibility_missing",
+        "contact_phase_match_missing",
+        "relative_height_match_missing",
+    } <= set(qa["blocking_facts"])
+    assert qa["runtime_blocking"] is True

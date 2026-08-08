@@ -566,3 +566,7 @@ def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
     assert "必保留原文台词" not in source
     assert "/target-duration" not in source
     assert "required_dialogue" not in source
+    assert "继续首版场次生成" in source
+    assert "继续完整剧本校验" in source
+    assert "场次写作已完成 {ep.screenplay_production.shard_progress.validated}/" in source
+    assert "shard_progress" in source

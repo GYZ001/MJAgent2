@@ -190,6 +190,33 @@ def test_direction_contract_allows_valid_split_action_continuation() -> None:
     assert not any("交付内容和结果几乎相同" in error for error in errors)
 
 
+def test_direction_contract_allows_distinct_structured_contribution_gain() -> None:
+    first = _shot(1, focus="context", size="全景", move="固定").model_copy(update={
+        "resulting_change": "观众确认门外危险已经逼近",
+        "shot_contribution": ShotContribution(
+            shot_contribution_id="SCONTRIB-SH0001",
+            evidence_ids=["EV-DOOR"],
+        ),
+    })
+    second = _shot(2, focus="action", size="中景", move="跟随").model_copy(update={
+        "resulting_change": "观众确认门外危险已经逼近",
+        "shot_contribution": ShotContribution(
+            shot_contribution_id="SCONTRIB-SH0002",
+            story_delta_fact_ids=["FACT-DOOR-LOCKED"],
+            character_state_delta_ids=["CSD-GUYAN-ALERT"],
+        ),
+    })
+    outline = _outline()
+    outline.shots = outline.shots[:2]
+
+    errors = validate_storyboard_direction_contract(
+        Storyboard(episode_no=1, shots=[first, second]),
+        outline,
+    )
+
+    assert not any("交付内容和结果几乎相同" in error for error in errors)
+
+
 def test_source_coverage_is_exhaustive_and_round_trips() -> None:
     source = "第一段发生关键事件。\n\n第二段补充人物关系。"
     screenplay = EpisodeScreenplay(

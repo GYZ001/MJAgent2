@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 
 import pytest
 from pydantic import ValidationError
 
 from app.narrative_blueprint import NarrativeBlueprint, derive_blueprint_scene_plans
+from app.evidence import repository as evidence_repository
+from app.harness.types import EvidenceArtifact
 from app.screenplay_ir import IRIdentity, IRScene, IRSceneUnit
 from app.screenplay_scene_shards import (
     SCREENPLAY_SCENE_SHARD_VERSION,
@@ -13,10 +16,13 @@ from app.screenplay_scene_shards import (
     ScreenplayEnvelopeIR,
     ScreenplayEnvelopeMetadata,
     ScreenplaySceneMergeError,
+    ScreenplaySceneShardError,
+    ScreenplaySceneShardOwnershipLost,
     ScreenplaySceneShardIR,
     UnresolvedParticipant,
     blueprint_content_hash,
     build_screenplay_scene_shard_plans,
+    generate_screenplay_scene_shards,
     merge_screenplay_scene_shards,
     validate_screenplay_scene_shard,
 )
@@ -229,3 +235,87 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
     assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v1"
+
+
+def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    episode_id = "ep-scene-shard-cache-test"
+    cached_ids: list[str] = []
+    for plan in plans:
+        shard = _shard(plan, blueprint)
+        artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="screenplay_scene_shard",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T1",
+            content=shard.model_dump(mode="json"),
+            contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+        ))
+        cached_ids.append(str(artifact["id"]))
+
+    async def forbidden_chat(*_args, **_kwargs):
+        raise AssertionError("validated shard must not be billed twice")
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        forbidden_chat,
+    )
+    shards, artifact_ids, rows = asyncio.run(generate_screenplay_scene_shards(
+        episode={"id": episode_id, "episode_no": 1},
+        source_text=SOURCE,
+        blueprint=blueprint,
+        identity_registry=[],
+        identities=_identities(),
+        plans=plans,
+    ))
+    assert len(shards) == len(plans)
+    assert artifact_ids == cached_ids
+    assert all(row["status"] == "validated" for row in rows)
+    assert all(row["attempt"] == 0 and row["reused"] for row in rows)
+
+
+def test_owner_change_after_provider_response_prevents_artifact_persist(monkeypatch) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    episode_id = "ep-scene-shard-owner-fence-test"
+    checks = 0
+
+    def fake_owner_check(_episode_id: str) -> None:
+        nonlocal checks
+        checks += 1
+        if checks >= 2:
+            raise ScreenplaySceneShardOwnershipLost("owner changed")
+
+    async def fake_structured(*_args, **_kwargs):
+        return _shard(plan, blueprint)
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards._assert_episode_owner",
+        fake_owner_check,
+    )
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    with pytest.raises(ScreenplaySceneShardError, match="owner changed"):
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={"id": episode_id, "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=[plan],
+        ))
+    assert evidence_repository.latest_artifact(
+        "screenplay_scene_shard", "episode", episode_id,
+    ) is None

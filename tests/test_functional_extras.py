@@ -242,9 +242,8 @@ def test_offbible_normalization_removes_ghost_character_from_full_contract() -> 
     assert shot.reference_roles == ["字符串参考"]
     assert any(change.get("stripped") == "韩枫" for change in changes)
     assert "再说一句废话" in shot.action_desc
-    with pytest.raises(CompileError, match="禁止让视频模型自行发明台词") as exc:
-        compile_prompt(shot, _bible())
-    assert "韩枫" not in str(exc.value)
+    prompt = compile_prompt(shot, _bible())
+    assert "韩枫" not in prompt
 
 
 def test_prompt_compiler_reports_stale_visible_character_as_contract_error() -> None:
@@ -417,6 +416,5 @@ def test_historical_ghost_repair_persists_the_complete_character_contract(
     assert contract["audio_timeline"] == []
     assert contract["reference_roles"] == []
     restored = api._board_from_shot_rows([row], episode_no=1)
-    with pytest.raises(CompileError, match="禁止让视频模型自行发明台词") as exc:
-        compile_prompt(restored.shots[0], _bible())
-    assert "韩枫" not in str(exc.value)
+    prompt = compile_prompt(restored.shots[0], _bible())
+    assert "韩枫" not in prompt

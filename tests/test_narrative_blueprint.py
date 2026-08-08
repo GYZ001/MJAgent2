@@ -1,4 +1,8 @@
+import asyncio
 from types import SimpleNamespace
+import uuid
+
+import pytest
 
 from app import stages
 from app.narrative_blueprint import (
@@ -628,3 +632,60 @@ def test_shard_gate_rejects_composite_location_and_unknown_fact() -> None:
 
     assert any("LOCATION_COMPOSITE" in error for error in errors)
     assert any("FACT_UNKNOWN" in error for error in errors)
+def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    modes: list[str] = []
+
+    async def fake_structured(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        modes.append(meta["substage"])
+        if meta["substage"] == "full":
+            return BlueprintSemanticReview(issues=[])
+        code = "timeline_conflict" if meta["review_sample"] == 1 else "spatial_action_gap"
+        return BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+            code=code,
+            node_keys=["n2"],
+            source_segment_ids=["SRC0002"],
+            message="两位审稿人的定向判断不同",
+            required_resolution="仅在全量上下文确认后处理",
+        )])
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true" if key == "screenplay_targeted_blueprint_review_enabled" else "1",
+    )
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": f"ep-blueprint-full-fallback-{uuid.uuid4()}", "episode_no": 8},
+        source_text=SOURCE,
+    ))
+    assert result is blueprint
+    assert modes == ["risk_nodes", "risk_nodes", "full", "full"]
+
+
+def test_blueprint_review_fails_closed_when_one_reviewer_is_unavailable(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+
+    async def fake_structured(*_args, **kwargs):
+        if kwargs["call_meta"]["review_sample"] == 1:
+            raise RuntimeError("review provider unavailable")
+        return BlueprintSemanticReview(issues=[])
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true" if key == "screenplay_targeted_blueprint_review_enabled" else "1",
+    )
+    with pytest.raises(RuntimeError, match="不足两份"):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            blueprint,
+            episode={"id": f"ep-blueprint-review-unavailable-{uuid.uuid4()}", "episode_no": 8},
+            source_text=SOURCE,
+        ))

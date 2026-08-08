@@ -408,7 +408,7 @@ def test_visible_cast_projection_is_inactive_when_visual_states_match_cast() -> 
     assert shot.state_out in prompt
 
 
-def test_solitary_subject_can_still_keep_scripted_background_crowd() -> None:
+def test_prose_does_not_infer_an_undeclared_background_collective() -> None:
     shot = _shot(
         dialogues=[],
         characters=["甲"],
@@ -421,7 +421,7 @@ def test_solitary_subject_can_still_keep_scripted_background_crowd() -> None:
 
     contract = keyframe_visual_contract(shot, _bible())
     assert contract["collective_presence_forbidden"] is False
-    assert contract["collective_presence_required"] is True
+    assert contract["collective_presence_required"] is False
 
 
 def test_offscreen_voice_keeps_listener_as_visual_subject() -> None:

@@ -1450,14 +1450,22 @@ def retry_job(job_id: str, body: dict | None = None):
     if not row:
         raise HTTPException(404, "媒体任务不存在")
     item = dict(row)
-    input_repair_codes = {
-        "FIRST_LAST_FRAME_REPAIR_REQUIRED",
-        "REFERENCE_IMAGE_REPAIR_REQUIRED",
-        "VIDEO_INPUT_REPAIR_REQUIRED",
-    }
-    waiting_input_repair = (
+    try:
+        input_metadata = json.loads(item.get("image_inputs") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        input_metadata = {}
+    shot_plan_id = str(input_metadata.get("shot_plan_id") or "")
+    shot_plan = (
+        conn.execute(
+            "SELECT status FROM shot_video_generation_plans WHERE id=?",
+            (shot_plan_id,),
+        ).fetchone()
+        if shot_plan_id else None
+    )
+    waiting_input_repair = bool(
         item["status"] == "waiting_human"
-        and item.get("reason_code") in input_repair_codes
+        and shot_plan is not None
+        and shot_plan["status"] == "waiting_asset"
     )
     if item["status"] not in {
         "failed", "cancelled", "paused", "paused_external", "paused_budget", "waiting_retry",
@@ -1536,7 +1544,7 @@ def retry_job(job_id: str, body: dict | None = None):
                 provider_recovery_unconfirmed = True
         provider_terminal_failure = bool(
             has_provider_task
-            and item["status"] == "failed"
+            and item.get("provider_create_state") == "model_rejected"
         )
         if provider_terminal_failure:
             raise HTTPException(409, detail={
@@ -1655,11 +1663,6 @@ def retry_job(job_id: str, body: dict | None = None):
                    WHERE id=? AND status='waiting_human'""",
                 (item["version_id"],),
             )
-            try:
-                metadata = json.loads(item.get("image_inputs") or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                metadata = {}
-            shot_plan_id = str(metadata.get("shot_plan_id") or "")
             if shot_plan_id:
                 conn.execute(
                     """UPDATE shot_video_generation_plans

@@ -5522,6 +5522,88 @@ def _compact_narrative_plan_context(screenplay: EpisodeScreenplay) -> str:
     )
 
 
+def _shot_narrative_plan_context(
+    screenplay: EpisodeScreenplay,
+    brief: StoryboardOutlineShot | None,
+) -> str:
+    """Project the transitive authority-graph neighborhood for one shot.
+
+    Node selection follows declared IDs and graph references.  It does not
+    classify words, genres, identities, or issue types.  The complete graph is
+    still consumed while compiling the outline; a per-shot fallback only needs
+    the nodes reachable from its already-approved task.
+    """
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return "【本镜叙事权威图投影】缺失；新生产不得生成分镜。\n"
+    if brief is None:
+        return _compact_narrative_plan_context(screenplay)
+
+    def _strings(value: Any):
+        if isinstance(value, str):
+            if value:
+                yield value
+        elif isinstance(value, dict):
+            for nested in value.values():
+                yield from _strings(nested)
+        elif isinstance(value, (list, tuple, set)):
+            for nested in value:
+                yield from _strings(nested)
+
+    nodes: dict[str, tuple[str, BaseModel]] = {}
+    ordered_fields: list[str] = []
+    for field_name in plan.__class__.model_fields:
+        collection = getattr(plan, field_name, None)
+        if not isinstance(collection, list):
+            continue
+        for item in collection:
+            if not isinstance(item, BaseModel):
+                continue
+            identity = ""
+            for item_field in item.__class__.model_fields:
+                candidate = getattr(item, item_field, None)
+                if item_field.endswith("_id") and isinstance(candidate, str) and candidate:
+                    identity = candidate
+                    break
+            if not identity:
+                continue
+            nodes[identity] = (field_name, item)
+            if field_name not in ordered_fields:
+                ordered_fields.append(field_name)
+
+    referenced = set(_strings(brief.model_dump(mode="json")))
+    selected: set[str] = set()
+    frontier = set(referenced) & set(nodes)
+    while frontier:
+        node_id = frontier.pop()
+        if node_id in selected:
+            continue
+        selected.add(node_id)
+        node_payload = nodes[node_id][1].model_dump(mode="json")
+        frontier.update(
+            value for value in _strings(node_payload)
+            if value in nodes and value not in selected
+        )
+
+    payload: dict[str, Any] = {
+        "contract_version": plan.contract_version,
+        "scope_id": plan.scope_id,
+    }
+    for field_name in ordered_fields:
+        items = [
+            item.model_dump(mode="json")
+            for node_id, (node_field, item) in nodes.items()
+            if node_field == field_name and node_id in selected
+        ]
+        if items:
+            payload[field_name] = items
+    return (
+        "【本镜叙事权威图投影·按 ID 关系从完整权威图闭包取得】\n"
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n"
+    )
+
+
 def _storyboard_narrative_contract_block(*, include_outline_windows: bool) -> str:
     """Return the ID-level narrative task contract shared by both shot stages.
 
@@ -5675,7 +5757,11 @@ def _storyboard_narrative_contract_block(*, include_outline_windows: bool) -> st
     )
 
 
-def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
+def _storyboard_key_content_block(
+    screenplay: EpisodeScreenplay,
+    *,
+    brief: StoryboardOutlineShot | None = None,
+) -> str:
     """把剧本台主线合同渲染成分镜 prompt 区块（spine + key_lines/points + drop_list）。"""
     key_lines = [ln.strip() for ln in (screenplay.key_lines or []) if ln and ln.strip()]
     key_points = [pt.strip() for pt in (screenplay.key_plot_points or []) if pt and pt.strip()]
@@ -5693,7 +5779,11 @@ def _storyboard_key_content_block(screenplay: EpisodeScreenplay) -> str:
     else:
         lines_text = "\n".join(f"- {ln}" for ln in key_lines) or "（剧本未单列，请从完整剧本文本中提取主线对白）"
     points_text = "\n".join(f"- {pt}" for pt in key_points) or "（剧本未单列，请从完整剧本文本中提取主线剧情）"
-    blocks: list[str] = [_compact_narrative_plan_context(screenplay), ""]
+    blocks: list[str] = [
+        _shot_narrative_plan_context(screenplay, brief)
+        if brief is not None else _compact_narrative_plan_context(screenplay),
+        "",
+    ]
     spine = screenplay.plot_spine
     if spine:
         beats = spine.spine_beats or []
@@ -6600,7 +6690,6 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         )
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
-    key_content_block = _storyboard_key_content_block(screenplay)
     narrative_shot_contract = _storyboard_narrative_contract_block(
         include_outline_windows=True,
     )
@@ -7041,12 +7130,18 @@ def _render_storyboard_outline(
     current_shot_no: int,
     valid_info_ids: set[str] | None = None,
 ) -> str:
-    """把整集大纲渲染进逐镜 prompt，并标出"本镜"在大纲里的位置，让模型按计划推进、不越位也不停留。"""
+    """Render a bounded local window plus the ID-only global sequence."""
     if not outline or not outline.shots:
         return ""
     total = len(outline.shots)
     rows = []
+    neighborhood = {
+        shot_no for shot_no in range(current_shot_no - 1, current_shot_no + 2)
+        if 1 <= shot_no <= total
+    }
     for s in outline.shots:
+        if s.shot_no not in neighborhood:
+            continue
         scene_label = s.scene_name or s.scene_setting
         scene = f"｜{s.scene_time or '时间未定'}｜{scene_label}" if scene_label else ""
         covers = f"｜落实：{s.covers}" if (s.covers or "").strip() else ""
@@ -7086,7 +7181,16 @@ def _render_storyboard_outline(
             f"第{s.shot_no}/{total}镜{scene}：{s.beat}{state}{event}{info}"
             f"{narrative}{covers}{mark}"
         )
-    return "本集分镜大纲（全局节奏计划，按它推进；本镜只落实标注「← 本镜」的那一条）：\n" + "\n".join(rows)
+    sequence = " ".join(
+        f"{s.shot_no}:{s.shot_id or '-'}:{','.join(s.event_ids) or s.story_event_id or '-'}"
+        for s in outline.shots
+    )
+    return (
+        "本集分镜大纲（仅展开相邻任务；本镜只落实标注「← 本镜」的一条）：\n"
+        + "\n".join(rows)
+        + "\n全局顺序索引（镜号:shot_id:event_ids，仅用于确认位置，不得据此扩写）：\n"
+        + sequence
+    )
 
 
 def _outline_brief(outline: StoryboardOutline | None, shot_no: int):
@@ -8314,6 +8418,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
         )
     budget_block = _storyboard_progress_block(completed_shots)
     brief = _outline_brief(outline, shot_no)
+    key_content_block = _storyboard_key_content_block(screenplay, brief=brief)
     valid_info_ids = {item.info_id for item in screenplay.information_ledger or []}
     outline_block = _render_storyboard_outline(outline, shot_no, valid_info_ids)
     current_info_ids = [
@@ -8522,8 +8627,8 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
 上一镜详细承接：{_render_completed_shots_context(completed_shots[-1:])}
 本镜大纲叙事任务（必须原样承接）：
 {json.dumps(brief.model_dump(mode="json") if brief is not None else {}, ensure_ascii=False, separators=(",", ":"))}
-剧本叙事权威图：
-{_compact_narrative_plan_context(screenplay)}
+本镜叙事权威图投影：
+{_shot_narrative_plan_context(screenplay, brief)}
 本镜相关剧本：
 {screenplay_window}
 本镜可逐字摘录原文：
