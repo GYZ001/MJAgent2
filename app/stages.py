@@ -8253,6 +8253,41 @@ def storyboard_planning_bible(
     return planning_bible
 
 
+def _scene_pack_chunk_validation_outline(
+    outline: StoryboardOutline,
+    scene_context: StoryboardSceneContext,
+    briefs: list[StoryboardOutlineShot],
+) -> StoryboardOutline:
+    """Project whole-scene obligations onto the bounded chunk that owns them.
+
+    Large scenes are generated in several model calls.  Context requirements
+    are graph deliveries owned by specific outline shots, normally the first
+    shot of the scene.  Revalidating every later chunk against the complete
+    scene requirement list makes an already-delivered obligation impossible
+    to satisfy and wastes repair calls.  Keep only requirements explicitly
+    assigned to this chunk's briefs; whole-outline validation remains the
+    authority that proves every scene requirement has an owner.
+    """
+    chunk_requirement_ids = {
+        str(requirement_id or "").strip()
+        for brief in briefs
+        for requirement_id in brief.context_requirement_ids
+        if str(requirement_id or "").strip()
+    }
+    chunk_context = scene_context.model_copy(update={
+        "context_requirements": [
+            requirement
+            for requirement in scene_context.context_requirements
+            if requirement.requirement_id in chunk_requirement_ids
+        ],
+    })
+    return StoryboardOutline(
+        episode_no=outline.episode_no,
+        shots=briefs,
+        scene_contexts=[chunk_context],
+    )
+
+
 async def generate_storyboard_scene_pack(
     episode: dict,
     source_text: str,
@@ -8441,10 +8476,10 @@ async def generate_storyboard_scene_pack(
                     episode_no=episode["episode_no"],
                     shots=pack.shots,
                 ),
-                StoryboardOutline(
-                    episode_no=episode["episode_no"],
-                    shots=briefs,
-                    scene_contexts=[scene_context],
+                _scene_pack_chunk_validation_outline(
+                    outline,
+                    scene_context,
+                    briefs,
                 ),
             ))
         return list(dict.fromkeys(errors))

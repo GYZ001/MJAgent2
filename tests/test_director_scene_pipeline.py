@@ -1166,3 +1166,23 @@ def test_long_scene_is_partitioned_into_bounded_model_outputs() -> None:
         "SC001:9-16",
         "SC001:17-18",
     ]
+
+
+def test_later_scene_chunk_does_not_reclaim_context_owned_by_first_chunk() -> None:
+    outline = _outline()
+    later_briefs = outline.shots[1:]
+    chunk_outline = stages._scene_pack_chunk_validation_outline(
+        outline,
+        outline.scene_contexts[0],
+        later_briefs,
+    )
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            _shot(2, focus="action", size="中景", move="跟随"),
+            _shot(3, focus="emotion", size="近景", move="固定"),
+        ],
+    )
+
+    assert chunk_outline.scene_contexts[0].context_requirements == []
+    assert validate_storyboard_direction_contract(board, chunk_outline) == []
