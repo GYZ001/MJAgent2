@@ -22,7 +22,7 @@ def test_portrait_prompt_uses_normalization() -> None:
     assert "国风水墨" in text
 
 
-def test_bible_rejects_identity_traits_hidden_by_normal_clothing() -> None:
+def test_bible_does_not_reject_appearance_by_word_list() -> None:
     bible = Bible(
         characters=[Character(
             name="角色甲",
@@ -35,10 +35,10 @@ def test_bible_rejects_identity_traits_hidden_by_normal_clothing() -> None:
         world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
     )
 
-    assert any("常规完整着装、中性站姿下静态可见" in error for error in validate_bible(bible))
+    assert validate_bible(bible) == []
 
 
-def test_bible_rejects_behavior_and_subjective_personality_as_appearance() -> None:
+def test_bible_does_not_reject_subjective_appearance_by_word_list() -> None:
     bible = Bible(
         characters=[Character(
             name="角色甲",
@@ -51,7 +51,7 @@ def test_bible_rejects_behavior_and_subjective_personality_as_appearance() -> No
         world=World(visual_style_canonical="3D动漫CG渲染，虚构数字角色，电影光影"),
     )
 
-    assert any("常规完整着装、中性站姿下静态可见" in error for error in validate_bible(bible))
+    assert validate_bible(bible) == []
 
 
 def test_bible_accepts_compact_complete_production_identity() -> None:

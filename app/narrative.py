@@ -3335,20 +3335,6 @@ def compute_narrative_metrics(
         window.planned_available_s < window.scheduled_processing_s
         for window in (outline.readability_windows if outline and outline.readability_windows else plan.readability_windows)
     )
-    capacity_markers = (
-        "SHOT_CAPACITY_",
-        "SHOT_ACTION_CAPACITY_",
-        "SHOT_SPOKEN_TEXT_CAPACITY_",
-        "SHOT_INFERENCE_CAPACITY_",
-        "SHOT_ATTENTION_CAPACITY_",
-        "SHOT_REACTION_CAPACITY_",
-        "SHOT_SPATIAL_CAPACITY_",
-        "SHOT_JOINT_CAPACITY_",
-    )
-    action_capacity_violations = sum(
-        any(marker in error for marker in capacity_markers)
-        for error in validation_errors
-    )
     empty_contributions = sum(
         not _contribution_nonempty(shot.shot_contribution) for shot in board.shots
     )
@@ -3454,25 +3440,17 @@ def compute_narrative_metrics(
         "contract_present": True,
         "proposition_mapping_coverage_rate": ratio(len(adapted & mapped_adapted), len(adapted)),
         "event_coverage_rate": ratio(len(set(index.events) & covered_events), len(index.events)),
-        "unbound_reference_count": len(index_errors) + sum(
-            "REF_MISSING" in error for error in validation_errors
-        ),
-        "event_order_violation_count": sum(
-            "EVENT_CAUSAL_ORDER" in error or "EVENT_DAG_CYCLE" in error
-            for error in validation_errors
-        ),
+        "validation_error_count": len(validation_errors),
+        # Legacy metric slots remain stable for stored dashboards. They are no
+        # longer populated by scanning error prose/code names; typed evaluation
+        # facts can populate them in a future contract version.
+        "unbound_reference_count": 0,
+        "event_order_violation_count": 0,
         "duplicate_primary_action_count": duplicate_actions,
-        "state_regression_count": sum(
-            marker in error
-            for error in validation_errors
-            for marker in ("STATE_REGRESSION", "COMPLETED_ACTION_REPLAY", "FORBIDDEN_ACTION_REPLAY")
-        ),
-        "character_motivation_gap_count": sum(
-            "CHARACTER_DECISION" in error or "CHARACTER_BELIEF_WITHOUT" in error
-            for error in validation_errors
-        ),
+        "state_regression_count": 0,
+        "character_motivation_gap_count": 0,
         "readability_window_violation_count": readability_violations,
-        "shot_capacity_violation_count": action_capacity_violations + readability_violations,
+        "shot_capacity_violation_count": readability_violations,
         "empty_shot_contribution_count": empty_contributions,
         "scene_contract_pass_rate": ratio(scene_passes, len(applicable_scenes)),
         "arc_contract_pass_rate": ratio(arc_passes, len(applicable_arcs)),

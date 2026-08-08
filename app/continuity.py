@@ -62,23 +62,6 @@ def raw_characters_visible(shot: Shot) -> list[str]:
     ]
 
 
-def _character_mentioned_as_visible(name: str, text: str) -> bool:
-    """Whether a visual clause requires ``name`` instead of an offscreen relation."""
-    for clause in re.split(r"[，。；！？]", text or ""):
-        if name not in clause:
-            continue
-        if any(
-            marker in clause
-            for marker in (
-                f"画外{name}", f"画面外{name}", f"镜外{name}", f"{name}画外",
-                f"{name}不入画", f"{name}留在画外",
-            )
-        ):
-            continue
-        return True
-    return False
-
-
 def required_visual_action_characters(shot: Shot) -> list[str]:
     """Recover visible action participants from typed start/end states.
 
@@ -88,16 +71,6 @@ def required_visual_action_characters(shot: Shot) -> list[str]:
     in frame. Typed continuity state is the authoritative evidence for those
     action participants.
     """
-    visual_text = "。".join(
-        str(value or "").strip()
-        for value in (
-            shot.primary_action,
-            shot.action_desc,
-            shot.first_frame_desc,
-            shot.last_frame_desc,
-        )
-        if str(value or "").strip()
-    )
     candidates: list[str] = []
     for state in (shot.continuity_state_in, shot.continuity_state_out):
         for name, character in (state.characters or {}).items():
@@ -115,7 +88,6 @@ def required_visual_action_characters(shot: Shot) -> list[str]:
         str(name).strip()
         for name in candidates
         if str(name).strip()
-        and _character_mentioned_as_visible(str(name).strip(), visual_text)
     ))
 
 

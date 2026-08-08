@@ -147,6 +147,26 @@ def _call_project(call_id: int) -> str | None:
     return system_api._call_project_id(row, meta)
 
 
+def _raw_call_detail_payload(call_id: int) -> dict[str, Any]:
+    row = _call_row(call_id)
+    if not row:
+        raise HTTPException(404, "调用记录不存在")
+    item = dict(row)
+    item["effective_status"] = system_api._effective_call_status(item)
+    item["category"] = system_api._call_category(str(item.get("kind") or ""))
+    item["context"] = system_api._call_meta_summary(item.get("meta"))
+    item["model_label"] = item.get("model") or "未记录模型"
+    for field in ("request_json", "response_json", "meta"):
+        raw = item.get(field)
+        item[f"{field}_size"] = (
+            len(raw.encode("utf-8"))
+            if isinstance(raw, str)
+            else 0
+        )
+    item["raw_access"] = True
+    return item
+
+
 def _assert_scope(project_id: str, actual: str | None, label: str = "观测对象") -> None:
     _project(project_id)
     # 使用同一个 404，避免通过详情或动作接口探测其他项目的对象是否存在。
@@ -970,13 +990,17 @@ def scoped_calls(
 @router.get("/projects/{project_id}/observability/calls/{call_id}")
 def scoped_call(project_id: str, call_id: int):
     _assert_scope(project_id, _call_project(call_id), "调用记录")
-    return system_api.call_detail(call_id)
+    return _raw_call_detail_payload(call_id)
 
 
 @router.get("/projects/{project_id}/observability/calls/{call_id}/download", response_class=PlainTextResponse)
 def scoped_call_download(project_id: str, call_id: int):
     _assert_scope(project_id, _call_project(call_id), "调用记录")
-    return system_api.download_call_detail(call_id)
+    return json.dumps(
+        _raw_call_detail_payload(call_id),
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 @router.get("/projects/{project_id}/observability/traces/{object_type}/{object_id}")

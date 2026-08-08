@@ -13,32 +13,30 @@ from app.portraits import bible_for_episode
 from app.schemas import Bible, Character, World
 
 
-def test_spectral_portrait_prompt_does_not_force_neutral_grounded_pose() -> None:
+def test_portrait_prompt_preserves_nonstandard_form_without_word_routing() -> None:
     prompt = portrait_prompt(
         "国漫风3D渲染CG，斗气特效华丽",
         "透明苍老人影，白须飘飘，悬浮于黑色古朴戒指之上，神态戏谑",
     )
 
-    assert "不要套用普通人的站立证件照姿态" in prompt
-    assert "双脚离地" in prompt
-    assert "角色垂直悬浮在戒指正上方" in prompt
-    assert "禁止严肃皱眉或中性表情" in prompt
-    assert "禁止额外火焰、斗气光环" in prompt
-    assert "正面站立，中性表情，双臂自然下垂" not in prompt
+    assert "透明苍老人影" in prompt
+    assert "悬浮于黑色古朴戒指之上" in prompt
+    assert "神态戏谑" in prompt
+    assert "完整遵循锚点声明的实体形态、空间关系、姿态和关联道具" in prompt
 
 
-def test_ordinary_portrait_prompt_keeps_standard_model_sheet_pose() -> None:
+def test_portrait_prompt_uses_open_conditional_model_sheet_pose() -> None:
     prompt = portrait_prompt("国漫风", "黑发少年，身着青灰色布衣")
 
-    assert "正面站立，中性表情，双臂自然下垂" in prompt
+    assert "若锚点未声明特殊姿态，则采用正面中性展示姿态" in prompt
     assert "鞋底均不得贴边或出画" in prompt
     assert "8% 安全边距" in prompt
     assert "明显动画化比例和非照片级卡通渲染材质" in prompt
     assert "不得生成可误认成真人照片的写实人脸" in prompt
-    assert "禁止额外火焰、斗气光环" in prompt
+    assert "不得添加外观合同未声明的主体或视觉元素" in prompt
 
 
-def test_portrait_prompt_keeps_only_clothed_visible_identity_traits() -> None:
+def test_portrait_prompt_preserves_approved_identity_contract_verbatim() -> None:
     anchor = (
         "24岁女性，黑色长发，常穿低领露肤上衣配半身裙，杏眼，"
         "标志性特征是粉色乳头、腰侧淡褐色小痣、左手臂烟疤与右眉上方细疤"
@@ -47,17 +45,12 @@ def test_portrait_prompt_keeps_only_clothed_visible_identity_traits() -> None:
     production_anchor = production_appearance_anchor(anchor)
     prompt = portrait_prompt("3D动漫CG，虚构数字角色", anchor)
 
-    assert "粉色乳头" not in production_anchor
-    assert "腰侧淡褐色小痣" not in production_anchor
-    assert "低领露肤上衣" not in production_anchor
-    assert "左手臂烟疤" not in production_anchor
-    assert "右眉上方细疤" in production_anchor
-    assert "粉色乳头" not in prompt
-    assert "腰侧淡褐色小痣" not in prompt
+    assert production_anchor == anchor
+    assert anchor in prompt
     assert "服装面料不透明并完整覆盖身体" in prompt
 
 
-def test_production_anchor_removes_behavior_and_subjective_identity_claims() -> None:
+def test_production_anchor_does_not_classify_behavior_words() -> None:
     anchor = (
         "40岁男性，短发，身材微胖，深色西装配白衬衫，"
         "标志性特征是看向女性时色欲外露的眼神，气质强势"
@@ -65,10 +58,10 @@ def test_production_anchor_removes_behavior_and_subjective_identity_claims() -> 
 
     production_anchor = production_appearance_anchor(anchor)
 
-    assert production_anchor == "40岁男性，短发，身材微胖，深色西装配白衬衫"
+    assert production_anchor == anchor
 
 
-def test_production_anchor_removes_sexualized_body_and_hosiery_emphasis() -> None:
+def test_production_anchor_does_not_filter_appearance_vocabulary() -> None:
     anchor = (
         "24岁女性，黑色长发，杏眼秀眉，身材丰满修长，"
         "常穿简约通勤衬衫配及膝裙、丝袜、高跟鞋"
@@ -76,13 +69,10 @@ def test_production_anchor_removes_sexualized_body_and_hosiery_emphasis() -> Non
 
     production_anchor = production_appearance_anchor(anchor)
 
-    assert production_anchor == (
-        "24岁女性，黑色长发，杏眼秀眉，"
-        "常穿简约通勤衬衫配及膝裙、高跟鞋"
-    )
+    assert production_anchor == anchor
 
 
-def test_effective_portrait_prompt_keeps_canonical_style_when_override_mentions_realism() -> None:
+def test_effective_portrait_prompt_keeps_override_and_independent_style_contract() -> None:
     prompt = effective_portrait_prompt(
         "国漫电影风",
         "黑发少女，月白长裙",
@@ -91,11 +81,11 @@ def test_effective_portrait_prompt_keeps_canonical_style_when_override_mentions_
 
     assert "国漫电影风" in prompt
     assert "红色机甲" in prompt
-    assert "赛博写实风" not in prompt
-    assert "静态外观事实" in prompt
+    assert "赛博写实风" in prompt
+    assert "全局画风合同仍独立生效" in prompt
 
 
-def test_multiview_prompt_uses_latest_edited_portrait_prompt_without_overriding_style() -> None:
+def test_multiview_prompt_keeps_latest_edit_without_keyword_filtering() -> None:
     prompt = character_view_prompt(
         "旧画风",
         "旧外观锚点",
@@ -106,13 +96,13 @@ def test_multiview_prompt_uses_latest_edited_portrait_prompt_without_overriding_
     assert "旧画风" in prompt
     assert "旧外观锚点" not in prompt
     assert "红色机甲" in prompt
-    assert "赛博写实风" not in prompt
+    assert "赛博写实风" in prompt
     assert "3/4" in prompt
     assert "画风最高优先级" in prompt
     assert "视角与构图要求覆盖源提示词" in prompt
 
 
-def test_accepted_portrait_prompt_derives_downstream_outfit_anchor() -> None:
+def test_persisted_appearance_is_authority_instead_of_prompt_parsing() -> None:
     latest = (
         "3D国漫写实风。全身角色立绘定妆照：少女，黑色及腰长发，"
         "淡紫色古风长裙，金色刺绣纹饰，广袖流仙裙。正面站立，中性表情，"
@@ -121,10 +111,7 @@ def test_accepted_portrait_prompt_derives_downstream_outfit_anchor() -> None:
 
     anchor = portrait_appearance_anchor(latest, "淡绿色上衣搭配紧腿长裤")
 
-    assert "淡紫色古风长裙" in anchor
-    assert "紧腿长裤" not in anchor
-    assert "正面站立" not in anchor
-    assert "纯浅米色背景" not in anchor
+    assert anchor == "淡绿色上衣搭配紧腿长裤"
 
 
 def test_placeholder_portrait_prompt_falls_back_to_segment_appearance() -> None:
@@ -136,7 +123,7 @@ def test_placeholder_portrait_prompt_falls_back_to_segment_appearance() -> None:
     assert anchor == "早期：黑发少年，玄色劲装，目光坚定"
 
 
-def test_episode_bible_uses_accepted_portrait_prompt_not_stale_appearance(monkeypatch) -> None:
+def test_episode_bible_uses_persisted_appearance_not_prompt_word_extraction(monkeypatch) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -164,8 +151,7 @@ def test_episode_bible_uses_accepted_portrait_prompt_not_stale_appearance(monkey
     episode_bible = bible_for_episode("p", bible, 1)
 
     appearance = episode_bible.characters[0].appearance_canonical
-    assert "淡紫色古风长裙" in appearance
-    assert "紧腿长裤" not in appearance
+    assert appearance == "淡绿色上衣搭配紧腿长裤"
 
 
 def test_portrait_completion_merges_without_erasing_concurrent_scenes() -> None:

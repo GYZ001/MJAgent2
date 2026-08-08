@@ -3438,9 +3438,8 @@ def portrait_for_episode(project_id: str, name: str, episode_no: int | None) -> 
 def appearance_for_episode(project_id: str, name: str, episode_no: int | None) -> str | None:
     """返回覆盖该集的定妆照有效外观锚点。
 
-    新定妆提示词可以改变服装/发型，因此已验收版本的 ``prompt``
-    比历史 ``appearance`` 列更新。构图、背景等定妆照专用指令会被
-    剥离，避免注入叙事镜头。
+    ``appearance`` 是验收时单独持久化的结构化外观权威；不得再从
+    prompt 文案中按关键词反向提取。
     """
     if episode_no is None:
         return None
@@ -3454,7 +3453,7 @@ def appearance_for_episode(project_id: str, name: str, episode_no: int | None) -
         return None
     if not row:
         return None
-    return portrait_appearance_anchor(row["prompt"], row["appearance"] or "") or None
+    return production_appearance_anchor(row["appearance"] or "") or None
 
 
 def bible_for_episode(project_id: str, bible: "Bible", episode_no: int | None) -> "Bible":

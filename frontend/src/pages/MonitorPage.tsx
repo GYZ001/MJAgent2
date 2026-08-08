@@ -768,7 +768,9 @@ function CallDrawer({
   const copy = async (label: string, value?: string) => {
     try {
       await navigator.clipboard.writeText(value || "");
-      setCopied(`${label}已复制（脱敏版本）`);
+      setCopied(
+        `${label}已复制（${projectId ? "完整原始数据" : "系统脱敏版本"}）`,
+      );
     } catch {
       setCopied("复制失败，请手动选择文本");
     }
@@ -783,7 +785,7 @@ function CallDrawer({
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `provider-call-${call.id}-masked.json`;
+      anchor.download = `provider-call-${call.id}-${projectId ? "raw" : "masked"}.json`;
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -891,12 +893,16 @@ function CallDrawer({
           </div>
         )}
         {!detail && !error && (
-          <div className="monitor-loading">正在按需加载脱敏详情…</div>
+          <div className="monitor-loading">
+            正在按需加载{projectId ? "完整原始" : "系统脱敏"}详情…
+          </div>
         )}
         {detail && (
           <>
             <div className="monitor-state ready">
-              本机路径、凭证及令牌形态字段已由系统遮罩；常规入口不提供未遮罩原文。
+              {projectId
+                ? "当前展示项目观测账本中的完整原始数据，未做文字替换、星号遮罩或字段省略。"
+                : "系统级调用详情继续遵循全局脱敏策略。"}
             </div>
             <JsonSection
               label="发送内容"
@@ -920,10 +926,12 @@ function CallDrawer({
                   void copy("详情", JSON.stringify(detail, null, 2))
                 }
               >
-                复制脱敏详情
+                复制{projectId ? "完整原始" : "脱敏"}详情
               </button>
               <button disabled={downloading} onClick={() => void download()}>
-                {downloading ? "下载中…" : "下载脱敏 JSON"}
+                {downloading
+                  ? "下载中…"
+                  : `下载${projectId ? "完整原始" : "脱敏"} JSON`}
               </button>
             </div>
             {downloadError && (
@@ -4487,8 +4495,8 @@ export default function MonitorPage({
                             writeQuery({ call_id: String(call.id) });
                           }}
                           aria-label={features.call_detail_v2
-                            ? `查看${callBusinessLabel(call)}的脱敏详情`
-                            : `查看${callBusinessLabel(call)}的脱敏详情，暂不可用：调用详情功能已停用`}
+                            ? `查看${callBusinessLabel(call)}的${projectId ? "完整原始" : "脱敏"}详情`
+                            : `查看${callBusinessLabel(call)}详情，暂不可用：调用详情功能已停用`}
                         >
                           {features.call_detail_v2 ? "查看详情" : "详情已停用"}
                         </button>

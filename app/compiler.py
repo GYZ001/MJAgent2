@@ -1443,14 +1443,6 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     # 压缩策略：先压低优先级段落（通用风格/重复锚点），永不删除优先级 1/2
     compact_negative_parts = negative_block.split("；")[:6]
-    for marker in (
-            "接触动作禁止正面摆拍",
-            "接近/未命中动作禁止正面摆拍",
-            "松开/分离动作禁止正面摆拍",
-            "禁止同框人物随意一高一低",
-    ):
-        if marker in negative_block and marker not in compact_negative_parts:
-            compact_negative_parts.append(marker)
     compact_map = {
         "CONSISTENCY": "保持人物身份服装与场景材质光线一致。",
         "REFERENCE ROLES": (

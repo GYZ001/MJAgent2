@@ -1216,8 +1216,8 @@ def test_refresh_scene_pack_failure_does_not_switch(monkeypatch, tmp_path) -> No
     """场景整包失败不切换版本。"""
     import asyncio
     import threading
-    from app import db, hiagent
-    from app.scenes import _refresh_scene_on_state_change
+    from app import db
+    from app.scenes import SceneAssetQualityError, _refresh_scene_on_state_change
 
     database = tmp_path / "scene-drift.db"
     monkeypatch.setattr(db, "DB_PATH", database)
@@ -1250,7 +1250,7 @@ def test_refresh_scene_pack_failure_does_not_switch(monkeypatch, tmp_path) -> No
     monkeypatch.setattr("app.scenes._review_scene_ref", fake_review)
     monkeypatch.setattr("app.multiview.ensure_scene_multiview_pack", failed_pack)
 
-    with pytest.raises(hiagent.ProviderError, match="无法切换版本"):
+    with pytest.raises(SceneAssetQualityError, match="无法切换版本"):
         asyncio.run(_refresh_scene_on_state_change(
             "proj", "广场", 8, "损毁后的废墟广场石柱倒塌", "anime", 0,
             change_meta={"persistence": "persistent", "change_dimensions": ["damage"]},

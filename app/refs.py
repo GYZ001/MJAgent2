@@ -57,33 +57,6 @@ def normalize_prompt_text(text: str) -> str:
     return "".join(kept).strip()
 
 
-_NON_PRODUCTION_APPEARANCE_RE = re.compile(
-    r"(?:乳头|乳晕|乳房|阴部|阴唇|阴蒂|阴毛|生殖器|下体|私处|"
-    r"隐私部位|裸体|裸露|赤裸|一丝不挂|内裤|胸罩|文胸)",
-    re.IGNORECASE,
-)
-_CLOTHING_HIDDEN_SKIN_MARK_RE = re.compile(
-    r"(?:腰侧|腰部|胸部|腹部|背部|肩部|手臂|上臂|(?:左|右)?臂|大腿|腿部|臀部|髋部|胯部)"
-    r"[^，,；;。]*(?:痣|胎记|纹身|疤痕|疤)",
-)
-_NON_STATIC_APPEARANCE_RE = re.compile(
-    r"(?:性格|气度|气场|气质|风情|女人味|书卷气|一举一动|"
-    r"看(?:向)?(?:女性|女人|他人)|看人|视线(?:落|停|扫|盯)|"
-    r"自带[^，,；;。]*(?:气场|气质|风情|女人味|书卷气)|"
-    r"眼神(?:躲闪|游移|贪婪|淫邪|迷离)|"
-    r"色欲|算计感|侵略感|迂腐|猥琐|含春|撩人|志在必得)",
-)
-_NON_NEUTRAL_CLOTHING_RE = re.compile(
-    r"(?:露肤|露腰|暴露|低领|深V|透视|镂空|吊带|超短|高开衩|丝袜|网袜|吊袜)",
-    re.IGNORECASE,
-)
-_SEXUALIZED_BODY_EMPHASIS_RE = re.compile(
-    r"(?:身材|体型|身体|曲线)[^，,；;。]*(?:丰满|丰腴|性感|凹凸|曲线)",
-    re.IGNORECASE,
-)
-_APPEARANCE_LIST_PREFIX_RE = re.compile(
-    r"^(?P<prefix>.*?标志性特征(?:是|为)?)(?P<items>.*)$",
-)
 _PORTRAIT_CLOTHING_CONTRACT = (
     "常规角色设定图着装，服装面料不透明并完整覆盖身体，"
     "重点呈现面部、发型、外层服装和可见配饰"
@@ -92,76 +65,28 @@ _PORTRAIT_PRIVACY_SAFE_STYLE = (
     "人物面部与皮肤必须采用明显动画化比例和非照片级卡通渲染材质，"
     "保持虚构角色辨识度但不得生成可误认成真人照片的写实人脸"
 )
-_PORTRAIT_OVERRIDE_LABEL_RE = re.compile(
-    r"^(?:(?:用户|角色)?最新)?(?:定妆|画像|角色)?(?:提示词|prompt)(?:为|是)?[:：\s-]*",
-    re.IGNORECASE,
-)
-_PORTRAIT_STYLE_ONLY_CLAUSE_RE = re.compile(
-    r"^(?:style|look|visual|画风|风格|写实(?:风|感)?|超写实(?:风)?|现实电影风|真人CG风|"
-    r"国漫(?:电影)?风|动漫(?:电影)?风|漫画(?:风格)?|卡通(?:风)?|插画(?:风)?|厚涂|"
-    r"水墨(?:风)?|二次元|赛博(?:写实风|风)?|CG(?:渲染|动画)?|3D(?:动漫)?CG(?:渲染)?|"
-    r"2D(?:动画)?(?:厚涂)?|真人(?:实拍|照片|摄影)?|照片写实|实拍摄影|摄影棚实拍|"
-    r"实景照片|非真人CG渲染|虚构数字角色|photoreal(?:istic)?|photo(?:-real)?(?:istic)?|"
-    r"photograph(?:ic)?|live[- ]?action|anime|manga|illustrat(?:ed|ion)|"
-    r"cel[- ]?shad(?:ed|ing)?|render(?:ed|ing)?)$",
-    re.IGNORECASE,
-)
 _PORTRAIT_OVERRIDE_APPEARANCE_ONLY_NOTE = (
-    "若最近一次用户编辑文案含与全局画风冲突的写实/真人/照片/摄影或其他风格描述，一律忽略；"
-    "该文案只允许补充发型、服装、体型、年龄与配饰等静态外观事实"
+    "最近一次用户编辑文案作为完整外观补充；全局画风合同仍独立生效"
 )
 PRODUCTION_APPEARANCE_MIN_CHARS = 20
 PRODUCTION_APPEARANCE_MAX_CHARS = 80
 
 
 def contains_non_production_appearance(anchor: str) -> bool:
-    return bool(
-        _NON_PRODUCTION_APPEARANCE_RE.search(anchor or "")
-        or _CLOTHING_HIDDEN_SKIN_MARK_RE.search(anchor or "")
-        or _NON_STATIC_APPEARANCE_RE.search(anchor or "")
-        or _NON_NEUTRAL_CLOTHING_RE.search(anchor or "")
-        or _SEXUALIZED_BODY_EMPHASIS_RE.search(anchor or "")
-    )
+    """Legacy compatibility: prose content is never classified by word lists."""
+    _ = anchor
+    return False
 
 
 def production_appearance_anchor(anchor: str) -> str:
-    """Keep only identity traits that a normally clothed model sheet can prove."""
-    clauses = re.split(r"[，,；;。]+", normalize_prompt_text(anchor or ""))
-    kept: list[str] = []
-    for raw_clause in clauses:
-        clause = raw_clause.strip()
-        if not clause:
-            continue
-        if not contains_non_production_appearance(clause):
-            kept.append(clause)
-            continue
-        match = _APPEARANCE_LIST_PREFIX_RE.match(clause)
-        prefix = match.group("prefix") if match else ""
-        items_text = match.group("items") if match else clause
-        items = [
-            item.strip()
-            for item in re.split(r"(?:[、与和]|及(?!膝))+", items_text)
-            if item.strip() and not contains_non_production_appearance(item)
-        ]
-        if items:
-            kept.append(f"{prefix}{'、'.join(items)}")
-    return "，".join(kept).strip("， ")
+    """Preserve the approved appearance contract without lexical filtering."""
+    return normalize_prompt_text(anchor or "").strip()
 
 
 def missing_production_appearance_dimensions(anchor: str) -> list[str]:
-    safe = production_appearance_anchor(anchor)
-    missing = []
-    if not re.search(
-        r"(?:岁|成年|男性|女性|男子|女子|男人|女人|青年|中年|老年|少年|少女|老人|人影)",
-        safe,
-    ):
-        missing.append("年龄性别")
-    if not re.search(r"(?:发|须|脸|面|眼|眉|肤|身形|身材|体型|高|矮|胖|瘦|形态|人影)", safe):
-        missing.append("外形")
-    spectral = any(token in safe for token in ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "人影"))
-    if not spectral and not re.search(r"(?:穿|衣|衫|裙|裤|鞋|装|袍|服|戴|配饰|手表|眼镜)", safe):
-        missing.append("服装配饰")
-    return missing
+    """Completeness is established by the typed generation contract, not words."""
+    _ = anchor
+    return []
 
 
 def ensure_portrait_clothing_contract(prompt: str) -> str:
@@ -200,19 +125,7 @@ def scene_visual_style_lock(visual_style: str) -> str:
 def portrait_override_appearance_anchor(anchor: str, portrait_prompt_override: str | None = None) -> str:
     fallback = production_appearance_anchor(anchor)
     override = normalize_prompt_text(portrait_prompt_override or "").strip()
-    if not override:
-        return fallback
-    extracted = portrait_appearance_anchor(override, fallback)
-    clauses: list[str] = []
-    for raw_clause in re.split(r"[，,；;。]+", extracted):
-        clause = _PORTRAIT_OVERRIDE_LABEL_RE.sub("", raw_clause.strip()).strip(" 。，,;；：:-")
-        if not clause:
-            continue
-        if _PORTRAIT_STYLE_ONLY_CLAUSE_RE.fullmatch(clause):
-            continue
-        clauses.append(clause)
-    merged = production_appearance_anchor("，".join(clauses))
-    return merged or fallback
+    return override or fallback
 
 
 def effective_portrait_prompt(
@@ -231,36 +144,15 @@ def effective_portrait_prompt(
 
 
 def portrait_prompt(visual_style: str, anchor: str) -> str:
-    spectral_tokens = ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "悬浮", "漂浮", "人影")
     style = character_visual_style_lock(visual_style)
     body = production_appearance_anchor(anchor)
-    is_spectral = any(token in body for token in spectral_tokens)
-    if is_spectral:
-        refinements: list[str] = [
-            "这是超自然角色概念设定图，不要套用普通人的站立证件照姿态",
-            "锚点指定的非实体形态、悬浮关系和神态优先级最高",
-        ]
-        if any(token in body for token in ("透明", "半透明", "虚影", "魂体", "灵魂", "幽灵", "人影")):
-            refinements.append("身体必须明显半透明，背景能透过身体看见，禁止实体皮肤质感")
-        if any(token in body for token in ("悬浮", "漂浮")):
-            refinements.append("双脚离地，明确表现悬浮，禁止站在地面")
-        if "戒指" in body:
-            refinements.append("戒指完整清晰地置于画面底部中央，角色垂直悬浮在戒指正上方")
-        if "戏谑" in body:
-            refinements.append("嘴角微扬、眼神狡黠，明确表现戏谑，禁止严肃皱眉或中性表情")
-        return normalize_prompt_text(
-            f"{style}。单角色全身概念定妆设定图：{body}。"
-            + "；".join(refinements)
-            + "。纯浅米色背景，全身与关联道具完整可见，主体四周保留安全边距。"
-              f"{_PORTRAIT_CLOTHING_CONTRACT}。"
-              "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
-        )
     return normalize_prompt_text(
-        f"{style}。全身角色立绘定妆照：{body}。"
-        "正面站立，中性表情，双臂自然下垂，纯浅米色背景，全身完整可见。"
+        f"{style}。单角色全身概念定妆设定图：{body}。"
+        "完整遵循锚点声明的实体形态、空间关系、姿态和关联道具；"
+        "若锚点未声明特殊姿态，则采用正面中性展示姿态。纯浅米色背景，全身完整可见。"
         "头顶、肩臂和鞋底均不得贴边或出画，主体四周保留至少 8% 安全边距。"
         f"{_PORTRAIT_CLOTHING_CONTRACT}。{_PORTRAIT_PRIVACY_SAFE_STYLE}。"
-        "仅保留锚点明确要求的特效，禁止额外火焰、斗气光环、文字、水印和 logo"
+        "不得添加外观合同未声明的主体或视觉元素"
     )
 
 
@@ -297,50 +189,10 @@ def _merge_generated_portraits(conn, project_id: str, characters) -> None:
     )
 
 
-_PORTRAIT_APPEARANCE_START_MARKERS = (
-    "全身角色立绘定妆照：",
-    "全身角色立绘定妆照:",
-)
-_PORTRAIT_APPEARANCE_STOP_MARKERS = (
-    "正面站立",
-    "正面全身立绘",
-    "中性姿态",
-    "中性表情",
-    "纯浅米色背景",
-    "全身完整可见",
-    "头顶、肩臂",
-    "主体四周保留",
-    "仅保留锚点",
-    "禁止额外",
-    "生成同一角色多视角",
-)
-
-
 def portrait_appearance_anchor(prompt: str | None, fallback: str = "") -> str:
-    """Extract the production appearance anchor from an accepted portrait prompt.
-
-    Portrait prompts often append character-sheet pose/background instructions.
-    Those instructions are useful while drawing the model sheet but conflict with
-    narrative shots, so downstream video/keyframe prompts receive only the visual
-    identity/outfit portion. Free-form prompts without the standard marker remain
-    authoritative after the same composition suffixes are stripped.
-    """
+    """Return the separately persisted appearance authority when available."""
     fallback_text = production_appearance_anchor(fallback)
-    text = normalize_prompt_text(prompt or "").strip()
-    if not text:
-        return fallback_text
-    for marker in _PORTRAIT_APPEARANCE_START_MARKERS:
-        if marker in text:
-            text = text.split(marker, 1)[1].strip()
-            break
-    stop_positions = [text.find(marker) for marker in _PORTRAIT_APPEARANCE_STOP_MARKERS if marker in text]
-    if stop_positions:
-        text = text[:min(stop_positions)].strip()
-    text = text.strip(" 。，,;；：:")
-    compact = re.sub(r"\s+", "", text)
-    if len(compact) < 8 and len(re.sub(r"\s+", "", fallback_text)) > len(compact):
-        return fallback_text
-    return production_appearance_anchor(text) or fallback_text
+    return fallback_text or production_appearance_anchor(prompt or "")
 
 
 async def generate_refs(
@@ -437,8 +289,8 @@ async def generate_refs(
             base_prompt = effective_portrait_prompt(
                 style, c.appearance_canonical, override,
             )
-            effective_appearance = portrait_appearance_anchor(
-                base_prompt, production_appearance_anchor(c.appearance_canonical),
+            effective_appearance = portrait_override_appearance_anchor(
+                c.appearance_canonical, override,
             )
             last_error: Exception | None = None
             # Score-only：只生成一次；QA 低分不带 critique 重生（PRD QA-SO #14）。

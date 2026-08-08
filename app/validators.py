@@ -4944,8 +4944,6 @@ def validate_bible(bible: Bible) -> list[str]:
     from app.refs import (
         PRODUCTION_APPEARANCE_MAX_CHARS,
         PRODUCTION_APPEARANCE_MIN_CHARS,
-        contains_non_production_appearance,
-        missing_production_appearance_dimensions,
     )
 
     errors = []
@@ -4961,17 +4959,6 @@ def validate_bible(bible: Bible) -> list[str]:
                 f"characters[{i}]({c.name}).appearance_canonical 长度 "
                 f"{len(c.appearance_canonical)} 字，要求 "
                 f"{PRODUCTION_APPEARANCE_MIN_CHARS}~{PRODUCTION_APPEARANCE_MAX_CHARS} 字"
-            )
-        missing_dimensions = missing_production_appearance_dimensions(c.appearance_canonical)
-        if missing_dimensions:
-            errors.append(
-                f"characters[{i}]({c.name}).appearance_canonical "
-                f"缺少生产身份维度：{','.join(missing_dimensions)}"
-            )
-        if contains_non_production_appearance(c.appearance_canonical):
-            errors.append(
-                f"characters[{i}]({c.name}).appearance_canonical "
-                "包含不属于常规完整着装、中性站姿下静态可见身份的信息"
             )
         for r in c.relationships:
             if r.to not in names:

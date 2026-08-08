@@ -238,6 +238,13 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
     assert "***" not in json.dumps(call, ensure_ascii=False)
     assert call["output"]["response"]["result"] == "完成"
 
+    project_detail = observability_api.scoped_call("p1", 1)
+    project_download = observability_api.scoped_call_download("p1", 1)
+    assert "sk-secret-value" in project_detail["request_json"]
+    assert "原始提示词" in project_detail["request_json"]
+    assert "sk-secret-value" in project_download
+    assert project_detail["raw_access"] is True
+
 
 def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
     assert observability_api._trace_step_label("character_discovery") == "识别剧本角色"
