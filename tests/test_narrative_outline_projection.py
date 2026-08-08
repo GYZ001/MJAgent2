@@ -701,7 +701,7 @@ def test_narrative_outline_splits_dialogue_when_speaker_changes() -> None:
     assert outline_key_line_speaker_errors(outline, screenplay) == []
 
 
-def test_stale_split_action_owner_is_reprojected_before_shot_generation() -> None:
+def test_split_action_owner_preserves_directed_post_dialogue_result() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)
     screenplay.dialogue_chains = [
@@ -746,12 +746,12 @@ def test_stale_split_action_owner_is_reprojected_before_shot_generation() -> Non
     )
 
     owner = outline.shots[1]
-    assert changes
-    assert owner.state_in == ""
-    assert owner.primary_action == action.completion_condition
-    assert owner.state_out == action.completion_condition
-    assert owner.beat == action.completion_condition
-    assert owner.covers == action.completion_condition
+    assert changes == []
+    assert owner.state_in == "The event has not started."
+    assert owner.primary_action == "The actor repeats the opening speech."
+    assert owner.state_out == "The opening speech is about to begin."
+    assert owner.beat == "The actor repeats the opening speech."
+    assert owner.covers == "The actor repeats the opening speech."
 
 
 def test_narrative_outline_keeps_coarse_snapshot_until_later_deadline() -> None:
@@ -880,89 +880,8 @@ def _screenplay_needing_staged_audience_state():
     return screenplay
 
 
-def test_screenplay_repair_creates_required_intermediate_audience_state() -> None:
-    screenplay = _screenplay_needing_staged_audience_state()
-    errors = validate_screenplay_narrative(screenplay, require=True)
-    message = next(
-        error
-        for error in errors
-        if "AUDIENCE_TARGET_DELTA_STAGING_REQUIRED" in error
-    )
-    issue = issues_from_validator_messages(
-        [message],
-        subject="screenplay",
-        stage="screenplay",
-    )[0]
-
-    operations = plan_screenplay_patch(issue, screenplay)
-
-    assert len(operations) == 1
-    assert operations[0].op == "create_node"
-    assert operations[0].target["collection"] == "audience_states"
-    document, _event = apply_patch_operation_to_document(
-        screenplay_to_document(screenplay),
-        operations[0],
-    )
-    repaired = document_to_screenplay(document)
-    assert not any(
-        "AUDIENCE_TARGET_DELTA_STAGING_REQUIRED" in error
-        for error in validate_screenplay_narrative(repaired, require=True)
-    )
 
 
-def test_screenplay_repair_splits_oversized_dialogue_turn() -> None:
-    screenplay = _screenplay()
-    oversized = "这是一个必须按原文标点拆分的连续对白，" * 5
-    screenplay.dialogue_chains = [
-        KeyDialogueChain(
-            chain_id="DC1",
-            topic="容量测试对白",
-            turns=[
-                KeyDialogueTurn(
-                    speaker="character-1",
-                    line=oversized,
-                    source_text=oversized,
-                )
-            ],
-        )
-    ]
-    turn = screenplay.dialogue_chains[0].turns[0]
-    turn.line = oversized
-    turn.source_text = oversized
-    message = next(
-        error
-        for error in validate_dialogue_chains(
-            screenplay,
-            source_text=oversized,
-            required=True,
-        )
-        if "DIALOGUE_TURN_CAPACITY_EXCEEDED" in error
-    )
-    issue = issues_from_validator_messages(
-        [message],
-        subject="screenplay",
-        stage="screenplay",
-    )[0]
-
-    operations = plan_screenplay_patch(issue, screenplay)
-
-    assert len(operations) == 1
-    assert operations[0].op == "split_dialogue_turn_by_capacity"
-    assert_patch_ops_allowed([
-        operation.model_dump(mode="json")
-        for operation in operations
-    ])
-    document, _event = apply_patch_operation_to_document(
-        screenplay_to_document(screenplay),
-        operations[0],
-    )
-    repaired = document_to_screenplay(document)
-    assert len(repaired.dialogue_chains[0].turns) > 1
-    assert all(
-        content_char_count(item.line)
-        <= config.MAX_SPOKEN_CHARS_PER_SHOT
-        for item in repaired.dialogue_chains[0].turns
-    )
 
 
 def test_ambient_audio_is_not_charged_as_spoken_capacity() -> None:

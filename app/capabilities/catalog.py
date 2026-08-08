@@ -646,7 +646,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "screenplay.generate",
             title="生成可交付剧本",
-            description="人物识别后生成一次 Baseline；结构校验通过即发布，QA 只记录评分",
+            description="人物解析、蓝图、全局包络与场次分片合并后建立完整 Baseline，再校验发布",
             input_model=I.ScreenplayGenerateInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.WHEN_IMPACT,
@@ -690,7 +690,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "screenplay.resume",
             title="继续剧本流程",
-            description="从 working Artifact 继续结构校验、质量评分与原子发布，禁止再次整版生成",
+            description="恢复未完成的首版场次分片，或从完整 working Artifact 继续校验与原子发布",
             input_model=I.ScreenplayResumeInput,
             risk=RiskLevel.R2_MATERIAL,
             confirmation=ConfirmationPolicy.WHEN_IMPACT,

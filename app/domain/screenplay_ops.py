@@ -1355,7 +1355,7 @@ async def _recorded_screenplay_task(
         get_conn().commit()
         input_artifact_ids, context_manifest = _screenplay_context_pack(episode_id)
         _, script = await recorder.step(
-            "screenplay",
+            "screenplay_document",
             lambda: operation(preflight),
             contract_key="screenplay",
             agent_name="screenplay_agent_loop",

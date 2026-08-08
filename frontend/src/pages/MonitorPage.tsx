@@ -534,25 +534,20 @@ function callStatusLabel(status: string) {
   return CALL_STATUS_LABELS[status] || "状态待确认";
 }
 function callPurpose(call: Call) {
-  const ctx = call.context || {};
-  const scope =
-    ctx.episode_no != null
-      ? `第${ctx.episode_no}集${ctx.shot_no != null ? `第${ctx.shot_no}镜` : ""} · `
-      : "";
-  return `${scope}${ctx.purpose || CALL_KIND_LABELS[call.kind] || (call.category === "internal" ? "内部事件" : "其他业务调用")}`;
+  return CALL_KIND_LABELS[call.kind]
+    || (call.category === "internal" ? "内部事件" : "其他业务调用");
 }
 export function callBusinessLabel(call: Call) {
   return [
-    call.context?.project_name || "未关联项目",
     callPurpose(call),
+    call.model_label || call.model || "未记录模型",
     callStatusLabel(call.effective_status),
   ].join(" · ");
 }
 export function callNextStep(call: Call) {
-  if (call.run_id) return "可查看关联运行任务";
   if (call.error || !["OK", "RECOVERED"].includes(call.effective_status))
-    return "调用未完成，可展开错误详情";
-  return "调用已完成，无需处理";
+    return "调用未完成，可查看本次模型输入输出";
+  return "查看本次模型输入输出";
 }
 export function blockStatus<T>(
   loading: boolean,
@@ -2894,7 +2889,7 @@ export default function MonitorPage({
   );
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [selectedJobId, setSelectedJobId] = useState(
-    initial.get("job_id") || "",
+    initial.get("job_id") || initial.get("run_id") || "",
   );
   const [callSearch, setCallSearch] = useState(
     initial.get("call_search") || "",
@@ -2930,6 +2925,24 @@ export default function MonitorPage({
   const observabilityBase = projectId
     ? `/projects/${encodeURIComponent(projectId)}/observability`
     : "";
+  useLayoutEffect(() => {
+    if (mode !== "project" || !/\/observability\/runs$/.test(window.location.pathname))
+      return;
+    const params = nowQuery();
+    const runId = params.get("run_id");
+    if (runId && !params.get("job_id")) {
+      params.set("job_id", runId);
+      params.set("source", "run");
+    }
+    params.delete("run_id");
+    params.delete("focus");
+    const pathname = window.location.pathname.replace(/\/runs$/, "/jobs");
+    window.history.replaceState(
+      {},
+      "",
+      `${pathname}${params.toString() ? `?${params}` : ""}`,
+    );
+  }, [mode]);
   const jobsSummaryPoll = usePoll<JobsSummary>(
     async () => assertProjectScope(
       await api.get(projectId ? `${observabilityBase}/jobs?page_size=100` : "/system/jobs") as JobsSummary,
@@ -3022,7 +3035,7 @@ export default function MonitorPage({
     const onPop = () => {
       const p = nowQuery();
       const raw = p.get("section");
-      if (raw && !VALID_SECTIONS.has(raw as MonitorSection)) {
+      if (raw && raw !== "runs" && !VALID_SECTIONS.has(raw as MonitorSection)) {
         setUrlNotice(`已忽略非法区域参数：${raw}`);
         setActiveSection("overview");
       } else {
@@ -3032,8 +3045,6 @@ export default function MonitorPage({
           ? nextSection
           : defaultSection);
       }
-      setSelectedRunId(p.get("run_id"));
-      setFocusToken(p.get("focus") || "");
       setJobSearch(p.get("job_search") || "");
       setJobStatus(p.get("job_status") || "");
       setJobProject(projectId || p.get("job_project") || "");
@@ -3043,7 +3054,7 @@ export default function MonitorPage({
       setJobSort(p.get("job_sort") || "desc");
       setJobPage(Math.max(1, Number(p.get("job_page")) || 1));
       setJobPageSize(Math.max(1, Number(p.get("job_page_size")) || 20));
-      setSelectedJobId(p.get("job_id") || "");
+      setSelectedJobId(p.get("job_id") || p.get("run_id") || "");
       setCallSearch(p.get("call_search") || "");
       setCallStatus(p.get("call_status") || "");
       setCallCategory(p.get("call_category") || "business");
@@ -3070,10 +3081,8 @@ export default function MonitorPage({
     const cleanup: Record<string, string | null> = {};
     if (section !== "jobs") cleanup.job_id = null;
     if (section !== "calls") cleanup.call_id = null;
-    if (section !== "runs") {
-      cleanup.focus = null;
-      cleanup.run_id = null;
-    }
+    cleanup.focus = null;
+    cleanup.run_id = null;
     const queryPatch = {
       section,
       ...cleanup,
@@ -3092,7 +3101,6 @@ export default function MonitorPage({
         setSelectedCall(null);
         setSelectedCallId(0);
       }
-      if (section !== "runs") setSelectedRunId(null);
       setActiveSection(section);
       writeQuery(queryPatch);
       track("drilldown", {
@@ -3102,13 +3110,6 @@ export default function MonitorPage({
       });
       window.scrollTo({ top: 0, behavior: "smooth" });
     });
-  };
-  const openRun = (runId: string) => {
-    const focus = String(Date.now());
-    setSelectedRunId(runId);
-    setFocusToken(focus);
-    track("deep_link", { source: activeSection, target_type: "run" }, runId);
-    openSection("runs", { run_id: runId, focus });
   };
   const openTrace = (target: TraceTarget) => {
     setSelectedJob(null);
@@ -3679,27 +3680,6 @@ export default function MonitorPage({
               </DataBoundary>
             </section>
           </div>
-        </div>
-      )}
-      {activeSection === "runs" && !features.run_center_v2 && (
-        <section
-          className="card monitor-section monitor-state stale"
-          role="status"
-        >
-          新版运行中心已由独立发布开关停用，权威任务状态未被修改。
-        </section>
-      )}
-      {activeSection === "runs" && features.run_center_v2 && (
-        <div className="monitor-section">
-          <RunCenter
-            projectId={projectId}
-            selectedRunId={selectedRunId}
-            focusToken={focusToken}
-            onSelect={(id) => {
-              setSelectedRunId(id);
-              writeQuery({ run_id: id }, false);
-            }}
-          />
         </div>
       )}
       {activeSection === "jobs" && !features.jobs_query_v2 && (
@@ -4293,7 +4273,7 @@ export default function MonitorPage({
                     <th>状态</th>
                     <th>接口状态码</th>
                     <th>延迟</th>
-                    <th>错误 / 下一步</th>
+                    <th>查看内容</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -4308,13 +4288,12 @@ export default function MonitorPage({
                           type="button"
                           className="monitor-name-button"
                           aria-haspopup="dialog"
-                          onClick={() =>
-                            openTrace({
-                              type: "calls",
-                              id: String(call.id),
-                              title: callBusinessLabel(call),
-                            })
-                          }
+                          onClick={() => {
+                            setSelectedCall(call);
+                            setSelectedCallId(call.id);
+                            setObjectLoadError("");
+                            writeQuery({ call_id: String(call.id) });
+                          }}
                         >
                           {callPurpose(call)}
                         </button>
@@ -4345,16 +4324,6 @@ export default function MonitorPage({
                       <td>{(call.latency_ms / 1000).toFixed(1)} 秒</td>
                       <td className="monitor-error-cell">
                         <span>{callNextStep(call)}</span>
-                        {call.error && (
-                          <details className="monitor-error-details">
-                            <summary
-                              aria-label={`查看${callBusinessLabel(call)}的错误详情`}
-                            >
-                              错误详情
-                            </summary>
-                            <pre>{call.error}</pre>
-                          </details>
-                        )}
                       </td>
                       <td>
                         <button
@@ -4438,7 +4407,6 @@ export default function MonitorPage({
             setSelectedCallId(0);
             writeQuery({ call_id: null }, false);
           }}
-          onRun={openRun}
         />
       )}
       {selectedJob && (
@@ -4461,7 +4429,6 @@ export default function MonitorPage({
                 .then((item) => setSelectedJob(item as Job)),
             ])
           }
-          onRun={openRun}
         />
       )}
       {traceTarget && projectId && (

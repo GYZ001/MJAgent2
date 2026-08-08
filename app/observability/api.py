@@ -1155,7 +1155,7 @@ def resolve_legacy_observability(
     if provided != 1:
         raise HTTPException(422, "必须且只能提供 run_id、job_id、call_id 之一")
     if run_id:
-        project_id, section, object_id = _run_project(run_id), "runs", run_id
+        project_id, section, object_id = _run_project(run_id), "jobs", run_id
     elif job_id:
         project_id, section, object_id = _job_project(job_id, source), "jobs", job_id
     else:

@@ -755,32 +755,21 @@ def test_screenplay_projection_separates_action_labels_and_deduplicates_dialogue
     assert "陌生杀手：你们来晚了。" in result.full_script_text
 
 
-def test_patch_planner_derives_short_scene_turn_without_model_call() -> None:
-    from app.production.screenplay_repair import (
-        _patch_strategy_key,
-        plan_screenplay_patch,
+def test_sync_repair_entry_never_maps_issue_content_to_operations():
+    from app.production.screenplay_repair import plan_screenplay_patch
+
+    first = structured_issue(
+        code="ARBITRARY_A", message="任意问题 A", subject="screenplay",
+        path="/arbitrary/a", stage="screenplay",
+    )
+    second = structured_issue(
+        code="ARBITRARY_B", message="完全不同的问题 B", subject="screenplay",
+        path="/arbitrary/b", stage="screenplay",
     )
 
-    script = _minimal_script()
-    script.scene_outline[0].turn = "收束"
-    script.scene_outline[0].exit_state = "甲已经作出应战决定"
-    issue = structured_issue(
-        code="SCENE_FIELD_INVALID",
-        message="scene_outline 第1场.turn 过短；请说明状态变化",
-        subject="screenplay",
-        path="/scene_blocks/SC01/turn",
-        rule_id="scene_turn_invalid",
-        stage="screenplay",
-        related_node_ids=["SC01"],
-    )
+    assert plan_screenplay_patch(first, _minimal_script()) == []
+    assert plan_screenplay_patch(second, _minimal_script()) == []
 
-    ops = plan_screenplay_patch(issue, script)
-
-    assert len(ops) == 1
-    assert ops[0].op == "replace_field"
-    assert ops[0].target["id"] == "SC01"
-    assert "甲已经作出应战决定" in ops[0].value
-    assert _patch_strategy_key(ops) == "fill_scene_SC01_turn"
 
 
 def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
@@ -1137,837 +1126,69 @@ def test_document_projection_removes_legacy_cross_scene_prefixed_duplicate() -> 
     assert projected.scene_outline[1].scene_no == 2
 
 
-def test_context_gap_skips_unsafe_rederive_and_trigger_insertion() -> None:
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    issue = structured_issue(
-        code="KEY_LINE_MISSING",
-        message=(
-            "主线对白上下文断裂：甲：别听他说，我是被抓来的。；"
-            "必须把同一场前两轮内另一角色的触发台词也列入 key_lines"
-        ),
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="key_line_context",
-        stage="screenplay",
-    )
-
-    assert plan_screenplay_patch(issue, _minimal_script()) == []
 
 
-def test_patch_planner_recognizes_legacy_rederive_and_repairs_opening_anchor():
-    from app.production.screenplay_repair import (
-        _patch_strategy_key,
-        _strategy_was_tried,
-        plan_screenplay_patch,
-    )
-
-    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
-        chain_id="DC1",
-        topic="测验结果公开",
-        turns=[KeyDialogueTurn(
-            speaker="测验员",
-            line="萧炎，斗之力，三段！级别：低级！",
-            function="announcement",
-            source_text="萧炎，斗之力，三段！级别：低级！",
-        )],
-    )])
-    issue = structured_issue(
-        code="SOURCE_FIDELITY",
-        message=(
-            "原文开场第一句对白未作为 dialogue_chains[0].turns[0]：斗之力，三段！；"
-            "开场对白不能丢失"
-        ),
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="opening_anchor",
-        stage="screenplay",
-    )
-
-    assert _strategy_was_tried(["rederive:"], "rederive")
-    ops = plan_screenplay_patch(
-        issue,
-        script,
-        strategy_history={issue.fingerprint: ["rederive:"]},
-    )
-
-    assert len(ops) == 1
-    assert _patch_strategy_key(ops) == "fix_opening_source_anchor"
-    assert ops[0].target["kind"] == "dialogue_chain_turn"
-    assert ops[0].value == "斗之力，三段！"
 
 
-def test_patch_planner_repairs_semantically_unrelated_first_turn_source():
-    from app.production.screenplay_repair import (
-        _patch_strategy_key,
-        plan_screenplay_patch,
-    )
-
-    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
-        chain_id="DC1",
-        topic="校长召见",
-        turns=[KeyDialogueTurn(
-            speaker="白洁",
-            line="校长，您找我？",
-            function="question",
-            source_text="砰、砰",
-        )],
-    )])
-    source = "门外传来“砰、砰”的敲击声。白洁问：“校长，您找我？”"
-    issue = structured_issue(
-        code="SOURCE_FIDELITY",
-        message=(
-            "dialogue_chains[0].turns[0].source_text 与改编台词语义不匹配："
-            "原文证据「砰、砰」→台词「校长，您找我？」"
-        ),
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="opening_anchor",
-        stage="screenplay",
-    )
-
-    ops = plan_screenplay_patch(issue, script, source_text=source)
-
-    assert len(ops) == 1
-    assert ops[0].target["chain_id"] == "DC1"
-    assert ops[0].target["turn_index"] == 0
-    assert ops[0].value == "校长，您找我？"
-    assert _patch_strategy_key(ops) == "fix_dialogue_source_DC1_0"
 
 
-def test_patch_planner_delivers_missing_spine_with_one_action_node():
-    from app.production.patch import apply_patch_operation_to_document
-    from app.production.screenplay_repair import (
-        _patch_strategy_key,
-        plan_screenplay_patch,
-    )
-    from app.validators import validate_screenplay_spine_delivery
-
-    script = _minimal_script()
-    issue = structured_issue(
-        code="SPINE_MISSING",
-        message=(
-            "full_script_text 未交付 1 条 must_keep 主线节拍："
-            "S01/甲:应战；必须在对应场次的动作段或角色对白中完整演出"
-        ),
-        subject="screenplay",
-        path="/nodes/S01",
-        related_node_ids=["S01"],
-        rule_id="spine_delivery",
-        stage="screenplay",
-    )
-
-    ops = plan_screenplay_patch(issue, script)
-
-    assert len(ops) == 1
-    assert ops[0].op == "create_node"
-    assert ops[0].target["kind"] == "action_block"
-    assert ops[0].target["scene_id"] == "SC01"
-    assert ops[0].value == {
-        "action_id": "AC-SPINE-S01",
-        "text": "甲应战。",
-    }
-    assert _patch_strategy_key(ops) == "deliver_spine_S01"
-
-    patched, touched = apply_patch_operation_to_document(
-        screenplay_to_document(script),
-        ops[0],
-    )
-    projected = document_to_screenplay(patched)
-
-    assert touched == ["AC-SPINE-S01", "SC01"]
-    assert "甲应战。" in projected.full_script_text
-    assert validate_screenplay_spine_delivery(
-        projected,
-        action_text=projected.full_script_text,
-    ) == []
 
 
-def test_patch_planner_repairs_indexed_source_placeholder_with_exact_source() -> None:
-    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
-
-    source = (
-        "铁柜没有上锁。苏禾拉开柜门，里面没有胶片，只有一只蓝色铁盒。"
-        "林澈接过铁盒，翻到背面，看见父亲留下的手写标签。"
-    )
-    script = _minimal_script(
-        dialogue_chains=[
-            KeyDialogueChain(
-                chain_id="DC1",
-                topic="任务开始",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="苏禾",
-                        line="先检查铁柜。",
-                        function="announcement",
-                        source_text="铁柜没有上锁。",
-                    ),
-                ],
-            ),
-            KeyDialogueChain(
-                chain_id="DC2",
-                topic="发现蓝色铁盒",
-                turns=[
-                    KeyDialogueTurn(
-                        speaker="林澈",
-                        line="柜里没有胶片。只有这个。",
-                        function="statement",
-                        source_text="（原文叙述转为对白）",
-                    ),
-                ],
-            ),
-        ],
-        full_script_text=(
-            "【场1】夜 / 放映室\n"
-            "苏禾：先检查铁柜。\n"
-            "林澈：柜里没有胶片。只有这个。"
-        ),
-        scene_outline=[
-            ScriptScene(
-                scene_no=1,
-                scene_heading="【场1】夜 / 放映室",
-                story_function="检查铁柜并发现蓝色铁盒",
-                characters=["林澈", "苏禾"],
-                summary="苏禾打开铁柜，林澈发现里面没有胶片。",
-                conflict="胶片缺失",
-                turn="转而检查蓝色铁盒",
-                source_basis="铁柜里没有胶片，只有蓝色铁盒。",
-            ),
-        ],
-    )
-    issue = structured_issue(
-        code="SOURCE_FIDELITY",
-        message=(
-            "dialogue_chains[1].turns[0].source_text 未在本集原文中找到："
-            "（原文叙述转为对白）"
-        ),
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="source_fidelity",
-        stage="screenplay",
-    )
-
-    ops = plan_screenplay_patch(issue, script, source_text=source)
-
-    assert len(ops) == 1
-    assert ops[0].target["chain_id"] == "DC2"
-    assert ops[0].target["turn_index"] == 0
-    assert ops[0].value == "苏禾拉开柜门，里面没有胶片，只有一只蓝色铁盒。"
-    assert ops[0].value in source
-    assert _patch_strategy_key(ops) == "fix_dialogue_source_DC2_0"
 
 
-def test_patch_planner_does_not_treat_generic_source_mismatch_as_opening_anchor() -> None:
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
-        chain_id="DC1",
-        topic="任务开始",
-        turns=[KeyDialogueTurn(
-            speaker="甲",
-            line="开始。",
-            function="announcement",
-            source_text="原文开场。",
-        )],
-    )])
-    issue = structured_issue(
-        code="SOURCE_FIDELITY",
-        message=(
-            "dialogue_chains[9].turns[9].source_text 未在本集原文中找到："
-            "（原文叙述转为对白）"
-        ),
-        subject="screenplay",
-        path="/dialogue_chains",
-        stage="screenplay",
-    )
-
-    assert plan_screenplay_patch(issue, script, source_text="原文开场。") == []
 
 
-def test_patch_planner_relabels_invalid_same_speaker_response() -> None:
-    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
-
-    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
-        chain_id="DC1",
-        topic="萧炎连续自语",
-        turns=[
-            KeyDialogueTurn(
-                speaker="萧炎", line="十五年了。", function="statement", source_text="十五年了。",
-            ),
-            KeyDialogueTurn(
-                speaker="萧炎", line="为什么偏偏是我？", function="response", source_text="为什么偏偏是我？",
-            ),
-        ],
-    )])
-    issue = structured_issue(
-        code="KEY_LINE_MISSING",
-        message="dialogue_chains[0].turns[1] 是 response，但前一话轮没有另一角色的触发台词",
-        subject="screenplay",
-        path="/dialogue_chains",
-        rule_id="response_requires_trigger",
-        stage="screenplay",
-    )
-
-    ops = plan_screenplay_patch(issue, script)
-
-    assert len(ops) == 1
-    assert ops[0].path == "function"
-    assert ops[0].value == "statement"
-    assert ops[0].target["chain_id"] == "DC1"
-    assert _patch_strategy_key(ops) == "fix_dialogue_function_DC1_1"
 
 
-def test_cross_scene_dialogue_chain_is_split_without_rewriting_body() -> None:
-    from app.production.screenplay_document import (
-        document_to_screenplay,
-        screenplay_to_document,
-        split_dialogue_chain_by_scene,
-    )
-    from app.production.screenplay_repair import _patch_strategy_key, plan_screenplay_patch
-
-    script = _minimal_script(dialogue_chains=[KeyDialogueChain(
-        chain_id="DC1",
-        topic="宣布与回应",
-        turns=[
-            KeyDialogueTurn(speaker="甲", line="结果公布。", function="announcement", source_text="结果公布。"),
-            KeyDialogueTurn(speaker="乙", line="我不接受。", function="response", source_text="我不接受。"),
-            KeyDialogueTurn(speaker="乙", line="你们若是当事人呢？", function="question", source_text="你们若是当事人呢？"),
-            KeyDialogueTurn(speaker="丙", line="他有权回答。", function="statement", source_text="他有权回答。"),
-        ],
-    )])
-    script.scene_outline = [
-        ScriptScene(scene_no=1, scene_heading="【场1】日 / 大厅", story_function="公布结果并引发拒绝",
-                    characters=["甲", "乙"], summary="公布结果", conflict="乙拒绝", turn="乙开始反问", source_basis="原文"),
-        ScriptScene(scene_no=2, scene_heading="【场2】日 / 大厅", story_function="反问促使立场改变",
-                    characters=["乙", "丙"], summary="乙反问", conflict="立场冲突", turn="丙支持乙", source_basis="原文"),
-        ScriptScene(scene_no=3, scene_heading="【场3】日 / 大厅", story_function="收束对峙并交付结果",
-                    characters=["乙"], summary="对峙收束", conflict="余波", turn="局势定型", source_basis="原文"),
-    ]
-    script.full_script_text = (
-        "【场1】日 / 大厅\n甲（宣布）：结果公布。\n乙（拒绝）：我不接受。\n\n"
-        "【场2】日 / 大厅\n乙（追问）：你们若是当事人呢？\n丙（支持）：他有权回答。\n\n"
-        "【场3】日 / 大厅\n乙转身离开。"
-    )
-    issue = structured_issue(
-        code="KEY_LINE_MISSING",
-        message="dialogue_chains[0] 被拆到多个场次；同一触发→回应链必须在同一场完成",
-        subject="screenplay", path="/dialogue_chains", rule_id="chain_scene", stage="screenplay",
-    )
-
-    ops = plan_screenplay_patch(issue, script)
-    assert len(ops) == 1
-    assert ops[0].op == "split_dialogue_chain_by_scene"
-    assert _patch_strategy_key(ops) == "split_dialogue_chain_DC1"
-
-    document = screenplay_to_document(script)
-    before_body = document_to_screenplay(document).full_script_text
-    patched, touched = split_dialogue_chain_by_scene(document, chain_id="DC1")
-    result = document_to_screenplay(patched)
-    assert [len(chain.turns) for chain in result.dialogue_chains] == [2, 2]
-    assert result.dialogue_chains[0].chain_id == "DC1"
-    assert result.dialogue_chains[1].chain_id == "DC2"
-    assert result.full_script_text == before_body
-    assert touched == ["dialogue_chains", "DC1", "DC2"]
 
 
 @pytest.mark.asyncio
-async def test_narrative_screenplay_uses_deterministic_document_patch_first(
+async def test_screenplay_repair_delegates_every_issue_to_semantic_planner(
     monkeypatch,
 ) -> None:
     from app.production import screenplay_repair
+    from app.production.patch import PatchOperation
 
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan(scope_id="ep_p"),
-        dialogue_chains=[KeyDialogueChain(
-            chain_id="DC1",
-            topic="宣布与回应",
-            turns=[
-                KeyDialogueTurn(
-                    speaker="甲",
-                    line="结果公布。",
-                    function="announcement",
-                    source_text="结果公布。",
-                ),
-                KeyDialogueTurn(
-                    speaker="乙",
-                    line="我不接受。",
-                    function="response",
-                    source_text="我不接受。",
-                ),
-            ],
-        )],
-    )
     issue = structured_issue(
-        code="KEY_LINE_MISSING",
-        message="dialogue_chains[0] 被拆到多个场次；同一触发→回应链必须在同一场完成",
+        code="ARBITRARY_RELATION_GAP",
+        message="开放关系缺口",
         subject="screenplay",
-        path="/dialogue_chains",
+        path="/arbitrary/relation",
         stage="screenplay",
     )
+    expected = [PatchOperation(
+        op="replace_field",
+        path="stakes",
+        value="候选值",
+        target={"kind": "metadata", "id": "stakes"},
+    )]
+    calls = []
 
-    async def forbidden_semantic_planner(*_args, **_kwargs):
-        raise AssertionError("文档结构问题不应调用叙事图语义规划器")
+    async def semantic_planner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return expected
 
-    monkeypatch.setattr(
-        screenplay_repair,
-        "_llm_field_patch",
-        forbidden_semantic_planner,
-    )
-
+    monkeypatch.setattr(screenplay_repair, "_llm_field_patch", semantic_planner)
     operations = await screenplay_repair._plan_screenplay_repair_operations(
         issue,
-        script,
+        _minimal_script(),
         source_text="原文",
         strategy_history={},
     )
 
-    assert len(operations) == 1
-    assert operations[0].op == "split_dialogue_chain_by_scene"
+    assert operations == expected
+    assert len(calls) == 1
 
 
-@pytest.mark.asyncio
-async def test_source_span_exact_mismatch_uses_deterministic_patch(
-    monkeypatch,
-) -> None:
-    from app.narrative import (
-        normalize_source_evidence_text,
-        validate_screenplay_narrative,
-    )
-    from app.production import screenplay_repair
-    from app.production.patch import apply_patch_operation_to_document
-
-    chapter = "前文。高义让白洁送总结。后文。"
-    excerpt = "高义让白洁送总结。"
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan.model_validate({
-            "scope_id": "ep_p",
-            "source_evidence": [{
-                "source_evidence_id": "SE-1",
-                "source_span": {"chapter_id": "1", "start": 0, "end": 2},
-                "verbatim_excerpt": excerpt,
-            }],
-        }),
-    )
-    issue = structured_issue(
-        code="SOURCE_SPAN_EXACT_MISMATCH",
-        message=(
-            "[SOURCE_SPAN_EXACT_MISMATCH] SE-1 的 start/end "
-            "切片与逐字摘录不一致"
-        ),
-        subject="screenplay",
-        path="/source_span_exact_mismatch",
-        stage="screenplay",
-    )
-
-    async def forbidden_semantic_planner(*_args, **_kwargs):
-        raise AssertionError("source_span 精确错位应由本地文本定位修复")
-
-    monkeypatch.setattr(
-        screenplay_repair,
-        "_llm_field_patch",
-        forbidden_semantic_planner,
-    )
-
-    operations = await screenplay_repair._plan_screenplay_repair_operations(
-        issue,
-        script,
-        source_text=chapter,
-        strategy_history={},
-    )
-
-    assert len(operations) == 1
-    assert screenplay_repair._patch_strategy_key(operations) == "fix_source_span_SE-1"
-    assert operations[0].op == "replace_field"
-    assert operations[0].path == "source_span"
-
-    patched, _touched = apply_patch_operation_to_document(
-        screenplay_to_document(script),
-        operations[0],
-    )
-    result = document_to_screenplay(patched)
-    evidence = result.narrative_plan.source_evidence[0]
-    raw_slice = chapter[evidence.source_span.start:evidence.source_span.end]
-    assert normalize_source_evidence_text(raw_slice) == (
-        normalize_source_evidence_text(excerpt)
-    )
-    errors = validate_screenplay_narrative(
-        result,
-        require=True,
-        expected_scope_id="ep_p",
-        source_text=chapter,
-    )
-    assert not any(
-        "SOURCE_SPAN_EXACT_MISMATCH" in error for error in errors
-    )
 
 
-def test_decision_chain_patch_is_derived_from_unique_perceivable_evidence():
-    from app.production.patch import _create_node
-    from app.production.screenplay_document import screenplay_to_document
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan.model_validate({
-            "scope_id": "ep_p",
-            "events": [{
-                "event_id": "E4",
-                "proposition_ids": ["P-5"],
-                "action_ids": ["A2"],
-            }],
-            "atomic_actions": [{
-                "action_id": "A2",
-                "actor_ids": ["char-a"],
-                "semantic_intent": "角色执行动作",
-                "completion_condition": "动作完成",
-                "decision_requirement": "applies",
-                "temporal_phases": [{
-                    "phase_id": "A2/P1",
-                    "start_condition": "收到请求",
-                    "end_condition": "完成动作",
-                    "estimated_min_s": 1.0,
-                }],
-            }],
-            "evidence": [{
-                "evidence_id": "EV-4",
-                "anchor": {"type": "event", "id": "E4"},
-                "observable_claim": "角色收到请求并执行动作",
-                "perceivable_by": ["char-a", "audience"],
-                "supports_proposition_ids": ["P-5"],
-            }],
-        }),
-    )
-    issue = structured_issue(
-        code="CHARACTER_DECISION_CHAIN_MISSING",
-        message=(
-            "[CHARACTER_DECISION_CHAIN_MISSING] "
-            "E4/A2 的执行者 char-a 缺少感知→判断→选择依据"
-        ),
-        subject="screenplay",
-        path="/nodes/E4",
-        stage="screenplay",
-    )
-
-    operations = plan_screenplay_patch(issue, script)
-
-    assert len(operations) == 1
-    operation = operations[0]
-    assert operation.op == "create_node"
-    assert operation.target["collection"] == "character_beliefs"
-    assert operation.value["decision_action_ids"] == ["A2"]
-    assert operation.value["decision_basis_ids"] == ["EV-4"]
-    patched, _ = _create_node(screenplay_to_document(script), operation)
-    belief = patched.narrative_plan.character_beliefs[0]
-    assert belief.character_id == "char-a"
-    assert belief.anchor.id == "E4"
 
 
-def test_belief_delta_patch_binds_exact_state_and_fills_assumed_unknowns():
-    from app.production.screenplay_repair import (
-        _patch_strategy_key,
-        plan_screenplay_patch,
-    )
-
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan.model_validate({
-            "scope_id": "ep_p",
-            "audience_priors": [{
-                "audience_prior_id": "AP-1",
-                "scope_id": "ep_p",
-                "audience_description": "首次观看",
-                "assumed_unknown_proposition_ids": ["P-1", "P-2"],
-            }],
-            "audience_states": [
-                {
-                    "audience_state_id": "AS-IN",
-                    "audience_prior_id": "AP-1",
-                    "anchor": {"type": "event", "id": "E1"},
-                    "beliefs": [{
-                        "proposition_id": "P-1",
-                        "stance": "unknown",
-                        "confidence": 0.0,
-                    }],
-                },
-                {
-                    "audience_state_id": "AS-OUT",
-                    "audience_prior_id": "AP-1",
-                    "anchor": {"type": "event", "id": "E2"},
-                    "beliefs": [
-                        {
-                            "proposition_id": "P-1",
-                            "stance": "believed",
-                            "confidence": 1.0,
-                        },
-                        {
-                            "proposition_id": "P-2",
-                            "stance": "believed",
-                            "confidence": 1.0,
-                        },
-                    ],
-                },
-            ],
-            "experience_intents": [{
-                "experience_intent_id": "XI-1",
-                "scope_id": "ep_p",
-                "director_objective": "建立认知",
-                "audience_paths": [{
-                    "audience_path_id": "XP-1",
-                    "audience_prior_id": "AP-1",
-                    "audience_state_in_id": "AS-IN",
-                    "audience_state_out_target_id": "AS-OUT",
-                    "target_deltas": [{
-                        "target_delta_id": "XD-1",
-                        "dimension": "belief",
-                        "proposition_ids": ["P-1", "P-2"],
-                        "description": "建立两个信念",
-                        "from_state": {"stance": "unknown"},
-                        "to_state": {"stance": "believed"},
-                        "deadline_event_id": "E2",
-                    }],
-                }],
-            }],
-        }),
-    )
-    issue = structured_issue(
-        code="TARGET_DELTA_FROM_STATE_MISMATCH",
-        message=(
-            "[TARGET_DELTA_FROM_STATE_MISMATCH] XD-1.from_state "
-            "不是该观众路径入场状态的真实结构片段"
-        ),
-        subject="screenplay",
-        path="/target_delta_from_state_mismatch",
-        stage="screenplay",
-    )
-
-    operations = plan_screenplay_patch(issue, script)
-
-    assert len(operations) == 2
-    assert operations[0].target["id"] == "XD-1"
-    assert operations[0].value["beliefs"][1] == {
-        "proposition_id": "P-2",
-        "stance": "unknown",
-        "confidence": 0.0,
-        "evidence_ids": [],
-    }
-    assert operations[1].target["id"] == "AS-IN"
-    assert _patch_strategy_key(operations) == "replace_field:XD-1:from_state"
 
 
-def test_unassigned_audience_state_fields_align_to_prior_contract():
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan.model_validate({
-            "scope_id": "ep_p",
-            "audience_priors": [
-                {
-                    "audience_prior_id": "AP-1",
-                    "scope_id": "ep_p",
-                    "audience_description": "首次观看",
-                },
-                {
-                    "audience_prior_id": "AP-2",
-                    "scope_id": "ep_p",
-                    "audience_description": "已知剧情",
-                    "assumed_known_proposition_ids": ["P-1", "P-2"],
-                },
-            ],
-            "audience_states": [
-                {
-                    "audience_state_id": "AS-1-IN",
-                    "audience_prior_id": "AP-1",
-                    "anchor": {"type": "event", "id": "E1"},
-                },
-                {
-                    "audience_state_id": "AS-1-OUT",
-                    "audience_prior_id": "AP-1",
-                    "anchor": {"type": "event", "id": "E2"},
-                    "working_memory": [{
-                        "proposition_id": "P-1",
-                        "retention_confidence": 0.9,
-                    }],
-                },
-                {
-                    "audience_state_id": "AS-2-IN",
-                    "audience_prior_id": "AP-2",
-                    "anchor": {"type": "event", "id": "E1"},
-                    "beliefs": [{
-                        "proposition_id": "P-1",
-                        "stance": "believed",
-                        "confidence": 1.0,
-                    }],
-                },
-                {
-                    "audience_state_id": "AS-2-OUT",
-                    "audience_prior_id": "AP-2",
-                    "anchor": {"type": "event", "id": "E2"},
-                    "beliefs": [{
-                        "proposition_id": "P-2",
-                        "stance": "believed",
-                        "confidence": 1.0,
-                        "evidence_ids": ["EV-2"],
-                    }],
-                },
-            ],
-            "experience_intents": [{
-                "experience_intent_id": "XI-1",
-                "scope_id": "ep_p",
-                "director_objective": "观众状态",
-                "audience_paths": [
-                    {
-                        "audience_path_id": "XP-1",
-                        "audience_prior_id": "AP-1",
-                        "audience_state_in_id": "AS-1-IN",
-                        "audience_state_out_target_id": "AS-1-OUT",
-                    },
-                    {
-                        "audience_path_id": "XP-2",
-                        "audience_prior_id": "AP-2",
-                        "audience_state_in_id": "AS-2-IN",
-                        "audience_state_out_target_id": "AS-2-OUT",
-                    },
-                ],
-            }],
-        }),
-    )
-    memory_issue = structured_issue(
-        code="AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
-        message=(
-            "[AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-1 "
-            "入/出状态的结构变化没有 target_delta 负责：['working_memory']"
-        ),
-        subject="screenplay",
-        stage="screenplay",
-    )
-    belief_issue = structured_issue(
-        code="AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
-        message=(
-            "[AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-2 "
-            "入/出状态的结构变化没有 target_delta 负责：['beliefs']"
-        ),
-        subject="screenplay",
-        stage="screenplay",
-    )
-
-    memory_ops = plan_screenplay_patch(memory_issue, script)
-    belief_ops = plan_screenplay_patch(belief_issue, script)
-
-    assert len(memory_ops) == 1
-    assert memory_ops[0].target["id"] == "AS-1-OUT"
-    assert memory_ops[0].value == []
-    assert len(belief_ops) == 2
-    assert {operation.target["id"] for operation in belief_ops} == {
-        "AS-2-IN",
-        "AS-2-OUT",
-    }
-    assert all(
-        operation.value == [
-            {
-                "proposition_id": "P-1",
-                "stance": "believed",
-                "confidence": 1.0,
-                "evidence_ids": [],
-            },
-            {
-                "proposition_id": "P-2",
-                "stance": "believed",
-                "confidence": 1.0,
-                "evidence_ids": [],
-            },
-        ]
-        for operation in belief_ops
-    )
 
 
-def test_unassigned_affective_state_creates_nested_target_delta():
-    from app.narrative import validate_screenplay_narrative
-    from app.production.patch import apply_patch_operation_to_document
-    from app.production.screenplay_repair import (
-        _patch_strategy_key,
-        plan_screenplay_patch,
-    )
 
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan.model_validate({
-            "scope_id": "ep_p",
-            "events": [
-                {"event_id": "E-1"},
-                {"event_id": "E-2"},
-            ],
-            "audience_priors": [{
-                "audience_prior_id": "AP-1",
-                "scope_id": "ep_p",
-                "audience_description": "首次观看",
-            }],
-            "audience_states": [
-                {
-                    "audience_state_id": "AS-IN",
-                    "audience_prior_id": "AP-1",
-                    "anchor": {"type": "event", "id": "E-1"},
-                    "affective_state": {},
-                },
-                {
-                    "audience_state_id": "AS-OUT",
-                    "audience_prior_id": "AP-1",
-                    "anchor": {"type": "event", "id": "E-2"},
-                    "affective_state": {"tension": 0.9},
-                },
-            ],
-            "experience_intents": [{
-                "experience_intent_id": "XI-1",
-                "scope_id": "ep_p",
-                "anchor_event_ids": ["E-2"],
-                "director_objective": "提高紧张感",
-                "audience_paths": [{
-                    "audience_path_id": "XP-AFFECT",
-                    "audience_prior_id": "AP-1",
-                    "audience_state_in_id": "AS-IN",
-                    "audience_state_out_target_id": "AS-OUT",
-                }],
-            }],
-        }),
-    )
-    issue = structured_issue(
-        code="AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED",
-        message=(
-            "[AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-AFFECT "
-            "入/出状态的结构变化没有 target_delta 负责：['affective_state']"
-        ),
-        subject="screenplay",
-        stage="screenplay",
-    )
-
-    operations = plan_screenplay_patch(issue, script)
-
-    assert len(operations) == 1
-    assert operations[0].op == "create_node"
-    assert operations[0].target["parent_id"] == "XP-AFFECT"
-    assert operations[0].target["parent_field"] == "target_deltas"
-    assert operations[0].value["dimension"] == "affective"
-    assert operations[0].value["from_state"] == {
-        "affective_state": {},
-    }
-    assert operations[0].value["to_state"] == {
-        "affective_state": {"tension": 0.9},
-    }
-    assert _patch_strategy_key(operations) == (
-        "create_node:XD-XP-AFFECT-affective:node"
-    )
-
-    patched, _touched = apply_patch_operation_to_document(
-        screenplay_to_document(script),
-        operations[0],
-    )
-    projected = document_to_screenplay(patched)
-    validation_errors = validate_screenplay_narrative(
-        projected,
-        require=True,
-        expected_scope_id="ep_p",
-    )
-
-    assert not any(
-        "AUDIENCE_TARGET_STATE_DIFF_UNASSIGNED] XP-AFFECT" in error
-        for error in validation_errors
-    )
 
 
 def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():
@@ -2699,98 +1920,10 @@ def test_repair_router_no_longer_emits_redo_or_replan():
     )
 
 
-def test_empty_dialogue_chain_requires_local_content_patch_not_rederive():
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    script = _minimal_script(
-        dialogue_chains=[
-            KeyDialogueChain(
-                chain_id="DC-EMPTY",
-                topic="Source-grounded letter",
-                turns=[],
-            ),
-        ],
-    )
-    issue = structured_issue(
-        code="KEY_LINE_MISSING",
-        message="dialogue_chains[0].turns 需包含 1~8 个连续话轮",
-        subject="screenplay",
-        path="/dialogue_chains",
-        stage="screenplay",
-    )
-
-    assert plan_screenplay_patch(issue, script) == []
 
 
-def test_recall_decision_mismatch_uses_typed_local_patch():
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan.model_validate({
-            "scope_id": "ep_p",
-            "setup_payoff_contracts": [{
-                "setup_payoff_id": "SP1",
-                "recall_needed": False,
-            }],
-        }),
-    )
-    issue = structured_issue(
-        code="SETUP_RECALL_DECISION_MISMATCH",
-        message=(
-            "[SETUP_RECALL_DECISION_MISMATCH] "
-            "SP1.recall_needed=False 与低分位记忆结果 True 不一致"
-        ),
-        subject="screenplay",
-        path="/setup_payoff_contracts/SP1",
-        stage="screenplay",
-    )
-
-    operations = plan_screenplay_patch(issue, script)
-
-    assert len(operations) == 1
-    assert operations[0].op == "replace_field"
-    assert operations[0].path == "recall_needed"
-    assert operations[0].value is True
 
 
-def test_missing_character_dramatic_state_uses_event_action_relations():
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    script = _minimal_script(
-        narrative_plan=NarrativeContinuityPlan.model_validate({
-            "scope_id": "ep_p",
-            "events": [{
-                "event_id": "E1",
-                "action_ids": ["A1"],
-                "proposition_ids": ["P1"],
-                "salience": 0.8,
-            }],
-            "atomic_actions": [{
-                "action_id": "A1",
-                "actor_ids": ["char-a"],
-                "semantic_intent": "Complete the declared action.",
-                "completion_condition": "The result is visible.",
-            }],
-        }),
-    )
-    issue = structured_issue(
-        code="CHARACTER_DRAMATIC_STATE_MISSING",
-        message=(
-            "[CHARACTER_DRAMATIC_STATE_MISSING] "
-            "E1/A1 的执行者 char-a 缺少目标/情绪/关系状态"
-        ),
-        subject="screenplay",
-        path="/nodes/E1",
-        stage="screenplay",
-    )
-
-    operations = plan_screenplay_patch(issue, script)
-
-    assert len(operations) == 1
-    assert operations[0].op == "create_node"
-    assert operations[0].target["collection"] == "character_states"
-    assert operations[0].value["character_id"] == "char-a"
-    assert operations[0].value["tactic"] == "Complete the declared action."
 
 
 def test_apply_screenplay_patch_cas_and_noop(monkeypatch):

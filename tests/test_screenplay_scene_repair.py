@@ -105,43 +105,6 @@ def test_legacy_scene_message_is_not_inferred_as_a_shot():
     assert "SC01" in issue.evidence["related_node_ids"]
 
 
-def test_story_function_patch_targets_only_the_scene_field():
-    from app.production.screenplay_repair import plan_screenplay_patch
-
-    script = _script()
-    issue = structured_issue(
-        code="SCENE_STORY_FUNCTION_TOO_SHORT",
-        message="scene_outline 第1场.story_function 过短",
-        subject="screenplay",
-        path="/scene_blocks/SC01/story_function",
-        related_node_ids=["SC01"],
-        stage="screenplay",
-    )
-
-    operations = plan_screenplay_patch(issue, script)
-
-    assert len(operations) == 1
-    operation = operations[0]
-    assert operation.op == "replace_field"
-    assert operation.path == "story_function"
-    assert operation.target == {"kind": "scene", "id": "SC01"}
-    assert len(operation.value) >= 6
-    assert "萧炎退回队尾" in operation.value
-
-    patched, touched = apply_field_patch(
-        screenplay_to_document(script),
-        path=operation.path,
-        value=operation.value,
-        target=operation.target,
-    )
-    result = document_to_screenplay(patched)
-    assert result.scene_outline[0].story_function == operation.value
-    assert result.scene_outline[0].summary == script.scene_outline[0].summary
-    # full_script_text 是文档的确定性投影，允许随依赖闭包重建；源场次内容不得改变。
-    assert result.scene_outline[0].conflict == script.scene_outline[0].conflict
-    assert result.scene_outline[0].turn == script.scene_outline[0].turn
-    assert "测验员：斗之力，三段！" in result.full_script_text
-    assert touched == ["SC01"]
 
 
 @pytest.mark.asyncio

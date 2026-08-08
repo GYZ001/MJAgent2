@@ -879,6 +879,127 @@ def screenplay_repair_draft(args) -> PreflightResult:
     return result
 
 
+def screenplay_generate(args) -> PreflightResult:
+    """Read-only generation sizing and reusable-artifact projection."""
+    conn = get_conn()
+    ep = conn.execute(
+        """SELECT id,episode_no,project_id,screenplay_status,
+                  screenplay_artifact_id,storyboard_artifact_id,
+                  active_screenplay_run_id,source_chapters
+             FROM episodes WHERE id=?""",
+        (args.episode_id,),
+    ).fetchone()
+    if not ep:
+        return PreflightResult(
+            command="screenplay.generate",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="剧集不存在",
+            state_fingerprint=_fp({"episode_id": args.episode_id, "missing": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+            denial_code="not_found",
+            denial_message="剧集不存在",
+        )
+    from app.domain.screenplay_ops import _screenplay_generation_preflight
+
+    projection = _screenplay_generation_preflight(args.episode_id)
+    input_projection = dict(projection.get("input") or {})
+    cast_impact = dict(projection.get("cast_impact") or {})
+    reusable = dict(projection.get("reusable_validated_artifacts") or {})
+    downstream_impact = bool(ep["screenplay_artifact_id"] or ep["storyboard_artifact_id"])
+    return PreflightResult(
+        command="screenplay.generate",
+        allowed=not bool(ep["active_screenplay_run_id"]),
+        risk=RiskLevel.R2_MATERIAL,
+        summary=(
+            f"第 {ep['episode_no']} 集将按 {input_projection.get('source_segment_count', 0)} 个 SRC，"
+            f"预计 {input_projection.get('estimated_blueprint_shards', 0)} 个蓝图片、"
+            f"{input_projection.get('estimated_scene_writing_shards', 0)} 个场次写作片生成"
+        ),
+        affected=AffectedScope(
+            projects=[ep["project_id"]],
+            episodes=[args.episode_id],
+            invalidated_artifacts=int(downstream_impact),
+            extra={
+                **input_projection,
+                "possible_character_cards": cast_impact.get("candidate_count"),
+                "cast_requires_model_resolution": cast_impact.get(
+                    "requires_model_resolution", True
+                ),
+                "reusable_validated_artifacts": reusable,
+            },
+        ),
+        warnings=(
+            ["重新发布完整剧本后，下游分镜/媒体可能失效"]
+            if downstream_impact else []
+        ),
+        state_fingerprint=_fp({
+            "episode": dict(ep),
+            "input": input_projection,
+            "reusable": reusable,
+        }),
+        requires_confirmation=downstream_impact,
+        confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+        denial_code="SCREENPLAY_ALREADY_RUNNING" if ep["active_screenplay_run_id"] else None,
+        denial_message="本集已有剧本任务运行中" if ep["active_screenplay_run_id"] else None,
+    )
+
+
+def screenplay_resume(args) -> PreflightResult:
+    """Read-only distinction between pre-document and document resume modes."""
+    conn = get_conn()
+    ep = conn.execute(
+        """SELECT id,episode_no,project_id,screenplay_status,
+                  active_screenplay_run_id,working_screenplay_artifact_id
+             FROM episodes WHERE id=?""",
+        (args.episode_id,),
+    ).fetchone()
+    if not ep:
+        return PreflightResult(
+            command="screenplay.resume",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="剧集不存在",
+            state_fingerprint=_fp({"episode_id": args.episode_id, "missing": True}),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+            denial_code="not_found",
+            denial_message="剧集不存在",
+        )
+    from app.domain.screenplay_ops import _screenplay_production_state
+
+    state = _screenplay_production_state(args.episode_id)
+    can_baseline = bool(state.get("can_resume_baseline"))
+    can_repair = bool(state.get("can_resume_repair"))
+    allowed = bool((can_baseline or can_repair) and not ep["active_screenplay_run_id"])
+    mode = "baseline" if can_baseline else "finalize" if can_repair else "none"
+    return PreflightResult(
+        command="screenplay.resume",
+        allowed=allowed,
+        risk=RiskLevel.R2_MATERIAL,
+        summary=(
+            "继续首版场次生成" if mode == "baseline"
+            else "继续完整剧本校验" if mode == "finalize"
+            else "当前没有可继续的剧本流程"
+        ),
+        affected=AffectedScope(
+            projects=[ep["project_id"]],
+            episodes=[args.episode_id],
+            extra={
+                "resume_mode": mode,
+                "phase": state.get("phase"),
+                "shard_progress": state.get("shard_progress") or {},
+            },
+        ),
+        state_fingerprint=_fp({"episode": dict(ep), "production": state}),
+        requires_confirmation=False,
+        confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+        denial_code=None if allowed else "SCREENPLAY_NOT_RESUMABLE",
+        denial_message=None if allowed else "当前没有可继续的剧本流程，或任务仍在运行",
+    )
+
+
 def screenplay_delete(args) -> PreflightResult:
     conn = get_conn()
     ep = conn.execute(
@@ -1082,6 +1203,8 @@ PREFLIGHT_MAP: dict[str, Any] = {
     "storyboard.confirm": storyboard_confirm,
     "shot.update": shot_update,
     "screenplay.update": screenplay_update,
+    "screenplay.generate": screenplay_generate,
+    "screenplay.resume": screenplay_resume,
     "screenplay.repair_draft": screenplay_repair_draft,
     "screenplay.delete": screenplay_delete,
     "bible.update": bible_update,

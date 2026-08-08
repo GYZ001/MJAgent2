@@ -90,18 +90,20 @@ describe("调用日志业务名称与恢复建议", () => {
     },
   } satisfies Call;
 
-  it("详情入口使用业务上下文，不把数字调用 ID作为主要名称", () => {
+  it("详情入口只使用调用目的、模型与状态，不展示业务上下文", () => {
     expect(callBusinessLabel(call))
-      .toBe("斗破苍穹 · 第1集第4镜 · 创建视频任务 · 失败");
+      .toBe("创建视频任务 · 未记录模型 · 失败");
+    expect(callBusinessLabel(call)).not.toContain("斗破苍穹");
+    expect(callBusinessLabel(call)).not.toContain("第1集");
     expect(callBusinessLabel(call)).not.toContain(String(call.id));
   });
 
-  it("主列表显示恢复动作，原始错误留给折叠详情", () => {
-    expect(callNextStep(call)).toBe("调用未完成，可展开错误详情");
+  it("主列表统一引导查看本次模型输入输出", () => {
+    expect(callNextStep(call)).toBe("调用未完成，可查看本次模型输入输出");
     expect(callNextStep({ ...call, error: undefined, effective_status: "OK" }))
-      .toBe("调用已完成，无需处理");
+      .toBe("查看本次模型输入输出");
     expect(callNextStep({ ...call, run_id: "run_1" }))
-      .toBe("可查看关联运行任务");
+      .toBe("调用未完成，可查看本次模型输入输出");
   });
 });
 

@@ -859,7 +859,7 @@ async def generate_screenplay_scene_shards(
                 ),
                 call_meta={
                     "stage": "剧本场次分片",
-                    "stage_key": "screenplay_scene_shard",
+                    "stage_key": "screenplay_scene_shards",
                     "substage": "scene_writing",
                     "shard_id": plan.shard_id,
                     "shard_count": len(plans),

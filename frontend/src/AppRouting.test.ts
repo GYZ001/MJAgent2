@@ -37,7 +37,7 @@ describe('无分集工作台路由', () => {
 
   it('项目观测台与系统设置使用隔离的稳定路由', () => {
     expect(locationFor('observability', 'project 1', null, null))
-      .toBe('/projects/project%201/observability/runs')
+      .toBe('/projects/project%201/observability/jobs')
     expect(routeFromPath('/projects/p1/observability/calls')).toEqual({
       view: 'observability', projectId: 'p1', episodeId: null, chapterIdx: null,
     })

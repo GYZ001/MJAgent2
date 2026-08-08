@@ -834,6 +834,10 @@ def _call_meta_summary(raw: str | None) -> dict:
         "shot_id", "shot_no", "stage", "asset_kind", "frame_kind", "reference_type",
         "character_name", "scene_name", "call_role", "call_role_label", "caller_module",
         "caller_function", "contract_version", "error_stage", "purpose",
+        "stage_key", "substage", "shard_id", "shard_count",
+        "format_attempt", "semantic_attempt", "source_count", "scene_count",
+        "unit_count", "input_chars", "output_chars", "local_recovery",
+        "normalized_artifact_id", "reuse_successful_operation",
     }
     return {key: value for key, value in meta.items() if key in allowed}
 

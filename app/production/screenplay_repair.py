@@ -3062,18 +3062,20 @@ async def run_screenplay_production(
             baseline_artifact_id=baseline_art["id"],
             working_artifact_id=baseline_art["id"],
         )
-        if duration_expanded:
-            input_fp = screenplay_authority_fingerprint(
-                episode_id,
-                conn=conn,
-                source_text=source_text,
-                # The Baseline is durable now. Rebind its duration change to
-                # the latest persisted composite Bible, which concurrent
-                # episode discovery may have advanced during generation.
-                bible=None,
-                contract_version=contract.version,
-                qa_profile_version="screenplay-qa-gate-2",
-            )
+        # Blueprint-driven identity closure and duration normalization can both
+        # advance persisted authority after the revision was acquired.  Bind
+        # the durable full-document Baseline to the latest fingerprint before
+        # QA/certificate work begins.
+        latest_input_fp = screenplay_authority_fingerprint(
+            episode_id,
+            conn=conn,
+            source_text=source_text,
+            bible=None,
+            contract_version=contract.version,
+            qa_profile_version="screenplay-qa-gate-2",
+        )
+        if latest_input_fp != rev.input_fingerprint:
+            input_fp = latest_input_fp
             rev = rebind_input_fingerprint(
                 rev.id,
                 input_fingerprint=input_fp,

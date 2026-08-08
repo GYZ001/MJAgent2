@@ -23,7 +23,15 @@ def normalize_split_action_owner_completions(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
 ) -> list[dict[str, Any]]:
-    """Repair terminal action shots created after an event's dialogue splits."""
+    """Fill missing terminal-action directing prose without overwriting it.
+
+    Action/state IDs are graph authority, while ``beat``/``covers`` and the
+    visible action prose are director-owned presentation.  Replacing an
+    already directed post-dialogue result with the action's completion text
+    can turn a reaction/result shot into a verbatim duplicate of the dialogue
+    shot.  That duplicate cannot be repaired by the later scene-pack model,
+    because the scene-pack contract correctly treats outline prose as fixed.
+    """
     plan = screenplay.narrative_plan
     if plan is None:
         return []
@@ -76,7 +84,7 @@ def normalize_split_action_owner_completions(
             ("covers", completion),
         ):
             current = getattr(shot, field)
-            if current == value:
+            if str(current or "").strip() or current == value:
                 continue
             setattr(shot, field, value)
             changes.append({

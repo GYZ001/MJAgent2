@@ -3481,6 +3481,7 @@ async def _semantic_review_narrative_blueprint(
         if (
             cached.get("blueprint_hash") == initial_blueprint_hash
             and not cached.get("consensus_issue_keys")
+            and cached.get("review_outcome") == "clean"
         ):
             return blueprint
 
@@ -3749,12 +3750,21 @@ async def _semantic_review_narrative_blueprint(
         consensus_issues = [
             issue_maps[0][key] for key in sorted(consensus_keys)
         ]
+        non_consensus_issue_count = (
+            sum(len(issue_map) for issue_map in issue_maps)
+            - 2 * len(consensus_keys)
+        )
+        needs_full_fallback = bool(
+            targeted_review
+            and not consensus_keys
+            and non_consensus_issue_count
+        )
         evidence_repository.create_artifact(
             EvidenceArtifact(
                 type="screenplay_narrative_blueprint_review_consensus",
                 scope_type="episode",
                 scope_id=str(episode.get("id") or ""),
-                status="validated",
+                status="needs_revision" if needs_full_fallback else "validated",
                 trust_level="T1",
                 content={
                     "review_round": review_round,
@@ -3766,9 +3776,13 @@ async def _semantic_review_narrative_blueprint(
                         }
                         for code, node_keys in sorted(consensus_keys)
                     ],
-                    "non_consensus_issue_count": (
-                        sum(len(issue_map) for issue_map in issue_maps)
-                        - 2 * len(consensus_keys)
+                    "non_consensus_issue_count": non_consensus_issue_count,
+                    "review_mode": "targeted" if targeted_review else "full",
+                    "review_outcome": (
+                        "full_fallback_required"
+                        if needs_full_fallback else
+                        "consensus_issues"
+                        if consensus_keys else "clean"
                     ),
                 },
                 parent_artifact_ids=review_artifact_ids,
@@ -3777,9 +3791,15 @@ async def _semantic_review_narrative_blueprint(
             ),
             step_run_id=trace.step_run_id,
         )
+        if needs_full_fallback:
+            # Conflicting targeted opinions are the only reason to pay for a
+            # full Blueprint review.  The next bounded round switches inputs;
+            # no patch is attempted from non-consensus findings.
+            targeted_review = False
+            continue
         if not consensus_issues:
             return blueprint
-        if review_round >= 6:
+        if review_round >= 4:
             raise ValueError(
                 "蓝图语义共识复审仍有必须修复问题："
                 + "；".join(
@@ -4510,6 +4530,30 @@ def _save_screenplay_generation_checkpoint(
     })
 
 
+async def _run_screenplay_workflow_step(
+    step_key: str,
+    operation: Callable[[], Any],
+    *,
+    agent_name: str,
+    context_manifest: dict[str, Any] | None = None,
+) -> Any:
+    """Expose each pre-document generation phase as a persisted workflow step."""
+    from app.observability.tracing import current_trace
+
+    trace = current_trace()
+    if not trace.run_id:
+        return await operation()
+    from app.orchestration.engine import WorkflowRecorder
+
+    _step_id, result = await WorkflowRecorder(trace.run_id).step(
+        step_key,
+        operation,
+        agent_name=agent_name,
+        context_manifest=context_manifest,
+    )
+    return result
+
+
 async def _generate_screenplay_scene_sharded_baseline(
     episode: dict[str, Any],
     source_text: str,
@@ -4539,6 +4583,70 @@ async def _generate_screenplay_scene_sharded_baseline(
         # Keep this guard at the orchestration boundary as well so resumed or
         # test-injected validated nodes cannot produce an empty shard plan.
         derive_blueprint_scene_plans(narrative_blueprint)
+
+    # The old fixed third identity scan is replaced by a typed audit after the
+    # Blueprint exists.  Only participant references not already covered by the
+    # frozen authority projection are sent, together with their owned SRC.
+    from app.identity_authority import identity_authority_registry
+    from app.portraits import ensure_structural_identity_coverage
+
+    authorities = identity_authority_registry(
+        bible,
+        list(episode.get("character_resolutions") or []),
+    )
+    known_identity_labels = {
+        str(value).strip()
+        for authority in authorities
+        for value in (
+            authority.get("canonical_name"),
+            *(authority.get("source_labels") or []),
+            authority.get("authority_id"),
+        )
+        if str(value or "").strip()
+    }
+    structural_identity_evidence: list[dict[str, Any]] = []
+    for node in narrative_blueprint.nodes:
+        evidence_by_key = {
+            item.identity_key: item
+            for item in node.participant_evidence
+        }
+        for participant in node.participants:
+            if participant in known_identity_labels:
+                continue
+            evidence = evidence_by_key.get(participant)
+            structural_identity_evidence.append({
+                "identity_key": participant,
+                "source_label": participant,
+                "source_segment_ids": (
+                    list(evidence.source_segment_ids)
+                    if evidence else list(node.source_segment_ids)
+                ),
+                "usage": evidence.usage if evidence else "visible",
+                "node_key": node.key,
+            })
+    if structural_identity_evidence and episode.get("project_id") and episode.get("id"):
+        coverage = await ensure_structural_identity_coverage(
+            str(episode["project_id"]),
+            str(episode["id"]),
+            int(episode["episode_no"]),
+            source_text,
+            bible,
+            structural_identity_evidence,
+        )
+        if coverage.get("errors"):
+            raise ValueError(
+                "蓝图人物权威收口失败："
+                + "；".join(str(value) for value in coverage["errors"][:10])
+            )
+        if coverage.get("resolutions"):
+            episode["character_resolutions"] = list(coverage["resolutions"])
+        if coverage.get("added"):
+            project_row = get_conn().execute(
+                "SELECT bible_json FROM projects WHERE id=?",
+                (str(episode["project_id"]),),
+            ).fetchone()
+            if project_row and project_row["bible_json"]:
+                bible = Bible.model_validate(json.loads(project_row["bible_json"]))
 
     episode_id = str(
         episode.get("id") or f"episode-{episode['episode_no']}"
@@ -4588,17 +4696,36 @@ async def _generate_screenplay_scene_sharded_baseline(
         yield_reason=None,
     )
 
-    identities, identity_registry, identity_registry_hash = (
-        build_frozen_identity_registry(
-            bible,
-            list(episode.get("character_resolutions") or []),
+    async def freeze_identity() -> tuple[list[Any], list[dict[str, Any]], str, str]:
+        identities_value, registry_value, registry_hash_value = (
+            build_frozen_identity_registry(
+                bible,
+                list(episode.get("character_resolutions") or []),
+            )
         )
-    )
-    identity_artifact_id = persist_identity_registry(
-        episode_id=episode_id,
-        identity_registry=identity_registry,
-        identity_registry_hash=identity_registry_hash,
-        parent_artifact_ids=[blueprint_artifact_id],
+        artifact_id_value = persist_identity_registry(
+            episode_id=episode_id,
+            identity_registry=registry_value,
+            identity_registry_hash=registry_hash_value,
+            parent_artifact_ids=[blueprint_artifact_id],
+        )
+        return (
+            identities_value,
+            registry_value,
+            registry_hash_value,
+            artifact_id_value,
+        )
+
+    (
+        identities,
+        identity_registry,
+        identity_registry_hash,
+        identity_artifact_id,
+    ) = await _run_screenplay_workflow_step(
+        "screenplay_identity_freeze",
+        freeze_identity,
+        agent_name="screenplay_identity_freeze",
+        context_manifest={"episode_id": episode_id},
     )
     plans = build_screenplay_scene_shard_plans(
         narrative_blueprint,
@@ -4655,24 +4782,37 @@ async def _generate_screenplay_scene_sharded_baseline(
         )
 
     envelope_result, shard_result = await asyncio.gather(
-        generate_screenplay_envelope(
-            episode=episode,
-            blueprint=narrative_blueprint,
-            identity_registry=identity_registry,
-            identity_registry_hash=identity_registry_hash,
-            blueprint_artifact_id=blueprint_artifact_id,
-            identity_artifact_id=identity_artifact_id,
+        _run_screenplay_workflow_step(
+            "screenplay_envelope",
+            lambda: generate_screenplay_envelope(
+                episode=episode,
+                blueprint=narrative_blueprint,
+                identity_registry=identity_registry,
+                identity_registry_hash=identity_registry_hash,
+                blueprint_artifact_id=blueprint_artifact_id,
+                identity_artifact_id=identity_artifact_id,
+            ),
+            agent_name="screenplay_envelope",
+            context_manifest={"episode_id": episode_id},
         ),
-        generate_screenplay_scene_shards(
-            episode=episode,
-            source_text=source_text,
-            blueprint=narrative_blueprint,
-            identity_registry=identity_registry,
-            identities=identities,
-            plans=plans,
-            blueprint_artifact_id=blueprint_artifact_id,
-            identity_artifact_id=identity_artifact_id,
-            progress=update_shard_progress,
+        _run_screenplay_workflow_step(
+            "screenplay_scene_shards",
+            lambda: generate_screenplay_scene_shards(
+                episode=episode,
+                source_text=source_text,
+                blueprint=narrative_blueprint,
+                identity_registry=identity_registry,
+                identities=identities,
+                plans=plans,
+                blueprint_artifact_id=blueprint_artifact_id,
+                identity_artifact_id=identity_artifact_id,
+                progress=update_shard_progress,
+            ),
+            agent_name="screenplay_scene_shards",
+            context_manifest={
+                "episode_id": episode_id,
+                "shard_count": len(plans),
+            },
         ),
     )
     envelope, envelope_artifact_id = envelope_result
@@ -4685,25 +4825,37 @@ async def _generate_screenplay_scene_sharded_baseline(
         shard_progress=shard_progress(checkpoint_rows),
         yield_reason=None,
     )
-    merged_ir = merge_screenplay_scene_shards(
-        envelope=envelope,
-        identities=identities,
-        plans=plans,
-        shards=shards,
-        blueprint=narrative_blueprint,
-        source_text=source_text,
-    )
-    merged_artifact_id = persist_merged_ir(
-        episode_id=episode_id,
-        ir=merged_ir,
-        parent_artifact_ids=[
-            blueprint_artifact_id,
-            identity_artifact_id,
-            envelope_artifact_id,
-            *shard_artifact_ids,
-        ],
-        blueprint_hash=blueprint_hash,
-        identity_registry_hash=identity_registry_hash,
+    async def merge_ir() -> tuple[Any, str]:
+        merged_value = merge_screenplay_scene_shards(
+            envelope=envelope,
+            identities=identities,
+            plans=plans,
+            shards=shards,
+            blueprint=narrative_blueprint,
+            source_text=source_text,
+        )
+        artifact_id_value = persist_merged_ir(
+            episode_id=episode_id,
+            ir=merged_value,
+            parent_artifact_ids=[
+                blueprint_artifact_id,
+                identity_artifact_id,
+                envelope_artifact_id,
+                *shard_artifact_ids,
+            ],
+            blueprint_hash=blueprint_hash,
+            identity_registry_hash=identity_registry_hash,
+        )
+        return merged_value, artifact_id_value
+
+    merged_ir, merged_artifact_id = await _run_screenplay_workflow_step(
+        "screenplay_merge",
+        merge_ir,
+        agent_name="screenplay_merge",
+        context_manifest={
+            "episode_id": episode_id,
+            "shard_count": len(shards),
+        },
     )
     _save_screenplay_generation_checkpoint(
         episode_id,
@@ -4751,10 +4903,18 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     拆镜与执行字段延后到分镜阶段。先显式锁定"本集必保留关键台词/关键剧情点"，
     再写正文，从机制上阻止重要台词与剧情在压缩中被丢弃。
     """
-    narrative_blueprint = await _generate_screenplay_narrative_blueprint(
-        episode,
-        source_text,
-        bible,
+    narrative_blueprint = await _run_screenplay_workflow_step(
+        "screenplay_blueprint",
+        lambda: _generate_screenplay_narrative_blueprint(
+            episode,
+            source_text,
+            bible,
+        ),
+        agent_name="screenplay_blueprint",
+        context_manifest={
+            "episode_id": str(episode.get("id") or ""),
+            "source_chars": len(source_text),
+        },
     )
     if str(
         get_setting("screenplay_scene_shards_enabled") or "true"

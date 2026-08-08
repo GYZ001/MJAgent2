@@ -116,6 +116,39 @@ def publish_screenplay(
         and "screenplay_generation_ir_merged" not in ancestor_types
     ):
         raise ValueError("Scene Shard 生成的完整 Document 缺少 merged IR 血缘")
+    merged_ancestors = [
+        item for item in lineage.get("ancestors") or []
+        if item.get("type") == "screenplay_generation_ir_merged"
+    ]
+    if merged_ancestors:
+        by_id = {
+            str(item.get("id") or ""): item
+            for item in lineage.get("ancestors") or []
+        }
+        merged = merged_ancestors[0]
+        direct_parents = [
+            by_id[parent_id]
+            for parent_id in merged.get("parent_artifact_ids") or []
+            if parent_id in by_id
+        ]
+        direct_types = {str(item.get("type") or "") for item in direct_parents}
+        required_types = {
+            "screenplay_narrative_blueprint",
+            "screenplay_identity_registry",
+            "screenplay_envelope",
+            "screenplay_scene_shard",
+        }
+        missing_lineage = sorted(required_types - direct_types)
+        if missing_lineage:
+            raise ValueError(
+                "merged IR 缺少直接父级：" + "、".join(missing_lineage)
+            )
+        if any(
+            item.get("type") in required_types
+            and item.get("status") not in {"validated", "approved"}
+            for item in direct_parents
+        ):
+            raise ValueError("merged IR 只能引用 validated 上游 Artifact")
     original_status = str(artifact["status"] or "")
     if original_status not in {"candidate", "working", "validated", "approved"}:
         raise ValueError("待发布 working Artifact 状态不可用")
