@@ -25,6 +25,7 @@ from app.domain.storyboard_ops import (
     _sync_storyboard_scene_bindings,
 )
 from app.validators import (
+    match_scene_name,
     validate_storyboard_screenplay_scene_alignment,
     validate_storyboard_scenes,
     validate_storyboard_outline_scene_alignment,
@@ -203,6 +204,13 @@ def test_overlapping_scene_aliases_do_not_create_false_missing_scene() -> None:
     assert board.shots[1].scene_time == "黄昏"
     assert board.shots[1].scene_name == "大青山顶山崖"
     assert validate_storyboard_screenplay_scene_alignment(board, screenplay, bible) == []
+
+
+def test_canonical_scene_name_outranks_same_text_legacy_alias() -> None:
+    bible = _bible("白洁家客厅", "白洁王申的家")
+    bible.scenes[0].aliases = ["【场8】晚上 到家后 / 白洁王申的家"]
+
+    assert match_scene_name("白洁王申的家", bible.scenes) == "白洁王申的家"
 
 
 def test_validated_scene_binding_is_persisted_for_downstream_generation() -> None:

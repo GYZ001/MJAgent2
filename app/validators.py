@@ -791,6 +791,16 @@ def match_scene_name(scene_label: str, scenes, *, allow_fuzzy: bool = True) -> s
     setting_variants = _scene_label_variants(setting)
     if not setting_variants:
         return None
+    canonical_exact = {
+        name
+        for sc in scenes
+        if (name := str(getattr(sc, "name", "") or "").strip())
+        and _normalize_scene_label(name) in setting_variants
+    }
+    if len(canonical_exact) == 1:
+        return next(iter(canonical_exact))
+    if len(canonical_exact) > 1:
+        return None
     containment_by_scene: dict[str, tuple[int, int, int]] = {}
     fuzzy_by_scene: dict[str, float] = {}
     for sc in scenes:
