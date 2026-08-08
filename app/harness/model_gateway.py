@@ -286,6 +286,24 @@ async def chat_structured(
             call_meta=meta,
         )
         candidates = _json_candidates(last_raw)
+        # Reuse the repository's conservative JSON repair for provider output
+        # that is structurally complete but contains an unescaped quote/newline
+        # inside a declared string field.  This is a local format recovery, so it
+        # does not consume either the provider transport budget or the semantic
+        # correction budget.
+        if not candidates:
+            try:
+                from app.schemas import extract_json
+
+                recovered = extract_json(
+                    last_raw,
+                    repair_unescaped_inner_quotes=True,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                recovered = None
+            if isinstance(recovered, dict):
+                candidates = [recovered]
+                local_recovery = True
         parsed: T | None = None
         parse_error: Exception | None = None
         for candidate_no, payload in enumerate(candidates):

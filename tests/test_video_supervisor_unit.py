@@ -7,9 +7,7 @@ import pytest
 
 from app.harness.types import Issue, IssueSeverity
 from app.video_issues import (
-    DEFAULT_FATAL_FAILURE_TYPES,
     is_fatal,
-    is_fatal_failure_code,
     issues_from_enqueue_error,
     issues_from_job_failure,
     issues_from_qa,
@@ -36,13 +34,13 @@ from app.compiler import CompileError
 def test_grade_shot_video_a_b_c():
     a = grade_shot_video(
         technical={"passed": True},
-        qa={"overall": 0.9, "failure_types": []},
+        qa={"overall": 0.9, "contract_facts": []},
     )
     assert a["grade"] == "A"
 
     b = grade_shot_video(
         technical={"passed": True},
-        qa={"overall": 0.4, "failure_types": ["state_mismatch"]},
+        qa={"overall": 0.4, "contract_facts": ["end_state_match_below_contract"]},
     )
     assert b["grade"] == "B"
     assert b["fallback_reason"]
@@ -57,7 +55,7 @@ def test_grade_shot_video_a_b_c():
         technical={"passed": True},
         qa={
             "overall": 0.95,
-            "failure_types": ["unknown_future_identity_diagnostic"],
+            "contract_facts": ["identity_contract_below_contract"],
             "whole_clip_usable": False,
         },
     )
@@ -66,36 +64,41 @@ def test_grade_shot_video_a_b_c():
 
     degraded = grade_shot_video(
         technical={"passed": True},
-        qa={"overall": 0.95, "failure_types": []},
+        qa={"overall": 0.95, "contract_facts": []},
         continuity_degraded=True,
     )
     assert degraded["grade"] == "B"
 
 
-def test_fatal_failure_types_default():
-    assert is_fatal_failure_code("character_duplicate")
-    assert is_fatal_failure_code("wrong_identity")
-    assert is_fatal_failure_code("wrong_outfit")
-    assert is_fatal_failure_code("text_error")
-    assert not is_fatal_failure_code("state_mismatch")
-    assert set(DEFAULT_FATAL_FAILURE_TYPES) == {
-        "character_duplicate",
-        "wrong_identity",
-        "wrong_outfit",
-        "text_error",
-    }
+def test_fatality_comes_from_typed_runtime_gate():
+    assert is_fatal(Issue(
+        code="ANY_FUTURE_QUALITY_FACT",
+        severity=IssueSeverity.BLOCKER,
+        category="quality",
+        subject="s",
+        message="x",
+        evidence={"runtime_blocking": True},
+    ))
+    assert not is_fatal(Issue(
+        code="ANY_FUTURE_QUALITY_FACT",
+        severity=IssueSeverity.WARNING,
+        category="quality",
+        subject="s",
+        message="x",
+        evidence={"runtime_blocking": True},
+    ))
 
 
 def test_issues_from_qa_and_job_and_enqueue():
     qa_issues = issues_from_qa(
-        {"overall": 0.3, "failure_types": ["state_mismatch"]},
+        {"overall": 0.3, "contract_facts": ["end_state_match_below_contract"]},
         {"passed": True},
         shot_id="shot_1",
         version_id="ver_1",
         shot_no=9,
     )
     codes = {i.code for i in qa_issues}
-    assert "VIDEO_QA_STATE_MISMATCH" in codes
+    assert "VIDEO_QA_CONTRACT_FACT" in codes
     assert "VIDEO_QA_LOW_SCORE" not in codes  # 有硬失败时不叠加低分
 
     job_issues = issues_from_job_failure(
@@ -104,7 +107,8 @@ def test_issues_from_qa_and_job_and_enqueue():
         shot_id="shot_1",
         shot_no=3,
     )
-    assert job_issues[0].code == "VIDEO_PROVIDER_SAFETY"
+    assert job_issues[0].code == "VIDEO_OPERATION_FAILED"
+    assert job_issues[0].category == "operational"
 
     enq = issues_from_enqueue_error(
         CompileError("动作容量超限；状态链断裂"),
@@ -117,7 +121,7 @@ def test_issues_from_qa_and_job_and_enqueue():
         severity=IssueSeverity.BLOCKER,
         subject="s",
         message="x",
-        evidence={"rule_id": "character_duplicate"},
+        evidence={"rule_id": "character_duplicate", "runtime_blocking": True},
     ))
 
 
@@ -136,7 +140,7 @@ def test_structured_model_rejection_is_non_repairable_and_never_retried() -> Non
     )
 
     assert len(issues) == 1
-    assert issues[0].code == "VIDEO_PROVIDER_MODEL_REJECTED"
+    assert issues[0].code == "ANY_FUTURE_MODEL_REJECTION"
     assert issues[0].repairable is False
     plan = route(issues)
     assert plan.is_paid is False
@@ -186,7 +190,12 @@ def test_repair_router_levels_and_upgrade():
             severity=IssueSeverity.BLOCKER,
             subject="shot_x",
             message="preflight",
-            evidence={"path": "6", "rule_id": "preflight"},
+            evidence={
+                "path": "6",
+                "rule_id": "preflight",
+                "recommended_level": "L5",
+            },
+            category="structural",
         )
     ], allow_storyboard_edit=False)
     assert plan5.pause_state == "WAITING_AUTHORIZATION"

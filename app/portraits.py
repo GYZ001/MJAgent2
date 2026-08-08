@@ -418,32 +418,38 @@ def _distributed_identity_fragments(
     ]
     if not spans or budget <= 0:
         return ""
-    merged: list[list[int]] = []
-    for start, end in spans:
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
+    # Rank the individual occurrences before de-duplicating overlap.  Merging a
+    # dense run first can create one multi-kilobyte span whose leading slice
+    # hides the decisive late occurrence (for example, the moment a recurring
+    # label finally states a name).
     ranked = sorted(
-        enumerate(merged),
+        enumerate(spans),
         key=lambda item: (
             -sum(
                 name != label and name in text[item[1][0]:item[1][1]]
                 for name in known_names
             ),
             0 if item[0] == 0 else 1,
-            0 if item[0] == len(merged) - 1 else 1,
+            0 if item[0] == len(spans) - 1 else 1,
             item[0],
         ),
     )
     pieces: list[tuple[int, str]] = []
+    selected_spans: list[tuple[int, int]] = []
     used = 0
     for index, (start, end) in ranked:
         if used >= budget:
             break
+        if any(
+            max(0, min(end, other_end) - max(start, other_start))
+            >= int(min(end - start, other_end - other_start) * 0.6)
+            for other_start, other_end in selected_spans
+        ):
+            continue
         piece = text[start:end].strip()[:budget - used]
         if piece:
             pieces.append((index, piece))
+            selected_spans.append((start, end))
             used += len(piece)
     pieces.sort(key=lambda item: item[0])
     return "\n……\n".join(piece for _index, piece in pieces)
@@ -497,7 +503,15 @@ def _future_identity_context(
         )
         if not fragments:
             continue
-        block = f"【当前称谓：{source_label}】\n{fragments}"
+        cooccurring = [
+            name for name in known
+            if name != source_label and name in fragments
+        ]
+        authority_hint = (
+            "\n人物谱真名：" + "、".join(cooccurring)
+            if cooccurring else ""
+        )
+        block = f"【当前称谓：{source_label}】\n{fragments}{authority_hint}"
         blocks.append(block)
         remaining -= len(block)
     return "\n\n".join(blocks)
@@ -1025,10 +1039,22 @@ async def resolve_future_identity_candidates(
     future_label: str = "",
 ) -> list[dict]:
     """Resolve only current unresolved identities from bounded future windows."""
+    unresolved_onscreen_groups = {
+        str(item.get("identity_group") or "").strip()
+        for item in candidates
+        if item.get("identity_kind") == "functional"
+        and item.get("kind") == "onscreen"
+        and str(item.get("identity_group") or "").strip()
+    }
     unresolved = [
         dict(item) for item in candidates
         if item.get("identity_kind") == "functional"
-        and item.get("kind") == "onscreen"
+        and (
+            item.get("kind") == "onscreen"
+            or str(item.get("identity_group") or "").strip()
+            in unresolved_onscreen_groups
+            or str(item.get("source_label") or "").strip() in future_text
+        )
     ]
     if not unresolved or not str(future_text or "").strip():
         return candidates
@@ -1088,6 +1114,7 @@ async def resolve_future_identity_candidates(
             "stage": "discover_character_candidates",
             "stage_key": "screenplay_character_discovery",
             "substage": "future_identity",
+            "discovery_phase": "future_identity",
             "episode_no": episode_no,
         },
         repair_context=future_context,
@@ -1097,9 +1124,22 @@ async def resolve_future_identity_candidates(
         for item in response.characters
         if str(item.get("source_label") or "").strip()
     }
+    group_resolution: dict[str, dict] = {}
+    candidate_by_label = {
+        str(item.get("source_label") or "").strip(): item
+        for item in unresolved
+    }
+    for label, resolution in resolved_by_label.items():
+        candidate = candidate_by_label.get(label)
+        group = str((candidate or {}).get("identity_group") or "").strip()
+        if group:
+            group_resolution[group] = resolution
     merged: list[dict] = []
     for item in candidates:
-        resolution = resolved_by_label.get(str(item.get("source_label") or ""))
+        resolution = (
+            resolved_by_label.get(str(item.get("source_label") or ""))
+            or group_resolution.get(str(item.get("identity_group") or "").strip())
+        )
         if not resolution:
             merged.append(item)
             continue
@@ -1169,6 +1209,7 @@ async def audit_identity_coverage_from_structural_evidence(
             "stage": "discover_character_candidates",
             "stage_key": "screenplay_character_discovery",
             "substage": "structural_coverage",
+            "discovery_phase": "coverage",
             "episode_no": episode_no,
         },
     )

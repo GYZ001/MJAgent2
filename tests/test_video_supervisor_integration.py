@@ -240,7 +240,7 @@ def test_coverage_ledger_counts_provider_attempts_inside_one_version(memdb):
     version_id = _add_succeeded_version(
         memdb,
         f"{eid}_shot_1",
-        qa={"overall": 0.9, "failure_types": []},
+        qa={"overall": 0.9, "contract_facts": []},
         cost=12.0,
     )
     memdb.execute(
@@ -258,7 +258,7 @@ def test_coverage_ledger_counts_provider_attempts_inside_one_version(memdb):
 def test_integration_all_a_covered(memdb):
     eid, _ = _seed_episode(memdb, 11)
     for i in range(1, 12):
-        _add_succeeded_version(memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "failure_types": []}, cost=3.0)
+        _add_succeeded_version(memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "contract_facts": []}, cost=3.0)
     ledger = rebuild_coverage_ledger(eid, fallback_quota=3)
     assert ledger.grades["A"] == 11
     assert ledger.covered_within_quota()
@@ -288,7 +288,7 @@ async def test_fresh_completion_with_all_adopted_finishes_without_enqueue(memdb,
         _add_succeeded_version(
             memdb,
             f"{eid}_shot_{i}",
-            qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+            qa={"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]},
         )
     memdb.execute(
         "UPDATE shots SET storyboard_artifact_id='old_storyboard' WHERE episode_id=?",
@@ -335,11 +335,11 @@ def test_integration_preflight_issue_in_ledger(memdb):
 def test_integration_adopted_b_over_quota_is_still_complete(memdb):
     eid, _ = _seed_episode(memdb, 5)
     for i in range(1, 4):
-        _add_succeeded_version(memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "failure_types": []})
+        _add_succeeded_version(memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "contract_facts": []})
     for i in range(4, 6):
         _add_succeeded_version(
             memdb, f"{eid}_shot_{i}",
-            qa={"overall": 0.4, "failure_types": ["state_mismatch"]},
+            qa={"overall": 0.4, "contract_facts": ["end_state_match_below_contract"]},
         )
     ledger = rebuild_coverage_ledger(eid, fallback_quota=1)
     assert ledger.grades["B"] >= 2
@@ -350,7 +350,7 @@ def test_integration_adopted_b_over_quota_is_still_complete(memdb):
 def test_adopted_stale_shot_is_protected_and_only_unadopted_is_actionable(memdb):
     eid, _ = _seed_episode(memdb, 2)
     adopted = _add_succeeded_version(
-        memdb, f"{eid}_shot_1", qa={"overall": 0.9, "failure_types": []},
+        memdb, f"{eid}_shot_1", qa={"overall": 0.9, "contract_facts": []},
     )
     memdb.execute(
         "UPDATE shots SET storyboard_artifact_id='old_storyboard' WHERE id=?",
@@ -395,7 +395,7 @@ def test_per_shot_artifact_inside_current_episode_aggregate_is_not_stale(memdb):
         parent_artifact_ids=[shot_art["id"]],
     ))
     version_id = _add_succeeded_version(
-        memdb, shot_id, qa={"overall": 0.9, "failure_types": []},
+        memdb, shot_id, qa={"overall": 0.9, "contract_facts": []},
     )
     video_art = evidence_repository.create_artifact(EvidenceArtifact(
         type="shot_video",
@@ -429,10 +429,10 @@ def test_per_shot_artifact_inside_current_episode_aggregate_is_not_stale(memdb):
 
 def test_integration_fallback_b_with_reason(memdb):
     eid, _ = _seed_episode(memdb, 2)
-    _add_succeeded_version(memdb, f"{eid}_shot_1", qa={"overall": 0.92, "failure_types": []})
+    _add_succeeded_version(memdb, f"{eid}_shot_1", qa={"overall": 0.92, "contract_facts": []})
     _add_succeeded_version(
         memdb, f"{eid}_shot_2",
-        qa={"overall": 0.45, "failure_types": ["state_mismatch"]},
+        qa={"overall": 0.45, "contract_facts": ["end_state_match_below_contract"]},
     )
     ledger = rebuild_coverage_ledger(eid, fallback_quota=1)
     b = next(e for e in ledger.entries if e.shot_no == 2)
@@ -445,10 +445,10 @@ def test_rebuild_ledger_never_moves_attempt_count_back_to_stale_checkpoint(memdb
     eid, _ = _seed_episode(memdb, 1)
     shot_id = f"{eid}_shot_1"
     _add_succeeded_version(
-        memdb, shot_id, qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+        memdb, shot_id, qa={"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]},
     )
     _add_succeeded_version(
-        memdb, shot_id, qa={"overall": 0.3, "failure_types": ["state_mismatch"]},
+        memdb, shot_id, qa={"overall": 0.3, "contract_facts": ["end_state_match_below_contract"]},
     )
     cp = VideoSupervisorCheckpoint(
         episode_id=eid,
@@ -469,7 +469,7 @@ def test_apply_cascade_reads_planned_state_from_contract_on_production_schema(me
         shot_id,
         qa={
             "overall": 0.8,
-            "failure_types": [],
+            "contract_facts": [],
             "observed_state_out": "角色倒在地上",
         },
     )
@@ -515,10 +515,10 @@ def test_deadline_closeout_adopts_best_candidate_without_image_fallback(memdb, t
     )
     # 镜3已经采用；镜4存在技术可播但 QA 不达标的候选，必须在截止时采用。
     _add_succeeded_version(
-        memdb, f"{eid}_shot_3", qa={"overall": 0.9, "failure_types": []},
+        memdb, f"{eid}_shot_3", qa={"overall": 0.9, "contract_facts": []},
     )
     candidate = _add_succeeded_version(
-        memdb, f"{eid}_shot_4", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+        memdb, f"{eid}_shot_4", qa={"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]},
     )
     candidate_path = tmp_path / "candidate-shot-4.mp4"
     candidate_path.write_bytes(b"candidate")
@@ -587,7 +587,7 @@ def test_deadline_closeout_finishes_when_every_shot_has_technical_candidate(memd
     )
     for i in (1, 2):
         _add_succeeded_version(
-            memdb, f"{eid}_shot_{i}", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+            memdb, f"{eid}_shot_{i}", qa={"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]},
         )
         memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_{i}",))
     memdb.commit()
@@ -619,7 +619,7 @@ def test_deadline_closeout_finishes_when_every_shot_has_technical_candidate(memd
 def test_repair_preview_is_strictly_read_only(memdb):
     eid, _ = _seed_episode(memdb, 2)
     candidate = _add_succeeded_version(
-        memdb, f"{eid}_shot_2", qa={"overall": 0.1, "failure_types": ["state_mismatch"]},
+        memdb, f"{eid}_shot_2", qa={"overall": 0.1, "contract_facts": ["end_state_match_below_contract"]},
     )
     memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_2",))
     memdb.execute(
@@ -685,7 +685,7 @@ async def test_watchdog_closes_stale_run_when_task_record_is_missing(memdb, monk
 
     eid, _ = _seed_episode(memdb, 1)
     candidate = _add_succeeded_version(
-        memdb, f"{eid}_shot_1", qa={"overall": 0.2, "failure_types": ["state_mismatch"]},
+        memdb, f"{eid}_shot_1", qa={"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]},
     )
     candidate_path = tmp_path / "watchdog-candidate.mp4"
     candidate_path.write_bytes(b"candidate")
@@ -870,7 +870,7 @@ def test_terminal_continuity_wait_does_not_touch_adopted_shot(memdb):
     _add_succeeded_version(
         memdb,
         f"{eid}_shot_2",
-        qa={"overall": 0.9, "failure_types": []},
+        qa={"overall": 0.9, "contract_facts": []},
     )
     memdb.execute(
         """INSERT INTO shot_versions(id,shot_id,version_no,prompt_text,idem_key,status,created_at)
@@ -895,17 +895,17 @@ def test_terminal_continuity_wait_does_not_touch_adopted_shot(memdb):
 
 def test_integration_continuity_degraded_marks_b(memdb):
     eid, _ = _seed_episode(memdb, 2)
-    _add_succeeded_version(memdb, f"{eid}_shot_1", qa={"overall": 0.9, "failure_types": []})
+    _add_succeeded_version(memdb, f"{eid}_shot_1", qa={"overall": 0.9, "contract_facts": []})
     _add_succeeded_version(
         memdb, f"{eid}_shot_2",
-        qa={"overall": 0.9, "failure_types": []},
+        qa={"overall": 0.9, "contract_facts": []},
         continuity_degraded=True,
     )
     # continuity_degraded 保存在 checkpoint shot_state；直接用 entry 级验证 grade_shot_video 路径
     from app.evidence.media import grade_shot_video
     g = grade_shot_video(
         technical={"passed": True},
-        qa={"overall": 0.9, "failure_types": []},
+        qa={"overall": 0.9, "contract_facts": []},
         continuity_degraded=True,
     )
     assert g["grade"] == "B"
@@ -936,8 +936,8 @@ def test_cost_regression_jitter_baseline(memdb):
         attempts = 1 if i <= 5 else 3
         cost = attempts * 4.0
         for a in range(attempts):
-            qa = {"overall": 0.9, "failure_types": []} if a == attempts - 1 else {
-                "overall": 0.3, "failure_types": ["state_mismatch"],
+            qa = {"overall": 0.9, "contract_facts": []} if a == attempts - 1 else {
+                "overall": 0.3, "contract_facts": ["end_state_match_below_contract"],
             }
             # 只保留最终成功版成本累计：模拟 paid 总账
             if a == attempts - 1:
@@ -995,7 +995,7 @@ def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
     _add_succeeded_version(
         memdb,
         f"{eid}_shot_2",
-        qa={"overall": 0.9, "failure_types": []},
+        qa={"overall": 0.9, "contract_facts": []},
     )
     assert _dispatch(e2, episode_id=eid, run_id=None, first=True) is False
     assert calls["n"] == 2
@@ -1096,7 +1096,7 @@ def test_fake_enqueue_paid_attempts_bounded(memdb, monkeypatch):
             ) VALUES(?,?,?,?,?, 'succeeded', 1.0, ?, 4.0, ?, ?)""",
             (
                 vid, shot_id, no, "p", f"idem-{vid}",
-                json.dumps({"overall": 0.2, "failure_types": ["state_mismatch"]}),
+                json.dumps({"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]}),
                 json.dumps({"passed": True, "issues": []}),
                 f"task-{vid}",
             ),
@@ -1133,7 +1133,7 @@ def test_cost_model_predicts_positive(memdb):
     eid, _ = _seed_episode(memdb, 4)
     for i in range(1, 3):
         _add_succeeded_version(
-            memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "failure_types": []}, cost=5.0,
+            memdb, f"{eid}_shot_{i}", qa={"overall": 0.9, "contract_facts": []}, cost=5.0,
         )
     pred = predict_shot_completion_cost(5, episode_id=eid, grade="C")
     assert pred["expected_cny"] > 0
@@ -1204,7 +1204,7 @@ def test_project_plan_budget_allocation(memdb):
             )
     # ep_a 已全覆盖
     for i in range(1, 3):
-        _add_succeeded_version(memdb, f"ep_a_s{i}", qa={"overall": 0.9, "failure_types": []})
+        _add_succeeded_version(memdb, f"ep_a_s{i}", qa={"overall": 0.9, "contract_facts": []})
     memdb.commit()
 
     # 复用 core 的规划逻辑（不真正 spawn supervisor）

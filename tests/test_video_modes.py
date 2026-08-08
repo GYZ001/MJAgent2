@@ -982,7 +982,7 @@ def test_keyframe_best_of_three_selects_highest_and_deletes_losers(monkeypatch, 
     assert video_inputs == [(hiagent.data_url_from_file(str(generated_paths[1])), "reference_image")]
 
 
-def test_all_three_structurally_invalid_keyframes_keep_best_after_retry_exhaustion(monkeypatch, tmp_path) -> None:
+def test_all_three_structurally_invalid_keyframes_fail_closed_after_retry_exhaustion(monkeypatch, tmp_path) -> None:
     _patch_reference_build_unit(monkeypatch)
     import app.multiview as mv
 
@@ -1035,29 +1035,29 @@ def test_all_three_structurally_invalid_keyframes_keep_best_after_retry_exhausti
     ))
 
     assert len(generated_paths) == 3
-    assert sum(path.exists() for path in generated_paths) == 1
-    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "scored_warning"
+    assert sum(path.exists() for path in generated_paths) == 0
+    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "contract_gate_failed"
     assert meta["reference_slots"]["narrative_keyframe"]["gate_retry_exhausted"] is True
     assert meta["narrative_keyframe_missing"] is False
-    assert "keyframe_fallback_mode" not in meta
+    assert meta["keyframe_fallback_mode"] == video_modes.KEYFRAME_STRUCTURAL_FALLBACK_MODE
     assert {asset.type for asset in assets if asset.selectedForSeedance} == {
-        "character", "scene", "plot_key_frame",
+        "character", "scene",
     }
-    assert any(asset.type == "plot_key_frame" for asset in assets)
+    assert not any(asset.type == "plot_key_frame" for asset in assets)
 
     packed = build_seedance_image_inputs({
         **meta,
         "mode": REFERENCE_IMAGE_MODE,
         "reference_images": [asset.public_dict() for asset in assets],
     })
-    assert len(packed) == 3
+    assert len(packed) == 2
     assert video_modes.reference_gallery_matches_keyframe_contract({
         **meta,
         "reference_images": [asset.public_dict() for asset in assets],
     }, expected_fingerprint=meta["keyframe_contract_fingerprint"])
 
 
-def test_multi_character_height_contract_keeps_best_when_all_keyframes_fail(monkeypatch, tmp_path) -> None:
+def test_multi_character_height_contract_fails_closed_when_all_keyframes_fail(monkeypatch, tmp_path) -> None:
     _patch_reference_build_unit(monkeypatch)
     import app.multiview as mv
 
@@ -1107,14 +1107,14 @@ def test_multi_character_height_contract_keeps_best_when_all_keyframes_fail(monk
     ))
 
     assert len(generated_paths) == 3
-    assert sum(path.exists() for path in generated_paths) == 1
-    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "scored_warning"
+    assert sum(path.exists() for path in generated_paths) == 0
+    assert meta["reference_slots"]["narrative_keyframe"]["status"] == "contract_gate_failed"
     assert meta["reference_slots"]["narrative_keyframe"]["gate_retry_exhausted"] is True
     assert meta["narrative_keyframe_missing"] is False
-    assert "keyframe_fallback_mode" not in meta
-    assert "keyframe_structural_fallback_slots" not in meta
-    assert any(asset.type == "plot_key_frame" for asset in assets)
-    assert video_modes.reference_gallery_matches_keyframe_contract({
+    assert meta["keyframe_fallback_mode"] == video_modes.KEYFRAME_STRUCTURAL_FALLBACK_MODE
+    assert "narrative_keyframe" in meta["keyframe_structural_fallback_slots"]
+    assert not any(asset.type == "plot_key_frame" for asset in assets)
+    assert not video_modes.reference_gallery_matches_keyframe_contract({
         **meta,
         "reference_images": [asset.public_dict() for asset in assets],
     }, expected_fingerprint=meta["keyframe_contract_fingerprint"])
@@ -2499,7 +2499,7 @@ def test_structural_style_drift_is_rejected_even_with_high_score() -> None:
 
     assert video_modes.apply_keep_gate(asset) is False
     assert asset.selectedForSeedance is False
-    assert asset.rejectReason == "style_drift_structural"
+    assert asset.rejectReason == "runtime_contract_blocked"
 
 
 def test_multiple_high_score_character_refs_keep_one_truth_anchor_with_keyframe() -> None:

@@ -271,7 +271,7 @@ def test_compile_prompt_locks_scene_canonical_and_persistent_landmark_geometry()
     assert "场景固定锚点：青石山门中央固定矗立一块黑色试炼石碑" in prompt
     assert "显式固定地标：中央黑色试炼石碑、左右铜柱" in prompt
     assert "不得消失、复制、变形、换位后再出现" in prompt
-    assert "头部突然放大或幼态大头" in prompt
+    assert "任何未声明的主体、状态或媒介变化都视为合同外输出" in prompt
 
 
 def test_legacy_action_detail_does_not_infer_typed_phase_count() -> None:
@@ -452,22 +452,21 @@ def test_reference_role_plan_sequence_for_continuity_modes() -> None:
         assert "character_identity:林风" in roles
 
 
-def test_classify_video_hard_failures_detects_story_repeat_and_related_failures() -> None:
+def test_classify_video_hard_failures_uses_only_structured_contract_facts() -> None:
     failures = classify_video_hard_failures(
         {
             "overall": 0.8,
             "issues": ["画面重演上一镜动作", "字幕文字乱码"],
-            "failure_types": ["future_leak"],
-            "start_state_match": 0.3,
+            "contract_facts": ["no_future_leak_failed"],
+            "contract_facts": ["start_state_match_below_contract"],
         },
         technical={"passed": False},
     )
 
-    assert "story_repeat" in failures
-    assert "future_leak" in failures
-    assert "text_error" in failures
-    assert "state_mismatch" in failures
-    assert "needs_crop" in failures
+    assert failures == [
+        "start_state_match_below_contract",
+        "technical_contract_failed",
+    ]
 
 
 def test_select_best_video_candidate_adopts_first_technical_version(monkeypatch) -> None:
@@ -492,7 +491,7 @@ def test_select_best_video_candidate_adopts_first_technical_version(monkeypatch)
         "INSERT INTO shot_versions VALUES('hard','s',2,'succeeded',?,?,NULL,?)",
         (
             technical,
-            json.dumps({"overall": 0.95, "failure_types": ["story_repeat"]}),
+            json.dumps({"overall": 0.95, "contract_facts": ["no_story_repeat_failed"]}),
             json.dumps({"auto_retake_count": 0}),
         ),
     )
@@ -533,7 +532,7 @@ def test_select_best_video_candidate_does_not_replace_existing_adoption(monkeypa
         "INSERT INTO shot_versions VALUES('best_low','s',2,'succeeded',?,?,NULL,?)",
         (
             technical,
-            json.dumps({"overall": 0.72, "failure_types": ["story_repeat"]}),
+            json.dumps({"overall": 0.72, "contract_facts": ["no_story_repeat_failed"]}),
             json.dumps({"auto_retake_count": 2}),
         ),
     )

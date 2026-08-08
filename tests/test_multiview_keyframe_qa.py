@@ -215,7 +215,12 @@ def test_watermark_not_hard_failure_unless_occluding() -> None:
     assert _hard_failures_of(asset) == []
     asset2 = ReferenceImageAsset(
         id="b", url="x", type="plot_key_frame", source="seedream_generated",
-        qa={"watermark_detected": True, "watermark_occluding": True},
+        qa={
+            "watermark_detected": True,
+            "watermark_occluding": True,
+            "runtime_blocking": True,
+            "blocking_facts": ["subject_occlusion"],
+        },
     )
     assert "subject_occlusion" in _hard_failures_of(asset2)
 

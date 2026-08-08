@@ -203,7 +203,7 @@ def test_episode_without_adoption_selects_existing_model_videos_before_mix(tmp_p
         _version(conn, shot_no=shot_no, path=path, adopted=False)
         conn.execute(
             "UPDATE shot_versions SET technical_validation_json=?,qa_json=? WHERE id=?",
-            ('{"passed":true}', '{"overall":0.2,"failure_types":[]}', f"v{shot_no}"),
+            ('{"passed":true}', '{"overall":0.2,"contract_facts":[]}', f"v{shot_no}"),
         )
     conn.commit()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -273,7 +273,7 @@ def test_legacy_image_fallback_cannot_outrank_or_grade_over_real_video(
     _version(conn, shot_no=1, path=real_path, adopted=False)
     conn.execute(
         "UPDATE shot_versions SET technical_validation_json=?,qa_json=? WHERE id='v1'",
-        ('{"passed":true}', '{"overall":0.18,"failure_types":["action_missing"]}'),
+        ('{"passed":true}', '{"overall":0.18,"contract_facts":["action_match_below_contract"]}'),
     )
     conn.execute(
         """INSERT INTO shot_versions(
@@ -284,7 +284,7 @@ def test_legacy_image_fallback_cannot_outrank_or_grade_over_real_video(
             str(fallback_path),
             '{"delivery_fallback":true}',
             '{"passed":true}',
-            '{"overall":1.0,"failure_types":[]}',
+            '{"overall":1.0,"contract_facts":[]}',
         ),
     )
     conn.execute("UPDATE shots SET adopted_version_id='fallback-v2' WHERE id='s1'")

@@ -14,17 +14,7 @@ SCENE_QA_RULE_VERSION = "scene-hard-gates-1.4.0"
 
 
 def _bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "detected", "present", "pass", "passed", "match", "matched"}:
-            return True
-        if normalized in {"0", "false", "no", "not_detected", "absent", "fail", "failed", "mismatch"}:
-            return False
-    return None
+    return value if isinstance(value, bool) else None
 
 
 def _strings(value: Any) -> list[str]:

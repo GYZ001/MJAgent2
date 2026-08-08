@@ -91,7 +91,7 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     final_stale.unlink()
     conn.execute(
         "UPDATE shot_versions SET qa_json=? WHERE id='v'",
-        (json.dumps({"overall": 0.9, "failure_types": ["character_duplicate"]}),),
+        (json.dumps({"overall": 0.9, "contract_facts": ["no_character_duplicate_failed"]}),),
     )
     conn.commit()
     score_only = delivery.delivery_readiness("e")

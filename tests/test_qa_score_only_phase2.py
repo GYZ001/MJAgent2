@@ -83,20 +83,31 @@ def test_video_clip_contract_blocks_auto_adoption_without_failure_code_list() ->
     issues = issues_from_qa(
         {
             "overall": 0.2,
-            "hard_failures": ["character_duplicate", "text_error"],
-            "failure_types": ["character_duplicate", "text_error"],
+            "contract_facts": [
+                "no_character_duplicate_failed",
+                "text_match_below_contract",
+            ],
             "issues": ["分身", "乱码文字"],
             "whole_clip_usable": False,
+            "runtime_blocking": True,
+            "blocking_facts": ["whole_clip_contract_failed"],
         },
         {"passed": True, "issues": []},
         shot_id="s1",
     )
     qa_issues = [i for i in issues if i.code.startswith("VIDEO_QA_")]
     assert qa_issues
-    by_code = {issue.code: issue for issue in qa_issues}
-    assert by_code["VIDEO_QA_CHARACTER_DUPLICATE"].severity == IssueSeverity.WARNING
-    assert by_code["VIDEO_QA_TEXT_ARTIFACT"].severity == IssueSeverity.WARNING
-    assert by_code["VIDEO_QA_CLIP_CONTRACT_FAILED"].severity == IssueSeverity.BLOCKER
+    contract_facts = [
+        issue for issue in qa_issues
+        if issue.code == "VIDEO_QA_CONTRACT_FACT"
+    ]
+    assert len(contract_facts) == 3
+    assert all(issue.severity == IssueSeverity.WARNING for issue in contract_facts)
+    clip_issue = next(
+        issue for issue in qa_issues
+        if issue.code == "VIDEO_QA_CLIP_CONTRACT_FAILED"
+    )
+    assert clip_issue.severity == IssueSeverity.BLOCKER
 
 
 def test_repair_router_uses_generic_clip_contract_failure() -> None:
@@ -106,7 +117,11 @@ def test_repair_router_uses_generic_clip_contract_failure() -> None:
             severity=IssueSeverity.BLOCKER,
             subject="s1",
             message="完整片段生产合同未通过",
-            evidence={"rule_id": "whole_clip_usable"},
+            evidence={
+                "rule_id": "whole_clip_usable",
+                "runtime_blocking": True,
+                "recommended_level": "L1",
+            },
         ),
     ])
     assert plan.is_paid is True
@@ -195,7 +210,7 @@ def test_select_best_immediately_adopts_first_technical_candidate(monkeypatch) -
     technical = json.dumps({"passed": True})
     conn.execute(
         "INSERT INTO shot_versions VALUES('low','s',1,'succeeded',?,?,NULL,?)",
-        (technical, json.dumps({"overall": 0.2, "failure_types": ["story_repeat"]}), "{}"),
+        (technical, json.dumps({"overall": 0.2, "contract_facts": ["no_story_repeat_failed"]}), "{}"),
     )
     conn.execute(
         "INSERT INTO shot_versions VALUES('high','s',2,'succeeded',?,?,NULL,?)",
@@ -239,7 +254,7 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
             technical,
             json.dumps({
                 "overall": 0.95,
-                "failure_types": ["wrong_identity"],
+                "contract_facts": ["character_match_below_contract"],
                 "whole_clip_usable": False,
             }),
             "{}",
@@ -251,7 +266,7 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
             technical,
             json.dumps({
                 "overall": 0.7,
-                "failure_types": [],
+                "contract_facts": [],
                 "whole_clip_usable": True,
             }),
             "{}",

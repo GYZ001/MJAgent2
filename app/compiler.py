@@ -18,13 +18,6 @@ from app.character_policy import (
 from app.schemas import Bible, EpisodeScreenplay, Shot
 from app.spoken_contract import SPOKEN_DELIVERIES
 
-NEGATIVE_SUFFIX = (
-    "避免出现：真人实拍，照片写实质感，画面内任何文字/字幕/水印/logo/乱码伪字，多余人物，"
-    "同一角色重复出现/分身/双重人物/画面里多出一个一模一样的人，前景出现贴满画面的巨大人物剪影遮挡主体，"
-    "畸形手/多指缺指/手指粘连，肢体错位/穿模/关节扭曲，面部扭曲，五官崩坏/中途换脸，"
-    "角色换发型换服装/年龄体型漂移，名人长相，道具凭空出现或消失/与手脱节，"
-    "角色凭空出现或消失，动作违反重力与人体运动规律/瞬移，画面变形 morphing/渐变扭曲，镜头中途无故切场景或跳切，"
-    "画面闪烁，画风突变，满屏光效/特效遮挡面部")
 # 正向质量/稳定锚点（Seedance 最佳实践：显式给出稳定与质量约束，比单纯负面词更有效）
 QUALITY_SUFFIX = (
     "人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，动作符合现实物理与人体运动规律、自然连贯，"
@@ -1055,10 +1048,9 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         parts.append("禁止同框人物随意一高一低或眼线错位")
     if extra_negative:
         parts.extend(x.strip() for x in extra_negative if x and x.strip())
-    # 保留关键安全负面词（精简，避免与条件文字策略冲突）
     parts.append(
-        "避免真人实拍、畸形手、肢体错位、面部崩坏、角色换装漂移、动作瞬移、头部突然放大或幼态大头、"
-        "画风突变、满屏光效遮挡面部"
+        "严格满足上述结构化身份、场景、动作、连续性、声音、文字与技术合同；"
+        "任何未声明的主体、状态或媒介变化都视为合同外输出"
     )
     return "；".join(dict.fromkeys(parts))
 
@@ -1517,11 +1509,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
 
 
-# 场景关键帧（Seedream 静帧）负面词：静帧不需要“快速跳切”这类视频负面，但要禁文字/畸形/多人/换装漂移
-SCENE_NEGATIVE = (
-    "避免出现：真人实拍，照片写实质感，画面内任何文字/字幕/水印/logo/乱码伪字，多余人物，"
-    "畸形手/多指缺指/手指粘连，肢体错位/关节扭曲，面部扭曲，五官崩坏，"
-    "角色换脸换发型换服装/年龄体型漂移，名人长相，道具与手脱节，满屏光效遮挡面部，画风突变")
+SCENE_RUNTIME_CONTRACT = (
+    "严格满足上方结构化身份、场景、动作、构图、文字和技术合同；"
+    "不添加合同外主体、状态、标记或媒介变化"
+)
 SCENE_QUALITY = (
     "竖屏 9:16 单帧定格画面，构图完整，人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，"
     "光影与色调统一，电影质感，高清")
@@ -1607,7 +1598,7 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
         transition_frame_hint,
         f"景别：{shot.shot_size}" + ("；机位：侧面" if has_contact_action(shot) else ""),
         SCENE_QUALITY,
-        SCENE_NEGATIVE,
+        SCENE_RUNTIME_CONTRACT,
     ]
     return "。".join(p.strip().rstrip("。") for p in parts if p.strip())
 
