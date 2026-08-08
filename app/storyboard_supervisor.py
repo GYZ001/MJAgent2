@@ -1246,8 +1246,6 @@ def _retarget_spine_repair_brief(
 ) -> None:
     if target is None:
         return
-    from app.validators import _spine_delivery_clauses
-
     beat_id, who, does = target
     brief.beat = f"{who}{does}"
     brief.covers = does
@@ -1257,9 +1255,8 @@ def _retarget_spine_repair_brief(
     if who and who not in visible:
         visible.insert(0, who)
     brief.characters_visible = visible
-    _visible_clauses, spoken_clauses, _receptive_clauses = _spine_delivery_clauses(does)
     audio_cast = [str(name).strip() for name in (brief.audio_cast or []) if str(name).strip()]
-    if spoken_clauses and who and who not in audio_cast:
+    if brief.key_line_ids and who and who not in audio_cast:
         audio_cast.insert(0, who)
     brief.audio_cast = audio_cast
 
@@ -1272,8 +1269,6 @@ def _retarget_spine_repair_shot(
     """Reapply the authorized spine contract after model paraphrasing."""
     if target is None:
         return
-    from app.validators import _spine_delivery_clauses
-
     beat_id, who, does = target
     shot.primary_action = does
     shot.spine_beat_ids = [beat_id]
@@ -1294,15 +1289,12 @@ def _retarget_spine_repair_shot(
             required = list(getattr(brief, field_name, None) or [])
             if required:
                 setattr(shot, field_name, required)
-    _visible_clauses, spoken_clauses, _receptive_clauses = (
-        _spine_delivery_clauses(does)
-    )
     audio_cast = [
         str(name).strip()
         for name in (shot.audio_cast or [])
         if str(name).strip()
     ]
-    if spoken_clauses and who and who not in audio_cast:
+    if shot.key_line_ids and who and who not in audio_cast:
         audio_cast.insert(0, who)
     shot.audio_cast = audio_cast
 

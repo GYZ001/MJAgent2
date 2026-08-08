@@ -1009,7 +1009,7 @@ def test_compiler_repairs_dangling_unit_context_and_time_budget() -> None:
         for scene in screenplay.scene_outline
         for item in scene.context_requirements
     )
-    assert "镜头" not in screenplay.full_script_text
+    assert "镜头扫过咖啡厅" in screenplay.full_script_text
     assert len(screenplay.scene_outline[0].source_basis) >= 8
     assert (
         screenplay.narrative_plan.readability_windows[-1]
@@ -1528,14 +1528,14 @@ def test_identity_adjudication_preserves_two_entities_with_one_source_label(
     payload["identities"][0]["authority_id"] = "bible:谷言"
     payload["identities"][1].update({
         "key": "friend_a",
-        "display_name": "旧友甲",
+        "display_name": "旧友",
         "source_names": ["旧友"],
         "authority_id": "",
     })
     payload["identities"].append({
         **payload["identities"][1],
         "key": "friend_b",
-        "display_name": "旧友乙",
+        "display_name": "旧友",
     })
     for scene in payload["scenes"]:
         scene["character_keys"] = [
@@ -1558,14 +1558,14 @@ def test_identity_adjudication_preserves_two_entities_with_one_source_label(
             {
                 "identity_key": "friend_a",
                 "status": "new_functional",
-                "canonical_name": "旧友甲",
+                "canonical_name": "旧友",
                 "evidence_source_ids": ["SRC0002"],
                 "rationale": "该 identity 在 SRC0002 独立出场并开口",
             },
             {
                 "identity_key": "friend_b",
                 "status": "new_functional",
-                "canonical_name": "旧友乙",
+                "canonical_name": "旧友",
                 "evidence_source_ids": ["SRC0003"],
                 "rationale": "该 identity 在 SRC0003 独立开口",
             },

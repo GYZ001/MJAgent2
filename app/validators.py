@@ -1103,9 +1103,6 @@ SCRIPT_SOUND_LINE_RE = re.compile(r"^([^\n：（]{1,16})(?:（([^）]{1,12})）)
 _SCRIPT_GLUED_HEADING_DIALOGUE_RE = re.compile(
     r"^【场\s*\d+】\s*([^\n：/（]{1,16})(?:（([^）]{1,12})）)?：(.+)$"
 )
-INNER_VOICE_MARKERS = ("内心", "心声", "OS", "os", "独白")
-
-
 def _iter_script_sound_matches(full_text: str):
     """逐行提取剧本对白，避免把场次标题/地点梗概误判成说话人。"""
     for raw_line in (full_text or "").splitlines():
@@ -1219,19 +1216,6 @@ MIN_KEY_PLOT_POINTS = KEY_PLOT_POINTS_MIN
 
 _strip_speaker = textmatch.strip_speaker
 _speaker_name = textmatch.speaker_name
-
-
-_CONTEXT_DEPENDENT_DIALOGUE_MARKERS = (
-    "以前你", "你以前", "你曾", "你说过", "你问过", "你叫我",
-    "我相信", "我知道", "我明白", "我也", "没错", "正是", "当然",
-    "因为", "可是", "但是", "不过", "所以", "本来就", "并不是",
-    "不是这样", "不会的", "你会重新", "你还能", "你仍然",
-)
-
-
-def _is_context_dependent_dialogue(line: str) -> bool:
-    compact = re.sub(r"\s+", "", _strip_speaker(line or ""))
-    return any(marker in compact for marker in _CONTEXT_DEPENDENT_DIALOGUE_MARKERS)
 
 
 def _structured_key_line_functions(
@@ -2591,9 +2575,7 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     if len((script.emotional_curve or "").strip()) < 6:
         errors.append("emotional_curve 过短或缺失；请说明本集情绪推进")
     ending_hook = (script.ending_hook or "").strip()
-    no_episode_hook_markers = {"无", "无钩子", "无集级钩子", "（无）"}
-    explicit_no_episode_hook = ending_hook in no_episode_hook_markers or ending_hook.startswith("无集级")
-    if len(ending_hook) < 6 and not explicit_no_episode_hook:
+    if ending_hook and len(ending_hook) < 6:
         errors.append("ending_hook 过短或缺失；请明确本集结尾钩子")
     if len((script.source_basis or "").strip()) < 12:
         errors.append("source_basis 过短或缺失；请概括本集原文依据与关键事件")
@@ -2692,10 +2674,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     }
     for line in key_lines:
         structured_functions = _structured_key_line_functions(script, line)
-        is_context_dependent = (
-            bool(structured_functions & _DIALOGUE_RESPONSE_FUNCTIONS)
-            if structured_functions
-            else _is_context_dependent_dialogue(line)
+        is_context_dependent = bool(
+            structured_functions & _DIALOGUE_RESPONSE_FUNCTIONS
         )
         if not is_context_dependent:
             continue
@@ -2812,15 +2792,10 @@ def _screenplay_sound_stats(script: EpisodeScreenplay) -> dict[str, int]:
     stats = {"dialogues": 0, "inner": 0, "narration": 0, "quoted_voice": 0}
     for match in _iter_script_sound_matches(full_text):
         speaker = match.group(1).strip()
-        parenthetical = (match.group(2) or "").strip()
         if speaker == "旁白":
             stats["narration"] += 1
-        elif any(marker in parenthetical for marker in INNER_VOICE_MARKERS):
-            stats["inner"] += 1
         else:
             stats["dialogues"] += 1
-    stats["quoted_voice"] = len(re.findall(r"(?:声音|嘲讽声|恭维|呼唤|自语|旁白)[^。！？\n]{0,24}[:：]“[^”]{2,}”", full_text))
-    stats["narration"] += full_text.count("旁白：")
     return stats
 
 
@@ -2969,47 +2944,16 @@ def key_line_delivery_errors(shot: Shot, screenplay: EpisodeScreenplay | None = 
     return errors
 
 
-_SPINE_SPOKEN_CLAUSE_MARKERS = (
-    "开口", "说", "宣布", "宣读", "询问", "回答", "回应", "安慰", "反驳",
-    "警告", "告知", "暗示", "提到", "介绍", "嘲笑", "威胁", "拒绝", "同意",
-    "解释", "请求", "承诺", "指出", "相信", "认为", "表示", "承认", "答应",
-    "提醒", "质问", "反问", "感叹", "对话", "吩咐", "抱怨", "嘀咕", "交代",
-    "命令", "劝告", "叮嘱", "讲述", "诉说", "哭诉", "呵斥", "冷哼",
-    "自语", "喃喃",
-)
-
-_SPINE_RECEPTIVE_CLAUSE_MARKERS = (
-    "听到", "听见", "听说", "得知", "获悉", "知晓", "了解到", "意识到",
-)
-
-
 def _spine_delivery_clauses(
     does: str,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Split a spine beat into visible-action and spoken-delivery evidence."""
-    clauses = [
-        clause.strip(" ，,；;。")
-        for clause in re.split(r"(?:并且|并|同时|随后|然后|[，,；;])", does or "")
-        if clause.strip(" ，,；;。")
-    ]
-    visible: list[str] = []
-    spoken: list[str] = []
-    receptive: list[str] = []
-    for clause in clauses:
-        if any(marker in clause for marker in _SPINE_RECEPTIVE_CLAUSE_MARKERS):
-            receptive.append(clause)
-        elif any(marker in clause for marker in _SPINE_SPOKEN_CLAUSE_MARKERS):
-            spoken.append(clause)
-        else:
-            visible.append(clause)
-    return visible, spoken, receptive
+    """Keep legacy prose whole; typed KL/I delivery fields own channel semantics."""
+    claim = (does or "").strip(" ，,；;。")
+    return ([claim] if claim else []), [], []
 
 
 def _spine_receptive_claim(clause: str) -> str:
-    """Strip the receiver framing and keep the fact supplied by the scene."""
-    for marker in _SPINE_RECEPTIVE_CLAUSE_MARKERS:
-        if marker in clause:
-            return clause.split(marker, 1)[1].strip() or clause
+    """Compatibility helper; typed delivery contracts no longer rewrite prose."""
     return clause
 
 
@@ -3077,12 +3021,9 @@ def validate_spine_delivery_ledger(
                 for part in re.split(r"[、，,和与及/／\s]+", (beat.who or "").strip())
                 if part.strip()
             ]
-            # “他/她/众人”等功能性概括没有稳定人物名，继续由 does/信息原子校验；
-            # 具名动作主体则必须真正进入可见动作文本，不能只靠 S* 编号冒充覆盖。
-            generic_who = {"他", "她", "他们", "她们", "众人", "人群", "围观者", "双方", "所有人"}
+            # Stable identities must enter the visible contract; prose labels
+            # receive no role-name exceptions.
             for who in who_parts:
-                if who in generic_who:
-                    continue
                 subject_shots = [
                     s for s in window
                     if any(

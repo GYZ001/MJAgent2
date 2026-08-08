@@ -114,13 +114,19 @@ async def _replay_candidate(
     episode, source_text, bible = _episode_context(conn, episode_id)
     candidate = _candidate_from_call(conn, call_id)
     before_identity_count = len(candidate.identities)
-    candidate = await adjudicate_screenplay_ir_identities(
-        candidate,
-        episode=episode,
-        source_text=source_text,
-        bible=bible,
-        persist_new_resolutions=False,
-    )
+    try:
+        candidate = await adjudicate_screenplay_ir_identities(
+            candidate,
+            episode=episode,
+            source_text=source_text,
+            bible=bible,
+            persist_new_resolutions=False,
+        )
+    except ScreenplayIRIdentityConflictError as exc:
+        details = json.dumps(exc.issues, ensure_ascii=False, sort_keys=True)
+        raise RuntimeError(
+            f"identity replay failed for {episode_id} call {call_id}: {details}"
+        ) from exc
     # Prove the model boundary remains round-trippable before compilation.
     candidate = ScreenplayGenerationIR.model_validate(
         candidate.model_dump(mode="json")

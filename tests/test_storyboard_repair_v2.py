@@ -1359,14 +1359,14 @@ def test_spine_repair_preserves_spoken_delivery_contract() -> None:
     assert brief.audio_cast == ["路人丙"]
 
 
-def test_spine_repair_treats_muttering_to_self_as_spoken_delivery() -> None:
+def test_spine_repair_does_not_infer_delivery_channel_from_words() -> None:
     from app.validators import _spine_delivery_clauses
 
     visible, spoken, receptive = _spine_delivery_clauses(
         "在宝阁内被珠光宝气震撼，喃喃自语"
     )
-    assert visible == ["在宝阁内被珠光宝气震撼"]
-    assert spoken == ["喃喃自语"]
+    assert visible == ["在宝阁内被珠光宝气震撼，喃喃自语"]
+    assert spoken == []
     assert receptive == []
 
     brief = StoryboardOutlineShot(
@@ -1383,7 +1383,7 @@ def test_spine_repair_treats_muttering_to_self_as_spoken_delivery() -> None:
         ("S01", "孟浩", "在宝阁内被珠光宝气震撼，喃喃自语"),
     )
 
-    assert brief.audio_cast == ["孟浩"]
+    assert brief.audio_cast == []
 
 
 def test_generated_spine_repair_reapplies_authorized_contract() -> None:

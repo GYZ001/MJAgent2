@@ -345,19 +345,6 @@ class _IRScenePartitionPlan(BaseModel):
     replacements: list[_IRSceneReplacement]
 
 
-_IR_FIDELITY_ERROR_MARKERS = (
-    "漏掉细粒度来源段",
-    "正文过度压缩",
-    "局部剧情过度压缩",
-    "场次标题包含多个不连续地点",
-)
-
-
-def _is_ir_fidelity_error(exc: Exception | str) -> bool:
-    message = str(exc)
-    return any(marker in message for marker in _IR_FIDELITY_ERROR_MARKERS)
-
-
 async def _repartition_multilocation_ir_scenes(
     candidate: ScreenplayGenerationIR,
     *,
@@ -4397,11 +4384,11 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         else f"剧本开头必须尽快进入本集 hook：{episode_hook}"
     )
     screenplay_ending_rule = (
-        "本集 episode hook 与 cliffhanger 均为空/空白：ending_hook 必须写成「无集级钩子」；"
+        "本集 episode hook 与 cliffhanger 均为空/空白：ending_hook 必须为空字符串；"
         "禁止发明任何未受原文命题、事件与改编决策支持的下一集钩子。"
         if no_episode_hook
         else (
-            "本集 cliffhanger 为空：剧本结尾只收束到原文真实状态，ending_hook 可写「无集级钩子」，"
+            "本集 cliffhanger 为空：剧本结尾只收束到原文真实状态，ending_hook 保持为空字符串，"
             "禁止为了尾钩发明原文没有的下一集事件。"
             if not episode_cliffhanger
             else f"剧本结尾必须落到本集尾钩：{episode_cliffhanger}"
@@ -4649,10 +4636,9 @@ async def generate_screenplay_baseline(
         errors.extend(adaptation_hook_errors(s, episode))
         if no_episode_hook:
             ending = (s.ending_hook or "").strip()
-            explicit_no_hook = ending in {"无", "无钩子", "无集级钩子", "（无）"} or ending.startswith("无集级")
-            if not explicit_no_hook:
+            if ending:
                 errors.append(
-                    "ending_hook 必须为「无集级钩子」：本集 hook/cliffhanger 均为空，禁止发明下一集钩子")
+                    "ending_hook 必须为空字符串：本集 hook/cliffhanger 均为空，禁止发明下一集钩子")
         return list(dict.fromkeys(errors))
 
     def _compile_candidate(
@@ -4836,8 +4822,7 @@ async def generate_screenplay_baseline(
         getattr(candidate, "evidence_artifact_id", None),
     )
     if no_episode_hook:
-        if not (script.ending_hook or "").strip() or len((script.ending_hook or "").strip()) < 4:
-            script.ending_hook = "无集级钩子"
+        script.ending_hook = ""
     return script
 
 

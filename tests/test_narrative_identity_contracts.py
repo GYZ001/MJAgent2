@@ -447,7 +447,7 @@ def test_narrative_compiler_uses_typed_policy_not_role_name_classifiers() -> Non
     assert contract["individual_visible_characters"] == ["云吞七号"]
 
 
-def test_narrative_compiler_fails_closed_for_undeclared_legacy_whitelist_role() -> None:
+def test_narrative_compiler_fails_closed_for_undeclared_identity() -> None:
     screenplay = _screenplay()
     shot = _shot(
         characters=["医生"],

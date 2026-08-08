@@ -1233,24 +1233,6 @@ def prepare_ir_identity_authorities(
     )
     changes.extend(merge_changes)
     issues.extend(merge_issues)
-    duplicate_displays: defaultdict[str, list[IRIdentity]] = defaultdict(list)
-    for identity in value.identities:
-        display_name = str(identity.display_name or "").strip()
-        if display_name:
-            duplicate_displays[display_name].append(identity)
-    for display_name, identities in duplicate_displays.items():
-        authority_ids = {
-            str(identity.authority_id or "").strip()
-            for identity in identities
-        }
-        if len(identities) > 1 and len(authority_ids) > 1:
-            issues.append({
-                "identity_key": identities[0].key,
-                "identity_keys": [identity.key for identity in identities],
-                "reason": "duplicate_display_authority",
-                "display_name": display_name,
-                "candidate_authority_ids": sorted(authority_ids),
-            })
     return changes, issues
 
 
@@ -1546,21 +1528,8 @@ def _split_spoken_line(value: str, *, max_chars: int) -> list[str]:
 
 
 def _screenplay_action_text(value: str) -> str:
-    """Remove directing vocabulary from an action unit, never from dialogue."""
-    text = str(value or "").strip()
-    replacements = (
-        (r"镜头(?:缓慢|慢慢)?拉远", "周围逐渐安静"),
-        (r"镜头(?:缓慢|慢慢)?推近", ""),
-        (r"镜头扫过", ""),
-        (r"镜头(?:转向|移向|停在)", ""),
-        (r"镜头", ""),
-        (r"运镜", ""),
-        (r"景别", ""),
-        (r"首帧|尾帧|参考图|提示词|prompt", ""),
-    )
-    for pattern, replacement in replacements:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    return re.sub(r"\s{2,}", " ", text).strip(" ，,；;")
+    """Preserve source-authored action prose; schema fields own semantics."""
+    return re.sub(r"\s{2,}", " ", str(value or "").strip()).strip(" ，,；;")
 
 
 def _source_location(
@@ -1632,10 +1601,7 @@ def _dialogue_source_text(value: str, source_text: str) -> str:
 
 
 def _default_metadata(episode: dict[str, Any]) -> IRMetadata:
-    ending = (
-        str(episode.get("cliffhanger") or "").strip()
-        or "无集级钩子"
-    )
+    ending = str(episode.get("cliffhanger") or "").strip()
     title = str(episode.get("title") or f"第{episode.get('episode_no') or 1}集")
     premise = str(episode.get("synopsis") or title)
     return IRMetadata(

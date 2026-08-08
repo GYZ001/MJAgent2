@@ -328,8 +328,8 @@ def test_screenplay_rejects_key_line_only_copied_into_action_prose() -> None:
     assert any("角色对白" in e and "动作描述或梗概" in e for e in errors), errors
 
 
-def test_screenplay_rejects_orphan_context_dependent_reply() -> None:
-    """安慰/回答不能脱离另一角色的触发话轮突然出现。"""
+def test_untyped_dialogue_wording_does_not_infer_response_function() -> None:
+    """自然语言措辞不替代 dialogue_chain.turn.function 合同。"""
     reply = "我相信，你会重新站起来。"
     script = _valid_rainy_script()
     script.full_script_text = script.full_script_text.replace(
@@ -340,7 +340,7 @@ def test_screenplay_rejects_orphan_context_dependent_reply() -> None:
 
     errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
 
-    assert any("主线对白上下文断裂" in e and "突然冒出一句回应" in e for e in errors), errors
+    assert not any("主线对白上下文断裂" in e for e in errors), errors
 
 
 def test_screenplay_accepts_reply_with_prior_other_character_turn() -> None:
@@ -1142,7 +1142,7 @@ def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> Non
 
     async def fake_loop(_stage, _stage_key, _prompt, _model, business_validate, **kwargs):
         captured["policy"] = kwargs["loop"].policy
-        script = EpisodeScreenplay(episode_no=9, ending_hook="无集级钩子")
+        script = EpisodeScreenplay(episode_no=9, ending_hook="")
         captured["errors"] = business_validate(script)
         return script
 
@@ -1250,7 +1250,7 @@ def test_screenplay_spine_delivery_accepts_source_bound_paraphrase() -> None:
     )
 
 
-def test_full_script_screenplay_rejects_shot_language() -> None:
+def test_full_script_screenplay_does_not_reject_story_vocabulary() -> None:
     script = EpisodeScreenplay(
         episode_no=1,
         mode="full_script",
@@ -1264,7 +1264,7 @@ def test_full_script_screenplay_rejects_shot_language() -> None:
 
     errors = validate_screenplay(script, _bible(), expected_beats=5, episode_no=1)
 
-    assert any("禁用词" in error for error in errors)
+    assert not any("禁用词" in error for error in errors)
 
 
 def test_full_script_screenplay_allows_new_names_without_bible() -> None:

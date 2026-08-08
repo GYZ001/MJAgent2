@@ -1819,20 +1819,18 @@ def adaptation_hook_errors(screenplay: EpisodeScreenplay, episode: dict | None =
     hook = (episode.get("hook") or "").strip()
     ending = (screenplay.ending_hook or "").strip()
     # 集级钩子为空时，不允许为了模板发明新钩子
-    if not cliff and not hook:
-        if ending and "（待定）" not in ending and "无钩子" not in ending and "无集级钩子" not in ending:
-            # 允许显式声明无钩子
-            if len(ending) >= 6 and not ending.startswith("无"):
-                # 检查是否有未授权改编事件
-                unauthorized = [
-                    e for e in (screenplay.events or [])
-                    if e.adaptation_addition and not e.approved
-                ]
-                if unauthorized:
-                    errors.append(
-                        "集级 hook/cliffhanger 为空，但 events 含未授权 adaptation_addition；"
-                        "禁止为满足钩子形式擅自发明下一集剧情"
-                    )
+    if not cliff and not hook and ending:
+        # Whether the ending is authorized comes from typed adaptation
+        # decisions, never from sentinel phrases in the prose field.
+        unauthorized = [
+            e for e in (screenplay.events or [])
+            if e.adaptation_addition and not e.approved
+        ]
+        if unauthorized:
+            errors.append(
+                "集级 hook/cliffhanger 为空，但 events 含未授权 adaptation_addition；"
+                "禁止为满足钩子形式擅自发明下一集剧情"
+            )
     for event in screenplay.events or []:
         if event.adaptation_addition and not event.approved:
             errors.append(
