@@ -81,11 +81,19 @@ def _action_key_line_ids(
     return [
         key_id
         for key_id, (speaker, spoken, _canonical) in catalog.items()
+        for spoken_relation in [_relation_text(spoken)]
         if (
             _relation_text(speaker)
-            and _relation_text(spoken)
+            and spoken_relation
             and _relation_text(speaker) in action_text
-            and _relation_text(spoken) in quoted_lines
+            and any(
+                spoken_relation == quoted_line
+                or (
+                    len(spoken_relation) >= 2
+                    and spoken_relation in quoted_line
+                )
+                for quoted_line in quoted_lines
+            )
         )
     ]
 
@@ -199,12 +207,7 @@ def reconcile_narrative_outline_action_deliveries(
                     str(key_id or "").strip().upper()
                     for key_id in shot.key_line_ids
                     if (
-                        (
-                            not authoritative_set
-                            or str(key_id or "").strip().upper()
-                            in authoritative_set
-                        )
-                        and exclusive_authority.get(
+                        exclusive_authority.get(
                             str(key_id or "").strip().upper(),
                             event_id,
                         ) == event_id
@@ -243,13 +246,21 @@ def narrative_outline_action_delivery_errors(
     if plan is None or not outline.shots or not catalog:
         return []
     actions = {action.action_id: action for action in plan.atomic_actions}
-    errors: list[str] = []
-    for event in plan.events:
-        expected = _action_key_line_ids(
+    expected_by_event = {
+        event.event_id: _action_key_line_ids(
             list(event.action_ids),
             actions,
             catalog,
         )
+        for event in plan.events
+    }
+    events_by_key: defaultdict[str, set[str]] = defaultdict(set)
+    for event_id, key_ids in expected_by_event.items():
+        for key_id in key_ids:
+            events_by_key[key_id].add(event_id)
+    errors: list[str] = []
+    for event in plan.events:
+        expected = expected_by_event[event.event_id]
         if not expected:
             continue
         event_shots = [
@@ -266,11 +277,21 @@ def narrative_outline_action_delivery_errors(
             for key_id in shot.key_line_ids
             if str(key_id or "").strip()
         ))
-        if actual != expected:
+        missing = [key_id for key_id in expected if key_id not in actual]
+        misplaced = [
+            key_id
+            for key_id in actual
+            if (
+                len(events_by_key.get(key_id, set())) == 1
+                and event.event_id not in events_by_key[key_id]
+            )
+        ]
+        if missing or misplaced:
             errors.append(
                 "[OUTLINE_ACTION_DIALOGUE_RELATION_MISMATCH] "
                 f"事件 {event.event_id} 的原子动作明确绑定台词 {expected}，"
-                f"当前镜头交付为 {actual}；请按 action_id 的说话人和原句关系重投影"
+                f"当前镜头交付为 {actual}，缺失 {missing}，错属 {misplaced}；"
+                "请按 action_id 的说话人和原句关系重投影"
             )
     return errors
 

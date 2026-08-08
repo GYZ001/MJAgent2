@@ -158,6 +158,48 @@ def test_outline_action_delivery_gate_rejects_stale_projected_key_line() -> None
     ) == []
 
 
+def test_outline_action_relation_keeps_canonical_segments_of_one_quote() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["陈三"]
+    action.target_ids = []
+    action.semantic_intent = (
+        "陈三说出对白「你不是不让我干她吗？"
+        "老子今天就在你面前好好教训她。现在看清楚。」"
+    )
+    screenplay.key_lines = [
+        "陈三：你不是不让我干她吗？",
+        "陈三：老子今天就在你面前好好教训她。",
+        "陈三：现在看清楚。",
+    ]
+    screenplay.dialogue_chains = []
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                key_line_ids=["KL01", "KL02", "KL03"],
+            )
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assigned = list(dict.fromkeys(
+        key_id
+        for shot in outline.shots
+        for key_id in shot.key_line_ids
+    ))
+    assert assigned == ["KL01", "KL02", "KL03"]
+    assert narrative_outline_action_delivery_errors(
+        outline,
+        screenplay,
+    ) == []
+
+
 def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)
