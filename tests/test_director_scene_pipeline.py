@@ -634,7 +634,7 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
 
     assert changes and outline.scene_contexts[0].scene_id == "SC01"
     shot = pack.shots[0]
-    assert shot.duration_s == 7
+    assert shot.duration_s == 5
     assert shot.shot_id == "SH001"
     assert shot.event_ids == ["E-1"]
     assert shot.story_event_id == "E1"
@@ -722,6 +722,67 @@ def test_scene_pack_expands_short_owned_dialogue_to_auditable_source_context() -
     assert "“说！”" in excerpt
     assert excerpt in source
     assert len(stages._condense(excerpt)) >= stages.SOURCE_EXCERPT_MIN_CHARS
+
+
+def test_scene_pack_normalizes_program_owned_stale_long_duration() -> None:
+    source = "谷言从桌边起身，快步走到门口停下。"
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=source,
+    )
+    bible = Bible(
+        characters=[
+            Character(
+                name="谷言",
+                role="主角",
+                appearance_canonical="二十八岁男性，黑色短发，深色常服，外观稳定清晰",
+            )
+        ],
+        world=World(visual_style_canonical="都市国漫画风"),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                shot_id="SH001",
+                scene_id="SC001",
+                duration_s=10,
+                scene_name="咖啡厅",
+                characters_visible=["谷言"],
+                beat="谷言起身走到门口停下",
+                primary_action="谷言起身走到门口停下",
+                continuity_mode="scene_change",
+            )
+        ],
+    )
+    draft = stages.DirectedScenePackDraft(
+        episode_no=1,
+        scene_id="SC001",
+        shots=[
+            stages.DirectedSceneShotDraft(
+                shot_no=1,
+                shot_size="中景",
+                camera_angle="平视",
+                camera_move="跟随",
+                camera_motivation="完整呈现动作路径和可见结果",
+                action_desc="谷言从桌边起身，快步走到门口停下并保持警觉。",
+                first_frame_desc="谷言站在桌边准备向门口移动。",
+                last_frame_desc="同一机位，谷言在门口停下。",
+                source_excerpt=source,
+            )
+        ],
+    )
+
+    pack = stages._hydrate_directed_scene_pack(
+        draft,
+        outline=outline,
+        source_text=source,
+        screenplay=screenplay,
+        bible=bible,
+    )
+
+    assert pack.shots[0].duration_s == 5
 
 
 def test_scene_pack_preserves_offscreen_voice_without_forcing_speaker_visible() -> None:

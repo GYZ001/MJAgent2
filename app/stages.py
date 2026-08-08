@@ -8211,6 +8211,17 @@ def _hydrate_directed_scene_pack(
         episode_no=draft.episode_no,
         shots=shots,
     )
+    # Duration is graph/program authority in a directed scene pack, so a model
+    # repair cannot change it.  Apply the shared deterministic duration policy
+    # before validating the pack: shots that genuinely need extra speech or
+    # viewing time keep 6~10s with the normal review tag, while a stale 10s
+    # allocation for one 5s action is compressed instead of wasting every
+    # AgentLoop iteration on an immutable field.
+    prefer_default_shot_durations(
+        normalized_board,
+        narrative_authority=screenplay.narrative_plan is not None,
+        narrative_plan=screenplay.narrative_plan,
+    )
     normalize_continuity(normalized_board)
     return StoryboardScenePack(
         episode_no=draft.episode_no,
