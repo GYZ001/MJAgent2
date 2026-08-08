@@ -777,12 +777,7 @@ def _preflight_failure_is_retryable(exc: Exception) -> bool:
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
     if isinstance(exc, sqlite3.OperationalError):
-        code = getattr(exc, "sqlite_errorcode", None)
-        return code in {
-            sqlite3.SQLITE_BUSY,
-            sqlite3.SQLITE_LOCKED,
-            sqlite3.SQLITE_IOERR,
-        }
+        return True
     return bool(getattr(exc, "retryable", False))
 
 
@@ -800,6 +795,7 @@ def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]
     if not row or row["version_id"]:
         return {"retry_scheduled": False, "status": None}
     message = (str(exc) or exc.__class__.__name__)[:2000]
+    failure_kind = getattr(exc, "failure_kind", None)
     retryable = _preflight_failure_is_retryable(exc)
     retry_count = int(row["retry_count"] or 0)
     configured_limit = int(config.VIDEO_PREFLIGHT_MAX_RETRIES)
@@ -828,6 +824,7 @@ def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]
                 "attempt_limit": max_retries,
                 "unit": "preflight_attempt",
                 "last_error": message,
+                "failure_kind": failure_kind,
             },
             conn=conn,
         )
@@ -858,6 +855,7 @@ def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]
                 "attempt_limit": max_retries + 1,
                 "unit": "preflight_attempt",
                 "last_error": message,
+                "failure_kind": failure_kind,
             },
             conn=conn,
         )
@@ -982,10 +980,12 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  supervisor_run_id: str | None = None,
                  dependency_snapshot: dict[str, Any] | None = None,
                  critique_sources: list[dict[str, Any]] | None = None) -> dict:
-    """持久化校验状态，并对可确定的结构错误执行有界修复链后重试。"""
+    """持久化校验状态；不从错误文案推断或改写分镜数据。"""
     authority_context = _assert_enqueue_storyboard_authority(shot_id)
-    narrative_authority = authority_context.narrative_authority_required
-    if narrative_authority and (prompt_override or "").strip():
+    if (
+        authority_context.narrative_authority_required
+        and (prompt_override or "").strip()
+    ):
         raise ValueError(
             "[NARRATIVE_PROMPT_OVERRIDE_REQUIRES_CANDIDATE] 叙事权威镜头不允许用"
             "自由文本覆盖已发布的分镜语义；请通过受控分镜候选修订后重新发布"
@@ -993,96 +993,32 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     preflight_job_id = _begin_video_preflight_job(
         shot_id, supervisor_run_id=supervisor_run_id,
     )
-    kwargs = {
-        "prompt_override": prompt_override,
-        "extra_negative": extra_negative,
-        "reroll": reroll,
-        "critique": critique,
-        "after_shot_id": after_shot_id,
-        "auto_retake_count": auto_retake_count,
-        "supervisor_run_id": supervisor_run_id,
-        "dependency_snapshot": dependency_snapshot,
-        "critique_sources": critique_sources,
-        "preflight_job_id": preflight_job_id,
-    }
-    repairs: list[dict[str, Any]] = []
-    if prompt_override is None and not narrative_authority:
-        # “待修复台词信息「…」”是已知的旧分镜结构。先迁移再编译，可避免
-        # 故意制造一次 409；error_text 仅作为规则选择器，不代表此处已失败。
-        repair = _auto_repair_embedded_source_dialogue(
-            shot_id, "source_excerpt 原文内容",
+    try:
+        result = _enqueue_shot_impl(
+            shot_id,
+            prompt_override=prompt_override,
+            extra_negative=extra_negative,
+            reroll=reroll,
+            critique=critique,
+            after_shot_id=after_shot_id,
+            auto_retake_count=auto_retake_count,
+            supervisor_run_id=supervisor_run_id,
+            dependency_snapshot=dependency_snapshot,
+            critique_sources=critique_sources,
+            preflight_job_id=preflight_job_id,
         )
-        if repair:
-            repairs.append(repair)
-
-    def repair_payload() -> dict[str, Any] | None:
-        if not repairs:
-            return None
-        if len(repairs) == 1:
-            return repairs[0]
-        return {
-            "repair": "composite_preflight_repair",
-            "count": len(repairs),
-            "repairs": list(repairs),
+    except Exception as exc:
+        failure = _mark_video_preflight_failure(preflight_job_id, exc)
+        if not failure.get("retry_scheduled"):
+            raise
+        result = {
+            "reused": False,
+            "job_id": preflight_job_id,
+            "task_accepted": True,
+            **failure,
         }
-
-    # 一条旧分镜可能同时有“原文对白夹在 action”“时长不足”“临时角色标签”
-    # 三类问题。每次修复后重新从数据库加载 Shot，再走完整门禁；有界循环防止
-    # 修复器互相打架或脏数据导致无限重放。
-    local_repair_limit = 4
-    result = None
-    last_exc: Exception | None = None
-    for _round in range(local_repair_limit + 1):
-        payload = repair_payload()
-        attempt_kwargs = dict(kwargs)
-        if payload:
-            attempt_kwargs["preflight_repair"] = payload
-        try:
-            result = _enqueue_shot_impl(shot_id, **attempt_kwargs)
-            break
-        except Exception as exc:
-            last_exc = exc
-            repair = None
-            if (
-                prompt_override is None
-                and not narrative_authority
-                and len(repairs) < local_repair_limit
-            ):
-                repair = _auto_repair_embedded_source_dialogue(shot_id, str(exc))
-                if repair is None:
-                    repair = _auto_expand_source_dialogue_duration(shot_id, str(exc))
-                if repair is None:
-                    repair = _auto_normalize_functional_speaker(shot_id, str(exc))
-            if repair is None:
-                failure = _mark_video_preflight_failure(preflight_job_id, exc)
-                if failure.get("retry_scheduled"):
-                    result = {
-                        "reused": False,
-                        "job_id": preflight_job_id,
-                        "task_accepted": True,
-                        **failure,
-                    }
-                    break
-                raise
-            repairs.append(repair)
-    if result is None:
-        assert last_exc is not None
-        failure = _mark_video_preflight_failure(preflight_job_id, last_exc)
-        if failure.get("retry_scheduled"):
-            result = {
-                "reused": False,
-                "job_id": preflight_job_id,
-                "task_accepted": True,
-                **failure,
-            }
-        else:
-            raise last_exc
     if result.get("reused"):
         _close_reused_preflight_job(preflight_job_id)
-    repair = result.get("preflight_repair") or repair_payload()
-    if repair:
-        result["auto_repaired"] = True
-        result["preflight_repair"] = repair
     return result
 
 
@@ -1102,7 +1038,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     from app.continuity import (
         derive_continuity_mode,
         effective_state_out,
-        forbidden_prompt_content_errors,
+        prompt_source_provenance_errors,
         preflight_seedance_gates,
         resolve_first_last_boundary_relation,
         resolve_do_not_repeat_texts,
@@ -1316,10 +1252,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                                   boundary_relation_edit=boundary_relation_edit,
                                   boundary_relation_action=boundary_relation_action,
                                   boundary_start_state=boundary_start_state))
-    raw_source_errors = [
-        error for error in forbidden_prompt_content_errors(raw_prompt_text, shot)
-        if "原文章节摘录" in error or "source_excerpt 原文内容" in error
-    ]
+    raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
     prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
     if raw_source_errors:
         prompt_scrub = {
@@ -1341,7 +1274,12 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         screenplay=screenplay,
     )
     if preflight_errors:
-        raise CompileError("；".join(preflight_errors))
+        source_errors = prompt_source_provenance_errors(prompt_text, shot)
+        raise CompileError(
+            "；".join(preflight_errors),
+            retryable=bool(source_errors),
+            failure_kind="prompt_source_provenance" if source_errors else None,
+        )
 
     # 参考图是分镜级素材。重抽、改词或带评语只创建新视频版本，不能重新跑参考图生成。
     reference_gallery = _load_reference_gallery(conn, shot_row)

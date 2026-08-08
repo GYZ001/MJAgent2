@@ -12,7 +12,7 @@ import re
 from collections import defaultdict
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.source_excerpt import (
     index_source_segments,
@@ -167,6 +167,18 @@ class BlueprintDecision(BaseModel):
         return self
 
 
+class NarrativeParticipantEvidence(BaseModel):
+    identity_key: str
+    source_segment_ids: list[str] = Field(default_factory=list)
+    usage: Literal["visible", "voice", "mentioned", "state_subject"]
+
+    @field_validator("source_segment_ids", mode="before")
+    @classmethod
+    def _normalize_source_ids(cls, value: Any) -> list[str]:
+        values = value if isinstance(value, list) else [value] if value else []
+        return [_normalize_source_segment_id(item) for item in values]
+
+
 class NarrativeNode(BaseModel):
     key: str
     source_segment_ids: list[str]
@@ -186,6 +198,9 @@ class NarrativeNode(BaseModel):
     location_key: str
     location_label: str
     participants: list[str] = Field(default_factory=list)
+    participant_evidence: list[NarrativeParticipantEvidence] = Field(
+        default_factory=list,
+    )
     scene_boundary_before: bool = False
     transition_cue: str = ""
     opening_image: str = ""
@@ -239,6 +254,7 @@ class BlueprintScenePlan(BaseModel):
     exit_state: str = ""
     dramatic_load: int = 1
     agency_contracts: list[dict[str, str]] = Field(default_factory=list)
+    participant_keys: list[str] = Field(default_factory=list)
     scene_heading: str
 
 
@@ -961,6 +977,12 @@ def derive_blueprint_scene_plans(
                 for node in nodes
                 if node.decision is not None
             ],
+            participant_keys=list(dict.fromkeys(
+                participant
+                for node in nodes
+                for participant in node.participants
+                if participant
+            )),
             scene_heading=(
                 f"【场{index}】{first.time_label} / {first.location_label}"
             ),
@@ -1183,6 +1205,34 @@ def validate_narrative_blueprint(
                 )
             participant_locations[participant] = node.location_key
 
+        participant_keys = set(node.participants)
+        evidence_keys = {
+            evidence.identity_key for evidence in node.participant_evidence
+            if evidence.identity_key
+        }
+        for evidence in node.participant_evidence:
+            unknown_evidence_sources = (
+                set(evidence.source_segment_ids) - set(node.source_segment_ids)
+            )
+            if unknown_evidence_sources:
+                errors.append(
+                    f"[BLUEPRINT_PARTICIPANT_EVIDENCE_OUT_OF_SCOPE] {node.key} "
+                    f"{evidence.identity_key} 引用非 owned SRC："
+                    + "、".join(sorted(unknown_evidence_sources))
+                )
+            if evidence.identity_key not in participant_keys:
+                errors.append(
+                    f"[BLUEPRINT_PARTICIPANT_EVIDENCE_ORPHAN] {node.key} "
+                    f"{evidence.identity_key} 未列入 participants"
+                )
+        if node.participant_evidence:
+            missing_evidence = participant_keys - evidence_keys
+            if missing_evidence:
+                errors.append(
+                    f"[BLUEPRINT_PARTICIPANT_EVIDENCE_MISSING] {node.key} 缺少"
+                    "参与者来源证据：" + "、".join(sorted(missing_evidence))
+                )
+
         for requirement in node.state_requirements:
             if requirement.assumed_prior:
                 active_state_facts[requirement.state_key].add(
@@ -1270,6 +1320,22 @@ def validate_narrative_blueprint(
 
         decision = node.decision
         if decision is not None:
+            if decision.actor_key not in set(node.participants):
+                errors.append(
+                    f"[BLUEPRINT_DECISION_ACTOR_NOT_PARTICIPANT] {node.key} "
+                    f"的 decision actor {decision.actor_key} 不在 participants"
+                )
+            if (
+                node.participant_evidence
+                and decision.actor_key not in {
+                    evidence.identity_key
+                    for evidence in node.participant_evidence
+                }
+            ):
+                errors.append(
+                    f"[BLUEPRINT_DECISION_ACTOR_EVIDENCE_MISSING] {node.key} "
+                    f"的 decision actor {decision.actor_key} 没有 participant evidence"
+                )
             unknown_setup = (
                 set(decision.setup_node_keys)
                 - known_node_keys
@@ -1582,4 +1648,9 @@ def blueprint_prompt_contract() -> dict[str, Any]:
             NarrativeNode.model_fields["time_relation"].annotation.__args__
         ),
         "program_derived": ["scene_plans", "scene_heading", "scene_order"],
+        "participant_evidence_required": {
+            "fields": ["identity_key", "source_segment_ids", "usage"],
+            "usage": ["visible", "voice", "mentioned", "state_subject"],
+            "ownership": "source_segment_ids must be owned by the same node",
+        },
     }

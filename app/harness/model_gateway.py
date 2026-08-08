@@ -318,9 +318,11 @@ async def chat_structured(
             ]
             continue
 
-        semantic_errors = _validation_messages(
-            validate(parsed) if validate is not None else None
-        )
+        try:
+            validation_result = validate(parsed) if validate is not None else None
+        except Exception as exc:  # business validators may be fail-fast
+            validation_result = [str(exc)]
+        semantic_errors = _validation_messages(validation_result)
         if not semantic_errors:
             return parsed
         if semantic_attempt >= max(0, int(semantic_retry_limit)):

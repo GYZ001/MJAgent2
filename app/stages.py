@@ -809,7 +809,27 @@ async def _complete_screenplay_ir_fidelity(
 
     patched = False
     consecutive_empty_patches = 0
-    for round_no in range(1, 33):
+    initial_gap_context = _ir_fidelity_patch_context(candidate, source_text)
+    missing_scene_plan_count = (
+        max(
+            0,
+            len(derive_blueprint_scene_plans(narrative_blueprint))
+            - len(candidate.scenes),
+        )
+        if narrative_blueprint is not None else 0
+    )
+    configured_max_rounds = max(
+        1, min(8, int(get_setting("screenplay_fidelity_max_rounds") or 8))
+    )
+    max_rounds = min(
+        configured_max_rounds,
+        max(
+            2,
+            len(initial_gap_context["windows_requiring_expansion"])
+            + missing_scene_plan_count,
+        ),
+    )
+    for round_no in range(1, max_rounds + 1):
         try:
             compile_screenplay_ir(
                 candidate.model_copy(deep=True),
@@ -1007,13 +1027,27 @@ async def _complete_screenplay_ir_fidelity(
             '"function":"statement","source_text":"原文逐字话语",'
             '"chain_key":"dc_patch"}]}]}'
         )
-        raw = await model_gateway.chat(
+        structured_patch = await model_gateway.chat_structured(
             [
                 {"role": "system", "content": SYSTEM_PREFIX},
                 {"role": "user", "content": prompt},
             ],
+            model_type=_IRFidelityPatch,
+            validate=None,
+            operation_id=(
+                f"screenplay.ir-fidelity:{IR_VERSION}:"
+                f"{episode.get('id') or episode.get('episode_no')}:"
+                f"{round_no}:"
+                + hashlib.sha256(
+                    json.dumps(context, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+            ),
             temperature=0.3,
             max_tokens=8192,
+            format_retry_limit=int(
+                get_setting("screenplay_format_retry_limit") or 1
+            ),
+            semantic_retry_limit=0,
             call_meta={
                 "stage": "剧本来源保真局部补写",
                 "stage_key": "screenplay_ir_fidelity_patch",
@@ -1026,7 +1060,11 @@ async def _complete_screenplay_ir_fidelity(
                 "expected_json": True,
                 "reuse_successful_operation": True,
             },
+            repair_context=json.dumps(
+                context, ensure_ascii=False, separators=(",", ":")
+            ),
         )
+        raw = structured_patch.model_dump_json()
         trace = current_trace()
         raw_artifact = evidence_repository.create_artifact(
             EvidenceArtifact(
@@ -1044,7 +1082,7 @@ async def _complete_screenplay_ir_fidelity(
             ),
             step_run_id=trace.step_run_id,
         )
-        payload = extract_json(raw)
+        payload = structured_patch.model_dump(mode="json")
         for new_scene in payload.get("new_scenes", []):
             if not isinstance(new_scene, dict):
                 continue
@@ -1061,9 +1099,9 @@ async def _complete_screenplay_ir_fidelity(
         )
         if not inserted:
             consecutive_empty_patches += 1
-            if consecutive_empty_patches >= 3:
+            if consecutive_empty_patches >= 2:
                 raise ValueError(
-                    "IR 保真补写连续三轮未返回任何可合并 unit"
+                    "IR 保真补写连续两轮未返回任何可合并 unit"
                 )
             continue
         consecutive_empty_patches = 0
@@ -1079,7 +1117,21 @@ async def _complete_screenplay_ir_fidelity(
                 parent_artifact_ids=[raw_artifact["id"]],
                 contract_version=IR_VERSION,
                 prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
-                model_snapshot={"inserted_units": inserted},
+                model_snapshot={
+                    "inserted_units": inserted,
+                    "resolved_source_ids": sorted(set(
+                        source_id
+                        for insertion in patch.insertions
+                        for unit in insertion.units
+                        for source_id in unit.source_segment_ids
+                    ).union(
+                        source_id
+                        for scene in patch.new_scenes
+                        for unit in scene.units
+                        for source_id in unit.source_segment_ids
+                    )),
+                    "missing_source_ids_before": context["missing_source_ids"],
+                },
             ),
             step_run_id=trace.step_run_id,
         )
@@ -1107,7 +1159,7 @@ async def _complete_screenplay_ir_fidelity(
             prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
             model_snapshot={
                 "compiler_version": IR_COMPILER_VERSION,
-                "fidelity_completion_rounds": 32,
+                "fidelity_completion_rounds": max_rounds,
                 "blueprint_hash": _narrative_blueprint_content_hash(
                     narrative_blueprint
                 ),
@@ -4437,6 +4489,255 @@ async def _generate_screenplay_narrative_blueprint(
     )
 
 
+def _save_screenplay_generation_checkpoint(
+    episode_id: str,
+    phase: str,
+    **values: Any,
+) -> None:
+    """Persist resumable pre-Document state without changing baseline_done."""
+    from app.production.revision import (
+        get_active_production_revision,
+        save_checkpoint,
+    )
+
+    revision = get_active_production_revision(episode_id, "screenplay")
+    if revision is None or revision.baseline_done:
+        return
+    checkpoint = dict(revision.checkpoint_json or {})
+    save_checkpoint(revision.id, {
+        **checkpoint,
+        "phase": phase,
+        **values,
+    })
+
+
+async def _generate_screenplay_scene_sharded_baseline(
+    episode: dict[str, Any],
+    source_text: str,
+    bible: Bible,
+    *,
+    narrative_blueprint: NarrativeBlueprint,
+) -> EpisodeScreenplay:
+    """Generate resumable Envelope + Blueprint-owned scene shards, then compile."""
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+    from app.screenplay_scene_shards import (
+        SCREENPLAY_SHARD_PLAN_VERSION,
+        blueprint_content_hash,
+        build_frozen_identity_registry,
+        build_screenplay_scene_shard_plans,
+        generate_screenplay_envelope,
+        generate_screenplay_scene_shards,
+        merge_screenplay_scene_shards,
+        persist_identity_registry,
+        persist_merged_ir,
+        shard_progress,
+    )
+
+    episode_id = str(
+        episode.get("id") or f"episode-{episode['episode_no']}"
+    )
+    blueprint_hash = blueprint_content_hash(narrative_blueprint)
+    trace = current_trace()
+    blueprint_row = get_conn().execute(
+        """SELECT id,content_json FROM artifacts
+             WHERE scope_type='episode' AND scope_id=?
+               AND type='screenplay_narrative_blueprint'
+               AND status='validated'
+             ORDER BY created_at DESC LIMIT 20""",
+        (episode_id,),
+    ).fetchall()
+    blueprint_artifact_id = None
+    for row in blueprint_row:
+        try:
+            if _narrative_blueprint_content_hash(
+                NarrativeBlueprint.model_validate(
+                    json.loads(row["content_json"] or "{}")
+                )
+            ) == blueprint_hash:
+                blueprint_artifact_id = str(row["id"])
+                break
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    if blueprint_artifact_id is None:
+        artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_narrative_blueprint",
+                scope_type="episode",
+                scope_id=episode_id,
+                status="validated",
+                trust_level="T1",
+                content=narrative_blueprint.model_dump(mode="json"),
+                contract_version=BLUEPRINT_VERSION,
+                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            ),
+            step_run_id=trace.step_run_id,
+        )
+        blueprint_artifact_id = str(artifact["id"])
+    _save_screenplay_generation_checkpoint(
+        episode_id,
+        "IDENTITY_FREEZE",
+        blueprint_artifact_id=blueprint_artifact_id,
+        blueprint_hash=blueprint_hash,
+        yield_reason=None,
+    )
+
+    identities, identity_registry, identity_registry_hash = (
+        build_frozen_identity_registry(
+            bible,
+            list(episode.get("character_resolutions") or []),
+        )
+    )
+    identity_artifact_id = persist_identity_registry(
+        episode_id=episode_id,
+        identity_registry=identity_registry,
+        identity_registry_hash=identity_registry_hash,
+        parent_artifact_ids=[blueprint_artifact_id],
+    )
+    plans = build_screenplay_scene_shard_plans(
+        narrative_blueprint,
+        source_text=source_text,
+        identity_registry_hash=identity_registry_hash,
+    )
+    plan_payload = {
+        "contract_version": SCREENPLAY_SHARD_PLAN_VERSION,
+        "blueprint_hash": blueprint_hash,
+        "identity_registry_hash": identity_registry_hash,
+        "plans": [plan.model_dump(mode="json") for plan in plans],
+    }
+    shard_plan_hash = evidence_repository.content_hash(plan_payload)
+    plan_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_scene_shard_plan",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T1",
+            content={**plan_payload, "shard_plan_hash": shard_plan_hash},
+            parent_artifact_ids=[blueprint_artifact_id, identity_artifact_id],
+            contract_version=SCREENPLAY_SHARD_PLAN_VERSION,
+        ),
+        step_run_id=trace.step_run_id,
+    )
+    _save_screenplay_generation_checkpoint(
+        episode_id,
+        "ENVELOPE_GENERATION",
+        identity_artifact_id=identity_artifact_id,
+        identity_registry_hash=identity_registry_hash,
+        shard_plan_artifact_id=plan_artifact["id"],
+        shard_plan_hash=shard_plan_hash,
+        shards=[
+            {
+                "shard_id": plan.shard_id,
+                "status": "pending",
+                "attempt": 0,
+                "source_hash": plan.source_hash,
+                "boundary_hash": plan.boundary_hash,
+            }
+            for plan in plans
+        ],
+        yield_reason=None,
+    )
+
+    def update_shard_progress(rows: list[dict[str, Any]]) -> None:
+        _save_screenplay_generation_checkpoint(
+            episode_id,
+            "SCENE_SHARD_GENERATION",
+            shards=rows,
+            shard_progress=shard_progress(rows),
+            yield_reason=None,
+        )
+
+    envelope_result, shard_result = await asyncio.gather(
+        generate_screenplay_envelope(
+            episode=episode,
+            blueprint=narrative_blueprint,
+            identity_registry=identity_registry,
+            identity_registry_hash=identity_registry_hash,
+            blueprint_artifact_id=blueprint_artifact_id,
+            identity_artifact_id=identity_artifact_id,
+        ),
+        generate_screenplay_scene_shards(
+            episode=episode,
+            source_text=source_text,
+            blueprint=narrative_blueprint,
+            identity_registry=identity_registry,
+            identities=identities,
+            plans=plans,
+            blueprint_artifact_id=blueprint_artifact_id,
+            identity_artifact_id=identity_artifact_id,
+            progress=update_shard_progress,
+        ),
+    )
+    envelope, envelope_artifact_id = envelope_result
+    shards, shard_artifact_ids, checkpoint_rows = shard_result
+    _save_screenplay_generation_checkpoint(
+        episode_id,
+        "IR_MERGE",
+        envelope_artifact_id=envelope_artifact_id,
+        shards=checkpoint_rows,
+        shard_progress=shard_progress(checkpoint_rows),
+        yield_reason=None,
+    )
+    merged_ir = merge_screenplay_scene_shards(
+        envelope=envelope,
+        identities=identities,
+        plans=plans,
+        shards=shards,
+        blueprint=narrative_blueprint,
+        source_text=source_text,
+    )
+    merged_artifact_id = persist_merged_ir(
+        episode_id=episode_id,
+        ir=merged_ir,
+        parent_artifact_ids=[
+            blueprint_artifact_id,
+            identity_artifact_id,
+            envelope_artifact_id,
+            *shard_artifact_ids,
+        ],
+        blueprint_hash=blueprint_hash,
+        identity_registry_hash=identity_registry_hash,
+    )
+    _save_screenplay_generation_checkpoint(
+        episode_id,
+        "IR_MERGE",
+        merged_ir_artifact_id=merged_artifact_id,
+        yield_reason=None,
+    )
+    completed_ir = await _complete_screenplay_ir_fidelity(
+        merged_ir,
+        episode=episode,
+        source_text=source_text,
+        bible=bible,
+        parent_artifact_id=merged_artifact_id,
+        narrative_blueprint=narrative_blueprint,
+    )
+    blueprint_errors = validate_and_apply_blueprint_scene_contract(
+        completed_ir,
+        narrative_blueprint,
+    )
+    if blueprint_errors:
+        raise ValueError("；".join(blueprint_errors))
+    compiler_audit: list[dict[str, Any]] = []
+    script = compile_screenplay_ir(
+        completed_ir,
+        episode=episode,
+        source_text=source_text,
+        bible=bible,
+        audit=compiler_audit,
+    )
+    object.__setattr__(
+        script,
+        "_source_ir_artifact_id",
+        getattr(completed_ir, "evidence_artifact_id", merged_artifact_id),
+    )
+    if not str(episode.get("cliffhanger") or "").strip():
+        script.ending_hook = ""
+    return script
+
+
 async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
                               prev_ending: str = "") -> EpisodeScreenplay:
     """小说 -> 完整剧本。
@@ -4450,6 +4751,15 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         source_text,
         bible,
     )
+    if str(
+        get_setting("screenplay_scene_shards_enabled") or "true"
+    ).strip().lower() not in {"0", "false", "off", "no"}:
+        return await _generate_screenplay_scene_sharded_baseline(
+            episode,
+            source_text,
+            bible,
+            narrative_blueprint=narrative_blueprint,
+        )
     blueprint_json = json.dumps(
         narrative_blueprint.model_dump(mode="json"),
         ensure_ascii=False,

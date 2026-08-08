@@ -228,7 +228,11 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
 
     stage_order = [
         ("CHARACTER_DISCOVERY", "人物识别"),
-        ("GENERATING_BASELINE", "生成首版"),
+        ("BLUEPRINT_GENERATION", "叙事蓝图"),
+        ("IDENTITY_FREEZE", "身份冻结"),
+        ("ENVELOPE_GENERATION", "全局包络"),
+        ("SCENE_SHARD_GENERATION", "场次写作"),
+        ("IR_MERGE", "全局编译"),
         ("STRUCTURE_VALIDATION", "结构校验"),
         ("QUALITY_SCORING", "质量评分"),
         ("PUBLISHING", "原子发布"),
@@ -266,6 +270,10 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             "first_evaluation_done": False,
             "task_active": active,
             "can_resume_repair": False,
+            "can_resume_baseline": False,
+            "shard_progress": {
+                "total": 0, "validated": 0, "running": 0, "failed": 0,
+            },
             "activation_count": 0,
             "patch_count": 0,
             "open_issue_count": 0,
@@ -277,10 +285,11 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
     phase = str(
         checkpoint.get("phase")
         or ("SUCCEEDED" if published else "STRUCTURE_VALIDATION" if has_working_baseline
-            else "GENERATING_BASELINE")
+            else "BLUEPRINT_GENERATION")
     )
     phase_aliases = {
-        "BASELINE": "GENERATING_BASELINE",
+        "BASELINE": "BLUEPRINT_GENERATION",
+        "GENERATING_BASELINE": "BLUEPRINT_GENERATION",
         "QA": "QUALITY_SCORING",
         "WAITING_HUMAN": "STRUCTURE_VALIDATION",
         "FAILED": "STRUCTURE_VALIDATION",
@@ -289,7 +298,10 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
     if (
         has_working_baseline
         and not published
-        and phase in {"GENERATING_BASELINE", "IDENTITY_AUDIT"}
+        and phase in {
+            "BLUEPRINT_GENERATION", "IDENTITY_FREEZE", "ENVELOPE_GENERATION",
+            "SCENE_SHARD_GENERATION", "IR_MERGE", "IDENTITY_AUDIT",
+        }
     ):
         # Baseline persistence precedes the next checkpoint write. A crash in
         # that narrow window must resume from the durable artifact instead of
@@ -310,6 +322,27 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         else:
             status = "pending"
         stages.append({"key": key, "label": label, "status": status})
+    shard_rows = [
+        item for item in (checkpoint.get("shards") or [])
+        if isinstance(item, dict)
+    ]
+    projected_shard_progress = {
+        "total": len(shard_rows),
+        "validated": sum(item.get("status") == "validated" for item in shard_rows),
+        "running": sum(item.get("status") == "running" for item in shard_rows),
+        "failed": sum(item.get("status") == "failed" for item in shard_rows),
+    }
+    has_resumable_baseline = bool(
+        not has_working_baseline
+        and not published
+        and (
+            checkpoint.get("blueprint_artifact_id")
+            or checkpoint.get("identity_artifact_id")
+            or checkpoint.get("envelope_artifact_id")
+            or any(item.get("status") == "validated" for item in shard_rows)
+            or checkpoint.get("merged_ir_artifact_id")
+        )
+    )
     return {
         "revision_id": rev.id,
         "operation": (
@@ -324,6 +357,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "first_evaluation_done": rev.first_evaluation_done,
         "task_active": active,
         "can_resume_repair": bool(has_working_baseline and not published and not active),
+        "can_resume_baseline": bool(has_resumable_baseline and not active),
+        "shard_progress": projected_shard_progress,
         "activation_count": int(checkpoint.get("activation_no") or 0),
         "patch_count": len(checkpoint.get("patch_artifact_ids") or []),
         "open_issue_count": len(checkpoint.get("open_issue_ids") or []),

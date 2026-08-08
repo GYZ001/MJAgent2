@@ -4241,19 +4241,11 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
     preflight_rows = rows_to_dicts(conn.execute(
         """SELECT id, shot_id, status FROM jobs
            WHERE kind='video' AND version_id IS NULL
-             AND (
-               (status='waiting_retry' AND (next_retry_at IS NULL OR next_retry_at<=?))
-               OR (
-                 status='waiting_human'
-                 AND reason_code='VIDEO_PREFLIGHT_BLOCKED'
-                 AND retry_count<?
-                 AND (error LIKE '%source_excerpt 原文内容%'
-                      OR reason_text LIKE '%source_excerpt 原文内容%')
-               )
-             )
+             AND status='waiting_retry'
+             AND (next_retry_at IS NULL OR next_retry_at<=?)
              AND cancellation_requested=0 AND abandoned=0
            ORDER BY updated_at LIMIT ?""",
-        (stamp, int(config.VIDEO_PREFLIGHT_MAX_RETRIES), max(1, int(limit))),
+        (stamp, max(1, int(limit))),
     ))
     for row in preflight_rows:
         try:

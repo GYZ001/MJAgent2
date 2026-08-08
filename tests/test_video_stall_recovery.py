@@ -79,7 +79,7 @@ def _patch_enqueue_runtime(monkeypatch, conn: sqlite3.Connection) -> None:
     monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
 
 
-def test_embedded_source_dialogue_is_repaired_before_enqueue(
+def test_embedded_source_dialogue_is_not_inferred_or_mutated_during_enqueue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
@@ -105,17 +105,12 @@ def test_embedded_source_dialogue_is_repaired_before_enqueue(
     result = worker.enqueue_shot("s1")
 
     assert result["task_accepted"] is True
-    assert result["auto_repaired"] is True
     shot = conn.execute(
-        "SELECT action_desc,dialogues FROM shots WHERE id='s1'"
+        "SELECT action_desc,dialogues,duration_s FROM shots WHERE id='s1'"
     ).fetchone()
-    assert "待修复台词信息" not in shot["action_desc"]
-    assert json.loads(shot["dialogues"]) == [{
-        "speaker": "管事",
-        "line": line,
-        "emotion": "平静",
-        "delivery": "spoken_dialogue",
-    }]
+    assert f"待修复台词信息「{line}」" in shot["action_desc"]
+    assert json.loads(shot["dialogues"]) == []
+    assert shot["duration_s"] == 5
     job = conn.execute(
         "SELECT status,version_id,pipeline_stage FROM jobs WHERE id=?",
         (result["job_id"],),
@@ -123,15 +118,12 @@ def test_embedded_source_dialogue_is_repaired_before_enqueue(
     assert job["status"] == "queued"
     assert job["version_id"] == result["version_id"]
     assert job["pipeline_stage"] == "job_queued"
-    assert conn.execute(
-        "SELECT duration_s FROM shots WHERE id='s1'"
-    ).fetchone()["duration_s"] > 5
 
 
-def test_legacy_descriptive_speaker_is_not_guessed_into_route_id(
+def test_descriptive_speaker_is_not_guessed_or_persisted_during_enqueue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """shot 17 同时带原文对白、空角色表和描述性临时说话人，必须一次收口。"""
+    """来源正文不能触发说话人、角色或时长的猜测性写入。"""
     conn = _conn()
     _seed(conn)
     line = "许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。"
@@ -158,19 +150,19 @@ def test_legacy_descriptive_speaker_is_not_guessed_into_route_id(
     conn.commit()
     _patch_enqueue_runtime(monkeypatch, conn)
 
-    with pytest.raises(compiler.CompileError, match="绿袍修士乙"):
-        worker.enqueue_shot("s1")
+    result = worker.enqueue_shot("s1")
 
     shot = conn.execute(
         "SELECT duration_s,characters,dialogues,action_desc FROM shots WHERE id='s1'"
     ).fetchone()
-    assert shot["duration_s"] == 9
-    assert json.loads(shot["characters"]) == ["绿袍修士乙"]
-    assert json.loads(shot["dialogues"])[0]["speaker"] == "绿袍修士乙"
-    assert "待修复台词信息" not in shot["action_desc"]
+    assert result["task_accepted"] is True
+    assert shot["duration_s"] == 5
+    assert json.loads(shot["characters"]) == []
+    assert json.loads(shot["dialogues"]) == []
+    assert f"待修复台词信息「{line}」" in shot["action_desc"]
 
 
-def test_structured_source_dialogue_expands_to_minimum_valid_duration(
+def test_structured_source_dialogue_capacity_failure_does_not_mutate_duration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
@@ -199,16 +191,17 @@ def test_structured_source_dialogue_expands_to_minimum_valid_duration(
         lambda *_args, **_kwargs: "安全的视频提示词",
     )
 
-    result = worker.enqueue_shot("s1")
+    with pytest.raises(compiler.CompileError, match="SPOKEN_CAPACITY_EXCEEDED"):
+        worker.enqueue_shot("s1")
 
-    assert result["task_accepted"] is True
-    assert result["auto_repaired"] is True
-    assert result["preflight_repair"]["repair"] == "source_dialogue_duration"
-    assert result["preflight_repair"]["from_duration_s"] == 5
-    assert result["preflight_repair"]["to_duration_s"] > 5
     assert conn.execute(
         "SELECT duration_s FROM shots WHERE id='s1'"
-    ).fetchone()["duration_s"] == result["preflight_repair"]["to_duration_s"]
+    ).fetchone()["duration_s"] == 5
+    job = conn.execute(
+        "SELECT status,pipeline_stage FROM jobs WHERE shot_id='s1'"
+    ).fetchone()
+    assert job["status"] == "waiting_human"
+    assert job["pipeline_stage"] == "preflight_blocked"
 
 
 def test_location_prefixed_speaker_is_not_normalized_by_name_pattern(
@@ -295,7 +288,6 @@ def test_unstructured_source_excerpt_is_scrubbed_instead_of_failing(
     assert job["version_id"] == result["version_id"]
     assert job["pipeline_stage"] == "job_queued"
     assert job["reason_code"] is None
-    assert result["auto_repaired"] is True
     assert result["preflight_repair"]["repair"] == "source_excerpt_prompt_scrub"
     version = conn.execute(
         "SELECT prompt_text,image_inputs FROM shot_versions WHERE id=?",
@@ -342,7 +334,7 @@ def test_source_excerpt_failure_gets_bounded_retry_if_scrubber_cannot_repair(
     assert result["job_id"]
 
 
-def test_legacy_blocked_source_excerpt_job_is_reactivated_after_upgrade(
+def test_blocked_preflight_is_not_reactivated_from_error_prose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
@@ -358,22 +350,22 @@ def test_legacy_blocked_source_excerpt_job_is_reactivated_after_upgrade(
                'VIDEO_PREFLIGHT_BLOCKED',?,'preflight_blocked','blocked',1,1
            )""",
         (
-            "视频输入校验未通过：shot_no=1 最终提示词包含 source_excerpt 原文内容",
-            "视频输入校验未通过：shot_no=1 最终提示词包含 source_excerpt 原文内容",
+            "历史业务错误文本",
+            "历史业务错误文本",
         ),
     )
     conn.commit()
 
     report = worker.reconcile_stalled_video_jobs()
 
-    assert report["legacy_preflight_reactivated"] == 1
-    assert report["preflight_retried"] == 1
+    assert report["legacy_preflight_reactivated"] == 0
+    assert report["preflight_retried"] == 0
     job = conn.execute(
         "SELECT status,version_id,pipeline_stage FROM jobs WHERE id='legacy-source-job'"
     ).fetchone()
-    assert job["status"] == "queued"
-    assert job["version_id"]
-    assert job["pipeline_stage"] == "job_queued"
+    assert job["status"] == "waiting_human"
+    assert job["version_id"] is None
+    assert job["pipeline_stage"] == "preflight_blocked"
 
 
 def test_transient_preflight_failure_is_retried_by_sweeper(

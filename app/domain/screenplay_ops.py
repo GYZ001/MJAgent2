@@ -9,6 +9,17 @@ except NameError:  # pragma: no cover - used when importing this module directly
 
 
 _SCREENPLAY_IR_WORKING_TYPES = (
+    "screenplay_identity_discovery_raw",
+    "screenplay_identity_discovery",
+    "screenplay_identity_registry",
+    "screenplay_envelope_raw",
+    "screenplay_envelope",
+    "screenplay_scene_shard_plan",
+    "screenplay_scene_shard_raw",
+    "screenplay_scene_shard",
+    "screenplay_scene_shard_patch_raw",
+    "screenplay_scene_shard_patch",
+    "screenplay_generation_ir_merged",
     "screenplay_generation_ir",
     "screenplay_generation_ir_raw",
     "screenplay_generation_ir_fidelity_patch",
@@ -74,7 +85,38 @@ def _clear_unpublished_screenplay_ir(
                )""",
         params,
     ).fetchall()
-    artifact_ids = [str(row["id"]) for row in rows]
+    candidate_ids = {str(row["id"]) for row in rows}
+    # Protect the complete recursive ancestry of every approved Document.  A
+    # direct-parent check is insufficient once Document -> merged IR -> shards
+    # -> raw evidence spans several generations.
+    scoped_rows = conn.execute(
+        "SELECT id,type,status,parent_artifact_ids_json FROM artifacts "
+        "WHERE scope_type='episode' AND scope_id=?",
+        (episode_id,),
+    ).fetchall()
+    parents_by_id: dict[str, list[str]] = {}
+    published_heads: list[str] = []
+    for row in scoped_rows:
+        artifact_id = str(row["id"])
+        try:
+            parents_by_id[artifact_id] = [
+                str(value)
+                for value in json.loads(row["parent_artifact_ids_json"] or "[]")
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parents_by_id[artifact_id] = []
+        if row["type"] == "screenplay_document" and row["status"] == "approved":
+            published_heads.append(artifact_id)
+    protected: set[str] = set(published_heads)
+    pending = list(published_heads)
+    while pending:
+        current = pending.pop()
+        for parent in parents_by_id.get(current, []):
+            if parent in protected:
+                continue
+            protected.add(parent)
+            pending.append(parent)
+    artifact_ids = sorted(candidate_ids - protected)
     if not artifact_ids:
         return 0
     marks = ",".join("?" for _ in artifact_ids)
@@ -874,13 +916,54 @@ async def _screenplay_task(
             "SELECT active_screenplay_run_id FROM episodes WHERE id=?", (episode_id,)
         ).fetchone()
         if not current_run_id or not owner or owner["active_screenplay_run_id"] in {None, current_run_id}:
-            _clear_unpublished_screenplay_ir(
-                episode_id,
-                run_id=current_run_id,
+            from app.production.revision import get_active_production_revision
+
+            active_revision = get_active_production_revision(
+                episode_id, "screenplay"
             )
+            checkpoint = dict(
+                active_revision.checkpoint_json or {}
+            ) if active_revision else {}
+            has_validated_shards = any(
+                isinstance(item, dict)
+                and item.get("status") == "validated"
+                for item in checkpoint.get("shards") or []
+            )
+            has_document = bool(
+                active_revision
+                and active_revision.baseline_done
+                and active_revision.working_artifact_id
+            )
+            if not has_document and not has_validated_shards:
+                _clear_unpublished_screenplay_ir(
+                    episode_id,
+                    run_id=current_run_id,
+                )
+            if active_revision:
+                from app.production.revision import save_checkpoint
+
+                save_checkpoint(active_revision.id, {
+                    **checkpoint,
+                    "yield_reason": "user_cancelled",
+                    "phase": (
+                        "STRUCTURE_VALIDATION" if has_document
+                        else checkpoint.get("phase") or "BLUEPRINT_GENERATION"
+                    ),
+                })
             conn.execute(
-                "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-                ("剧本生成已取消，可重新发起。", now(), episode_id))
+                "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
+                (
+                    "repairing" if has_document else "failed",
+                    (
+                        "完整剧本校验已取消，工作副本已保留，可继续校验。"
+                        if has_document else
+                        "首版生成已取消，已验证场次分片已保留，可继续首版生成。"
+                        if has_validated_shards else
+                        "剧本生成已取消，可重新发起。"
+                    ),
+                    now(),
+                    episode_id,
+                ))
             conn.commit()
         raise
     except Exception as exc:  # noqa: BLE001

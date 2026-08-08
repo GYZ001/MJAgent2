@@ -4003,14 +4003,14 @@ async def run_screenplay_production(
         assert_baseline_allowed(rev, command="screenplay.generate", episode_id=episode_id)
         save_checkpoint(rev.id, {
             **checkpoint,
-            "phase": "GENERATING_BASELINE",
+            "phase": "BLUEPRINT_GENERATION",
             "activation_no": activation_no,
             "yield_reason": None,
         })
         if run_id:
             evidence_repository.append_event(
                 run_id, "BASELINE_GENERATION_STARTED", "info",
-                "剧本 Baseline 生成（本 revision 仅此一次）",
+                "剧本蓝图与可恢复场次 Baseline 生成（完整 Document 本 revision 仅创建一次）",
                 payload={"revision_id": rev.id},
             )
         script = await generate_screenplay_baseline(
@@ -4137,7 +4137,7 @@ async def run_screenplay_production(
         baseline_created_this_activation = True
         checkpoint = {
             **checkpoint,
-            "phase": "IDENTITY_AUDIT",
+            "phase": "STRUCTURE_VALIDATION",
             "activation_no": activation_no,
             "working_artifact_id": baseline_art["id"],
             "source_ir_artifact_id": source_ir_artifact_id or None,
@@ -4164,7 +4164,7 @@ async def run_screenplay_production(
     elif not rev.working_artifact_id:
         raise RuntimeError("revision 已有 baseline 计数但缺少 working artifact")
 
-    # ---- Baseline 后身份收口（可恢复，不消耗第二次完整生成）----
+    # ---- Baseline 后只做确定性身份归一化；未知身份进入 typed QA gate ----
     rev = get_production_revision(rev.id)  # type: ignore[assignment]
     assert rev and rev.working_artifact_id
     working_id = rev.working_artifact_id
@@ -4175,14 +4175,8 @@ async def run_screenplay_production(
         or evidence_repository.content_hash(working_artifact.get("content"))
     )
     working_script = load_screenplay_from_artifact(working_id)
-    identity_audit_required = (
-        baseline_created_this_activation
-        or checkpoint.get("phase") == "IDENTITY_AUDIT"
-    )
     from app.portraits import (
         apply_screenplay_character_resolutions,
-        bible_with_provisional_characters,
-        merge_screenplay_character_resolutions,
         normalize_screenplay_voice_ids,
         screenplay_unknown_identity_errors,
     )
@@ -4201,53 +4195,17 @@ async def run_screenplay_production(
         bible,
         episode.get("character_resolutions") or [],
     )
-    if draft_identity_errors:
-        draft_audit = await ensure_source_characters_incremental(
-            episode_id,
-            source_text,
-            draft_text=working_script.model_dump_json(),
-        )
-        previous_resolutions = list(
-            episode.get("character_resolutions") or []
-        )
-        episode["character_resolutions"] = merge_screenplay_character_resolutions(
-            previous_resolutions,
-            draft_audit.get("resolutions") or [],
-        )
-        previous_resolution_pairs = {
-            (
-                str(item.get("source_label") or "").strip(),
-                str(item.get("canonical_name") or "").strip(),
-            )
-            for item in previous_resolutions
-            if isinstance(item, dict)
-        }
-        merged_resolution_pairs = {
-            (
-                str(item.get("source_label") or "").strip(),
-                str(item.get("canonical_name") or "").strip(),
-            )
-            for item in episode["character_resolutions"]
-            if isinstance(item, dict)
-        }
-        if merged_resolution_pairs - previous_resolution_pairs:
-            identity_normalization_changes.extend(
-                apply_screenplay_character_resolutions(
-                    working_script,
-                    episode["character_resolutions"],
-                )
-            )
-        if draft_audit.get("added"):
-            project = conn.execute(
-                "SELECT * FROM projects WHERE id=?",
-                (episode["project_id"],),
-            ).fetchone()
-            from app.domain.common import _project_bible_or_placeholder
-
-            bible = _project_bible_or_placeholder(project)
-        bible = bible_with_provisional_characters(bible, draft_audit)
-        identity_normalization_changes.extend(
-            normalize_screenplay_voice_ids(working_script, bible)
+    if draft_identity_errors and run_id:
+        evidence_repository.append_event(
+            run_id,
+            "SCREENPLAY_IDENTITY_STRUCTURAL_GATE_OPEN",
+            "warning",
+            "完整 Document 仍有未知身份；不再回扫全章，交由 typed structural QA gate",
+            payload={
+                "episode_id": episode_id,
+                "issue_count": len(draft_identity_errors),
+                "issues": [str(value) for value in draft_identity_errors[:20]],
+            },
         )
     elif run_id:
         evidence_repository.append_event(
@@ -4302,15 +4260,14 @@ async def run_screenplay_production(
                     "after_artifact_id": working_id,
                 },
             )
-    if identity_audit_required:
-        checkpoint = {
-            **checkpoint,
-            "phase": "STRUCTURE_VALIDATION",
-            "activation_no": activation_no,
-            "working_artifact_id": working_id,
-            "yield_reason": None,
-        }
-        save_checkpoint(rev.id, checkpoint)
+    checkpoint = {
+        **checkpoint,
+        "phase": "STRUCTURE_VALIDATION",
+        "activation_no": activation_no,
+        "working_artifact_id": working_id,
+        "yield_reason": None,
+    }
+    save_checkpoint(rev.id, checkpoint)
 
     # All issues marked must_fix/runtime_blocking enter the bounded local Patch
     # loop. Quality-only findings remain score-only and never masquerade as a

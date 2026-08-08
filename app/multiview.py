@@ -2623,6 +2623,12 @@ async def review_keyframe_with_evidence(
         blocking_facts.append("photoreal_medium_detected")
     if data.get("live_action_detected") is True:
         blocking_facts.append("live_action_medium_detected")
+    geometry_guard = data.get("geometry_guard")
+    if isinstance(geometry_guard, dict):
+        if geometry_guard.get("status") != "verified":
+            blocking_facts.append("geometry_guard_unverified")
+        elif geometry_guard.get("passed") is not True:
+            blocking_facts.append("geometry_guard_failed")
     data["blocking_facts"] = list(dict.fromkeys(blocking_facts))
     data["runtime_blocking"] = bool(data["blocking_facts"])
     data["hard_failures"] = list(data["blocking_facts"])

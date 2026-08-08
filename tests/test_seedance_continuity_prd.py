@@ -9,7 +9,7 @@ from app.continuity import (
     action_capacity_errors,
     classify_video_hard_failures,
     derive_continuity_mode,
-    forbidden_prompt_content_errors,
+    prompt_source_provenance_errors,
     information_items_for_shot,
     information_ledger_errors,
     preflight_seedance_gates,
@@ -647,7 +647,7 @@ def test_continuity_mode_is_derived_from_scene_and_time_context() -> None:
     assert derive_continuity_mode(changed_context, prev=same_context) == "scene_change"
 
 
-def test_dialogue_matching_source_excerpt_prefix_is_not_forbidden_leak() -> None:
+def test_dialogue_matching_source_excerpt_prefix_respects_provenance() -> None:
     """ERR-20260725-f24b91：台词与 source_excerpt 前缀相同且只出现在对白中，不得误杀。"""
     line = "萧炎哥哥，以前你曾经与薰儿说过，要能放下，才能拿起，提放自如，是自在人！"
     excerpt = line + "萧薰儿微笑着柔声道，略微稚嫩的嗓音，却是暖人心肺。"
@@ -670,11 +670,11 @@ def test_dialogue_matching_source_excerpt_prefix_is_not_forbidden_leak() -> None
     prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut")
     assert line in prompt
     assert SOURCE_EXCERPT_MARKER not in prompt
-    assert not any("source_excerpt 原文内容" in err for err in forbidden_prompt_content_errors(prompt, shot))
+    assert not prompt_source_provenance_errors(prompt, shot)
     assert not any("source_excerpt 原文内容" in err for err in preflight_seedance_gates(shot, prompt_text=prompt))
 
 
-def test_source_excerpt_in_action_block_still_forbidden() -> None:
+def test_source_excerpt_in_action_block_fails_provenance() -> None:
     excerpt = "林风按住铜环，听见门后传来细微响动，这段原文不得进入画面描述。"
     shot = _shot(
         source_excerpt=excerpt,
@@ -683,10 +683,10 @@ def test_source_excerpt_in_action_block_still_forbidden() -> None:
         continuity_mode="same_scene_cut",
     )
     prompt = compile_prompt(shot, _bible(), continuity_mode="same_scene_cut")
-    assert any("source_excerpt 原文内容" in err for err in forbidden_prompt_content_errors(prompt, shot))
+    assert prompt_source_provenance_errors(prompt, shot)
 
 
-def test_source_excerpt_middle_segment_is_also_forbidden() -> None:
+def test_source_excerpt_middle_segment_fails_provenance() -> None:
     excerpt = (
         "林风先抬头确认山门无人值守，随后按住铜环，"
         "听见门后传来连续而细微的脚步声，最后退到石阶边缘。"
@@ -694,7 +694,7 @@ def test_source_excerpt_middle_segment_is_also_forbidden() -> None:
     shot = _shot(source_excerpt=excerpt, continuity_mode="same_scene_cut")
     middle = excerpt[18:18 + 30]
 
-    errors = forbidden_prompt_content_errors(f"画面动作：{middle}", shot)
+    errors = prompt_source_provenance_errors(f"画面动作：{middle}", shot)
 
     assert any("source_excerpt 原文内容" in err for err in errors)
 
@@ -716,7 +716,7 @@ def test_final_prompt_scrubber_preserves_allowed_dialogue_and_removes_other_exce
 
     assert line in scrubbed
     assert leaked_middle not in scrubbed
-    assert not forbidden_prompt_content_errors(scrubbed, shot)
+    assert not prompt_source_provenance_errors(scrubbed, shot)
 
 
 def test_preflight_does_not_leak_prev_shot_errors() -> None:

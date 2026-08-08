@@ -277,12 +277,9 @@ async def test_narrative_enqueue_never_runs_legacy_in_place_repair(
     await _published_narrative_case(monkeypatch)
     from app import api, worker
 
-    def forbidden_repair(*_args, **_kwargs):
-        raise AssertionError("narrative authority must not run legacy row repair")
-
-    monkeypatch.setattr(worker, "_auto_repair_embedded_source_dialogue", forbidden_repair)
-    monkeypatch.setattr(worker, "_auto_expand_source_dialogue_duration", forbidden_repair)
-    monkeypatch.setattr(worker, "_auto_normalize_functional_speaker", forbidden_repair)
+    assert not hasattr(worker, "_auto_repair_embedded_source_dialogue")
+    assert not hasattr(worker, "_auto_expand_source_dialogue_duration")
+    assert not hasattr(worker, "_auto_normalize_functional_speaker")
     monkeypatch.setattr(worker, "_begin_video_preflight_job", lambda *_a, **_k: "preflight")
     monkeypatch.setattr(
         api,

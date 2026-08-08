@@ -28,7 +28,9 @@ IDENTITY_ADJUDICATOR_VERSION = "screenplay-ir-identity-adjudicator.v2"
 
 class IdentityAdjudicationDecision(BaseModel):
     identity_key: str
-    status: Literal["bind", "new_functional", "insufficient_evidence"]
+    status: Literal[
+        "bind", "new_functional", "new_named", "insufficient_evidence",
+    ]
     authority_id: str = ""
     canonical_name: str = ""
     evidence_source_ids: list[str] = Field(default_factory=list)
@@ -185,20 +187,22 @@ def _prompt(payload: dict[str, Any]) -> str:
 1. 每个 issues 涉及的 identity_key 都必须且只能输出一个 decision。
 2. 若证据确认它属于 authority_registry 中某个实体，status=bind，authority_id 必须逐字引用该项。
    identities 中留空的 authority_id 表示未决输入，不构成任何既有身份权威。
-3. 若原文确认它是独立出场/开口实体，但 registry 尚无对应项，status=new_functional，
+3. 若原文唯一明确给出稳定真名且 registry 尚无对应项，status=new_named，canonical_name 必须逐字来自 owned SRC；
+   后端先完成最小文字卡，再签发 bible:<name> authority。
+4. 若原文确认它是独立出场/开口实体，但 registry 尚无对应项，status=new_functional，
    canonical_name 优先逐字引用 source segment；若同一原文称谓明确指向多个实体，必须逐字沿用
    该 identity 当前的 display_name 作为区分显示名，后端负责生成不同的稳定 ID，禁止另造称谓。
-4. 若证据不能唯一判断，status=insufficient_evidence，禁止猜测或按字面相似合并。
-5. evidence_source_ids 只能引用输入 source_segments，且必须真正支持身份结论。
+5. 若证据不能唯一判断，status=insufficient_evidence，禁止猜测或按字面相似合并。
+6. evidence_source_ids 只能引用输入 source_segments，且必须真正支持身份结论。
    每个 decision 只能从该 identity 的 owned_source_ids 中选择；若 owned_source_ids 为空，
    必须 status=insufficient_evidence，禁止借用其他 identity 的来源段。
-6. 同一 authority_id 表示同一实体；两个可区分实体不得因共享“少年、男子、女子、师兄”等泛称而合并。
+7. 同一 authority_id 表示同一实体；两个可区分实体不得因共享泛称而合并。
 
 输入：
 {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}
 
 只输出 JSON：
-{{"decisions":[{{"identity_key":"IR identity.key","status":"bind|new_functional|insufficient_evidence","authority_id":"bind 时填写已有 ID，否则空串","canonical_name":"new_functional 时填写原文逐字稳定称谓，否则可空","evidence_source_ids":["SRC0001"],"rationale":"基于哪些原文动作、对白或同一性证据"}}]}}"""
+{{"decisions":[{{"identity_key":"IR identity.key","status":"bind|new_named|new_functional|insufficient_evidence","authority_id":"bind 时填写已有 ID，否则空串","canonical_name":"new_named/new_functional 时填写 owned SRC 逐字称谓，否则可空","evidence_source_ids":["SRC0001"],"rationale":"基于哪些原文动作、对白或同一性证据"}}]}}"""
 
 
 def _validate_decisions(
@@ -260,7 +264,7 @@ def _validate_decisions(
                 raise ContentGenerationError(
                     f"人物身份仲裁 {key} 引用了不存在的 authority_id"
                 )
-        elif decision.status == "new_functional":
+        elif decision.status in {"new_functional", "new_named"}:
             canonical_name = decision.canonical_name.strip()
             identity_display_name = str(
                 identity_by_key[key].get("display_name") or ""
@@ -314,10 +318,22 @@ async def adjudicate_screenplay_ir_identities(
     operation_id = "op_ir_identity_" + hashlib.sha256(
         prompt.encode("utf-8")
     ).hexdigest()[:32]
-    raw = await model_gateway.chat(
+    result = await model_gateway.chat_structured(
         [{"role": "user", "content": prompt}],
+        model_type=IdentityAdjudicationResult,
+        validate=lambda value: (
+            []
+            if _validate_decisions(value, payload=payload)
+            else []
+        ),
+        operation_id=(
+            f"screenplay.identity-adjudication:{IDENTITY_ADJUDICATOR_VERSION}:"
+            f"{operation_id}"
+        ),
         temperature=0.05,
         max_tokens=4096,
+        format_retry_limit=1,
+        semantic_retry_limit=1,
         call_meta={
             "stage": "screenplay_ir_identity_adjudication",
             "episode_id": str(episode.get("id") or ""),
@@ -326,14 +342,12 @@ async def adjudicate_screenplay_ir_identities(
             "adjudicator_version": IDENTITY_ADJUDICATOR_VERSION,
             "ambiguity_count": len(issues),
         },
+        repair_context=json.dumps(
+            payload.get("source_segments") or [],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
-    try:
-        parsed = extract_json(raw, repair_unescaped_inner_quotes=True)
-        result = IdentityAdjudicationResult.model_validate(parsed)
-    except (TypeError, ValueError) as exc:
-        raise ContentGenerationError(
-            "人物身份仲裁返回了不可验证的结构化结果"
-        ) from exc
     decisions = _validate_decisions(result, payload=payload)
 
     unresolved = [
@@ -354,6 +368,41 @@ async def adjudicate_screenplay_ir_identities(
         identity = identities_by_key[key]
         if decision.status == "bind":
             identity.authority_id = decision.authority_id
+            continue
+        if decision.status == "new_named":
+            from app.portraits import ensure_character_card
+
+            card = await ensure_character_card(
+                str(episode.get("project_id") or ""),
+                decision.canonical_name,
+                int(episode.get("episode_no") or 1),
+                generate_portrait=False,
+                require_identity_card=True,
+            )
+            if card.get("status") not in {"exists", "added", "ready", "created"}:
+                raise ContentGenerationError(
+                    "具名身份仲裁未能完成最小人物卡："
+                    + str(card.get("reason") or card.get("status") or "unknown")
+                )
+            authority_id = f"bible:{decision.canonical_name}"
+            identity.authority_id = authority_id
+            source_label = next((
+                token
+                for token in [*identity.source_names, identity.display_name]
+                if str(token or "").strip()
+            ), decision.canonical_name)
+            new_resolutions.append(normalize_character_resolution({
+                "source_label": source_label,
+                "canonical_name": decision.canonical_name,
+                "resolution": "future_identity",
+                "identity_group": authority_id,
+                "authority_id": authority_id,
+                "source_instance_key": authority_id,
+                "reason": "AI 根据 owned SRC 确认稳定具名身份并完成最小人物卡",
+                "evidence": decision.rationale[:160],
+                "evidence_source_ids": decision.evidence_source_ids,
+                "decision_source": IDENTITY_ADJUDICATOR_VERSION,
+            }))
             continue
         seed = {
             "episode_id": str(episode.get("id") or ""),

@@ -143,6 +143,7 @@ def identity_authority_registry(
             "identity_kind": "named",
             "source_labels": [name],
             "identity_group": f"bible:{name}",
+            "source_instance_key": f"bible:{name}",
             "evidence": "角色圣经已登记身份",
             "future_evidence": "",
         }
@@ -159,6 +160,11 @@ def identity_authority_registry(
             ),
             "source_labels": [],
             "identity_group": item.get("identity_group") or "",
+            "source_instance_key": (
+                item.get("source_instance_key")
+                or item.get("identity_group")
+                or authority_id
+            ),
             "evidence": item.get("evidence") or "",
             "future_evidence": item.get("future_evidence") or "",
         })
