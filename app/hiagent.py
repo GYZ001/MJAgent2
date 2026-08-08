@@ -28,9 +28,9 @@ import httpx
 from app import config
 from app.atomic_io import atomic_write_bytes
 from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
-                    provider_operation_id, start_provider_call)
+                    provider_operation_id, start_provider_call,
+                    update_provider_call_progress)
 from app.model_capabilities import (
-    DEFAULT_MAX_OUTPUT_TOKENS,
     active_model_token_limits,
 )
 
@@ -309,6 +309,8 @@ def active_provider(kind: str) -> str:
     configured = (get_setting(f"model_{kind}_provider") or "").strip()
     if configured.startswith("custom:"):
         return configured
+    if kind == "video" and configured in {"hiagent", "minimax_h3"}:
+        return configured
     if kind == "text" and configured in {"hiagent", "openrouter", "bailian", "deepseek", "zhipu"}:
         return configured
     if kind == "vlm" and configured in {"hiagent", "openrouter", "bailian"}:
@@ -356,6 +358,13 @@ def _absolute_provider_url(value: str, base_url: str) -> str:
 
 def active_model(kind: str, provider: str | None = None) -> str:
     provider = provider or active_provider(kind)
+    if provider == "minimax_h3":
+        if kind == "video":
+            return _model_setting(
+                "minimax_h3_model_video",
+                config.DEFAULT_MINIMAX_H3_MODEL_VIDEO,
+            )
+        return ""
     if provider.startswith("custom:"):
         try:
             custom = json.loads(get_setting("custom_models") or "[]")
@@ -1270,6 +1279,16 @@ async def _stream_chat_completion(
     reasoning_parts: list[str] = []
     tool_slots: dict[int, dict[str, Any]] = {}
     state: dict[str, Any] = {}
+    received_chars = 0
+    last_progress_chars = 0
+    last_progress_at = start
+    try:
+        total_timeout_s = max(
+            60.0,
+            float(get_setting("text_stream_total_timeout_s") or 1200),
+        )
+    except (TypeError, ValueError):
+        total_timeout_s = 1200.0
     try:
         async with client.stream("POST", url, json=stream_payload, headers=req_headers) as resp:
             if resp.status_code != 200:
@@ -1292,18 +1311,57 @@ async def _stream_chat_completion(
                     chunk = json.loads(chunk_str)
                 except (json.JSONDecodeError, ValueError):
                     continue
+                content_count = len(content_parts)
+                reasoning_count = len(reasoning_parts)
                 _accumulate_stream_chunk(
                     chunk, content_parts=content_parts, reasoning_parts=reasoning_parts,
                     tool_slots=tool_slots, state=state, on_token=on_token)
+                received_chars += sum(
+                    len(value)
+                    for value in content_parts[content_count:]
+                ) + sum(
+                    len(value)
+                    for value in reasoning_parts[reasoning_count:]
+                )
+                stamp = time.time()
+                if (
+                    received_chars > 0
+                    and (
+                        last_progress_chars == 0
+                        or received_chars - last_progress_chars >= 8192
+                        or stamp - last_progress_at >= 2.0
+                    )
+                ):
+                    update_provider_call_progress(
+                        call_id,
+                        received_chars=received_chars,
+                        chunk_at=stamp,
+                    )
+                    last_progress_chars = received_chars
+                    last_progress_at = stamp
+                if stamp - start > total_timeout_s:
+                    raise asyncio.TimeoutError(
+                        f"stream total timeout after {total_timeout_s:.0f}s"
+                    )
         latency = int((time.time() - start) * 1000)
+        if received_chars > last_progress_chars:
+            update_provider_call_progress(
+                call_id,
+                received_chars=received_chars,
+                chunk_at=time.time(),
+            )
         data = _reconstruct_stream_data(content_parts, reasoning_parts, tool_slots, state)
         finish_provider_call(call_id, "OK", 200, latency, response_json=data)
         return data
     except ProviderError:
         raise
-    except httpx.TimeoutException as exc:
+    except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
         latency = int((time.time() - start) * 1000)
-        phase = _timeout_phase(exc)
+        phase = (
+            "总时长"
+            if isinstance(exc, asyncio.TimeoutError)
+            else _timeout_phase(exc)
+        )
         detail = f"{type(exc).__name__}(phase={phase}, latency_ms={latency}): {exc!r}"
         finish_provider_call(call_id, "TIMEOUT", None, latency, error=detail)
         raise ProviderError(f"流式调用{phase}阶段超时（{latency}ms）", retryable=True, raw=detail, timeout_phase=phase)
@@ -1460,6 +1518,16 @@ async def create_video_task(
         if str(url).startswith("data:") or not str(url).startswith(("http://", "https://")):
             raise ProviderError("reference_video 必须是供应商可访问的 http(s) Web URL")
 
+    if active_provider("video") == "minimax_h3":
+        from app import minimax_h3
+
+        return await minimax_h3.create_video_task(
+            prompt_text,
+            image_urls=image_urls,
+            video_urls=video_urls,
+            call_meta=call_meta,
+        )
+
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
     for url, role in image_urls or []:
         content.append({"type": "image_url", "image_url": {"url": url}, "role": role})
@@ -1491,6 +1559,11 @@ async def create_video_task(
 
 async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dict:
     """轮询单次。返回 {status, video_url, last_frame_url, error}。"""
+    from app import minimax_h3
+
+    if minimax_h3.is_task_id(task_id):
+        return await minimax_h3.poll_video_task(task_id, call_meta=call_meta)
+
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_POLL, write=10, pool=10)
     start = time.time()
     model = active_model("video", "hiagent")
@@ -1547,6 +1620,12 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
 
 async def _download_once(url: str, dest_path: str) -> None:
     """单次下载；禁止 SSRF：仅允许公网 http(s)，跟随重定向后再次校验。"""
+    from app import minimax_h3
+
+    if minimax_h3.is_output_url(url):
+        await minimax_h3.download_output(url, dest_path)
+        return
+
     import ipaddress
     import socket
     from urllib.parse import urlparse
@@ -1616,6 +1695,10 @@ async def download(url: str, dest_path: str) -> None:
         try:
             await _download_once(url, dest_path)
             return
+        except ProviderError as exc:
+            if not exc.retryable:
+                raise
+            last_error = exc
         except httpx.RequestError as exc:
             phase = _timeout_phase(exc) if isinstance(exc, httpx.TimeoutException) else None
             last_error = ProviderError(

@@ -814,6 +814,11 @@ def test_source_dialogue_inventory_keeps_first_utterance_in_order() -> None:
 
 def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None:
     script, source = _screenplay_with_source_dialogue_chain()
+    script.voice_bible.append(VoiceCanonical(
+        speaker_id="测验员",
+        voice_canonical="中性播报声线",
+        role_type="functional_character",
+    ))
     normalized = normalize_screenplay_candidate(script)
 
     errors = validate_screenplay(
@@ -838,7 +843,6 @@ def test_dialogue_chain_allows_seven_continuous_turns_but_keeps_hard_limit() -> 
         script,
         source_text=source,
         required=True,
-        required_dialogue_lines=["斗之力，三段！", "只有三段？", "结果无误。"],
     )
 
     assert not any("turns 需包含" in error for error in seven_turn_errors)
@@ -848,7 +852,6 @@ def test_dialogue_chain_allows_seven_continuous_turns_but_keeps_hard_limit() -> 
         script,
         source_text=source,
         required=True,
-        required_dialogue_lines=["一", "二", "三", "四", "五"],
     )
 
     assert any("turns 需包含 1~8 个连续话轮" in error for error in nine_turn_errors)
@@ -1086,7 +1089,6 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
         "hook": "开场",
         "cliffhanger": "收束",
         "synopsis": "测验结果引发回应",
-        "required_dialogue_lines": ["只有三段？", "结果无误。"],
         "authorized_source_chapters": {"chapter-1": source},
     }
 
@@ -1095,9 +1097,7 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
     assert "【首条改编对白来源锚点·硬门禁】" in prompts[0]
     assert "D001 是本集实际采用的第一条对白" in prompts[0]
     assert "D001：斗之力，三段！" not in prompts[0]
-    assert "【用户多选的必保留台词·按原文位置绑定·逐字硬门禁】" in prompts[0]
-    assert "R001：只有三段？" in prompts[0]
-    assert "R002：结果无误。" in prompts[0]
+    assert "用户多选的必保留台词" not in prompts[0]
     assert '"dialogue_chains"' in prompts[0]
     assert "`key_lines` 由后端按 dialogue_chains.turns 确定性回填" in prompts[0]
     assert "最终时长由完整剧情、对白容量、主线节拍和场次建立成本自动扩展，不设上限" in prompts[0]
@@ -1107,7 +1107,7 @@ def test_initial_screenplay_prompt_contains_d001_and_dialogue_chain_contract(mon
     assert '"chapter_id":"chapter-1"' in prompts[0]
 
 
-def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> None:
+def test_screenplay_baseline_forbids_full_ir_regeneration(monkeypatch) -> None:
     captured = {}
 
     async def fake_loop(_stage, _stage_key, _prompt, *_args, **kwargs):
@@ -1120,7 +1120,6 @@ def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> 
         "id": "ep-json-bootstrap",
         "episode_no": 9,
         "target_duration_s": 50,
-        "required_dialogue_lines": [],
     }
 
     asyncio.run(stages.generate_screenplay_baseline(
@@ -1131,8 +1130,8 @@ def test_screenplay_baseline_keeps_structural_bootstrap_retries(monkeypatch) -> 
     ))
 
     policy = captured["policy"]
-    assert policy.max_iterations == 2
-    assert policy.stall_rounds == 2
+    assert policy.max_iterations == 1
+    assert policy.stall_rounds == 1
     assert policy.no_gain_rounds == 2
     assert policy.baseline_only is True
     assert policy.repair_all_blockers is True
@@ -1157,7 +1156,6 @@ def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> Non
         "id": "ep-json-bootstrap",
         "episode_no": 9,
         "target_duration_s": 50,
-        "required_dialogue_lines": [],
         "authorized_source_chapters": {"1": "第一章正文", "2": ""},
     }
 
@@ -1173,36 +1171,6 @@ def test_screenplay_baseline_rejects_missing_narrative_graph(monkeypatch) -> Non
         for error in captured["errors"]
     )
     assert captured["require_source_coverage"] is True
-
-
-def test_user_selected_dialogues_are_hard_gates() -> None:
-    script, source = _screenplay_with_source_dialogue_chain()
-
-    ok = validate_screenplay(
-        script,
-        _bible(),
-        expected_beats=5,
-        episode_no=1,
-        source_text=source,
-        require_dialogue_chains=True,
-        required_dialogue_lines=["只有三段？", "结果无误。"],
-    )
-    assert not any("用户锁定台词" in error for error in ok), ok
-
-    script.full_script_text = script.full_script_text.replace("测验员：结果无误。", "")
-    errors = validate_screenplay(
-        script,
-        _bible(),
-        expected_beats=5,
-        episode_no=1,
-        source_text=source,
-        require_dialogue_chains=True,
-        required_dialogue_lines=["结果无误。"],
-    )
-    assert any(
-        "用户锁定台词未作为角色对白写进 full_script_text" in error
-        for error in errors
-    ), errors
 
 
 def test_screenplay_allows_dropping_non_spine_source_dialogues() -> None:

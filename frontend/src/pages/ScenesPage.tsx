@@ -14,7 +14,7 @@ import PrepSubnav from '../components/PrepSubnav'
 import QueryState from '../components/QueryState'
 import DecisionDialog from '../components/DecisionDialog'
 import OperationError from '../components/OperationError'
-import { useFillPageSize } from '../hooks/useFillPageSize'
+import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
@@ -35,12 +35,11 @@ export default function ScenesPage() {
   const { projectId, toast, registerNavigationGuard } = useNav()
   const { data: p, refresh, error, loading } = useProject(projectId!, undefined, 'scenes')
   const [busy, setBusy] = useState(false)
-  const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
+  const [pageSize, sceneGridRef] = useFillPageSize(SINGLE_ROW_ASSET_PAGE)
   const [listState, setListState] = usePrepListState(projectId!, 'scene-library', pageSize)
   const search = listState.search
   const page = listState.page
   const availabilityFilter = listState.filters.availability || ''
-  const effectivePageSize = pageSize
   const setSearch = (value: string) => setListState(current => ({ ...current, search: value, page: 0 }))
   const setPage = (value: number) => setListState(current => ({ ...current, page: value, scrollY: window.scrollY }))
   const setFilter = (key: string, value: string) => setListState(current => ({
@@ -76,7 +75,7 @@ export default function ScenesPage() {
     if (availabilityFilter && sceneUsability(s, false) !== availabilityFilter) return false
     return true
   }).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
-  const pageCount = Math.max(1, Math.ceil(filtered.length / effectivePageSize))
+  const pageCount = pageSize > 0 ? Math.max(1, Math.ceil(filtered.length / pageSize)) : 1
   const curPage = Math.min(page, pageCount - 1)
   const dirtyParamCount = Number(paramsDirty.anchor) + Number(paramsDirty.prompt)
   const hasSceneCriteria = Boolean(query) || Boolean(availabilityFilter)
@@ -199,7 +198,9 @@ export default function ScenesPage() {
     finally { setPayLoading(false) }
   }
 
-  const paged = filtered.slice(curPage * effectivePageSize, curPage * effectivePageSize + effectivePageSize)
+  const paged = pageSize > 0
+    ? filtered.slice(curPage * pageSize, curPage * pageSize + pageSize)
+    : []
   const hasBible = !!p.bible
   const detailScene = detailSceneName ? scenes.find(scene => scene.name === detailSceneName) ?? null : null
   const paramsScene = paramsSceneName ? scenes.find(scene => scene.name === paramsSceneName) ?? null : null
@@ -306,7 +307,7 @@ export default function ScenesPage() {
               共 {scenes.length} 个场景{hasSceneCriteria ? ` · 当前显示 ${filtered.length}` : ''}
             </span>
           </div>
-          <div className="figure-grid">
+          <div ref={sceneGridRef} className="figure-grid">
             {paged.map(s => {
               const fitting = generating && (!p.scene_refs_target || p.scene_refs_target === s.name)
               const refs = s.scene_refs ?? []
@@ -343,7 +344,7 @@ export default function ScenesPage() {
               )
             })}
           </div>
-          {!paged.length && (
+          {pageSize > 0 && !paged.length && (
             <div className="library-filter-empty" role="status">
               <b>{hasSceneCriteria ? '没有符合当前条件的场景' : '场景库暂无场景'}</b>
               <p>{hasSceneCriteria

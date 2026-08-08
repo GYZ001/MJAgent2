@@ -3,10 +3,68 @@
 > 对应 PRD §4.2~§4.4。每个 LLM 阶段 = 一个 prompt 模板 + 一个 Pydantic Schema + 一个业务规则校验器 + 修复回路。
 > 本文件中的 prompt 是可直接使用的初稿；任何修改必须先跑金样回归（PRD §7）再合入。
 
-## 当前生产合同（v3/v4）
+## 当前生产合同（Blueprint 1.2.1 + IR 5.4，兼容 v3/v4 发布结构）
 
-- 剧本以完整内容交付为目标。后端先把原文建立 `SRC*` 索引，模型必须在
-  `source_coverage` 中逐段标记为交付、合并、上下文保留或有证据的重复；禁止静默删戏。
+- 剧本写作前先生成 `screenplay-narrative-blueprint.v2`。模型只识别时间域、单一地点、
+  人物位置、状态事实、重大决定依据和行为自主性；程序根据节点确定性生成
+  `scene_plans`，剧本 IR 必须逐场消费。
+- 蓝图采用可恢复分片协议。默认分片拥有 28 个连续 SRC；每片独立进行 Schema、来源覆盖、
+  单一地点、时间关系、转场、状态引用和动机门禁。三次仍失败时只将当前片二分为 14，
+  必要时继续二分到 7；已通过分片按来源哈希和边界状态哈希复用。
+- 分片节点和事实由程序添加命名空间，跨片只通过上片输出的有效状态事实、人物位置和最近
+  节点引用。分片合并后仍执行整集时间、空间、状态、自主性和来源顺序门禁。
+- 每个 `scene_plan` 分开保存 `previous_scene_exit_state`、`opening_image` 和 `exit_state`。
+  `entry_state` 只投影本场开场画面，禁止把车外或里间的上一镜状态当成本场入场画面。
+- 场景复杂度由程序控制：同场累计 `dramatic_load <= 3`，且最多拥有 8 个 SRC。时间域、
+  地点、回忆进出、显式边界或复杂度超限都会切场。
+- 行为自主性使用结构化 `agency_mode` 和程序绑定的 `narrative_attribution`。受胁迫、
+  失去行动能力与自愿选择不能在同一节点混写；生理反应、停止反抗或事后互动不能反向
+  改写事件发生时的自主性。
+- IR Artifact 必须记录其消费的完整蓝图哈希。蓝图变更后，无哈希或哈希不一致的旧 IR
+  不得整版恢复，避免“蓝图已修、正文仍旧”；受影响正文必须重新投影并重新 QA。
+- 人物身份使用稳定实体 key。原文有明确称谓时，`source_names` 必须逐字绑定授权原文，
+  程序以来源称谓生成唯一显示名；未命名群众使用地点与戏剧职责构成稳定实体，不使用
+  按出现顺序生成的临时编号，也不使用姓名黑白名单。
+
+- 剧本 Baseline 从 `screenplay-generation-ir.v1.3` 紧凑语义 IR 生成。模型负责人物、
+  场次有序单元、对白、事件与观众意图；后端从 events 确定性生成 beats、动作阶段、
+  audience priors、稳定 ID、
+  精确来源 offset、状态重放、双向引用、窗口预算和最终 `EpisodeScreenplay`。
+- 发布字段没有精简：`plot_spine/source_coverage/scene_outline/full_script_text`、
+  `dialogue_chains/events/information_ledger/voice_bible` 及完整 `narrative_plan`
+  仍在剧本发布前生成并通过既有验证，分镜不增加 IR 兼容分支。
+- IR 场次的 `units` 是动作与对白的严格播放顺序。新 IR Artifact 通过
+  `ScreenplayDocument.body_order` 保序往返；历史 Artifact 保持原投影行为。
+- 模型不得生成最终 `S/E/F/A/SC/P/SE/RW/AP/AS/XI/XD` 编号及机械反向引用。
+  这些字段只能由 `app.screenplay_ir.compile_screenplay_ir` 编译，避免模型把输出预算
+  消耗在重复引用上，也避免同一关系在不同字段中漂移。
+- IR 不再要求模型输出 events 或 beats。每个 `scenes.units` 单元必须声明其实际改编的
+  细粒度 `source_segment_ids`；编译器按播放顺序先生成 event，再按 event 来源归属生成
+  beat 和 `deliver/merge`。所有来源段都必须被正文 unit 消费，模型不得使用
+  `context/coverage` 掩盖未进入正文的内容。
+- IR 在 Pydantic 前接受可证明等价的供应商形状漂移：coverage 的
+  `segment_ids/coverage_type/context_note`、单字符串 information、字符串形式的
+  familiarity assumption，以及省略的 source_excerpt。归一化只改变容器/字段表示，
+  不改写创作语义。
+- IR Baseline 只允许一次完整模型响应。原始响应先保存为
+  `screenplay_generation_ir_raw`，规范化结果保存为 `screenplay_generation_ir`；
+  编译器升级或服务恢复时按输入指纹本地重编译，不再次付费生成。结构问题不得触发
+  “原任务 + 完整候选”的第二次整版重写。
+- 若供应商因长度上限在 events 等程序派生尾部截断，但顶层 `scenes` 数组已由标准 JSON
+  decoder 证明完整，系统只恢复完整成员并从 units 重建尾部；不猜测或补闭未完成场次。
+- `v1.3` 不允许未被 event 直接消费的来源段发布；未知 ID、漏段、来源首次入戏顺序错误、
+  对白错绑来源段、单 unit 过量挂载来源 ID都会在编译阶段失败。
+- `audience` 只作为感知主体，不进入人物身份图；IR 实际引用但未预登记的功能身份按当前
+  事件关系生成 contextual identity，不使用姓名或题材白名单。
+- 剧本 IR 输出预算按细粒度来源段数量在 `20480~36864` 内动态计算。单 unit 最多合并
+  12 个连续来源段；整集改编净文本不得低于原文的 35%，每 12 个来源段的局部窗口不得
+  低于 18%。模型不再重复输出事件；事件、前置状态、完成条件、可观察证据和动作阶段由
+  `scenes.units` 确定性派生。旧 `v1.1/v1.2` Artifact 继续按原分段合同恢复。
+- IR 归一化采用“宽容读取、严格发布”：所有形状映射与编译派生写入 normalization/
+  compiler audit；最终 QA 依据 Issue 的 `must_fix/runtime_blocking` 属性阻断发布，
+  不按错误码白名单降级。
+- 剧本以完整内容交付为目标。后端先把原文建立 `SRC*` 索引，最终
+  `source_coverage` 必须逐段标记为交付、合并、上下文保留或有证据的重复；禁止静默删戏。
 - 剧情节拍、场次数和镜头数量不设产品上限。目标时长只作节奏与成本参考，不能反向裁剪剧情。
 - 分镜先生成整集导演规划，再按场景批量生成详细镜头；不同场景在受控并发门内并行，
   不再把一集拆成几十次串行单镜调用。
@@ -126,7 +184,9 @@
 > 关联 PRD：`PRD/剧本分镜主线压缩与视频能力适配方案.md`。
 > 成功标准：可拍、可生成、可观看的主线节拍；禁止抠细节。
 
-机制：剧本台（`generate_screenplay`）**先**产出 `plot_spine`（5~12 条 `spine_beats` + `must_keep_ending` + `drop_list`≥2），**再**写正文：
+机制：当前剧本台由模型先产出按因果排序的 events 与严格保序的 scene units；后端从
+events 生成 `plot_spine/spine_beats`，再投影正文、对白链和完整叙事权威图。以下
+`key_lines/key_plot_points` 均为程序投影结果：
 
 - `key_lines`：推动 spine 的主线台词，不设固定条数上限；按完整语义链保留，并由目标时长与逐镜口播容量约束。禁止为了凑数把人物谱原文台词全量入库。
 - `key_plot_points`：4~8 条，与 spine 局势变化对齐。
@@ -197,7 +257,12 @@
 大纲动作容量与视频生成前门禁共用同一阈值：5~6 秒最多 2 个顺序动作节拍，7~10 秒最多 3 个。`primary_action`、`beat` 或 `covers` 暴露出超限动作链时，规划器优先确定性拆成前后相邻两镜；若逐镜扩写（例如补写人物入画路径）才导致超限，当前镜 Agent Loop 必须先定向修复，仍不可满足时由局部 Repair Router 拆该大纲节点，不重做整集。
 修复轮会在候选之后再次声明这份输出合同；warning 回退必须让候选内容、残余 Issue 与 Artifact 来自同一次 schema-valid 迭代，退出提示按实际的 `stalled`、`no_quality_gain` 或 `max_iterations` 展示。
 
-**功能性路人合同**：有姓名、重要或需要跨镜/跨集保持身份的角色仍必须来自角色圣经。无姓名且无需持久定妆的群演可以使用确定性通用标签进入 `characters` 并在 `dialogues` 开口，例如 `测验员`、`裁判`、`守卫`、`路人甲/乙/丙`、`族人甲`、`弟子乙`。编译器只为当前镜注入通用职业外观锚点，不创建角色圣经身份或定妆资产。「当前称谓是稳定姓名、与后文某真名为同一人，还是一次性角色」必须由剧本人物预检模型根据语义与上下文判断，不得使用服饰/性别/年龄后缀词表猜测。模型会用带重叠的批次读取本集之后完整 10 章；有唯一同一性证据则映射为真名，并必须完成最小人物卡，不能再按“戏份少”降回路人；只有没有可靠真名时，才在剧本发布前编号为不冲突的 `路人甲/乙/丙/丁`。决议与证据持久化到 episode，恢复与 Patch 后重放；任何未映射的圣经外身份都是不可豁免的剧本发布 blocker，不得进入分镜。
+**功能性角色合同**：有姓名、原文明确称谓、重要或需要跨镜/跨集保持身份的角色使用稳定
+实体 key；原文称谓逐字进入 `source_names`，正文、上下文、入场状态和对白说话人统一投影
+同一显示名。原文确实未命名且无需持久定妆的群众，使用“地点 + 戏剧职责”稳定标识，
+不按出现顺序编号。角色同一性由语义预检结合后续上下文判断，不使用姓名、服饰、性别或
+题材词表猜测。决议与证据持久化到 episode，恢复与 Patch 后重放；任何未映射的身份都是
+不可豁免的剧本发布 blocker，不得进入分镜。
 
 ```
 任务：为漫剧第 {episode_no} 集《{title}》编写分镜脚本。
@@ -215,7 +280,7 @@
 10. source_excerpt 必填：每条 shot 必须带对应小说原文摘录，至少 8 字、不设上限，必须从下方"本集改编源文本"逐字摘录；可以截取最相关的连续段落，不要改写成摘要，不要写分镜解释。它会作为 Seedance prompt 的兜底参考。
 11. 每个 5~10s 视频段必须推进一个明确的新动作、信息或局势变化。禁止单纯场景氛围、人物姿态、重复上一镜内容。
 12. 【硬性·禁旁白】narration 必须为空；禁止内心OS/画外解说。无法开口的信息改用画面姿态表达。
-13. 角色名必须准确：characters 不能为空；具体姓名、重要角色和跨镜持续角色只能使用角色圣经里的准确姓名。允许功能性路人通用标签（测验员、守卫、路人甲/乙/丙、族人甲、弟子乙等），但必须在 action_desc 或首尾帧中明确入画。体貌称谓必须先在剧本阶段解析真名或改为路人编号，不得原样进入分镜。幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色。
+13. 角色名必须准确：characters 不能为空；具体姓名、重要角色和跨镜持续角色只能使用角色圣经或剧本 `identity_contracts` 中的 canonical identity。功能身份只能引用剧本已签发的 `role_type=functional_character` 稳定 identity_id，并在 action_desc 或首尾帧中明确入画；不得根据职业、年龄、服饰、称号、体貌词或固定词表自行判定路人，也不得把来源称谓改写成按出场顺序编号的路人甲乙丙。幕后发消息者、纸条落款、屏幕昵称、AI 软件名不算出场角色。
 14. action_desc 必须显式写出本镜头主要角色的准确姓名，不能只写"他/她/男人/女人/镜头/纸张"；每个动作节点都优先围绕人物表情、动作、道具反应和剧情后果展开。
 15. dialogues 只写人物实际开口台词，dialogues[*].speaker 必须在本镜头 characters 中；不要把纸条文字、屏幕文字、手机通知写成 speaker。
 16. 单句台词可按人物语气灵活长短，但单镜台词纯文字（不计标点）必须符合第 4 条所选时长的口播预算；关键长台词超过 10s 容量时请拆成连续相邻镜头分段说。emotion 只能取：平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定。台词从原著提炼为口语化短句，但优先保留关键细节和人物说话风格：{各角色 speech_style}
@@ -293,7 +358,7 @@
      "shot_size": "远景|全景|中景|近景|特写",
      "camera_move": "固定|推近|拉远|横摇|跟随",
      "scene_time": str, "scene_name": str, "scene_setting": str,
-     "characters": [str], // 可见的角色圣经姓名或合法功能性路人标签
+     "characters": [str], // 可见的角色圣经姓名或 identity_contracts 已声明的稳定功能身份
      "action_desc": str, "source_excerpt": str, // 对应本镜头的小说原文逐字摘录
      "state_in": str, "primary_action": str, "state_out": str,
      "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change",
@@ -320,7 +385,7 @@
 | V1 | 单集不设镜头数或总时长产品上限；完整覆盖剧本和尾钩后结束 | `分镜异常超过技术熔断值，请检查重复生成` |
 | V2 | duration 为 5~10s 整数；口播按台词纯文字（不计标点）随时长增长：5s≤18 … 10s≤36 | `超过本镜 {d}s 的口播上限 {n} 字` / `台词纯文字 {x} 字（不计标点）` |
 ### D1. Seedance 结构化连续性提示词合同（`seedance_structured_continuity_v4`）
-| V4 | 角色合法性；具体姓名必须来自角色圣经；确定性功能性路人标签可放行但必须明确入画；characters 非空；speaker 必须在本镜头 characters 中 | `既不在角色圣经中，也不是允许的功能性路人标签` / `功能性路人未明确入画` |
+| V4 | 角色合法性；具体姓名必须来自角色圣经或 canonical identity contract；功能身份必须由 typed identity contract 明确声明且入画；禁止按角色名称词表推断；characters 非空；speaker 必须在本镜头 characters 中 | `既不在角色圣经中，也未被 identity contract 声明` / `功能身份未明确入画` |
 视频最终 prompt 由 `app.compiler.compile_prompt` 确定性编译，合同版本写入 `prompt_contract_version=seedance_structured_continuity_v4`。核心输入是 `continuity_mode`、自然语言状态链与可比较的 `continuity_state_in/out`；仅 `action_continuation` 可使用上一镜尾帧作为 0 秒起点，其余模式必须重新构图。
 | V6 | 场景连续性；scene_setting 只作时间+地点标签（长度不校验）；同场景必须接上镜，换场必须写承接 | `scene_setting"{x}"在 shots[i] 与 shots[j] 间被打断` / `缺少承接说明` |
 | V7 | shot_no 连续 / 枚举值合法 | 同模板 |

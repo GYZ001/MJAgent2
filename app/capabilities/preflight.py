@@ -949,7 +949,6 @@ def screenplay_delete(args) -> PreflightResult:
     warnings = ["删除后当前剧本不可恢复；历史证据仅供审计，不能直接还原"]
     if int(shots or 0) or int(versions or 0):
         warnings.append("本集分镜、参考图、视频和成片会一并清空")
-    warnings.append("已勾选的必保留原文台词会保留，供下次首次生成使用")
     return PreflightResult(
         command="screenplay.delete",
         allowed=True,

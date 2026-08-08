@@ -1,11 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
-  DialogueOccurrence,
   EpisodeScreenplay,
   KeyDialogueChain,
   PlotSpine,
-  PlotSpineBeat,
   ScreenplayState,
   ScriptScene,
   numToCn,
@@ -20,6 +18,7 @@ import QueryState from '../components/QueryState'
 import OperationError from '../components/OperationError'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { screenplayTaskNotice, storyboardTaskNotice } from '../lib/productionNotices'
+import { paginateItems, paginateManuscript, paginateSpine } from './scriptReaderPagination'
 
 type EditorSection = 'spine' | 'body' | 'scenes' | 'evidence'
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
@@ -114,11 +113,9 @@ export default function ScriptPage() {
   const [draftSaveState, setDraftSaveState] = useState<SaveState>('idle')
   const [recoverable, setRecoverable] = useState<{
     content?: EpisodeScreenplay
-    constraints?: { occurrence_ids?: string[] }
     baseline?: string | null
     saved_at?: number
   } | null>(null)
-  const [selectedOccurrenceIds, setSelectedOccurrenceIds] = useState<string[] | null>(null)
   const [manuscriptExpanded, setManuscriptExpanded] = useState(false)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const [editorSection, setEditorSection] = useState<EditorSection>('spine')
@@ -129,7 +126,6 @@ export default function ScriptPage() {
   const [discardDraftOpen, setDiscardDraftOpen] = useState(false)
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false)
   const [qaFailure, setQaFailure] = useState<{ score?: number; errors: string[] } | null>(null)
-  const [targetDurationDraft, setTargetDurationDraft] = useState(50)
   const historyRef = useRef<EpisodeScreenplay[]>([])
   const redoRef = useRef<EpisodeScreenplay[]>([])
   const restoredRef = useRef(false)
@@ -147,31 +143,6 @@ export default function ScriptPage() {
       ?? ['queued', 'running'].includes(ep?.screenplay_status ?? ''),
   )
 
-  const occurrences = ep?.source_dialogue_occurrences ?? []
-  const serverOccurrenceIds = ep?.required_dialogue_occurrence_ids ?? []
-  const requiredOccurrenceIds = selectedOccurrenceIds ?? serverOccurrenceIds
-  const selectedSet = useMemo(() => new Set(requiredOccurrenceIds), [requiredOccurrenceIds])
-  const selectedOccurrences = useMemo(
-    () => occurrences.filter(item => selectedSet.has(item.id)),
-    [occurrences, selectedSet],
-  )
-  const selectedSeconds = useMemo(
-    () => selectedOccurrences.reduce((sum, item) => sum + item.estimated_seconds, 0),
-    [selectedOccurrences],
-  )
-  const targetDuration = ep?.target_duration_s ?? 50
-  const performanceReserve = targetDuration - selectedSeconds
-  const suggestedTargetDuration = Math.max(
-    40,
-    Math.ceil((selectedSeconds / 0.8) / 10) * 10,
-  )
-  const averageSeconds = occurrences.length
-    ? occurrences.reduce((sum, item) => sum + item.estimated_seconds, 0) / occurrences.length
-    : 2.5
-  const dynamicLimit = Math.max(1, Math.floor(targetDuration * 0.8 / Math.max(averageSeconds, 0.5)))
-  const effectiveLimit = Math.max(dynamicLimit, requiredOccurrenceIds.length)
-  const allDialogueSelected = occurrences.length > 0 && occurrences.every(item => selectedSet.has(item.id))
-
   const screenplayTaskActive = ep?.screenplay_production?.task_active
     ?? ['queued', 'running'].includes(ep?.screenplay_status ?? '')
   const canResumeFlow = ep?.screenplay_production?.can_resume_repair
@@ -188,27 +159,6 @@ export default function ScriptPage() {
   const draftEpisodeArtifactId = ep?.screenplay_artifact_id ?? null
 
   useEffect(() => {
-    if (ep) setTargetDurationDraft(ep.target_duration_s)
-  }, [ep?.id, ep?.target_duration_s])
-
-  const applyTargetDuration = async () => {
-    if (!ep || targetDurationDraft === targetDuration) return
-    setBusy(true)
-    try {
-      await api.put(`/episodes/${ep.id}/target-duration`, {
-        target_duration_s: targetDurationDraft,
-      })
-      await refresh()
-      toast(`本集目标时长已调整为 ${targetDurationDraft} 秒`)
-    } catch (reason: unknown) {
-      setTargetDurationDraft(targetDuration)
-      toast((reason as Error).message, true)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  useEffect(() => {
     if (!ep || restoredRef.current) return
     restoredRef.current = true
     let cancelled = false
@@ -216,7 +166,7 @@ export default function ScriptPage() {
     if (fromLocal) {
       try {
         const parsed = JSON.parse(fromLocal)
-        setRecoverable(parsed)
+        if (parsed?.content) setRecoverable(parsed)
       } catch { localStorage.removeItem(localDraftKey) }
     }
     api.get(`/episodes/${ep.id}/screenplay/draft`).then((result: any) => {
@@ -224,7 +174,6 @@ export default function ScriptPage() {
       const server = result.draft
       const candidate = {
         content: server.content,
-        constraints: server.constraints,
         baseline: server.baseline_artifact_id,
         saved_at: Number(server.updated_at ?? 0) * 1000,
       }
@@ -241,7 +190,6 @@ export default function ScriptPage() {
     if (!draftEpisodeId || !dirty) return
     const payload = {
       content: draft ?? undefined,
-      constraints: { occurrence_ids: requiredOccurrenceIds },
       baseline: baselineVersion ?? draftEpisodeArtifactId,
       saved_at: Date.now(),
     }
@@ -250,12 +198,11 @@ export default function ScriptPage() {
     const timer = window.setTimeout(() => {
       api.put(`/episodes/${draftEpisodeId}/screenplay/draft`, {
         content: draft ?? undefined,
-        constraints: { occurrence_ids: requiredOccurrenceIds },
         baseline_artifact_id: baselineVersion ?? draftEpisodeArtifactId,
       }).then(() => setDraftSaveState('saved')).catch(() => setDraftSaveState('error'))
     }, 650)
     return () => window.clearTimeout(timer)
-  }, [baselineVersion, dirty, draft, draftEpisodeArtifactId, draftEpisodeId, localDraftKey, requiredOccurrenceIds])
+  }, [baselineVersion, dirty, draft, draftEpisodeArtifactId, draftEpisodeId, localDraftKey])
 
   useLayoutEffect(() => {
     if (!dirty) {
@@ -338,7 +285,6 @@ export default function ScriptPage() {
     setDraft(null)
     setBaselineVersion(null)
     setDirty(false)
-    setSelectedOccurrenceIds(null)
     setRecoverable(null)
     setConflict(null)
     setQaFailure(null)
@@ -405,9 +351,7 @@ export default function ScriptPage() {
     if (!ep || canResumeFlow) return
     setBusy(true)
     try {
-      const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {
-        occurrence_ids: requiredOccurrenceIds,
-      })
+      const data = await api.post(`/episodes/${ep.id}/screenplay/preflight`, {})
       setPreview({
         kind: 'screenplay',
         title: '首次生成剧本预检',
@@ -430,8 +374,6 @@ export default function ScriptPage() {
     if (current.kind === 'screenplay') {
       screenplayTimer.start()
       const result = await run(() => api.post(`/episodes/${ep.id}/screenplay`, {
-        required_dialogue_occurrence_ids: requiredOccurrenceIds,
-        required_dialogue_lines: selectedOccurrences.map(item => item.text),
         idempotency_key: current.idempotencyKey,
       }), '首版剧本任务已受理').catch(() => screenplayTimer.clear())
       if (result) {
@@ -506,7 +448,7 @@ export default function ScriptPage() {
       if (result) {
         await clearWorkingDraft()
         screenplayTimer.clear()
-        toast('当前剧本及下游已删除；必保留台词已保留')
+        toast('当前剧本及下游已删除')
       }
     } catch { /* run 已呈现结果 */ }
   }
@@ -610,20 +552,6 @@ export default function ScriptPage() {
     : totalErrors > 0
       ? `工作草稿还有 ${totalErrors} 项需要修正`
       : ''
-  const dialogueSelectionDisabledReason = busy
-    ? '正在处理上一项操作'
-    : canResumeFlow
-      ? '安全恢复点已锁定台词约束，继续流程不会读取本地改动'
-      : !occurrences.length
-        ? '本集原文未识别到显式台词'
-        : ''
-  const targetDurationDisabledReason = busy
-    ? '正在处理上一项操作'
-    : canResumeFlow
-      ? '安全恢复点已锁定本次目标时长'
-      : ''
-  const applyTargetDurationDisabledReason = targetDurationDisabledReason
-    || (targetDurationDraft === targetDuration ? '所选时长与当前目标一致' : '')
 
   const primaryAction = () => {
     if (dirty && editing) return <button className="btn primary" disabled={Boolean(publishDisabledReason)}
@@ -633,7 +561,7 @@ export default function ScriptPage() {
       case 'generate_screenplay':
         return <button className="btn primary" disabled={Boolean(screenplayGenerateDisabledReason)}
           aria-label={screenplayGenerateDisabledReason ? `首次生成剧本，暂不可用：${screenplayGenerateDisabledReason}` : '首次生成剧本'}
-          title={screenplayGenerateDisabledReason || '生成前将展示范围、约束和费用'} onClick={openScreenplayPreview}>首次生成剧本</button>
+          title={screenplayGenerateDisabledReason || '生成前将展示输入范围和人物资产影响'} onClick={openScreenplayPreview}>首次生成剧本</button>
       case 'stop_screenplay':
         return <button className="btn ghost danger" disabled={busy}
           aria-label={busy ? '停止剧本任务，暂不可用：正在处理上一项操作' : '停止剧本任务'}
@@ -756,101 +684,11 @@ export default function ScriptPage() {
             <div>
               <button className="btn small" onClick={() => {
                 if (recoverable.content) beginEditing(recoverable.content, recoverable.baseline ?? null)
-                if (recoverable.constraints?.occurrence_ids) setSelectedOccurrenceIds(recoverable.constraints.occurrence_ids)
                 setDirty(true)
                 setRecoverable(null)
               }}>恢复草稿</button>
               <button className="btn small ghost" onClick={() => setDiscardDraftOpen(true)}>放弃</button>
             </div>
-          </div>
-        )}
-
-        {!script && !screenplayTaskActive && (
-          <div className="screenplay-dialogue-picker">
-            <div className="screenplay-dialogue-picker-head">
-              <div>
-                <b>必保留原文台词（按出现位置）</b>
-                <span>已选 {requiredOccurrenceIds.length} / {occurrences.length} 处 · 估算 {selectedSeconds.toFixed(1)}s / 目标 {targetDuration}s · 差值 {(targetDuration - selectedSeconds).toFixed(1)}s</span>
-              </div>
-              <button type="button" className="btn ghost" disabled={Boolean(dialogueSelectionDisabledReason)}
-                aria-label={dialogueSelectionDisabledReason
-                  ? `${allDialogueSelected ? '取消全选' : '全选'}，暂不可用：${dialogueSelectionDisabledReason}`
-                  : allDialogueSelected ? '取消全选' : '全选'}
-                title={dialogueSelectionDisabledReason || (allDialogueSelected ? '取消选择全部原文台词' : '选择全部原文台词')}
-                onClick={() => {
-                  setSelectedOccurrenceIds(allDialogueSelected ? [] : occurrences.map(item => item.id))
-                  setDirty(true)
-                }}>
-                {allDialogueSelected ? '取消全选' : '全选'}
-              </button>
-            </div>
-            <div className="target-duration-control">
-              <div className="target-duration-copy">
-                <b>本集目标时长</b>
-                <span>这是包含对白、动作、反应和转场的整集节奏预算，不要求成片精确卡到该秒数。</span>
-              </div>
-              <div className="target-duration-actions">
-                <label>
-                  <input
-                    type="number"
-                    min={40}
-                    step={10}
-                    aria-label="本集目标时长"
-                    value={targetDurationDraft}
-                    disabled={Boolean(targetDurationDisabledReason)}
-                    title={targetDurationDisabledReason || '输入最低节奏参考；系统会按完整剧情自动向上扩展'}
-                    onChange={event => setTargetDurationDraft(Number(event.target.value))}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="btn small"
-                  disabled={Boolean(applyTargetDurationDisabledReason)}
-                  aria-label={applyTargetDurationDisabledReason
-                    ? `应用目标，暂不可用：${applyTargetDurationDisabledReason}`
-                    : `应用 ${targetDurationDraft} 秒目标时长`}
-                  title={applyTargetDurationDisabledReason || `将本集目标时长调整为 ${targetDurationDraft} 秒`}
-                  onClick={() => void applyTargetDuration()}
-                >应用目标</button>
-              </div>
-            </div>
-            <div className={`dialogue-budget ${selectedSeconds > targetDuration * 0.8 ? 'soft' : 'ok'}`}>
-              <b>时长预算参考：约 {dynamicLimit} 处</b>
-              <span>
-                这不是对白条数上限；当前选择按口播时长折算约可容纳 {effectiveLimit} 处，所选对白后
-                {performanceReserve >= 0 ? `约剩 ${performanceReserve.toFixed(1)}s` : `已超 ${Math.abs(performanceReserve).toFixed(1)}s`} 表演空间。
-              </span>
-              <small>
-                口径：约 4.2 字/秒；通常建议至少留出 20% 给动作、反应和转场。
-                {selectedSeconds > targetDuration * 0.8
-                  ? ` 当前选择至少需要约 ${suggestedTargetDuration} 秒；生成后还会按完整剧情自动扩展。`
-                  : ''}
-              </small>
-            </div>
-            {canResumeFlow && <div className="screenplay-dialogue-warning">当前安全恢复点锁定了约束版本，台词选择只读；继续流程不会使用尚未提交的本地改动。</div>}
-            <div className="screenplay-dialogue-options">
-              {occurrences.map(item => (
-                <DialogueOption
-                  key={item.id}
-                  item={item}
-                  checked={selectedSet.has(item.id)}
-                  disabled={Boolean(canResumeFlow)}
-                  onChange={checked => {
-                    const next = new Set(requiredOccurrenceIds)
-                    if (checked) next.add(item.id)
-                    else next.delete(item.id)
-                    setSelectedOccurrenceIds(occurrences.filter(value => next.has(value.id)).map(value => value.id))
-                    setDirty(true)
-                  }}
-                />
-              ))}
-              {!occurrences.length && <div className="screenplay-dialogue-empty">本集原文未识别到显式台词，可直接首次生成剧本。</div>}
-            </div>
-            {performanceReserve < 0 && (
-              <div className="screenplay-dialogue-warning">
-                当前对白已超过最低节奏参考 {Math.abs(performanceReserve).toFixed(1)}s；系统会自动扩展整集时长，不会因此删减剧情或台词。
-              </div>
-            )}
           </div>
         )}
 
@@ -861,7 +699,6 @@ export default function ScriptPage() {
           <div className="screenplay-detail-grid">
             <div className="kv"><b>当前分集</b>第{numToCn(ep.episode_no)}集</div>
             <div className="kv"><b>原文来源范围</b>{script?.source_text_range || sourceRangeText(ep.source_chapters)}{!script?.source_text_range && <em>推断显示</em>}</div>
-            <div className="kv"><b>目标时长</b>{ep.target_duration_s}s</div>
             <div className="kv"><b>状态快照</b>v{ep.screenplay_state?.version ?? 0} · {ep.screenplay_state?.code ?? 'unknown'}</div>
             {ep.screenplay_production && (
               <div className="kv"><b>当前阶段</b>
@@ -1001,8 +838,10 @@ export default function ScriptPage() {
             <ul>
               {preview.kind === 'screenplay' ? (
                 <>
-                  <li>原文 {preview.data.input?.source_chars ?? '—'} 字，选中 {preview.data.selected_count ?? 0} 处台词</li>
-                  <li>口播估算 {preview.data.selected_seconds ?? 0}s / 目标 {preview.data.target_duration_s}s</li>
+                  <li>
+                    原文 {preview.data.input?.source_chars ?? '—'} 字，
+                    覆盖 {preview.data.input?.source_chapters?.length ?? '—'} 个源章节
+                  </li>
                   <li>
                     疑似新增人物 {preview.data.cast_impact?.candidate_count ?? 0} 名；
                     剧本阶段只补人物文字卡，不生成定妆图片
@@ -1011,7 +850,6 @@ export default function ScriptPage() {
                     定妆资产预计最多 {preview.data.cast_impact?.portrait_asset_stage?.estimated_images ?? 0} 张，
                     将在独立资产环节确认后补齐
                   </li>
-                  <li>{preview.data.estimate_note}</li>
                 </>
               ) : preview.kind === 'screenplay-save' ? (
                 <>
@@ -1028,7 +866,7 @@ export default function ScriptPage() {
             </ul>
             <div className="dialog-actions">
               <button className="btn" onClick={() => setPreview(null)}>取消（不执行）</button>
-              <button className="btn primary" disabled={Boolean(preview.data.hard_exceeded)} onClick={executePreview}>
+              <button className="btn primary" onClick={executePreview}>
                 {preview.kind === 'screenplay'
                   ? '启动首版剧本生成'
                   : (preview.data.unchanged ? '确认无变更' : '确认发布')}
@@ -1078,29 +916,6 @@ export default function ScriptPage() {
         </div>
       )}
     </>
-  )
-}
-
-function DialogueOption({ item, checked, disabled, onChange }: {
-  item: DialogueOccurrence
-  checked: boolean
-  disabled: boolean
-  onChange: (checked: boolean) => void
-}) {
-  const [contextOpen, setContextOpen] = useState(false)
-  return (
-    <div className="screenplay-dialogue-option">
-      <label>
-        <input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} />
-        <span><em>D{String(item.order).padStart(3, '0')}</em>{item.text}</span>
-      </label>
-      <div className="dialogue-occurrence-meta">
-        <span>{item.chapter ? `第 ${item.chapter} 章` : '本集原文'} · 段落 {item.paragraph} · 约 {item.estimated_seconds}s</span>
-        {item.group_id && <span>建议上下文组 {item.group_id}</span>}
-        <button type="button" className="btn small ghost" onClick={() => setContextOpen(value => !value)}>{contextOpen ? '收起上下文' : '查看上下文'}</button>
-      </div>
-      {contextOpen && <p>{item.context}</p>}
-    </div>
   )
 }
 
@@ -1339,6 +1154,40 @@ function SceneFields({ scene, update }: { scene: ScriptScene; update: (patch: Pa
   )
 }
 
+function ReaderPagination({
+  label,
+  page,
+  pageCount,
+  summary,
+  onPage,
+}: {
+  label: string
+  page: number
+  pageCount: number
+  summary: string
+  onPage: (page: number) => void
+}) {
+  return (
+    <nav className="script-reader-pagination" aria-label={`${label}分页`}>
+      <button
+        className="btn small ghost"
+        type="button"
+        disabled={page <= 0}
+        aria-label={page <= 0 ? `${label}上一页，暂不可用：当前已是第一页` : `${label}上一页`}
+        onClick={() => onPage(page - 1)}
+      >← 上一页</button>
+      <span aria-live="polite">第 {page + 1} / {pageCount} 页 · {summary}</span>
+      <button
+        className="btn small ghost"
+        type="button"
+        disabled={page >= pageCount - 1}
+        aria-label={page >= pageCount - 1 ? `${label}下一页，暂不可用：当前已是最后一页` : `${label}下一页`}
+        onClick={() => onPage(page + 1)}
+      >下一页 →</button>
+    </nav>
+  )
+}
+
 function ScreenplayReader({
   script,
   epTitle,
@@ -1363,18 +1212,76 @@ function ScreenplayReader({
   structureItems: Array<(string | undefined)[]>
 }) {
   const spine = script.plot_spine
-  const matches = search.trim() ? (script.full_script_text ?? '').toLowerCase().split(search.trim().toLowerCase()).length - 1 : 0
+  const manuscriptText = script.full_script_text || '暂无完整剧本文本'
+  const spinePages = useMemo(() => spine ? paginateSpine(spine) : [], [spine])
+  const keyLinePages = useMemo(() => paginateItems(script.key_lines ?? [], 6), [script.key_lines])
+  const manuscriptPages = useMemo(() => paginateManuscript(manuscriptText), [manuscriptText])
+  const [spinePage, setSpinePage] = useState(0)
+  const [keyLinePage, setKeyLinePage] = useState(0)
+  const [manuscriptPage, setManuscriptPage] = useState(0)
+  const spinePageRef = useRef<HTMLDivElement>(null)
+  const keyLinePageRef = useRef<HTMLDivElement>(null)
+  const safeSpinePage = Math.min(spinePage, Math.max(0, spinePages.length - 1))
+  const safeKeyLinePage = Math.min(keyLinePage, Math.max(0, keyLinePages.length - 1))
+  const safeManuscriptPage = Math.min(manuscriptPage, Math.max(0, manuscriptPages.length - 1))
+  const currentSpineItems = spinePages[safeSpinePage] ?? []
+  const currentPremise = currentSpineItems.find(item => item.kind === 'premise')
+  const currentEnding = currentSpineItems.find(item => item.kind === 'ending')
+  const currentBeats = currentSpineItems.flatMap(item => item.kind === 'beat' ? [item] : [])
+  const currentDrops = currentSpineItems.flatMap(item => item.kind === 'drop' ? [item] : [])
+  const query = search.trim().toLowerCase()
+  const matches = query ? (script.full_script_text ?? '').toLowerCase().split(query).length - 1 : 0
+
+  useEffect(() => {
+    setSpinePage(0)
+    setKeyLinePage(0)
+    setManuscriptPage(0)
+  }, [script.episode_no])
+
+  useEffect(() => {
+    if (!query) return
+    const matchIndex = manuscriptText.toLowerCase().indexOf(query)
+    let pageStart = 0
+    const matchPage = manuscriptPages.findIndex(page => {
+      const containsMatch = matchIndex >= pageStart && matchIndex < pageStart + page.length
+      pageStart += page.length
+      return containsMatch
+    })
+    if (matchPage >= 0) setManuscriptPage(matchPage)
+  }, [manuscriptPages, manuscriptText, query])
+
+  useEffect(() => {
+    if (spinePageRef.current) spinePageRef.current.scrollTop = 0
+  }, [safeSpinePage])
+
+  useEffect(() => {
+    if (keyLinePageRef.current) keyLinePageRef.current.scrollTop = 0
+  }, [safeKeyLinePage])
+
+  useEffect(() => {
+    if (manuscriptRef.current) manuscriptRef.current.scrollTop = 0
+  }, [manuscriptRef, safeManuscriptPage])
+
   return (
     <>
       {spine && (
         <section className="card spine-card" id="script-spine">
           <details open>
             <summary><b>主线骨架</b><span>保留本集故事主线；排除内容默认不拍</span></summary>
-            <div className="shot-body">
-              {spine.episode_premise && <div className="kv full"><b>本集前提</b>{spine.episode_premise}</div>}
-              {!!spine.spine_beats?.length && <div className="kv full"><b>主线节拍</b><ol className="spine-beat-list">{spine.spine_beats.map((beat: PlotSpineBeat, index: number) => <li key={beat.beat_id || index}><code>{beat.beat_id || `S${index + 1}`}</code><span>{beat.who}｜{beat.does}→{beat.turn}</span>{beat.must_keep === false && <em className="spine-optional">可删过渡</em>}</li>)}</ol></div>}
-              {spine.must_keep_ending && <div className="kv full"><b>必须收束</b>{spine.must_keep_ending}</div>}
-              {!!spine.drop_list?.length && <div className="kv full"><b>本集不拍</b><ul className="key-list drop-list">{spine.drop_list.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+            <div className="script-paged-frame spine-paged-frame">
+              <div ref={spinePageRef} className="shot-body script-paged-content">
+                {currentPremise?.kind === 'premise' && <div className="kv full"><b>本集前提</b>{currentPremise.text}</div>}
+                {!!currentBeats.length && <div className="kv full"><b>主线节拍 · 第 {currentBeats[0].index + 1}–{currentBeats[currentBeats.length - 1].index + 1} 项</b><ol className="spine-beat-list" start={currentBeats[0].index + 1}>{currentBeats.map(({ beat, index }) => <li key={beat.beat_id || index}><code>{beat.beat_id || `S${index + 1}`}</code><span>{beat.who}｜{beat.does}→{beat.turn}</span>{beat.must_keep === false && <em className="spine-optional">可删过渡</em>}</li>)}</ol></div>}
+                {currentEnding?.kind === 'ending' && <div className="kv full"><b>必须收束</b>{currentEnding.text}</div>}
+                {!!currentDrops.length && <div className="kv full"><b>本集不拍 · 第 {currentDrops[0].index + 1}–{currentDrops[currentDrops.length - 1].index + 1} 项</b><ul className="key-list drop-list">{currentDrops.map(item => <li key={item.index}>{item.text}</li>)}</ul></div>}
+              </div>
+              <ReaderPagination
+                label="主线骨架"
+                page={safeSpinePage}
+                pageCount={Math.max(1, spinePages.length)}
+                summary={`共 ${spinePages.flat().length} 项`}
+                onPage={setSpinePage}
+              />
             </div>
           </details>
         </section>
@@ -1390,19 +1297,42 @@ function ScreenplayReader({
       <section className="card script-editor">
         <div className="kv full"><b>标题</b>{script.title || epTitle}</div>
         <div className="kv full"><b>本集一句话梗概</b>{script.logline}</div>
-        {!!script.key_lines?.length && <div className="kv full"><b>主线台词</b><ul className="key-list">{script.key_lines.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+        {!!script.key_lines?.length && <div className="kv full script-paged-module key-lines-module">
+          <div className="script-paged-heading"><b>主线台词</b><span>{script.key_lines.length} 条</span></div>
+          <div className="script-paged-frame key-lines-paged-frame">
+            <div ref={keyLinePageRef} className="script-paged-content">
+              <ul className="key-list">{(keyLinePages[safeKeyLinePage] ?? []).map((item, index) => <li key={safeKeyLinePage * 6 + index}>{item}</li>)}</ul>
+            </div>
+            <ReaderPagination
+              label="主线台词"
+              page={safeKeyLinePage}
+              pageCount={Math.max(1, keyLinePages.length)}
+              summary={`共 ${script.key_lines.length} 条`}
+              onPage={setKeyLinePage}
+            />
+          </div>
+        </div>}
         <div className={`kv full script-manuscript-section ${expanded ? 'expanded' : 'collapsed'}`}>
           <div className="script-manuscript-head">
             <div><b>完整剧本文本</b><span>{(script.full_script_text ?? '').length.toLocaleString()} 字 · {(script.full_script_text ?? '').split('\n').filter(Boolean).length} 行</span></div>
             <div className="manuscript-tools">
-              <input type="search" value={search} onChange={event => { setSearch(event.target.value); setExpanded(true) }} placeholder="页内搜索" aria-label="搜索剧本正文" />
+              <input type="search" value={search} onChange={event => { setSearch(event.target.value); setExpanded(true) }} placeholder="搜索全文" aria-label="搜索剧本正文" />
               {search && <span>{matches} 处</span>}
               <button className="btn small ghost" type="button" onClick={() => navigator.clipboard.writeText(script.full_script_text ?? '').then(() => toast('剧本正文已复制'))}>复制</button>
               <button className="btn small ghost" type="button" onClick={exportScript}>导出</button>
               <button type="button" className="script-manuscript-toggle" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? '收起全文 ↑' : '展开全文 ↓'}</button>
             </div>
           </div>
-          {expanded ? <div ref={manuscriptRef} className="script-manuscript"><HighlightedText text={script.full_script_text || '暂无完整剧本文本'} query={search} /></div> : <button type="button" className="script-manuscript-collapsed" onClick={() => setExpanded(true)}><span>正文已收起</span><small>点击展开并阅读完整剧本</small></button>}
+          {expanded ? <div className="script-paged-frame manuscript-paged-frame">
+            <div ref={manuscriptRef} className="script-manuscript script-paged-content"><HighlightedText text={manuscriptPages[safeManuscriptPage] ?? manuscriptText} query={search} /></div>
+            <ReaderPagination
+              label="完整剧本文本"
+              page={safeManuscriptPage}
+              pageCount={Math.max(1, manuscriptPages.length)}
+              summary={`共 ${(script.full_script_text ?? '').length.toLocaleString()} 字`}
+              onPage={setManuscriptPage}
+            />
+          </div> : <button type="button" className="script-manuscript-collapsed" onClick={() => setExpanded(true)}><span>正文已收起</span><small>点击展开并阅读完整剧本</small></button>}
         </div>
         <div className="kv"><b>情绪曲线说明</b>{script.emotional_curve}</div>
         <div className="kv"><b>结尾钩子</b>{script.ending_hook}</div>

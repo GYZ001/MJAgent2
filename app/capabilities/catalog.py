@@ -676,7 +676,7 @@ def _register_commands(registry) -> None:
         _cmd(
             "screenplay.delete",
             title="删除当前剧本",
-            description="删除本集当前剧本并清空分镜、媒体和交付指针；保留历史证据与必保留台词约束",
+            description="删除本集当前剧本并清空分镜、媒体和交付指针；保留历史证据",
             input_model=I.ScreenplayDeleteInput,
             risk=RiskLevel.R3_DESTRUCTIVE,
             confirmation=ConfirmationPolicy.ALWAYS,
@@ -1426,7 +1426,7 @@ def _register_exemptions(registry) -> None:
         "DELETE /api/episodes/{episode_id}/screenplay/draft": "剧本台草稿清理；只删除未发布工作副本",
         "DELETE /api/shots/{shot_id}/drafts/{draft_id}": "分镜编辑会话草稿清理；不改变已发布产物",
         "POST /api/episodes/{episode_id}/confirm-preview": "分集确认前只读影响预览；正式确认仍走已登记命令",
-        "POST /api/episodes/{episode_id}/screenplay/preflight": "剧本生成前只读预算、台词位置与人物资产影响预检",
+        "POST /api/episodes/{episode_id}/screenplay/preflight": "剧本生成前只读输入范围与人物资产影响预检",
         "POST /api/episodes/{episode_id}/screenplay/impact-preview": "剧本发布前只读影响预览；不写库、不建任务，正式发布仍走 screenplay.update",
         "POST /api/episodes/{episode_id}/storyboard/preflight": "分镜生成前只读预检与短时凭证签发",
         "POST /api/episodes/{episode_id}/storyboard/clear-preview": "整集分镜清空前的影响预览与短时凭证签发；不删除制作数据",

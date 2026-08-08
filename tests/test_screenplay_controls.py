@@ -11,6 +11,7 @@ from app.capabilities import ensure_catalog_loaded
 from app.capabilities.direct import enter_handler
 from app.capabilities.registry import get_registry
 from app.evidence import repository
+from app.harness.types import EvidenceArtifact
 from app.production.revision import (
     ensure_production_revision,
     mark_baseline_generated,
@@ -90,8 +91,232 @@ def test_resume_route_has_a_distinct_capability() -> None:
     assert registry.commands["screenplay.resume"].title == "继续剧本流程"
 
 
+def test_clear_unpublished_ir_preserves_published_lineage() -> None:
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="input-v1",
+    )
+    step_id = repository.create_step(
+        run_id,
+        "screenplay.iteration",
+    )
+    unpublished = repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id="e1",
+            status="approved",
+            trust_level="T2",
+            content={"candidate": "retry-only"},
+        ),
+        step_run_id=step_id,
+    )
+    published_ir = repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id="e1",
+            status="approved",
+            trust_level="T2",
+            content={"candidate": "published-source"},
+        ),
+        step_run_id=step_id,
+    )
+    repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="e1",
+        status="approved",
+        trust_level="T4",
+        content={"published": True},
+        parent_artifact_ids=[published_ir["id"]],
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE step_runs SET output_artifact_id=? WHERE id=?",
+        (unpublished["id"], step_id),
+    )
+    conn.commit()
+
+    assert api._clear_unpublished_screenplay_ir("e1") == 1
+    assert repository.get_artifact(unpublished["id"]) is None
+    assert repository.get_artifact(published_ir["id"]) is not None
+    assert conn.execute(
+        "SELECT output_artifact_id FROM step_runs WHERE id=?",
+        (step_id,),
+    ).fetchone()["output_artifact_id"] is None
+
+
+def test_failed_recovery_run_clears_only_its_ir_lineage() -> None:
+    parent_run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="input-v1",
+    )
+    child_run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="input-v1",
+        parent_run_id=parent_run_id,
+    )
+    unrelated_run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="other-input",
+    )
+    artifacts = []
+    for run_id, label in (
+        (parent_run_id, "parent"),
+        (child_run_id, "child"),
+        (unrelated_run_id, "unrelated"),
+    ):
+        step_id = repository.create_step(run_id, "screenplay.iteration")
+        artifacts.append(repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_generation_ir",
+                scope_type="episode",
+                scope_id="e1",
+                status="approved",
+                trust_level="T2",
+                content={"candidate": label},
+            ),
+            step_run_id=step_id,
+        ))
+
+    assert api._clear_unpublished_screenplay_ir(
+        "e1",
+        run_id=child_run_id,
+    ) == 2
+    assert repository.get_artifact(artifacts[0]["id"]) is None
+    assert repository.get_artifact(artifacts[1]["id"]) is None
+    assert repository.get_artifact(artifacts[2]["id"]) is not None
+
+
+def test_exhausted_repair_discards_ir_and_active_revision() -> None:
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="input-v1",
+    )
+    step_id = repository.create_step(run_id, "screenplay.iteration")
+    ir = repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id="e1",
+            status="approved",
+            trust_level="T2",
+            content={"candidate": "repair-working"},
+        ),
+        step_run_id=step_id,
+    )
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=ir["id"],
+        working_artifact_id=ir["id"],
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing', "
+        "active_screenplay_run_id=?, working_screenplay_artifact_id=?, "
+        "screenplay_production_revision_id=? WHERE id='e1'",
+        (run_id, ir["id"], revision.id),
+    )
+    conn.commit()
+
+    deleted = api._discard_exhausted_screenplay_working_state(
+        "e1",
+        run_id=run_id,
+        message="修复轮次耗尽",
+    )
+
+    assert deleted == 1
+    assert repository.get_artifact(ir["id"]) is None
+    row = conn.execute(
+        "SELECT screenplay_status,active_screenplay_run_id,"
+        "working_screenplay_artifact_id,screenplay_production_revision_id "
+        "FROM episodes WHERE id='e1'",
+    ).fetchone()
+    assert dict(row) == {
+        "screenplay_status": "failed",
+        "active_screenplay_run_id": None,
+        "working_screenplay_artifact_id": None,
+        "screenplay_production_revision_id": None,
+    }
+    assert conn.execute(
+        "SELECT status FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["status"] == "superseded"
+
+
+def test_atomic_claim_does_not_clear_current_owner_ir() -> None:
+    owner_run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="owner",
+    )
+    step_id = repository.create_step(
+        owner_run_id,
+        "screenplay.iteration",
+    )
+    ir = repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id="e1",
+            status="approved",
+            trust_level="T2",
+            content={"candidate": "current-owner"},
+        ),
+        step_run_id=step_id,
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='queued', "
+        "active_screenplay_run_id=? WHERE id='e1'",
+        (owner_run_id,),
+    )
+    conn.commit()
+
+    class Recorder:
+        run_id = "late-run"
+        cancelled = False
+
+        def cancel(self, _message: str) -> None:
+            self.cancelled = True
+
+    recorder = Recorder()
+    with pytest.raises(api.StateConflict):
+        api._spawn_screenplay_activation(
+            "e1",
+            recorder,
+            project_id="p1",
+            status="queued",
+            message="late",
+            clear_unpublished_ir=True,
+        )
+
+    assert recorder.cancelled is True
+    assert repository.get_artifact(ir["id"]) is not None
+    assert conn.execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id='e1'",
+    ).fetchone()["active_screenplay_run_id"] == owner_run_id
+
+
 @pytest.mark.asyncio
-async def test_first_screenplay_spawn_failure_restores_state_and_keeps_constraints(
+async def test_first_screenplay_spawn_failure_restores_state_and_legacy_columns(
     monkeypatch,
 ) -> None:
     conn = db.get_conn()
@@ -101,7 +326,18 @@ async def test_first_screenplay_spawn_failure_restores_state_and_keeps_constrain
     )
     conn.execute(
         "UPDATE episodes SET source_chapters='[1]', screenplay_error='上次提示', "
-        "screenplay_started_at=10, screenplay_updated_at=11 WHERE id='e1'"
+        "screenplay_started_at=10, screenplay_updated_at=11, "
+        "screenplay_character_resolutions=?, screenplay_required_dialogues=?, "
+        "screenplay_required_dialogue_occurrences=? WHERE id='e1'",
+        (
+            json.dumps([{
+                "source_label": "旧称谓",
+                "canonical_name": "路人甲",
+                "resolution": "functional_extra",
+            }], ensure_ascii=False),
+            json.dumps(["旧台词"], ensure_ascii=False),
+            json.dumps(["legacy-occurrence"], ensure_ascii=False),
+        ),
     )
     conn.commit()
 
@@ -120,18 +356,22 @@ async def test_first_screenplay_spawn_failure_restores_state_and_keeps_constrain
 
     monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
     monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "_clear_unpublished_screenplay_ir",
+        lambda episode_id, **_kwargs: cleared.append(episode_id) or 0,
+    )
 
     with enter_handler(), pytest.raises(HTTPException) as exc_info:
-        await api.start_screenplay(
-            "e1",
-            body={"required_dialogue_lines": ["别走"], "required_dialogue_occurrence_ids": []},
-        )
+        await api.start_screenplay("e1", body={})
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["action"] == "retry_generate"
     row = conn.execute(
         "SELECT screenplay_status,screenplay_error,screenplay_started_at,"
-        "screenplay_updated_at,active_screenplay_run_id,screenplay_required_dialogues "
+        "screenplay_updated_at,active_screenplay_run_id,screenplay_required_dialogues,"
+        "screenplay_required_dialogue_occurrences,screenplay_character_resolutions "
         "FROM episodes WHERE id='e1'"
     ).fetchone()
     assert row["screenplay_status"] == "pending"
@@ -139,8 +379,71 @@ async def test_first_screenplay_spawn_failure_restores_state_and_keeps_constrain
     assert row["screenplay_started_at"] == 10
     assert row["screenplay_updated_at"] == 11
     assert row["active_screenplay_run_id"] is None
-    assert json.loads(row["screenplay_required_dialogues"]) == ["别走"]
+    assert json.loads(row["screenplay_required_dialogues"]) == ["旧台词"]
+    assert json.loads(row["screenplay_required_dialogue_occurrences"]) == ["legacy-occurrence"]
+    assert json.loads(row["screenplay_character_resolutions"])[0][
+        "source_label"
+    ] == "旧称谓"
     assert recorder.cancelled is True
+    assert cleared == ["e1"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_screenplay_clears_stale_identity_and_legacy_dialogue_selection(
+    monkeypatch,
+) -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','第一章\\n小胖子站在门口。',12)"
+    )
+    conn.execute(
+        "UPDATE episodes SET source_chapters='[1]',screenplay_status='failed',"
+        "screenplay_character_resolutions=?,screenplay_required_dialogues=?,"
+        "screenplay_required_dialogue_occurrences=? WHERE id='e1'",
+        (
+            json.dumps([{
+                "source_label": "小胖子",
+                "canonical_name": "路人甲",
+                "resolution": "functional_extra",
+            }], ensure_ascii=False),
+            json.dumps(["旧台词"], ensure_ascii=False),
+            json.dumps(["legacy-occurrence"], ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+    class Recorder:
+        run_id = "run_fresh"
+
+    seen: dict[str, object] = {}
+
+    def fake_spawn(_kind, _key, coro, *, project_id=None):
+        row = conn.execute(
+            "SELECT screenplay_character_resolutions,screenplay_required_dialogues,"
+            "screenplay_required_dialogue_occurrences FROM episodes WHERE id='e1'"
+        ).fetchone()
+        seen["resolutions"] = json.loads(row["screenplay_character_resolutions"])
+        seen["legacy_dialogues"] = json.loads(row["screenplay_required_dialogues"])
+        seen["legacy_occurrences"] = json.loads(
+            row["screenplay_required_dialogue_occurrences"]
+        )
+        coro.close()
+
+    monkeypatch.setattr(
+        api,
+        "_new_screenplay_recorder",
+        lambda *_args, **_kwargs: Recorder(),
+    )
+    monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+
+    with enter_handler():
+        result = await api.start_screenplay("e1", body={})
+
+    assert result["mode"] == "baseline"
+    assert seen["resolutions"] == []
+    assert seen["legacy_dialogues"] == []
+    assert seen["legacy_occurrences"] == []
 
 
 def test_recovery_resumes_repair_interrupted_by_service_restart(monkeypatch) -> None:
@@ -329,6 +632,12 @@ async def test_batch_start_reports_partial_failure_without_stranding_episode(
 
     monkeypatch.setattr(api, "_new_screenplay_recorder", fake_recorder)
     monkeypatch.setattr(task_registry, "spawn", fake_spawn)
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "_clear_unpublished_screenplay_ir",
+        lambda episode_id, **_kwargs: cleared.append(episode_id) or 0,
+    )
     with enter_handler():
         result = await api.start_screenplay_all("p1")
 
@@ -347,6 +656,7 @@ async def test_batch_start_reports_partial_failure_without_stranding_episode(
     assert rows["e2"]["screenplay_status"] == "failed"
     assert rows["e2"]["active_screenplay_run_id"] is None
     assert recorders["e2"].cancelled is True
+    assert cleared == ["e1", "e2"]
     batch = conn.execute(
         "SELECT workflow_type,scope_id,status FROM workflow_runs WHERE id=?",
         (result["batch_run_id"],),

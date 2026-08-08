@@ -143,6 +143,7 @@ describe("设置规范化与脏状态基础规则", () => {
 describe("系统设置功能分类", () => {
   it("按业务影响归类且每个设置只出现一次", () => {
     const keys = [
+      "text_generation_concurrency",
       "video_submit_concurrency",
       "vlm_request_concurrency",
       "episode_cost_limit_cny",
@@ -150,6 +151,8 @@ describe("系统设置功能分类", () => {
       "future_setting",
     ];
     const groups = categorizeSettingKeys(keys);
+    expect(groups.find((group) => group.id === "text-generation")?.keys)
+      .toEqual(["text_generation_concurrency"]);
     expect(groups.find((group) => group.id === "video-flow")?.keys).toEqual([
       "video_submit_concurrency",
     ]);

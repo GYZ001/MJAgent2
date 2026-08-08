@@ -296,6 +296,53 @@ def test_character_resolution_updates_contract_display_name_but_keeps_stable_id(
     )
 
 
+def test_character_resolution_merges_duplicate_canonical_identity_contracts() -> None:
+    screenplay = _screenplay()
+    plan = screenplay.narrative_plan
+    plan.identity_contracts.extend([
+        NarrativeIdentityContract(
+            identity_id="主角",
+            display_name="主角",
+            kind="canonical lead",
+            visual_policy="canonical",
+            visual_canonical="黑发青年，深灰长衣，左眉有一道细痕",
+            asset_requirement="required",
+            voice_ids=["主角"],
+            evidence=_evidence("角色圣经中的当前身份"),
+        ),
+        NarrativeIdentityContract(
+            identity_id="lead-flashback",
+            display_name="年轻主角",
+            kind="flashback version",
+            visual_policy="contextual",
+            visual_canonical="年轻时期的主角",
+            asset_requirement="optional",
+            evidence=_evidence("同一人物的回忆时期"),
+        ),
+    ])
+    plan.propositions[0].entity_ids.extend(["主角", "lead-flashback"])
+
+    changes = portraits.apply_screenplay_character_resolutions(screenplay, [{
+        "source_label": "年轻主角",
+        "canonical_name": "主角",
+        "resolution": "canonical_identity",
+    }])
+
+    matching = [
+        contract
+        for contract in plan.identity_contracts
+        if contract.display_name == "主角"
+    ]
+    assert len(matching) == 1
+    assert matching[0].identity_id == "主角"
+    assert "lead-flashback" not in plan.propositions[0].entity_ids
+    assert plan.propositions[0].entity_ids.count("主角") == 1
+    assert any(
+        change.get("kind") == "identity_contract_merge"
+        for change in changes
+    )
+
+
 def test_storyboard_operational_identity_projection_uses_contract_and_dialogue() -> None:
     screenplay = _screenplay()
     screenplay.voice_bible.append(VoiceCanonical(
@@ -410,7 +457,7 @@ def test_narrative_compiler_fails_closed_for_undeclared_legacy_whitelist_role() 
         action_desc="医生走到门前伸手推开木门。",
     )
 
-    assert is_functional_extra("医生")
+    assert not is_functional_extra("医生")
     with pytest.raises(CompileError, match="未在 Bible 或 narrative identity contract 中声明"):
         compile_prompt(shot, _bible(), screenplay=screenplay)
 

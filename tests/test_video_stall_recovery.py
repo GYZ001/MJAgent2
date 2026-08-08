@@ -128,7 +128,7 @@ def test_embedded_source_dialogue_is_repaired_before_enqueue(
     ).fetchone()["duration_s"] > 5
 
 
-def test_err_20260803_97f7e5_repairs_dialogue_and_role_before_enqueue(
+def test_legacy_descriptive_speaker_is_not_guessed_into_route_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """shot 17 同时带原文对白、空角色表和描述性临时说话人，必须一次收口。"""
@@ -158,26 +158,16 @@ def test_err_20260803_97f7e5_repairs_dialogue_and_role_before_enqueue(
     conn.commit()
     _patch_enqueue_runtime(monkeypatch, conn)
 
-    result = worker.enqueue_shot("s1")
+    with pytest.raises(compiler.CompileError, match="绿袍修士乙"):
+        worker.enqueue_shot("s1")
 
-    assert result["task_accepted"] is True
-    assert result["auto_repaired"] is True
-    repair = result["preflight_repair"]
-    assert repair["repair"] == "embedded_dialogue"
-    assert repair["speaker"] == "路人乙"
     shot = conn.execute(
         "SELECT duration_s,characters,dialogues,action_desc FROM shots WHERE id='s1'"
     ).fetchone()
     assert shot["duration_s"] == 9
-    assert json.loads(shot["characters"]) == ["路人乙"]
-    assert json.loads(shot["dialogues"])[0]["speaker"] == "路人乙"
+    assert json.loads(shot["characters"]) == ["绿袍修士乙"]
+    assert json.loads(shot["dialogues"])[0]["speaker"] == "绿袍修士乙"
     assert "待修复台词信息" not in shot["action_desc"]
-    version = conn.execute(
-        "SELECT prompt_text,image_inputs FROM shot_versions WHERE id=?",
-        (result["version_id"],),
-    ).fetchone()
-    assert line in version["prompt_text"]
-    assert json.loads(version["image_inputs"])["preflight_auto_repair"]["speaker"] == "路人乙"
 
 
 def test_structured_source_dialogue_expands_to_minimum_valid_duration(
@@ -221,7 +211,7 @@ def test_structured_source_dialogue_expands_to_minimum_valid_duration(
     ).fetchone()["duration_s"] == result["preflight_repair"]["to_duration_s"]
 
 
-def test_location_prefixed_functional_speaker_is_normalized(
+def test_location_prefixed_speaker_is_not_normalized_by_name_pattern(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _conn()
@@ -262,20 +252,17 @@ def test_location_prefixed_functional_speaker_is_normalized(
 
     monkeypatch.setattr(compiler, "compile_prompt", compile_role)
 
-    result = worker.enqueue_shot("s1")
+    with pytest.raises(compiler.CompileError, match="宝阁管事"):
+        worker.enqueue_shot("s1")
 
-    assert result["task_accepted"] is True
-    assert result["preflight_repair"] == {
-        "repair": "functional_speaker_normalized",
-        "from_label": "宝阁管事",
-        "to_label": "管事",
-    }
     shot = conn.execute(
         "SELECT characters,dialogues,shot_contract_json FROM shots WHERE id='s1'"
     ).fetchone()
-    assert json.loads(shot["characters"]) == ["管事"]
-    assert json.loads(shot["dialogues"])[0]["speaker"] == "管事"
-    assert json.loads(shot["shot_contract_json"])["characters_visible"] == ["管事"]
+    assert json.loads(shot["characters"]) == ["宝阁管事"]
+    assert json.loads(shot["dialogues"])[0]["speaker"] == "宝阁管事"
+    assert json.loads(shot["shot_contract_json"])["characters_visible"] == [
+        "宝阁管事"
+    ]
 
 
 def test_unstructured_source_excerpt_is_scrubbed_instead_of_failing(

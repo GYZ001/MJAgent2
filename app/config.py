@@ -47,6 +47,58 @@ DEFAULT_HIAGENT_MODEL_TEXT = "d2a5n9rnvvm49eucvnvg"
 DEFAULT_HIAGENT_MODEL_VLM = "d7ev7il5boeaebtf4sgg"
 DEFAULT_HIAGENT_MODEL_VIDEO = "d7jf6nd5boeaebtfbdqg"
 DEFAULT_HIAGENT_MODEL_IMAGE = "d7ute7ppcc7n89uuqqp0"
+DEFAULT_MINIMAX_H3_MODEL_VIDEO = "minimax-h3"
+
+# 局域网 MiniMax H3 ComfyUI 服务。该服务默认无鉴权；如部署侧重新启用
+# Bearer Token，可仅通过环境变量注入，不在代码或数据库中保存明文。
+MINIMAX_H3_BASE_URL = os.environ.get(
+    "MINIMAX_H3_BASE_URL", "http://192.168.31.232:8181"
+).rstrip("/")
+MINIMAX_H3_API_KEY = os.environ.get("MINIMAX_H3_API_KEY", "")
+MINIMAX_H3_VIDEO_WIDTH = max(
+    32, min(4096, int(os.environ.get("MINIMAX_H3_VIDEO_WIDTH", "576")) // 32 * 32)
+)
+MINIMAX_H3_VIDEO_HEIGHT = max(
+    32, min(4096, int(os.environ.get("MINIMAX_H3_VIDEO_HEIGHT", "1024")) // 32 * 32)
+)
+_minimax_h3_acceleration = os.environ.get(
+    "MINIMAX_H3_ACCELERATION", "turbo"
+).strip().lower()
+MINIMAX_H3_ACCELERATION = (
+    _minimax_h3_acceleration
+    if _minimax_h3_acceleration in {"standard", "turbo"}
+    else "turbo"
+)
+_minimax_h3_step_min, _minimax_h3_step_max = (
+    (4, 8) if MINIMAX_H3_ACCELERATION == "turbo" else (1, 100)
+)
+MINIMAX_H3_STEPS = max(
+    _minimax_h3_step_min,
+    min(
+        _minimax_h3_step_max,
+        int(os.environ.get(
+            "MINIMAX_H3_STEPS",
+            "8" if MINIMAX_H3_ACCELERATION == "turbo" else "20",
+        )),
+    ),
+)
+MINIMAX_H3_USE_TE_SPEED = (
+    os.environ.get(
+        "MINIMAX_H3_USE_TE_SPEED",
+        "false" if MINIMAX_H3_ACCELERATION == "turbo" else "true",
+    ).strip().lower()
+    not in {"0", "false", "off", "no"}
+)
+MINIMAX_H3_TURBO_STRENGTH = max(
+    0.5, min(1.5, float(os.environ.get("MINIMAX_H3_TURBO_STRENGTH", "1.0")))
+)
+MINIMAX_H3_TURBO_LOW_VRAM = (
+    os.environ.get("MINIMAX_H3_TURBO_LOW_VRAM", "false").strip().lower()
+    in {"1", "true", "on", "yes"}
+)
+MINIMAX_H3_POLL_INTERVAL = max(
+    2.0, min(5.0, float(os.environ.get("MINIMAX_H3_POLL_INTERVAL", "5")))
+)
 
 _model_text_env = os.environ.get("MODEL_TEXT", "").strip()
 MODEL_TEXT = _model_text_env or DEFAULT_HIAGENT_MODEL_TEXT
@@ -160,10 +212,18 @@ STORYBOARD_SHOT_MAX_TOKENS = max(
     1024, min(int(os.environ.get("STORYBOARD_SHOT_MAX_TOKENS", "8192")), 16384)
 )
 
-# 分镜大纲需要一次性输出整集节奏与镜头合同。4K 会让推理模型在正文前耗尽预算；
-# 默认提升到约 32K，同时保留环境变量以便对供应商的更低硬上限做部署级覆盖。
+# 仅供无 narrative_plan 的历史大纲路径使用；新叙事剧本由本地编译器生成大纲。
 STORYBOARD_OUTLINE_MAX_TOKENS = max(
     8192, min(int(os.environ.get("STORYBOARD_OUTLINE_MAX_TOKENS", "32768")), 65536)
+)
+
+# 场景画面创作按有界镜头块调用模型，避免长场次重新形成整集大响应。
+STORYBOARD_SCENE_PACK_MAX_SHOTS = max(
+    1,
+    min(
+        int(os.environ.get("STORYBOARD_SCENE_PACK_MAX_SHOTS", "8")),
+        16,
+    ),
 )
 
 # 分镜时长：默认 5s（PREFERRED）；6~10s 仅当口播/连续动作需要，并进入 AI 审核。
@@ -247,7 +307,10 @@ DEFAULT_SETTINGS = {
     "hiagent_model_vlm": MODEL_VLM,
     "hiagent_model_video": MODEL_VIDEO,
     "hiagent_model_image": MODEL_IMAGE,
-    "text_generation_concurrency": "2", # 剧本与分镜共享文本模型资源池
+    "minimax_h3_model_video": DEFAULT_MINIMAX_H3_MODEL_VIDEO,
+    "minimax_h3_base_url": MINIMAX_H3_BASE_URL,
+    "text_generation_concurrency": "10", # 剧本与分镜共享文本模型资源池
+    "text_stream_total_timeout_s": "1200", # 流式文本调用总墙钟熔断；空闲超时仍由 httpx 负责
     "storyboard_concurrency": "2",      # 旧设置兼容读取，不再作为新资源池名称
     # PRD-03 分镜台独立灰度/回滚开关；P0 服务端防线不受 UI 开关影响。
     "storyboard_workspace_safe_readonly": "false",

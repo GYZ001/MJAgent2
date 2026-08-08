@@ -479,20 +479,87 @@ class AgentLoop(Generic[T]):
         if not step_run_id:
             return None
         accepted_candidate = value is not None and (not issues or score_only_quality)
-        artifact = repository.create_artifact(
-            EvidenceArtifact(
-                type=self.artifact_type,
-                scope_type=self.scope_type,
-                scope_id=self.scope_id,
-                status="validated" if accepted_candidate else "candidate",
-                trust_level="T2" if accepted_candidate else ("T1" if value is not None else "T0"),
-                content=value.model_dump(mode="json") if value is not None else {"raw_output": raw},
-                parent_artifact_ids=self.input_artifact_ids,
-                contract_version=self.contract.version,
-                prompt_version=self.prompt_version,
-            ),
-            step_run_id=step_run_id,
-        )
+        parent_artifact_ids = list(self.input_artifact_ids)
+        model_snapshot: dict[str, object] = {}
+        if self.artifact_type == "screenplay_generation_ir":
+            from app.screenplay_ir import IR_COMPILER_VERSION, IR_VERSION
+
+            run_row = get_conn().execute(
+                "SELECT wr.input_fingerprint "
+                "FROM step_runs sr JOIN workflow_runs wr ON wr.id=sr.run_id "
+                "WHERE sr.id=?",
+                (step_run_id,),
+            ).fetchone()
+            model_snapshot = {
+                "generation_contract": IR_VERSION,
+                "compiler_version": IR_COMPILER_VERSION,
+                "input_fingerprint": (
+                    str(run_row["input_fingerprint"] or "")
+                    if run_row else ""
+                ),
+            }
+            raw_artifact = repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_generation_ir_raw",
+                    scope_type=self.scope_type,
+                    scope_id=self.scope_id,
+                    status="candidate",
+                    trust_level="T0",
+                    content={"raw_output": raw},
+                    parent_artifact_ids=parent_artifact_ids,
+                    contract_version=IR_VERSION,
+                    prompt_version=self.prompt_version,
+                    model_snapshot=model_snapshot,
+                ),
+                step_run_id=step_run_id,
+            )
+            if value is None:
+                artifact = raw_artifact
+            else:
+                parent_artifact_ids.append(str(raw_artifact["id"]))
+                artifact = repository.create_artifact(
+                    EvidenceArtifact(
+                        type=self.artifact_type,
+                        scope_type=self.scope_type,
+                        scope_id=self.scope_id,
+                        status=(
+                            "validated" if accepted_candidate else "candidate"
+                        ),
+                        trust_level="T2" if accepted_candidate else "T1",
+                        content=value.model_dump(mode="json"),
+                        parent_artifact_ids=parent_artifact_ids,
+                        contract_version=IR_VERSION,
+                        prompt_version=self.prompt_version,
+                        model_snapshot={
+                            **model_snapshot,
+                            "normalization_count": len(
+                                getattr(value, "normalization_log", []) or []
+                            ),
+                        },
+                    ),
+                    step_run_id=step_run_id,
+                )
+        else:
+            artifact = repository.create_artifact(
+                EvidenceArtifact(
+                    type=self.artifact_type,
+                    scope_type=self.scope_type,
+                    scope_id=self.scope_id,
+                    status="validated" if accepted_candidate else "candidate",
+                    trust_level=(
+                        "T2" if accepted_candidate
+                        else ("T1" if value is not None else "T0")
+                    ),
+                    content=(
+                        value.model_dump(mode="json")
+                        if value is not None else {"raw_output": raw}
+                    ),
+                    parent_artifact_ids=parent_artifact_ids,
+                    contract_version=self.contract.version,
+                    prompt_version=self.prompt_version,
+                ),
+                step_run_id=step_run_id,
+            )
         evaluation = Evaluation(
             evaluator_type="deterministic",
             evaluator_name=f"{self.stage_key}_validator",

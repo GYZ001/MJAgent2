@@ -727,7 +727,7 @@ def current_capability_snapshot(
     conn=None,
 ) -> ProviderVideoCapabilitySnapshot:
     """Return the latest measured snapshot, bootstrapping the PRD-observed channel facts."""
-    from app import hiagent
+    from app import config, hiagent
 
     db = conn or get_conn()
     resolved_provider = provider or hiagent.active_provider("video")
@@ -739,24 +739,36 @@ def current_capability_snapshot(
         (resolved_provider, resolved_model),
     ).fetchone()
     if row:
-        return _snapshot_from_row(row)
+        saved = _snapshot_from_row(row)
+        if (
+            resolved_provider != "minimax_h3"
+            or (
+                saved.technical_success
+                and saved.api_version == "1.2.0"
+                and saved.format_limits.get("default_acceleration")
+                == config.MINIMAX_H3_ACCELERATION
+            )
+        ):
+            return saved
 
     active_provider = hiagent.active_provider("video")
     active_model = hiagent.active_model("video", active_provider)
     observed_channel = (
         resolved_provider == active_provider and resolved_model == active_model
     )
+    is_minimax_h3 = resolved_provider == "minimax_h3"
+    capability_verified = observed_channel or is_minimax_h3
     snapshot = ProviderVideoCapabilitySnapshot(
         id=new_id("cap"),
         provider=resolved_provider,
         model=resolved_model,
-        gateway="hiagent",
-        api_version="2024-01-01",
-        supports_reference_image=observed_channel,
-        supports_first_frame=observed_channel,
-        supports_last_frame=observed_channel,
-        supports_first_last_pair=observed_channel,
-        supports_reference_video=observed_channel,
+        gateway="minimax_h3" if is_minimax_h3 else "hiagent",
+        api_version="1.2.0" if is_minimax_h3 else "2024-01-01",
+        supports_reference_image=capability_verified,
+        supports_first_frame=capability_verified,
+        supports_last_frame=capability_verified,
+        supports_first_last_pair=capability_verified,
+        supports_reference_video=capability_verified,
         supports_true_video_continuation=False,
         supports_return_last_frame=False,
         supports_data_url_by_media_type={"image": True, "video": False},
@@ -768,13 +780,38 @@ def current_capability_snapshot(
             ["first_frame", "reference_video"],
             ["last_frame", "reference_video"],
         ],
-        duration_limits={"min_s": 5, "max_s": 10},
+        duration_limits=(
+            {"min_s": 0.2, "max_s": 15}
+            if is_minimax_h3 else {"min_s": 5, "max_s": 10}
+        ),
+        size_limits=(
+            {"min": 32, "max": 4096, "multiple": 32}
+            if is_minimax_h3 else {}
+        ),
+        format_limits=(
+            {
+                "output": "mp4",
+                "video_codec": "h264",
+                "fps": 24,
+                "audio": "stereo",
+                "reference_images_max": 9,
+                "reference_videos_max": 3,
+                "accelerations": ["standard", "turbo"],
+                "default_acceleration": config.MINIMAX_H3_ACCELERATION,
+                "turbo_steps": {"min": 4, "max": 8, "default": 8},
+            }
+            if is_minimax_h3 else {}
+        ),
         probe_time=now(),
         probe_result=(
-            "observed_channel_baseline_2026_08_04"
-            if observed_channel else "unverified"
+            f"verified_v1.2.0_three_modes_{config.MINIMAX_H3_ACCELERATION}_2026_08_08"
+            if is_minimax_h3
+            else (
+                "observed_channel_baseline_2026_08_04"
+                if observed_channel else "unverified"
+            )
         ),
-        technical_success=observed_channel,
+        technical_success=capability_verified,
         semantic_continuation_success=False,
     )
     save_capability_snapshot(snapshot, conn=db)
@@ -1180,6 +1217,21 @@ def validate_episode_plan(
     if issues:
         raise VideoPlanValidationError(issues)
 
+    serial_provider = snapshot.provider == "minimax_h3"
+    if serial_provider:
+        from app import minimax_h3
+
+        for item in normalized:
+            duration_s = float(by_id[item.shot_id]["duration_s"] or 5)
+            item.estimated_latency_ms = 1000 * minimax_h3.estimated_generation_seconds(
+                item.mode.value,
+                duration_s,
+            )
+            item.timeout_s = float(minimax_h3.generation_timeout_seconds(
+                item.mode.value,
+                duration_s,
+            ))
+
     depths: dict[str, int] = {}
     latency_paths: dict[str, int] = {}
     for item in normalized:
@@ -1192,7 +1244,11 @@ def validate_episode_plan(
         item.critical_path_group = f"depth-{depths[item.shot_id]}"
     plan.estimated_latency_ms = sum(item.estimated_latency_ms for item in normalized)
     plan.estimated_cost = round(sum(item.estimated_cost for item in normalized), 4)
-    plan.critical_path_latency_ms = max(latency_paths.values(), default=0)
+    plan.critical_path_latency_ms = (
+        plan.estimated_latency_ms
+        if serial_provider
+        else max(latency_paths.values(), default=0)
+    )
     plan.safe_parallelism_ratio = round(
         sum(1 for item in normalized if not item.depends_on_shot_id) / max(1, len(normalized)),
         4,

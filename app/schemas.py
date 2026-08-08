@@ -146,6 +146,9 @@ class ScriptScene(BaseModel):
     conflict: str = ""
     turn: str = ""
     source_basis: str = ""
+    previous_scene_exit_state: str = ""
+    opening_image: str = ""
+    agency_contracts: list[dict[str, str]] = Field(default_factory=list)
     entry_state: str = ""
     exit_state: str = ""
     context_requirements: list[str] = Field(default_factory=list)
@@ -1567,13 +1570,6 @@ def _repair_structural_json_delimiters(text: str) -> str:
                 escaped = True
             elif char == '"':
                 in_string = False
-                if (
-                    expected_closers
-                    and expected_closers[-1] == "}"
-                    and string_started_after in "{,"
-                    and next_significant_char(index + 1) in "},"
-                ):
-                    repaired.extend(":null")
                 previous_significant = '"'
             continue
         if char == '"':
@@ -1597,7 +1593,6 @@ def _repair_structural_json_delimiters(text: str) -> str:
                 expected_closers.pop()
         elif (
             char == ","
-            and previous_significant == "}"
             and expected_closers
             and expected_closers[-1] == "]"
             and next_token_is_object_key(index + 1)

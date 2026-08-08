@@ -101,6 +101,84 @@ def render_indexed_source(source: str, *, max_chars: int = 900) -> str:
     )
 
 
+_CHAPTER_HEADING_RE = re.compile(
+    r"^\s*(?:[【\[]\s*)?第\s*[0-9一二三四五六七八九十百千]+\s*章"
+)
+
+
+def structural_front_matter_ids(
+    segments: list[SourceSegment],
+) -> set[str]:
+    """Return only document headings that are provably not dramatic content."""
+    if not segments or not _CHAPTER_HEADING_RE.match(segments[0].text):
+        return set()
+    result = {segments[0].segment_id}
+    if len(segments) < 2:
+        return result
+    subtitle = segments[1].text.strip()
+    if (
+        len(re.sub(r"\s+", "", subtitle)) <= 32
+        and "\n" not in subtitle
+        and not re.search(r"[。！？!?：“”「」『』]", subtitle)
+    ):
+        result.add(segments[1].segment_id)
+    return result
+
+
+def index_compact_source_segments(
+    source: str,
+    *,
+    max_chars: int = 900,
+) -> list[SourceSegment]:
+    """Pack adjacent short paragraphs into exhaustive generation units.
+
+    The legacy index intentionally preserves paragraph boundaries. That creates
+    hundreds of IDs for novels formatted with one short sentence per paragraph,
+    which in turn pressures the model to repeat one event per paragraph. The
+    compact index keeps exact offsets and text while packing adjacent legacy
+    units up to the same size bound.
+    """
+    raw = source or ""
+    legacy = index_source_segments(raw, max_chars=max_chars)
+    if not legacy:
+        return []
+    packed: list[tuple[int, int]] = []
+    start = legacy[0].start_offset
+    end = legacy[0].end_offset
+    for segment in legacy[1:]:
+        if segment.end_offset - start <= max_chars:
+            end = segment.end_offset
+            continue
+        packed.append((start, end))
+        start = segment.start_offset
+        end = segment.end_offset
+    packed.append((start, end))
+    return [
+        SourceSegment(
+            segment_id=f"SRC{index:04d}",
+            text=raw[start:end].strip(),
+            start_offset=start,
+            end_offset=end,
+        )
+        for index, (start, end) in enumerate(packed, start=1)
+        if raw[start:end].strip()
+    ]
+
+
+def render_compact_indexed_source(
+    source: str,
+    *,
+    max_chars: int = 900,
+) -> str:
+    return "\n\n".join(
+        f"【{segment.segment_id}】\n{segment.text}"
+        for segment in index_compact_source_segments(
+            source,
+            max_chars=max_chars,
+        )
+    )
+
+
 def _alignment_view(text: str) -> tuple[str, list[int]]:
     chars: list[str] = []
     offsets: list[int] = []

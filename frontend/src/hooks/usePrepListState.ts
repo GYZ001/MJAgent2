@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 
 export interface PrepListState {
   search: string
@@ -28,14 +28,24 @@ export function usePrepListState(projectId: string, pageKey: string, fallbackPag
     try {
       const raw = sessionStorage.getItem(storageKey(projectId, pageKey))
       if (!raw) return { ...DEFAULT, pageSize: fallbackPageSize }
-      return { ...DEFAULT, ...JSON.parse(raw), pageSize: fallbackPageSize || DEFAULT.pageSize }
+      const stored = { ...DEFAULT, ...JSON.parse(raw) }
+      return { ...stored, pageSize: fallbackPageSize || stored.pageSize }
     } catch {
       return { ...DEFAULT, pageSize: fallbackPageSize }
     }
   })
 
-  useEffect(() => {
-    setState(prev => ({ ...prev, pageSize: fallbackPageSize || prev.pageSize }))
+  useLayoutEffect(() => {
+    if (!fallbackPageSize) return
+    setState(prev => {
+      if (prev.pageSize === fallbackPageSize) return prev
+      const firstVisibleIndex = prev.pageSize > 0 ? prev.page * prev.pageSize : 0
+      return {
+        ...prev,
+        page: Math.floor(firstVisibleIndex / fallbackPageSize),
+        pageSize: fallbackPageSize,
+      }
+    })
   }, [fallbackPageSize])
 
   useEffect(() => {

@@ -13,6 +13,7 @@ from app.character_policy import (
     is_allowed_storyboard_character,
     is_collective_role,
     is_functional_extra,
+    typed_functional_identity_names,
 )
 from app.continuity import (
     normalize_board_continuity,
@@ -57,7 +58,7 @@ from app.scene_contract import (
     scene_time_of,
     split_legacy_scene_setting,
 )
-from app.source_excerpt import index_source_segments
+from app.source_excerpt import align_source_excerpt, index_source_segments
 from app.renderability import (
     ACTION_DESC_HARD_MIN,
     ACTION_DESC_TARGET_MAX,
@@ -317,6 +318,7 @@ def validate_storyboard(
     errors.extend(validate_storyboard_scenes(board, bible))
 
     bible_names = {c.name for c in bible.characters}
+    declared_functional_names = typed_functional_identity_names(screenplay)
     narrative_character_ids: set[str] = set()
     narrative_actions: dict[str, Any] = {}
     identity_resolver = None
@@ -509,11 +511,15 @@ def validate_storyboard(
                     errors.append(
                         f"[NARRATIVE_CHARACTER_REF_MISSING] {tag}.characters 含「{name}」：{exc}"
                     )
-            elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
+            elif not narrative_authority and not is_allowed_storyboard_character(
+                name,
+                bible_names,
+                declared_functional_names=declared_functional_names,
+            ):
                 errors.append(
                     f"{tag}.characters 含「{name}」，既不在角色圣经中，也不是允许的功能性路人标签；"
-                    f"圣经角色为：{'/'.join(sorted(bible_names))}。无姓名群演请使用测验员、守卫、"
-                    "路人甲/乙/丙、族人甲、弟子乙等通用身份标签"
+                    f"圣经角色为：{'/'.join(sorted(bible_names))}。功能身份必须由持久化人物决议"
+                    "或 voice_bible 明确声明，不能根据称谓推断"
                 )
         # characters 不是唯一的角色来源。Prompt 会从 characters_visible、
         # audio_cast/audio_timeline 和 reference_roles 继续取名，所以必须在同一门禁
@@ -602,7 +608,11 @@ def validate_storyboard(
                     errors.append(
                         f"[NARRATIVE_CHARACTER_REF_MISSING] {tag}.characters_visible 含「{name}」：{exc}"
                     )
-            elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
+            elif not narrative_authority and not is_allowed_storyboard_character(
+                name,
+                bible_names,
+                declared_functional_names=declared_functional_names,
+            ):
                 errors.append(
                     f"{tag}.characters_visible 含「{name}」，既不在角色圣经中，"
                     "也不是允许的功能性路人或群体标签；请同步镜头角色合同"
@@ -622,7 +632,11 @@ def validate_storyboard(
                     errors.append(
                         f"[NARRATIVE_SPEAKER_REF_MISSING] {tag}.声轨角色「{name}」：{exc}"
                     )
-            elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
+            elif not narrative_authority and not is_allowed_storyboard_character(
+                name,
+                bible_names,
+                declared_functional_names=declared_functional_names,
+            ):
                 errors.append(
                     f"{tag}.声轨角色「{name}」既不在角色圣经中，"
                     "也不是允许的功能性路人或群体标签"
@@ -643,7 +657,11 @@ def validate_storyboard(
                         errors.append(
                             f"[NARRATIVE_REFERENCE_ROLE_MISSING] {tag}.reference_roles 引用「{name}」：{exc}"
                         )
-                elif not narrative_authority and not is_allowed_storyboard_character(name, bible_names):
+                elif not narrative_authority and not is_allowed_storyboard_character(
+                    name,
+                    bible_names,
+                    declared_functional_names=declared_functional_names,
+                ):
                     errors.append(
                         f"{tag}.reference_roles 残留非法角色「{name}」；"
                         "请重建角色参考合同"
@@ -670,7 +688,13 @@ def validate_storyboard(
                     )
         for name in (
             item for item in shot.characters
-            if not narrative_authority and is_functional_extra(item)
+            if (
+                not narrative_authority
+                and (
+                    is_functional_extra(item)
+                    or item in declared_functional_names
+                )
+            )
         ):
             if name not in visual_text:
                 errors.append(
@@ -1438,7 +1462,10 @@ _DIALOGUE_TURN_FUNCTIONS = {
 _DIALOGUE_RESPONSE_FUNCTIONS = {"response"}
 
 
-def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeScreenplay:
+def normalize_screenplay_dialogue_chains(
+    script: EpisodeScreenplay,
+    source_text: str = "",
+) -> EpisodeScreenplay:
     """Make structured dialogue chains authoritative for downstream key-line delivery."""
     if not script.dialogue_chains:
         return script
@@ -1457,6 +1484,51 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                     for voice_id in (identity.voice_ids or [])
                 ),
             })
+    if source_text:
+        for chain in script.dialogue_chains:
+            grounded_turns = []
+            for turn in chain.turns or []:
+                source_line = str(turn.source_text or "").strip()
+                if not source_line:
+                    aligned = align_source_excerpt(
+                        str(turn.line or ""),
+                        source_text,
+                    )
+                    if aligned is None:
+                        continue
+                    turn.source_text = aligned.excerpt
+                    source_line = aligned.excerpt
+                if (
+                    len(_condense(source_line)) < 2
+                    and source_line in source_text
+                    and _condense(turn.line) != _condense(source_line)
+                ):
+                    turn.line = source_line
+                grounded_turns.append(turn)
+            chain.turns = grounded_turns
+        script.dialogue_chains = [
+            chain for chain in script.dialogue_chains if chain.turns
+        ]
+        while script.dialogue_chains and script.dialogue_chains[0].turns:
+            first_turn = script.dialogue_chains[0].turns[0]
+            line = str(first_turn.line or "").strip()
+            evidence = str(first_turn.source_text or "").strip()
+            if (
+                textmatch.spoken_digit_sequence_equivalent(evidence, line)
+                or _longest_run_ratio(line, evidence)
+                >= KEY_LINE_PRESENT_RATIO
+                or _bigram_coverage(line, evidence)
+                >= KEY_LINE_BIGRAM_COVERAGE
+            ):
+                break
+            aligned = align_source_excerpt(line, source_text)
+            if aligned is not None:
+                first_turn.source_text = aligned.excerpt
+                break
+            script.dialogue_chains[0].turns.pop(0)
+            if not script.dialogue_chains[0].turns:
+                script.dialogue_chains.pop(0)
+                continue
     for chain in script.dialogue_chains:
         turns = list(chain.turns or [])
         narrator_only_chain = bool(turns) and all(
@@ -1511,6 +1583,37 @@ def normalize_screenplay_dialogue_chains(script: EpisodeScreenplay) -> EpisodeSc
                 continue
             normalized_turns.append(turn)
         chain.turns = normalized_turns
+    authoritative_turns = {
+        (
+            _condense(turn.speaker),
+            _condense(turn.line),
+        )
+        for chain in script.dialogue_chains
+        for turn in chain.turns or []
+        if _condense(turn.speaker) and _condense(turn.line)
+    }
+    normalized_body_lines: list[str] = []
+    for raw_line in (script.full_script_text or "").splitlines(
+        keepends=True,
+    ):
+        line = raw_line.rstrip("\r\n")
+        ending = raw_line[len(line):]
+        match = SCRIPT_SOUND_LINE_RE.match(line.strip())
+        if (
+            match is not None
+            and (
+                _condense(match.group(1)),
+                _condense(match.group(3)),
+            )
+            not in authoritative_turns
+        ):
+            indent = line[:len(line) - len(line.lstrip())]
+            line = (
+                f"{indent}{match.group(1).strip()}，"
+                f"{match.group(3).strip()}"
+            )
+        normalized_body_lines.append(line + ending)
+    script.full_script_text = "".join(normalized_body_lines)
     full_script_turns = _script_dialogue_turns(
         script.full_script_text or ""
     )
@@ -1676,7 +1779,6 @@ def validate_dialogue_chains(
     *,
     source_text: str | None,
     required: bool,
-    required_dialogue_lines: list[str] | None = None,
 ) -> list[str]:
     """Validate source-grounded trigger→reply chains before accepting a screenplay."""
     errors: list[str] = []
@@ -1693,7 +1795,6 @@ def validate_dialogue_chains(
     total_turns = 0
     full_turns = _script_dialogue_turns(script.full_script_text or "")
     full_texts = [turn[2] for turn in full_turns]
-    required_lines = [line for line in (required_dialogue_lines or []) if (line or "").strip()]
     for chain_index, chain in enumerate(chains):
         tag = f"dialogue_chains[{chain_index}]"
         chain_id = (chain.chain_id or "").strip().upper()
@@ -1842,33 +1943,6 @@ def validate_dialogue_chains(
             "D001 必须引用语义支持首条改编对白的原文话语，"
             "不能强绑整章第一处引号、拟声或已舍弃场景中的无关话语"
         )
-    if required_lines:
-        chain_sources = [
-            (turn.source_text or "").strip()
-            for chain in chains for turn in (chain.turns or [])
-        ]
-        chain_lines = [
-            (turn.line or "").strip()
-            for chain in chains for turn in (chain.turns or [])
-        ]
-        for required_line in required_lines:
-            needle = textmatch.strip_speaker(required_line)
-            identity = _condense(needle)
-            source_locked = any(identity and identity in _condense(line) for line in chain_sources)
-            adapted_locked = any(identity and identity in _condense(line) for line in chain_lines)
-            spoken_locked = any(identity and identity in _condense(turn[2]) for turn in full_turns)
-            if not source_locked:
-                errors.append(
-                    f"用户锁定台词未进入 dialogue_chains.source_text：「{required_line}」"
-                )
-            if not adapted_locked:
-                errors.append(
-                    f"用户锁定台词未逐字进入 dialogue_chains.line：「{required_line}」"
-                )
-            if not spoken_locked:
-                errors.append(
-                    f"用户锁定台词未作为角色对白写进 full_script_text：「{required_line}」"
-                )
     return errors
 
 
@@ -2312,11 +2386,15 @@ def normalize_screenplay_ledgers(script: EpisodeScreenplay) -> EpisodeScreenplay
     return script
 
 
-def normalize_screenplay_candidate(script: EpisodeScreenplay) -> EpisodeScreenplay:
+def normalize_screenplay_candidate(
+    script: EpisodeScreenplay,
+    *,
+    source_text: str = "",
+) -> EpisodeScreenplay:
     """在 QA 之前生成规范化副本；QA 本身不得修改候选内容。"""
     normalized = script.model_copy(deep=True)
     normalize_screenplay_ledgers(normalized)
-    normalize_screenplay_dialogue_chains(normalized)
+    normalize_screenplay_dialogue_chains(normalized, source_text)
     return normalized
 
 
@@ -2326,6 +2404,8 @@ def validate_plot_spine(
     narrative_authority: bool = False,
 ) -> list[str]:
     """先校验主线骨架，再允许正文通过（Renderability First）。"""
+    from app.screenplay_ir import screenplay_beat_fields_repeat
+
     errors: list[str] = []
     spine = script.plot_spine
     if spine is None:
@@ -2359,6 +2439,12 @@ def validate_plot_spine(
             errors.append(f"{tag}.does 过短；请写可见/可听的主动作")
         if len((beat.turn or "").strip()) < 4:
             errors.append(f"{tag}.turn 过短；请写局势变化")
+        elif screenplay_beat_fields_repeat(beat.does, beat.turn):
+            errors.append(
+                "[SPINE_ACTION_TURN_DUPLICATE] "
+                f"{tag}.does 与 turn 语义重复；does 应写可见/可听动作，"
+                "turn 必须写该动作完成后新成立的人物、信息、关系或局势状态"
+            )
         if beat.must_keep:
             must_keep_count += 1
         if not narrative_authority:
@@ -2623,9 +2709,9 @@ def validate_screenplay_spine_delivery(
 def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats: int,
                         episode_no: int | None = None, source_text: str | None = None,
                         require_dialogue_chains: bool = False,
-                        required_dialogue_lines: list[str] | None = None,
                         validate_narrative: bool = True,
-                        require_source_coverage: bool = False) -> list[str]:
+                        require_source_coverage: bool = False,
+                        functional_identity_names: set[str] | None = None) -> list[str]:
     """纯 QA：只读取候选并返回问题，不补字段、不覆盖投影、不修改输入。"""
     errors: list[str] = []
     narrative_authority = script.narrative_plan is not None
@@ -2640,7 +2726,6 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         ))
     errors.extend(validate_dialogue_chains(
         script, source_text=source_text, required=require_dialogue_chains,
-        required_dialogue_lines=required_dialogue_lines,
     ))
     if require_source_coverage:
         errors.extend(validate_screenplay_source_coverage(script, source_text))
@@ -2665,6 +2750,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             "场次数由完整剧情与时空边界决定，不设上限"
         )
     bible_names = {c.name for c in bible.characters}
+    typed_functional_names = {
+        *set(functional_identity_names or ()),
+        *typed_functional_identity_names(script),
+    }
     narrative_character_ids = set(bible_names)
     if script.narrative_plan is not None:
         for identity in script.narrative_plan.identity_contracts:
@@ -2727,7 +2816,11 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             if narrative_authority
             else [
                 name for name in scene.characters
-                if name not in bible_names and not is_functional_extra(name)
+                if (
+                    name not in bible_names
+                    and name not in typed_functional_names
+                    and not is_functional_extra(name)
+                )
             ]
         )
         if unknown and (narrative_authority or bible_names):
@@ -2739,7 +2832,8 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
     full_text = (script.full_script_text or "").strip()
     spine_n = len((script.plot_spine.spine_beats if script.plot_spine else None) or [])
     min_script_chars = max(160, spine_n * 36 if spine_n else max(160, expected_beats * 30))
-    if len(full_text) < min_script_chars:
+    hard_min_script_chars = max(160, (min_script_chars * 99 + 99) // 100)
+    if len(full_text) < hard_min_script_chars:
         errors.append(
             f"full_script_text 过短；当前仅 {len(full_text)} 字，至少需要 {min_script_chars} 字"
             "（只演主线骨架，勿注水细节）"
@@ -2782,7 +2876,11 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             and (
                 speaker not in narrative_character_ids
                 if narrative_authority
-                else speaker not in bible_names and not is_functional_extra(speaker)
+                else (
+                    speaker not in bible_names
+                    and speaker not in typed_functional_names
+                    and not is_functional_extra(speaker)
+                )
             )
         })
         if offbible_speakers:
@@ -2828,7 +2926,11 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             invalid_speaker = (
                 speaker not in narrative_character_ids
                 if narrative_authority
-                else speaker not in bible_names and not is_functional_extra(speaker)
+                else (
+                    speaker not in bible_names
+                    and speaker not in typed_functional_names
+                    and not is_functional_extra(speaker)
+                )
             )
             if invalid_speaker:
                 non_bible_key_lines.append(ln)

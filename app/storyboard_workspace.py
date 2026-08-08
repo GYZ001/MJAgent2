@@ -183,17 +183,21 @@ def finalize_storyboard_cancellation(
             checkpoint,
         )
         if recovered_outline is not None:
-            save_checkpoint(checkpoint, run_id=effective_run_id)
-    checkpoint_created = False
-    if checkpoint is None and paused:
+            save_checkpoint(checkpoint)
+    checkpoint_created = checkpoint is None
+    if checkpoint is None:
         checkpoint = SupervisorCheckpoint(
             episode_id=episode_id,
-            phase="PAUSED_EXTERNAL",
-            outcome="PAUSED_BY_USER",
+            phase=(
+                "PAUSED_EXTERNAL" if paused else "CANCELLED"
+            ),
+            outcome=(
+                "PAUSED_BY_USER" if paused else "CANCELLED"
+            ),
             validated_prefix_end=shot_count,
             next_shot_no=shot_count + 1,
+            expected_total=shot_count,
         )
-        checkpoint_created = True
     target_checkpoint_phase = "PAUSED_EXTERNAL" if paused else "CANCELLED"
     target_checkpoint_outcome = "PAUSED_BY_USER" if paused else "CANCELLED"
     if checkpoint is not None and (
@@ -201,7 +205,11 @@ def finalize_storyboard_cancellation(
     ):
         checkpoint.phase = target_checkpoint_phase
         checkpoint.outcome = target_checkpoint_outcome
-        save_checkpoint(checkpoint, run_id=effective_run_id)
+        # The task may already have transitioned the Run to CANCELLED before
+        # this business-level convergence executes. Cancellation itself is the
+        # terminal authority, so do not reject its checkpoint on a stale run
+        # ownership fence.
+        save_checkpoint(checkpoint)
     if run and run.get("status") in repository.ACTIVE_RUN_STATUSES:
         WorkflowRecorder(effective_run_id).cancel(message)
 

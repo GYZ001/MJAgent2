@@ -260,6 +260,7 @@ def make_dir(body: dict):
 MODEL_KINDS = {"text", "vlm", "video", "image"}
 MODEL_PROVIDER_KINDS = {
     "hiagent": MODEL_KINDS,
+    "minimax_h3": {"video"},
     "openrouter": {"text", "vlm"},
     "bailian": {"text", "vlm"},
     "deepseek": {"text"},
@@ -271,6 +272,7 @@ BUILTIN_MODELS = (
     ("hiagent", config.DEFAULT_HIAGENT_MODEL_VLM, "视觉质检模型", ("vlm",)),
     ("hiagent", config.DEFAULT_HIAGENT_MODEL_VIDEO, "Seedance 视频生成", ("video",)),
     ("hiagent", config.DEFAULT_HIAGENT_MODEL_IMAGE, "Seedream 图像生成", ("image",)),
+    ("minimax_h3", config.DEFAULT_MINIMAX_H3_MODEL_VIDEO, "MiniMaxH3", ("video",)),
     ("openrouter", "z-ai/glm-5.2", "GLM 5.2", ("text",)),
     ("openrouter", "anthropic/claude-opus-4.8", "Claude Opus 4.8", ("text",)),
     ("openrouter", "google/gemini-3.5-flash", "Gemini 3.5 Flash", ("vlm",)),
@@ -308,6 +310,13 @@ def _model_catalog() -> list[dict]:
         apply_token_limit_defaults({
             "id": f"builtin:{provider}:{model}", "provider": provider, "model": model,
             "label": label, "kinds": list(kinds), "builtin": True,
+            **({
+                "base_url": (
+                    get_setting("minimax_h3_base_url")
+                    or config.MINIMAX_H3_BASE_URL
+                ),
+                "requires_api_key": False,
+            } if provider == "minimax_h3" else {}),
             **overrides.get(f"builtin:{provider}:{model}", {}),
         })
         for provider, model, label, kinds in BUILTIN_MODELS
@@ -330,8 +339,14 @@ def _public_model(item: dict) -> dict:
         "bailian": config.BAILIAN_API_KEY, "deepseek": config.DEEPSEEK_API_KEY,
         "zhipu": config.ZHIPU_API_KEY,
     }.get(str(item.get("provider") or ""), "")
-    public["key_configured"] = bool(
-        item.get("api_key") or credentials.get(item.get("id"), {}).get("api_key") or provider_key
+    public["key_configured"] = (
+        bool(item.get("base_url"))
+        if item.get("requires_api_key") is False
+        else bool(
+            item.get("api_key")
+            or credentials.get(item.get("id"), {}).get("api_key")
+            or provider_key
+        )
     )
     return public
 
@@ -612,6 +627,16 @@ async def test_saved_model(model_id: str, body: dict | None = None):
     if not item:
         raise HTTPException(404, "模型不存在")
     override = body or {}
+    if item.get("provider") == "minimax_h3":
+        from app import hiagent, minimax_h3
+
+        try:
+            result = await minimax_h3.probe_connection(
+                str(override.get("base_url") or item.get("base_url") or "")
+            )
+        except hiagent.ProviderError as exc:
+            raise HTTPException(422, f"模型测试失败：{exc}") from exc
+        return {**result, **normalize_token_limits({})}
     try:
         credentials = json.loads(get_setting("model_credentials") or "{}")
     except (TypeError, json.JSONDecodeError):
@@ -722,6 +747,7 @@ def health():
         ]),
         "video": selected("video", "视频模型", [
             option("hiagent", hiagent.active_model("video", "hiagent"), model_available("hiagent", hiagent.active_model("video", "hiagent"), bool(config.HIAGENT_API_KEY))),
+            option("minimax_h3", hiagent.active_model("video", "minimax_h3"), bool(config.MINIMAX_H3_BASE_URL)),
             option("openrouter", "", False),
         ]),
         "image": selected("image", "图像模型", [
@@ -741,6 +767,7 @@ def health():
         "hiagent_model_text": hiagent.active_model("text", "hiagent"),
         "hiagent_model_vlm": hiagent.active_model("vlm", "hiagent"),
         "hiagent_model_video": hiagent.active_model("video", "hiagent"),
+        "minimax_h3_model_video": hiagent.active_model("video", "minimax_h3"),
         "hiagent_model_image": hiagent.active_model("image", "hiagent"),
         "openrouter_model_text": hiagent.active_model("text", "openrouter"),
         "openrouter_model_vlm": hiagent.active_model("vlm", "openrouter"),
@@ -768,7 +795,7 @@ def recent_calls(limit: int = 30):
     rows = rows_to_dicts(get_conn().execute(
         """SELECT id,ts,kind,model,status,http_status,latency_ms,error,run_id,step_run_id,
                   trace_id,operation_id,attempt_no,supersedes_call_id,superseded_by_call_id,
-                  recovery_disposition,meta
+                  recovery_disposition,first_chunk_at,last_chunk_at,received_chars,meta
            FROM provider_calls ORDER BY id DESC LIMIT ?""",
         (min(limit, 200),),
     ).fetchall())
@@ -971,7 +998,7 @@ def query_calls(
     rows = rows_to_dicts(get_conn().execute(
         f"""SELECT id,ts,kind,model,status,http_status,latency_ms,error,run_id,step_run_id,
                     trace_id,operation_id,attempt_no,supersedes_call_id,superseded_by_call_id,
-                    recovery_disposition,meta
+                    recovery_disposition,first_chunk_at,last_chunk_at,received_chars,meta
              FROM provider_calls {where} ORDER BY id {order}""",
         params,
     ).fetchall())
@@ -1763,6 +1790,7 @@ def put_settings(body: dict):
             "hiagent": bool(config.HIAGENT_API_KEY), "openrouter": bool(config.OPENROUTER_API_KEY),
             "bailian": bool(config.BAILIAN_API_KEY), "deepseek": bool(config.DEEPSEEK_API_KEY),
             "zhipu": bool(config.ZHIPU_API_KEY),
+            "minimax_h3": bool(config.MINIMAX_H3_BASE_URL),
         }
         for kind in ("text", "vlm", "video", "image"):
             provider_field = f"model_{kind}_provider"
@@ -1826,6 +1854,9 @@ def put_settings(body: dict):
         immediate_changed = [key for key in changed if SETTINGS_SCHEMA[key].get("immediate", True)]
         if immediate_changed:
             reload_limits_from_settings()
+        if "text_generation_concurrency" in changed:
+            from app.generation_concurrency import reload_generation_limits
+            reload_generation_limits()
         # 三通道 worker 分别跟随各自并发配置热更新
         if any(k in changed for k in (*SETTING_KEYS.values(), "video_concurrency", "auto_concurrency",
                                    "media_scheduler_policy", "video_ready_low_watermark",
@@ -1845,6 +1876,11 @@ def put_settings(body: dict):
         try:
             from app.media_pipeline.concurrency import reload_limits_from_settings
             reload_limits_from_settings()
+        except Exception:
+            pass
+        try:
+            from app.generation_concurrency import reload_generation_limits
+            reload_generation_limits()
         except Exception:
             pass
         audit("settings_update", "settings", str(current_version), "rolled_back", {"error_type": type(exc).__name__})

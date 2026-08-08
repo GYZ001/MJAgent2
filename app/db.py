@@ -231,6 +231,9 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     supersedes_call_id INTEGER,
     superseded_by_call_id INTEGER,
     recovery_disposition TEXT,
+    first_chunk_at REAL,
+    last_chunk_at REAL,
+    received_chars INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(supersedes_call_id) REFERENCES provider_calls(id),
     FOREIGN KEY(superseded_by_call_id) REFERENCES provider_calls(id)
 );
@@ -1228,6 +1231,9 @@ MIGRATIONS = (
     "ALTER TABLE provider_calls ADD COLUMN supersedes_call_id INTEGER",
     "ALTER TABLE provider_calls ADD COLUMN superseded_by_call_id INTEGER",
     "ALTER TABLE provider_calls ADD COLUMN recovery_disposition TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN first_chunk_at REAL",
+    "ALTER TABLE provider_calls ADD COLUMN last_chunk_at REAL",
+    "ALTER TABLE provider_calls ADD COLUMN received_chars INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE workflow_runs ADD COLUMN recovered_by_run_id TEXT",
     "ALTER TABLE workflow_runs ADD COLUMN recovered_at REAL",
     "ALTER TABLE workflow_runs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
@@ -1910,6 +1916,19 @@ def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
         "_original_chars": len(raw),
         "_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
     }
+    priority_keys = (
+        "generation_contract",
+        "published_output_contract",
+        "prompt_version",
+        "stage",
+        "stage_key",
+        "call_role",
+        "call_role_label",
+        "repair_round",
+        "gateway",
+        "run_id",
+        "step_run_id",
+    )
     projected_items: list[tuple[str, Any]] = []
     for key in value:
         item = value[key]
@@ -1922,6 +1941,16 @@ def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
         else:
             projected = {"type": type(item).__name__}
         projected_items.append((str(key), projected))
+    projected_by_key = dict(projected_items)
+    for key in priority_keys:
+        if key not in projected_by_key:
+            continue
+        candidate = {**summary, key: projected_by_key[key]}
+        encoded = json.dumps(
+            candidate, ensure_ascii=False, sort_keys=True, default=str,
+        )
+        if len(encoded) <= max_chars:
+            summary[key] = projected_by_key[key]
     projected_items.sort(
         key=lambda pair: (
             len(json.dumps(pair[1], ensure_ascii=False, default=str)),
@@ -1929,6 +1958,8 @@ def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
         )
     )
     for key, projected in projected_items:
+        if key in summary:
+            continue
         candidate = {**summary, str(key): projected}
         encoded = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
         if len(encoded) > max_chars:
@@ -2089,6 +2120,31 @@ def _start_provider_call_inner(
         )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def update_provider_call_progress(
+    call_id: int,
+    *,
+    received_chars: int,
+    chunk_at: float | None = None,
+) -> None:
+    """Persist bounded stream heartbeat data without affecting business flow."""
+    if not call_id:
+        return
+    stamp = float(chunk_at or now())
+    conn = get_conn()
+    try:
+        conn.execute(
+            """UPDATE provider_calls
+                  SET first_chunk_at=COALESCE(first_chunk_at,?),
+                      last_chunk_at=?,
+                      received_chars=MAX(received_chars,?)
+                WHERE id=? AND status='RUNNING'""",
+            (stamp, stamp, max(0, int(received_chars)), call_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
 
 
 def finish_provider_call(call_id: int, status: str, http_status: int | None,

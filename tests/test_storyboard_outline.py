@@ -213,16 +213,16 @@ def test_outline_brief_lookup() -> None:
 
 
 def test_functional_extra_spoken_is_preserved_in_outline() -> None:
-    """测验员是允许开口的功能性路人，不应被降级为旁白。"""
+    """已签发的合成功能身份可开口，不应被降级为旁白。"""
     bible = _bible_with("萧炎", "萧薰儿")
     names = {c.name for c in bible.characters}
     outline = _outline(_valid_beats(),
-                       covers={3: "萧炎测验斗之气仅三段，被测验员宣布为低级"})
+                       covers={3: "萧炎测验斗之气仅三段，被路人甲宣布为低级"})
     assert _covers_outside_spoken(outline.shots[2].covers, names) == []
 
     changed = downgrade_outline_offbible_spoken(outline, bible)
     assert changed == []
-    assert outline.shots[2].covers == "萧炎测验斗之气仅三段，被测验员宣布为低级"
+    assert outline.shots[2].covers == "萧炎测验斗之气仅三段，被路人甲宣布为低级"
     assert validate_storyboard_outline(outline, _screenplay(), 50, bible=bible) == []
 
 

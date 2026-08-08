@@ -95,6 +95,19 @@ def test_extract_json_combines_inner_quote_and_missing_root_repairs() -> None:
     }
 
 
+def test_extract_json_closes_array_before_next_object_field() -> None:
+    text = (
+        '{"approved_adaptations":["保留核心冲突",'
+        '"简化露骨描写",'
+        '"forbidden_additions":["禁止原创人物"]}'
+    )
+
+    assert extract_json(text) == {
+        "approved_adaptations": ["保留核心冲突", "简化露骨描写"],
+        "forbidden_additions": ["禁止原创人物"],
+    }
+
+
 def test_extract_json_does_not_guess_multiple_missing_closers() -> None:
     text = '{"episode_no": 9, "events": [{"event_id": "E1"'
 

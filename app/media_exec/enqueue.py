@@ -899,23 +899,8 @@ def _close_reused_preflight_job(job_id: str) -> None:
 
 
 def _canonical_functional_speaker(name: str) -> str:
-    """把明确的场所前缀角色收敛为角色策略允许的通用功能标签。"""
-    import re
-
-    value = (name or "").strip()
-    prefixes = ("宝阁", "店铺", "客栈", "宗门", "山门", "府中", "府内")
-    if value.endswith("管事") and value[:-2] in prefixes:
-        return "管事"
-    # 小说常以衣着/外貌 + 临时身份 + 甲乙区分一次性角色，例如“绿袍修士乙”。
-    # 这不是可跨镜追踪的真名，不能临时铸造成角色圣经实体；收敛为既有功能路人
-    # 标签，衣着与职业语义仍由 action_desc / 首尾帧保留。
-    match = re.fullmatch(
-        r".{1,6}(?:修士|男子|女子|青年|少年|少女|老者|大汉|陌生人)(甲|乙|丙|丁)",
-        value,
-    )
-    if match:
-        return f"路人{match.group(1)}"
-    return value
+    """Do not infer functional identity from a source label's wording."""
+    return (name or "").strip()
 
 
 def _auto_normalize_functional_speaker(

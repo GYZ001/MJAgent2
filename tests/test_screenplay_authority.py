@@ -465,6 +465,86 @@ def test_published_authority_survives_later_scene_discovery_updates() -> None:
     assert resolved.input_fingerprint == published_authority.input_fingerprint
 
 
+def _seed_lagging_bible_pointer_then_append_alias(
+    published_artifact: dict,
+) -> tuple[object, dict]:
+    bible, base_bible_artifact = _seed_test_bible_authority()
+    published_projection = json.loads(json.dumps(bible))
+    published_projection["characters"][0]["appearance_canonical"] += "。"
+    published_projection["scenes"] = [{
+        "name": "宗门广场",
+        "scene_canonical": "清晨宗门广场石阶与主殿形成稳定空间结构",
+        "aliases": [],
+        "discovery_sources": ["剧本阶段发现"],
+    }]
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(published_projection, ensure_ascii=False),),
+    )
+    conn.commit()
+    published_authority = _republish_as_screenplay_v4(published_artifact)
+
+    appended_projection = json.loads(json.dumps(published_projection))
+    appended_projection["scenes"][0]["aliases"].append("山门广场 / 清晨")
+    next_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_bible",
+        scope_type="project",
+        scope_id="project-generic",
+        status="approved",
+        trust_level="T2",
+        content=appended_projection,
+        parent_artifact_ids=[base_bible_artifact["id"]],
+        contract_version="character-bible-1.0.0",
+        prompt_version="reactive-scene-bible-1.0.0",
+        model_snapshot={
+            "operation": "incremental_scene_alias",
+            "scene_name": "宗门广场",
+        },
+    ))
+    conn.execute(
+        "UPDATE projects SET bible_json=?,bible_artifact_id=? "
+        "WHERE id='project-generic'",
+        (
+            json.dumps(appended_projection, ensure_ascii=False),
+            next_artifact["id"],
+        ),
+    )
+    conn.commit()
+    return published_authority, appended_projection
+
+
+def test_published_authority_recovers_projection_ahead_of_bible_artifact() -> None:
+    _screenplay_value, published_artifact, _legacy_authority = _published_case()
+    published_authority, _projection = (
+        _seed_lagging_bible_pointer_then_append_alias(published_artifact)
+    )
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+
+    assert resolved.artifact_id == published_artifact["id"]
+    assert resolved.input_fingerprint == published_authority.input_fingerprint
+
+
+def test_lagging_bible_recovery_rejects_mutation_after_recorded_append() -> None:
+    _screenplay_value, published_artifact, _legacy_authority = _published_case()
+    _published_authority, projection = (
+        _seed_lagging_bible_pointer_then_append_alias(published_artifact)
+    )
+    projection["characters"][0]["appearance_canonical"] = (
+        "银发青年，白色长衣，身形高挑，佩戴一枚崭新的金色令牌"
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='project-generic'",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="input_fingerprint"):
+        resolve_current_screenplay_authority("episode-generic")
+
+
 def test_published_authority_rejects_later_existing_character_mutation() -> None:
     _screenplay_value, published_artifact, _legacy_authority = _published_case()
     bible, _artifact = _seed_test_bible_authority()

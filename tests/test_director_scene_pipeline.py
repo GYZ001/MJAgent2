@@ -35,6 +35,7 @@ from app.validators import (
     validate_storyboard_outline_scene_alignment,
     validate_storyboard_screenplay_scene_alignment,
 )
+from app.storyboard_supervisor import _storyboard_scene_pack_batches
 
 
 def _shot(
@@ -832,4 +833,46 @@ def test_extra_physical_scene_does_not_shift_screenplay_context_contracts() -> N
         ["Establish the family relationship."],
         [],
         ["Establish the school destination."],
+    ]
+
+
+def test_long_scene_is_partitioned_into_bounded_model_outputs() -> None:
+    context = StoryboardSceneContext(
+        scene_id="SC001",
+        scene_no=1,
+        scene_name="长场景",
+        scene_time="日",
+        entry_state="场景开始",
+        exit_state="场景结束",
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        scene_contexts=[context],
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=shot_no,
+                scene_id="SC001",
+                beat=f"第 {shot_no} 镜",
+            )
+            for shot_no in range(1, 19)
+        ],
+    )
+
+    batches = _storyboard_scene_pack_batches(
+        outline,
+        max_shots=8,
+    )
+
+    assert [
+        sorted(batch["shot_nos"])
+        for batch in batches
+    ] == [
+        list(range(1, 9)),
+        list(range(9, 17)),
+        [17, 18],
+    ]
+    assert [batch["key"] for batch in batches] == [
+        "SC001:1-8",
+        "SC001:9-16",
+        "SC001:17-18",
     ]

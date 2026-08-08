@@ -100,6 +100,13 @@ export function runFailureGuidance(status?: string | null) {
   if (status === "PARTIAL") return "部分步骤未完成，可查看详情后受控重试。";
   return "运行未完成，可查看错误详情后重试或返回源页面修正。";
 }
+export function shouldFocusRunRow(
+  focusToken: string | undefined,
+  handledFocusToken: string,
+  hasSelectedRow: boolean,
+) {
+  return Boolean(focusToken && focusToken !== handledFocusToken && hasSelectedRow);
+}
 function formatTime(value?: number | null) {
   return value ? new Date(value * 1000).toLocaleString() : "—";
 }
@@ -437,6 +444,7 @@ export default function RunCenter({
   >("");
   const requestSeq = useRef(0);
   const selectedRowRef = useRef<HTMLButtonElement | null>(null);
+  const handledFocusTokenRef = useRef("");
 
   const queryPath = useMemo(() => {
     const p = new URLSearchParams({
@@ -592,13 +600,21 @@ export default function RunCenter({
       });
   }, [projectId, selected]);
   useEffect(() => {
-    if (!focusToken || !selectedRowRef.current) return;
-    selectedRowRef.current.scrollIntoView({
+    if (!focusToken) {
+      handledFocusTokenRef.current = "";
+      return;
+    }
+    const selectedRow = selectedRowRef.current;
+    if (!selectedRow || !shouldFocusRunRow(
+      focusToken, handledFocusTokenRef.current, true,
+    )) return;
+    handledFocusTokenRef.current = focusToken;
+    selectedRow.scrollIntoView({
       block: "center",
       behavior: "smooth",
     });
-    selectedRowRef.current.focus();
-    selectedRowRef.current.classList.remove("deep-linked");
+    selectedRow.focus();
+    selectedRow.classList.remove("deep-linked");
     requestAnimationFrame(() =>
       selectedRowRef.current?.classList.add("deep-linked"),
     );

@@ -4,23 +4,9 @@ from __future__ import annotations
 import re
 
 
-# Only deterministic, non-proper role labels are allowed through this path. A named or
-# recurring character must still enter the character bible and receive normal assets.
-FUNCTIONAL_EXTRA_ROLES = frozenset({
-    "测验员", "裁判", "主持人", "司仪", "店员", "服务员", "侍者", "守卫", "门卫",
-    "护卫", "保安", "司机", "医生", "护士", "记者", "警员", "官差", "伙计", "小二",
-    "传令兵", "随从", "仆人", "侍女", "宫女", "太监", "管家", "管事", "长老",
-})
-FUNCTIONAL_EXTRA_BASES = frozenset({
-    "路人", "围观者", "群众", "族人", "弟子", "学生", "顾客", "客人", "村民", "士兵",
-    "护卫", "守卫", "侍女", "仆人", "记者", "警员",
-})
-FUNCTIONAL_EXTRA_BARE_LABELS = frozenset({"路人", "围观者"})
-FUNCTIONAL_EXTRA_MODIFIERS = frozenset({
-    "年轻", "中年", "年长", "老年", "老", "男", "女", "男性", "女性",
-})
-_EXTRA_INDEX_RE = re.compile(r"(?:甲|乙|丙|丁|A|B|C|D|[1-9]\d*)$", re.I)
-_ROLE_ORDINAL_RE = re.compile(r"(?:[一二三四五六七八九十]|[1-9]\d*)$")
+_GENERATED_FUNCTIONAL_ID_RE = re.compile(
+    r"^(?:路人(?:甲|乙|丙|丁|[1-9]\d*)|functional:[A-Za-z0-9_.:-]+)$"
+)
 _COLLECTIVE_ROLE_EXACT = frozenset({
     "人群", "众人", "群众", "大家", "人们", "百姓", "观众", "家族子弟", "族人", "子弟",
 })
@@ -38,45 +24,52 @@ _SINGULAR_QUANTIFIER_RE = re.compile(r"^(?:一|1)(?:名|位|个)")
 
 
 def is_functional_extra(name: str) -> bool:
-    """Return whether ``name`` is an unnamed, non-persistent background role."""
+    """Recognize only an already-minted synthetic functional identity ID.
+
+    Whether a source character is functional is decided upstream by the typed
+    identity contract. Names, occupations, ages and honorifics are never used
+    here as a business classifier.
+    """
     value = (name or "").strip()
-    if not value or len(value) > 8:
-        return False
-    if (
-        value in FUNCTIONAL_EXTRA_ROLES
-        or value in FUNCTIONAL_EXTRA_BARE_LABELS
-    ):
-        return True
-    if any(
-        value == modifier + role
-        for modifier in FUNCTIONAL_EXTRA_MODIFIERS
-        for role in FUNCTIONAL_EXTRA_ROLES
-    ):
-        return True
-    if any(
-        value.endswith(role)
-        and _ROLE_ORDINAL_RE.fullmatch(value[:-len(role)]) is not None
-        for role in FUNCTIONAL_EXTRA_ROLES
-    ):
-        return True
-    return any(
-        value.startswith(base) and _EXTRA_INDEX_RE.fullmatch(value[len(base):]) is not None
-        for base in FUNCTIONAL_EXTRA_BASES | FUNCTIONAL_EXTRA_ROLES
+    return bool(value and _GENERATED_FUNCTIONAL_ID_RE.fullmatch(value))
+
+
+def resolution_declares_functional_identity(value: object) -> bool:
+    """Accept current and historical typed resolution records.
+
+    These are persisted enum values, not role/name classifiers. The source
+    label itself never decides whether an identity is functional.
+    """
+    resolution = (
+        str(value.get("resolution") or "").strip()
+        if isinstance(value, dict)
+        else str(value or "").strip()
+    )
+    return (
+        resolution == "functional_identity"
+        or resolution == "functional_extra"
     )
 
 
+def typed_functional_identity_names(screenplay: object | None) -> set[str]:
+    """Return identities explicitly typed as functional by published data."""
+    if screenplay is None:
+        return set()
+    return {
+        str(getattr(voice, "speaker_id", "") or "").strip()
+        for voice in (getattr(screenplay, "voice_bible", None) or [])
+        if (
+            str(getattr(voice, "role_type", "") or "").strip()
+            == "functional_character"
+            and str(getattr(voice, "speaker_id", "") or "").strip()
+        )
+    }
+
+
 def generic_functional_extra_role(name: str) -> str | None:
-    """Collapse a one-character surname plus minor job title to its generic role."""
+    """Return an existing synthetic ID; never infer identity from a role name."""
     value = (name or "").strip()
-    if not value:
-        return None
-    if is_functional_extra(value):
-        return value
-    for role in sorted(FUNCTIONAL_EXTRA_ROLES, key=len, reverse=True):
-        prefix = value[:-len(role)] if value.endswith(role) else ""
-        if role and re.fullmatch(r"[\u3400-\u9fff]", prefix):
-            return role
-    return None
+    return value if is_functional_extra(value) else None
 
 
 def is_collective_role(name: str) -> bool:
@@ -102,6 +95,7 @@ def is_allowed_storyboard_character(
     bible_names: set[str] | frozenset[str],
     *,
     allow_without_bible: bool = True,
+    declared_functional_names: set[str] | frozenset[str] = frozenset(),
 ) -> bool:
     """判定一个镜头角色标签是否能进入渲染合同。
 
@@ -116,6 +110,7 @@ def is_allowed_storyboard_character(
         (not bible_names and allow_without_bible)
         or value in bible_names
         or is_functional_extra(value)
+        or value in declared_functional_names
         or is_collective_role(value)
     )
 
@@ -130,9 +125,16 @@ def collective_role_anchor(name: str) -> str:
     )
 
 
-def functional_extra_anchor(name: str) -> str:
+def functional_extra_anchor(
+    name: str,
+    *,
+    declared_functional_names: set[str] | frozenset[str] = frozenset(),
+) -> str:
     """Build a stable visual instruction without minting a character-bible identity."""
-    if not is_functional_extra(name):
+    if (
+        not is_functional_extra(name)
+        and name not in declared_functional_names
+    ):
         raise ValueError(f"not a functional extra: {name}")
     return (
         f"功能性路人「{name}」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、"
@@ -143,10 +145,9 @@ def functional_extra_anchor(name: str) -> str:
 def functional_extra_policy_text() -> str:
     """Shared prompt wording for the deterministic storyboard contract."""
     return (
-        "允许无姓名、无需跨集定妆的功能性路人进入 characters 并开口，例如测验员、裁判、"
-        "店员、守卫、路人甲/乙/丙、族人甲、弟子乙；这类角色必须使用通用身份标签。"
-        "原文只写绿袍男子/青衣女子/大汉/陌生人等过渡称谓时，不得直接放行："
-        "必须先向后解析真名，"
-        "无真名则改用不冲突的路人甲/乙/丙/丁；"
-        "并在 action_desc 或首尾帧中明确可见。任何具体姓名、重要配角或跨镜持续角色仍必须来自角色圣经"
+        "功能身份只能引用剧本 identity_contracts 中已声明为 "
+        "role_type=functional_character 的稳定 identity_id；"
+        "不得根据姓名、职业、年龄、服饰、称号或固定词表自行判断谁是路人。"
+        "该身份仍须在 action_desc 或首尾帧中明确可见；"
+        "具名或跨镜持续角色必须使用 identity_contracts/角色圣经中的 canonical identity"
     )

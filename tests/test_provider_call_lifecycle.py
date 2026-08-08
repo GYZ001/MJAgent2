@@ -489,6 +489,9 @@ def test_provider_metadata_truncation_preserves_valid_json(tmp_path, monkeypatch
         "text-model",
         meta={
             "stage": "screenplay",
+            "generation_contract": "screenplay-generation-ir.v1.1",
+            "published_output_contract": "EpisodeScreenplay@4.0.0",
+            "prompt_version": "screenplay-compact-ir-5.1.0",
             "latest_errors": ["错误" * 500 for _ in range(20)],
         },
         request_json={"messages": []},
@@ -502,6 +505,9 @@ def test_provider_metadata_truncation_preserves_valid_json(tmp_path, monkeypatch
     assert metadata["_truncated"] is True
     assert metadata["_original_chars"] > 800
     assert metadata["_sha256"]
+    assert metadata["generation_contract"] == "screenplay-generation-ir.v1.1"
+    assert metadata["published_output_contract"] == "EpisodeScreenplay@4.0.0"
+    assert metadata["prompt_version"] == "screenplay-compact-ir-5.1.0"
 
 
 def test_semantic_attempt_id_separates_new_repair_from_crash_recovery(
@@ -618,6 +624,7 @@ def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:
             return Response()
 
     monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "hiagent")
     monkeypatch.setattr(hiagent, "_model_connection", lambda *_args: ("https://provider", {"x": "y"}))
     monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model")
     monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 1)
@@ -885,3 +892,32 @@ def test_jobs_overview_includes_harness_runs_and_deduplicates_linked_work(monkey
     assert result["recent"][0]["kind"] == "character_references"
     assert result["recent"][0]["project_name"] == "Project"
     assert all(row["id"] not in {"job_linked", "screenplay_e1"} for row in result["recent"])
+
+
+def test_provider_stream_progress_persists_heartbeat(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-progress.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    call_id = db.start_provider_call(
+        "chat",
+        "text-model",
+        meta={"stage": "screenplay"},
+        request_json={"messages": []},
+    )
+
+    db.update_provider_call_progress(
+        call_id,
+        received_chars=8192,
+        chunk_at=1234.5,
+    )
+    row = db.get_conn().execute(
+        "SELECT first_chunk_at,last_chunk_at,received_chars "
+        "FROM provider_calls WHERE id=?",
+        (call_id,),
+    ).fetchone()
+
+    assert row["first_chunk_at"] == 1234.5
+    assert row["last_chunk_at"] == 1234.5
+    assert row["received_chars"] == 8192

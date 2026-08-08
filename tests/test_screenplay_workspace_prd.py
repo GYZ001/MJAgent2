@@ -103,7 +103,6 @@ def test_server_draft_survives_version_conflict(client) -> None:
     saved = client.put("/api/episodes/e1/screenplay/draft", json={
         "content": draft,
         "baseline_artifact_id": "art_stale",
-        "constraints": {"occurrence_ids": ["dlg_one"]},
     })
     assert saved.status_code == 200
 
@@ -119,51 +118,28 @@ def test_server_draft_survives_version_conflict(client) -> None:
     assert recovered["content"]["title"] == draft["title"]
 
 
-def test_constraint_only_server_draft_does_not_become_empty_screenplay(client) -> None:
+def test_removed_constraint_only_draft_is_rejected(client) -> None:
     _seed_episode(with_artifact=False)
     saved = client.put("/api/episodes/e1/screenplay/draft", json={
-        "constraints": {"occurrence_ids": ["dlg_one"]},
+        "constraints": {"occurrence_ids": ["legacy"]},
         "baseline_artifact_id": None,
     })
 
-    assert saved.status_code == 200
-    recovered = client.get("/api/episodes/e1/screenplay/draft").json()["draft"]
-    assert recovered["content"] is None
-    assert recovered["constraints"] == {"occurrence_ids": ["dlg_one"]}
+    assert saved.status_code == 422
 
 
-def test_repeated_dialogue_text_has_distinct_occurrence_ids() -> None:
-    conn = db.get_conn()
-    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','planned',1)")
-    source = "【第一章】\n甲：「我会回来。」\n\n中间发生了很多事。\n\n乙：「我会回来。」"
-    conn.execute(
-        "INSERT INTO chapters(project_id,idx,title,content) VALUES('p1',1,'第一章',?)",
-        (source,),
-    )
-    conn.execute(
-        "INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,created_at) "
-        "VALUES('e1','p1',1,'E','[1]',1)"
-    )
-    conn.commit()
+def test_screenplay_preflight_has_no_dialogue_selection_budget(client) -> None:
+    _seed_episode(with_artifact=False)
 
-    detail = api.episode_detail("e1", view="script")
-    matches = [
-        item for item in detail["source_dialogue_occurrences"]
-        if item["text"] == "我会回来。"
-    ]
-    assert len(matches) == 2
-    assert matches[0]["id"] != matches[1]["id"]
-    assert matches[0]["offset"] != matches[1]["offset"]
+    response = client.post("/api/episodes/e1/screenplay/preflight", json={})
 
-
-def test_single_character_dialogue_requires_occurrence_proof() -> None:
-    with pytest.raises(HTTPException, match="台词过短"):
-        api._normalize_required_dialogue_lines(["飞！"])
-
-    assert api._normalize_required_dialogue_lines(
-        ["飞！"],
-        allow_single_character=True,
-    ) == ["飞！"]
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["input"]["source_chars"] >= 0
+    assert "selected_count" not in payload
+    assert "selected_seconds" not in payload
+    assert "hard_exceeded" not in payload
+    assert "target_duration_s" not in payload
 
 
 def test_character_discovery_bootstraps_placeholder_bible(monkeypatch) -> None:
@@ -209,15 +185,6 @@ def test_character_discovery_bootstraps_placeholder_bible(monkeypatch) -> None:
         "generate_portraits": False,
     }
     assert result["resolutions"] == []
-
-
-def test_nested_curly_quotes_do_not_truncate_dialogue_occurrence() -> None:
-    source = "【第一章】\n“三段？嘿嘿，果然不出我所料，这个“天才”这一年又是在原地踏步！”"
-    items = api._screenplay_occurrences(source, [1])
-    assert len(items) == 1
-    assert items[0]["text"] == "三段？嘿嘿，果然不出我所料，这个“天才”这一年又是在原地踏步！"
-    assert "“天才”这一年又是在原地踏步" in items[0]["context"]
-    assert items[0]["estimated_seconds"] > 7
 
 
 def test_target_duration_can_be_changed_before_generation_and_versions_constraints(client) -> None:
@@ -520,12 +487,16 @@ def test_unchanged_legacy_screenplay_is_canonicalized_before_noop_return(monkeyp
         }))
 
     assert result["saved"] is True
-    assert result["unchanged"] is False
+    assert result["unchanged"] is True
     published = json.loads(conn.execute(
         "SELECT screenplay_json FROM episodes WHERE id='e1'"
     ).fetchone()["screenplay_json"])
-    assert "青衣人" not in published["scene_outline"][0]["characters"]
-    assert "路人甲" in published["scene_outline"][0]["characters"]
+    assert "青衣人" in published["scene_outline"][0]["characters"]
+    resolutions = json.loads(conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone()["screenplay_character_resolutions"])
+    assert resolutions[0]["canonical_name"] == "青衣人"
+    assert resolutions[0]["resolution"] == "functional_identity"
 
 
 def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:
@@ -558,21 +529,6 @@ def test_invalid_published_certificate_recommends_revalidation(monkeypatch) -> N
     assert "重新校验" in state["message"]
 
 
-def test_dialogue_grouping_only_suggests_clear_semantic_pairs() -> None:
-    source = "\n".join([
-        "甲：「你为什么来？」",
-        "乙：「因为我要救他。」",
-        "丙：「外面下雨了。」",
-        "丁：「灯也亮了。」",
-    ])
-    items = api._screenplay_occurrences(source, [1])
-    by_text = {item["text"]: item for item in items}
-    assert by_text["你为什么来？"]["group_id"] == by_text["因为我要救他。"]["group_id"]
-    assert by_text["你为什么来？"]["group_id"] is not None
-    assert by_text["外面下雨了。"]["group_id"] is None
-    assert by_text["灯也亮了。"]["group_id"] is None
-
-
 def test_1646_episode_picker_and_light_status_reduce_minute_payload_over_80_percent() -> None:
     conn = db.get_conn()
     conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','planned',1)")
@@ -601,6 +557,6 @@ def test_script_page_has_pure_navigation_and_no_pipe_parser() -> None:
     assert "window.confirm(`确认恢复" not in source
     assert "查看分镜台 →" in source
     assert "go('board', projectId, ep.id)" in source
-    assert "本集目标时长" in source
-    assert "/target-duration" in source
-    assert "整集节奏预算" in source
+    assert "必保留原文台词" not in source
+    assert "/target-duration" not in source
+    assert "required_dialogue" not in source

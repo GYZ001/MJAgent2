@@ -52,11 +52,18 @@ class SceneBlockNode(BaseModel):
     conflict: str = ""
     turn: str = ""
     source_basis: str = ""
+    previous_scene_exit_state: str = ""
+    opening_image: str = ""
+    agency_contracts: list[dict[str, str]] = Field(default_factory=list)
     entry_state: str = ""
     exit_state: str = ""
     context_requirements: list[str] = Field(default_factory=list)
     action_blocks: list[ActionBlockNode] = Field(default_factory=list)
     dialogue_turns: list[DialogueTurnNode] = Field(default_factory=list)
+    # Stable references preserving the authored action/dialogue interleave.
+    # Historical documents leave this empty and retain the legacy
+    # actions-then-dialogues projection.
+    body_order: list[str] = Field(default_factory=list)
 
 
 class ScreenplayMetadata(BaseModel):
@@ -170,6 +177,9 @@ def document_to_screenplay(doc: ScreenplayDocument) -> EpisodeScreenplay:
             conflict=block.conflict,
             turn=block.turn,
             source_basis=block.source_basis,
+            previous_scene_exit_state=block.previous_scene_exit_state,
+            opening_image=block.opening_image,
+            agency_contracts=list(block.agency_contracts),
             entry_state=block.entry_state,
             exit_state=block.exit_state,
             context_requirements=list(block.context_requirements),
@@ -260,7 +270,31 @@ def rederive_projections(doc: ScreenplayDocument) -> ScreenplayDocument:
         for turn in block.dialogue_turns:
             if turn.turn_id in chain_by_turn:
                 turn.chain_id = chain_by_turn[turn.turn_id]
+        _normalize_scene_body_order(block)
     return out
+
+
+def _normalize_scene_body_order(block: SceneBlockNode) -> None:
+    if not block.body_order:
+        return
+    known = {
+        *(item.action_id for item in block.action_blocks if item.action_id),
+        *(item.turn_id for item in block.dialogue_turns if item.turn_id),
+    }
+    normalized = list(dict.fromkeys(
+        value for value in block.body_order if value in known
+    ))
+    normalized.extend(
+        item.action_id
+        for item in block.action_blocks
+        if item.action_id and item.action_id not in normalized
+    )
+    normalized.extend(
+        item.turn_id
+        for item in block.dialogue_turns
+        if item.turn_id and item.turn_id not in normalized
+    )
+    block.body_order = normalized
 
 
 def _dialogue_identity(value: str) -> str:
@@ -422,7 +456,12 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
             if found is None:
                 continue
             block, node = found
+            previous_turn_id = node.turn_id
             node.turn_id = f"{chain.chain_id}-T{turn_index + 1}"
+            block.body_order = [
+                node.turn_id if item == previous_turn_id else item
+                for item in block.body_order
+            ]
             node.chain_id = chain.chain_id
             node.function = turn.function
             node.source_text = turn.source_text
@@ -475,6 +514,15 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
                 source_text=turn.source_text,
             )
             block.dialogue_turns.insert(insert_at, node)
+            sibling_id = sibling.turn_id if previous is not None or following is not None else ""
+            if block.body_order:
+                if sibling_id and sibling_id in block.body_order:
+                    order_at = block.body_order.index(sibling_id)
+                    if previous is not None:
+                        order_at += 1
+                    block.body_order.insert(order_at, node.turn_id)
+                else:
+                    block.body_order.append(node.turn_id)
             matches[key] = (block, node)
 
     # Baseline prose can contain the same spoken line twice, for example once
@@ -531,17 +579,57 @@ def render_full_script_text(doc: ScreenplayDocument) -> str:
         if not heading.startswith("【"):
             heading = f"【场{block.scene_no}】{heading}"
         parts.append(heading)
-        if block.action_blocks:
-            for action in block.action_blocks:
-                if action.text.strip():
-                    parts.append(action.text.strip())
-        elif block.summary.strip():
-            parts.append(block.summary.strip())
-        for turn in block.dialogue_turns:
+        if not block.body_order:
+            if block.action_blocks:
+                for action in block.action_blocks:
+                    if action.text.strip():
+                        parts.append(action.text.strip())
+            elif block.summary.strip():
+                parts.append(block.summary.strip())
+            for turn in block.dialogue_turns:
+                speaker = (turn.speaker or "旁白").strip()
+                line = (turn.line or "").strip()
+                if line:
+                    parts.append(f"{speaker}：{line}")
+            parts.append("")
+            continue
+        action_by_id = {
+            action.action_id: action for action in block.action_blocks
+        }
+        turn_by_id = {
+            turn.turn_id: turn for turn in block.dialogue_turns
+        }
+        emitted: set[str] = set()
+
+        def emit_action(action: ActionBlockNode) -> None:
+            if action.text.strip():
+                parts.append(action.text.strip())
+
+        def emit_turn(turn: DialogueTurnNode) -> None:
             speaker = (turn.speaker or "旁白").strip()
             line = (turn.line or "").strip()
             if line:
                 parts.append(f"{speaker}：{line}")
+
+        for node_id in block.body_order:
+            if node_id in emitted:
+                continue
+            if node_id in action_by_id:
+                emit_action(action_by_id[node_id])
+                emitted.add(node_id)
+            elif node_id in turn_by_id:
+                emit_turn(turn_by_id[node_id])
+                emitted.add(node_id)
+        for action in block.action_blocks:
+            if action.action_id not in emitted:
+                emit_action(action)
+                emitted.add(action.action_id)
+        if not block.action_blocks and block.summary.strip():
+            parts.append(block.summary.strip())
+        for turn in block.dialogue_turns:
+            if turn.turn_id not in emitted:
+                emit_turn(turn)
+                emitted.add(turn.turn_id)
         parts.append("")  # blank between scenes
     text = "\n".join(parts).strip()
     return text
@@ -1089,6 +1177,11 @@ def split_dialogue_turn_by_capacity(
 
 def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
     blocks: list[SceneBlockNode] = []
+    preserve_body_order = (
+        str(script.source_text_range or "").strip().startswith(
+            "screenplay-generation-ir.v1"
+        )
+    )
     known_speakers: dict[str, str] = {}
     authoritative_speakers_by_line: dict[str, str] = {}
     for scene in script.scene_outline or []:
@@ -1117,7 +1210,10 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
         )
         for scene in script.scene_outline:
             sid = f"SC{int(scene.scene_no):02d}"
-            body = parsed_body.get(int(scene.scene_no), {"actions": [], "turns": []})
+            body = parsed_body.get(
+                int(scene.scene_no),
+                {"actions": [], "turns": [], "order": []},
+            )
             actions = [
                 ActionBlockNode(action_id=f"AC{int(scene.scene_no):02d}-{i:02d}", text=t)
                 for i, t in enumerate(body.get("actions") or [], start=1)
@@ -1133,6 +1229,16 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
                 )
                 for i, t in enumerate(body.get("turns") or [], start=1)
             ]
+            body_order = [
+                (
+                    actions[index].action_id
+                    if kind == "action" and 0 <= index < len(actions)
+                    else turns[index].turn_id
+                    if kind == "dialogue" and 0 <= index < len(turns)
+                    else ""
+                )
+                for kind, index in (body.get("order") or [])
+            ]
             # If no body turns, project from dialogue_chains proportionally later
             blocks.append(SceneBlockNode(
                 scene_id=sid,
@@ -1144,11 +1250,20 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
                 conflict=scene.conflict or "",
                 turn=scene.turn or "",
                 source_basis=scene.source_basis or "",
+                previous_scene_exit_state=(
+                    scene.previous_scene_exit_state or ""
+                ),
+                opening_image=scene.opening_image or "",
+                agency_contracts=list(scene.agency_contracts or []),
                 entry_state=scene.entry_state or "",
                 exit_state=scene.exit_state or "",
                 context_requirements=list(scene.context_requirements or []),
                 action_blocks=actions,
                 dialogue_turns=turns,
+                body_order=(
+                    [value for value in body_order if value]
+                    if preserve_body_order else []
+                ),
             ))
         # If the prose body has no dialogue, place each authoritative turn in
         # the closest scene instead of distributing unrelated chains by index.
@@ -1168,6 +1283,8 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
                         function=turn.function,
                         source_text=turn.source_text,
                     ))
+                    if preserve_body_order:
+                        block.body_order.append(f"{chain.chain_id}-T{idx}")
         return blocks
 
     # Fallback: parse full_script_text only
@@ -1187,23 +1304,39 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
             )
         ]
     for scene_no, body in sorted(parsed.items()):
+        actions = [
+            ActionBlockNode(action_id=f"AC{scene_no:02d}-{i:02d}", text=t)
+            for i, t in enumerate(body.get("actions") or [], start=1)
+        ]
+        turns = [
+            DialogueTurnNode(
+                turn_id=f"DC{scene_no}-T{i}",
+                chain_id=f"DC{scene_no}",
+                speaker=t.get("speaker", ""),
+                line=t.get("line", ""),
+            )
+            for i, t in enumerate(body.get("turns") or [], start=1)
+        ]
+        body_order = [
+            (
+                actions[index].action_id
+                if kind == "action" and 0 <= index < len(actions)
+                else turns[index].turn_id
+                if kind == "dialogue" and 0 <= index < len(turns)
+                else ""
+            )
+            for kind, index in (body.get("order") or [])
+        ]
         blocks.append(SceneBlockNode(
             scene_id=f"SC{scene_no:02d}",
             scene_no=scene_no,
             scene_heading=body.get("heading") or f"【场{scene_no}】",
-            action_blocks=[
-                ActionBlockNode(action_id=f"AC{scene_no:02d}-{i:02d}", text=t)
-                for i, t in enumerate(body.get("actions") or [], start=1)
-            ],
-            dialogue_turns=[
-                DialogueTurnNode(
-                    turn_id=f"DC{scene_no}-T{i}",
-                    chain_id=f"DC{scene_no}",
-                    speaker=t.get("speaker", ""),
-                    line=t.get("line", ""),
-                )
-                for i, t in enumerate(body.get("turns") or [], start=1)
-            ],
+            action_blocks=actions,
+            dialogue_turns=turns,
+            body_order=(
+                [value for value in body_order if value]
+                if preserve_body_order else []
+            ),
         ))
     return blocks
 
@@ -1234,6 +1367,7 @@ def _parse_full_script_scenes(
                 "heading": line,
                 "actions": [],
                 "turns": [],
+                "order": [],
             }
             rest = heading.group(2).strip()
             if rest and "／" not in rest and "/" not in rest:
@@ -1242,7 +1376,10 @@ def _parse_full_script_scenes(
             continue
         if current is None:
             current = 1
-            scenes.setdefault(1, {"heading": "【场1】", "actions": [], "turns": []})
+            scenes.setdefault(
+                1,
+                {"heading": "【场1】", "actions": [], "turns": [], "order": []},
+            )
         dlg = _DIALOGUE_RE.match(line)
         if dlg:
             raw_speaker = dlg.group(1).strip()
@@ -1262,6 +1399,9 @@ def _parse_full_script_scenes(
                     "speaker": canonical_speaker or exact_speaker,
                     "line": spoken_line,
                 })
+                scenes[current]["order"].append(
+                    ("dialogue", len(scenes[current]["turns"]) - 1)
+                )
             elif (
                 starts_with_known_speaker
                 or raw_speaker.startswith(_VISUAL_NARRATION_SPEAKER_PREFIXES)
@@ -1272,6 +1412,9 @@ def _parse_full_script_scenes(
                 scenes[current]["actions"].append(
                     f"{raw_speaker}，{spoken_line}",
                 )
+                scenes[current]["order"].append(
+                    ("action", len(scenes[current]["actions"]) - 1)
+                )
             else:
                 # Preserve genuinely unknown named speakers so the existing
                 # character-consistency gate can reject them.
@@ -1279,8 +1422,14 @@ def _parse_full_script_scenes(
                     "speaker": raw_speaker,
                     "line": spoken_line,
                 })
+                scenes[current]["order"].append(
+                    ("dialogue", len(scenes[current]["turns"]) - 1)
+                )
         else:
             scenes[current]["actions"].append(line)
+            scenes[current]["order"].append(
+                ("action", len(scenes[current]["actions"]) - 1)
+            )
     return scenes
 
 

@@ -8,6 +8,162 @@ except NameError:  # pragma: no cover - used when importing this module directly
     from app.domain.common import *
 
 
+_SCREENPLAY_IR_WORKING_TYPES = (
+    "screenplay_generation_ir",
+    "screenplay_generation_ir_raw",
+    "screenplay_generation_ir_fidelity_patch",
+    "screenplay_generation_ir_fidelity_patch_raw",
+    "screenplay_generation_ir_scene_partition_raw",
+)
+
+
+def _clear_unpublished_screenplay_ir(
+    episode_id: str,
+    *,
+    run_id: str | None = None,
+    conn=None,
+    commit: bool = True,
+) -> int:
+    """Delete retry-only IR while preserving published screenplay lineage."""
+    conn = conn or get_conn()
+    type_marks = ",".join("?" for _ in _SCREENPLAY_IR_WORKING_TYPES)
+    params: list[object] = [
+        episode_id,
+        *_SCREENPLAY_IR_WORKING_TYPES,
+    ]
+    run_filter = ""
+    if run_id:
+        run_filter = """
+          AND a.created_by_step_run_id IN (
+                SELECT sr.id
+                  FROM step_runs sr
+                 WHERE sr.run_id IN (
+                       WITH RECURSIVE lineage(id) AS (
+                           SELECT ?
+                           UNION ALL
+                           SELECT wr.parent_run_id
+                             FROM workflow_runs wr
+                             JOIN lineage ON wr.id=lineage.id
+                            WHERE wr.parent_run_id IS NOT NULL
+                       )
+                       SELECT id FROM lineage
+                 )
+          )"""
+        params.append(run_id)
+    rows = conn.execute(
+        f"""SELECT a.id
+              FROM artifacts a
+             WHERE a.scope_type='episode'
+               AND a.scope_id=?
+               AND a.type IN ({type_marks})
+               {run_filter}
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM artifacts published,
+                          json_each(
+                              COALESCE(
+                                  published.parent_artifact_ids_json,
+                                  '[]'
+                              )
+                          ) parent
+                    WHERE published.type='screenplay_document'
+                      AND published.scope_type='episode'
+                      AND published.scope_id=a.scope_id
+                      AND published.status='approved'
+                      AND parent.value=a.id
+               )""",
+        params,
+    ).fetchall()
+    artifact_ids = [str(row["id"]) for row in rows]
+    if not artifact_ids:
+        return 0
+    marks = ",".join("?" for _ in artifact_ids)
+    conn.execute(
+        f"UPDATE step_runs SET output_artifact_id=NULL "
+        f"WHERE output_artifact_id IN ({marks})",
+        artifact_ids,
+    )
+    conn.execute(
+        f"DELETE FROM gate_decisions WHERE artifact_id IN ({marks})",
+        artifact_ids,
+    )
+    conn.execute(
+        f"DELETE FROM evaluations WHERE artifact_id IN ({marks})",
+        artifact_ids,
+    )
+    conn.execute(
+        f"DELETE FROM completion_certificates "
+        f"WHERE artifact_id IN ({marks})",
+        artifact_ids,
+    )
+    conn.execute(
+        f"UPDATE artifacts SET superseded_by_artifact_id=NULL "
+        f"WHERE superseded_by_artifact_id IN ({marks})",
+        artifact_ids,
+    )
+    conn.execute(
+        f"DELETE FROM artifacts WHERE id IN ({marks})",
+        artifact_ids,
+    )
+    if commit:
+        conn.commit()
+    return len(artifact_ids)
+
+
+def _discard_exhausted_screenplay_working_state(
+    episode_id: str,
+    *,
+    run_id: str | None,
+    message: str,
+) -> int:
+    """Make exhausted repair terminal and remove every recoverable IR."""
+    conn = get_conn()
+    stamp = now()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        revision_ids = [
+            str(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM production_revisions "
+                "WHERE episode_id=? AND kind='screenplay' AND status='active'",
+                (episode_id,),
+            ).fetchall()
+        ]
+        deleted = _clear_unpublished_screenplay_ir(
+            episode_id,
+            run_id=run_id,
+            conn=conn,
+            commit=False,
+        )
+        if revision_ids:
+            marks = ",".join("?" for _ in revision_ids)
+            conn.execute(
+                f"UPDATE production_grants "
+                f"SET revoked_at=COALESCE(revoked_at, ?) "
+                f"WHERE production_revision_id IN ({marks})",
+                (stamp, *revision_ids),
+            )
+            conn.execute(
+                f"UPDATE production_revisions SET status='superseded', "
+                f"updated_at=? WHERE id IN ({marks})",
+                (stamp, *revision_ids),
+            )
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='failed', "
+            "screenplay_error=?, screenplay_updated_at=?, "
+            "active_screenplay_run_id=NULL, "
+            "working_screenplay_artifact_id=NULL, "
+            "screenplay_production_revision_id=NULL "
+            "WHERE id=?",
+            (message[:800], stamp, episode_id),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return deleted
+
+
 def _screenplay_content_payload(value) -> dict:
     """只比较用户可编辑的语义内容，不让时间戳造成假 diff。"""
     if isinstance(value, EpisodeScreenplay):
@@ -42,116 +198,6 @@ def _screenplay_field_diff(current, proposed) -> list[dict]:
             "after_chars": len(json.dumps(new, ensure_ascii=False, default=str)),
         })
     return changed
-
-
-def _screenplay_occurrences(source_text: str, source_chapters: list[int]) -> list[dict]:
-    """按原文位置而非文本去重；ID 绑定原文哈希+偏移，原文变化后自然失效。"""
-    import hashlib
-    import re
-
-    def quoted_dialogues(text: str) -> list[tuple[int, int, str]]:
-        """用栈匹配中文成对引号，内层同类引号不得截断外层台词。"""
-        open_to_close = {"“": "”", "「": "」", "『": "』"}
-        stack: list[str] = []
-        start: int | None = None
-        spans: list[tuple[int, int, str]] = []
-        for index, char in enumerate(text):
-            if char == "\n" and stack:
-                # 未闭合引号不跨段吞掉后续原文。
-                stack.clear()
-                start = None
-                continue
-            if char in open_to_close:
-                if not stack:
-                    start = index
-                stack.append(open_to_close[char])
-                continue
-            if stack and char == stack[-1]:
-                stack.pop()
-                if not stack and start is not None:
-                    value = text[start + 1:index].strip()
-                    if len("".join(value.split())) >= 2:
-                        spans.append((start, index + 1, value))
-                    start = None
-        return spans
-
-    speaker_pattern = re.compile(
-        r"(?m)^\s*[^\n：:“「『]{1,20}(?:[（(][^）)]{1,12}[）)])?\s*[：:]\s*(?P<line>\S.{1,239})\s*$"
-    )
-    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
-    found = quoted_dialogues(source_text)
-    for match in speaker_pattern.finditer(source_text):
-        line = match.group("line").strip()
-        if len(line) >= 2 and line[0] in {"“", "「", "『"}:
-            expected_close = {"“": "”", "「": "」", "『": "』"}[line[0]]
-            if line.endswith(expected_close):
-                line = line[1:-1].strip()
-        line = line.strip("\"'")
-        if len("".join(line.split())) >= 2:
-            found.append((match.start(), match.end(), line))
-    found.sort(key=lambda item: item[0])
-    result: list[dict] = []
-    seen_positions: set[tuple[int, str]] = set()
-    accepted_spans: list[tuple[int, int, str]] = []
-    for offset, span_end, line in found:
-        identity = (offset, line)
-        if identity in seen_positions:
-            continue
-        if any(
-            previous_line == line and not (span_end <= previous_start or offset >= previous_end)
-            for previous_start, previous_end, previous_line in accepted_spans
-        ):
-            # 同一句“说话人：「台词」”可能同时命中引号和行首规则，
-            # 这是同一出现而不是重复文本的另一个位置。
-            continue
-        accepted_spans.append((offset, span_end, line))
-        seen_positions.add(identity)
-        paragraph = source_text.count("\n\n", 0, offset) + 1
-        chapter_pos = source_text.count("【", 0, offset)
-        chapter = source_chapters[min(max(chapter_pos - 1, 0), len(source_chapters) - 1)] if source_chapters else None
-        context_start = max(0, source_text.rfind("\n", 0, max(0, offset - 1)))
-        context_end = source_text.find("\n", offset + len(line))
-        if context_end < 0:
-            context_end = min(len(source_text), offset + len(line) + 80)
-        occurrence_id = "dlg_" + hashlib.sha256(
-            f"{source_hash}:{offset}:{line}".encode("utf-8")
-        ).hexdigest()[:20]
-        result.append({
-            "id": occurrence_id,
-            "text": line,
-            "order": len(result) + 1,
-            "offset": offset,
-            "chapter": chapter,
-            "paragraph": paragraph,
-            "context": source_text[context_start:context_end].strip()[:240],
-            "estimated_seconds": round(max(len("".join(line.split())) / 4.2, 0.5), 1),
-            "group_id": None,
-        })
-    # 只对具有明确问答/反驳语义的相邻台词给出建议组。组仅用于解释
-    # 上下文，每个 occurrence 仍可独立勾选，避免把“位置近”误当成语义绑定。
-    question_tail = re.compile(r"(?:[?？]|吗|呢|为何|怎么|谁|哪(?:个|里|儿)?)[。！!?？……]*$")
-    response_head = re.compile(r"^(?:是|不|没|我|你|他|她|因为|但|可|却|当然|正是|并非|胡说|住口)")
-    for idx in range(len(result) - 1):
-        first, second = result[idx], result[idx + 1]
-        close_enough = second["offset"] - first["offset"] <= 240
-        semantic_pair = bool(question_tail.search(first["text"]) and response_head.search(second["text"]))
-        explicit_rebuttal = bool(response_head.search(second["text"]) and any(
-            marker in second["context"] for marker in ("反驳", "回答", "打断")
-        ))
-        if close_enough and (semantic_pair or explicit_rebuttal):
-            group = f"ctx_{idx + 1}"
-            first["group_id"] = first["group_id"] or group
-            second["group_id"] = second["group_id"] or group
-    return result
-
-
-def _screenplay_required_occurrence_ids(ep) -> list[str]:
-    try:
-        raw = ep["screenplay_required_dialogue_occurrences"] or "[]"
-        values = json.loads(raw) if isinstance(raw, str) else raw
-        return [str(value) for value in values if str(value).strip()]
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-        return []
 
 
 def _screenplay_cast_impact(conn, ep: dict, source_text: str) -> dict:
@@ -413,18 +459,6 @@ def update_episode_target_duration(
     }
 
 
-def _validate_required_dialogues_against_source(lines: list[str], source_text: str) -> None:
-    from app.textmatch import condense, strip_speaker
-
-    source = condense(source_text)
-    missing = [line for line in lines if condense(strip_speaker(line)) not in source]
-    if missing:
-        raise HTTPException(
-            422,
-            "以下必保留台词未在本集原文范围内逐字找到：" + "；".join(missing),
-        )
-
-
 def _screenplay_production_state(episode_id: str) -> dict:
     """Expose the actual production phase used by ScriptPage controls.
 
@@ -574,6 +608,7 @@ def recover_screenplay_tasks() -> int:
                 status="queued",
                 message="恢复任务已排队，等待文本生成槽位",
                 preserve_started_at=True,
+                expected_active_run_id=row["active_screenplay_run_id"],
                 task_factory=lambda episode_id=episode_id, recorder=recorder, batch_run_id=batch_run_id: _screenplay_guarded(
                     episode_id,
                     recorder,
@@ -734,22 +769,6 @@ async def _screenplay_task(
                 conn=conn,
             )
         )
-        occurrence_ids = _screenplay_required_occurrence_ids(ep)
-        occurrences = _screenplay_occurrences(
-            source_text, json.loads(ep["source_chapters"] or "[]")
-        )
-        occurrence_by_id = {item["id"]: item for item in occurrences}
-        selected_occurrences = [
-            occurrence_by_id[occurrence_id]
-            for occurrence_id in occurrence_ids
-            if occurrence_id in occurrence_by_id
-        ]
-        ep_data["required_dialogue_occurrences"] = selected_occurrences
-        ep_data["required_dialogue_lines"] = (
-            [item["text"] for item in selected_occurrences]
-            if selected_occurrences
-            else _screenplay_required_dialogues(ep)
-        )
         if preflight_result is None:
             preflight_result = await _screenplay_character_discovery(episode_id, source_text)
         # 身份映射必须随 Baseline、恢复 Patch 和手工发布重放。
@@ -853,6 +872,10 @@ async def _screenplay_task(
             "SELECT active_screenplay_run_id FROM episodes WHERE id=?", (episode_id,)
         ).fetchone()
         if not current_run_id or not owner or owner["active_screenplay_run_id"] in {None, current_run_id}:
+            _clear_unpublished_screenplay_ir(
+                episode_id,
+                run_id=current_run_id,
+            )
             conn.execute(
                 "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
                 ("剧本生成已取消，可重新发起。", now(), episode_id))
@@ -874,9 +897,11 @@ async def _screenplay_task(
         from app.production.screenplay_repair import ScreenplayNarrativeGateError
 
         if isinstance(exc, ScreenplayNarrativeGateError):
-            # run_screenplay_production 已保存 working artifact、repairing 状态和
-            # WAITING_HUMAN checkpoint。让编排层将 Run 收束为 PARTIAL，禁止在此
-            # 用通用 SYS 错误覆盖可恢复诊断。
+            _discard_exhausted_screenplay_working_state(
+                episode_id,
+                run_id=current_run_id,
+                message=str(exc),
+            )
             raise
         msg = str(exc)
         if msg.startswith("WAITING_INPUT"):
@@ -886,6 +911,10 @@ async def _screenplay_task(
             conn.commit()
             return None
         if type(exc).__name__ == "ScreenplayIdentityGateError":
+            _clear_unpublished_screenplay_ir(
+                episode_id,
+                run_id=current_run_id,
+            )
             conn.execute(
                 "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, "
                 "screenplay_updated_at=? WHERE id=?",
@@ -893,6 +922,10 @@ async def _screenplay_task(
             )
             conn.commit()
             return None
+        _clear_unpublished_screenplay_ir(
+            episode_id,
+            run_id=current_run_id,
+        )
         public = errors.record_and_format(exc, action="screenplay_generate", context={"episode_id": episode_id})
         conn.execute(
             "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
@@ -947,7 +980,7 @@ def _new_screenplay_recorder(
             "repair_activation_pass_limit": 32,
         },
         config_snapshot={
-            "pipeline_version": "screenplay-pipeline-4.0.0",
+            "pipeline_version": "screenplay-compact-ir-pipeline-5.0.0",
             "prompt_version": SCREENPLAY_BASELINE_PROMPT_VERSION,
             "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
             "provider": active_text_provider,
@@ -955,7 +988,7 @@ def _new_screenplay_recorder(
             "text_generation_concurrency": (
                 get_setting("text_generation_concurrency")
                 or get_setting("storyboard_concurrency")
-                or "2"
+                or "10"
             ),
             "duration_policy": "content_derived_unbounded",
         },
@@ -972,28 +1005,99 @@ def _spawn_screenplay_activation(
     message: str | None,
     preserve_started_at: bool = False,
     task_factory=None,
+    expected_active_run_id: str | None = None,
+    clear_unpublished_ir: bool = False,
 ) -> None:
-    """Persist an activation only if its in-process task can be registered."""
+    """Atomically claim one episode before registering its in-process task."""
     conn = get_conn()
-    previous_row = conn.execute(
-        "SELECT screenplay_status, screenplay_error, screenplay_started_at, "
-        "screenplay_updated_at, active_screenplay_run_id FROM episodes WHERE id=?",
-        (episode_id,),
-    ).fetchone()
-    if not previous_row:
-        raise ValueError(f"episode not found: {episode_id}")
-    previous = dict(previous_row)
-    stamp = now()
-    started_at = previous["screenplay_started_at"] if preserve_started_at else stamp
-    if started_at is None:
-        started_at = stamp
-    conn.execute(
-        "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
-        "screenplay_started_at=?, screenplay_updated_at=?, active_screenplay_run_id=? WHERE id=?",
-        (status, message, started_at, stamp, recorder.run_id, episode_id),
-    )
-    conn.commit()
+    previous: dict | None = None
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        previous_row = conn.execute(
+            "SELECT screenplay_status, screenplay_error, screenplay_started_at, "
+            "screenplay_updated_at, active_screenplay_run_id, "
+            "screenplay_character_resolutions, screenplay_required_dialogues, "
+            "screenplay_required_dialogue_occurrences "
+            "FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        if not previous_row:
+            raise ValueError(f"episode not found: {episode_id}")
+        previous = dict(previous_row)
+        previous_run_id = str(
+            previous["active_screenplay_run_id"] or ""
+        )
+        if expected_active_run_id is not None:
+            if previous_run_id != str(expected_active_run_id or ""):
+                raise StateConflict(
+                    "screenplay_owner",
+                    episode_id,
+                    {str(expected_active_run_id or "")},
+                    previous_run_id,
+                )
+        elif (
+            previous["screenplay_status"] in {
+                "queued", "running", "repairing",
+            }
+            and previous_run_id
+        ):
+            owner = conn.execute(
+                "SELECT status FROM workflow_runs WHERE id=?",
+                (previous_run_id,),
+            ).fetchone()
+            if owner and owner["status"] not in {
+                "FAILED", "CANCELLED", "SUCCEEDED", "PARTIAL",
+            }:
+                raise StateConflict(
+                    "screenplay_owner",
+                    episode_id,
+                    {""},
+                    previous_run_id,
+                )
+        if clear_unpublished_ir:
+            _clear_unpublished_screenplay_ir(
+                episode_id,
+                conn=conn,
+                commit=False,
+            )
+            conn.execute(
+                "UPDATE episodes SET screenplay_character_resolutions='[]', "
+                "screenplay_required_dialogues='[]', "
+                "screenplay_required_dialogue_occurrences='[]' "
+                "WHERE id=?",
+                (episode_id,),
+            )
+        stamp = now()
+        started_at = (
+            previous["screenplay_started_at"]
+            if preserve_started_at else stamp
+        )
+        if started_at is None:
+            started_at = stamp
+        cursor = conn.execute(
+            "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
+            "screenplay_started_at=?, screenplay_updated_at=?, "
+            "active_screenplay_run_id=? "
+            "WHERE id=? AND COALESCE(active_screenplay_run_id, '')=?",
+            (
+                status,
+                message,
+                started_at,
+                stamp,
+                recorder.run_id,
+                episode_id,
+                previous_run_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StateConflict(
+                "screenplay_owner",
+                episode_id,
+                {previous_run_id},
+                "changed_during_claim",
+            )
+        conn.commit()
+
         task_coro = (
             task_factory()
             if task_factory is not None
@@ -1006,19 +1110,36 @@ def _spawn_screenplay_activation(
             project_id=project_id,
         )
     except BaseException:
-        conn.execute(
-            "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
-            "screenplay_started_at=?, screenplay_updated_at=?, active_screenplay_run_id=? WHERE id=?",
-            (
-                previous["screenplay_status"],
-                previous["screenplay_error"],
-                previous["screenplay_started_at"],
-                previous["screenplay_updated_at"],
-                previous["active_screenplay_run_id"],
-                episode_id,
-            ),
-        )
-        conn.commit()
+        if conn.in_transaction:
+            conn.rollback()
+        if previous is not None:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "UPDATE episodes SET screenplay_status=?, "
+                    "screenplay_error=?, screenplay_started_at=?, "
+                    "screenplay_updated_at=?, active_screenplay_run_id=?, "
+                    "screenplay_character_resolutions=?, "
+                    "screenplay_required_dialogues=?, "
+                    "screenplay_required_dialogue_occurrences=? "
+                    "WHERE id=? AND active_screenplay_run_id=?",
+                    (
+                        previous["screenplay_status"],
+                        previous["screenplay_error"],
+                        previous["screenplay_started_at"],
+                        previous["screenplay_updated_at"],
+                        previous["active_screenplay_run_id"],
+                        previous["screenplay_character_resolutions"],
+                        previous["screenplay_required_dialogues"],
+                        previous["screenplay_required_dialogue_occurrences"],
+                        episode_id,
+                        recorder.run_id,
+                    ),
+                )
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
         try:
             recorder.cancel("任务未能启动，剧集状态已回滚")
         except Exception:  # noqa: BLE001 - rollback must not be hidden by run bookkeeping
@@ -1230,7 +1351,7 @@ async def _recorded_screenplay_task(
                 context={"episode_id": episode_id, "phase": "narrative_gate"},
             )
             try:
-                recorder.partial(str(exc))
+                recorder.fail(exc)
             except StateConflict:
                 pass
             return None
@@ -1277,21 +1398,11 @@ async def _recorded_screenplay_task(
 
 
 def _screenplay_generation_preflight(episode_id: str):
-    """首次生成的纯读预检；返回预算口径，不创建任务。"""
+    """首次生成的纯读预检；只报告输入范围和人物资产影响。"""
     ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
     source_text = _episode_source_text(conn, ep)
     chapters = json.loads(ep["source_chapters"] or "[]")
-    occurrences = _screenplay_occurrences(source_text, chapters)
-    selected_ids = set(_screenplay_required_occurrence_ids(ep))
-    selected = [item for item in occurrences if item["id"] in selected_ids]
-    selected_seconds = round(sum(item["estimated_seconds"] for item in selected), 1)
-    target = int(ep["target_duration_s"] or 50)
-    average = (
-        sum(item["estimated_seconds"] for item in occurrences) / len(occurrences)
-        if occurrences else 2.5
-    )
-    dynamic_limit = max(1, int((target * 0.8) // max(average, 0.5)))
     cast_impact = _screenplay_cast_impact(conn, ep, source_text)
     return {
         "action": "generate_screenplay",
@@ -1299,20 +1410,9 @@ def _screenplay_generation_preflight(episode_id: str):
         "input": {
             "source_chapters": chapters,
             "source_chars": len(source_text),
-            "occurrence_count": len(occurrences),
         },
-        "target_duration_s": target,
-        "speech_rate_chars_per_s": 4.2,
-        "dynamic_limit": dynamic_limit,
-        "dialogue_limit_mode": "duration_based",
-        "fixed_dialogue_turn_limit": None,
-        "selected_count": len(selected),
-        "selected_seconds": selected_seconds,
-        "difference_seconds": round(target - selected_seconds, 1),
-        "hard_exceeded": selected_seconds > target,
         "wait_estimate": None,
         "cost_estimate_cny": None,
-        "estimate_note": "对白不设固定条数上限；口播按约 4.2 字/秒估算，仍需为动作、反应与转场留出时间",
         "cast_impact": cast_impact,
         "idempotency_scope": {
             "baseline": ep.get("screenplay_artifact_id") or "empty",
@@ -1322,37 +1422,9 @@ def _screenplay_generation_preflight(episode_id: str):
 
 
 @router.post("/episodes/{episode_id}/screenplay/preflight")
-def screenplay_generation_preflight_for_selection(
-    episode_id: str, body: dict | None = Body(None)
-):
-    """针对当前未发布选择的预算预检，仍为纯读。"""
-    body = _as_body_dict(body)
-    result = _screenplay_generation_preflight(episode_id)
-    ep = dict(_episode_or_404(episode_id))
-    source_text = _episode_source_text(get_conn(), ep)
-    occurrences = _screenplay_occurrences(
-        source_text, json.loads(ep["source_chapters"] or "[]")
-    )
-    by_id = {item["id"]: item for item in occurrences}
-    ids = [str(value) for value in (body.get("occurrence_ids") or [])]
-    invalid = [value for value in ids if value not in by_id]
-    if invalid:
-        raise HTTPException(409, {
-            "code": "dialogue_occurrence_stale",
-            "message": "部分台词位置已失效，请重新选择",
-            "invalid_occurrence_ids": invalid,
-        })
-    selected = [by_id[value] for value in ids]
-    seconds = round(sum(item["estimated_seconds"] for item in selected), 1)
-    target = int(ep["target_duration_s"] or 50)
-    result.update({
-        "selected_count": len(selected),
-        "selected_seconds": seconds,
-        "difference_seconds": round(target - seconds, 1),
-        "hard_exceeded": seconds > target,
-        "selected_occurrence_ids": ids,
-    })
-    return result
+def screenplay_generation_preflight(episode_id: str):
+    """返回首次生成的只读输入预检，不创建任务。"""
+    return _screenplay_generation_preflight(episode_id)
 
 
 @router.get("/episodes/{episode_id}/screenplay/draft")
@@ -1365,17 +1437,14 @@ def get_screenplay_draft(episode_id: str):
     if not row:
         return {"draft": None}
     value = dict(row)
-    for source, target in (
-        ("content_json", "content"), ("constraint_json", "constraints"),
-    ):
-        raw = value.pop(source)
-        if raw is None:
-            value[target] = None if target == "content" else {}
-            continue
-        try:
-            value[target] = json.loads(raw or "{}")
-        except (TypeError, json.JSONDecodeError):
-            value[target] = None if target == "content" else {}
+    raw = value.pop("content_json")
+    value.pop("constraint_json", None)
+    if raw is None:
+        return {"draft": None}
+    try:
+        value["content"] = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {"draft": None}
     return {"draft": value}
 
 
@@ -1383,8 +1452,7 @@ def get_screenplay_draft(episode_id: str):
 def save_screenplay_draft(episode_id: str, body: dict):
     ep = dict(_episode_or_404(episode_id))
     content = body.get("content")
-    constraints = body.get("constraints") or {}
-    if content is None and not constraints:
+    if content is None:
         raise HTTPException(422, "草稿内容不能为空")
     baseline = body.get("baseline_artifact_id")
     current = ep.get("screenplay_artifact_id")
@@ -1407,8 +1475,8 @@ def save_screenplay_draft(episode_id: str, body: dict):
                dirty_at=excluded.dirty_at, updated_at=excluded.updated_at""",
         (
             draft_id, episode_id, baseline,
-            json.dumps(content, ensure_ascii=False) if content is not None else None,
-            json.dumps(constraints, ensure_ascii=False),
+            json.dumps(content, ensure_ascii=False),
+            "{}",
             stamp, stamp,
         ),
     )
@@ -1436,20 +1504,10 @@ def delete_screenplay_draft(episode_id: str):
 async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     from app.capabilities.dispatch import ui_route
     body = _as_body_dict(body)
-    requested_occurrence_ids = [
-        str(value) for value in (body.get("required_dialogue_occurrence_ids") or [])
-        if str(value).strip()
-    ]
-    requested_dialogues = _normalize_required_dialogue_lines(
-        body.get("required_dialogue_lines") or [],
-        allow_single_character=bool(requested_occurrence_ids),
-    )
     routed = await ui_route(
         "screenplay.generate",
         {
             "episode_id": episode_id,
-            "required_dialogue_lines": requested_dialogues,
-            "required_dialogue_occurrence_ids": requested_occurrence_ids,
             "idempotency_key": body.get("idempotency_key"),
         },
     )
@@ -1485,40 +1543,7 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         # repairing → 续跑 Repair（不新建 Baseline）
         pass
 
-    conn = get_conn()
     resume_existing = bool(active_rev and active_rev.baseline_done and active_rev.working_artifact_id)
-    if not resume_existing:
-        source_text = _episode_source_text(conn, ep)
-        occurrences = _screenplay_occurrences(
-            source_text, json.loads(ep["source_chapters"] or "[]")
-        )
-        by_id = {item["id"]: item for item in occurrences}
-        invalid_ids = [value for value in requested_occurrence_ids if value not in by_id]
-        if invalid_ids:
-            raise HTTPException(409, {
-                "code": "dialogue_occurrence_stale",
-                "message": "原文已变化，部分台词位置失效，请重新选择",
-                "invalid_occurrence_ids": invalid_ids,
-            })
-        if requested_occurrence_ids:
-            requested_dialogues = _normalize_required_dialogue_lines(
-                [by_id[value]["text"] for value in requested_occurrence_ids],
-                allow_single_character=True,
-            )
-        _validate_required_dialogues_against_source(
-            requested_dialogues, source_text
-        )
-        conn.execute(
-            "UPDATE episodes SET screenplay_required_dialogues=?, "
-            "screenplay_required_dialogue_occurrences=?, screenplay_constraint_version=screenplay_constraint_version+1 "
-            "WHERE id=?",
-            (
-                json.dumps(requested_dialogues, ensure_ascii=False),
-                json.dumps(requested_occurrence_ids, ensure_ascii=False),
-                episode_id,
-            ),
-        )
-    conn.commit()
     try:
         recorder = _new_screenplay_recorder(
             episode_id,
@@ -1534,11 +1559,16 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
                 "从 working Artifact 继续结构校验、评分与发布"
                 if resume_existing else "剧本任务已排队，等待文本生成槽位"
             ),
+            expected_active_run_id=(
+                ep["active_screenplay_run_id"]
+                if resume_existing else None
+            ),
+            clear_unpublished_ir=not resume_existing,
         )
     except Exception as exc:
         raise HTTPException(503, {
             "code": "SCREENPLAY_START_FAILED",
-            "message": "剧本任务未能启动，原状态和已选台词约束均已保留，请重试",
+            "message": "剧本任务未能启动，原状态已恢复，请重试",
             "action": "retry_resume" if resume_existing else "retry_generate",
         }) from exc
     return {
@@ -1667,6 +1697,7 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             project_id=ep["project_id"],
             status="queued",
             message="剧本续修已排队，等待文本生成槽位",
+            expected_active_run_id=ep["active_screenplay_run_id"],
         )
     except Exception as exc:
         raise HTTPException(503, {
@@ -1695,8 +1726,8 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     )
     from app.production.screenplay_repair import (
         SCREENPLAY_REPAIR_PLANNER_VERSION,
-        non_waivable_screenplay_issues,
         run_screenplay_qa,
+        screenplay_identity_gate_issues,
     )
     from app.portraits import (
         apply_screenplay_character_resolutions,
@@ -1778,7 +1809,6 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
     )
     qa_episode = {
         **ep,
-        "required_dialogue_lines": _screenplay_required_dialogues(ep),
         "character_resolutions": resolutions,
         "screenplay_contract_version": (
             contract_row["contract_version"]
@@ -1792,7 +1822,7 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
         source_text=source_text,
         episode=qa_episode,
     )
-    hard_identity_issues = non_waivable_screenplay_issues(issues)
+    hard_identity_issues = screenplay_identity_gate_issues(issues)
     if hard_identity_issues:
         raise HTTPException(422, {
             "code": "screenplay_character_identity_unresolved",
@@ -1891,6 +1921,7 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
             project_id=ep["project_id"],
             status="repairing",
             message="Repair 正在按 QA 问题局部修复；完成后会重新执行 QA",
+            expected_active_run_id=ep["active_screenplay_run_id"],
         )
     except Exception as exc:
         raise HTTPException(503, {
@@ -1961,6 +1992,8 @@ async def delete_screenplay(episode_id: str):
         """UPDATE episodes SET
             screenplay_json=NULL,
             screenplay_character_resolutions='[]',
+            screenplay_required_dialogues='[]',
+            screenplay_required_dialogue_occurrences='[]',
             screenplay_status='pending',
             screenplay_error=NULL,
             screenplay_started_at=NULL,
@@ -1993,7 +2026,6 @@ async def delete_screenplay(episode_id: str):
         "deleted": episode_id,
         "downstream_shots_cleared": int(shot_count or 0),
         "cancelled_tasks": cancelled,
-        "required_dialogue_lines": _screenplay_required_dialogues(ep),
     }
 
 
@@ -2167,6 +2199,11 @@ async def start_screenplay_all(project_id: str):
                     "批量任务已从工作副本继续结构校验、评分与发布"
                     if is_resume else "批量剧本已排队，等待文本生成槽位"
                 ),
+                expected_active_run_id=(
+                    row["active_screenplay_run_id"]
+                    if is_resume else None
+                ),
+                clear_unpublished_ir=not is_resume,
                 task_factory=lambda eid=eid, recorder=recorder: _screenplay_guarded(
                     eid,
                     recorder,
@@ -2351,8 +2388,8 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
             "errors": validation_errors,
         })
     from app.production.screenplay_repair import (
-        non_waivable_screenplay_issues,
         run_screenplay_qa,
+        screenplay_identity_gate_issues,
     )
     from app.portraits import (
         apply_screenplay_character_resolutions,
@@ -2385,11 +2422,10 @@ def preview_screenplay_edit_impact(episode_id: str, body: dict):
             source_text=_episode_source_text(conn, ep),
             episode={
                 **ep,
-                "required_dialogue_lines": _screenplay_required_dialogues(ep),
                 "character_resolutions": resolutions,
             },
         )
-    hard_identity_issues = non_waivable_screenplay_issues(qa_issues)
+    hard_identity_issues = screenplay_identity_gate_issues(qa_issues)
     counts = {
         "shots": int(conn.execute(
             "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
@@ -2490,8 +2526,8 @@ async def edit_screenplay(episode_id: str, body: dict):
             "errors": validation_errors,
         })
     from app.production.screenplay_repair import (
-        non_waivable_screenplay_issues,
         run_screenplay_qa,
+        screenplay_identity_gate_issues,
     )
     from app.portraits import (
         apply_screenplay_character_resolutions,
@@ -2549,7 +2585,6 @@ async def edit_screenplay(episode_id: str, body: dict):
     )
     qa_episode = {
         **ep,
-        "required_dialogue_lines": _screenplay_required_dialogues(ep),
         "character_resolutions": resolutions,
         "screenplay_contract_version": (
             contract_row["contract_version"]
@@ -2563,7 +2598,7 @@ async def edit_screenplay(episode_id: str, body: dict):
         source_text=source_text,
         episode=qa_episode,
     )
-    hard_identity_issues = non_waivable_screenplay_issues(qa_issues)
+    hard_identity_issues = screenplay_identity_gate_issues(qa_issues)
     if hard_identity_issues:
         raise HTTPException(422, {
             "code": "screenplay_character_identity_unresolved",
@@ -2680,7 +2715,7 @@ async def edit_screenplay(episode_id: str, body: dict):
             artifact_id=candidate["id"],
             artifact_hash=candidate["content_hash"],
         )
-        hard_identity_issues = non_waivable_screenplay_issues(final_issues)
+        hard_identity_issues = screenplay_identity_gate_issues(final_issues)
         if hard_identity_issues:
             raise HTTPException(422, {
                 "code": "screenplay_character_identity_unresolved",

@@ -208,7 +208,6 @@ def test_screenplay_qa_is_read_only_and_blocks_production_issues() -> None:
         episode={
             "episode_no": 1,
             "target_duration_s": 50,
-            "required_dialogue_lines": [],
         },
     )
 
@@ -238,11 +237,10 @@ def test_unresolved_character_identity_is_reported_by_runtime_gate() -> None:
         episode={
             "episode_no": 1,
             "target_duration_s": 50,
-            "required_dialogue_lines": [],
         },
     )
-    # 无真实 Bible 的历史占位流程不开身份门禁。
-    assert non_waivable_screenplay_issues(issues) == []
+    # 即使是脱离持久项目的 fixture，结构 must_fix 也必须保持 runtime gate。
+    assert non_waivable_screenplay_issues(issues)
     assert evaluation.runtime_blocking is True
 
     issues, evaluation = run_screenplay_qa(
@@ -259,11 +257,14 @@ def test_unresolved_character_identity_is_reported_by_runtime_gate() -> None:
         episode={
             "episode_no": 1,
             "target_duration_s": 50,
-            "required_dialogue_lines": [],
         },
     )
     hard = non_waivable_screenplay_issues(issues)
-    assert hard and all(issue.code == "CHARACTER_IDENTITY_UNRESOLVED" for issue in hard)
+    assert hard
+    assert any(
+        issue.code == "CHARACTER_IDENTITY_UNRESOLVED"
+        for issue in hard
+    )
     assert evaluation.evaluation_role == "runtime_gate"
     assert evaluation.runtime_blocking is True
     assert evaluation.retry_eligible is True
@@ -791,6 +792,34 @@ def test_patch_planner_normalizes_overdetail_without_model_call() -> None:
     assert ops[0].op == "normalize_overdetail"
     assert ops[0].value == {"terms": ["衣角"]}
     assert _patch_strategy_key(ops) == "normalize_overdetail"
+
+
+def test_patch_planner_derives_short_scene_turn_without_model_call() -> None:
+    from app.production.screenplay_repair import (
+        _patch_strategy_key,
+        plan_screenplay_patch,
+    )
+
+    script = _minimal_script()
+    script.scene_outline[0].turn = "收束"
+    script.scene_outline[0].exit_state = "甲已经作出应战决定"
+    issue = structured_issue(
+        code="SCENE_FIELD_INVALID",
+        message="scene_outline 第1场.turn 过短；请说明状态变化",
+        subject="screenplay",
+        path="/scene_blocks/SC01/turn",
+        rule_id="scene_turn_invalid",
+        stage="screenplay",
+        related_node_ids=["SC01"],
+    )
+
+    ops = plan_screenplay_patch(issue, script)
+
+    assert len(ops) == 1
+    assert ops[0].op == "replace_field"
+    assert ops[0].target["id"] == "SC01"
+    assert "甲已经作出应战决定" in ops[0].value
+    assert _patch_strategy_key(ops) == "fill_scene_SC01_turn"
 
 
 def test_dialogue_chain_turn_patch_changes_only_opening_source_anchor():
@@ -3863,7 +3892,7 @@ def test_screenplay_narrative_gate_is_quality_error():
 
 
 @pytest.mark.asyncio
-async def test_recorded_narrative_gate_preserves_repair_state_and_partial_run(
+async def test_recorded_narrative_gate_discards_repair_state_and_fails_run(
     monkeypatch,
 ):
     from app.domain import screenplay_ops
@@ -3915,10 +3944,10 @@ async def test_recorded_narrative_gate_preserves_repair_state_and_partial_run(
         "ORDER BY ts DESC LIMIT 1"
     ).fetchone()
 
-    assert episode["screenplay_status"] == "repairing"
+    assert episode["screenplay_status"] == "failed"
     assert episode["screenplay_error"] == message
-    assert run["status"] == "PARTIAL"
-    assert run["failure_code"] == "PARTIAL_RESULT"
+    assert run["status"] == "FAILED"
+    assert run["failure_code"] == "SCREENPLAYNARRATIVEGATEERROR"
     assert run["failure_message"] == message
     assert step["status"] == "FAILED"
     assert step["error_code"] == "SCREENPLAYNARRATIVEGATEERROR"

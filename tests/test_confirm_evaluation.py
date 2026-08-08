@@ -160,8 +160,8 @@ def test_dialogue_composition_is_score_warning_not_confirmation_blocker() -> Non
     ep = {"id": "ep1", "target_duration_s": 50}
     shot = _shot(
         shot_size="中景",
-        characters=["萧炎", "测验员"],
-        characters_visible=["萧炎", "测验员"],
+        characters=["萧炎", "路人甲"],
+        characters_visible=["萧炎", "路人甲"],
     )
 
     result = evaluate_storyboard_for_confirmation(

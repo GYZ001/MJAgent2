@@ -2194,15 +2194,26 @@ async def review_keyframe_with_evidence(
             functional_extra_anchor,
             is_collective_role,
             is_functional_extra,
+            typed_functional_identity_names,
         )
 
+        declared_functional_names = typed_functional_identity_names(
+            screenplay,
+        )
         for name in contract.get("visible_characters") or []:
             if name in by_name:
                 anchors_txt.append(f"{name}: {by_name[name].appearance_canonical}")
             elif is_collective_role(str(name)):
                 anchors_txt.append(f"{name}: {collective_role_anchor(str(name))}")
-            elif is_functional_extra(str(name)):
-                anchors_txt.append(f"{name}: {functional_extra_anchor(str(name))}")
+            elif (
+                is_functional_extra(str(name))
+                or str(name) in declared_functional_names
+            ):
+                functional_anchor = functional_extra_anchor(
+                    str(name),
+                    declared_functional_names=declared_functional_names,
+                )
+                anchors_txt.append(f"{name}: {functional_anchor}")
 
     geometry_requirements = [
         f"唯一目标定格：{contract.get('target_keyframe_desc') or getattr(shot, 'action_desc', '')}",

@@ -1263,6 +1263,90 @@ def _provider_submitted_at(conn, job, task_id: str) -> float:
     return submitted_at
 
 
+def _provider_wait_policy(
+    task_id: str,
+    result: dict[str, Any],
+    meta: dict[str, Any],
+    *,
+    duration_s: float,
+    provider_submitted_at: float,
+    stamp: float | None = None,
+) -> dict[str, Any]:
+    """Choose queue-aware polling and timeout behavior for the active provider."""
+    current = time.time() if stamp is None else float(stamp)
+    provider_age = max(0.0, current - float(provider_submitted_at))
+    policy = {
+        "elapsed_s": provider_age,
+        "timeout_s": float(config.VIDEO_PROVIDER_MAX_WAIT),
+        "poll_delay_s": None,
+        "scope": "供应商任务",
+        "meta_changed": False,
+    }
+    from app import minimax_h3
+
+    if not minimax_h3.is_task_id(task_id):
+        return policy
+    policy["poll_delay_s"] = minimax_h3.poll_interval_seconds()
+    status = str(result.get("status") or "").strip().lower()
+    stage = str(result.get("stage") or "").strip().lower()
+    if status != "running" or stage not in {"", "generating"}:
+        return policy
+
+    started_key = "minimax_h3_generation_started_at"
+    try:
+        generation_started_at = float(meta.get(started_key) or 0)
+    except (TypeError, ValueError):
+        generation_started_at = 0.0
+    if generation_started_at <= 0:
+        generation_started_at = current
+        mode = str(
+            meta.get("actual_mode")
+            or meta.get("mode")
+            or meta.get("planned_mode")
+            or ""
+        )
+        try:
+            timeout_s = minimax_h3.generation_timeout_seconds(mode, duration_s)
+            estimated_s = minimax_h3.estimated_generation_seconds(
+                mode,
+                duration_s,
+            )
+        except (TypeError, ValueError):
+            timeout_s = float(config.VIDEO_PROVIDER_MAX_WAIT)
+            estimated_s = 0
+        meta.update({
+            started_key: generation_started_at,
+            "minimax_h3_generation_timeout_s": timeout_s,
+            "minimax_h3_acceleration": config.MINIMAX_H3_ACCELERATION,
+            "minimax_h3_estimated_generation_s": estimated_s,
+        })
+        policy["meta_changed"] = True
+    try:
+        generation_timeout_s = float(
+            meta.get("minimax_h3_generation_timeout_s")
+            or minimax_h3.generation_timeout_seconds(
+                str(
+                    meta.get("actual_mode")
+                    or meta.get("mode")
+                    or meta.get("planned_mode")
+                    or ""
+                ),
+                duration_s,
+            )
+        )
+    except (TypeError, ValueError):
+        generation_timeout_s = float(config.VIDEO_PROVIDER_MAX_WAIT)
+    policy.update({
+        "elapsed_s": max(0.0, current - generation_started_at),
+        "timeout_s": min(
+            float(config.VIDEO_PROVIDER_MAX_WAIT),
+            generation_timeout_s,
+        ),
+        "scope": "MiniMaxH3 生成阶段",
+    })
+    return policy
+
+
 def _recover_paid_video_task(conn, operation_id: str | None) -> tuple[str, float] | None:
     """Recover a provider handle accepted before the local job commit."""
     if not operation_id:
@@ -1349,6 +1433,13 @@ def _persist_video_resubmit(
     operation_id: str,
 ) -> None:
     """Persist the next intentional paid attempt as one recoverable checkpoint."""
+    for key in (
+        "minimax_h3_generation_started_at",
+        "minimax_h3_generation_timeout_s",
+        "minimax_h3_acceleration",
+        "minimax_h3_estimated_generation_s",
+    ):
+        meta.pop(key, None)
     paid_attempts = max(
         int(meta.get("provider_paid_attempts") or 0),
         _paid_video_attempt_count(conn, version_id),
@@ -3009,6 +3100,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                     "episode_no": ep["episode_no"],
                                     "shot_id": shot["id"],
                                     "shot_no": shot["shot_no"],
+                                    "duration_s": shot["duration_s"],
                                     "version_id": version["id"],
                                     "version_no": version["version_no"],
                                     "operation_id": provider_operation_id,
@@ -3174,14 +3266,33 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     raise
             _assert_job_lease(job_id, owner)
             if result is None or result["status"] not in ("succeeded", "failed"):
-                provider_age = time.time() - float(provider_submitted_at or time.time())
-                if provider_age >= config.VIDEO_PROVIDER_MAX_WAIT:
+                policy = _provider_wait_policy(
+                    task_id,
+                    result or {},
+                    meta,
+                    duration_s=float(shot["duration_s"] or 5),
+                    provider_submitted_at=float(
+                        provider_submitted_at or time.time()
+                    ),
+                )
+                if policy["meta_changed"]:
+                    _set_version(
+                        version["id"],
+                        image_inputs=json.dumps(meta, ensure_ascii=False),
+                    )
+                if policy["elapsed_s"] >= policy["timeout_s"]:
                     raise ProviderError(
-                        f"供应商任务 {task_id} 已持续运行 "
-                        f"{provider_age / 3600:.1f} 小时，超过系统保护上限；"
+                        f"{policy['scope']} {task_id} 已持续 "
+                        f"{policy['elapsed_s'] / 60:.1f} 分钟，超过 "
+                        f"{policy['timeout_s'] / 60:.1f} 分钟保护上限；"
                         "任务可能卡在上游，请联系供应商核查"
                     )
-                if _defer_provider_poll(job_id, task_id, lease_owner=owner):
+                if _defer_provider_poll(
+                    job_id,
+                    task_id,
+                    lease_owner=owner,
+                    delay=policy["poll_delay_s"],
+                ):
                     return
                 raise LeaseLost(f"provider poll defer lost lease: {job_id} / {owner}")
             if result["status"] == "failed":

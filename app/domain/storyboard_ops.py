@@ -3989,22 +3989,10 @@ def episode_detail(episode_id: str, view: str | None = None):
             ep["scene_options"] = [
                 scene.name for scene in (project_bible.scenes or []) if (scene.name or "").strip()
             ]
-    ep["required_dialogue_lines"] = _screenplay_required_dialogues(ep)
     if full or view == "script":
         from app.domain.screenplay_ops import (
-            _screenplay_occurrences,
-            _screenplay_required_occurrence_ids,
             _screenplay_status_snapshot,
         )
-
-        source_text = _episode_source_text(conn, ep)
-        ep["source_dialogue_occurrences"] = _screenplay_occurrences(
-            source_text, ep["source_chapters"]
-        )
-        ep["required_dialogue_occurrence_ids"] = _screenplay_required_occurrence_ids(ep)
-    else:
-        ep["source_dialogue_occurrences"] = None
-        ep["required_dialogue_occurrence_ids"] = []
     ep.pop("screenplay_required_dialogues", None)
     ep.pop("screenplay_required_dialogue_occurrences", None)
     artifact_id = ep.get("screenplay_artifact_id")

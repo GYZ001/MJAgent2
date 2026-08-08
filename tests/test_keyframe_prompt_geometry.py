@@ -38,11 +38,11 @@ def _contact_shot(**overrides) -> Shot:
         "camera_move": "固定",
         "camera_angle": "平视",
         "scene_setting": "日，测验广场",
-        "characters": ["萧炎", "测验员"],
-        "characters_visible": ["萧炎", "测验员"],
-        "action_desc": "萧炎走到黑色石碑前，抬起右手按住石碑，测验员在侧方观察。",
+        "characters": ["萧炎", "路人甲"],
+        "characters_visible": ["萧炎", "路人甲"],
+        "action_desc": "萧炎走到黑色石碑前，抬起右手按住石碑，路人甲以测验员身份在侧方观察。",
         "first_frame_desc": "萧炎从人群中走出，右手尚未碰到石碑。",
-        "last_frame_desc": "萧炎右掌已贴住石碑，测验员侧身看向接触点。",
+        "last_frame_desc": "萧炎右掌已贴住石碑，路人甲侧身看向接触点。",
         "state_in": "萧炎靠近石碑。",
         "primary_action": "萧炎抬手按住石碑。",
         "state_out": "萧炎右掌仍贴住石碑。",
@@ -291,7 +291,7 @@ def test_every_timeline_beat_preserves_explicit_height_difference() -> None:
 def test_functional_extra_is_kept_in_keyframe_roster_and_anchor() -> None:
     prompt = video_modes.reference_generation_prompt(_contact_shot(), _bible(), "plot_key_frame", 1)
 
-    assert "测验员" in prompt
+    assert "路人甲" in prompt
     assert "Named/individual visible identities, each exactly once" in prompt
     assert "功能性路人" in prompt
 

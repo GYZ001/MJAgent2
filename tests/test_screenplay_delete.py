@@ -1,4 +1,4 @@
-"""剧本删除与生成前原文台词多选的回归测试。"""
+"""剧本删除回归测试。"""
 from __future__ import annotations
 
 import asyncio
@@ -72,33 +72,30 @@ def _db(tmp_path, monkeypatch):
     yield
 
 
-def test_script_view_lists_all_source_dialogues_for_multi_select() -> None:
+def test_script_view_does_not_expose_removed_dialogue_selection_fields() -> None:
     detail = api.episode_detail("e1", view="script")
 
-    assert [item["text"] for item in detail["source_dialogue_occurrences"]] == [
-        "斗之力，三段！", "只有三段？", "结果无误。",
-    ]
-    assert detail["required_dialogue_lines"] == ["斗之力，三段！", "只有三段？"]
+    assert "source_dialogue_occurrences" not in detail
+    assert "required_dialogue_lines" not in detail
+    assert "required_dialogue_occurrence_ids" not in detail
 
 
-def test_delete_screenplay_resets_to_fresh_baseline_but_keeps_dialogue_selection() -> None:
+def test_delete_screenplay_resets_to_fresh_baseline_and_clears_legacy_selection() -> None:
     with enter_handler():
         result = asyncio.run(api.delete_screenplay("e1"))
 
     conn = db.get_conn()
     episode = conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone()
     assert result["downstream_shots_cleared"] == 1
-    assert result["required_dialogue_lines"] == ["斗之力，三段！", "只有三段？"]
+    assert "required_dialogue_lines" not in result
     assert episode["screenplay_json"] is None
     assert episode["screenplay_status"] == "pending"
     assert episode["screenplay_artifact_id"] is None
     assert episode["working_screenplay_artifact_id"] is None
     assert episode["published_screenplay_artifact_id"] is None
     assert episode["status"] == "planned"
-    assert json.loads(episode["screenplay_required_dialogues"]) == [
-        "斗之力，三段！",
-        "只有三段？",
-    ]
+    assert json.loads(episode["screenplay_required_dialogues"]) == []
+    assert json.loads(episode["screenplay_required_dialogue_occurrences"]) == []
     assert conn.execute("SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'").fetchone()["c"] == 0
     state = screenplay_production_state("e1")
     assert state["operation"] == "baseline"

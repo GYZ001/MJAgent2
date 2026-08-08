@@ -253,7 +253,7 @@ const VALID_SECTIONS = new Set(SECTIONS.map((item) => item.key));
 const MODEL_ROWS: Array<{ key: ModelKind; label: string; note: string }> = [
   { key: "text", label: "文本模型", note: "分集、剧本、分镜与文本修复" },
   { key: "vlm", label: "视觉理解模型", note: "参考图评审与视频质检" },
-  { key: "video", label: "视频模型", note: "Seedance 视频生成" },
+  { key: "video", label: "视频模型", note: "首尾帧、参考图与视频输入生成" },
   { key: "image", label: "图像模型", note: "Seedream 参考图 / 定妆照" },
 ];
 const MODEL_KIND_LABELS: Record<ModelKind, string> = {
@@ -264,6 +264,7 @@ const MODEL_KIND_LABELS: Record<ModelKind, string> = {
 };
 const PROVIDER_LABELS: Record<string, string> = {
   hiagent: "火山",
+  minimax_h3: "MiniMax H3",
   openrouter: "OpenRouter",
   bailian: "百炼",
   deepseek: "DeepSeek",
@@ -1234,6 +1235,13 @@ interface SettingGroupDefinition {
 
 const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
   {
+    id: "text-generation",
+    title: "剧本与分镜生成",
+    description: "控制文本模型可同时推进的剧集数量；排队任务会按新值立即扩缩容。",
+    affects: ["剧本批量生成", "分镜批量生成", "文本模型"],
+    keys: ["text_generation_concurrency"],
+  },
+  {
     id: "video-flow",
     title: "视频生成与任务调度",
     description: "控制任务如何排队、提交、轮询，以及单集和项目的在途上限。",
@@ -1317,6 +1325,7 @@ const SETTING_GROUP_DEFINITIONS: SettingGroupDefinition[] = [
 ];
 
 const SETTING_FIELD_IMPACTS: Record<string, string> = {
+  text_generation_concurrency: "同时生成剧本或分镜的剧集数量",
   video_submit_concurrency: "每次可同时提交多少个视频生成任务",
   video_inflight_limit: "供应商侧允许同时处理的视频任务总量",
   video_poll_concurrency: "同时查询多少个视频任务的完成状态",

@@ -569,7 +569,7 @@ def test_bible_for_episode_picks_segment_anchor(monkeypatch) -> None:
     assert bible.characters[0].appearance_canonical == original
 
 
-def test_discover_character_candidates_filters_functional_extras_and_unseen_names(monkeypatch) -> None:
+def test_discover_character_candidates_keeps_typed_functionals_and_filters_unseen_names(monkeypatch) -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
         characters=[Character(
@@ -583,10 +583,26 @@ def test_discover_character_candidates_filters_functional_extras_and_unseen_name
         assert kwargs["call_meta"]["reuse_successful_operation"] is True
         return json.dumps({
             "characters": [
-                {"name": "魂天帝", "kind": "onscreen", "evidence": "魂天帝踏着血云现身"},
-                {"name": "萧炎", "kind": "onscreen", "evidence": "萧炎迎空而起"},
-                {"name": "守卫", "kind": "onscreen", "evidence": "守卫后退"},
-                {"name": "不存在的人", "kind": "onscreen", "evidence": "模型臆造"},
+                {
+                    "source_label": "魂天帝", "canonical_name": "魂天帝",
+                    "identity_kind": "named", "kind": "onscreen",
+                    "evidence": "魂天帝踏着血云现身",
+                },
+                {
+                    "source_label": "萧炎", "canonical_name": "萧炎",
+                    "identity_kind": "named", "kind": "onscreen",
+                    "evidence": "萧炎迎空而起",
+                },
+                {
+                    "source_label": "守卫", "canonical_name": "",
+                    "identity_kind": "functional", "kind": "onscreen",
+                    "evidence": "守卫后退",
+                },
+                {
+                    "source_label": "不存在的人", "canonical_name": "不存在的人",
+                    "identity_kind": "named", "kind": "onscreen",
+                    "evidence": "模型臆造",
+                },
             ],
         }, ensure_ascii=False)
 
@@ -597,7 +613,8 @@ def test_discover_character_candidates_filters_functional_extras_and_unseen_name
         1926,
     ))
 
-    assert [item["name"] for item in result] == ["魂天帝", "萧炎"]
+    assert [item["name"] for item in result] == ["魂天帝", "萧炎", "守卫"]
+    assert result[-1]["identity_kind"] == "functional"
 
 
 def test_discover_character_candidates_repairs_unescaped_evidence_quotes(monkeypatch) -> None:
@@ -710,6 +727,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         "reason": "后续章节已确认该称谓的稳定真名",
         "evidence": "绿袍男子拦路呵斥",
         "future_evidence": "众人认出他正是丁力",
+        "identity_group": "current-1:绿袍男子",
     }]
 
 
@@ -767,6 +785,297 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     ]
 
 
+def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="李富贵",
+            role="重要配角",
+            appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+        )],
+    )
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({"characters": [{
+            "source_label": "白白净净身较胖的少年",
+            "canonical_name": "",
+            "identity_kind": "functional",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+            "evidence": "原文中的白净胖少年",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "王有材身边另一个则是白白净净身较胖，正缩在裂缝里。",
+        bible,
+        1,
+    ))
+
+    assert candidates[0]["source_label"] == "白白净净身较胖"
+    assert candidates[0]["model_source_label"] == "白白净净身较胖的少年"
+
+
+def test_future_context_prioritizes_late_known_name_cooccurrence() -> None:
+    future_text = (
+        ("小胖子继续砍柴，没有报出姓名。" * 120)
+        + "小胖子拍着胸口说，我李富贵认你这个朋友。"
+    )
+
+    context = portraits._future_identity_context(
+        future_text,
+        ["小胖子"],
+        known_names=["李富贵"],
+        current_text="白净胖少年被带上山。",
+    )
+
+    assert "我李富贵" in context
+    assert "人物谱真名：李富贵" in context
+
+
+def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[Character(
+            name="许清",
+            role="重要配角",
+            appearance_canonical="银袍女子，面色苍白，黑发冷眸",
+        )],
+    )
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if kwargs["call_meta"]["discovery_phase"] == "current":
+            return json.dumps({"characters": [
+                {
+                    "source_label": "会飞的女人",
+                    "canonical_name": "",
+                    "identity_kind": "functional",
+                    "functional_identity_key": "F1",
+                    "kind": "onscreen",
+                    "evidence": "银袍女子将众人卷走",
+                },
+                {
+                    "source_label": "许师姐",
+                    "canonical_name": "",
+                    "identity_kind": "functional",
+                    "functional_identity_key": "F1",
+                    "kind": "mentioned",
+                    "evidence": "同一女子被称为许师姐",
+                },
+            ]}, ensure_ascii=False)
+        return json.dumps({"characters": [{
+            "source_label": "许师姐",
+            "canonical_name": "许清",
+            "identity_kind": "named",
+            "kind": "mentioned",
+            "evidence": "许师姐是同一女子",
+            "future_evidence": "后文明确称许清",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "会飞的女人出现，绿袍修士称她为许师姐。",
+        bible,
+        1,
+        future_text="许师姐转身，众人称她许清。",
+        future_label="后续章节",
+    ))
+
+    assert calls == 2
+    assert {
+        (item["source_label"], item["name"], item["identity_kind"])
+        for item in candidates
+    } == {
+        ("会飞的女人", "许清", "named"),
+        ("许师姐", "许清", "named"),
+    }
+
+
+def test_future_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="国风"),
+        characters=[
+            Character(
+                name="孟浩",
+                role="主角",
+                appearance_canonical="黑发书生，蓝色长衫，手持葫芦",
+            ),
+            Character(
+                name="李富贵",
+                role="重要配角",
+                appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+            ),
+        ],
+    )
+
+    async def fake_chat(messages, **kwargs):
+        if kwargs["call_meta"]["discovery_phase"] == "current":
+            return json.dumps({"characters": [{
+                "source_label": "孟浩",
+                "canonical_name": "孟浩",
+                "identity_kind": "named",
+                "kind": "onscreen",
+                "evidence": "当前主角",
+            }]}, ensure_ascii=False)
+        assert "白白净净身较胖" in messages[0]["content"]
+        assert "我李富贵" in messages[0]["content"]
+        return json.dumps({"characters": [{
+            "source_label": "白白净净身较胖",
+            "canonical_name": "李富贵",
+            "identity_kind": "named",
+            "kind": "onscreen",
+            "evidence": "当前集独立出场的白净胖少年",
+            "future_evidence": "后续以小胖子承接并自报李富贵",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "孟浩身边另一个则是白白净净身较胖。",
+        bible,
+        1,
+        future_text="小胖子跟随孟浩。后来小胖子说：我李富贵认你这个朋友。",
+        future_label="后续章节",
+    ))
+
+    assert any(
+        item["source_label"] == "白白净净身较胖"
+        and item["name"] == "李富贵"
+        and item["identity_kind"] == "named"
+        for item in candidates
+    )
+
+
+def test_stable_unique_title_is_accepted_as_named_identity(monkeypatch) -> None:
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="国风"),
+    )
+
+    async def fake_chat(*_args, **kwargs):
+        if kwargs["call_meta"]["discovery_phase"] == "current":
+            return json.dumps({"characters": [{
+                "source_label": "靠山老祖",
+                "canonical_name": "",
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "mentioned",
+                "evidence": "本集提到建立宗门的老祖",
+            }]}, ensure_ascii=False)
+        return json.dumps({"characters": [{
+            "source_label": "靠山老祖",
+            "canonical_name": "靠山老祖",
+            "identity_kind": "named",
+            "kind": "mentioned",
+            "evidence": "跨章节唯一指向建立宗门的同一位老祖",
+            "future_evidence": "后续仍以同一专属尊号指代",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "靠山老祖建立宗门，靠山老祖后来失踪。",
+        bible,
+        2,
+        future_text="靠山老祖定下门规，靠山老祖的画像仍在宗门。",
+        future_label="后续章节",
+    ))
+
+    assert candidates[0]["name"] == "靠山老祖"
+    assert candidates[0]["identity_kind"] == "named"
+
+
+def test_future_functional_relation_label_is_not_promoted_by_text_presence(
+    monkeypatch,
+) -> None:
+    bible = Bible(
+        characters=[],
+        world=World(visual_style_canonical="都市漫画"),
+    )
+
+    async def fake_chat(*_args, **kwargs):
+        if kwargs["call_meta"]["discovery_phase"] == "current":
+            return json.dumps({"characters": [{
+                "source_label": "她男朋友",
+                "canonical_name": "",
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "onscreen",
+                "evidence": "她男朋友帮忙拎行李",
+            }]}, ensure_ascii=False)
+        return json.dumps({"characters": [{
+            "source_label": "她男朋友",
+            "canonical_name": "她男朋友",
+            "identity_kind": "functional",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+            "evidence": "她男朋友帮忙拎行李",
+            "future_evidence": "后续仍以她男朋友指代，没有稳定真名",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "她男朋友帮忙拎行李。",
+        bible,
+        3,
+        future_text="后来她男朋友又来了一次，仍未交代姓名。",
+        future_label="后续章节",
+    ))
+
+    assert [
+        (item["source_label"], item["name"], item["identity_kind"])
+        for item in candidates
+    ] == [("她男朋友", "她男朋友", "functional")]
+
+
+def test_future_functional_enum_drift_can_use_existing_bible_identity(
+    monkeypatch,
+) -> None:
+    bible = Bible(
+        characters=[Character(
+            name="李富贵",
+            role="重要配角",
+            appearance_canonical="圆脸胖少年，粗麻长衫，门牙醒目",
+        )],
+        world=World(visual_style_canonical="国风"),
+    )
+
+    async def fake_chat(*_args, **kwargs):
+        if kwargs["call_meta"]["discovery_phase"] == "current":
+            return json.dumps({"characters": [{
+                "source_label": "小胖子",
+                "canonical_name": "",
+                "identity_kind": "functional",
+                "functional_identity_key": "F1",
+                "kind": "onscreen",
+                "evidence": "小胖子跟随孟浩",
+            }]}, ensure_ascii=False)
+        return json.dumps({"characters": [{
+            "source_label": "小胖子",
+            "canonical_name": "李富贵",
+            "identity_kind": "functional",
+            "functional_identity_key": "F1",
+            "kind": "onscreen",
+            "evidence": "小胖子跟随孟浩",
+            "future_evidence": "小胖子自报姓名为李富贵",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.discover_character_candidates(
+        "小胖子跟随孟浩。",
+        bible,
+        2,
+        future_text="小胖子拍着胸口说，我李富贵认你这个朋友。",
+        future_label="后续章节",
+    ))
+
+    assert [
+        (item["source_label"], item["name"], item["identity_kind"])
+        for item in candidates
+    ] == [("小胖子", "李富贵", "named")]
+
+
 def test_character_resolutions_persist_and_future_identity_upgrades_route_fallback() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -803,7 +1112,7 @@ def test_character_importance_window_remains_twenty_chapters() -> None:
     assert "+20 章" in label
 
 
-def test_unresolved_descriptive_people_become_numbered_extras_before_screenplay(monkeypatch) -> None:
+def test_unresolved_descriptive_people_keep_source_labels(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "绿袍男子与大汉守在门前。")
     _patch_settings(monkeypatch, conn)
@@ -836,9 +1145,16 @@ def test_unresolved_descriptive_people_become_numbered_extras_before_screenplay(
         generate_portraits=False,
     ))
 
-    assert [(item["source_label"], item["canonical_name"]) for item in result["resolutions"]] == [
-        ("绿袍男子", "路人甲"),
-        ("大汉", "路人乙"),
+    assert [
+        (
+            item["source_label"],
+            item["canonical_name"],
+            item["resolution"],
+        )
+        for item in result["resolutions"]
+    ] == [
+        ("绿袍男子", "绿袍男子", "functional_identity"),
+        ("大汉", "大汉", "functional_identity"),
     ]
     assert result["checked"] == 0
 
@@ -1146,6 +1462,60 @@ def test_screenplay_resolution_is_applied_before_publish_and_keeps_source_eviden
     assert portraits.screenplay_character_resolution_errors(script, resolutions) == []
 
 
+def test_resolution_does_not_turn_non_dialogue_prefix_into_speaker() -> None:
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=(
+            "【场1】夜 / 歌厅\n"
+            "并行画面：王申和同事在歌厅唱歌。\n"
+            "王申：我先回去了。"
+        ),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            turns=[KeyDialogueTurn(
+                speaker="王申",
+                line="我先回去了。",
+                source_text="我先回去了。",
+            )],
+        )],
+    )
+
+    portraits.apply_screenplay_character_resolutions(script, [{
+        "source_label": "并行画面",
+        "canonical_name": "路人11",
+        "resolution": "functional_extra",
+    }])
+
+    assert "并行画面：王申和同事在歌厅唱歌。" in script.full_script_text
+    assert "路人11：" not in script.full_script_text
+
+
+def test_dialogue_normalization_demotes_unowned_colon_line_to_action() -> None:
+    from app.validators import normalize_screenplay_dialogue_chains
+
+    script = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=(
+            "【场1】夜 / 歌厅\n"
+            "路人11：王申和同事在歌厅唱歌。\n"
+            "王申：我先回去了。"
+        ),
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            turns=[KeyDialogueTurn(
+                speaker="王申",
+                line="我先回去了。",
+                source_text="我先回去了。",
+            )],
+        )],
+    )
+
+    normalize_screenplay_dialogue_chains(script)
+
+    assert "路人11，王申和同事在歌厅唱歌。" in script.full_script_text
+    assert "王申：我先回去了。" in script.full_script_text
+
+
 def test_identity_gate_uses_shared_speaker_parser_and_allows_narrator() -> None:
     bible = Bible(
         world=World(visual_style_canonical="国风"),
@@ -1432,7 +1802,7 @@ def test_future_identity_keeps_current_display_label() -> None:
     assert script.scene_outline[0].characters == ["丁力"]
     assert script.dialogue_chains[0].turns[0].speaker == "丁力"
     assert "青衣人挡在门前" in script.full_script_text
-    assert "青衣人：止步" in script.full_script_text
+    assert "丁力：止步" in script.full_script_text
     assert "丁力" not in script.scene_outline[0].summary
 
 

@@ -50,47 +50,6 @@ BIBLE_INTERRUPTED_ERROR = "人物谱任务已中断（服务重载或后台任�
 FALLBACK_VISUAL_STYLE = "国漫风格，非真人CG渲染，统一电影感光影，暖灰色调"
 
 
-def _normalize_required_dialogue_lines(
-    value,
-    *,
-    allow_single_character: bool = False,
-) -> list[str]:
-    if value in (None, ""):
-        return []
-    if not isinstance(value, list):
-        raise HTTPException(422, "必保留原文台词必须按行提交")
-    from app.textmatch import condense, strip_speaker
-
-    lines: list[str] = []
-    seen: set[str] = set()
-    for raw in value:
-        line = str(raw or "").strip().lstrip("-• ").strip()
-        if not line:
-            continue
-        content = condense(strip_speaker(line))
-        if len(content) < 2 and not allow_single_character:
-            raise HTTPException(422, f"必保留原文台词过短：{line}")
-        if len(line) > 160:
-            raise HTTPException(422, f"单条必保留原文台词不能超过 160 字：{line[:30]}…")
-        if content in seen:
-            continue
-        seen.add(content)
-        lines.append(line)
-    return lines
-
-
-def _screenplay_required_dialogues(ep) -> list[str]:
-    try:
-        raw = ep["screenplay_required_dialogues"] or "[]"
-    except (KeyError, IndexError, TypeError):
-        return []
-    try:
-        value = json.loads(raw) if isinstance(raw, str) else raw
-        return _normalize_required_dialogue_lines(value)
-    except (json.JSONDecodeError, HTTPException):
-        return []
-
-
 def _as_body_dict(body) -> dict:
     """FastAPI ``Body(None)`` 在直接调用时会把默认值变成 Body 对象，不能当 dict 展开。"""
     return body if isinstance(body, dict) else {}

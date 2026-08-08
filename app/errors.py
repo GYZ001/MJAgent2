@@ -78,7 +78,11 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         return "provider", "LLM"
     if name == "StageError" and "JSON 解析失败" in _extract_message(exc):
         return "generation", "JSON"
-    if name in {"StageError", "CompileError"}:
+    if name in {
+        "StageError",
+        "CompileError",
+        "ScreenplayIRIdentityConflictError",
+    }:
         return "generation", "GEN"
     if name == "FullRegenDenied":
         return "conflict", "FULL-REGEN-DENIED"

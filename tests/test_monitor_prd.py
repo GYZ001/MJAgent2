@@ -39,6 +39,7 @@ def test_settings_schema_rejects_illegal_values_and_dependency_conflicts(monkeyp
         {"video_submit_concurrency": "abc"},
         {"video_submit_concurrency": "Infinity"},
         {"video_submit_concurrency": 0},
+        {"text_generation_concurrency": 17},
         {"auto_qa": "yes"},
         {"media_scheduler_policy": "random"},
         {"video_ready_low_watermark": 9, "video_ready_high_watermark": 3},
@@ -88,6 +89,42 @@ def test_settings_save_is_versioned_authoritative_and_atomic(monkeypatch) -> Non
     assert failed.value.status_code == 503
     assert conn.execute("SELECT value FROM settings WHERE key='video_submit_concurrency'").fetchone()[0] == "20"
     assert conn.execute("SELECT value FROM settings WHERE key='_monitor_config_version'").fetchone()[0] == "1"
+
+
+def test_text_generation_concurrency_hot_resizes_existing_queue(monkeypatch) -> None:
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+    conn.execute(
+        "UPDATE settings SET value='2' WHERE key='text_generation_concurrency'"
+    )
+    conn.commit()
+    from app import generation_concurrency, worker
+    from app.media_pipeline import concurrency
+
+    reloads: list[str] = []
+    monkeypatch.setattr(concurrency, "reload_limits_from_settings", lambda: None)
+    monkeypatch.setattr(worker, "ensure_workers", lambda: None)
+    monkeypatch.setattr(
+        generation_concurrency,
+        "reload_generation_limits",
+        lambda: reloads.append("text") or 1,
+    )
+
+    result = system_api.put_settings({
+        "version": 0,
+        "patch": {"text_generation_concurrency": 10},
+    })
+
+    assert reloads == ["text"]
+    assert result["items"] == [{
+        "key": "text_generation_concurrency",
+        "requested": "10",
+        "effective": "10",
+        "apply_mode": "immediate",
+    }]
+    assert conn.execute(
+        "SELECT value FROM settings WHERE key='text_generation_concurrency'"
+    ).fetchone()[0] == "10"
 
 
 def test_independent_release_switches_fail_safe(monkeypatch) -> None:

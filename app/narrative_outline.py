@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from math import ceil
+import re
 from typing import Any
 
 from app import config
@@ -14,6 +15,7 @@ from app.schemas import (
     ShotCapacityBudget,
     ShotContribution,
     StoryboardOutline,
+    StoryboardOutlineShot,
 )
 
 
@@ -140,20 +142,57 @@ def normalize_narrative_storyboard_outline(
         item.event_id: position
         for position, item in enumerate(plan.events)
     }
+    catalog_by_turn: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
+    for key_position, line in enumerate(screenplay.key_lines or [], start=1):
+        text = str(line or "").strip()
+        speaker, separator, spoken = text.partition("：")
+        if not separator:
+            speaker, separator, spoken = text.partition(":")
+        if (
+            not separator
+            or not speaker.strip()
+            or not spoken.strip()
+            or speaker.strip() == "旁白"
+        ):
+            continue
+        catalog_by_turn[(
+            "".join(character for character in speaker if character.isalnum()),
+            "".join(character for character in spoken if character.isalnum()),
+        )].append(f"KL{key_position:02d}")
+
     key_line_meta: dict[str, tuple[str, str, str]] = {}
     chain_key_ids: dict[str, list[str]] = {}
-    key_number = 1
+    fallback_key_number = 1
+    use_legacy_chain_catalog = not bool(catalog_by_turn)
     for chain in screenplay.dialogue_chains:
         ids: list[str] = []
         for turn in chain.turns:
-            key_id = f"KL{key_number:02d}"
+            identity = (
+                "".join(
+                    character
+                    for character in str(turn.speaker or "")
+                    if character.isalnum()
+                ),
+                "".join(
+                    character
+                    for character in str(turn.line or "")
+                    if character.isalnum()
+                ),
+            )
+            candidates = catalog_by_turn.get(identity) or []
+            if candidates:
+                key_id = candidates.pop(0)
+            elif use_legacy_chain_catalog and str(turn.speaker or "").strip() != "旁白":
+                key_id = f"KL{fallback_key_number:02d}"
+                fallback_key_number += 1
+            else:
+                continue
             key_line_meta[key_id] = (
                 turn.speaker,
                 turn.line,
                 chain.chain_id,
             )
             ids.append(key_id)
-            key_number += 1
         chain_key_ids[chain.chain_id] = ids
     base_by_event: dict[str, Any] = {}
     bases_by_event: defaultdict[str, list[Any]] = defaultdict(list)
@@ -601,6 +640,16 @@ def normalize_narrative_storyboard_outline(
                 main.beat = main.primary_action
                 main.covers = main.primary_action
             event_nodes.append((event.event_id, "main", main))
+        for _event_id, _role, event_shot in event_nodes:
+            for field_name in (
+                "scene_id",
+                "scene_time",
+                "scene_name",
+                "scene_setting",
+            ):
+                if getattr(event_shot, field_name):
+                    continue
+                setattr(event_shot, field_name, getattr(base, field_name))
         nodes.extend(event_nodes)
 
     for position, (_event_id, _role, shot) in enumerate(nodes, start=1):
@@ -918,3 +967,253 @@ def normalize_narrative_storyboard_outline(
         )
     )
     return changes
+
+
+def compile_narrative_storyboard_outline(
+    screenplay: EpisodeScreenplay,
+) -> StoryboardOutline:
+    """Compile one compact event skeleton without asking a model for ledgers.
+
+    The screenplay already owns event order, scene boundaries, source
+    ownership, dialogue IDs and state transitions. The outline model used to
+    restate all of those fields in one very large JSON response. This compiler
+    keeps only the directing prose needed by the later scene-pack stage; the
+    existing narrative projection then derives every graph-owned field.
+    """
+    plan = screenplay.narrative_plan
+    scenes = list(screenplay.scene_outline or [])
+    events = list(plan.events if plan is not None else [])
+    scene_contracts = list(plan.scene_contracts if plan is not None else [])
+    if plan is None:
+        raise ValueError("叙事剧本缺少 narrative_plan")
+    if not events:
+        raise ValueError("叙事剧本没有可编译事件")
+    if not scenes:
+        raise ValueError("叙事剧本没有场次结构")
+    if len(scene_contracts) != len(scenes):
+        raise ValueError(
+            "scene_outline 与 narrative_plan.scene_contracts 数量不一致："
+            f"{len(scenes)} != {len(scene_contracts)}"
+        )
+    if len(events) < len(scenes):
+        raise ValueError(
+            "叙事事件少于场次数，无法保证每场至少一个镜头："
+            f"{len(events)} < {len(scenes)}"
+        )
+
+    event_positions = {
+        event.event_id: position
+        for position, event in enumerate(events)
+    }
+    scene_by_event: dict[str, int] = {}
+    cursor = 0
+    for scene_index, contract in enumerate(scene_contracts):
+        remaining_scenes = len(scenes) - scene_index - 1
+        latest_allowed = len(events) - remaining_scenes - 1
+        declared_turns = [
+            event_positions[event_id]
+            for event_id in contract.turn_event_ids
+            if (
+                event_id in event_positions
+                and cursor <= event_positions[event_id] <= latest_allowed
+            )
+        ]
+        if scene_index == len(scenes) - 1:
+            end = len(events) - 1
+        elif declared_turns:
+            end = min(max(declared_turns), latest_allowed)
+        else:
+            end = min(cursor, latest_allowed)
+        if end < cursor:
+            raise ValueError(
+                f"场次 {contract.scene_id} 没有可分配的顺序事件"
+            )
+        for position in range(cursor, end + 1):
+            scene_by_event[events[position].event_id] = scene_index
+        cursor = end + 1
+    if cursor != len(events):
+        raise ValueError(
+            f"场次合同只覆盖 {cursor}/{len(events)} 个叙事事件"
+        )
+
+    legacy_events = {
+        event.event_id: event
+        for event in screenplay.events or []
+    }
+
+    def source_ids(value: str) -> set[str]:
+        return set(re.findall(r"SRC\d+", str(value or "")))
+
+    event_source_ids = {
+        event.event_id: source_ids(
+            legacy_events.get(event.event_id).source_span
+            if event.event_id in legacy_events else ""
+        )
+        for event in events
+    }
+    beats_by_event: defaultdict[str, list[Any]] = defaultdict(list)
+    beats = list(
+        screenplay.plot_spine.spine_beats
+        if screenplay.plot_spine is not None else []
+    )
+    for beat_position, beat in enumerate(beats):
+        beat_sources = set(beat.source_segment_ids or [])
+        _score, _distance, selected_event_id = max(
+            (
+                len(beat_sources & event_source_ids[event.event_id]),
+                -abs(beat_position - event_position),
+                event.event_id,
+            )
+            for event_position, event in enumerate(events)
+        )
+        beats_by_event[selected_event_id].append(beat)
+
+    key_line_catalog: dict[str, str] = {}
+    for key_position, line in enumerate(screenplay.key_lines or [], start=1):
+        text = str(line or "").strip()
+        speaker, separator, _spoken = text.partition("：")
+        if not separator:
+            speaker, separator, _spoken = text.partition(":")
+        if text and separator and speaker.strip() != "旁白":
+            key_line_catalog[f"KL{key_position:02d}"] = text
+
+    evidence_by_event: defaultdict[str, list[str]] = defaultdict(list)
+    for evidence in plan.evidence:
+        if evidence.anchor.type == "event":
+            evidence_by_event[evidence.anchor.id].append(
+                evidence.observable_claim
+            )
+    information_by_event: defaultdict[str, list[str]] = defaultdict(list)
+    for item in screenplay.information_ledger or []:
+        if item.event_id:
+            information_by_event[item.event_id].append(item.info_id)
+
+    def scene_parts(scene_heading: str) -> tuple[str, str]:
+        heading = re.sub(
+            r"^【场[^】]*】\s*",
+            "",
+            str(scene_heading or ""),
+        ).strip()
+        parts = re.split(r"\s*[／/]\s*", heading, maxsplit=1)
+        if len(parts) == 2:
+            return parts[0].strip(), parts[1].strip()
+        return "", heading
+
+    shots: list[StoryboardOutlineShot] = []
+    for shot_no, event in enumerate(events, start=1):
+        scene_index = scene_by_event[event.event_id]
+        scene = scenes[scene_index]
+        scene_contract = scene_contracts[scene_index]
+        legacy = legacy_events.get(event.event_id)
+        event_beats = beats_by_event[event.event_id]
+        event_key_line_ids = list(dict.fromkeys(
+            key_line_id
+            for beat in event_beats
+            for key_line_id in beat.key_line_ids
+            if key_line_id in key_line_catalog
+        ))
+        event_information_ids = list(dict.fromkeys([
+            *information_by_event[event.event_id],
+            *[
+                info_id
+                for beat in event_beats
+                for info_id in beat.information_ids
+            ],
+        ]))
+        scene_time, scene_name = scene_parts(scene.scene_heading)
+        observable = next(
+            (
+                claim.strip()
+                for claim in evidence_by_event[event.event_id]
+                if claim.strip()
+            ),
+            "",
+        )
+        visible_change = str(
+            getattr(legacy, "visible_change", "") or ""
+        ).strip()
+        trigger = str(getattr(legacy, "trigger", "") or "").strip()
+        beat_text = (
+            visible_change
+            or observable
+            or trigger
+            or scene.summary
+        )
+        covers = "；".join(dict.fromkeys(filter(None, [
+            *[
+                str(beat.does or "").strip()
+                for beat in event_beats
+            ],
+            observable,
+            visible_change,
+        ])))
+        speakers = list(dict.fromkeys(
+            key_line_catalog[key_line_id].partition("：")[0].strip()
+            for key_line_id in event_key_line_ids
+            if key_line_id in key_line_catalog
+        ))
+        previous_scene_id = shots[-1].scene_id if shots else ""
+        shots.append(StoryboardOutlineShot(
+            shot_no=shot_no,
+            scene_time=scene_time,
+            scene_name=scene_name,
+            scene_setting=(
+                f"{scene_time}，{scene_name}"
+                if scene_time and scene_name else scene_name or scene_time
+            ),
+            beat=beat_text,
+            covers=covers or beat_text,
+            story_event_id=event.event_id,
+            spine_beat_ids=[
+                beat.beat_id
+                for beat in event_beats
+                if beat.beat_id
+            ],
+            key_line_ids=event_key_line_ids,
+            information_ids=event_information_ids,
+            new_information_ids=event_information_ids,
+            state_in=(
+                str(getattr(legacy, "state_in", "") or "").strip()
+                or scene.entry_state
+            ),
+            primary_action=trigger or visible_change or observable,
+            state_out=(
+                str(getattr(legacy, "state_out", "") or "").strip()
+                or scene.exit_state
+            ),
+            continuity_mode=(
+                "scene_change"
+                if previous_scene_id != scene_contract.scene_id
+                else "same_scene_cut"
+            ),
+            duration_s=config.DEFAULT_VIDEO_DURATION_S,
+            characters_visible=list(scene.characters),
+            audio_cast=speakers,
+            purpose=observable or scene.story_function,
+            resulting_change=(
+                str(getattr(legacy, "state_out", "") or "").strip()
+                or scene.exit_state
+            ),
+            readability_focus=(
+                "dialogue" if event_key_line_ids else "action"
+            ),
+            scene_id=scene_contract.scene_id,
+            event_ids=[event.event_id],
+        ))
+
+    outline = StoryboardOutline(
+        episode_no=screenplay.episode_no,
+        shots=shots,
+    )
+    object.__setattr__(
+        outline,
+        "_compile_audit",
+        {
+            "compiler": "narrative-storyboard-outline.v1",
+            "event_count": len(events),
+            "scene_count": len(scenes),
+            "base_shot_count": len(shots),
+            "model_calls": 0,
+        },
+    )
+    return outline

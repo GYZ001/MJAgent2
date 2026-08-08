@@ -101,6 +101,51 @@ def test_uncommitted_accepted_candidate_records_evaluation(
     assert recorded == [("art-isolated", "step-isolated")]
 
 
+def test_screenplay_ir_candidate_persists_raw_and_normalized_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = AgentLoop(
+        stage_key="screenplay",
+        contract_key="screenplay",
+        goal="persist the recoverable generation boundary",
+        scope_type="episode",
+        scope_id="e1",
+        artifact_type="screenplay_generation_ir",
+        prompt_version="screenplay-compact-ir-5.2.0",
+        policy=AgentLoopPolicy(commit_accepted_artifact=False),
+    )
+    created: list[EvidenceArtifact] = []
+
+    def capture_artifact(artifact, **_kwargs):
+        created.append(artifact)
+        return {"id": f"art-{len(created)}"}
+
+    monkeypatch.setattr(repository, "create_artifact", capture_artifact)
+    monkeypatch.setattr(
+        repository,
+        "create_evaluation",
+        lambda *_args, **_kwargs: {"id": "eval-1"},
+    )
+
+    artifact_id = loop._record_candidate(
+        "step-missing-is-allowed",
+        1,
+        '{"value":2}',
+        Candidate(value=2),
+        [],
+        1.0,
+    )
+
+    assert artifact_id == "art-2"
+    assert [item.type for item in created] == [
+        "screenplay_generation_ir_raw",
+        "screenplay_generation_ir",
+    ]
+    assert created[0].content == {"raw_output": '{"value":2}'}
+    assert created[1].content == {"value": 2}
+    assert created[1].parent_artifact_ids == ["art-1"]
+
+
 def test_agent_loop_repairs_all_authority_blockers() -> None:
     outputs = ['{"value": 1}', '{"value": 2}']
 

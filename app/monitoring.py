@@ -69,6 +69,14 @@ def _boolean(label: str, default: str, *, experimental: bool = False) -> dict[st
 # 监制房可写白名单。其余 DEFAULT_SETTINGS 仍能被程序内部读取，但不能通过通用
 # 运维接口任意写入；模型路由键在下方按专用规则补充。
 SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
+    "text_generation_concurrency": _number(
+        "剧本/分镜文本并发",
+        "10",
+        1,
+        16,
+        unit="集",
+        description="同一时间最多生成多少集剧本或分镜；活动队列会立即按新值扩缩容。",
+    ),
     "video_submit_concurrency": _number("视频提交并发", "15", 1, 64, unit="任务"),
     "video_inflight_limit": _number("上游视频在途上限", "15", 1, 128, unit="任务"),
     "video_poll_concurrency": _number("视频轮询并发", "15", 1, 128, unit="任务"),
@@ -117,7 +125,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
 _MODEL_PROVIDER_OPTIONS = {
     "model_text_provider": ["hiagent", "openrouter", "bailian", "deepseek", "zhipu"],
     "model_vlm_provider": ["hiagent", "openrouter", "bailian"],
-    "model_video_provider": ["hiagent"],
+    "model_video_provider": ["hiagent", "minimax_h3"],
     "model_image_provider": ["hiagent"],
     "model_route": ["hiagent", "openrouter"],
 }
@@ -129,6 +137,7 @@ for _key, _options in _MODEL_PROVIDER_OPTIONS.items():
 
 for _key in (
     "hiagent_model_text", "hiagent_model_vlm", "hiagent_model_video", "hiagent_model_image",
+    "minimax_h3_model_video", "minimax_h3_base_url",
     "openrouter_model_text", "openrouter_model_vlm", "bailian_model_text", "bailian_model_vlm",
     "deepseek_model_text", "zhipu_model_text",
     "provider_media_public_base_url",
@@ -203,6 +212,14 @@ def normalize_setting(key: str, value: Any) -> str:
         raise HTTPException(422, detail={"field": key, "message": "不能为空"})
     if len(raw) > int(spec.get("max_length") or 1000):
         raise HTTPException(422, detail={"field": key, "message": "内容过长"})
+    if key == "minimax_h3_base_url" and not re.fullmatch(
+        r"https?://(?:\[[0-9A-Fa-f:]+\]|[^\s/:?#]+)(?::\d+)?",
+        raw,
+    ):
+        raise HTTPException(422, detail={
+            "field": key,
+            "message": "必须是仅包含协议、主机和可选端口的 http(s) 服务地址",
+        })
     return raw
 
 

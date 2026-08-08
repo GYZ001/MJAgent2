@@ -1765,9 +1765,6 @@ export interface Episode {
   narrative_calibration_summary?: NarrativeCalibrationSummary | null;
   narrative_metrics?: Record<string, unknown> | null;
   scene_options?: string[];
-  source_dialogue_occurrences?: DialogueOccurrence[] | null;
-  required_dialogue_lines?: string[];
-  required_dialogue_occurrence_ids?: string[];
   shot_count?: number;
   video_count?: number;
   pending_adoption_count?: number;
@@ -1828,18 +1825,6 @@ export interface Episode {
   delivery_artifact_id?: string | null;
   delivery_status?: string;
   pipeline_summary?: EpisodePipelineSummary | null;
-}
-
-export interface DialogueOccurrence {
-  id: string;
-  text: string;
-  order: number;
-  offset: number;
-  chapter?: number | null;
-  paragraph: number;
-  context: string;
-  estimated_seconds: number;
-  group_id?: string | null;
 }
 
 export interface ScreenplayState {

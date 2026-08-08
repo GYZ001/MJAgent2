@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from app import config, textmatch
+from app.character_policy import resolution_declares_functional_identity
 from app.db import get_conn, get_setting, now
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue
@@ -53,9 +54,6 @@ MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
 SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-16"
-NON_WAIVABLE_SCREENPLAY_ISSUE_CODES = frozenset({
-    "CHARACTER_IDENTITY_UNRESOLVED",
-})
 
 
 class ScreenplayIdentityGateError(RuntimeError):
@@ -89,8 +87,31 @@ def _eval_id_from_create(evaluation_row: dict[str, Any] | str | None) -> str:
 
 
 def non_waivable_screenplay_issues(issues: list[Issue]) -> list[Issue]:
-    """只有会让下游身份/资产合同失真的问题禁止降级发布。"""
-    return [issue for issue in issues if issue.code in NON_WAIVABLE_SCREENPLAY_ISSUE_CODES]
+    """Select runtime gates from issue attributes, never from a code whitelist."""
+    return [
+        issue
+        for issue in issues
+        if (
+            bool((issue.evidence or {}).get("must_fix", False))
+            or bool((issue.evidence or {}).get("runtime_blocking", False))
+        )
+    ]
+
+
+def screenplay_identity_gate_issues(issues: list[Issue]) -> list[Issue]:
+    """Return identity-specific gates using their structured owner metadata."""
+    return [
+        issue
+        for issue in non_waivable_screenplay_issues(issues)
+        if (
+            str((issue.evidence or {}).get("path") or "").startswith(
+                "/character_identities/"
+            )
+            or str(
+                (issue.evidence or {}).get("rule_id") or ""
+            ) == "character_identity_must_resolve_before_publish"
+        )
+    ]
 
 
 def _gate_failure_message(
@@ -358,8 +379,7 @@ def run_screenplay_qa(
                     key: episode.get(key)
                     for key in (
                         "title", "hook", "cliffhanger", "synopsis",
-                        "target_duration_s", "required_dialogue_lines",
-                        "required_dialogue_occurrences", "character_resolutions",
+                        "target_duration_s", "character_resolutions",
                     )
                 },
                 "contract_version": contract_version,
@@ -379,13 +399,25 @@ def run_screenplay_qa(
             authority_input_fingerprint = ""
 
     expected = max(1, int(episode.get("target_duration_s") or 50) // config.VIDEO_DURATION_MIN_S)
+    character_resolutions = list(
+        episode.get("character_resolutions") or []
+    )
+    functional_identity_names = {
+        str(item.get("canonical_name") or "").strip()
+        for item in character_resolutions
+        if (
+            isinstance(item, dict)
+            and resolution_declares_functional_identity(item)
+            and str(item.get("canonical_name") or "").strip()
+        )
+    }
     messages = validate_screenplay(
         script, bible, expected,
         episode_no=episode.get("episode_no"),
         source_text=source_text,
         require_dialogue_chains=True,
-        required_dialogue_lines=episode.get("required_dialogue_lines") or [],
         validate_narrative=False,
+        functional_identity_names=functional_identity_names,
     )
     source_chapter_contract_present = "source_chapters" in episode
     raw_source_chapters = episode.get("source_chapters") or []
@@ -442,10 +474,13 @@ def run_screenplay_qa(
         screenplay_unknown_identity_errors,
     )
     identity_messages = screenplay_character_resolution_errors(
-        script,
-        episode.get("character_resolutions") or [],
+        script, character_resolutions,
     )
-    identity_messages.extend(screenplay_unknown_identity_errors(script, bible))
+    identity_messages.extend(screenplay_unknown_identity_errors(
+        script,
+        bible,
+        character_resolutions,
+    ))
     messages.extend(adaptation_hook_errors(script, episode))
     if authority_error:
         messages.append(f"[SCREENPLAY_SOURCE_AUTHORITY_MISMATCH] {authority_error}")
@@ -476,10 +511,6 @@ def run_screenplay_qa(
     for issue in issues:
         if artifact_hash:
             issue.evidence["artifact_hash"] = artifact_hash
-        if issue.code == "KEY_LINE_MISSING" and "dialogue_chains 共" in issue.message:
-            issue.evidence["required_dialogue_lines"] = list(
-                episode.get("required_dialogue_lines") or []
-            )
     score = 100.0 if not issues else max(0.0, 100.0 - 10.0 * len(issues))
     try:
         pass_score = min(100.0, max(0.0, float(get_setting("screenplay_qa_pass_score") or 80)))
@@ -490,19 +521,26 @@ def run_screenplay_qa(
         and must_fix_count(issues) == 0
         and score >= pass_score
     )
-    status = "passed" if quality_passed else "warning"
-    evaluation_role = "score_only"
-    runtime_blocking = False
+    runtime_gate_issues = non_waivable_screenplay_issues(issues)
+    runtime_blocking = bool(runtime_gate_issues)
+    status = (
+        "failed" if runtime_blocking
+        else "passed" if quality_passed
+        else "warning"
+    )
+    evaluation_role = "runtime_gate" if runtime_blocking else "score_only"
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
         evaluator_version="screenplay-qa-gate-2",
         status=status,
-        hard_gate_passed=True,
+        hard_gate_passed=not runtime_blocking,
         evaluation_role=evaluation_role,
         score_status="scored",
         runtime_blocking=runtime_blocking,
-        retry_eligible=False,
+        retry_eligible=runtime_blocking and any(
+            issue.repairable for issue in runtime_gate_issues
+        ),
         score=score,
         issues=issues,
         evidence={
@@ -515,6 +553,7 @@ def run_screenplay_qa(
             "runtime_blocking": runtime_blocking,
             "pass_score": pass_score,
             "verdict": "passed" if quality_passed else "quality_risk",
+            "runtime_gate_issue_count": len(runtime_gate_issues),
             "gate_retry_exhausted": bool(issues),
         },
     )
@@ -537,6 +576,35 @@ def plan_screenplay_patch(
     related = list((issue.evidence or {}).get("related_node_ids") or [])
 
     ops: list[PatchOperation] = []
+
+    if code == "SCENE_FIELD_INVALID" and path.endswith("/turn"):
+        scene_id, scene = _scene_from_issue(issue, script)
+        strategy = f"derive_scene_turn_{scene_id}"
+        if (
+            scene_id
+            and scene is not None
+            and not _strategy_was_tried(tried, strategy)
+        ):
+            exit_state = re.sub(
+                r"\s+", " ", str(scene.exit_state or "")
+            ).strip(" ，,；;。")
+            story_function = re.sub(
+                r"\s+", " ", str(scene.story_function or scene.summary or "")
+            ).strip(" ，,；;。")
+            value = (
+                f"本场结束时，{exit_state or '人物与局势完成状态变化'}，"
+                f"并完成「{story_function or '本场戏剧任务'}」"
+            )
+            return [PatchOperation(
+                op="replace_field",
+                target={
+                    "kind": "screenplay_scene",
+                    "id": scene_id,
+                    "strategy": strategy,
+                },
+                path="turn",
+                value=value,
+            )]
 
     if code == "SOURCE_SPAN_EXACT_MISMATCH":
         ops = _plan_source_span_patch(
@@ -3657,7 +3725,11 @@ def _complete_screenplay_from_working_artifact(
             script,
             episode.get("character_resolutions") or [],
         ),
-        *screenplay_unknown_identity_errors(script, bible),
+        *screenplay_unknown_identity_errors(
+            script,
+            bible,
+            episode.get("character_resolutions") or [],
+        ),
     ]))
     if identity_errors:
         message = ("剧本缺少可确定的人物身份上下文：" + "；".join(identity_errors[:5]))[:800]
@@ -3861,17 +3933,12 @@ async def run_screenplay_production(
         checkpoints can resume across the upgrade.  It no longer issues a
         completion certificate or publishes an unvalidated candidate.
         """
-        hard_identity_issues = non_waivable_screenplay_issues(open_issues)
-        if hard_identity_issues:
-            # #region debug-point D:identity-hard-gate-working-artifact
-            try:
-                import json as _dbg_json, urllib.request as _dbg_request; _dbg_p=".dbg/contextual-speaker-contract.env"; _dbg_u,_dbg_s="http://127.0.0.1:7777/event","contextual-speaker-contract"; _dbg_c=open(_dbg_p).read(); _dbg_u=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SERVER_URL=")),_dbg_u); _dbg_s=next((line.split("=",1)[1] for line in _dbg_c.splitlines() if line.startswith("DEBUG_SESSION_ID=")),_dbg_s); _dbg_request.urlopen(_dbg_request.Request(_dbg_u,data=_dbg_json.dumps({"sessionId":_dbg_s,"runId":"post-fix","hypothesisId":"D","location":"app/production/screenplay_repair.py:identity_hard_gate","msg":"[DEBUG] Identity hard gate working artifact","data":{"episodeId":episode_id,"revisionId":current_rev.id,"workingArtifactId":working_id,"artifactHash":artifact_hash,"reason":reason,"issues":[{"code":issue.code,"message":issue.message} for issue in hard_identity_issues]},"ts":int(__import__("time").time()*1000)}).encode(),headers={"Content-Type":"application/json"}),timeout=0.5).read()
-            except Exception:
-                pass
-            # #endregion
+        hard_issues = non_waivable_screenplay_issues(open_issues)
+        identity_issues = screenplay_identity_gate_issues(open_issues)
+        if hard_issues and len(identity_issues) == len(hard_issues):
             message = (
                 "剧本人物身份预检未通过，已在剧本阶段停止："
-                + "；".join(issue.message for issue in hard_identity_issues[:5])
+                + "；".join(issue.message for issue in identity_issues[:5])
             )[:800]
             conn.execute(
                 "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,screenplay_updated_at=? "
@@ -3899,7 +3966,7 @@ async def run_screenplay_production(
                     "人物身份未解决，禁止发布剧本和启动分镜",
                     payload={
                         "reason": reason,
-                        "issues": [issue.model_dump(mode="json") for issue in hard_identity_issues],
+                        "issues": [issue.model_dump(mode="json") for issue in identity_issues],
                     },
                 )
             raise ScreenplayIdentityGateError(message)
@@ -4008,11 +4075,25 @@ async def run_screenplay_production(
             authorized_source_chapters=episode.get("authorized_source_chapters"),
         )
 
+        source_ir_artifact_id = str(
+            getattr(script, "_source_ir_artifact_id", None) or ""
+        )
+        compiler_version = str(
+            getattr(script, "_ir_compiler_version", "") or ""
+        )
+        compiler_audit = list(
+            getattr(script, "_ir_compiler_audit", []) or []
+        )
         from app.validators import normalize_screenplay_candidate
-        script = normalize_screenplay_candidate(script)
+        script = normalize_screenplay_candidate(
+            script,
+            source_text=source_text,
+        )
         payload = screenplay_artifact_payload(script)
-        candidate_parent_ids: list[str] = []
-        if run_id:
+        candidate_parent_ids: list[str] = (
+            [source_ir_artifact_id] if source_ir_artifact_id else []
+        )
+        if run_id and not candidate_parent_ids:
             candidate_row = conn.execute(
                 "SELECT output_artifact_id FROM step_runs "
                 "WHERE run_id=? AND step_key='screenplay.iteration' "
@@ -4032,6 +4113,15 @@ async def run_screenplay_production(
                 content=payload,
                 parent_artifact_ids=candidate_parent_ids,
                 contract_version=contract.version,
+                model_snapshot={
+                    "generation_contract": str(
+                        getattr(script, "source_text_range", "") or ""
+                    ),
+                    "compiler_version": str(
+                        compiler_version
+                    ),
+                    "compiler_audit_count": len(compiler_audit),
+                },
             )
         )
         rev = mark_baseline_generated(
@@ -4062,6 +4152,9 @@ async def run_screenplay_production(
             "phase": "IDENTITY_AUDIT",
             "activation_no": activation_no,
             "working_artifact_id": baseline_art["id"],
+            "source_ir_artifact_id": source_ir_artifact_id or None,
+            "compiler_version": compiler_version,
+            "compiler_audit": compiler_audit[:200],
             "yield_reason": None,
         }
         save_checkpoint(rev.id, checkpoint)
@@ -4124,6 +4217,7 @@ async def run_screenplay_production(
     draft_identity_errors = screenplay_unknown_identity_errors(
         working_script,
         bible,
+        episode.get("character_resolutions") or [],
     )
     # #region debug-point B:post-baseline-identity-gate
     try:
@@ -4137,16 +4231,36 @@ async def run_screenplay_production(
             source_text,
             draft_text=working_script.model_dump_json(),
         )
+        previous_resolutions = list(
+            episode.get("character_resolutions") or []
+        )
         episode["character_resolutions"] = merge_screenplay_character_resolutions(
-            episode.get("character_resolutions") or [],
+            previous_resolutions,
             draft_audit.get("resolutions") or [],
         )
-        identity_normalization_changes.extend(
-            apply_screenplay_character_resolutions(
-                working_script,
-                episode["character_resolutions"],
+        previous_resolution_pairs = {
+            (
+                str(item.get("source_label") or "").strip(),
+                str(item.get("canonical_name") or "").strip(),
             )
-        )
+            for item in previous_resolutions
+            if isinstance(item, dict)
+        }
+        merged_resolution_pairs = {
+            (
+                str(item.get("source_label") or "").strip(),
+                str(item.get("canonical_name") or "").strip(),
+            )
+            for item in episode["character_resolutions"]
+            if isinstance(item, dict)
+        }
+        if merged_resolution_pairs - previous_resolution_pairs:
+            identity_normalization_changes.extend(
+                apply_screenplay_character_resolutions(
+                    working_script,
+                    episode["character_resolutions"],
+                )
+            )
         if draft_audit.get("added"):
             project = conn.execute(
                 "SELECT * FROM projects WHERE id=?",
@@ -4228,9 +4342,9 @@ async def run_screenplay_production(
         }
         save_checkpoint(rev.id, checkpoint)
 
-    # Identity authority remains a deterministic production gate. Only those
-    # non-waivable issues may enter the bounded local Patch loop below;
-    # narrative, renderability, and adaptation findings stay score-only.
+    # All issues marked must_fix/runtime_blocking enter the bounded local Patch
+    # loop. Quality-only findings remain score-only and never masquerade as a
+    # passed runtime gate.
     initial_issues, _initial_evaluation = run_screenplay_qa(
         working_script,
         bible=bible,
@@ -4239,8 +4353,8 @@ async def run_screenplay_production(
         artifact_id=working_id,
         artifact_hash=working_hash,
     )
-    initial_hard_identity_issues = non_waivable_screenplay_issues(initial_issues)
-    if not initial_hard_identity_issues:
+    initial_hard_issues = non_waivable_screenplay_issues(initial_issues)
+    if not initial_hard_issues:
         return _complete_screenplay_from_working_artifact(
             episode_id=episode_id,
             episode=episode,
@@ -4255,7 +4369,7 @@ async def run_screenplay_production(
         "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
         "screenplay_updated_at=? WHERE id=?",
         (
-            f"剧本有 {len(initial_hard_identity_issues)} 项身份合同问题，正在局部修复",
+            f"剧本有 {len(initial_hard_issues)} 项结构或业务硬门禁问题，正在局部修复",
             now(),
             episode_id,
         ),
@@ -4364,8 +4478,8 @@ async def run_screenplay_production(
         if not rev.first_evaluation_done:
             rev = mark_first_evaluation(rev.id, eval_id or f"eval-{working_id}")
 
-        hard_identity_issues = non_waivable_screenplay_issues(issues)
-        if not hard_identity_issues:
+        hard_issues = non_waivable_screenplay_issues(issues)
+        if not hard_issues:
             return _complete_screenplay_from_working_artifact(
                 episode_id=episode_id,
                 episode=episode,
@@ -4439,10 +4553,9 @@ async def run_screenplay_production(
             return load_screenplay_from_artifact(working_id)
 
         # 选择最高依赖 Issue
-        # Identity authority is a non-waivable prerequisite for every later
-        # graph repair.  Resolve it before spending a model call on unrelated
-        # narrative quality issues.
-        issue = _choose_issue(hard_identity_issues)
+        # Dependency ordering determines which must-fix issue is repaired
+        # first; the selector does not route by story words or error whitelist.
+        issue = _choose_issue(hard_issues)
         if issue is None or not issue.repairable:
             return _publish_retry_exhausted_fallback(
                 rev,
@@ -5788,6 +5901,160 @@ async def _llm_field_patch(
     return []
 
 
+def _narrative_patch_prompt_context(
+    document,
+    issue: Issue,
+    source_text: str,
+) -> tuple[dict[str, Any], str]:
+    """Project one issue-local graph slice instead of the full document."""
+    payload = document.model_dump(mode="json")
+    plan = payload.get("narrative_plan") or {}
+    issue_payload = issue.model_dump(mode="json")
+    issue_blob = json.dumps(issue_payload, ensure_ascii=False)
+
+    def strings(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, list):
+            return set().union(*(strings(item) for item in value), set())
+        if isinstance(value, dict):
+            return set().union(*(strings(item) for item in value.values()), set())
+        return set()
+
+    graph_nodes: list[tuple[str, str, dict, set[str]]] = []
+    all_ids: set[str] = set()
+    for collection, values in plan.items():
+        if not isinstance(values, list):
+            continue
+        singular = collection[:-1] if collection.endswith("s") else collection
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            id_fields = [
+                (key, str(value))
+                for key, value in item.items()
+                if key.endswith("_id") and isinstance(value, str) and value
+            ]
+            if not id_fields:
+                continue
+            primary = next(
+                (
+                    value
+                    for key, value in id_fields
+                    if key == f"{singular}_id"
+                ),
+                id_fields[0][1],
+            )
+            all_ids.add(primary)
+            graph_nodes.append((collection, primary, item, set()))
+
+    enriched_nodes: list[tuple[str, str, dict, set[str]]] = []
+    for collection, primary, item, _refs in graph_nodes:
+        refs = strings(item) & all_ids
+        refs.discard(primary)
+        enriched_nodes.append((collection, primary, item, refs))
+    graph_nodes = enriched_nodes
+
+    selected_ids = {
+        identity
+        for identity in all_ids
+        if identity in issue_blob
+    }
+    ordered_selected: list[str] = [
+        primary
+        for _collection, primary, _item, _refs in graph_nodes
+        if primary in selected_ids
+    ]
+    frontier = set(selected_ids)
+    for _depth in range(2):
+        if not frontier or len(ordered_selected) >= 24:
+            break
+        discovered: list[str] = []
+        for _collection, primary, _item, refs in graph_nodes:
+            if primary in selected_ids:
+                continue
+            if refs & frontier or (
+                primary in set().union(*(
+                    refs
+                    for _c, selected, _i, refs in graph_nodes
+                    if selected in frontier
+                ), set())
+            ):
+                discovered.append(primary)
+        for primary in discovered:
+            if primary not in selected_ids:
+                selected_ids.add(primary)
+                ordered_selected.append(primary)
+                if len(ordered_selected) >= 24:
+                    break
+        frontier = set(discovered)
+
+    if not ordered_selected:
+        related_values = strings(issue_payload)
+        for _collection, primary, item, _refs in graph_nodes:
+            if strings(item) & related_values:
+                selected_ids.add(primary)
+                ordered_selected.append(primary)
+                if len(ordered_selected) >= 8:
+                    break
+
+    selected_order = {
+        primary: index for index, primary in enumerate(ordered_selected)
+    }
+    scoped_plan: dict[str, Any] = {
+        key: value
+        for key, value in plan.items()
+        if not isinstance(value, list)
+    }
+    graph_index: dict[str, list[str]] = {}
+    for collection, primary, item, _refs in graph_nodes:
+        graph_index.setdefault(collection, []).append(primary)
+        if primary not in selected_ids:
+            continue
+        scoped_plan.setdefault(collection, []).append(item)
+    for values in scoped_plan.values():
+        if isinstance(values, list):
+            values.sort(
+                key=lambda item: selected_order.get(
+                    next(
+                        (
+                            str(value)
+                            for key, value in item.items()
+                            if key.endswith("_id")
+                            and isinstance(value, str)
+                        ),
+                        "",
+                    ),
+                    len(selected_order),
+                ),
+            )
+
+    source_excerpts: list[str] = []
+    for item in scoped_plan.get("source_evidence") or []:
+        excerpt = str(item.get("verbatim_excerpt") or "").strip()
+        if excerpt and excerpt in source_text:
+            source_excerpts.append(excerpt)
+    if not source_excerpts and len(source_text) <= 20_000:
+        source_excerpt = source_text
+    else:
+        source_excerpt = "\n\n".join(dict.fromkeys(source_excerpts))
+    source_excerpt = source_excerpt[:20_000]
+
+    context = {
+        "screenplay_metadata": payload.get("screenplay_metadata"),
+        "scene_blocks": payload.get("scene_blocks"),
+        "dialogue_chains": payload.get("dialogue_chains"),
+        "voice_bible": payload.get("voice_bible"),
+        "narrative_plan": scoped_plan,
+        "narrative_graph_id_index": graph_index,
+        "scope_note": (
+            "narrative_plan 仅含当前问题的双向两跳依赖闭包；"
+            "narrative_graph_id_index 是全图稳定 ID 索引。"
+        ),
+    }
+    return context, source_excerpt
+
+
 async def _llm_field_patch_once(
     issue: Issue,
     script: EpisodeScreenplay,
@@ -5826,14 +6093,19 @@ async def _llm_field_patch_once(
     from app.schemas import extract_json
 
     document = screenplay_to_document(script)
+    prompt_context, source_excerpt = _narrative_patch_prompt_context(
+        document,
+        issue,
+        source_text,
+    )
     prompt = {
         "task": "诊断当前剧本叙事关系缺口，比较至少两个最小候选，再选择一个局部候选",
         "planner_attempt": planner_attempt,
         "prior_rejections": list(rejection_feedback or []),
         "issue": issue.model_dump(mode="json"),
         "acceptance_test": _issue_acceptance_test(issue),
-        "screenplay_document": document.model_dump(mode="json"),
-        "authorized_source_excerpt": source_text,
+        "screenplay_document": prompt_context,
+        "authorized_source_excerpt": source_excerpt,
         "identity_contract_policy": _identity_contract_repair_policy(),
         "operation_contract": {
             "op": "使用当前 PatchOperation 协议；每个候选会由生产执行器在副本上探测可执行性",
@@ -5902,10 +6174,11 @@ async def _llm_field_patch_once(
             "修复后仍会运行整图 DAG、状态、信念与观众路径全量复验",
         ],
     }
+    prompt_json = json.dumps(prompt, ensure_ascii=False)
     raw = await model_gateway.chat(
         [
             {"role": "system", "content": "你是叙事图局部修复器。只输出 JSON，不按题材或剧情关键词判断。"},
-            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            {"role": "user", "content": prompt_json},
         ],
         temperature=0.1,
         max_tokens=4096,
@@ -5916,6 +6189,7 @@ async def _llm_field_patch_once(
             "contract_version": "narrative-continuity.v1",
             "reuse_successful_operation": True,
             "planner_attempt": planner_attempt,
+            "prompt_context_chars": len(prompt_json),
         },
     )
     try:

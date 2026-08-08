@@ -103,8 +103,6 @@ class EpisodeScopedInput(StandardCommandInput):
 
 class ScreenplayGenerateInput(StandardCommandInput):
     episode_id: str
-    required_dialogue_lines: list[str] = Field(default_factory=list)
-    required_dialogue_occurrence_ids: list[str] = Field(default_factory=list)
 
 
 class ScreenplayResumeInput(StandardCommandInput):

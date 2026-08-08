@@ -15,6 +15,8 @@ T = TypeVar("T")
 PRIORITY_INTERACTIVE = 0
 PRIORITY_RECOVERY = 10
 PRIORITY_BATCH = 20
+DEFAULT_TEXT_GENERATION_CONCURRENCY = 10
+MAX_TEXT_GENERATION_CONCURRENCY = 16
 
 
 @dataclass
@@ -85,9 +87,44 @@ def _configured_limit(_workflow_type: str) -> int:
         or get_setting("storyboard_concurrency")
     )
     try:
-        return max(1, int(raw or 2))
+        return max(
+            1,
+            min(
+                MAX_TEXT_GENERATION_CONCURRENCY,
+                int(raw or DEFAULT_TEXT_GENERATION_CONCURRENCY),
+            ),
+        )
     except (TypeError, ValueError):
-        return 2
+        return DEFAULT_TEXT_GENERATION_CONCURRENCY
+
+
+def reload_generation_limits() -> int:
+    """Apply persisted limits to existing gates, including tasks already waiting."""
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    updated = 0
+    for loop, by_type in list(_loop_gates.items()):
+        if loop.is_closed():
+            continue
+        changes = [
+            (gate, _configured_limit(resource))
+            for resource, gate in list(by_type.items())
+        ]
+        if not changes:
+            continue
+
+        def apply(changes=changes) -> None:
+            for gate, limit in changes:
+                gate.resize(limit)
+
+        if loop is current_loop or not loop.is_running():
+            apply()
+        else:
+            loop.call_soon_threadsafe(apply)
+        updated += len(changes)
+    return updated
 
 
 def gate_for(workflow_type: str) -> _PriorityGate:

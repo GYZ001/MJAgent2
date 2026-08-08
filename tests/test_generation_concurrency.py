@@ -54,6 +54,59 @@ def test_screenplay_and_storyboard_share_one_process_wide_limit(
     assert asyncio.run(scenario()) == 2
 
 
+def test_live_resize_releases_existing_generation_waiters(monkeypatch) -> None:
+    configured = {"value": "2"}
+    monkeypatch.setattr(
+        generation_concurrency,
+        "get_setting",
+        lambda key: configured["value"]
+        if key == "text_generation_concurrency"
+        else None,
+    )
+
+    async def scenario() -> int:
+        active = 0
+        peak = 0
+        release = asyncio.Event()
+        first_two_started = asyncio.Event()
+        all_started = asyncio.Event()
+
+        async def operation() -> None:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                first_two_started.set()
+            if active == 10:
+                all_started.set()
+            await release.wait()
+            active -= 1
+
+        tasks = [
+            asyncio.create_task(
+                generation_concurrency.run_with_generation_slot(
+                    "screenplay",
+                    operation,
+                    priority=generation_concurrency.PRIORITY_BATCH,
+                )
+            )
+            for _ in range(10)
+        ]
+        await asyncio.wait_for(first_two_started.wait(), timeout=1)
+        assert active == 2
+
+        configured["value"] = "10"
+        assert generation_concurrency.reload_generation_limits() >= 1
+        await asyncio.wait_for(all_started.wait(), timeout=1)
+        assert active == 10
+
+        release.set()
+        await asyncio.gather(*tasks)
+        return peak
+
+    assert asyncio.run(scenario()) == 10
+
+
 def test_interactive_generation_jumps_ahead_of_queued_batch_work(
     monkeypatch,
 ) -> None:

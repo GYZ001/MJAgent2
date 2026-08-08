@@ -745,16 +745,36 @@ def _converge_confirmed_storyboard_state(
     )
     conn.commit()
     try:
-        from app.storyboard_supervisor import load_latest_checkpoint, save_checkpoint
+        from app.storyboard_supervisor import (
+            SupervisorCheckpoint,
+            load_latest_checkpoint,
+            save_checkpoint,
+        )
 
         checkpoint = load_latest_checkpoint(episode_id)
-        if checkpoint is not None and (
+        if checkpoint is None:
+            shot_count = int(conn.execute(
+                "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?",
+                (episode_id,),
+            ).fetchone()["c"])
+            checkpoint = SupervisorCheckpoint(
+                episode_id=episode_id,
+                phase="SUCCEEDED",
+                outcome="SUCCEEDED_READY_FOR_CONFIRM",
+                validated_prefix_end=shot_count,
+                next_shot_no=shot_count + 1,
+                expected_total=shot_count,
+            )
+        elif (
             checkpoint.phase != "SUCCEEDED"
             or checkpoint.outcome != "SUCCEEDED_READY_FOR_CONFIRM"
         ):
             checkpoint.phase = "SUCCEEDED"
             checkpoint.outcome = "SUCCEEDED_READY_FOR_CONFIRM"
-            save_checkpoint(checkpoint, run_id=active_storyboard_run_id)
+        # Confirmation is the terminal authority. The preceding run has
+        # already been cancelled above, so a run-ownership fence would reject
+        # this durable terminal projection.
+        save_checkpoint(checkpoint)
     except Exception:  # noqa: BLE001 -- 业务确认已完成，辅助投影可在下次重试自愈
         pass
     try:

@@ -11,7 +11,7 @@ import PaymentConfirmDialog from '../components/PaymentConfirmDialog'
 import GenerationParamsDialog from '../components/GenerationParamsDialog'
 import QueryState from '../components/QueryState'
 import PrepSubnav from '../components/PrepSubnav'
-import { useFillPageSize } from '../hooks/useFillPageSize'
+import { SINGLE_ROW_ASSET_PAGE, useFillPageSize } from '../hooks/useFillPageSize'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { usePrepListState } from '../hooks/usePrepListState'
 import { formatBookTitle } from '../lib/bookTitle'
@@ -396,7 +396,7 @@ export default function BiblePage() {
   const [undoStack, setUndoStack] = useState<Bible[]>([])
   const [draftState, setDraftState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [busy, setBusy] = useState(false)
-  const pageSize = useFillPageSize({ minCardWidth: 270, rows: 3, floor: 8, ceiling: 24 })
+  const [pageSize, characterGridRef] = useFillPageSize(SINGLE_ROW_ASSET_PAGE)
   const [listState, setListState] = usePrepListState(projectId!, 'bible-characters', pageSize)
   const charSearch = listState.search
   const charFilters: CharacterFilterState = { ...EMPTY_CHARACTER_FILTERS, ...(listState.filters as Partial<CharacterFilterState>) }
@@ -448,7 +448,9 @@ export default function BiblePage() {
   const filteredCharsPreview = indexedCharsPreview.filter(({ c }) =>
     matchCharacterFilters(c, charQuery, charFilters, characterFilterMeta(p, c)),
   ).sort((left, right) => compareCharacters(left.c, right.c, charFilters.sort, p))
-  const charPageCount = Math.max(1, Math.ceil(filteredCharsPreview.length / pageSize))
+  const charPageCount = pageSize > 0
+    ? Math.max(1, Math.ceil(filteredCharsPreview.length / pageSize))
+    : 1
   const dirtyCount = countBibleChanges(editing, p?.bible)
   const dirty = dirtyCount > 0
   const currentEditVersion = editBaseVersion ?? p?.bible_version ?? 0
@@ -606,7 +608,9 @@ export default function BiblePage() {
     matchCharacterFilters(c, charQuery, charFilters, characterFilterMeta(p, c)),
   ).sort((left, right) => compareCharacters(left.c, right.c, charFilters.sort, p))
   const curCharPage = Math.min(charPage, charPageCount - 1)
-  const pagedChars = filteredChars.slice(curCharPage * pageSize, curCharPage * pageSize + pageSize)
+  const pagedChars = pageSize > 0
+    ? filteredChars.slice(curCharPage * pageSize, curCharPage * pageSize + pageSize)
+    : []
   const refsRunning = p.refs_status === 'running' || refsProgress?.refs_status === 'running'
   const generating = p.bible_status === 'running' || refsRunning
   const visualStyleDisplayName = bible?.world.visual_style_canonical?.trim() || '未设置统一画风'
@@ -1232,7 +1236,7 @@ export default function BiblePage() {
               共 {bible.characters.length} 个角色{hasCharacterCriteria ? ` · 当前显示 ${filteredChars.length}` : ''}
             </span>
           </div>
-          <div className="figure-grid">
+          <div ref={characterGridRef} className="figure-grid">
             {pagedChars.map(({ c, i }: { c: Character; i: number }) => {
               const portraits = c.portraits ?? []
               const hasPortraitImage = portraits.some(portrait =>
@@ -1300,7 +1304,7 @@ export default function BiblePage() {
               </article>
             )})}
           </div>
-          {!pagedChars.length && (
+          {pageSize > 0 && !pagedChars.length && (
             <div className="library-filter-empty" role="status">
               <b>{hasCharacterCriteria ? '没有符合当前条件的角色' : '人物谱暂无角色'}</b>
               <p>{hasCharacterCriteria

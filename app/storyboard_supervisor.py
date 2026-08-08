@@ -15,7 +15,7 @@ from typing import Any, Literal
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from app import errors
+from app import config, errors
 from app.db import get_conn, get_setting
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
@@ -113,6 +113,46 @@ class SupervisorCheckpoint(BaseModel):
     scene_pack_candidates: dict[str, dict[str, Any]] = Field(default_factory=dict)
     legacy_repair_audit: dict[str, Any] = Field(default_factory=dict)
     outcome: str | None = None  # SUCCEEDED_READY_FOR_CONFIRM
+
+
+def _storyboard_scene_pack_batches(
+    outline: StoryboardOutline,
+    *,
+    max_shots: int | None = None,
+) -> list[dict[str, Any]]:
+    """Partition each scene into bounded, contiguous model outputs."""
+    chunk_size = max(
+        1,
+        int(max_shots or config.STORYBOARD_SCENE_PACK_MAX_SHOTS),
+    )
+    batches: list[dict[str, Any]] = []
+    for context in outline.scene_contexts:
+        scene_briefs = [
+            brief
+            for brief in outline.shots
+            if brief.scene_id == context.scene_id
+        ]
+        for offset in range(0, len(scene_briefs), chunk_size):
+            chunk = scene_briefs[offset:offset + chunk_size]
+            if not chunk:
+                continue
+            start = min(int(item.shot_no) for item in chunk)
+            end = max(int(item.shot_no) for item in chunk)
+            batches.append({
+                "key": (
+                    context.scene_id
+                    if len(scene_briefs) <= chunk_size
+                    else f"{context.scene_id}:{start}-{end}"
+                ),
+                "context": context,
+                "shot_nos": {
+                    int(item.shot_no)
+                    for item in chunk
+                },
+                "start": start,
+                "end": end,
+            })
+    return batches
 
 
 def _migrate_checkpoint(cp: SupervisorCheckpoint) -> SupervisorCheckpoint:
@@ -2558,6 +2598,7 @@ async def run_storyboard_supervisor(
         # ---- 按场景批量生成（新合同）----
         scene_pack_failure: BaseException | None = None
         failed_scene_ids: set[str] = set()
+        failed_batch_ends: list[int] = []
         scene_pack_fallback_end: int | None = None
         if (
             outline is not None
@@ -2583,6 +2624,11 @@ async def run_storyboard_supervisor(
                         f"已由批准大纲确定性划分 {len(derived_contexts)} 个场景批次",
                         payload={"batches": derived_contexts},
                     )
+
+        scene_pack_batches = (
+            _storyboard_scene_pack_batches(outline)
+            if outline is not None else []
+        )
         scene_pack_mode = bool(
             outline is not None
             and outline.scene_contexts
@@ -2590,48 +2636,31 @@ async def run_storyboard_supervisor(
         )
         if scene_pack_mode:
             scene_ends = {
-                max(
-                    int(brief.shot_no)
-                    for brief in outline.shots
-                    if brief.scene_id == context.scene_id
-                )
-                for context in outline.scene_contexts
-                if any(
-                    brief.scene_id == context.scene_id
-                    for brief in outline.shots
-                )
+                int(batch["end"])
+                for batch in scene_pack_batches
             }
-            # A scene pack is committed atomically. Legacy checkpoints that end
-            # inside a scene continue through the old per-shot compatibility path.
+            # Each bounded scene chunk is committed atomically. Checkpoints at
+            # older, non-chunk boundaries use the per-shot compatibility path.
             scene_pack_mode = len(completed) == 0 or len(completed) in scene_ends
             if not scene_pack_mode:
                 next_shot_no = len(completed) + 1
                 scene_pack_fallback_end = next((
-                    max(
-                        int(brief.shot_no)
-                        for brief in outline.shots
-                        if brief.scene_id == context.scene_id
-                    )
-                    for context in outline.scene_contexts
-                    if any(
-                        int(brief.shot_no) == next_shot_no
-                        for brief in outline.shots
-                        if brief.scene_id == context.scene_id
-                    )
+                    int(batch["end"])
+                    for batch in scene_pack_batches
+                    if int(batch["start"]) == next_shot_no
                 ), None)
 
         if scene_pack_mode:
-            pending_contexts = [
-                context
-                for context in outline.scene_contexts
-                if any(
-                    int(brief.shot_no) > len(completed)
-                    for brief in outline.shots
-                    if brief.scene_id == context.scene_id
+            pending_batches = [
+                batch
+                for batch in scene_pack_batches
+                if (
+                    int(batch["end"]) > len(completed)
+                    and str(batch["key"])
+                    not in cp.scene_pack_candidates
                 )
-                and context.scene_id not in cp.scene_pack_candidates
             ]
-            if pending_contexts:
+            if pending_batches:
                 try:
                     scene_parallelism = max(
                         1,
@@ -2641,7 +2670,7 @@ async def run_storyboard_supervisor(
                     scene_parallelism = 2
                 scene_gate = asyncio.Semaphore(scene_parallelism)
 
-                async def _generate_scene(context):
+                async def _generate_scene_batch(batch):
                     async with scene_gate:
                         return await generate_storyboard_scene_pack(
                             ep_data,
@@ -2649,25 +2678,28 @@ async def run_storyboard_supervisor(
                             bible,
                             screenplay,
                             outline,
-                            context,
+                            batch["context"],
+                            shot_nos=set(batch["shot_nos"]),
                         )
 
                 generated = await asyncio.gather(
                     *[
-                        _generate_scene(context)
-                        for context in pending_contexts
+                        _generate_scene_batch(batch)
+                        for batch in pending_batches
                     ],
                     return_exceptions=True,
                 )
                 if not _run_has_write_ownership():
                     return cp
-                for context, result in zip(pending_contexts, generated):
+                for batch, result in zip(pending_batches, generated):
+                    context = batch["context"]
                     if isinstance(result, BaseException):
                         failed_scene_ids.add(context.scene_id)
+                        failed_batch_ends.append(int(batch["end"]))
                         if scene_pack_failure is None:
                             scene_pack_failure = result
                         continue
-                    cp.scene_pack_candidates[context.scene_id] = (
+                    cp.scene_pack_candidates[str(batch["key"])] = (
                         result.model_dump(mode="json")
                     )
                 save_checkpoint(cp, run_id=run_id)
@@ -2676,21 +2708,17 @@ async def run_storyboard_supervisor(
                 normalize_dialogue_focus_offscreen_mentions,
             )
 
-            for context in outline.scene_contexts:
-                scene_briefs = [
-                    brief for brief in outline.shots
-                    if brief.scene_id == context.scene_id
-                ]
-                if not scene_briefs:
-                    continue
-                scene_start = min(int(brief.shot_no) for brief in scene_briefs)
-                scene_end = max(int(brief.shot_no) for brief in scene_briefs)
+            for batch in scene_pack_batches:
+                context = batch["context"]
+                batch_key = str(batch["key"])
+                scene_start = int(batch["start"])
+                scene_end = int(batch["end"])
                 if scene_end <= len(completed):
-                    cp.scene_pack_candidates.pop(context.scene_id, None)
+                    cp.scene_pack_candidates.pop(batch_key, None)
                     continue
                 if scene_start != len(completed) + 1:
                     break
-                raw_pack = cp.scene_pack_candidates.get(context.scene_id)
+                raw_pack = cp.scene_pack_candidates.get(batch_key)
                 if raw_pack is None:
                     break
                 pack = StoryboardScenePack.model_validate(raw_pack)
@@ -2721,6 +2749,7 @@ async def run_storyboard_supervisor(
                     })
                     if stripped:
                         failed_scene_ids.add(context.scene_id)
+                        failed_batch_ends.append(scene_end)
                         scene_pack_failure = StageError(
                             "场景分镜人物合同",
                             [
@@ -2755,6 +2784,7 @@ async def run_storyboard_supervisor(
                 )
                 if candidate_errors:
                     failed_scene_ids.add(context.scene_id)
+                    failed_batch_ends.append(scene_end)
                     scene_pack_failure = StageError(
                         "场景分镜批量校验",
                         candidate_errors,
@@ -2792,7 +2822,7 @@ async def run_storyboard_supervisor(
                     raise
                 conn.commit()
                 completed = _reload_completed()
-                cp.scene_pack_candidates.pop(context.scene_id, None)
+                cp.scene_pack_candidates.pop(batch_key, None)
                 cp.phase = "GENERATING_SHOTS"
                 cp.expected_total = len(outline.shots)
                 cp.next_shot_no = len(completed) + 1
@@ -2800,10 +2830,11 @@ async def run_storyboard_supervisor(
                 if run_id:
                     evidence_repository.append_event(
                         run_id,
-                        "SCENE_PACK_COMMITTED",
+                        "SCENE_PACK_BATCH_COMMITTED",
                         "info",
                         f"{context.scene_id} 已原子提交第 {scene_start}~{scene_end} 镜",
                         payload={
+                            "batch_key": batch_key,
                             "scene_id": context.scene_id,
                             "scene_no": context.scene_no,
                             "shot_start": scene_start,
@@ -2821,27 +2852,19 @@ async def run_storyboard_supervisor(
                         run_id=run_id,
                         action="storyboard_scene_pack_provider",
                     )
-                # A content/schema failure is local to the batch contract.
-                # Preserve already committed scenes and continue through the
-                # existing per-shot path instead of changing the delivery goal.
-                for scene_id in failed_scene_ids:
-                    cp.scene_pack_candidates.pop(scene_id, None)
-                failed_ends = [
-                    max(
-                        int(brief.shot_no)
-                        for brief in outline.shots
-                        if brief.scene_id == context.scene_id
-                    )
-                    for context in outline.scene_contexts
-                    if (
-                        context.scene_id in failed_scene_ids
-                        and any(
-                            brief.scene_id == context.scene_id
-                            for brief in outline.shots
+                # A content/schema failure is local to the bounded chunk.
+                # Preserve committed chunks and continue only the failed
+                # window through the per-shot compatibility path.
+                for batch in scene_pack_batches:
+                    if batch["context"].scene_id in failed_scene_ids:
+                        cp.scene_pack_candidates.pop(
+                            str(batch["key"]),
+                            None,
                         )
-                    )
-                ]
-                scene_pack_fallback_end = min(failed_ends) if failed_ends else None
+                scene_pack_fallback_end = (
+                    min(failed_batch_ends)
+                    if failed_batch_ends else None
+                )
                 cp.phase = "GENERATING_SHOTS"
                 cp.outcome = None
                 save_checkpoint(cp, run_id=run_id)

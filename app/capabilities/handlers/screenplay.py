@@ -12,10 +12,7 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
     outcome = await call_guarded(
         api.start_screenplay,
         args.episode_id,
-        body={
-            "required_dialogue_lines": args.required_dialogue_lines,
-            "required_dialogue_occurrence_ids": args.required_dialogue_occurrence_ids,
-        },
+        body={},
     )
     if isinstance(outcome, CommandResult):
         return outcome
@@ -72,7 +69,7 @@ async def delete(args: I.ScreenplayDeleteInput) -> CommandResult:
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(
-        "当前剧本及其下游产物已删除；必保留台词约束已保留",
+        "当前剧本及其下游产物已删除",
         data=outcome,
         resource_uris=[f"manju://episodes/{args.episode_id}"],
     )

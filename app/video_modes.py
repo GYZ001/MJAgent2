@@ -790,10 +790,15 @@ def _keyframe_character_anchors(
             for name in effective_characters_visible(shot)
         }
     from app.character_policy import (
-        collective_role_anchor, functional_extra_anchor, is_collective_role, is_functional_extra,
+        collective_role_anchor,
+        functional_extra_anchor,
+        is_collective_role,
+        is_functional_extra,
+        typed_functional_identity_names,
     )
 
     by_name = {c.name: c for c in bible.characters}
+    declared_functional_names = typed_functional_identity_names(screenplay)
     anchors: dict[str, str] = {}
     for name in effective_characters_visible(shot):
         character = by_name.get(name)
@@ -801,8 +806,11 @@ def _keyframe_character_anchors(
             anchors[name] = character.appearance_canonical
         elif is_collective_role(name):
             anchors[name] = collective_role_anchor(name)
-        elif is_functional_extra(name):
-            anchors[name] = functional_extra_anchor(name)
+        elif is_functional_extra(name) or name in declared_functional_names:
+            anchors[name] = functional_extra_anchor(
+                name,
+                declared_functional_names=declared_functional_names,
+            )
         else:
             # 上游编译门禁会拦截未知具名角色；这里仍保留可见名单，
             # 防止历史分镜在图片边界被静默省略。

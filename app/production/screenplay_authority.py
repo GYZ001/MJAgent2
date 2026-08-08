@@ -383,6 +383,9 @@ def screenplay_authority_material(
             )
         projection_hash = evidence_repository.content_hash(bible_projection)
 
+    # The two dialogue fields are no longer production inputs. Keep their
+    # historical values in v1 authority material so already-issued completion
+    # certificates remain verifiable after the feature removal.
     constraints = {
         "title": _episode_value(episode, "title", "") or "",
         "hook": _episode_value(episode, "hook", "") or "",
@@ -441,6 +444,61 @@ def screenplay_authority_fingerprint(
 
 def _authority_material_fingerprint(material: dict[str, Any]) -> str:
     return hashlib.sha256(_json(material).encode("utf-8")).hexdigest()
+
+
+def _projection_before_recorded_bible_append(
+    artifact: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reverse one append operation recorded by a reactive Bible writer."""
+    snapshot = artifact.get("model_snapshot") or {}
+    operation = str(snapshot.get("operation") or "")
+    prompt_version = str(artifact.get("prompt_version") or "")
+    allowed_prompt = {
+        "incremental_add": "incremental-character-discovery-1.0.0",
+        "incremental_scene_add": "reactive-scene-bible-1.0.0",
+        "incremental_scene_alias": "reactive-scene-bible-1.0.0",
+    }
+    if allowed_prompt.get(operation) != prompt_version:
+        return None
+    try:
+        projection = screenplay_bible_payload(artifact.get("content") or {})
+    except (TypeError, ValueError):
+        return None
+
+    if operation == "incremental_add":
+        character_name = str(snapshot.get("character_name") or "")
+        characters = list(projection.get("characters") or [])
+        if (
+            not character_name
+            or not characters
+            or str(characters[-1].get("name") or "") != character_name
+        ):
+            return None
+        projection["characters"] = characters[:-1]
+    elif operation == "incremental_scene_add":
+        scene_name = str(snapshot.get("scene_name") or "")
+        scenes = list(projection.get("scenes") or [])
+        if (
+            not scene_name
+            or not scenes
+            or str(scenes[-1].get("name") or "") != scene_name
+        ):
+            return None
+        projection["scenes"] = scenes[:-1]
+    else:
+        scene_name = str(snapshot.get("scene_name") or "")
+        matches = [
+            scene
+            for scene in projection.get("scenes") or []
+            if str(scene.get("name") or "") == scene_name
+        ]
+        if len(matches) != 1:
+            return None
+        aliases = list(matches[0].get("aliases") or [])
+        if not aliases:
+            return None
+        matches[0]["aliases"] = aliases[:-1]
+    return projection
 
 
 def _append_compatible_historical_materials(
@@ -522,6 +580,38 @@ def _append_compatible_historical_materials(
             )
         except (TypeError, ValueError):
             continue
+        parents = list(artifact.get("parent_artifact_ids") or [])
+        predecessor = _projection_before_recorded_bible_append(artifact)
+        if predecessor is not None and len(parents) == 1:
+            parent = evidence_repository.get_artifact(str(parents[0]))
+            if (
+                parent is not None
+                and parent.get("type") == "character_bible"
+                and parent.get("scope_type") == "project"
+                and parent.get("scope_id") == project_id
+                and int(parent.get("version") or 0)
+                < int(artifact.get("version") or 0)
+                and _bible_extends_by_appending_cards(
+                    predecessor,
+                    projection,
+                )
+            ):
+                try:
+                    parent_hash = _verified_artifact_hash(
+                        parent,
+                        label="追加前 Bible Artifact",
+                    )
+                except ValueError:
+                    pass
+                else:
+                    candidates.append({
+                        **material,
+                        "bible_artifact_id": str(parent["id"]),
+                        "bible_content_hash": parent_hash,
+                        "bible_projection_hash": (
+                            evidence_repository.content_hash(predecessor)
+                        ),
+                    })
         for historical_projection, projection_hash in projection_prefixes:
             if not (
                 artifact_projection == historical_projection

@@ -13,6 +13,7 @@ from app.character_policy import (
     functional_extra_anchor,
     is_allowed_storyboard_character,
     is_collective_role,
+    typed_functional_identity_names,
 )
 from app.renderability import strip_overdetail_terms
 from app.schemas import Bible, EpisodeScreenplay, Shot
@@ -170,11 +171,15 @@ def _assert_shot_character_contract(
             ) from exc
         return resolver
     bible_names = {character.name for character in bible.characters}
+    declared_functional_names = typed_functional_identity_names(screenplay)
     invalid = [
         name
         for name in _shot_character_contract_names(shot)
         if not is_allowed_storyboard_character(
-            name, bible_names, allow_without_bible=False,
+            name,
+            bible_names,
+            allow_without_bible=False,
+            declared_functional_names=declared_functional_names,
         )
     ]
     if invalid:
@@ -1530,6 +1535,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     # 角色/场景锚点（短）
     anchors = []
+    declared_functional_names = typed_functional_identity_names(screenplay)
     for name in visible_names:
         if identity_resolver is not None:
             anchors.append(f"{name}：{identity_resolver.visual_anchor(name)}")
@@ -1538,7 +1544,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         elif is_collective_role(name):
             anchors.append(f"{name}：{collective_role_anchor(name)}")
         else:
-            anchors.append(f"{name}：{functional_extra_anchor(name)}")
+            functional_anchor = functional_extra_anchor(
+                name,
+                declared_functional_names=declared_functional_names,
+            )
+            anchors.append(f"{name}：{functional_anchor}")
     character_anchor = "；".join(anchors[:4]) if anchors else "保持人物身份服装一致"
     scene_anchor, scene_geometry, _ = _scene_geometry_contract(shot, bible)
     prop_anchor = ""
@@ -1784,6 +1794,7 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
     identity_resolver = _assert_shot_character_contract(
         shot, bible, context="关键帧", screenplay=screenplay,
     )
+    declared_functional_names = typed_functional_identity_names(screenplay)
     anchors = "；".join(
         identity_resolver.visual_anchor(name)
         if identity_resolver is not None
@@ -1792,7 +1803,10 @@ def compile_scene_prompt(shot: Shot, bible: Bible, *, kind: str = "tail",
             if name in bible_map else (
                 collective_role_anchor(name)
                 if is_collective_role(name)
-                else functional_extra_anchor(name)
+                else functional_extra_anchor(
+                    name,
+                    declared_functional_names=declared_functional_names,
+                )
             )
         )
         for name in shot.characters

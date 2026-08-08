@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import deepcopy
 import hashlib
 import json
@@ -15,15 +16,38 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
-from app import config, hiagent
-from app.character_policy import functional_extra_policy_text
+from app import config, hiagent, textmatch
+from app.character_policy import (
+    functional_extra_policy_text,
+    resolution_declares_functional_identity,
+)
 from app.continuity import (adaptation_hook_errors, ensure_audio_timeline,
                             information_ledger_errors, ledger_context_for_shot,
                             sync_shot_continuity_fields)
-from app.db import get_setting, log_provider_call
+from app.db import get_conn, get_setting, log_provider_call
 from app.evaluations.issues import issues_from_messages
 from app.harness import model_gateway
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
+from app.narrative_blueprint import (
+    BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE,
+    BLUEPRINT_VERSION,
+    BlueprintSemanticReview,
+    NarrativeBlueprint,
+    NarrativeBlueprintPatch,
+    NarrativeBlueprintShard,
+    apply_narrative_blueprint_patch,
+    blueprint_semantic_issue_is_resolved,
+    blueprint_prompt_contract,
+    derive_blueprint_scene_plans,
+    normalize_blueprint_agency_continuity,
+    normalize_blueprint_fact_versions,
+    normalize_blueprint_raw_json,
+    recover_complete_blueprint_prefix,
+    validate_and_apply_blueprint_scene_contract,
+    validate_blueprint_semantic_review,
+    validate_narrative_blueprint,
+    validate_narrative_blueprint_shard,
+)
 from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenplay,
                          RequiredOnScreenText, SHOT_SIZES, Scene, Shot, Storyboard,
                          StoryboardContextRequirement, StoryboardOutline,
@@ -73,8 +97,26 @@ from app.source_excerpt import (
     align_source_excerpt,
     index_source_segments,
     render_indexed_source,
+    structural_front_matter_ids,
 )
 from app.spoken_contract import onscreen_text_for_capacity
+from app.screenplay_ir import (
+    IR_COMPILER_VERSION,
+    IR_LOCAL_SOURCE_WINDOW,
+    IR_MAX_SOURCE_SEGMENTS_PER_UNIT,
+    IR_MIN_ADAPTED_SOURCE_RATIO,
+    IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO,
+    IRScene,
+    IRSceneUnit,
+    IR_VERSION,
+    ScreenplayGenerationIR,
+    compile_screenplay_ir,
+    normalize_screenplay_ir_payload,
+    recover_complete_screenplay_ir_prefix,
+    scene_heading_has_multiple_locations,
+    screenplay_ir_bible_context,
+    screenplay_ir_prompt_contract,
+)
 
 SYSTEM_PREFIX = (
     "你是专业的竖屏漫剧（动态漫画短剧）编剧与分镜师。\n"
@@ -83,8 +125,182 @@ SYSTEM_PREFIX = (
     "所有内容使用简体中文。"
 )
 
-SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-baseline-4.0.0"
-SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS = 2
+SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.4.0"
+SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.2.1"
+# IR shape drift is normalized locally. A second AgentLoop iteration would
+# resend the entire chapter and candidate for a few field-level corrections,
+# erasing the latency/token savings of the compact contract.
+SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS = 1
+SCREENPLAY_IR_MIN_TOKENS = 20480
+SCREENPLAY_IR_MAX_TOKENS = 36864
+
+
+def screenplay_ir_token_budget(source_text: str) -> int:
+    """Bound output by source complexity without reserving 36K for short chapters."""
+    source_segments = len(index_source_segments(source_text))
+    estimated = 8192 + source_segments * 48
+    return min(
+        SCREENPLAY_IR_MAX_TOKENS,
+        max(SCREENPLAY_IR_MIN_TOKENS, estimated),
+    )
+
+
+def screenplay_ir_fidelity_budget(source_text: str) -> dict[str, Any]:
+    segments = index_source_segments(source_text)
+    front_matter_ids = structural_front_matter_ids(segments)
+    dramatic = [
+        segment for segment in segments
+        if segment.segment_id not in front_matter_ids
+    ]
+    source_chars = sum(
+        len(textmatch.condense(segment.text))
+        for segment in dramatic
+    )
+    windows: list[dict[str, Any]] = []
+    for start in range(0, len(dramatic), IR_LOCAL_SOURCE_WINDOW):
+        window = dramatic[start:start + IR_LOCAL_SOURCE_WINDOW]
+        chars = sum(
+            len(textmatch.condense(segment.text))
+            for segment in window
+        )
+        windows.append({
+            "first_source_id": window[0].segment_id,
+            "last_source_id": window[-1].segment_id,
+            "source_chars": chars,
+            "minimum_adapted_chars": math.ceil(
+                chars * IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO
+            ),
+        })
+    return {
+        "front_matter_ids": sorted(front_matter_ids),
+        "dramatic_source_chars": source_chars,
+        "minimum_adapted_chars": math.ceil(
+            source_chars * IR_MIN_ADAPTED_SOURCE_RATIO
+        ),
+        "windows": windows,
+    }
+
+
+def _narrative_blueprint_content_hash(
+    blueprint: NarrativeBlueprint | None,
+) -> str:
+    if blueprint is None:
+        return ""
+    return hashlib.sha256(
+        json.dumps(
+            blueprint.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _screenplay_ir_blueprint_snapshot_matches(
+    model_snapshot: dict[str, Any],
+    expected_blueprint_hash: str,
+) -> bool:
+    recorded_hash = str(model_snapshot.get("blueprint_hash") or "")
+    return bool(
+        not expected_blueprint_hash
+        or not recorded_hash
+        or recorded_hash == expected_blueprint_hash
+    )
+
+
+def _recover_screenplay_ir_candidate(
+    episode_id: str,
+    *,
+    blueprint_hash: str = "",
+) -> tuple[ScreenplayGenerationIR, str] | None:
+    """Load the latest IR produced for the same authority input."""
+    from app.observability.tracing import current_trace
+
+    trace = current_trace()
+    if not trace.run_id:
+        return None
+    conn = get_conn()
+    current_run = conn.execute(
+        "SELECT input_fingerprint FROM workflow_runs WHERE id=?",
+        (trace.run_id,),
+    ).fetchone()
+    if current_run is None:
+        return None
+    input_fingerprint = str(current_run["input_fingerprint"] or "")
+    lineage_rows = conn.execute(
+        """WITH RECURSIVE lineage(id, parent_run_id) AS (
+               SELECT id,parent_run_id
+                 FROM workflow_runs
+                WHERE id=?
+               UNION ALL
+               SELECT wr.id,wr.parent_run_id
+                 FROM workflow_runs wr
+                 JOIN lineage ON wr.id=lineage.parent_run_id
+           )
+           SELECT id FROM lineage""",
+        (trace.run_id,),
+    ).fetchall()
+    lineage_run_ids = [str(row["id"]) for row in lineage_rows]
+    if not lineage_run_ids:
+        return None
+    lineage_marks = ",".join("?" for _ in lineage_run_ids)
+    rows = conn.execute(
+        f"""SELECT a.id,a.type,a.content_json,a.prompt_version,
+                  a.model_snapshot_json,
+                  wr.input_fingerprint AS artifact_input_fingerprint
+             FROM artifacts a
+             JOIN step_runs sr ON sr.id=a.created_by_step_run_id
+             JOIN workflow_runs wr ON wr.id=sr.run_id
+            WHERE a.scope_type='episode' AND a.scope_id=?
+              AND a.prompt_version=?
+              AND a.contract_version=?
+              AND a.type IN (
+                    'screenplay_generation_ir',
+                    'screenplay_generation_ir_raw',
+                    'episode_screenplay'
+              )
+              AND wr.input_fingerprint=?
+              AND wr.id IN ({lineage_marks})
+            ORDER BY a.created_at DESC
+            LIMIT 20""",
+        (
+            episode_id,
+            SCREENPLAY_BASELINE_PROMPT_VERSION,
+            IR_VERSION,
+            input_fingerprint,
+            *lineage_run_ids,
+        ),
+    ).fetchall()
+    for row in rows:
+        try:
+            model_snapshot = json.loads(
+                row["model_snapshot_json"] or "{}"
+            )
+            if not _screenplay_ir_blueprint_snapshot_matches(
+                model_snapshot,
+                blueprint_hash,
+            ):
+                continue
+            content = json.loads(row["content_json"] or "{}")
+            raw = content.get("raw_output") if isinstance(content, dict) else None
+            if isinstance(raw, str):
+                try:
+                    payload = extract_json(
+                        raw,
+                        repair_unescaped_inner_quotes=True,
+                    )
+                except ValueError:
+                    payload = recover_complete_screenplay_ir_prefix(raw)
+            else:
+                payload = content
+            if not isinstance(payload, dict):
+                continue
+            payload, _changes = normalize_screenplay_ir_payload(payload)
+            candidate = ScreenplayGenerationIR.model_validate(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        return candidate, str(row["id"])
+    return None
 
 
 class StageError(Exception):
@@ -94,6 +310,814 @@ class StageError(Exception):
         self.stage = stage
         self.errors = errors
         super().__init__(f"[{stage}] " + "；".join(errors[:5]))
+
+
+class _IRFidelityInsertion(BaseModel):
+    scene_key: str
+    insert_after_event_key: str | None = None
+    units: list[IRSceneUnit] = Field(default_factory=list)
+
+
+class _IRFidelityPatch(BaseModel):
+    insertions: list[_IRFidelityInsertion] = Field(default_factory=list)
+    new_scenes: list[IRScene] = Field(default_factory=list)
+
+
+class _IRScenePartition(BaseModel):
+    key: str
+    scene_heading: str
+    story_function: str
+    summary: str
+    conflict: str
+    turn: str
+    unit_indexes: list[int]
+
+
+class _IRSceneReplacement(BaseModel):
+    scene_key: str
+    scenes: list[_IRScenePartition]
+
+
+class _IRScenePartitionPlan(BaseModel):
+    replacements: list[_IRSceneReplacement]
+
+
+_IR_FIDELITY_ERROR_MARKERS = (
+    "漏掉细粒度来源段",
+    "正文过度压缩",
+    "局部剧情过度压缩",
+    "场次标题包含多个不连续地点",
+)
+
+
+def _is_ir_fidelity_error(exc: Exception | str) -> bool:
+    message = str(exc)
+    return any(marker in message for marker in _IR_FIDELITY_ERROR_MARKERS)
+
+
+async def _repartition_multilocation_ir_scenes(
+    candidate: ScreenplayGenerationIR,
+    *,
+    episode: dict[str, Any],
+    source_text: str,
+    parent_artifact_id: str | None,
+) -> ScreenplayGenerationIR:
+    problematic = [
+        scene for scene in candidate.scenes
+        if scene_heading_has_multiple_locations(scene.scene_heading)
+    ]
+    if not problematic:
+        return candidate
+
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+
+    source_segments = {
+        segment.segment_id: segment.text
+        for segment in index_source_segments(source_text)
+    }
+    context = []
+    for scene in problematic:
+        context.append({
+            "scene_key": scene.key,
+            "scene_heading": scene.scene_heading,
+            "story_function": scene.story_function,
+            "summary": scene.summary,
+            "conflict": scene.conflict,
+            "turn": scene.turn,
+            "units": [
+                {
+                    "unit_index": index,
+                    "kind": unit.kind,
+                    "text": unit.text,
+                    "source_segment_ids": unit.source_segment_ids,
+                    "source_text": [
+                        source_segments[source_id]
+                        for source_id in unit.source_segment_ids
+                        if source_id in source_segments
+                    ],
+                }
+                for index, unit in enumerate(scene.units)
+            ],
+        })
+    prompt = (
+        "任务：把包含多个不连续地点的 IR 场次重新分成连续时空场次。"
+        "只能重新分组已有 unit_index，禁止改写、删除、复制或新增 unit。"
+        "每个原场的所有索引必须恰好使用一次，分组必须保持原顺序且每组索引连续。"
+        "每个新 scene_heading 只能包含一个主要地点，地点栏禁止使用「、」「+」"
+        "或逗号连接多个地点；同一建筑内发生明确房间切换也应分场。"
+        "时间、地点、人物目标或连续动作发生切换时建立新场。\n\n"
+        "待重分场数据："
+        + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        + "\n\n只输出 JSON："
+        '{"replacements":[{"scene_key":"sc1","scenes":['
+        '{"key":"sc1a","scene_heading":"【场1】日 / 单一地点",'
+        '"story_function":"","summary":"","conflict":"","turn":"",'
+        '"unit_indexes":[0,1]}]}]}'
+    )
+    raw = await model_gateway.chat(
+        [
+            {"role": "system", "content": SYSTEM_PREFIX},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=12288,
+        call_meta={
+            "stage": "剧本连续时空重分场",
+            "stage_key": "screenplay_ir_scene_partition",
+            "call_role": "stage_repair",
+            "call_role_label": "连续时空重分场",
+            "episode_id": str(episode.get("id") or ""),
+            "generation_contract": IR_VERSION,
+            "compiler_version": IR_COMPILER_VERSION,
+            "expected_json": True,
+            "reuse_successful_operation": True,
+        },
+    )
+    plan = _IRScenePartitionPlan.model_validate(extract_json(raw))
+    replacements = {item.scene_key: item for item in plan.replacements}
+    rebuilt: list[IRScene] = []
+    used_keys = {
+        scene.key for scene in candidate.scenes
+        if scene.key not in replacements
+    }
+    for scene in candidate.scenes:
+        if scene not in problematic:
+            rebuilt.append(scene)
+            continue
+        replacement = replacements.get(scene.key)
+        if replacement is None or len(replacement.scenes) < 2:
+            raise ValueError(f"IR 场次重分组缺少有效替代：{scene.key}")
+        ordered_partitions = sorted(
+            replacement.scenes,
+            key=lambda partition: min(
+                partition.unit_indexes,
+                default=len(scene.units),
+            ),
+        )
+        starts = [
+            min(partition.unit_indexes, default=len(scene.units))
+            for partition in ordered_partitions
+        ]
+        if (
+            not starts
+            or starts[0] != 0
+            or len(set(starts)) != len(starts)
+            or any(
+                start < 0 or start >= len(scene.units)
+                for start in starts
+            )
+        ):
+            raise ValueError(
+                f"IR 场次重分组缺少有效连续边界：{scene.key}"
+            )
+        for partition_index, partition in enumerate(ordered_partitions):
+            unit_start = starts[partition_index]
+            unit_end = (
+                starts[partition_index + 1]
+                if partition_index + 1 < len(starts)
+                else len(scene.units)
+            )
+            partition.unit_indexes = list(range(unit_start, unit_end))
+            if (
+                partition.key in used_keys
+                or scene_heading_has_multiple_locations(
+                    partition.scene_heading
+                )
+            ):
+                raise ValueError(
+                    f"IR 场次重分组的新 key/heading 非法：{partition.key}"
+                )
+            used_keys.add(partition.key)
+            rebuilt.append(IRScene(
+                key=partition.key,
+                scene_heading=partition.scene_heading,
+                story_function=partition.story_function,
+                summary=partition.summary,
+                conflict=partition.conflict,
+                turn=partition.turn,
+                units=[
+                    scene.units[index]
+                    for index in partition.unit_indexes
+                ],
+            ))
+    candidate.scenes = rebuilt
+    candidate.events = []
+    candidate.beats = []
+    candidate.coverage = []
+
+    trace = current_trace()
+    raw_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir_scene_partition_raw",
+            scope_type="episode",
+            scope_id=str(episode.get("id") or ""),
+            status="candidate",
+            trust_level="T0",
+            content={"raw_output": raw},
+            parent_artifact_ids=(
+                [parent_artifact_id] if parent_artifact_id else []
+            ),
+            contract_version=IR_VERSION,
+            prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
+        ),
+        step_run_id=trace.step_run_id,
+    )
+    completed_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id=str(episode.get("id") or ""),
+            status="candidate",
+            trust_level="T1",
+            content=candidate.model_dump(mode="json"),
+            parent_artifact_ids=[raw_artifact["id"]],
+            contract_version=IR_VERSION,
+            prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
+            model_snapshot={
+                "compiler_version": IR_COMPILER_VERSION,
+                "scene_partition_count": len(problematic),
+            },
+        ),
+        step_run_id=trace.step_run_id,
+    )
+    object.__setattr__(
+        candidate,
+        "evidence_artifact_id",
+        completed_artifact["id"],
+    )
+    return candidate
+
+
+def _ir_fidelity_patch_context(
+    candidate: ScreenplayGenerationIR,
+    source_text: str,
+) -> dict[str, Any]:
+    segments = index_source_segments(source_text)
+    front_matter_ids = structural_front_matter_ids(segments)
+    dramatic = [
+        segment for segment in segments
+        if segment.segment_id not in front_matter_ids
+    ]
+    flat_units = [
+        (scene, unit)
+        for scene in candidate.scenes
+        for unit in scene.units
+    ]
+    owned = {
+        source_id
+        for _scene, unit in flat_units
+        for source_id in unit.source_segment_ids
+    }
+    missing = [
+        segment.segment_id
+        for segment in dramatic
+        if segment.segment_id not in owned
+    ]
+    windows: list[dict[str, Any]] = []
+    for start in range(0, len(dramatic), IR_LOCAL_SOURCE_WINDOW):
+        window = dramatic[start:start + IR_LOCAL_SOURCE_WINDOW]
+        window_ids = {segment.segment_id for segment in window}
+        source_chars = sum(
+            len(textmatch.condense(segment.text))
+            for segment in window
+        )
+        existing_units = [
+            {
+                "scene_key": scene.key,
+                "event_key": unit.event_key,
+                "kind": unit.kind,
+                "text": unit.text,
+                "source_segment_ids": unit.source_segment_ids,
+                "speaker_key": unit.speaker_key,
+            }
+            for scene, unit in flat_units
+            if window_ids.intersection(unit.source_segment_ids)
+        ]
+        adapted_chars = sum(
+            len(textmatch.condense(str(item["text"])))
+            for item in existing_units
+        )
+        target_chars = math.ceil(
+            source_chars * IR_MIN_ADAPTED_SOURCE_RATIO
+        )
+        missing_here = [
+            source_id for source_id in missing if source_id in window_ids
+        ]
+        if adapted_chars >= target_chars and not missing_here:
+            continue
+        windows.append({
+            "source_range": (
+                f"{window[0].segment_id}-{window[-1].segment_id}"
+            ),
+            "source_chars": source_chars,
+            "existing_adapted_chars": adapted_chars,
+            "minimum_final_adapted_chars": target_chars,
+            "minimum_additional_chars": max(
+                0, target_chars - adapted_chars,
+            ),
+            "missing_source_ids": missing_here,
+            "source_segments": [
+                {
+                    "source_segment_id": segment.segment_id,
+                    "text": segment.text,
+                }
+                for segment in window
+            ],
+            "existing_units": existing_units,
+        })
+    return {
+        "missing_source_ids": missing,
+        "identities": [
+            {
+                "key": identity.key,
+                "display_name": identity.display_name,
+                "voice_canonical": identity.voice_canonical,
+            }
+            for identity in candidate.identities
+        ],
+        "scenes": [
+            {
+                "key": scene.key,
+                "scene_heading": scene.scene_heading,
+                "summary": scene.summary,
+            }
+            for scene in candidate.scenes
+        ],
+        "windows_requiring_expansion": windows,
+    }
+
+
+def _select_fidelity_blueprint_plans(
+    context: dict[str, Any],
+    plans: list[Any],
+    *,
+    candidate_scene_count: int,
+) -> tuple[list[Any], list[Any], list[Any], set[str]]:
+    remaining_plans = plans[candidate_scene_count:]
+    repair_source_ids = set(context["missing_source_ids"])
+    repair_source_ids.update(
+        str(segment["source_segment_id"])
+        for window in context["windows_requiring_expansion"]
+        for segment in window["source_segments"]
+    )
+    internal_plans = [
+        plan
+        for plan in plans[:candidate_scene_count]
+        if repair_source_ids.intersection(plan.source_segment_ids)
+    ]
+    selected_plans = [] if internal_plans else remaining_plans[:6]
+    return (
+        remaining_plans,
+        internal_plans,
+        selected_plans,
+        repair_source_ids,
+    )
+
+
+def _merge_ir_fidelity_patch(
+    candidate: ScreenplayGenerationIR,
+    patch: _IRFidelityPatch,
+    source_text: str,
+    *,
+    round_no: int,
+) -> int:
+    segments = index_source_segments(source_text)
+    source_order = {
+        segment.segment_id: index
+        for index, segment in enumerate(segments)
+    }
+    scenes = {scene.key: scene for scene in candidate.scenes}
+    existing_units = [
+        (scene, unit)
+        for scene in candidate.scenes
+        for unit in scene.units
+    ]
+    occupied_keys = {
+        unit.event_key for _scene, unit in existing_units
+    }
+    inserted = 0
+    existing_scene_keys = set(scenes)
+    for new_scene in patch.new_scenes:
+        if new_scene.key in existing_scene_keys or not new_scene.units:
+            continue
+        valid_units: list[IRSceneUnit] = []
+        for patch_unit in new_scene.units:
+            source_ids = list(dict.fromkeys(
+                patch_unit.source_segment_ids
+            ))
+            if (
+                not source_ids
+                or any(source_id not in source_order for source_id in source_ids)
+            ):
+                continue
+            inserted += 1
+            event_key = f"fidelity-r{round_no}-{inserted}"
+            while event_key in occupied_keys:
+                inserted += 1
+                event_key = f"fidelity-r{round_no}-{inserted}"
+            occupied_keys.add(event_key)
+            patch_unit.event_key = event_key
+            patch_unit.source_segment_ids = source_ids
+            valid_units.append(patch_unit)
+        if not valid_units:
+            continue
+        new_scene.units = valid_units
+        candidate.scenes.append(new_scene)
+        scenes[new_scene.key] = new_scene
+        existing_scene_keys.add(new_scene.key)
+        existing_units.extend(
+            (new_scene, unit) for unit in valid_units
+        )
+    for insertion in patch.insertions:
+        for patch_unit in insertion.units:
+            source_ids = list(dict.fromkeys(
+                patch_unit.source_segment_ids
+            ))
+            if (
+                not source_ids
+                or any(source_id not in source_order for source_id in source_ids)
+            ):
+                continue
+            target_index = min(source_order[source_id] for source_id in source_ids)
+            nearest_scene = min(
+                (
+                    (
+                        min(
+                            abs(source_order[source_id] - target_index)
+                            for source_id in unit.source_segment_ids
+                            if source_id in source_order
+                        ),
+                        scene,
+                    )
+                    for scene, unit in existing_units
+                    if any(
+                        source_id in source_order
+                        for source_id in unit.source_segment_ids
+                    )
+                ),
+                key=lambda item: item[0],
+                default=(0, scenes.get(insertion.scene_key)),
+            )[1]
+            target_scene = nearest_scene or scenes.get(insertion.scene_key)
+            if target_scene is None:
+                continue
+            inserted += 1
+            event_key = f"fidelity-r{round_no}-{inserted}"
+            while event_key in occupied_keys:
+                inserted += 1
+                event_key = f"fidelity-r{round_no}-{inserted}"
+            occupied_keys.add(event_key)
+            patch_unit.event_key = event_key
+            patch_unit.source_segment_ids = source_ids
+            target_scene.units.append(patch_unit)
+            existing_units.append((target_scene, patch_unit))
+
+    for scene in candidate.scenes:
+        scene.units.sort(
+            key=lambda unit: min(
+                (
+                    source_order[source_id]
+                    for source_id in unit.source_segment_ids
+                    if source_id in source_order
+                ),
+                default=len(segments),
+            )
+        )
+    candidate.events = []
+    candidate.beats = []
+    candidate.coverage = []
+    return inserted
+
+
+async def _complete_screenplay_ir_fidelity(
+    candidate: ScreenplayGenerationIR,
+    *,
+    episode: dict[str, Any],
+    source_text: str,
+    bible: Bible,
+    parent_artifact_id: str | None,
+    narrative_blueprint: NarrativeBlueprint | None = None,
+) -> ScreenplayGenerationIR:
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+
+    patched = False
+    consecutive_empty_patches = 0
+    for round_no in range(1, 33):
+        try:
+            compile_screenplay_ir(
+                candidate.model_copy(deep=True),
+                episode=episode,
+                source_text=source_text,
+                bible=bible,
+            )
+            if patched:
+                trace = current_trace()
+                completed_artifact = evidence_repository.create_artifact(
+                    EvidenceArtifact(
+                        type="screenplay_generation_ir",
+                        scope_type="episode",
+                        scope_id=str(episode.get("id") or ""),
+                        status="candidate",
+                        trust_level="T1",
+                        content=candidate.model_dump(mode="json"),
+                        parent_artifact_ids=(
+                            [parent_artifact_id]
+                            if parent_artifact_id else []
+                        ),
+                        contract_version=IR_VERSION,
+                        prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
+                        model_snapshot={
+                            "compiler_version": IR_COMPILER_VERSION,
+                            "fidelity_completion_rounds": round_no - 1,
+                            "blueprint_hash": (
+                                _narrative_blueprint_content_hash(
+                                    narrative_blueprint
+                                )
+                            ),
+                        },
+                    ),
+                    step_run_id=trace.step_run_id,
+                )
+                object.__setattr__(
+                    candidate,
+                    "evidence_artifact_id",
+                    completed_artifact["id"],
+                )
+            return candidate
+        except ValueError as exc:
+            if not _is_ir_fidelity_error(exc):
+                raise
+
+        context = _ir_fidelity_patch_context(candidate, source_text)
+        if narrative_blueprint is not None:
+            plans = derive_blueprint_scene_plans(narrative_blueprint)
+            (
+                _remaining_plans,
+                internal_plans,
+                selected_plans,
+                _repair_source_ids,
+            ) = _select_fidelity_blueprint_plans(
+                context,
+                plans,
+                candidate_scene_count=len(candidate.scenes),
+            )
+            original_windows = context["windows_requiring_expansion"]
+            original_missing_source_ids = context["missing_source_ids"]
+
+            def project_windows(
+                allowed_source_ids: set[str],
+            ) -> list[dict[str, Any]]:
+                projected: list[dict[str, Any]] = []
+                for window in original_windows:
+                    source_segments = [
+                        segment
+                        for segment in window["source_segments"]
+                        if segment["source_segment_id"]
+                        in allowed_source_ids
+                    ]
+                    if not source_segments:
+                        continue
+                    source_ids = {
+                        segment["source_segment_id"]
+                        for segment in source_segments
+                    }
+                    existing_units = [
+                        unit
+                        for unit in window["existing_units"]
+                        if source_ids.intersection(
+                            unit["source_segment_ids"]
+                        )
+                    ]
+                    source_chars = sum(
+                        len(textmatch.condense(segment["text"]))
+                        for segment in source_segments
+                    )
+                    adapted_chars = sum(
+                        len(textmatch.condense(unit["text"]))
+                        for unit in existing_units
+                    )
+                    target_chars = math.ceil(
+                        source_chars * IR_MIN_ADAPTED_SOURCE_RATIO
+                    )
+                    missing_source_ids = [
+                        source_id
+                        for source_id in window["missing_source_ids"]
+                        if source_id in allowed_source_ids
+                    ]
+                    if (
+                        adapted_chars >= target_chars
+                        and not missing_source_ids
+                    ):
+                        continue
+                    projected.append({
+                        **window,
+                        "source_range": (
+                            f"{source_segments[0]['source_segment_id']}-"
+                            f"{source_segments[-1]['source_segment_id']}"
+                        ),
+                        "source_chars": source_chars,
+                        "existing_adapted_chars": adapted_chars,
+                        "minimum_final_adapted_chars": target_chars,
+                        "minimum_additional_chars": max(
+                            0, target_chars - adapted_chars,
+                        ),
+                        "missing_source_ids": missing_source_ids,
+                        "source_segments": source_segments,
+                        "existing_units": existing_units,
+                    })
+                return projected
+
+            allowed_source_ids = {
+                source_id
+                for plan in (
+                    internal_plans[:6]
+                    if internal_plans
+                    else selected_plans
+                )
+                for source_id in plan.source_segment_ids
+            }
+            selected_windows = project_windows(allowed_source_ids)
+            if (
+                not selected_windows
+                and internal_plans
+                and _remaining_plans
+            ):
+                selected_plans = _remaining_plans[:6]
+                allowed_source_ids = {
+                    source_id
+                    for plan in selected_plans
+                    for source_id in plan.source_segment_ids
+                }
+                selected_windows = project_windows(
+                    allowed_source_ids
+                )
+            context["required_remaining_scene_plans"] = [
+                plan.model_dump(mode="json")
+                for plan in selected_plans
+            ]
+            context["missing_source_ids"] = [
+                source_id
+                for source_id in original_missing_source_ids
+                if source_id in allowed_source_ids
+            ]
+            context["windows_requiring_expansion"] = selected_windows
+        else:
+            context["windows_requiring_expansion"] = context[
+                "windows_requiring_expansion"
+            ][:2]
+        windows = context["windows_requiring_expansion"]
+        if not windows:
+            raise ValueError("IR 保真补写没有可处理的缺口窗口")
+        prompt = (
+            "任务：只补写现有剧本 IR 中缺失或过度压缩的剧情单元，不重写整集。\n"
+            f"这是第 {round_no} 轮局部补写；只要上下文仍列出缺口，禁止返回空数组。\n"
+            "每个窗口都给出了原文、已有 units 和最低补写字符数。新增 units 必须把"
+            "遗漏的动作、人物反应、对白关系、因果桥梁和场景转换真正写进 text；"
+            "禁止重复已有内容凑字数。\n"
+            "source_segment_ids 只能引用对应窗口内 SRC，必须按原文顺序且连续；"
+            "dialogue.source_text 必须逐字来自声明的 SRC，并使用 identities 中已有"
+            " speaker_key。scene_key 从现有 scenes 选择。每个 insertion 的 units 按"
+            "播放顺序输出，event_key 可使用任意临时唯一值，后端会重编号。"
+            "若缺失 SRC 是现有正文之后的连续尾段，必须通过 new_scenes 续写必要的新场次，"
+            "不得把不同时空强塞进最后一个旧场；非尾段缺口才使用 insertions。\n\n"
+            "若上下文包含 required_remaining_scene_plans，new_scenes 必须逐项使用其"
+            " key、scene_heading、顺序和 source_segment_ids 分配；禁止合并、跳过或"
+            "自行改名蓝图场次。每个新 scene 的 units 只能引用该 plan 允许的 SRC。\n\n"
+            "保真缺口上下文：\n"
+            + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+            + "\n\n只输出 JSON："
+            '{"new_scenes":[{"key":"sc_next",'
+            '"scene_heading":"【场】日 / 地点","story_function":"",'
+            '"summary":"","conflict":"","turn":"","units":['
+            '{"kind":"action","text":"尾段可拍动作",'
+            '"event_key":"tail1","source_segment_ids":["SRC0100"]}]}],'
+            '"insertions":[{"scene_key":"sc1",'
+            '"insert_after_event_key":"ev1","units":['
+            '{"kind":"action","text":"新增可拍动作",'
+            '"event_key":"patch1","source_segment_ids":["SRC0003"]},'
+            '{"kind":"dialogue","text":"改编台词","event_key":"patch2",'
+            '"source_segment_ids":["SRC0003"],"speaker_key":"person_a",'
+            '"function":"statement","source_text":"原文逐字话语",'
+            '"chain_key":"dc_patch"}]}]}'
+        )
+        raw = await model_gateway.chat(
+            [
+                {"role": "system", "content": SYSTEM_PREFIX},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=8192,
+            call_meta={
+                "stage": "剧本来源保真局部补写",
+                "stage_key": "screenplay_ir_fidelity_patch",
+                "call_role": "stage_repair",
+                "call_role_label": "局部剧情补写",
+                "repair_round": round_no,
+                "episode_id": str(episode.get("id") or ""),
+                "generation_contract": IR_VERSION,
+                "compiler_version": IR_COMPILER_VERSION,
+                "expected_json": True,
+                "reuse_successful_operation": True,
+            },
+        )
+        trace = current_trace()
+        raw_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_generation_ir_fidelity_patch_raw",
+                scope_type="episode",
+                scope_id=str(episode.get("id") or ""),
+                status="candidate",
+                trust_level="T0",
+                content={"raw_output": raw, "round": round_no},
+                parent_artifact_ids=(
+                    [parent_artifact_id] if parent_artifact_id else []
+                ),
+                contract_version=IR_VERSION,
+                prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
+            ),
+            step_run_id=trace.step_run_id,
+        )
+        payload = extract_json(raw)
+        for new_scene in payload.get("new_scenes", []):
+            if not isinstance(new_scene, dict):
+                continue
+            new_scene.setdefault(
+                "story_function",
+                str(new_scene.get("summary") or "推进本场剧情"),
+            )
+        patch = _IRFidelityPatch.model_validate(payload)
+        inserted = _merge_ir_fidelity_patch(
+            candidate,
+            patch,
+            source_text,
+            round_no=round_no,
+        )
+        if not inserted:
+            consecutive_empty_patches += 1
+            if consecutive_empty_patches >= 3:
+                raise ValueError(
+                    "IR 保真补写连续三轮未返回任何可合并 unit"
+                )
+            continue
+        consecutive_empty_patches = 0
+        patched = True
+        normalized_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_generation_ir_fidelity_patch",
+                scope_type="episode",
+                scope_id=str(episode.get("id") or ""),
+                status="validated",
+                trust_level="T1",
+                content=patch.model_dump(mode="json"),
+                parent_artifact_ids=[raw_artifact["id"]],
+                contract_version=IR_VERSION,
+                prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
+                model_snapshot={"inserted_units": inserted},
+            ),
+            step_run_id=trace.step_run_id,
+        )
+        parent_artifact_id = normalized_artifact["id"]
+
+    compile_screenplay_ir(
+        candidate.model_copy(deep=True),
+        episode=episode,
+        source_text=source_text,
+        bible=bible,
+    )
+    trace = current_trace()
+    completed_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id=str(episode.get("id") or ""),
+            status="candidate",
+            trust_level="T1",
+            content=candidate.model_dump(mode="json"),
+            parent_artifact_ids=(
+                [parent_artifact_id] if parent_artifact_id else []
+            ),
+            contract_version=IR_VERSION,
+            prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
+            model_snapshot={
+                "compiler_version": IR_COMPILER_VERSION,
+                "fidelity_completion_rounds": 32,
+                "blueprint_hash": _narrative_blueprint_content_hash(
+                    narrative_blueprint
+                ),
+            },
+        ),
+        step_run_id=trace.step_run_id,
+    )
+    object.__setattr__(
+        candidate,
+        "evidence_artifact_id",
+        completed_artifact["id"],
+    )
+    return candidate
 
 
 class StoryboardShotDraft(BaseModel):
@@ -881,6 +1905,17 @@ async def _run_with_agent_loop(
         "initiator_scope": "agent_loop",
         "contract_version": loop.contract.version,
         "expected_json": True,
+        **(
+            {
+                "generation_contract": IR_VERSION,
+                "published_output_contract": "EpisodeScreenplay@4.0.0",
+                "deterministic_compiler": "app.screenplay_ir.compile_screenplay_ir",
+                "compiler_version": IR_COMPILER_VERSION,
+                "prompt_version": loop.prompt_version,
+            }
+            if model_cls is ScreenplayGenerationIR
+            else {}
+        ),
     }
 
     async def producer(
@@ -992,10 +2027,15 @@ async def _run_with_agent_loop(
         return repaired_raw
 
     def evaluator(raw: str):
+        if model_cls is NarrativeBlueprint:
+            raw = normalize_blueprint_raw_json(raw)
         try:
             obj = extract_json(
                 raw,
-                repair_unescaped_inner_quotes=model_cls is EpisodeScreenplay,
+                repair_unescaped_inner_quotes=model_cls in {
+                    EpisodeScreenplay,
+                    NarrativeBlueprint,
+                },
                 repair_singleton_string_object_fields=(
                     ("attention_memory_assumptions",)
                     if model_cls is EpisodeScreenplay
@@ -1003,8 +2043,38 @@ async def _run_with_agent_loop(
                 ),
             )
         except ValueError as exc:
-            messages = [str(exc)]
-            return None, issues_from_messages(messages, subject=f"{loop.scope_type}:{loop.scope_id}")
+            obj = (
+                recover_complete_screenplay_ir_prefix(raw)
+                if model_cls is ScreenplayGenerationIR
+                else (
+                    recover_complete_blueprint_prefix(raw)
+                    if model_cls is NarrativeBlueprint
+                    else None
+                )
+            )
+            if obj is None:
+                messages = [str(exc)]
+                return None, issues_from_messages(
+                    messages,
+                    subject=f"{loop.scope_type}:{loop.scope_id}",
+                )
+        if model_cls is ScreenplayGenerationIR and isinstance(obj, dict):
+            obj, normalizations = normalize_screenplay_ir_payload(obj)
+            if normalizations:
+                log_provider_call(
+                    "screenplay_ir_candidate_normalization",
+                    config.MODEL_TEXT,
+                    "NORMALIZED",
+                    None,
+                    0,
+                    meta={
+                        "episode_id": loop.scope_id,
+                        "stage": stage,
+                        "generation_contract": IR_VERSION,
+                        "compiler_version": IR_COMPILER_VERSION,
+                        "changes": normalizations,
+                    },
+                )
         if model_cls is EpisodeScreenplay:
             obj, normalized_paths = normalize_screenplay_json_shape(obj)
             if normalized_paths:
@@ -2024,6 +3094,1221 @@ def _narrative_plan_prompt_block(scope_id: str) -> str:
     )
 
 
+async def _repair_narrative_blueprint(
+    blueprint: NarrativeBlueprint,
+    *,
+    episode: dict[str, Any],
+    source_text: str,
+    additional_errors: list[str] | None = None,
+) -> NarrativeBlueprint:
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+
+    parent_artifact_ids: list[str] = []
+    pending_external_errors = list(additional_errors or [])
+    for round_no in range(1, 7):
+        normalize_blueprint_agency_continuity(blueprint)
+        errors = (
+            validate_narrative_blueprint(blueprint, source_text)
+            + pending_external_errors
+        )
+        if not errors:
+            trace = current_trace()
+            evidence_repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_narrative_blueprint",
+                    scope_type="episode",
+                    scope_id=str(episode.get("id") or ""),
+                    status="validated",
+                    trust_level="T1",
+                    content=blueprint.model_dump(mode="json"),
+                    parent_artifact_ids=parent_artifact_ids,
+                    contract_version=BLUEPRINT_VERSION,
+                    prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                ),
+                step_run_id=trace.step_run_id,
+            )
+            return blueprint
+        error_text = "\n".join(errors)
+        mentioned_keys = {
+            node.key
+            for node in blueprint.nodes
+            if node.key and node.key in error_text
+        }
+        selected_indexes = {
+            neighbor
+            for index, node in enumerate(blueprint.nodes)
+            if node.key in mentioned_keys
+            for neighbor in range(
+                max(0, index - 2),
+                min(len(blueprint.nodes), index + 3),
+            )
+        }
+        mentioned_source_ids = set(re.findall(
+            r"\bSRC\d+\b",
+            "\n".join(errors),
+        ))
+        source_segments = index_source_segments(source_text)
+        source_order = {
+            segment.segment_id: index
+            for index, segment in enumerate(source_segments)
+        }
+        for source_id in mentioned_source_ids:
+            target_position = source_order.get(source_id)
+            if target_position is None:
+                continue
+            nearest_index = min(
+                range(len(blueprint.nodes)),
+                key=lambda index: min(
+                    (
+                        abs(
+                            source_order[owned_source_id]
+                            - target_position
+                        )
+                        for owned_source_id
+                        in blueprint.nodes[index].source_segment_ids
+                        if owned_source_id in source_order
+                    ),
+                    default=len(source_segments),
+                ),
+            )
+            selected_indexes.update(range(
+                max(0, nearest_index - 2),
+                min(len(blueprint.nodes), nearest_index + 3),
+            ))
+        if not selected_indexes:
+            raise ValueError(
+                "蓝图错误无法映射到可局部替换的时间线节点："
+                + "；".join(errors[:10])
+            )
+        selected_nodes = [
+            blueprint.nodes[index].model_dump(mode="json")
+            for index in sorted(selected_indexes)
+        ]
+        node_index = [
+            {
+                "key": node.key,
+                "summary": node.summary,
+                "time": node.time_label,
+                "location": node.location_label,
+            }
+            for node in blueprint.nodes
+        ]
+        repair_prompt = (
+            "只局部修复叙事蓝图的硬门禁问题，禁止重写整份蓝图。"
+            "replacements 中只输出需要修改的完整 node；普通修改使用 node，"
+            "需要拆分复合时空时使用 nodes。拆分前后 source_segment_ids 的集合"
+            "必须完全相同，允许多个新节点共同引用同一来源段；新节点 key 必须唯一。"
+            "仅当硬门禁明确给出 BLUEPRINT_SOURCE_MISSING 时，允许把下方列出的"
+            "缺失 SRC 补入语义和原文位置最接近的节点。"
+            "若错误节点是局部修复曾产生的重复/虚构节点，可写入 delete_node_keys；"
+            "但必须先把其真实来源交付归还正确节点，删除后任何 SRC 缺失都会被拒绝。"
+            "允许修正时间关系、转场、状态事实引用、决定、行为自主性和"
+            " released_constraints_for。不得修改未列出的节点。原文没有的同谋、"
+            "关系、满房、行程或人物动机默认禁止；若为修复原文自身的明确逻辑矛盾"
+            "确有必要，必须设 adaptation_kind=logic_bridge，并用 bridge_rationale"
+            "说明为何不改变核心事件与结果。已有住宿、车辆、关系等持久事实必须"
+            "继续有效，禁止用锁门、系统错误、被占用等新理由让它失效；若剧情需要"
+            "临时空间，应在更早的相关节点建立属于其他人物的独立资源，再说明角色"
+            "为何临时使用该资源。被迫决定必须建立"
+            " constraint_fact_key；只有后续节点用 supersedes_fact_keys 终止"
+            "该约束事实后，才能写 released_constraints_for。快感或停止反抗"
+            "不能解除威胁。若 setup_missing 涉及原文明确写出的既有关系或人物，"
+            "禁止删除、弱化该来源事实；必须在当前节点或更早节点增加可见/可听的"
+            "身份与关系建立内容，同节点先建立再引用也有效。\n\n"
+            "硬门禁：\n"
+            + "\n".join(f"- {error}" for error in errors)
+            + "\n\n相关节点及前后文：\n"
+            + json.dumps(
+                selected_nodes,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n门禁提到的缺失来源原文：\n"
+            + json.dumps(
+                [
+                    {
+                        "source_segment_id": segment.segment_id,
+                        "text": segment.text,
+                    }
+                    for segment in source_segments
+                    if segment.segment_id in mentioned_source_ids
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n全篇节点索引（仅用于引用）：\n"
+            + json.dumps(
+                node_index,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n输出 Schema：\n"
+            + json.dumps(
+                NarrativeBlueprintPatch.model_json_schema(),
+                ensure_ascii=False,
+            )
+        )
+        raw = await model_gateway.chat(
+            [
+                {"role": "system", "content": SYSTEM_PREFIX},
+                {"role": "user", "content": repair_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=16384,
+            call_meta={
+                "stage": "剧本蓝图局部语义修复",
+                "stage_key": "screenplay_blueprint_patch",
+                "call_role": "stage_repair",
+                "call_role_label": "蓝图局部语义修复",
+                "repair_round": round_no,
+                "episode_id": str(episode.get("id") or ""),
+                "contract_version": BLUEPRINT_VERSION,
+                "expected_json": True,
+                "reuse_successful_operation": True,
+            },
+        )
+        trace = current_trace()
+        raw_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_narrative_blueprint_patch_raw",
+                scope_type="episode",
+                scope_id=str(episode.get("id") or ""),
+                status="candidate",
+                trust_level="T0",
+                content={"raw_output": raw, "round": round_no},
+                contract_version=BLUEPRINT_VERSION,
+                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            ),
+            step_run_id=trace.step_run_id,
+        )
+        patch = NarrativeBlueprintPatch.model_validate(
+            extract_json(
+                normalize_blueprint_raw_json(raw),
+                repair_unescaped_inner_quotes=True,
+            ),
+        )
+        changed = apply_narrative_blueprint_patch(
+            blueprint,
+            patch,
+            allow_source_expansion=True,
+        )
+        if not changed:
+            raise ValueError("蓝图局部修复没有替换任何节点")
+        pending_external_errors = []
+        normalized_artifact = evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_narrative_blueprint_patch",
+                scope_type="episode",
+                scope_id=str(episode.get("id") or ""),
+                status="validated",
+                trust_level="T1",
+                content=patch.model_dump(mode="json"),
+                parent_artifact_ids=[raw_artifact["id"]],
+                contract_version=BLUEPRINT_VERSION,
+                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                model_snapshot={"replaced_nodes": changed},
+            ),
+            step_run_id=trace.step_run_id,
+        )
+        parent_artifact_ids = [normalized_artifact["id"]]
+        evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_narrative_blueprint",
+                scope_type="episode",
+                scope_id=str(episode.get("id") or ""),
+                status="candidate",
+                trust_level="T1",
+                content=blueprint.model_dump(mode="json"),
+                parent_artifact_ids=parent_artifact_ids,
+                contract_version=BLUEPRINT_VERSION,
+                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                model_snapshot={
+                    "semantic_patch_round": round_no,
+                    "remaining_issue_count": len(
+                        validate_narrative_blueprint(
+                            blueprint,
+                            source_text,
+                        )
+                    ),
+                },
+            ),
+            step_run_id=trace.step_run_id,
+        )
+
+    normalize_blueprint_agency_continuity(blueprint)
+    errors = validate_narrative_blueprint(blueprint, source_text)
+    if errors:
+        raise ValueError(
+            "蓝图局部语义修复六轮后仍未通过："
+            + "；".join(errors[:10])
+        )
+    trace = current_trace()
+    evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_narrative_blueprint",
+            scope_type="episode",
+            scope_id=str(episode.get("id") or ""),
+            status="validated",
+            trust_level="T1",
+            content=blueprint.model_dump(mode="json"),
+            parent_artifact_ids=parent_artifact_ids,
+            contract_version=BLUEPRINT_VERSION,
+            prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        ),
+        step_run_id=trace.step_run_id,
+    )
+    return blueprint
+
+
+async def _semantic_review_narrative_blueprint(
+    blueprint: NarrativeBlueprint,
+    *,
+    episode: dict[str, Any],
+    source_text: str,
+) -> NarrativeBlueprint:
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+
+    initial_blueprint_hash = hashlib.sha256(
+        json.dumps(
+            blueprint.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    cached_rows = get_conn().execute(
+        """SELECT content_json
+             FROM artifacts
+            WHERE scope_type='episode' AND scope_id=?
+              AND type='screenplay_narrative_blueprint_review_consensus'
+              AND status='validated'
+            ORDER BY created_at DESC LIMIT 20""",
+        (str(episode.get("id") or ""),),
+    ).fetchall()
+    for row in cached_rows:
+        try:
+            cached = json.loads(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            cached.get("blueprint_hash") == initial_blueprint_hash
+            and not cached.get("consensus_issue_keys")
+        ):
+            return blueprint
+
+    for review_round in range(1, 7):
+        current_blueprint_hash = hashlib.sha256(
+            json.dumps(
+                blueprint.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        prompt = (
+            "你是漫剧叙事蓝图的独立语义审稿人。只找会导致观众理解错误、"
+            "人物瞬移、状态矛盾、因果跳跃或动机突变的可证实问题；不改稿，"
+            "不评价题材或人物道德，不因为个人偏好要求美化原文。\n"
+            "逐项检查：\n"
+            "1. 回忆进入/退出、次日/当晚/数日后是否可识别，时间标签是否互相冲突；\n"
+            "2. 人物、车辆、司机、行李、房间和关键物品的位置与行动是否闭环；\n"
+            "3. 已建立的住宿、关系、知情状态等是否被后文无理由推翻，是否为了推进"
+            "剧情临时发明满房、同谋、开放关系等便利条件；\n"
+            "4. 重大决定是否有此前可见的压力、欲望和认知依据；\n"
+            "5. 威胁、武器、醉酒或失去行动能力是否被错误改写为自主选择，约束解除"
+            "是否真实发生；\n"
+            "6. 后文引用的视觉事实是否此前真正给观众看见。\n"
+            "连续剧可继承前序集已经建立的人物和关系；原文在当前节点明确揭示的"
+            "既有关系，只要该节点先以可见/可听内容建立再引用，也不属于"
+            " setup_missing。不得要求删除原文明确写出的关系来修复 setup。\n"
+            "required_resolution 不得把无来源的便利设定伪装为原文事实；若只能通过"
+            "改编补桥修复，必须明确要求 adaptation_kind=logic_bridge 及审计理由。"
+            "每个问题必须引用现有 node_keys；有直接原文依据时附"
+            " source_segment_ids。只输出 must_fix=true 的确定问题，禁止泛泛建议。"
+            "\n\n蓝图：\n"
+            + json.dumps(
+                blueprint.model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n带稳定 ID 的原文：\n"
+            + _render_screenplay_source(render_indexed_source(source_text))
+            + "\n\n输出 Schema：\n"
+            + json.dumps(
+                BlueprintSemanticReview.model_json_schema(),
+                ensure_ascii=False,
+            )
+        )
+        trace = current_trace()
+        reviews: list[BlueprintSemanticReview] = []
+        review_artifact_ids: list[str] = []
+        for sample_no in range(1, 3):
+            review: BlueprintSemanticReview | None = None
+            for review_attempt in range(1, 3):
+                try:
+                    raw = await model_gateway.chat(
+                        [
+                            {"role": "system", "content": SYSTEM_PREFIX},
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"{prompt}\n独立审稿样本编号："
+                                    f"{sample_no}"
+                                ),
+                            },
+                        ],
+                        temperature=0.1,
+                        max_tokens=8192,
+                        call_meta={
+                            "stage": "剧本蓝图语义审稿",
+                            "stage_key": "screenplay_blueprint_review",
+                            "call_role": "stage_critic",
+                            "call_role_label": "蓝图独立语义审稿",
+                            "review_round": review_round,
+                            "review_sample": sample_no,
+                            "review_attempt": review_attempt,
+                            "episode_id": str(episode.get("id") or ""),
+                            "contract_version": BLUEPRINT_VERSION,
+                            "expected_json": True,
+                            "reuse_successful_operation": True,
+                        },
+                    )
+                    candidate_review = (
+                        BlueprintSemanticReview.model_validate(
+                            extract_json(
+                                raw,
+                                repair_unescaped_inner_quotes=True,
+                            ),
+                        )
+                    )
+                    review_errors = validate_blueprint_semantic_review(
+                        candidate_review,
+                        blueprint,
+                        source_text,
+                    )
+                    if review_errors:
+                        raise ValueError(
+                            "蓝图语义审稿引用无效："
+                            + "；".join(review_errors[:10])
+                        )
+                    candidate_review.issues = [
+                        issue
+                        for issue in candidate_review.issues
+                        if not blueprint_semantic_issue_is_resolved(
+                            issue,
+                            blueprint,
+                        )
+                    ]
+                    review = candidate_review
+                    break
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            if review is None:
+                continue
+            reviews.append(review)
+            artifact = evidence_repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_narrative_blueprint_review",
+                    scope_type="episode",
+                    scope_id=str(episode.get("id") or ""),
+                    status="candidate",
+                    trust_level="T1",
+                    content=review.model_dump(mode="json"),
+                    contract_version=BLUEPRINT_VERSION,
+                    prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                    model_snapshot={
+                        "review_round": review_round,
+                        "review_sample": sample_no,
+                    },
+                ),
+                step_run_id=trace.step_run_id,
+            )
+            review_artifact_ids.append(artifact["id"])
+
+        if len(reviews) < 2:
+            evidence_repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_narrative_blueprint_review_consensus",
+                    scope_type="episode",
+                    scope_id=str(episode.get("id") or ""),
+                    status="validated",
+                    trust_level="T1",
+                    content={
+                        "review_round": review_round,
+                        "blueprint_hash": current_blueprint_hash,
+                        "consensus_issue_keys": [],
+                        "non_consensus_issue_count": sum(
+                            len(review.issues) for review in reviews
+                        ),
+                        "valid_review_sample_count": len(reviews),
+                        "unavailable_review_sample_count": 2 - len(reviews),
+                    },
+                    parent_artifact_ids=review_artifact_ids,
+                    contract_version=BLUEPRINT_VERSION,
+                    prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                ),
+                step_run_id=trace.step_run_id,
+            )
+            return blueprint
+
+        issue_maps = [
+            {
+                (
+                    issue.code,
+                    tuple(sorted(issue.node_keys)),
+                ): issue
+                for issue in review.issues
+                if issue.must_fix
+            }
+            for review in reviews
+        ]
+        consensus_keys = set(issue_maps[0]).intersection(issue_maps[1])
+        consensus_issues = [
+            issue_maps[0][key] for key in sorted(consensus_keys)
+        ]
+        evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_narrative_blueprint_review_consensus",
+                scope_type="episode",
+                scope_id=str(episode.get("id") or ""),
+                status="validated",
+                trust_level="T1",
+                content={
+                    "review_round": review_round,
+                    "blueprint_hash": current_blueprint_hash,
+                    "consensus_issue_keys": [
+                        {
+                            "code": code,
+                            "node_keys": list(node_keys),
+                        }
+                        for code, node_keys in sorted(consensus_keys)
+                    ],
+                    "non_consensus_issue_count": (
+                        sum(len(issue_map) for issue_map in issue_maps)
+                        - 2 * len(consensus_keys)
+                    ),
+                },
+                parent_artifact_ids=review_artifact_ids,
+                contract_version=BLUEPRINT_VERSION,
+                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            ),
+            step_run_id=trace.step_run_id,
+        )
+        if not consensus_issues:
+            return blueprint
+        if review_round >= 6:
+            raise ValueError(
+                "蓝图语义共识复审仍有必须修复问题："
+                + "；".join(
+                    issue.message for issue in consensus_issues[:10]
+                )
+            )
+        semantic_errors = [
+            (
+                f"[BLUEPRINT_SEMANTIC_{issue.code.upper()}] "
+                f"{'、'.join(issue.node_keys)} "
+                f"{'、'.join(issue.source_segment_ids)}："
+                f"{issue.message}；必须：{issue.required_resolution}"
+            )
+            for issue in consensus_issues
+        ]
+        blueprint = await _repair_narrative_blueprint(
+            blueprint,
+            episode=episode,
+            source_text=source_text,
+            additional_errors=semantic_errors,
+        )
+        evidence_repository.create_artifact(
+            EvidenceArtifact(
+                type="screenplay_narrative_blueprint_review_repair_link",
+                scope_type="episode",
+                scope_id=str(episode.get("id") or ""),
+                status="validated",
+                trust_level="T1",
+                content={
+                    "review_artifact_ids": review_artifact_ids,
+                    "repaired_issue_count": len(consensus_issues),
+                },
+                parent_artifact_ids=review_artifact_ids,
+                contract_version=BLUEPRINT_VERSION,
+                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            ),
+            step_run_id=trace.step_run_id,
+        )
+    return blueprint
+
+
+def _blueprint_shard_boundary_context(
+    nodes: list[Any],
+) -> dict[str, Any]:
+    active_facts: dict[str, dict[str, Any]] = {}
+    participant_locations: dict[str, str] = {}
+    for node in nodes:
+        for change in node.state_changes:
+            for fact_key in change.supersedes_fact_keys:
+                active_facts.pop(fact_key, None)
+            active_facts[change.fact_key] = {
+                "fact_key": change.fact_key,
+                "state_key": change.state_key,
+                "value": change.value,
+                "established_by": node.key,
+            }
+        for participant in node.participants:
+            participant_locations[participant] = node.location_key
+    return {
+        "recent_nodes": [
+            {
+                "key": node.key,
+                "summary": node.summary,
+                "temporal_domain_key": node.temporal_domain_key,
+                "time_label": node.time_label,
+                "location_key": node.location_key,
+                "location_label": node.location_label,
+                "participants": node.participants,
+            }
+            for node in nodes[-6:]
+        ],
+        "active_state_facts": list(active_facts.values())[-40:],
+        "participant_locations": participant_locations,
+    }
+
+
+def _namespace_blueprint_shard(
+    shard: NarrativeBlueprintShard,
+) -> None:
+    prefix = f"S{shard.shard_index:03d}-"
+    node_key_map = {
+        node.key: f"{prefix}{node.key}"
+        for node in shard.nodes
+        if not node.key.startswith(prefix)
+    }
+    fact_key_map = {
+        change.fact_key: f"{prefix}{change.fact_key}"
+        for node in shard.nodes
+        for change in node.state_changes
+        if not change.fact_key.startswith(prefix)
+    }
+    for node in shard.nodes:
+        node.key = node_key_map.get(node.key, node.key)
+        for requirement in node.state_requirements:
+            requirement.required_fact_key = fact_key_map.get(
+                requirement.required_fact_key,
+                requirement.required_fact_key,
+            )
+        for change in node.state_changes:
+            change.fact_key = fact_key_map.get(
+                change.fact_key,
+                change.fact_key,
+            )
+            change.supersedes_fact_keys = [
+                fact_key_map.get(fact_key, fact_key)
+                for fact_key in change.supersedes_fact_keys
+            ]
+        if node.decision is not None:
+            node.decision.setup_node_keys = [
+                node_key_map.get(node_key, node_key)
+                for node_key in node.decision.setup_node_keys
+            ]
+            node.decision.constraint_release_node_keys = [
+                node_key_map.get(node_key, node_key)
+                for node_key in node.decision.constraint_release_node_keys
+            ]
+            node.decision.constraint_fact_key = fact_key_map.get(
+                node.decision.constraint_fact_key,
+                node.decision.constraint_fact_key,
+            )
+
+
+def _normalize_blueprint_shard_structure(
+    shard: NarrativeBlueprintShard,
+    *,
+    boundary_context: dict[str, Any],
+) -> None:
+    fact_state_keys = {
+        str(fact.get("fact_key") or ""): str(
+            fact.get("state_key") or ""
+        )
+        for fact in boundary_context.get("active_state_facts", [])
+    }
+    previous = None
+    for node in shard.nodes:
+        if previous is not None:
+            changed_domain = (
+                node.temporal_domain_key
+                != previous.temporal_domain_key
+            )
+            changed_location = node.location_key != previous.location_key
+            if changed_domain and node.time_relation == "continuous":
+                node.time_relation = "jump"
+            if (
+                (changed_domain or changed_location)
+                and not node.transition_cue.strip()
+            ):
+                node.transition_cue = (
+                    node.opening_image.strip()
+                    or f"从{previous.location_label}转至{node.location_label}"
+                )
+        if (
+            node.decision is not None
+            and node.decision.impact == "major"
+            and not node.decision.pressure.strip()
+        ):
+            node.decision.pressure = node.action_logic
+        if (
+            node.decision is not None
+            and node.decision.impact == "major"
+            and not node.decision.setup_node_keys
+            and node.decision.pressure.strip()
+            and node.decision.desire.strip()
+        ):
+            node.decision.setup_node_keys = [node.key]
+        for change in node.state_changes:
+            change.supersedes_fact_keys = [
+                fact_key
+                for fact_key in change.supersedes_fact_keys
+                if (
+                    fact_key not in fact_state_keys
+                    or fact_state_keys[fact_key] == change.state_key
+                    or node.released_constraints_for
+                )
+            ]
+            fact_state_keys[change.fact_key] = change.state_key
+        previous = node
+    if (
+        shard.shard_index == 1
+        and not boundary_context.get("active_state_facts")
+    ):
+        for node in shard.nodes:
+            for requirement in node.state_requirements:
+                if not requirement.required_fact_key.strip():
+                    requirement.assumed_prior = True
+
+
+async def _generate_sharded_narrative_blueprint(
+    episode: dict[str, Any],
+    source_text: str,
+    bible_context: dict[str, Any],
+) -> NarrativeBlueprint:
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+
+    segments = index_source_segments(source_text)
+    shard_size = 28
+    source_position = {
+        segment.segment_id: index
+        for index, segment in enumerate(segments)
+    }
+    layout_candidates: dict[int, set[int]] = {}
+    layout_rows = get_conn().execute(
+        """SELECT content_json
+             FROM artifacts
+            WHERE scope_type='episode' AND scope_id=?
+              AND type='screenplay_narrative_blueprint_shard'
+              AND prompt_version=? AND status='validated'
+            ORDER BY created_at DESC LIMIT 200""",
+        (
+            str(episode.get("id") or ""),
+            SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        ),
+    ).fetchall()
+    for layout_row in layout_rows:
+        try:
+            prior_shard = NarrativeBlueprintShard.model_validate(
+                json.loads(layout_row["content_json"] or "{}"),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not prior_shard.source_segment_ids:
+            continue
+        start = source_position.get(prior_shard.source_segment_ids[0])
+        if start is None:
+            continue
+        expected_ids = [
+            segment.segment_id
+            for segment in segments[
+                start:start + len(prior_shard.source_segment_ids)
+            ]
+        ]
+        if expected_ids == prior_shard.source_segment_ids:
+            layout_candidates.setdefault(start, set()).add(
+                len(expected_ids)
+            )
+    segment_shards: list[list[Any]] = []
+    cursor = 0
+    while cursor < len(segments):
+        reusable_lengths = layout_candidates.get(cursor, set())
+        length = (
+            max(reusable_lengths)
+            if reusable_lengths
+            else min(shard_size, len(segments) - cursor)
+        )
+        segment_shards.append(segments[cursor:cursor + length])
+        cursor += length
+    optional_ids = structural_front_matter_ids(segments)
+    merged_nodes: list[Any] = []
+    shard_index = 1
+    while shard_index <= len(segment_shards):
+        shard_segments = segment_shards[shard_index - 1]
+        source_ids = [segment.segment_id for segment in shard_segments]
+        source_payload = [
+            {
+                "source_segment_id": segment.segment_id,
+                "text": segment.text,
+            }
+            for segment in shard_segments
+        ]
+        boundary = _blueprint_shard_boundary_context(merged_nodes)
+        source_hash = hashlib.sha256(
+            json.dumps(
+                source_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        boundary_hash = hashlib.sha256(
+            json.dumps(
+                boundary,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        cached_rows = get_conn().execute(
+            """SELECT content_json
+                 FROM artifacts
+                WHERE scope_type='episode' AND scope_id=?
+                  AND type='screenplay_narrative_blueprint_shard'
+                  AND prompt_version=? AND status='validated'
+                ORDER BY created_at DESC LIMIT 50""",
+            (
+                str(episode.get("id") or ""),
+                SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            ),
+        ).fetchall()
+        shard: NarrativeBlueprintShard | None = None
+        for cached_row in cached_rows:
+            try:
+                cached = NarrativeBlueprintShard.model_validate(
+                    json.loads(cached_row["content_json"] or "{}"),
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                cached.shard_index == shard_index
+                and cached.source_hash == source_hash
+                and cached.boundary_hash == boundary_hash
+            ):
+                shard = cached
+                log_provider_call(
+                    "screenplay_blueprint_shard_local_recompile",
+                    config.MODEL_TEXT,
+                    "REUSED",
+                    None,
+                    0,
+                    meta={
+                        "episode_id": str(episode.get("id") or ""),
+                        "shard_index": shard_index,
+                    },
+                )
+                break
+        if shard is None:
+            errors: list[str] = []
+            for attempt in range(1, 4):
+                prompt = (
+                    f"为第 {episode['episode_no']} 集生成叙事蓝图分片 "
+                    f"{shard_index}/{len(segment_shards)}。只处理 target_sources，"
+                    "不得复述或重新拥有边界上下文中的来源。每个节点最多绑定 "
+                    f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE} 个连续 SRC。"
+                    "节点只承担一个核心动作、一个主要情绪/因果转折和一个离场结果；"
+                    "跨时间域、跨地点或动作过载必须拆节点。participants、decision.actor_key"
+                    " 和状态主体必须使用人物上下文中的稳定 character_key；未具名角色使用"
+                    "地点与戏剧职责组成稳定 key；原文有称谓的实体必须复用其来源实体 key。"
+                    "第一分片首节点使用"
+                    " episode_start，后续分片根据 boundary_context 延续或明确跳转。"
+                    "必须复用 boundary_context 中仍有效的 fact_key、人物位置和时间域；"
+                    "新 node/fact key 只需在本分片内唯一，程序会加命名空间。"
+                    "只输出 JSON，不要解释。\n\n"
+                    f"上次校验错误：{json.dumps(errors, ensure_ascii=False)}\n"
+                    f"人物上下文：{json.dumps(bible_context, ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"boundary_context：{json.dumps(boundary, ensure_ascii=False, separators=(',', ':'))}\n"
+                    f"target_sources：{json.dumps(source_payload, ensure_ascii=False, separators=(',', ':'))}\n"
+                    "输出 Schema："
+                    + json.dumps(
+                        NarrativeBlueprintShard.model_json_schema(),
+                        ensure_ascii=False,
+                    )
+                )
+                raw = await model_gateway.chat(
+                    [
+                        {"role": "system", "content": SYSTEM_PREFIX},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.15,
+                    max_tokens=10000,
+                    call_meta={
+                        "stage": "剧本时空因果蓝图分片",
+                        "stage_key": "screenplay_blueprint_shard",
+                        "episode_id": str(episode.get("id") or ""),
+                        "shard_index": shard_index,
+                        "shard_count": len(segment_shards),
+                        "attempt": attempt,
+                        "expected_json": True,
+                    },
+                )
+                trace = current_trace()
+                evidence_repository.create_artifact(
+                    EvidenceArtifact(
+                        type="screenplay_narrative_blueprint_shard_raw",
+                        scope_type="episode",
+                        scope_id=str(episode.get("id") or ""),
+                        status="candidate",
+                        trust_level="T0",
+                        content={
+                            "raw_output": raw,
+                            "shard_index": shard_index,
+                            "attempt": attempt,
+                            "source_hash": source_hash,
+                            "boundary_hash": boundary_hash,
+                        },
+                        contract_version=BLUEPRINT_VERSION,
+                        prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                    ),
+                    step_run_id=trace.step_run_id,
+                )
+                try:
+                    candidate = NarrativeBlueprintShard.model_validate(
+                        extract_json(
+                            raw,
+                            repair_unescaped_inner_quotes=True,
+                        ),
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    errors = [f"[BLUEPRINT_SHARD_JSON] {exc}"]
+                    continue
+                candidate.source_hash = source_hash
+                candidate.boundary_hash = boundary_hash
+                candidate.source_segment_ids = source_ids
+                _normalize_blueprint_shard_structure(
+                    candidate,
+                    boundary_context=boundary,
+                )
+                _namespace_blueprint_shard(candidate)
+                errors = validate_narrative_blueprint_shard(
+                    candidate,
+                    expected_episode_no=int(episode["episode_no"]),
+                    expected_shard_index=shard_index,
+                    expected_source_segment_ids=source_ids,
+                    optional_source_segment_ids=optional_ids,
+                    boundary_state_facts=boundary[
+                        "active_state_facts"
+                    ],
+                )
+                if not errors:
+                    shard = candidate
+                    evidence_repository.create_artifact(
+                        EvidenceArtifact(
+                            type="screenplay_narrative_blueprint_shard",
+                            scope_type="episode",
+                            scope_id=str(episode.get("id") or ""),
+                            status="validated",
+                            trust_level="T1",
+                            content=shard.model_dump(mode="json"),
+                            contract_version=BLUEPRINT_VERSION,
+                            prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                            model_snapshot={
+                                "shard_index": shard_index,
+                                "source_count": len(source_ids),
+                            },
+                        ),
+                        step_run_id=trace.step_run_id,
+                    )
+                    break
+            if shard is None:
+                if (
+                    len(shard_segments)
+                    > BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE
+                ):
+                    midpoint = len(shard_segments) // 2
+                    segment_shards[shard_index - 1:shard_index] = [
+                        shard_segments[:midpoint],
+                        shard_segments[midpoint:],
+                    ]
+                    continue
+                raise StageError(
+                    f"剧本时空因果蓝图分片 {shard_index}",
+                    errors[:10],
+                )
+        merged_nodes.extend(shard.nodes)
+        shard_index += 1
+    blueprint = NarrativeBlueprint(
+        episode_no=int(episode["episode_no"]),
+        nodes=merged_nodes,
+    )
+    normalize_blueprint_fact_versions(blueprint)
+    errors = validate_narrative_blueprint(blueprint, source_text)
+    if errors:
+        blueprint = await _repair_narrative_blueprint(
+            blueprint,
+            episode=episode,
+            source_text=source_text,
+            additional_errors=errors,
+        )
+    derive_blueprint_scene_plans(blueprint)
+    trace = current_trace()
+    evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_narrative_blueprint",
+            scope_type="episode",
+            scope_id=str(episode.get("id") or ""),
+            status="validated",
+            trust_level="T1",
+            content=blueprint.model_dump(mode="json"),
+            contract_version=BLUEPRINT_VERSION,
+            prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            model_snapshot={
+                "generation_mode": "source_shards",
+                "shard_count": len(segment_shards),
+            },
+        ),
+        step_run_id=trace.step_run_id,
+    )
+    return blueprint
+
+
+async def _generate_screenplay_narrative_blueprint(
+    episode: dict[str, Any],
+    source_text: str,
+    bible: Bible,
+) -> NarrativeBlueprint:
+    from app.observability.tracing import current_trace
+
+    trace = current_trace()
+    current_run = get_conn().execute(
+        "SELECT input_fingerprint FROM workflow_runs WHERE id=?",
+        (trace.run_id,),
+    ).fetchone()
+    if current_run is not None:
+        rows = get_conn().execute(
+            """SELECT a.content_json
+                 FROM artifacts a
+                 JOIN step_runs sr ON sr.id=a.created_by_step_run_id
+                 JOIN workflow_runs wr ON wr.id=sr.run_id
+                WHERE a.scope_type='episode' AND a.scope_id=?
+                  AND a.type='screenplay_narrative_blueprint'
+                  AND a.prompt_version=?
+                  AND wr.input_fingerprint=?
+                ORDER BY a.created_at DESC LIMIT 10""",
+            (
+                str(episode.get("id") or ""),
+                SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                str(current_run["input_fingerprint"] or ""),
+            ),
+        ).fetchall()
+        for row in rows:
+            try:
+                content = json.loads(row["content_json"] or "{}")
+                raw = (
+                    content.get("raw_output")
+                    if isinstance(content, dict)
+                    else None
+                )
+                if isinstance(raw, str):
+                    try:
+                        payload = extract_json(
+                            normalize_blueprint_raw_json(raw),
+                            repair_unescaped_inner_quotes=True,
+                        )
+                    except ValueError:
+                        payload = recover_complete_blueprint_prefix(raw)
+                else:
+                    payload = content
+                recovered = NarrativeBlueprint.model_validate(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            normalize_blueprint_fact_versions(recovered)
+            log_provider_call(
+                "screenplay_blueprint_local_recompile",
+                config.MODEL_TEXT,
+                "REUSED",
+                None,
+                0,
+                meta={
+                    "episode_id": str(episode.get("id") or ""),
+                    "contract_version": BLUEPRINT_VERSION,
+                    "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                },
+            )
+            if validate_narrative_blueprint(recovered, source_text):
+                recovered = await _repair_narrative_blueprint(
+                    recovered,
+                    episode=episode,
+                    source_text=source_text,
+                )
+            derive_blueprint_scene_plans(recovered)
+            return await _semantic_review_narrative_blueprint(
+                recovered,
+                episode=episode,
+                source_text=source_text,
+            )
+
+    source_with_ids = render_indexed_source(source_text)
+    bible_context = screenplay_ir_bible_context(
+        bible,
+        source_text=source_text,
+        episode_no=int(episode["episode_no"]),
+        character_resolutions=list(
+            episode.get("character_resolutions") or []
+        ),
+    )
+    candidate = await _generate_sharded_narrative_blueprint(
+        episode,
+        source_text,
+        bible_context,
+    )
+    return await _semantic_review_narrative_blueprint(
+        candidate,
+        episode=episode,
+        source_text=source_text,
+    )
+
+    prompt = f"""任务：先为第 {episode['episode_no']} 集建立写作前叙事蓝图。
+
+这一步不写剧本台词和场景正文，只识别原文中不可机械判断的时间、空间、行动因果、
+人物位置、持久状态和重大决定依据。后端会依据节点的时间域与单一地点确定性分场，
+再让剧本阶段严格消费分场结果。
+
+硬规则：
+1. 按原文顺序覆盖每个非标题 SRC。单节点最多绑定
+   {BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE} 个连续 SRC，不得用大节点掩盖事件。
+2. temporal_domain_key 表示同一连续时间域；回忆必须明确 flashback_enter、
+   flashback_continue、flashback_exit。次日、当晚、数日后和蒙太奇必须使用正确
+   time_relation，并提供观众可见/可听的 transition_cue。
+3. 每节点只有一个主要 location_key/location_label。人物改变地点时，transition_cue
+   必须说明走路、乘车、下车、进入房间、字幕或匹配剪辑，禁止瞬移。
+   location_label 禁止使用「/」「、」「+」「内外」合并大堂/房间、里间/外间、
+   车站/车厢等多个空间；同一原文段跨空间时可由多个节点重复引用该 SRC。
+4. 对后文会复用的持久事实建立 state_changes/state_requirements，包括但不限于：
+   车辆所有者与司机、人物所在位置、住宿分配、房间结构、关键物品、掩护动作、
+   谁知道什么。每个 state_change 必须建立本集唯一且递增的 fact_key（F001...）；
+   后续 requirement 必须用 required_fact_key 精确引用此前仍有效的事实，禁止重新用
+   自由文本描述一个“差不多”的状态。只有人物谱或前集已明确建立、但本集原文没有
+   建立节点的事实才可设 assumed_prior=true，并写清审计依据；不得把为了推动剧情
+   临时发明的同谋、开放关系、满房等设定标成 assumed_prior。事实默认并存；司机、
+   住宿分配、人物位置等互斥事实发生替换时，必须在新事实的 supersedes_fact_keys
+   中明确列出被替代事实。
+5. major decision 必须通过 setup_node_keys 引用此前已经发生的压力、欲望、认知或关系
+   节点，并写清 pressure/desire。禁止“受一次刺激立即性格突变”。
+6. agency_mode 必须区分 voluntary、reluctant、coerced、incapacitated、unclear。
+   武器、威胁或失去行为能力不能同时写成自主选择；若自主性后来变化，必须另建节点，
+   并提供明确 agency_change_reason 和可见心理过程。coerced/incapacitated 决定必须
+   用 constraint_fact_key 引用本节点建立且仍有效的约束事实。从该状态恢复为
+   voluntary 时，constraint_release_node_keys 必须引用发生在两次决定之间、真正解除
+   武器/威胁/无行为能力约束的节点；该节点还必须把角色 key 写入
+   released_constraints_for，并用 state_change.supersedes_fact_keys 终止原约束事实。
+   产生快感、停止反抗或自我说服不等于约束解除。
+7. scene_boundary_before 只标记创作上必须切场的额外边界。时间域、地点、回忆进出变化
+   后端本身就会自动切场。scene_plans 留空，禁止由模型决定场次编号和标题。
+8. summary/action_logic 必须交代“为何发生、如何到达、动作完成后改变了什么”，
+   不能只罗列事件。不得为修补逻辑发明违背原文的事实；仅当原文本身存在明确矛盾、
+   且不补桥就无法成片时，才可使用 adaptation_kind=logic_bridge，并在
+   bridge_rationale 中说明必要性及如何保持核心事件/结果；普通视觉过桥使用
+   transition_cue，不能冒充剧情事实。
+
+本集概要：{episode.get('synopsis') or '（无）'}
+人物与场景上下文：
+{json.dumps(bible_context, ensure_ascii=False, separators=(",", ":"))}
+
+带稳定段 ID 的授权原文：
+{_render_screenplay_source(source_with_ids)}
+
+只输出 JSON，不要解释：
+程序所有权摘要：
+{json.dumps(blueprint_prompt_contract(), ensure_ascii=False)}
+完整输出 Schema：
+{json.dumps(NarrativeBlueprint.model_json_schema(), ensure_ascii=False)}
+"""
+    loop = AgentLoop(
+        stage_key="screenplay_blueprint",
+        contract_key="screenplay",
+        goal=f"建立第 {episode['episode_no']} 集叙事时空与因果蓝图",
+        scope_type="episode",
+        scope_id=str(
+            episode.get("id") or f"episode-{episode['episode_no']}"
+        ),
+        artifact_type="screenplay_narrative_blueprint",
+        prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        policy=AgentLoopPolicy(
+            max_iterations=1,
+            stall_rounds=2,
+            min_quality_gain=0.01,
+            no_gain_rounds=2,
+            allow_warning_candidate=False,
+            repair_all_blockers=True,
+        ),
+    )
+    try:
+        candidate = await _run_with_agent_loop(
+            "剧本时空因果蓝图",
+            "screenplay_blueprint",
+            prompt,
+            NarrativeBlueprint,
+            lambda value: validate_narrative_blueprint(
+                value,
+                source_text,
+            ),
+            loop=loop,
+            temperature=0.2,
+            max_tokens=20480,
+            repair_user_prompt_limit=None,
+            repair_candidate_limit=None,
+            prefill={
+                "format_version": BLUEPRINT_VERSION,
+                "episode_no": episode["episode_no"],
+            },
+        )
+    except AgentLoopFailure:
+        from app.observability.tracing import current_trace
+
+        trace = current_trace()
+        row = get_conn().execute(
+            """SELECT a.content_json
+                 FROM artifacts a
+                 JOIN step_runs sr ON sr.id=a.created_by_step_run_id
+                WHERE a.scope_type='episode' AND a.scope_id=?
+                  AND a.type='screenplay_narrative_blueprint'
+                  AND a.prompt_version=?
+                  AND sr.run_id=?
+                ORDER BY a.created_at DESC LIMIT 1""",
+            (
+                str(episode.get("id") or ""),
+                SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                trace.run_id,
+            ),
+        ).fetchone()
+        if row is None:
+            raise
+        candidate = NarrativeBlueprint.model_validate(
+            json.loads(row["content_json"] or "{}"),
+        )
+        candidate = await _repair_narrative_blueprint(
+            candidate,
+            episode=episode,
+            source_text=source_text,
+        )
+    derive_blueprint_scene_plans(candidate)
+    return await _semantic_review_narrative_blueprint(
+        candidate,
+        episode=episode,
+        source_text=source_text,
+    )
+
+
 async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
                               prev_ending: str = "") -> EpisodeScreenplay:
     """小说 -> 完整剧本。
@@ -2032,63 +4317,43 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
     拆镜与执行字段延后到分镜阶段。先显式锁定"本集必保留关键台词/关键剧情点"，
     再写正文，从机制上阻止重要台词与剧情在压缩中被丢弃。
     """
-    speech_styles = "；".join(f"{c.name}：{c.speech_style}" for c in bible.characters if c.speech_style)
-    bible_names_inline = "、".join(c.name for c in bible.characters) or "（角色圣经为空）"
-    from app.production.screenplay_authority import screenplay_bible_payload
-
+    narrative_blueprint = await _generate_screenplay_narrative_blueprint(
+        episode,
+        source_text,
+        bible,
+    )
+    blueprint_json = json.dumps(
+        narrative_blueprint.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     screenplay_bible_json = json.dumps(
-        screenplay_bible_payload(bible),
+        screenplay_ir_bible_context(
+            bible,
+            source_text=source_text,
+            episode_no=int(episode["episode_no"]),
+            character_resolutions=list(episode.get("character_resolutions") or []),
+        ),
         ensure_ascii=False,
         separators=(",", ":"),
     )
     character_resolution_block = _character_resolution_prompt_block(episode)
     source_with_ids = render_indexed_source(source_text)
-    source_segment_ids = [
-        segment.segment_id for segment in index_source_segments(source_text)
-    ]
+    fidelity_budget = screenplay_ir_fidelity_budget(source_text)
+    fidelity_budget_json = json.dumps(
+        fidelity_budget,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     episode_hook = (episode.get("hook") or "").strip()
     episode_cliffhanger = (episode.get("cliffhanger") or "").strip()
     no_episode_hook = not episode_hook and not episode_cliffhanger
     source_dialogues = source_dialogue_fragments(source_text)
-    required_dialogue_lines = [
-        str(line).strip()
-        for line in (episode.get("required_dialogue_lines") or [])
-        if str(line).strip()
-    ]
-    required_dialogue_occurrences = [
-        item for item in (episode.get("required_dialogue_occurrences") or [])
-        if isinstance(item, dict) and str(item.get("text") or "").strip()
-    ]
-    required_dialogue_rows = (
-        [
-            (
-                f"- {item.get('id') or f'R{index:03d}'}｜"
-                f"第{item.get('chapter') or '-'}章·段落{item.get('paragraph') or '-'}："
-                f"{str(item.get('text') or '').strip()}"
-                + (f"\n  上下文：{str(item.get('context') or '').strip()}" if item.get("context") else "")
-            )
-            for index, item in enumerate(required_dialogue_occurrences, start=1)
-        ]
-        if required_dialogue_occurrences
-        else [
-            f"- R{index:03d}：{line}"
-            for index, line in enumerate(required_dialogue_lines, start=1)
-        ]
-    )
-    required_dialogue_block = (
-        "【用户多选的必保留台词·按原文位置绑定·逐字硬门禁】\n"
-        + "\n".join(required_dialogue_rows)
-        + "\n以上每条都必须进入 dialogue_chains[*].turns[*].source_text 与 line，"
-        "并作为角色真实对白逐字写进 full_script_text；相同文本的不同 occurrence 仍是不同原文位置，"
-        "不得合并其上下文语义，不得概括、改写或只写进动作描述。"
-        if required_dialogue_rows
-        else "【用户多选的必保留台词】本次未额外勾选；仍须遵守开场对白锚点与主线对白链规则。"
-    )
     opening_dialogue_block = (
         "【首条改编对白来源锚点·硬门禁】\n"
         "- D001 是本集实际采用的第一条对白，不是整章最早出现的引号片段。\n"
-        "dialogue_chains[0].turns[0].source_text 必须逐字引用本集原文中语义支持该改编台词的"
-        "真实话语，line 只能做口语压缩，二者不得表达不同内容。"
+        "第一条 dialogue unit 的 source_text 必须逐字引用本集原文中语义支持该改编台词的"
+        "真实话语，text 只能做口语压缩，二者不得表达不同内容。"
         "不得把拟声、环境声或已被改编方案舍弃场景中的无关话语强绑为 D001。"
         "即使说话人不需跨集定妆，只要该话语被本集采用并负责触发后续反应，也必须按完整因果链保留。"
         if source_dialogues
@@ -2110,7 +4375,6 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
             else f"剧本结尾必须落到本集尾钩：{episode_cliffhanger}"
         )
     )
-    scope_id = str(episode.get("id") or f"episode-{episode['episode_no']}")
     authorized_source_chapters = episode.get("authorized_source_chapters")
     source_chapter_ids = (
         [str(value) for value in authorized_source_chapters]
@@ -2121,81 +4385,72 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
             if str(value).strip()
         ]
     )
-    narrative_plan_block = _narrative_plan_prompt_block(scope_id)
-    narrative_plan_schema = _narrative_plan_schema_example(
-        scope_id,
-        source_chapter_ids=source_chapter_ids,
+    source_chapter_contract = json.dumps(
+        [{"chapter_id": value} for value in source_chapter_ids],
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》改写一份完整、连续、可导演的生产剧本。
+    prompt = f"""任务：为漫剧第 {episode['episode_no']} 集《{episode['title']}》生成完整生产剧本的紧凑语义 IR。
 
-核心目标不是压缩镜头数，而是完整交付剧情。当前 {episode['target_duration_s']} 秒只是最低节奏参考，
-最终时长由完整剧情、对白容量、主线节拍和场次建立成本自动扩展，不设上限；
-不得为了时长、场次数或未来镜头数删除有效事件、对白、人物反应、因果桥梁和场景上下文。
-只有能指出重复来源的内容才允许合并；任何原文段都不得静默消失。
+后端会把 IR 确定性编译成现有 EpisodeScreenplay、narrative_plan、来源台账和全部分镜引用。
+你只负责不可机械推导的创作语义；禁止输出最终 S/E/F/A/SC/P/SE/RW/AP/AS/XI/XD 等编号，
+也不要重复输出 key_lines、full_script_text、scene_outline 或任何反向引用。
+后端将 scenes.units 确定性生成 `"dialogue_chains"`；`key_lines` 由后端按 dialogue_chains.turns 确定性回填。
+每组 dialogue_chain 最多 {DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮，超过时按自然语义转折拆分 chain_key。
+后端编译后的最终顶层必须输出 narrative_plan；IR 只写其不可机械推导的关系语义。
+最终来源证据允许的章节句柄：{source_chapter_contract}
+
+核心目标不是压缩剧情。当前 {episode['target_duration_s']} 秒只是最低节奏参考，
+最终时长由完整剧情、对白容量、主线节拍和场次建立成本自动扩展，不设上限。
+不得删除有效事件、对白、人物反应、因果桥梁和场景上下文；只有能指出重复来源的内容才允许 duplicate。
 
 {renderability_prompt_block()}
 
-【剧情交付台账】
-- 原文已由后端切成 {len(source_segment_ids)} 个稳定段：{source_segment_ids}。
-- source_coverage 必须逐个覆盖这些 SRC*，每个恰好一次。
-- disposition=deliver：由一个或多个 beat_ids 正面演出。
-- disposition=merge：与相邻段共同由一个或多个 beat_ids 交付。
-- disposition=context：作为环境、人物关系、情绪或因果上下文保留，reason 说明保留位置。
-- disposition=duplicate：只有内容确实重复时使用，duplicate_of 必须指向另一 SRC*，reason 说明重复关系。
+【IR 编写规则】
+1. scenes.units 是唯一的模型创作时间线，按原文与因果顺序覆盖全部有效剧情单元。
+   后端从 units 确定性生成 events、plot_spine/beats；禁止输出 events 或 beats。
+2. 下方每个 SRC* 是不可跳过的细粒度原文段。每个 action/dialogue unit 必须填写
+   source_segment_ids，且只能填写该 unit 真正改编进正文的 SRC；同一 unit 可合并连续 SRC，
+   同一 SRC 也可由多个 unit 展开。所有 SRC 必须至少被一个正文 unit 消费，首次消费顺序
+   必须与原文一致。不得把未改编内容仅登记为 context/coverage 来制造“已覆盖”；
+   coverage 留空，由后端从 units 确定性生成 deliver/merge。单个 unit 最多合并
+   {IR_MAX_SOURCE_SEGMENTS_PER_UNIT} 个连续 SRC，禁止一次挂载大量 ID 掩盖删戏。
+3. scenes 按真实时空与连续动作分场。每场只写 heading、戏剧功能、摘要、冲突、转折及
+   units；人物、来源依据、入场/出场状态由后端从 events 投影。units 是最终台本的严格播放顺序：
+   action 表示动作段，dialogue 表示角色实际开口；禁止把场次摘要冒充 units。
+   每个 scene_heading 只能写一个主要地点，禁止用「、」「+」或逗号把家、学校、
+   车辆、车站、宾馆等不连续空间合成一场；时间、地点、人物目标或连续动作切换必须新建场次。
+4. 每个 unit 必须提供一个按播放顺序递增且在本集唯一的 event_key，作为程序生成 event
+   的稳定句柄，并按原文顺序填写 source_segment_ids。resulting_state 必须写该 unit
+   完成后新成立的人物、信息、道具、关系或局势状态，禁止复述 text；does→turn 必须形成
+   可核对的状态变化。每个 dialogue 必须引用 identity.key，
+   chain_key 保持问答链，source_text 必须逐字连续存在于本集原文且语义支持改编台词。
+   dialogue 的 source_text 必须位于该 unit 声明的 source_segment_ids 内。
+   原文没有显式对白时禁止发明角色对白。
+5. 不要输出 events。event 的来源段、参与身份、前后状态、动作意图、完成条件、
+   action_phases、observable_claim、因果边、证据、信息台账、显著度与阅读时间，
+   均由后端根据 units 顺序、resulting_state、speaker_key、原文锚点和动作文本确定性生成。
+6. 复杂动作的自然阶段直接写成同一 event_key 下有序的多个 action unit；
+   后端据此建立 action_phases 和可跨镜边界。
+7. identities 覆盖所有可见身份和说话人。人物谱角色 display_name 必须逐字使用人物谱姓名；
+   其他身份只要原文有明确称谓，就必须把原文逐字称谓写入 source_names，display_name 使用
+   source_names[0]，key 作为全篇稳定实体 ID；不得把原文可区分实体改写成路人编号、
+   英文占位符或其他临时名字。原文确实未命名的群众才用地点+职责构成稳定
+   key/display_name。视觉/资产/声音策略由本集来源和戏剧职责决定，
+   禁止按姓名或题材白名单猜测。
+8. 不要输出 audience_priors。后端按项目上下文确定性建立两类一次观看先验；
+   experience 只写本集希望观众完成的整体理解变化、盲审标准和处理时间。
+9. metadata 必须包含完整戏剧问题、目标、阻力、代价、情绪曲线、结局和四段结构。
+10. {screenplay_hook_rule} {screenplay_ending_rule}
+11. 完整剧情优先于压缩：所有 units 的改编净文本总量不得低于原文净文本的
+    {IR_MIN_ADAPTED_SOURCE_RATIO:.0%}；每连续 {IR_LOCAL_SOURCE_WINDOW} 个 SRC 的局部改编量
+    不得低于该窗口原文净文本的 {IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO:.0%}。
+    这是防止删戏的最低线，不是扩写目标。必须保留有效动作、人物反应、对白关系、
+    因果桥梁、入场出场与场景转换，不能用重复描述凑字数。
 
-【完整剧情骨架】
-- plot_spine.spine_beats 数量不设上限，按原文顺序覆盖所有有效剧情单元。
-- 每条 beat 写 beat_id、who、does、turn、purpose、source_segment_ids、must_keep。
-- `does` 只写一个可拍的核心动作或可听交付，尽量 8~24 字；动机、心理、结果和后果写入
-  `turn` 或 `purpose`。不要把“看到→心生邪念→安排后续事件”这类多段因果塞进同一个 does。
-- 每条 must_keep beat 必须在 full_script_text 的动作段或对白行中用同一主体真实演出，
-  不能只出现在 plot_spine、source_coverage、scene_outline 或摘要里。
-- plot_spine.drop_list 可以为空；只允许记录 source_coverage 中已证明的 duplicate 内容。
-- must_keep_ending 必须与本章真实结局一致，禁止发明下一章剧情。
-- key_plot_points 数量不设上限，必须覆盖所有会改变局势、关系、目标或观众理解的节点。
-
-【场次合同】
-- scene_outline 场次数不设上限，由时间、地点和连续戏剧动作决定。
-- narrative_plan.scene_contracts 必须与 scene_outline 逐场一一对应，使用 SC01、SC02……连续 ID；
-  同一地点后来再次出现也不得和前一次合并。
-- full_script_text 中只要地点或主要时间段变化就必须新建场标；禁止在“客厅”场内用
-  “饭后卧室”“转到学校”等一句话暗藏未登记子场景。
-- 每场必须填写 entry_state、exit_state、context_requirements。
-- entry_state 写人物位置、目标、关键道具和承接来源。
-- context_requirements 写观众在主要动作发生前需要知道的时间、地点、空间关系、人物关系或关键道具。
-- exit_state 写交给下一场的人物、情绪、空间、道具和信息状态。
-- 每场开头先建立必要上下文，但不要机械地把每场都写成相同远景。
-
-【对白与人物】
-- dialogue_chains 按真实发生顺序保留完整问答、宣布、反应和决定链。
-- 每组 dialogue_chain 最多 {DIALOGUE_CHAIN_TURNS_HARD_MAX} 个连续话轮；更长互动必须按自然语义转折拆成多组，
-  但不得删除、概括或重排原文对白。
-- source_text 必须逐字引用本集原文，不得写占位说明。
-- `key_lines` 由后端按 dialogue_chains.turns 确定性回填，模型不得另选孤立金句。
-- key_lines 由 dialogue_chains 派生并真实写入 full_script_text 的“角色名：台词”行。
-- scene_outline.characters 和所有说话人只能使用人物谱准确姓名（{bible_names_inline}）
-  或人物预检已解析的功能性身份；禁止新造具名角色。
-
-【正文】
-- full_script_text 使用“【场N】时间 / 地点”场标、动作段、对白段。
-- 写完整戏剧动作、人物反应、关系变化和必要停顿，不写景别、角度、运镜、首尾帧或提示词。
-- 不得写成摘要；每场必须有目标、阻力、变化和承接结果。
-- 动作保持 AI 视频可执行：复杂连续动作在剧情层完整保留，后续由导演规划拆镜。
-
-【连续性台账】
-- events 与有效 beat 对齐，数量不设上限；每项写 state_in/trigger/visible_change/state_out。
-- information_ledger 只登记真正需要观众获得的信息，不设数量上限，不为气氛重复建项。
-- voice_bible 只收录实际说话身份，Bible 角色的 speaker_id 必须逐字使用人物谱姓名。
-- 原文没有的新增事件必须 adaptation_addition=true、写 adaptation_reason，且 approved=false。
-
-{narrative_plan_block}
-
-硬性规则：
-1. episode_no={episode['episode_no']}，mode=full_script。
-2. title/logline/戏剧问题/目标/阻力/stakes/完整场次/完整正文/情绪曲线/结尾/来源依据均必填。
-3. scene_no 连续递增，场标数量与 scene_outline 一致。
-4. {screenplay_hook_rule}
-5. {screenplay_ending_rule}
+本集程序计算的保真预算（字符数均为去空白后的净文本，必须逐窗口满足）：
+{fidelity_budget_json}
+front_matter_ids 是程序确认的章节标题，不需要改编进正文；其余 SRC 不得遗漏。
 
 本集规划：
 - 概要：{episode.get('synopsis') or '（无）'}
@@ -2203,56 +4458,34 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
 - cliffhanger：{episode_cliffhanger or '（空）'}
 - 上一集结尾：{prev_ending or '（本集为第一集）'}
 
+【程序已验证的叙事蓝图·场次权威】
+{blueprint_json}
+必须严格按 scene_plans 的 key、顺序、单一时间域和单一地点输出 scenes。
+每场 units 只能消费该 scene_plan.source_segment_ids，不得跨场挪用来源。
+节点的 transition_cue、state_requirements/state_changes、decision 动机、agency_mode
+与 narrative_attribution 都是正文必须可见的因果合同；禁止只把它们写在摘要里。
+生理反应、停止反抗或事后互动不能反向改写事件发生时的 agency_mode；同一节点中
+external_coercion 不得同时归因为角色自愿选择或道德转变。自主性真正改变时必须使用
+蓝图中已拆开的后续节点和约束解除事实。
+
 {opening_dialogue_block}
 
-{required_dialogue_block}
-
-角色圣经：
+本集相关人物与场景圣经（已按当前来源证据动态投影）：
 {screenplay_bible_json}
 
 {character_resolution_block}
-
-说话风格：{speech_styles or '（无额外约束）'}
 
 带稳定段 ID 的本集原文：
 授权章节 ID：{source_chapter_ids or ['（未提供）']}
 {_render_screenplay_source(source_with_ids)}
 
-输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "mode": "full_script", "title": str, "logline": str,
-"script_format_note": str,
-"plot_spine": {{"episode_premise": str, "spine_beats": [{{"beat_id": "S01", "who": str,
-"does": str, "turn": str, "purpose": str, "source_segment_ids": ["SRC0001"], "must_keep": true}}],
-"must_keep_ending": str, "drop_list": []}},
-"source_coverage": [{{"source_segment_id": "SRC0001",
-"disposition": "deliver|merge|context|duplicate", "beat_ids": ["S01"],
-"duplicate_of": null, "reason": str}}],
-"dramatic_question": str, "protagonist_goal": str, "obstacle": str, "stakes": str,
-"dialogue_chains": [{{"chain_id": "DC1", "topic": str, "turns": [{{"speaker": str,
-"line": str, "function": "trigger|announcement|question|response|decision|statement",
-"source_text": str}}]}}],
-"key_lines": [str], "key_plot_points": [str],
-"scene_outline": [{{"scene_no": 1, "scene_heading": str, "story_function": str,
-"characters": [str], "summary": str, "conflict": str, "turn": str, "source_basis": str,
-"entry_state": str, "exit_state": str, "context_requirements": [str]}}],
-"full_script_text": str, "character_state_changes": [str], "emotional_curve": str,
-"ending_hook": str, "source_basis": str, "adaptation_direction": str,
-"opening": str, "development": str, "conflict": str, "climax": str,
-"episode_premise": str,
-"events": [{{"event_id": "E1", "source_span": "SRC0001", "source_fact": str,
-"state_in": str, "trigger": str, "visible_change": str, "state_out": str,
-"must_keep": true, "adaptation_addition": false, "adaptation_reason": "", "approved": false}}],
-"information_ledger": [{{"info_id": "I1", "event_id": "E1", "content": str,
-"delivery_owner": "visual_action|spoken_dialogue|offscreen_voice|narration|on_screen_text|ambient_sound",
-"speaker_id": null, "exact_text": null, "reinforcement_allowed": false, "status": "unassigned"}}],
-"voice_bible": [{{"speaker_id": str, "voice_canonical": str, "language": "普通话",
-"role_type": "named_character|functional_character|narrator"}}],
-"approved_adaptations": [str], "forbidden_additions": [str],
-"narrative_plan": {narrative_plan_schema}}}"""
+只输出以下紧凑 JSON 合同，不要解释、不要 Markdown：
+{screenplay_ir_prompt_contract()}"""
     # Production Repair：完整生成只允许一次；QA 后禁止“重新输出完整 JSON”。
     return await generate_screenplay_baseline(
         episode, source_text, bible, prev_ending=prev_ending, _prompt=prompt,
         _no_episode_hook=no_episode_hook,
+        _narrative_blueprint=narrative_blueprint,
     )
 
 
@@ -2264,6 +4497,7 @@ async def generate_screenplay_baseline(
     *,
     _prompt: str | None = None,
     _no_episode_hook: bool | None = None,
+    _narrative_blueprint: NarrativeBlueprint | None = None,
 ) -> EpisodeScreenplay:
     """仅一次有效 Baseline 生成。无论 QA 是否通过都返回可解析候选，交由局部 Patch。"""
     if _prompt is None:
@@ -2272,9 +4506,9 @@ async def generate_screenplay_baseline(
         return await generate_screenplay(episode, source_text, bible, prev_ending=prev_ending)
 
     no_episode_hook = bool(_no_episode_hook)
-    # Baseline-only 禁止对已成形剧本做第二次整版 QA 重写，但首轮若连
-    # Pydantic 候选都没有产生（JSON/结构错误），必须允许受限的结构修复。
-    # 一旦出现首个可解析候选，baseline_only 会立即交给局部 Patch。
+    # Compact IR only permits one full model response. Shape drift is repaired
+    # before Pydantic validation; semantic fields are expanded by the local
+    # compiler. Never resend the complete source and candidate as a repair.
     structural_bootstrap_iterations = SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS
     loop = AgentLoop(
         stage_key="screenplay",
@@ -2282,7 +4516,7 @@ async def generate_screenplay_baseline(
         goal=f"生成第 {episode['episode_no']} 集剧本 Baseline（仅一次完整生成）",
         scope_type="episode",
         scope_id=str(episode.get("id") or f"episode-{episode['episode_no']}"),
-        artifact_type="episode_screenplay",
+        artifact_type="screenplay_generation_ir",
         prompt_version=SCREENPLAY_BASELINE_PROMPT_VERSION,
         policy=AgentLoopPolicy(
             max_iterations=structural_bootstrap_iterations,
@@ -2294,6 +4528,7 @@ async def generate_screenplay_baseline(
             repair_all_blockers=True,
             baseline_handoff_blocking_codes=frozenset({
                 "NARRATIVE_PLAN_REQUIRED",
+                "SCREENPLAY_IR_COMPILE_FAILED",
             }),
         ),
     )
@@ -2307,6 +4542,15 @@ async def generate_screenplay_baseline(
             screenplay_character_resolution_errors,
         )
         resolutions = list(episode.get("character_resolutions") or [])
+        functional_identity_names = {
+            str(item.get("canonical_name") or "").strip()
+            for item in resolutions
+            if (
+                isinstance(item, dict)
+                and resolution_declares_functional_identity(item)
+                and str(item.get("canonical_name") or "").strip()
+            )
+        }
         apply_screenplay_character_resolutions(
             s,
             resolutions,
@@ -2316,15 +4560,54 @@ async def generate_screenplay_baseline(
             s, bible, max(1, episode["target_duration_s"] // config.VIDEO_DURATION_MIN_S),
             episode_no=episode["episode_no"], source_text=source_text,
             require_dialogue_chains=True,
-            required_dialogue_lines=episode.get("required_dialogue_lines") or [],
-            validate_narrative=True,
+            # Narrative source spans are chapter-local. The generic validator
+            # only receives the concatenated episode source and therefore
+            # cannot validate those offsets without producing false
+            # SOURCE_SPAN_EXACT_MISMATCH findings.
+            validate_narrative=False,
             require_source_coverage=True,
+            functional_identity_names=functional_identity_names,
         )
         if s.narrative_plan is None:
             errors.append(
                 "[NARRATIVE_PLAN_REQUIRED] 新生成剧本必须包含 narrative_plan；"
                 "legacy 兼容仅允许读取历史已发布产物，不得用于新生产"
             )
+        else:
+            from app.narrative import validate_screenplay_narrative
+
+            authorized_source_chapters = (
+                episode.get("authorized_source_chapters")
+                if isinstance(
+                    episode.get("authorized_source_chapters"), dict,
+                )
+                else None
+            )
+            raw_source_chapters = episode.get("source_chapters") or []
+            if isinstance(raw_source_chapters, str):
+                try:
+                    raw_source_chapters = json.loads(raw_source_chapters)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    raw_source_chapters = []
+            errors.extend(validate_screenplay_narrative(
+                s,
+                require=True,
+                source_text=source_text,
+                expected_scope_id=str(
+                    episode.get("id")
+                    or f"episode-{episode['episode_no']}"
+                ),
+                authorized_source_chapter_ids=(
+                    [
+                        str(value)
+                        for value in raw_source_chapters
+                        if str(value).strip()
+                    ]
+                    if authorized_source_chapters is None
+                    else None
+                ),
+                authorized_source_chapters=authorized_source_chapters,
+            ))
         errors.extend(screenplay_character_resolution_errors(
             s,
             resolutions,
@@ -2338,13 +4621,180 @@ async def generate_screenplay_baseline(
                     "ending_hook 必须为「无集级钩子」：本集 hook/cliffhanger 均为空，禁止发明下一集钩子")
         return list(dict.fromkeys(errors))
 
-    script = await _run_with_agent_loop(
-        "剧本首次整版 Baseline", "screenplay", _prompt, EpisodeScreenplay,
-        _check_screenplay,
-        loop=loop, temperature=0.7, max_tokens=65535,
+    def _compile_candidate(
+        candidate: ScreenplayGenerationIR | EpisodeScreenplay,
+    ) -> EpisodeScreenplay:
+        if isinstance(candidate, EpisodeScreenplay):
+            return candidate
+        compiler_audit: list[dict[str, Any]] = []
+        return compile_screenplay_ir(
+            candidate,
+            episode=episode,
+            source_text=source_text,
+            bible=bible,
+            audit=compiler_audit,
+        )
+
+    def _check_ir(
+        candidate: ScreenplayGenerationIR | EpisodeScreenplay,
+    ) -> list[str]:
+        if (
+            isinstance(candidate, ScreenplayGenerationIR)
+            and _narrative_blueprint is not None
+        ):
+            blueprint_errors = (
+                validate_and_apply_blueprint_scene_contract(
+                    candidate,
+                    _narrative_blueprint,
+                    allow_prefix=True,
+                )
+            )
+            if blueprint_errors:
+                return blueprint_errors
+        try:
+            return _check_screenplay(_compile_candidate(candidate))
+        except (TypeError, ValueError) as exc:
+            if (
+                isinstance(candidate, ScreenplayGenerationIR)
+                and _is_ir_fidelity_error(exc)
+            ):
+                # The baseline is structurally usable. A bounded source-local
+                # expansion runs after AgentLoop instead of resending the
+                # entire chapter and candidate.
+                return []
+            return [f"[SCREENPLAY_IR_COMPILE_FAILED] {exc}"]
+
+    episode_id = str(
+        episode.get("id") or f"episode-{episode['episode_no']}"
+    )
+    recovered = _recover_screenplay_ir_candidate(
+        episode_id,
+        blueprint_hash=_narrative_blueprint_content_hash(
+            _narrative_blueprint
+        ),
+    )
+    if recovered is not None:
+        recovered_candidate, recovered_artifact_id = recovered
+        try:
+            if _narrative_blueprint is None:
+                recovered_candidate = await _repartition_multilocation_ir_scenes(
+                    recovered_candidate,
+                    episode=episode,
+                    source_text=source_text,
+                    parent_artifact_id=recovered_artifact_id,
+                )
+            else:
+                blueprint_errors = (
+                    validate_and_apply_blueprint_scene_contract(
+                        recovered_candidate,
+                        _narrative_blueprint,
+                        allow_prefix=True,
+                    )
+                )
+                if blueprint_errors:
+                    raise ValueError("；".join(blueprint_errors))
+            recovered_candidate = await _complete_screenplay_ir_fidelity(
+                recovered_candidate,
+                episode=episode,
+                source_text=source_text,
+                bible=bible,
+                parent_artifact_id=getattr(
+                    recovered_candidate,
+                    "evidence_artifact_id",
+                    recovered_artifact_id,
+                ),
+                narrative_blueprint=_narrative_blueprint,
+            )
+            if _narrative_blueprint is not None:
+                blueprint_errors = (
+                    validate_and_apply_blueprint_scene_contract(
+                        recovered_candidate,
+                        _narrative_blueprint,
+                    )
+                )
+                if blueprint_errors:
+                    raise ValueError("；".join(blueprint_errors))
+            recovered_script = _compile_candidate(recovered_candidate)
+            recovered_errors = _check_screenplay(recovered_script)
+        except (TypeError, ValueError):
+            recovered_errors = ["recovered_ir_compile_failed"]
+        else:
+            object.__setattr__(
+                recovered_script,
+                "_source_ir_artifact_id",
+                recovered_artifact_id,
+            )
+            log_provider_call(
+                "screenplay_ir_local_recompile",
+                config.MODEL_TEXT,
+                "REUSED",
+                None,
+                0,
+                meta={
+                    "episode_id": episode_id,
+                    "artifact_id": recovered_artifact_id,
+                    "generation_contract": IR_VERSION,
+                    "compiler_version": IR_COMPILER_VERSION,
+                    "prompt_version": SCREENPLAY_BASELINE_PROMPT_VERSION,
+                    "qa_handoff_issue_count": len(recovered_errors),
+                    "reason": (
+                        "production_repair_handles_compiled_candidate_issues"
+                    ),
+                },
+            )
+            return recovered_script
+
+    candidate = await _run_with_agent_loop(
+        "剧本首次整版 Baseline", "screenplay", _prompt,
+        ScreenplayGenerationIR,
+        _check_ir,
+        loop=loop, temperature=0.7,
+        max_tokens=screenplay_ir_token_budget(source_text),
         repair_user_prompt_limit=None,
         repair_candidate_limit=None,
-        prefill={"episode_no": episode["episode_no"], "mode": "full_script"},
+        prefill={
+            "format_version": IR_VERSION,
+            "episode_no": episode["episode_no"],
+        },
+    )
+    if isinstance(candidate, ScreenplayGenerationIR):
+        if _narrative_blueprint is None:
+            candidate = await _repartition_multilocation_ir_scenes(
+                candidate,
+                episode=episode,
+                source_text=source_text,
+                parent_artifact_id=getattr(
+                    candidate, "evidence_artifact_id", None,
+                ),
+            )
+        else:
+            blueprint_errors = validate_and_apply_blueprint_scene_contract(
+                candidate,
+                _narrative_blueprint,
+                allow_prefix=True,
+            )
+            if blueprint_errors:
+                raise ValueError("；".join(blueprint_errors))
+        candidate = await _complete_screenplay_ir_fidelity(
+            candidate,
+            episode=episode,
+            source_text=source_text,
+            bible=bible,
+            parent_artifact_id=getattr(candidate, "evidence_artifact_id", None),
+            narrative_blueprint=_narrative_blueprint,
+        )
+        if _narrative_blueprint is not None:
+            blueprint_errors = validate_and_apply_blueprint_scene_contract(
+                candidate,
+                _narrative_blueprint,
+            )
+            if blueprint_errors:
+                raise ValueError("；".join(blueprint_errors))
+    script = _compile_candidate(candidate)
+    object.__setattr__(
+        script,
+        "_source_ir_artifact_id",
+        getattr(candidate, "evidence_artifact_id", None),
     )
     if no_episode_hook:
         if not (script.ending_hook or "").strip() or len((script.ending_hook or "").strip()) < 4:
@@ -3368,10 +5818,157 @@ async def _generate_episode_director_outline(
 
 async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bible,
                                       prev_ending: str, screenplay: EpisodeScreenplay) -> StoryboardOutline:
-    """先出整集分镜大纲（一次 LLM 调用）：把完整剧本铺成有序的 N 条镜头节拍，先定全局节奏。
-    逐镜填充阶段据此让每镜知道"我该推进到剧情的哪个位置"，避免多镜停留同一情绪导致推进缓慢。"""
+    """Compile narrative outlines locally; keep the model path for legacy scripts.
+
+    The published narrative graph already owns global event/state relations.
+    Requiring a model to restate the complete graph as one JSON object is both
+    redundant and unbounded, so only later bounded scene packs use the model.
+    """
     if not (screenplay.full_script_text or "").strip():
         raise StageError("分镜大纲", ["请先生成完整剧本，再规划分镜大纲"])
+    if screenplay.narrative_plan is not None:
+        from app.evidence import repository as evidence_repository
+        from app.harness.contracts import get_contract
+        from app.harness.types import EvidenceArtifact
+        from app.narrative import validate_storyboard_narrative
+        from app.narrative_outline import (
+            compile_narrative_storyboard_outline,
+            normalize_narrative_storyboard_outline,
+        )
+        from app.validators import (
+            assign_outline_delivery_ids,
+            normalize_outline_dialogue_ownership,
+            normalize_outline_spoken_durations,
+            outline_key_line_capacity_errors,
+            outline_key_line_speaker_errors,
+            outline_scene_coverage_errors,
+            split_outline_on_speaker_changes,
+            split_outline_over_action_capacity,
+            split_outline_over_key_line_capacity,
+        )
+
+        outline = compile_narrative_storyboard_outline(screenplay)
+        max_shots = storyboard_shot_count_range(
+            int(episode.get("target_duration_s") or 0)
+        )[1]
+        projection_changes = normalize_narrative_storyboard_outline(
+            outline,
+            screenplay,
+        )
+        assign_outline_delivery_ids(outline, screenplay)
+        split_changes = [
+            *split_outline_over_action_capacity(
+                outline,
+                max_shots=max_shots,
+            ),
+            *split_outline_on_speaker_changes(
+                outline,
+                screenplay,
+                max_shots=max_shots,
+            ),
+            *split_outline_over_key_line_capacity(
+                outline,
+                screenplay,
+                max_shots=max_shots,
+            ),
+            *normalize_outline_dialogue_ownership(
+                outline,
+                screenplay,
+            ),
+        ]
+        projection_changes.extend(
+            normalize_narrative_storyboard_outline(
+                outline,
+                screenplay,
+            )
+        )
+        projection_changes.extend(
+            normalize_outline_dialogue_ownership(
+                outline,
+                screenplay,
+            )
+        )
+        normalize_outline_spoken_durations(outline, screenplay)
+        ensure_storyboard_scene_contexts(outline, screenplay, bible)
+
+        errors = [
+            *outline_key_line_capacity_errors(outline, screenplay),
+            *outline_key_line_speaker_errors(outline, screenplay),
+            *outline_scene_coverage_errors(outline, screenplay, bible),
+            *narrative_outline_action_capacity_errors(
+                outline,
+                screenplay.narrative_plan,
+            ),
+            *validate_storyboard_narrative(
+                board=None,
+                screenplay=screenplay,
+                outline=outline,
+                complete=True,
+                expected_scope_id=str(
+                    episode.get("id")
+                    or f"episode-{episode['episode_no']}"
+                ),
+            ),
+        ]
+        if errors:
+            raise StageError(
+                "分镜大纲确定性编译",
+                list(dict.fromkeys(errors)),
+            )
+
+        parent_ids = [
+            str(value)
+            for value in (
+                episode.get("screenplay_artifact_id"),
+                episode.get("bible_artifact_id"),
+            )
+            if str(value or "").strip()
+        ]
+        artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="storyboard_outline",
+            scope_type="episode",
+            scope_id=str(
+                episode.get("id")
+                or f"episode-{episode['episode_no']}"
+            ),
+            status="validated",
+            trust_level="T2",
+            content=outline.model_dump(mode="json"),
+            parent_artifact_ids=parent_ids,
+            contract_version=get_contract("storyboard").version,
+            prompt_version="storyboard-outline-compiler-1.0.0",
+            model_snapshot={
+                **dict(getattr(outline, "_compile_audit", {}) or {}),
+                "projection_change_count": len(projection_changes),
+                "split_change_count": len(split_changes),
+                "final_shot_count": len(outline.shots),
+                "scene_batch_count": len(outline.scene_contexts),
+            },
+        ))
+        object.__setattr__(
+            outline,
+            "evidence_artifact_id",
+            artifact["id"],
+        )
+        log_provider_call(
+            "storyboard_outline_local_compile",
+            config.MODEL_TEXT,
+            "COMPILED",
+            None,
+            0,
+            meta={
+                "episode_id": episode.get("id"),
+                "episode_no": episode.get("episode_no"),
+                "input_event_count": len(
+                    screenplay.narrative_plan.events
+                ),
+                "final_shot_count": len(outline.shots),
+                "scene_batch_count": len(outline.scene_contexts),
+                "model_calls": 0,
+                "artifact_id": artifact["id"],
+            },
+        )
+        return outline
     if screenplay.narrative_plan is None:
         return await _generate_episode_director_outline(
             episode,
@@ -3947,14 +6544,29 @@ def ensure_storyboard_scene_contexts(
     if outline.scene_contexts or not outline.shots:
         return []
 
+    scene_id_bindings: defaultdict[str, set[tuple[str, str]]] = (
+        defaultdict(set)
+    )
+    for brief in outline.shots:
+        scene_id = str(brief.scene_id or "").strip()
+        if scene_id:
+            scene_id_bindings[scene_id].add((
+                str(brief.scene_name or brief.scene_setting).strip(),
+                str(brief.scene_time or "").strip(),
+            ))
+
     runs: list[tuple[str, list[StoryboardOutlineShot]]] = []
     for brief in outline.shots:
         scene_name = str(brief.scene_name or brief.scene_setting).strip()
         scene_time = str(brief.scene_time or "").strip()
+        scene_id = str(brief.scene_id or "").strip()
         scene_key = (
-            f"scene:{scene_name}:{scene_time}"
-            if scene_name or scene_time
-            else f"id:{str(brief.scene_id or '').strip()}"
+            f"id:{scene_id}"
+            if (
+                scene_id
+                and len(scene_id_bindings[scene_id]) == 1
+            )
+            else f"scene:{scene_name}:{scene_time}"
         )
         if runs and runs[-1][0] == scene_key:
             runs[-1][1].append(brief)
@@ -4653,11 +7265,19 @@ async def generate_storyboard_scene_pack(
     screenplay: EpisodeScreenplay,
     outline: StoryboardOutline,
     scene_context: StoryboardSceneContext,
+    *,
+    shot_nos: set[int] | None = None,
 ) -> StoryboardScenePack:
-    """Generate one complete scene in one model call; scenes may run in parallel."""
+    """Generate one bounded scene chunk; independent chunks may run in parallel."""
     briefs = [
         item for item in outline.shots
-        if item.scene_id == scene_context.scene_id
+        if (
+            item.scene_id == scene_context.scene_id
+            and (
+                shot_nos is None
+                or int(item.shot_no) in shot_nos
+            )
+        )
     ]
     if not briefs:
         raise StageError(
@@ -4723,7 +7343,7 @@ async def generate_storyboard_scene_pack(
         }
         for brief in briefs
     ]
-    prompt = f"""任务：按导演规划一次性生成 {scene_context.scene_id} 的完整场景分镜包。
+    prompt = f"""任务：按导演规划生成 {scene_context.scene_id} 的有界场景分镜块。
 
 本场镜号必须精确为 {shot_nos}，数量不得增删；导演规划已经决定了完整剧情覆盖和拆镜边界。
 你只负责每镜的画面动作、首尾帧、摄影表达和空间构图。

@@ -24,9 +24,9 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app import config, hiagent
+from app import config, hiagent, textmatch
 from app.atomic_io import atomic_write_bytes
-from app.character_policy import is_functional_extra
+from app.character_policy import resolution_declares_functional_identity
 from app.db import get_conn, get_setting, new_id, now, set_setting
 from app.evidence import repository as evidence_repository
 from app.evidence.media import record_reference_asset
@@ -44,6 +44,7 @@ from app.refs import (
     production_appearance_anchor,
 )
 from app.schemas import Bible, Character, EpisodeScreenplay, extract_json
+from app.source_excerpt import align_source_excerpt
 
 FRAGMENT_WINDOW = 220   # 命中角色名前后各取多少字
 FRAGMENT_BUDGET = 4000  # 单角色单段送审片段总字数预算
@@ -372,18 +373,141 @@ def _identity_carrier_annotation_base(value: object) -> str:
     return match.group("base").strip() if match else ""
 
 
-def _future_identity_context(future_text: str, source_labels: list[str]) -> str:
+def _aligned_identity_source_label(
+    source_label: str,
+    identity_haystack: str,
+) -> str:
+    """Recover a provider-expanded label only when source alignment is strong."""
+    label = str(source_label or "").strip()
+    if not label:
+        return ""
+    if label in identity_haystack:
+        return label
+    condensed = textmatch.condense(label)
+    if len(condensed) < 4:
+        return ""
+    aligned = align_source_excerpt(
+        label,
+        identity_haystack,
+        min_match_chars=max(3, int(len(condensed) * 0.6)),
+    )
+    if aligned is None:
+        return ""
+    excerpt = str(aligned.excerpt or "").strip()
+    excerpt_chars = len(textmatch.condense(excerpt))
+    if (
+        excerpt_chars < 3
+        or excerpt_chars > len(condensed) + 4
+        or textmatch.longest_run_ratio(label, excerpt) < 0.65
+        or textmatch.bigram_coverage(label, excerpt) < 0.55
+    ):
+        return ""
+    return excerpt
+
+
+def _distributed_identity_fragments(
+    text: str,
+    label: str,
+    *,
+    known_names: list[str],
+    window: int,
+    budget: int,
+) -> str:
+    """Prefer identity windows containing known names, then span the timeline."""
+    spans = [
+        (max(0, match.start() - window), min(len(text), match.end() + window))
+        for match in re.finditer(re.escape(label), text)
+    ]
+    if not spans or budget <= 0:
+        return ""
+    merged: list[list[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    ranked = sorted(
+        enumerate(merged),
+        key=lambda item: (
+            -sum(
+                name != label and name in text[item[1][0]:item[1][1]]
+                for name in known_names
+            ),
+            0 if item[0] == 0 else 1,
+            0 if item[0] == len(merged) - 1 else 1,
+            item[0],
+        ),
+    )
+    pieces: list[tuple[int, str]] = []
+    used = 0
+    for index, (start, end) in ranked:
+        if used >= budget:
+            break
+        piece = text[start:end].strip()[:budget - used]
+        if piece:
+            pieces.append((index, piece))
+            used += len(piece)
+    pieces.sort(key=lambda item: item[0])
+    return "\n……\n".join(piece for _index, piece in pieces)
+
+
+def _future_identity_context(
+    future_text: str,
+    source_labels: list[str],
+    *,
+    known_names: list[str] | None = None,
+    current_text: str = "",
+) -> str:
     """Return bounded future excerpts only where a current identity label occurs."""
+    if not str(future_text or "").strip():
+        return ""
     blocks: list[str] = []
+    known = list(dict.fromkeys(
+        str(name or "").strip()
+        for name in (known_names or [])
+        if str(name or "").strip()
+    ))
     remaining = CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET
+    needs_boundary_handoff = any(
+        str(label or "").strip()
+        and str(label or "").strip() not in future_text
+        for label in source_labels
+    )
+    boundary = (
+        "\n".join(filter(None, [
+            str(current_text or "").strip()[-700:],
+            str(future_text or "").strip()[:900],
+        ]))
+        if needs_boundary_handoff else ""
+    )
+    if boundary:
+        block = f"【章节边界身份交接】\n{boundary[:remaining]}"
+        blocks.append(block)
+        remaining -= len(block)
+    for name in known:
+        if remaining <= 0 or name not in future_text:
+            continue
+        fragments = _distributed_identity_fragments(
+            future_text,
+            name,
+            known_names=known,
+            window=180,
+            budget=min(420, remaining),
+        )
+        if not fragments:
+            continue
+        block = f"【人物谱真名：{name}】\n{fragments}"
+        blocks.append(block)
+        remaining -= len(block)
     for source_label in dict.fromkeys(source_labels):
         if remaining <= 0:
             break
-        fragments = extract_character_fragments(
+        fragments = _distributed_identity_fragments(
             future_text,
             source_label,
+            known_names=known,
             window=180,
-            budget=min(1200, remaining),
+            budget=min(900, remaining),
         )
         if not fragments:
             continue
@@ -441,7 +565,7 @@ async def discover_character_candidates(
 
     后续章节只能用来把当前章节的“大汉/老者/黑衣人”解析成稳定真名，
     不得把尚未出场的人物或剧情带回本集。身份模型确认的稳定真名必须完成
-    最小人物卡；未确认真名的一次性人物才进入路人编号合同。
+    最小人物卡；未确认真名的一次性人物保留来源称谓并签发 typed functional identity。
     """
     known_names = [c.name for c in bible.characters if c.name]
     known = "、".join(known_names) or "（无）"
@@ -450,7 +574,7 @@ async def discover_character_candidates(
         for item in (existing_resolutions or [])
         if (
             isinstance(item, dict)
-            and item.get("resolution") == "functional_extra"
+            and resolution_declares_functional_identity(item)
             and str(item.get("canonical_name") or "").strip()
         )
     }
@@ -462,7 +586,7 @@ async def discover_character_candidates(
         for item in (existing_resolutions or [])
         if (
             isinstance(item, dict)
-            and item.get("resolution") == "functional_extra"
+            and resolution_declares_functional_identity(item)
             and str(item.get("source_label") or "").strip()
             and str(item.get("canonical_name") or "").strip()
         )
@@ -497,25 +621,37 @@ async def discover_character_candidates(
                 continue
             # 兼容旧模型形状 {name, kind, evidence}。新协议的身份判断完全以模型输出为准。
             legacy_name = str(item.get("name") or "").strip()
-            source_label = str(item.get("source_label") or legacy_name).strip()
-            has_explicit_identity_kind = "identity_kind" in item
+            model_source_label = str(
+                item.get("source_label") or legacy_name
+            ).strip()
+            source_label = _aligned_identity_source_label(
+                model_source_label,
+                current_haystack,
+            )
             identity_kind = str(item.get("identity_kind") or "named").strip().lower()
             canonical_name = str(item.get("canonical_name") or legacy_name).strip()
             if identity_kind not in {"named", "functional"}:
                 continue
-            if identity_kind == "functional":
-                canonical_name = ""
-            elif is_functional_extra(canonical_name):
-                if not has_explicit_identity_kind:
-                    continue
-                identity_kind = "functional"
+            future_evidence = str(
+                item.get("future_evidence") or ""
+            ).strip()
+            if (
+                group_scope in {"future", "coverage"}
+                and canonical_name
+                and future_evidence
+                and canonical_name in known_names
+            ):
+                # Only an existing canonical Bible identity can repair provider
+                # enum drift. Repeating a relation/description in source text
+                # proves label presence, not a stable named identity.
+                identity_kind = "named"
+            elif identity_kind == "functional":
                 canonical_name = ""
             dedupe_key = (source_label, canonical_name, identity_kind)
             if (
                 not source_label
                 or len(source_label) > 16
                 or dedupe_key in seen
-                or source_label not in current_haystack
                 or (
                     identity_kind == "named"
                     and (
@@ -538,10 +674,51 @@ async def discover_character_candidates(
                 if functional_identity_key in existing_functional_routes
                 else ""
             )
+            prior_groups = {
+                str(candidate.get("identity_group") or "").strip()
+                for candidate in candidates
+                if (
+                    str(candidate.get("source_label") or "").strip()
+                    == source_label
+                    and str(candidate.get("identity_group") or "").strip()
+                )
+            }
+            declared_group = str(
+                item.get("identity_group")
+                or functional_identity_key
+                or ""
+            ).strip()
+            existing_groups = {
+                str(candidate.get("identity_group") or "").strip()
+                for candidate in candidates
+                if str(candidate.get("identity_group") or "").strip()
+            }
+            declared_matches = {
+                group
+                for group in existing_groups
+                if (
+                    declared_group
+                    and (
+                        group == declared_group
+                        or group.endswith(f":{declared_group}")
+                    )
+                )
+            }
             identity_group = (
-                f"existing:{existing_route_name}"
-                if existing_route_name
-                else f"{group_scope}:{functional_identity_key or source_label}"
+                next(iter(prior_groups))
+                if group_scope in {"future", "coverage"} and len(prior_groups) == 1
+                else (
+                    next(iter(declared_matches))
+                    if (
+                        group_scope in {"future", "coverage"}
+                        and len(declared_matches) == 1
+                    )
+                    else (
+                        f"existing:{existing_route_name}"
+                        if existing_route_name
+                        else f"{group_scope}:{declared_group or source_label}"
+                    )
+                )
             )
             candidates.append({
                 "name": canonical_name or source_label,
@@ -551,7 +728,11 @@ async def discover_character_candidates(
                 "existing_route_name": existing_route_name,
                 "kind": "mentioned" if item.get("kind") == "mentioned" else "onscreen",
                 "evidence": str(item.get("evidence") or "").strip()[:80],
-                "future_evidence": str(item.get("future_evidence") or "").strip()[:120],
+                "future_evidence": future_evidence[:120],
+                "model_source_label": (
+                    model_source_label
+                    if model_source_label != source_label else ""
+                ),
             })
 
     for current_batch, source_context in enumerate(source_contexts, start=1):
@@ -573,8 +754,8 @@ async def discover_character_candidates(
 规则：
 1. 找出本集原文/草稿中实际出场或开口的人，source_label 填本集对他/她的原始称谓。
 2. 若当前输入有明确同一人证据，identity_kind="named"，canonical_name 填稳定真名。
-3. canonical_name 必须是文本明确给出的人名，或“当前人物谱已有角色”中的稳定名；姓氏加师兄/师姐、
-   长老等称谓、职位、外貌标签都不是真名（除非它已在当前人物谱中），这类情况必须判为 functional。
+3. canonical_name 可以是文本明确给出的人名，也可以是跨章节稳定、唯一指向同一实体的法号、
+   尊号或专属称号。泛化职位、外貌标签和无法唯一指人的称谓才判为 functional。
 4. 姓名单独出现不算同一人证据；必须能确认该真名与 source_label 是同一人，有歧义一律不猜。
 5. 若是一次性角色，或在可见线索中无法确认稳定真名，identity_kind="functional"、canonical_name=""。
 6. 若身份投影中的 source_label 混入动作或表演提示，必须结合对应 line_context 判断真正说话人；
@@ -620,25 +801,66 @@ async def discover_character_candidates(
             group_scope=f"current-{current_batch}",
         )
 
+    unresolved_onscreen_groups = {
+        str(item.get("identity_group") or "").strip()
+        for item in candidates
+        if (
+            item.get("identity_kind") == "functional"
+            and item.get("kind") == "onscreen"
+            and str(item.get("identity_group") or "").strip()
+        )
+    }
+    future_candidates = [
+        item
+        for item in candidates
+        if (
+            item.get("identity_kind") == "functional"
+            and (
+                item.get("kind") == "onscreen"
+                or str(item.get("identity_group") or "").strip()
+                in unresolved_onscreen_groups
+                or str(item.get("source_label") or "").strip()
+                in future_text
+            )
+        )
+    ]
     future_context = _future_identity_context(
         future_text,
-        [item["source_label"] for item in candidates],
+        [item["source_label"] for item in future_candidates],
+        known_names=known_names,
+        current_text=source_text,
     )
     if future_context:
+        current_identity_audit_source = str(source_text or "").strip()
+        if len(current_identity_audit_source) > CAST_DISCOVERY_SOURCE_BUDGET:
+            half = CAST_DISCOVERY_SOURCE_BUDGET // 2
+            current_identity_audit_source = (
+                current_identity_audit_source[:half]
+                + "\n……（身份覆盖复核中段省略）……\n"
+                + current_identity_audit_source[-half:]
+            )
         future_prompt = f"""任务：只为当前集已经发现的人物称谓做后续姓名消歧。
 
 当前人物谱已有角色：
 {known}
 
-当前集候选：
-{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}
+当前集尚未确认真名的候选：
+{json.dumps(future_candidates, ensure_ascii=False, separators=(',', ':'))}
+
+当前集原文（同时复核第一遍是否漏掉独立出场/开口的实体）：
+{current_identity_audit_source}
 
 后续章节中命中这些称谓的局部窗口（{future_label or '后续章节'}）：
 {future_context}
 
 规则：
-1. 只输出当前集候选中 source_label 完全相同、且后续窗口明确证明稳定真名的项目。
-2. canonical_name 必须出现在后续窗口或当前人物谱中；有歧义就不输出。
+1. 优先输出当前集候选中 source_label 完全相同的项目；若第一遍遗漏了当前原文中可区分、
+   独立出场或开口的实体，也必须补充输出，source_label 使用当前原文逐字称谓。
+   称谓可以在章节边界发生变化；
+   若当前集离场状态、后续开场承接和人物谱真名窗口共同形成唯一同一性证据，可据此确认，
+   不要求旧称谓与真名必须出现在同一句。
+2. canonical_name 必须出现在后续窗口或当前人物谱中；稳定唯一的法号、尊号、专属称号
+   也属于 named identity，不要求必须是户籍式真名；有歧义就不输出。
 3. 不得新增只在后续章节出场的人，不得复述与身份无关的剧情。
 
 只输出 JSON：
@@ -671,6 +893,45 @@ async def discover_character_candidates(
             identity_haystack=f"{current_haystack}\n{future_context}",
             group_scope="future",
         )
+        if len(current_identity_audit_source) >= 1000:
+            coverage_prompt = f"""任务：独立审计当前集人物身份覆盖，只找第一遍遗漏或错误降级的实体。
+
+当前人物谱已有角色：
+{known}
+
+当前集原文：
+{current_identity_audit_source}
+
+前两遍候选：
+{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}
+
+后续姓名证据：
+{future_context}
+
+规则：
+1. 逐段核对每个独立行动、开口或具有可区分外观的实体；集合称谓不能替代其中的独立人物。
+2. 只输出遗漏实体，或已有候选中能由后续证据唯一升级为 named identity 的实体。
+3. source_label 必须逐字来自当前集原文。canonical_name 必须有当前原文、人物谱或后续窗口证据。
+4. 不得按职业、年龄、服饰、称号词表判断人物是否重要；无法唯一确认就不输出。
+
+只输出 JSON：
+{{"characters": [{{"source_label": "当前原文逐字称谓", "canonical_name": "稳定真名或专属称号", "identity_kind": "named|functional", "identity_group": "若与已有候选同一实体则精确复用其 identity_group，否则空串", "functional_identity_key": "同一实体分组或空串", "kind": "onscreen|mentioned", "evidence": "当前依据", "future_evidence": "后续同一性依据"}}]}}"""
+            coverage_raw = await model_gateway.chat(
+                [{"role": "user", "content": coverage_prompt}],
+                temperature=0.05,
+                max_tokens=4096,
+                call_meta={
+                    "stage": "discover_character_candidates",
+                    "episode_no": episode_no,
+                    "discovery_phase": "coverage_audit",
+                    "reuse_successful_operation": True,
+                },
+            )
+            collect(
+                coverage_raw,
+                identity_haystack=f"{current_haystack}\n{future_context}",
+                group_scope="coverage",
+            )
 
     # 同一称谓在不同后文批次中可能先被保守判为 functional，后被真名证据命中。
     # 具名证据唯一时优先；出现两个不同真名时不猜，降级为一次性角色。
@@ -700,49 +961,40 @@ async def discover_character_candidates(
         else:
             resolved.append(options[0])
 
+    named_by_group: dict[str, set[str]] = {}
+    named_evidence: dict[tuple[str, str], dict] = {}
+    for item in resolved:
+        if item.get("identity_kind") != "named":
+            continue
+        group = str(item.get("identity_group") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if group and name:
+            named_by_group.setdefault(group, set()).add(name)
+            named_evidence[(group, name)] = item
+    upgraded: list[dict] = []
+    for item in resolved:
+        group = str(item.get("identity_group") or "").strip()
+        names = named_by_group.get(group, set())
+        if item.get("identity_kind") == "functional" and len(names) == 1:
+            canonical_name = next(iter(names))
+            evidence = named_evidence[(group, canonical_name)]
+            upgraded.append({
+                **item,
+                "name": canonical_name,
+                "identity_kind": "named",
+                "future_evidence": str(
+                    evidence.get("future_evidence") or ""
+                ),
+            })
+        else:
+            upgraded.append(item)
+    resolved = upgraded
+
     # 按本集第一次出现排序，保证后续“路人甲/乙/丙/丁”分配不受模型输出顺序影响。
     return sorted(
         resolved,
         key=lambda item: current_haystack.find(item["source_label"]),
     )
-
-
-_ROUTE_EXTRA_SUFFIXES = ("甲", "乙", "丙", "丁")
-_ROUTE_EXTRA_RE = re.compile(r"路人(?:甲|乙|丙|丁|[1-9]\d*)")
-
-
-def _route_extra_name(
-    source_label: str,
-    *,
-    used: set[str],
-    assigned: dict[str, str],
-    force: bool = False,
-) -> str:
-    """为一次性人物分配确定性通用标签。
-
-    职业型身份（守卫/医生/测验员）保留语义；大汉/陌生人等过渡称谓以及
-    已确认戏份不足的具名人物，按本集出场顺序映射为路人甲/乙/丙/丁。
-    """
-    source_label = (source_label or "").strip()
-    if source_label in assigned:
-        return assigned[source_label]
-    if not force and is_functional_extra(source_label):
-        assigned[source_label] = source_label
-        used.add(source_label)
-        return source_label
-    for suffix in _ROUTE_EXTRA_SUFFIXES:
-        candidate = f"路人{suffix}"
-        if candidate not in used:
-            assigned[source_label] = candidate
-            used.add(candidate)
-            return candidate
-    index = 5
-    while f"路人{index}" in used:
-        index += 1
-    candidate = f"路人{index}"
-    assigned[source_label] = candidate
-    used.add(candidate)
-    return candidate
 
 
 def _identity_resolution(
@@ -783,6 +1035,7 @@ def _replace_screenplay_body_label(
     canonical_name: str,
     *,
     replace_prose: bool = True,
+    replace_speaker: bool = True,
 ) -> str:
     """改剧本正文中的角色身份，不改其他角色说出的台词内容。"""
     lines: list[str] = []
@@ -793,7 +1046,7 @@ def _replace_screenplay_body_label(
         r"^\s*[\u3400-\u9fffA-Za-z0-9_·•・·-]{1,16}(?:[\(（][^\)）]{0,16}[\)）])?[:：]"
     )
     for line in (text or "").splitlines(keepends=True):
-        if speaker_pattern.match(line):
+        if replace_speaker and speaker_pattern.match(line):
             line = speaker_pattern.sub(
                 lambda match: (
                     f"{match.group('indent')}{canonical_name}"
@@ -805,6 +1058,35 @@ def _replace_screenplay_body_label(
         elif replace_prose and not any_dialogue_pattern.match(line):
             line = _replace_resolved_label(line, source_label, canonical_name)
         lines.append(line)
+    return "".join(lines)
+
+
+def _restore_non_dialogue_prefix(
+    text: str,
+    source_label: str,
+    canonical_name: str,
+    *,
+    authoritative_lines: set[str],
+) -> str:
+    """Restore a structural prefix previously mistaken for a speaker."""
+    prefix = re.compile(
+        rf"^(?P<indent>\s*){re.escape(canonical_name)}(?P<colon>[:：])"
+        r"(?P<line>.*)$"
+    )
+    lines: list[str] = []
+    for raw_line in (text or "").splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        ending = raw_line[len(line):]
+        match = prefix.match(line)
+        if (
+            match is not None
+            and match.group("line").strip() not in authoritative_lines
+        ):
+            line = (
+                f"{match.group('indent')}{source_label}"
+                f"{match.group('colon')}{match.group('line')}"
+            )
+        lines.append(line + ending)
     return "".join(lines)
 
 
@@ -1023,6 +1305,131 @@ def _replace_narrative_plan_identity(
     return plan.model_dump(mode="json") != before
 
 
+def _merge_duplicate_narrative_identity_contracts(plan) -> list[dict]:
+    """Merge aliases that resolve to one canonical display identity."""
+    if plan is None:
+        return []
+    data = plan.model_dump(mode="json")
+    contracts = list(data.get("identity_contracts") or [])
+    groups: dict[str, list[tuple[int, dict]]] = {}
+    for index, contract in enumerate(contracts):
+        if not isinstance(contract, dict):
+            continue
+        display_name = str(contract.get("display_name") or "").strip()
+        if display_name:
+            groups.setdefault(display_name, []).append((index, contract))
+
+    replacements: dict[str, str] = {}
+    merged_by_display: dict[str, dict] = {}
+    changes: list[dict] = []
+    for display_name, members in groups.items():
+        if len(members) < 2:
+            continue
+        _canonical_index, canonical = max(
+            members,
+            key=lambda item: (
+                int(str(item[1].get("identity_id") or "") == display_name),
+                int(str(item[1].get("visual_policy") or "") == "canonical"),
+                int(str(item[1].get("asset_requirement") or "") == "required"),
+                -item[0],
+            ),
+        )
+        canonical_id = str(canonical.get("identity_id") or "").strip()
+        if not canonical_id:
+            continue
+        merged = dict(canonical)
+        merged_evidence = dict(merged.get("evidence") or {})
+        merged_voice_ids = list(merged.get("voice_ids") or [])
+        rationales = [str(merged_evidence.get("rationale") or "").strip()]
+        merged_ids: list[str] = []
+        for _index, contract in members:
+            identity_id = str(contract.get("identity_id") or "").strip()
+            if identity_id and identity_id != canonical_id:
+                replacements[identity_id] = canonical_id
+                merged_ids.append(identity_id)
+            merged_voice_ids.extend(contract.get("voice_ids") or [])
+            evidence = contract.get("evidence") or {}
+            for field in (
+                "source_evidence_ids",
+                "proposition_ids",
+                "adaptation_decision_ids",
+            ):
+                merged_evidence[field] = list(dict.fromkeys([
+                    *(merged_evidence.get(field) or []),
+                    *(evidence.get(field) or []),
+                ]))
+            rationale = str(evidence.get("rationale") or "").strip()
+            if rationale:
+                rationales.append(rationale)
+        merged["voice_ids"] = list(dict.fromkeys(merged_voice_ids))
+        merged_evidence["rationale"] = "；".join(dict.fromkeys(filter(
+            None,
+            rationales,
+        )))
+        merged["evidence"] = merged_evidence
+        merged_by_display[display_name] = merged
+        changes.append({
+            "kind": "identity_contract_merge",
+            "display_name": display_name,
+            "canonical_identity_id": canonical_id,
+            "merged_identity_ids": merged_ids,
+        })
+
+    if not replacements:
+        return []
+
+    def replace_merged_ids(value):
+        if isinstance(value, str):
+            return replacements.get(value, value)
+        if isinstance(value, list):
+            replaced = [replace_merged_ids(item) for item in value]
+            if not any(
+                isinstance(item, str) and item in replacements
+                for item in value
+            ):
+                return replaced
+            deduplicated: list = []
+            seen_strings: set[str] = set()
+            for item in replaced:
+                if isinstance(item, str):
+                    if item in seen_strings:
+                        continue
+                    seen_strings.add(item)
+                deduplicated.append(item)
+            return deduplicated
+        if isinstance(value, tuple):
+            return tuple(replace_merged_ids(item) for item in value)
+        if isinstance(value, dict):
+            return {
+                replacements.get(str(key), key): replace_merged_ids(item)
+                for key, item in value.items()
+            }
+        return value
+
+    data = replace_merged_ids(data)
+
+    retained_contracts: list[dict] = []
+    emitted_displays: set[str] = set()
+    for contract in contracts:
+        display_name = str(contract.get("display_name") or "").strip()
+        merged = merged_by_display.get(display_name)
+        if merged is not None:
+            if display_name in emitted_displays:
+                continue
+            normalized = replace_merged_ids(merged)
+            retained_contracts.append(normalized)
+            emitted_displays.add(display_name)
+            continue
+        normalized = replace_merged_ids(contract)
+        retained_contracts.append(normalized)
+    data["identity_contracts"] = retained_contracts
+
+    rebuilt = type(plan).model_validate(data)
+    for field in type(plan).model_fields:
+        setattr(plan, field, getattr(rebuilt, field))
+    return changes
+
+
 def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] | None) -> list[dict]:
     """在剧本进入 QA/发布之前原子性落实人物身份映射。
 
@@ -1030,6 +1437,22 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
     避免破坏逐字证据；所有会被下游当成角色身份的字段统一改名。
     """
     changes: list[dict] = []
+    authoritative_speakers = {
+        str(turn.speaker or "").strip()
+        for chain in getattr(screenplay, "dialogue_chains", None) or []
+        for turn in chain.turns or []
+        if str(turn.speaker or "").strip()
+    }
+    authoritative_lines_by_speaker: dict[str, set[str]] = {}
+    for chain in getattr(screenplay, "dialogue_chains", None) or []:
+        for turn in chain.turns or []:
+            speaker = str(turn.speaker or "").strip()
+            line = str(turn.line or "").strip()
+            if speaker and line:
+                authoritative_lines_by_speaker.setdefault(
+                    speaker,
+                    set(),
+                ).add(line)
     for item in resolutions or []:
         if not isinstance(item, dict):
             continue
@@ -1061,7 +1484,18 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
             source_label,
             canonical_name,
             replace_prose=replace_display_text,
+            replace_speaker=source_label in authoritative_speakers,
         )
+        if source_label not in authoritative_speakers:
+            replaced_body = _restore_non_dialogue_prefix(
+                replaced_body,
+                source_label,
+                canonical_name,
+                authoritative_lines=authoritative_lines_by_speaker.get(
+                    canonical_name,
+                    set(),
+                ),
+            )
         if replaced_body != body:
             screenplay.full_script_text = replaced_body
             changed = True
@@ -1111,11 +1545,11 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                 voice.speaker_id = canonical_name
                 if getattr(screenplay, "narrative_plan", None) is not None:
                     if (
-                        item.get("resolution") == "functional_extra"
+                        resolution_declares_functional_identity(item)
                         and str(voice.role_type or "").strip() != "narrator"
                     ):
                         voice.role_type = "functional_character"
-                elif is_functional_extra(canonical_name):
+                elif resolution_declares_functional_identity(item):
                     voice.role_type = "functional_character"
                 changed = True
 
@@ -1156,6 +1590,9 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                 "canonical_name": canonical_name,
                 "resolution": item.get("resolution") or "unknown",
             })
+    changes.extend(_merge_duplicate_narrative_identity_contracts(
+        getattr(screenplay, "narrative_plan", None),
+    ))
     return changes
 
 
@@ -1641,7 +2078,11 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
     return errors
 
 
-def screenplay_unknown_identity_errors(screenplay, bible: Bible) -> list[str]:
+def screenplay_unknown_identity_errors(
+    screenplay,
+    bible: Bible,
+    resolutions: list[dict] | None = None,
+) -> list[str]:
     """确定性检查“模型判断是否已经落地”，不猜测称谓语义。"""
     bible_names = {character.name for character in bible.characters}
     narrative_plan = getattr(screenplay, "narrative_plan", None)
@@ -1661,6 +2102,15 @@ def screenplay_unknown_identity_errors(screenplay, bible: Bible) -> list[str]:
         except IdentityContractError as exc:
             return [f"剧本身份合同无法解析：{exc}"]
     locations: dict[str, list[str]] = {}
+    typed_functional_names = {
+        str(item.get("canonical_name") or "").strip()
+        for item in (resolutions or [])
+        if (
+            isinstance(item, dict)
+            and resolution_declares_functional_identity(item)
+            and str(item.get("canonical_name") or "").strip()
+        )
+    }
 
     def collect(raw_name: str, path: str, *, usage: str) -> None:
         name = str(raw_name or "").strip()
@@ -1674,7 +2124,7 @@ def screenplay_unknown_identity_errors(screenplay, bible: Bible) -> list[str]:
                 pass
         elif name == "旁白" or name in bible_names:
             return
-        elif is_functional_extra(name):
+        elif name in typed_functional_names:
             return
         locations.setdefault(name, []).append(path)
 
@@ -1736,11 +2186,23 @@ def merge_screenplay_character_resolutions(
             merged[source_label] = candidate
             order.append(source_label)
             continue
-        current_named = current.get("resolution") == "future_identity"
-        candidate_named = candidate.get("resolution") == "future_identity"
-        if candidate_named and not current_named:
+        priority = {
+            "functional_extra": 0,
+            "functional_identity": 1,
+            "future_identity": 2,
+        }
+        current_priority = priority.get(
+            str(current.get("resolution") or ""), 0,
+        )
+        candidate_priority = priority.get(
+            str(candidate.get("resolution") or ""), 0,
+        )
+        if candidate_priority > current_priority:
             merged[source_label] = candidate
-        elif candidate_named == current_named and current.get("canonical_name") == canonical_name:
+        elif (
+            candidate_priority == current_priority
+            and current.get("canonical_name") == canonical_name
+        ):
             merged[source_label] = {**current, **candidate}
     return [merged[label] for label in order]
 
@@ -1787,10 +2249,14 @@ async def ensure_cards_for_text(
 ) -> dict:
     """发现并补人物卡；同时输出供剧本使用的姓名消歧表。"""
     conn = get_conn()
-    episode_row = conn.execute(
-        "SELECT id FROM episodes WHERE project_id=? AND episode_no=?",
-        (project_id, episode_no),
-    ).fetchone()
+    episode_row = (
+        conn.execute(
+            "SELECT id FROM episodes WHERE project_id=? AND episode_no=?",
+            (project_id, episode_no),
+        ).fetchone()
+        if _has_column(conn, "episodes", "id")
+        else None
+    )
     existing_resolutions = (
         load_screenplay_character_resolutions(conn, episode_row["id"])
         if episode_row
@@ -1833,18 +2299,6 @@ async def ensure_cards_for_text(
     errors: list[str] = []
     warnings: list[str] = []
     resolutions: list[dict] = []
-    used_extra_names = {
-        *set(_ROUTE_EXTRA_RE.findall(f"{source_text or ''}\n{draft_text or ''}")),
-        *{
-            str(item.get("canonical_name") or "").strip()
-            for item in existing_resolutions
-            if (
-                isinstance(item, dict)
-                and item.get("resolution") == "functional_extra"
-                and str(item.get("canonical_name") or "").strip()
-            )
-        },
-    }
     assigned_extra_names: dict[str, str] = {}
     assigned_identity_groups: dict[str, str] = {}
 
@@ -1859,7 +2313,8 @@ async def ensure_cards_for_text(
                 reason="后续章节已确认该称谓属于人物谱已有角色",
             ))
 
-    # 先处理模型已确认的一次性人物，编号严格按本集出场顺序分配。
+    # 功能身份保留原文稳定称谓。是否需要人物卡与是否具备真名是两件事，
+    # 不得通过改成“路人甲/乙/丙”来降低角色重要性或抹掉来源身份。
     for item in functional_candidates:
         source_label = str(item.get("source_label") or item.get("name") or "").strip()
         identity_group = str(
@@ -1869,20 +2324,15 @@ async def ensure_cards_for_text(
         if not route_name:
             route_name = assigned_identity_groups.get(identity_group, "")
         if not route_name:
-            route_name = _route_extra_name(
-                source_label,
-                used=used_extra_names,
-                assigned=assigned_extra_names,
-            )
+            route_name = source_label
         assigned_identity_groups[identity_group] = route_name
         assigned_extra_names[source_label] = route_name
-        if route_name != source_label:
-            resolutions.append(_identity_resolution(
-                item,
-                route_name,
-                "functional_extra",
-                reason="后续章节无法确认稳定真名，按一次性路人生产",
-            ))
+        resolutions.append(_identity_resolution(
+            item,
+            route_name,
+            "functional_identity",
+            reason="模型依据当前来源确认该实体为本集功能身份",
+        ))
 
     for name, items in unknown_by_name.items():
         result = await ensure_character_card(
@@ -2632,7 +3082,7 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
     unknown = (
         ([resolver_error] if resolver_error else [])
         if narrative_authority
-        else [n for n in names if n not in bible_names and not is_functional_extra(n)]
+        else [n for n in names if n not in bible_names]
     )
     added: list[dict] = []
     blocking_errors: list[str] = []
