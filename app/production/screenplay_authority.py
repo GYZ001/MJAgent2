@@ -685,6 +685,102 @@ def _append_compatible_historical_materials(
         "ORDER BY version DESC",
         (project_id,),
     ).fetchall()
+
+    # A later storyboard run can advance the project pointer through several
+    # approved Bible artifacts and then apply an asset-backed appearance
+    # update to the mutable projection.  Recover every verified ancestor, not
+    # just the immediate predecessor.  Each edge must be an exact immutable
+    # parent relation whose semantic payload only appends character/scene
+    # cards or scene aliases; one broken edge stops the walk fail-closed.
+    current_artifact_id = str(material.get("bible_artifact_id") or "")
+    current_artifact = (
+        evidence_repository.get_artifact(current_artifact_id)
+        if current_artifact_id else None
+    )
+    if current_artifact is not None:
+        current_artifact_projection: dict[str, Any] = {}
+        try:
+            current_artifact_projection = screenplay_bible_payload(
+                current_artifact.get("content") or {}
+            )
+            _verified_artifact_hash(
+                current_artifact,
+                label="当前 Bible Artifact",
+            )
+        except (TypeError, ValueError):
+            current_artifact = None
+        projection_reachable = bool(
+            current_artifact is not None
+            and (
+                current_artifact_projection == projection
+                or _bible_extends_by_appending_cards(
+                    current_artifact_projection,
+                    projection,
+                )
+                or _bible_extends_by_recorded_downstream_changes(
+                    current_artifact_projection,
+                    projection,
+                    conn=conn,
+                    project_id=project_id,
+                    bible_artifact_id=current_artifact_id,
+                )
+            )
+        )
+        visited: set[str] = set()
+        child = current_artifact if projection_reachable else None
+        child_projection = current_artifact_projection
+        while child is not None:
+            child_id = str(child.get("id") or "")
+            if not child_id or child_id in visited:
+                break
+            visited.add(child_id)
+            try:
+                child_hash = _verified_artifact_hash(
+                    child,
+                    label="Bible Artifact 血缘节点",
+                )
+            except ValueError:
+                break
+            candidates.append({
+                **material,
+                "bible_artifact_id": child_id,
+                "bible_content_hash": child_hash,
+                "bible_projection_hash": evidence_repository.content_hash(
+                    child_projection
+                ),
+            })
+            parent_ids = list(child.get("parent_artifact_ids") or [])
+            if len(parent_ids) != 1:
+                break
+            parent = evidence_repository.get_artifact(str(parent_ids[0]))
+            if (
+                parent is None
+                or parent.get("type") != "character_bible"
+                or parent.get("scope_type") != "project"
+                or parent.get("scope_id") != project_id
+                or parent.get("status") in {"rejected", "needs_revision"}
+                or int(parent.get("version") or 0)
+                >= int(child.get("version") or 0)
+            ):
+                break
+            try:
+                parent_projection = screenplay_bible_payload(
+                    parent.get("content") or {}
+                )
+                _verified_artifact_hash(
+                    parent,
+                    label="Bible Artifact 父节点",
+                )
+            except (TypeError, ValueError):
+                break
+            if not _bible_extends_by_appending_cards(
+                parent_projection,
+                child_projection,
+            ):
+                break
+            child = parent
+            child_projection = parent_projection
+
     for row in artifact_rows:
         artifact = evidence_repository.get_artifact(str(row["id"]))
         if artifact is None:

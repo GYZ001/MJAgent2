@@ -629,6 +629,89 @@ def test_published_authority_survives_multi_step_scene_append_lineage() -> None:
     assert resolved.input_fingerprint == published_authority.input_fingerprint
 
 
+def test_published_authority_walks_verified_bible_ancestors_before_asset_change() -> None:
+    _screenplay_value, published_artifact, _legacy_authority = _published_case()
+    bible, base_artifact = _seed_test_bible_authority()
+    published_authority = _republish_as_screenplay_v4(published_artifact)
+
+    appended = json.loads(json.dumps(bible))
+    appended["scenes"].append({
+        "name": "宗门广场",
+        "scene_canonical": "清晨宗门广场石阶与主殿形成稳定空间结构",
+        "aliases": [],
+        "discovery_sources": ["分镜预取新增场景"],
+    })
+    child_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_bible",
+        scope_type="project",
+        scope_id="project-generic",
+        status="approved",
+        trust_level="T4",
+        content=appended,
+        parent_artifact_ids=[base_artifact["id"]],
+        contract_version="character-bible-1.0.0",
+    ))
+
+    changed_appearance = "黑发青年，深色长衣，旧玉佩旁留有一道永久伤痕"
+    portrait_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="character_portrait",
+        scope_type="reference_asset",
+        scope_id="project-generic:Hero:2",
+        status="approved",
+        trust_level="T2",
+        content={
+            "character_name": "Hero",
+            "appearance": changed_appearance,
+            "episode_start": 2,
+            "change": {
+                "change_dimensions": ["body"],
+                "persistence": "persistent",
+            },
+        },
+        parent_artifact_ids=[child_artifact["id"]],
+        contract_version="reference-1.0.0",
+    ))
+    current_projection = json.loads(json.dumps(appended))
+    current_projection["characters"][0][
+        "appearance_canonical"
+    ] = changed_appearance
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE projects SET bible_json=?,bible_artifact_id=? "
+        "WHERE id='project-generic'",
+        (
+            json.dumps(current_projection, ensure_ascii=False),
+            child_artifact["id"],
+        ),
+    )
+    conn.execute(
+        """INSERT INTO character_portraits(
+               id,project_id,character_name,ep_start,appearance,prompt,image_path,
+               bible_version,artifact_id,pack_status,change_json,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "portrait-hero-ancestor-chain",
+            "project-generic",
+            "Hero",
+            2,
+            changed_appearance,
+            "portrait prompt",
+            "/tmp/hero-ancestor-chain.png",
+            2,
+            portrait_artifact["id"],
+            "ready",
+            json.dumps(portrait_artifact["content"]["change"]),
+            3,
+        ),
+    )
+    conn.commit()
+
+    resolved = resolve_current_screenplay_authority("episode-generic")
+
+    assert resolved.artifact_id == published_artifact["id"]
+    assert resolved.input_fingerprint == published_authority.input_fingerprint
+
+
 def _seed_lagging_bible_pointer_then_append_alias(
     published_artifact: dict,
 ) -> tuple[object, dict]:
