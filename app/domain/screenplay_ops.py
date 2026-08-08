@@ -834,10 +834,6 @@ async def _screenplay_task(
         # Delivery 状态必须与真实 production phase 一致：Baseline 尚未落库时
         # 仍是 running；已有 working baseline 时从确定性阶段继续。
         production_state = _screenplay_production_state(episode_id)
-        is_resume = bool(
-            production_state["operation"] == "finalize"
-            or production_state.get("can_resume_baseline")
-        )
         conn.execute(
             "UPDATE episodes SET screenplay_status=?, screenplay_error=?, screenplay_updated_at=? WHERE id=?",
             (

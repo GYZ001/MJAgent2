@@ -28,8 +28,6 @@ from app.schemas import (
     Character,
     Dialogue,
     EpisodeScreenplay,
-    KeyDialogueChain,
-    KeyDialogueTurn,
     Shot,
     Storyboard,
     StoryboardOutline,
@@ -50,7 +48,6 @@ from app.storyboard_supervisor import (
     _commit_repair_candidate,
     _deterministic_ambient_audio_cast_candidate,
     _deterministic_dialogue_framing_candidate,
-    _deterministic_missing_spoken_candidate,
     _merge_repair_candidate,
     _migrate_checkpoint,
     _open_shot_gap,
@@ -1930,63 +1927,8 @@ def test_deterministic_action_dialogue_framing_candidate(
     assert shot.shot_size == initial_size
 
 
-def test_deterministic_missing_spoken_candidate_uses_published_dialogue_clause() -> None:
-    shot = _shot(
-        2,
-        action="老师告知学生评选结果，并承诺协助完成申报。",
-    )
-    shot.primary_action = "老师向学生确认评选结果并承诺协助申报"
-    shot.characters = ["老师", "学生"]
-    shot.characters_visible = ["老师", "学生"]
-    shot.first_frame_desc = "老师看向学生，正准备开口说明评选结果。"
-    shot.last_frame_desc = "老师说完承诺，学生点头回应。"
-    screenplay = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text="老师向学生说明结果。",
-        dialogue_chains=[KeyDialogueChain(
-            chain_id="DC1",
-            topic="评选结果与后续申报",
-            turns=[KeyDialogueTurn(
-                speaker="老师",
-                line="本次评选结果已经确定，我会协助你完成申报。",
-                source_text="本次评选结果已经确定，我会协助你完成申报。",
-            )],
-        )],
-    )
-
-    candidate = _deterministic_missing_spoken_candidate(shot, screenplay)
-
-    assert candidate is not None
-    assert candidate.dialogues[0].speaker == "老师"
-    assert candidate.dialogues[0].line in screenplay.dialogue_chains[0].turns[0].line
-    assert candidate.audio_cast == ["老师"]
-    assert candidate.audio_timeline[0].type == "spoken_dialogue"
-    assert candidate.audio_timeline[0].speaker_id == "老师"
-    assert shot.dialogues == []
 
 
-def test_deterministic_missing_spoken_candidate_rejects_weak_text_overlap() -> None:
-    shot = _shot(2, action="老师走入教室并放下课本。")
-    shot.primary_action = "老师走入教室"
-    shot.characters = ["老师"]
-    shot.characters_visible = ["老师"]
-    shot.first_frame_desc = "老师站在门口。"
-    shot.last_frame_desc = "老师把书放到桌上。"
-    screenplay = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text="老师走入教室。",
-        dialogue_chains=[KeyDialogueChain(
-            chain_id="DC1",
-            topic="无关安排",
-            turns=[KeyDialogueTurn(
-                speaker="老师",
-                line="今晚山门关闭后，你去库房清点法器。",
-                source_text="今晚山门关闭后，你去库房清点法器。",
-            )],
-        )],
-    )
-
-    assert _deterministic_missing_spoken_candidate(shot, screenplay) is None
 
 
 def test_deterministic_ambient_audio_cast_candidate_removes_identity_claim() -> None:
@@ -2009,31 +1951,6 @@ def test_deterministic_ambient_audio_cast_candidate_removes_identity_claim() -> 
     assert shot.audio_cast == ["未绑定的拟音标签"]
 
 
-def test_deterministic_single_dialogue_marks_named_listener_offscreen() -> None:
-    shot = _shot(
-        2,
-        action="少年看向纳兰嫣然，平静说出少女名字。",
-    )
-    shot.shot_size = "近景"
-    shot.characters = ["少年"]
-    shot.characters_visible = ["少年"]
-    shot.dialogues = [Dialogue(speaker="少年", line="纳兰嫣然。", emotion="平静")]
-    shot.first_frame_desc = "少年近景，目光看向纳兰嫣然。"
-    shot.last_frame_desc = "少年说完后仍看着纳兰嫣然。"
-    issue = (
-        "shots[1](shot_no=2) 是「少年」的单人对白近景，但 action_desc/首尾帧仍把"
-        "「纳兰嫣然」写进可见画面；请把听者明确留在画外，下一话轮再切反打"
-    )
-
-    candidate = _deterministic_dialogue_framing_candidate(shot, [issue])
-
-    assert candidate is not None
-    assert candidate.characters == ["少年"]
-    assert candidate.characters_visible == ["少年"]
-    assert "画外纳兰嫣然" in candidate.action_desc
-    assert "画外纳兰嫣然" in candidate.first_frame_desc
-    assert "画外纳兰嫣然" in candidate.last_frame_desc
-    assert "画外" not in shot.action_desc
 
 
 def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repair_db) -> None:
@@ -2081,85 +1998,6 @@ def test_repair_plan_uses_deterministic_dialogue_candidate_without_provider(repa
     assert planned.repair_candidate_shots[0]["shot_size"] == "近景"
 
 
-def test_missing_spoken_repair_updates_isolated_outline_audio_authority(
-    repair_db,
-) -> None:
-    conn, _screenplay = repair_db
-    shot = _shot(2, action="少年告知众人结果并承诺继续处理。")
-    shot.primary_action = "少年向众人确认结果并承诺继续处理"
-    shot.characters = ["少年"]
-    shot.characters_visible = ["少年"]
-    shot.first_frame_desc = "少年看向众人，正准备开口说明结果。"
-    shot.last_frame_desc = "少年说完承诺，众人安静听着。"
-    conn.execute(
-        "UPDATE shots SET characters=?,action_desc=?,first_frame_desc=?,"
-        "last_frame_desc=?,dialogues='[]',shot_contract_json=? WHERE id='s2'",
-        (
-            json.dumps(shot.characters, ensure_ascii=False),
-            shot.action_desc,
-            shot.first_frame_desc,
-            shot.last_frame_desc,
-            json.dumps(shot.model_dump(mode="json"), ensure_ascii=False),
-        ),
-    )
-    outline = StoryboardOutline(
-        episode_no=1,
-        shots=[
-            StoryboardOutlineShot(
-                shot_no=number,
-                scene_setting="日，广场",
-                beat=f"少年完成第{number}步动作",
-                audio_cast=[],
-            )
-            for number in range(1, 4)
-        ],
-    )
-    screenplay = EpisodeScreenplay(
-        episode_no=1,
-        full_script_text="少年向众人说明结果。",
-        dialogue_chains=[KeyDialogueChain(
-            chain_id="DC1",
-            topic="结果",
-            turns=[KeyDialogueTurn(
-                speaker="少年",
-                line="结果已经确定，我会继续处理。",
-                source_text="结果已经确定，我会继续处理。",
-            )],
-        )],
-    )
-    conn.execute(
-        "UPDATE episodes SET screenplay_json=?,storyboard_outline_json=? WHERE id='e1'",
-        (screenplay.model_dump_json(), outline.model_dump_json()),
-    )
-    conn.commit()
-    plan = route_issues(
-        ["shot_no=2 没有有效 dialogues/audio_timeline 口播，但画面合同要求人物说话"],
-        validated_prefix_end=3,
-        semantic_diagnosis={
-            "scope": "current_shot",
-            "selected_strategy": "repair_current",
-        },
-    )
-
-    planned = _apply_repair(
-        SupervisorCheckpoint(
-            episode_id="e1",
-            planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
-            validated_prefix_end=3,
-        ),
-        plan,
-        conn,
-        "e1",
-        list(_current_board(conn).shots),
-        outline,
-    )
-
-    assert planned.last_repair["deterministic_repair"] == "published_dialogue_clause"
-    candidate_outline = StoryboardOutline.model_validate(
-        planned.last_repair["candidate_outline"]
-    )
-    assert candidate_outline.shots[1].audio_cast == ["少年"]
-    assert planned.repair_candidate_shots[0]["dialogues"][0]["speaker"] == "少年"
 
 
 def test_early_final_marker_cannot_finish_before_persisted_plan() -> None:

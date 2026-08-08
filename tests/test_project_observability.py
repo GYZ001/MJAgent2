@@ -210,6 +210,14 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
                meta='{"stage":"discover_character_candidates","discovery_phase":"current"}'
            WHERE id=1"""
     )
+    scoped_db.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,request_json,response_json,meta,run_id
+           ) VALUES(
+               1.5,'storyboard_candidate_normalization','local','NORMALIZED',5,
+               NULL,NULL,'{"changes":{"count":2},"episode_id":"e1"}','run-1'
+           )"""
+    )
     scoped_db.commit()
 
     tree = observability_api._trace_tree("p1", "runs", "run-1")
@@ -222,6 +230,25 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
     assert by_id["call:1"]["node_role"] == "model_processing"
     assert by_id["call:1"]["name"] == "提取本集人物候选"
     assert by_id["call:1"]["subtitle"] == "通过文本生成模型"
+    program = next(
+        item
+        for item in tree["nodes"]
+        if item["id"] != "call:1"
+        and item["kind"] == "call"
+        and item["node_role"] == "program_processing"
+    )
+    group = by_id[program["parent_id"]]
+    assert group["kind"] == "stage"
+    assert group["node_role"] == "business_stage"
+    assert group["parent_id"] == "run:run-1"
+    assert all(
+        by_id[child_id]["node_role"] == "business_stage"
+        for child_id in [
+            item["id"]
+            for item in tree["nodes"]
+            if item["parent_id"] == "run:run-1"
+        ]
+    )
 
     step = observability_api._trace_node_detail(
         "p1", "runs", "run-1", "step:step-1", "auto",
@@ -238,6 +265,19 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
     assert "已隐藏" not in json.dumps(call, ensure_ascii=False)
     assert "***" not in json.dumps(call, ensure_ascii=False)
     assert call["output"]["response"]["result"] == "完成"
+
+    program_detail = observability_api._trace_node_detail(
+        "p1", "runs", "run-1", program["id"], "auto",
+    )
+    assert program_detail["input"] == {
+        "execution_context": {
+            "changes": {"count": 2},
+            "episode_id": "e1",
+        },
+        "payload_recorded": False,
+    }
+    assert program_detail["output"]["status"] == "NORMALIZED"
+    assert program_detail["output"]["payload_recorded"] is False
 
     project_detail = observability_api.scoped_call("p1", 1)
     project_download = observability_api.scoped_call_download("p1", 1)

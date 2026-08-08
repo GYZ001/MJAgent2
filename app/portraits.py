@@ -43,7 +43,6 @@ from app.refs import (
     PRODUCTION_APPEARANCE_MIN_CHARS,
     _safe_name,
     missing_production_appearance_dimensions,
-    portrait_appearance_anchor,
     portrait_prompt,
     production_appearance_anchor,
 )

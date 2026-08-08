@@ -5,11 +5,13 @@ export default function JsonViewer({
   data,
   raw,
   collapsed = false,
+  expandAll = false,
   maxHeight = '45vh',
 }: {
   data?: unknown
   raw?: string
   collapsed?: boolean
+  expandAll?: boolean
   maxHeight?: string
 }) {
   const [expanded, setExpanded] = useState(!collapsed)
@@ -67,14 +69,22 @@ export default function JsonViewer({
       </div>
       {expanded && (
         <div className="json-viewer-body" style={{ maxHeight }}>
-          <JsonNode value={parsed} depth={0} />
+          <JsonNode value={parsed} depth={0} expandAll={expandAll} />
         </div>
       )}
     </div>
   )
 }
 
-function JsonNode({ value, depth }: { value: unknown; depth: number }) {
+function JsonNode({
+  value,
+  depth,
+  expandAll,
+}: {
+  value: unknown
+  depth: number
+  expandAll: boolean
+}) {
   if (value === null) return <span className="json-null">null</span>
   if (typeof value === 'boolean') return <span className="json-bool">{String(value)}</span>
   if (typeof value === 'number') return <span className="json-number">{String(value)}</span>
@@ -82,12 +92,12 @@ function JsonNode({ value, depth }: { value: unknown; depth: number }) {
 
   if (Array.isArray(value)) {
     if (value.length === 0) return <span className="json-punctuation">[]</span>
-    return <JsonCollapsible label={`Array(${value.length})`} depth={depth} open={depth < 2}>
+    return <JsonCollapsible label={`Array(${value.length})`} depth={depth} open={expandAll || depth < 2}>
       {value.map((item, i) => (
         <div className="json-row" key={i}>
           <span className="json-key">{i}</span>
           <span className="json-punctuation">: </span>
-          <JsonNode value={item} depth={depth + 1} />
+          <JsonNode value={item} depth={depth + 1} expandAll={expandAll} />
         </div>
       ))}
     </JsonCollapsible>
@@ -97,12 +107,12 @@ function JsonNode({ value, depth }: { value: unknown; depth: number }) {
     const entries = Object.entries(value as Record<string, unknown>)
     if (entries.length === 0) return <span className="json-punctuation">{'{}'}</span>
     return (
-      <JsonCollapsible label={`Object(${entries.length})`} depth={depth} open={depth < 2}>
+      <JsonCollapsible label={`Object(${entries.length})`} depth={depth} open={expandAll || depth < 2}>
         {entries.map(([k, v]) => (
           <div className="json-row" key={k}>
             <span className="json-key">"{k}"</span>
             <span className="json-punctuation">: </span>
-            <JsonNode value={v} depth={depth + 1} />
+            <JsonNode value={v} depth={depth + 1} expandAll={expandAll} />
           </div>
         ))}
       </JsonCollapsible>

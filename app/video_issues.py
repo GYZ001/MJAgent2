@@ -181,7 +181,7 @@ def issues_from_job_failure(
 
     if provider_state == "model_rejected":
         return [_mk(
-            reason_code or "VIDEO_PROVIDER_MODEL_REJECTED",
+            "VIDEO_PROVIDER_MODEL_REJECTED",
             IssueSeverity.BLOCKER,
             shot_id=sid,
             message=message or "视频模型明确拒绝本次输入",
@@ -193,6 +193,7 @@ def issues_from_job_failure(
             category="operational",
             extra={
                 "provider_create_state": provider_state,
+                "provider_reason_code": reason_code or None,
                 "pause_state": "PAUSED_EXTERNAL",
                 "recommended_level": "L6",
                 "runtime_blocking": True,

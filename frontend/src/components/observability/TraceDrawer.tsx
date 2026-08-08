@@ -22,7 +22,7 @@ export type TraceNodeRole =
 export interface TraceNode {
   id: string;
   parent_id: string | null;
-  kind: "run" | "step" | "job" | "call";
+  kind: "run" | "stage" | "step" | "job" | "call";
   node_role?: TraceNodeRole;
   name: string;
   subtitle: string;
@@ -79,6 +79,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 const KIND_LABELS: Record<TraceNode["kind"], string> = {
   run: "总任务",
+  stage: "业务环节",
   step: "业务步骤",
   job: "异步任务",
   call: "处理记录",
@@ -104,7 +105,7 @@ const LEGACY_NODE_LABELS: Record<string, string> = {
 export function traceNodeRole(node: TraceNode): TraceNodeRole {
   if (node.node_role) return node.node_role;
   if (node.kind === "run") return "task";
-  if (node.kind === "step") return "business_stage";
+  if (node.kind === "stage" || node.kind === "step") return "business_stage";
   if (node.kind === "job") return "program_processing";
   return /metric|normalization|compile|recompile|cache|repair_required/i.test(node.name)
     ? "program_processing"
@@ -221,9 +222,17 @@ export function traceNodeSummaries(nodes: TraceNode[]) {
 
 export function traceInitialExpandedIds(nodes: TraceNode[], selectedId: string) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
+  const parentIds = new Set(
+    nodes
+      .map((node) => node.parent_id)
+      .filter((nodeId): nodeId is string => Boolean(nodeId)),
+  );
   const expanded = new Set(
-    traceRoots(nodes)
-      .filter((node) => traceNodeRole(node) === "task")
+    nodes
+      .filter((node) => (
+        parentIds.has(node.id)
+        && ["task", "business_stage"].includes(traceNodeRole(node))
+      ))
       .map((node) => node.id),
   );
   let current = byId.get(selectedId);
@@ -232,6 +241,16 @@ export function traceInitialExpandedIds(nodes: TraceNode[], selectedId: string) 
     current = byId.get(current.parent_id);
   }
   return expanded;
+}
+
+export function traceNodeOrder(left: TraceNode, right: TraceNode) {
+  const leftStarted = Number(left.started_at);
+  const rightStarted = Number(right.started_at);
+  const leftHasTime = Number.isFinite(leftStarted) && leftStarted > 0;
+  const rightHasTime = Number.isFinite(rightStarted) && rightStarted > 0;
+  if (leftHasTime !== rightHasTime) return leftHasTime ? -1 : 1;
+  if (leftHasTime && leftStarted !== rightStarted) return leftStarted - rightStarted;
+  return left.id.localeCompare(right.id, "zh-CN");
 }
 
 function statusTone(status: string) {
@@ -436,9 +455,13 @@ export default function TraceDrawer({
       group.push(node);
       groups.set(node.parent_id, group);
     }
+    groups.forEach((group) => group.sort(traceNodeOrder));
     return groups;
   }, [trace?.nodes]);
-  const roots = useMemo(() => traceRoots(trace?.nodes || []), [trace?.nodes]);
+  const roots = useMemo(
+    () => traceRoots(trace?.nodes || []).sort(traceNodeOrder),
+    [trace?.nodes],
+  );
   const displayNames = useMemo(
     () => traceDisplayNames(trace?.nodes || []),
     [trace?.nodes],
@@ -618,7 +641,13 @@ export default function TraceDrawer({
                 )}
                 {detail && !detailLoading && (
                   <div className="trace-json">
-                    <JsonViewer data={detailValue} collapsed={false} maxHeight="calc(100vh - 340px)" />
+                    <JsonViewer
+                      key={`${selectedId}:${tab}`}
+                      data={detailValue}
+                      collapsed={false}
+                      expandAll
+                      maxHeight="calc(100vh - 340px)"
+                    />
                   </div>
                 )}
               </section>

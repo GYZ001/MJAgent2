@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import re
@@ -16,11 +15,10 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app import config, errors
-from app.db import get_conn, get_setting
+from app.db import get_conn
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
-from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
-from app.loops.base import is_structural_issue
+from app.harness.types import Evaluation, EvidenceArtifact, Issue
 from app.repair_router import (
     RepairPlan,
     bump_fingerprint_count,
@@ -29,6 +27,7 @@ from app.repair_router import (
 from app.schemas import (
     Bible,
     CognitiveBridgePlan,
+    EpisodeScreenplay,
     Shot,
     Storyboard,
     StoryboardOutline,
@@ -652,7 +651,6 @@ def _repair_message_atoms(messages: list[str]) -> set[tuple[str, str]]:
 
 def _deterministic_dialogue_framing_candidate(
     shot: Shot,
-    issue_messages: list[str] | None = None,
 ) -> Shot | None:
     """Return the smallest contract-preserving framing fix when it is unambiguous."""
     from app.continuity import dialogue_action_staging_kind
@@ -672,146 +670,7 @@ def _deterministic_dialogue_framing_candidate(
             tags.append("dialogue_action_staging")
         candidate.risk_tags = tags
 
-    messages = [str(message or "") for message in (issue_messages or [])]
-    speakers = {
-        match.group(1).strip()
-        for message in messages
-        for match in re.finditer(r"是「([^」]+)」的单人对白近景", message)
-        if match.group(1).strip()
-    }
-    offscreen_names = {
-        match.group(1).strip()
-        for message in messages
-        for match in re.finditer(r"仍把「([^」]+)」写进可见画面", message)
-        if match.group(1).strip()
-    }
-    if len(speakers) == 1 and offscreen_names:
-        speaker = next(iter(speakers))
-        candidate.characters = [speaker]
-        candidate.characters_visible = [speaker]
-        for name in offscreen_names - {speaker}:
-            pattern = re.compile(rf"(?<!画外){re.escape(name)}")
-            for field in (
-                "action_desc", "state_in", "primary_action", "state_out",
-                "first_frame_desc", "last_frame_desc", "spatial_anchor",
-            ):
-                value = getattr(candidate, field, None)
-                if value and name in value:
-                    setattr(candidate, field, pattern.sub(f"画外{name}", value))
-                    changed = True
-
     return candidate if changed else None
-
-
-def _deterministic_missing_spoken_candidate(
-    shot: Shot,
-    screenplay,
-) -> Shot | None:
-    """Fill a silent speech contract from an exact published dialogue clause."""
-    from app.continuity import implicit_speech_without_dialogue_errors
-    from app.schemas import Dialogue
-    from app.spoken_contract import max_speech_chars
-    from app.textmatch import (
-        KEY_LINE_BIGRAM_COVERAGE,
-        KEY_LINE_PRESENT_RATIO,
-        atomize_claim,
-        bigram_coverage,
-        condense,
-        longest_run_ratio,
-    )
-
-    if not implicit_speech_without_dialogue_errors(shot):
-        return None
-    allowed_speakers = {
-        str(value or "").strip()
-        for value in [
-            *(shot.characters or []),
-            *(shot.characters_visible or []),
-            *(shot.audio_cast or []),
-        ]
-        if str(value or "").strip()
-    }
-    if not allowed_speakers:
-        return None
-    preferred_speakers: set[str] = set()
-    plan = getattr(screenplay, "narrative_plan", None)
-    action_id = str(getattr(shot, "primary_action_id", "") or "").strip()
-    if plan is not None and action_id:
-        action = next((
-            item for item in plan.atomic_actions
-            if str(item.action_id or "").strip() == action_id
-        ), None)
-        actor_ids = {
-            str(value or "").strip()
-            for value in (action.actor_ids if action is not None else [])
-            if str(value or "").strip()
-        }
-        for identity in plan.identity_contracts:
-            if str(identity.identity_id or "").strip() not in actor_ids:
-                continue
-            preferred_speakers.update(filter(None, [
-                str(identity.display_name or "").strip(),
-                *[
-                    str(value or "").strip()
-                    for value in identity.voice_ids
-                ],
-            ]))
-    candidate_speakers = preferred_speakers & allowed_speakers
-    if not candidate_speakers:
-        candidate_speakers = allowed_speakers
-    context = "；".join(filter(None, (
-        shot.primary_action,
-        shot.action_desc,
-        shot.state_in,
-        shot.state_out,
-        shot.first_frame_desc,
-        shot.last_frame_desc,
-    )))
-    capacity = max_speech_chars(int(shot.duration_s or 0))
-    ranked: list[tuple[float, int, str, str]] = []
-    for chain in screenplay.dialogue_chains or []:
-        for turn in chain.turns or []:
-            speaker = str(turn.speaker or "").strip()
-            line = str(turn.line or "").strip()
-            if speaker not in candidate_speakers or not line:
-                continue
-            clauses = [line, *atomize_claim(line)]
-            for clause in dict.fromkeys(clauses):
-                content_chars = len(condense(clause))
-                if not 4 <= content_chars <= capacity:
-                    continue
-                run_score = longest_run_ratio(clause, context)
-                bigram_score = bigram_coverage(clause, context)
-                score = max(run_score, bigram_score)
-                if (
-                    run_score >= KEY_LINE_PRESENT_RATIO
-                    or bigram_score >= KEY_LINE_BIGRAM_COVERAGE
-                ):
-                    ranked.append((score, -content_chars, speaker, clause))
-    if not ranked:
-        return None
-    _score, _size, speaker, line = max(ranked)
-    candidate = Shot.model_validate(shot.model_dump(mode="json"))
-    candidate.dialogues = [
-        Dialogue(
-            speaker=speaker,
-            line=line,
-            emotion="平静",
-            delivery="spoken_dialogue",
-        ),
-    ]
-    candidate.audio_cast = list(dict.fromkeys([
-        *(candidate.audio_cast or []),
-        speaker,
-    ]))
-    candidate.audio_timeline = []
-    from app.continuity import ensure_audio_timeline
-
-    ensure_audio_timeline(
-        candidate,
-        getattr(screenplay, "voice_bible", None),
-    )
-    return candidate
 
 
 def _deterministic_ambient_audio_cast_candidate(
@@ -4262,27 +4121,17 @@ def _apply_repair(
         if (
             target is not None
             and not narrative_repair_active
-            and "DIALOGUE_FRAMING_INVALID" in set(plan.issue_codes or [])
         ):
-            deterministic = _deterministic_dialogue_framing_candidate(
-                target,
-                plan.issue_messages,
-            )
+            deterministic = _deterministic_dialogue_framing_candidate(target)
             deterministic_kind = "dialogue_action_framing"
-        if deterministic is None and target is not None:
-            deterministic = _deterministic_missing_spoken_candidate(
-                target,
-                repair_screenplay,
-            )
-            deterministic_kind = "published_dialogue_clause"
         if deterministic is None and target is not None:
             deterministic = _deterministic_ambient_audio_cast_candidate(target)
             deterministic_kind = "ambient_sound_identity_cleanup"
         if deterministic is not None:
-            if deterministic_kind in {
-                "published_dialogue_clause",
-                "ambient_sound_identity_cleanup",
-            } and candidate_outline is not None:
+            if (
+                deterministic_kind == "ambient_sound_identity_cleanup"
+                and candidate_outline is not None
+            ):
                 brief = next((
                     item for item in candidate_outline.shots
                     if int(item.shot_no) == window_start

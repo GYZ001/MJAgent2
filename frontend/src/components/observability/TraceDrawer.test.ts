@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   traceDisplayNames,
   traceInitialExpandedIds,
+  traceNodeOrder,
   traceNodeSummaries,
   traceNodeRole,
   traceRoots,
@@ -41,7 +42,7 @@ describe("调用树根节点识别", () => {
     ]);
   });
 
-  it("默认展开总任务和当前节点路径，其余业务环节保持合并", () => {
+  it("默认展开总任务和全部业务环节", () => {
     const nodes = [
       node("run:main", null, "task"),
       node("step:one", "run:main", "business_stage"),
@@ -50,10 +51,29 @@ describe("调用树根节点识别", () => {
       node("call:2", "step:two", "model_processing"),
     ];
 
-    expect([...traceInitialExpandedIds(nodes, "run:main")]).toEqual(["run:main"]);
+    expect([...traceInitialExpandedIds(nodes, "run:main")].sort()).toEqual([
+      "run:main",
+      "step:one",
+      "step:two",
+    ]);
     expect([...traceInitialExpandedIds(nodes, "call:2")].sort()).toEqual([
       "run:main",
+      "step:one",
       "step:two",
+    ]);
+  });
+
+  it("同一层节点按真实开始时间排序，无时间节点放在最后", () => {
+    const nodes = [
+      { ...node("step:late", "run:main", "business_stage"), started_at: 20 },
+      { ...node("step:unknown", "run:main", "business_stage"), started_at: null },
+      { ...node("step:early", "run:main", "business_stage"), started_at: 10 },
+    ];
+
+    expect(nodes.sort(traceNodeOrder).map((item) => item.id)).toEqual([
+      "step:early",
+      "step:late",
+      "step:unknown",
     ]);
   });
 

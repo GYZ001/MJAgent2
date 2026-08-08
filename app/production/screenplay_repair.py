@@ -2943,7 +2943,6 @@ async def run_screenplay_production(
         raise ScreenplayNarrativeGateError(message)
 
     # ---- Baseline（仅一次）----
-    baseline_created_this_activation = False
     if not rev.baseline_done:
         assert_baseline_allowed(rev, command="screenplay.generate", episode_id=episode_id)
         save_checkpoint(rev.id, {
@@ -3081,7 +3080,6 @@ async def run_screenplay_production(
                 input_fingerprint=input_fp,
                 expected_working_artifact_id=baseline_art["id"],
             )
-        baseline_created_this_activation = True
         checkpoint = {
             **checkpoint,
             "phase": "STRUCTURE_VALIDATION",
@@ -4943,8 +4941,6 @@ async def _llm_field_patch_once(
     compares at least two relation-level candidates and the selected candidate
     is CAS-applied to an isolated working artifact before full-graph QA.
     """
-    path = str((issue.evidence or {}).get("path") or "")
-    field = path.strip("/").split("/")[-1] if path else ""
     from app.harness import model_gateway
     from app.production.screenplay_document import screenplay_to_document
     from app.schemas import extract_json

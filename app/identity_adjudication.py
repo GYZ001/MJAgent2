@@ -14,7 +14,7 @@ from app.identity_authority import (
     identity_authority_registry,
     normalize_character_resolution,
 )
-from app.schemas import Bible, EpisodeScreenplay, extract_json
+from app.schemas import Bible, EpisodeScreenplay
 from app.screenplay_ir import (
     ScreenplayGenerationIR,
     ScreenplayIRIdentityConflictError,

@@ -748,7 +748,6 @@ async def generate_screenplay_scene_shards(
     """Generate/reuse independent shards with a per-episode concurrency cap."""
     episode_id = str(episode.get("id") or f"episode-{episode['episode_no']}")
     scene_plan_map = {plan.key: plan for plan in blueprint.scene_plans}
-    node_map = {node.key: node for node in blueprint.nodes}
     source_by_id = {
         segment.segment_id: segment.text
         for segment in index_source_segments(source_text)

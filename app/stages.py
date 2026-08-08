@@ -6657,6 +6657,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         )
     target = episode["target_duration_s"]
     min_shots, max_shots = storyboard_shot_count_range(target)
+    key_content_block = _storyboard_key_content_block(screenplay)
     narrative_shot_contract = _storyboard_narrative_contract_block(
         include_outline_windows=True,
     )

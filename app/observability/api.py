@@ -759,6 +759,52 @@ def _trace_tree(
             "latency_ms": int(call.get("latency_ms") or 0),
         })
     primary = next(run for run in runs if str(run["id"]) == primary_run_id)
+    primary_node_id = f"run:{primary_run_id}"
+    direct_processing = [
+        node
+        for node in nodes
+        if node.get("parent_id") == primary_node_id
+        and node.get("node_role") not in {"business_stage", "task"}
+    ]
+    if direct_processing:
+        started_values = [
+            float(node["started_at"])
+            for node in direct_processing
+            if node.get("started_at") is not None
+        ]
+        finished_values = [
+            float(node["finished_at"])
+            for node in direct_processing
+            if node.get("finished_at") is not None
+        ]
+        stage_id = f"stage:{primary_run_id}:internal"
+        for node in direct_processing:
+            node["parent_id"] = stage_id
+        nodes.append({
+            "id": stage_id,
+            "parent_id": primary_node_id,
+            "kind": "stage",
+            "node_role": "business_stage",
+            "name": (
+                f"{_trace_label(primary.get('workflow_type'), _TRACE_WORKFLOW_LABELS, '业务任务')}"
+                "内部处理"
+            ),
+            "subtitle": "组织未单独归属环节的模型与程序处理",
+            "status": primary.get("status") or "unknown",
+            "started_at": min(started_values) if started_values else primary.get("started_at"),
+            "finished_at": max(finished_values) if finished_values else primary.get("finished_at"),
+            "latency_ms": max(
+                0,
+                int(
+                    (
+                        max(finished_values) - min(started_values)
+                        if started_values and finished_values
+                        else 0
+                    )
+                    * 1000
+                ),
+            ),
+        })
     return _scope({
         "source": {"type": object_type, "id": object_id},
         "run_id": primary_run_id,
@@ -824,7 +870,47 @@ def _trace_node_detail(
         kind, raw_id = node_id.split(":", 1)
     except ValueError as exc:
         raise HTTPException(422, "链路节点标识无效") from exc
-    if kind == "run":
+    if kind == "stage":
+        children = [
+            item
+            for item in tree["nodes"]
+            if item.get("parent_id") == node_id
+        ]
+        input_value = {
+            "purpose": node.get("name"),
+            "ordered_processing_nodes": [
+                {
+                    "id": child.get("id"),
+                    "name": child.get("name"),
+                    "role": child.get("node_role"),
+                    "started_at": child.get("started_at"),
+                }
+                for child in sorted(
+                    children,
+                    key=lambda child: (
+                        float(child.get("started_at") or float("inf")),
+                        str(child.get("id") or ""),
+                    ),
+                )
+            ],
+        }
+        output_value = {
+            "status": node.get("status"),
+            "processing_node_count": len(children),
+            "model_node_count": sum(
+                child.get("node_role") == "model_processing"
+                for child in children
+            ),
+            "program_node_count": sum(
+                child.get("node_role") == "program_processing"
+                for child in children
+            ),
+        }
+        metadata = {
+            "virtual_group": True,
+            "source": "persisted_trace_links",
+        }
+    elif kind == "run":
         row = repository.get_run(raw_id)
         if not row:
             raise HTTPException(404, "运行节点不存在")
@@ -944,12 +1030,22 @@ def _trace_node_detail(
         item = _call_row(int(raw_id))
         if not item:
             raise HTTPException(404, "调用节点不存在")
-        input_value = _trace_json_value(item.get("request_json"))
+        request_value = _trace_json_value(item.get("request_json"))
+        response_value = _trace_json_value(item.get("response_json"))
+        meta_value = _trace_json_value(item.get("meta"))
+        if node.get("node_role") == "program_processing" and request_value is None:
+            input_value = {
+                "execution_context": meta_value or {},
+                "payload_recorded": False,
+            }
+        else:
+            input_value = request_value
         output_value = {
-            "response": _trace_json_value(item.get("response_json")),
+            "response": response_value,
             "status": system_api._effective_call_status(item),
             "http_status": item.get("http_status"),
             "error": item.get("error"),
+            "payload_recorded": response_value is not None,
         }
         metadata = {
             "call_id": item.get("id"),
@@ -961,7 +1057,7 @@ def _trace_node_detail(
             "operation_id": item.get("operation_id"),
             "attempt_no": item.get("attempt_no"),
             "received_chars": item.get("received_chars"),
-            "meta": _trace_json_value(item.get("meta")),
+            "meta": meta_value,
         }
     else:
         raise HTTPException(404, "链路节点类型不存在")
