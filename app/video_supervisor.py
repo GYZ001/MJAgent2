@@ -989,7 +989,7 @@ def rebuild_coverage_ledger(
             last_codes = [i.code for i in persisted]
 
         # 若有失败 job 无成功版，补充 issue
-        if grade == "C" and not best:
+        if grade == "C" and not best and not persisted:
             fail_job = conn.execute(
                 """SELECT * FROM jobs WHERE shot_id=? AND kind='video'
                    AND status IN ('failed','paused_budget','waiting_human')

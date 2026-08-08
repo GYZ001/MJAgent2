@@ -861,7 +861,7 @@ def test_terminal_continuity_wait_becomes_routable_issue(memdb):
     ledger = rebuild_coverage_ledger(eid)
     blocked = next(e for e in ledger.entries if e.shot_no == 2)
     assert blocked.active_job_id is None
-    assert "VIDEO_CHAIN_ANCHOR_BLOCKED" in blocked.last_issue_codes
+    assert blocked.last_issue_codes == ["VIDEO_CHAIN_ANCHOR_BLOCKED"]
 
 
 def test_terminal_continuity_wait_does_not_touch_adopted_shot(memdb):
@@ -1072,6 +1072,7 @@ def test_dispatch_fences_model_rejection_and_unsettled_provider_handle(
         ShotCoverageEntry(shot_no=1, shot_id=rejected_shot, grade="C")
     )
     assert issues[0].code == "VIDEO_PROVIDER_MODEL_REJECTED"
+    assert issues[0].evidence["provider_reason_code"] == "ANY_FUTURE_REJECTION"
     assert issues[0].evidence["pause_state"] == "PAUSED_EXTERNAL"
     assert calls["n"] == 0
 

@@ -140,7 +140,8 @@ def test_structured_model_rejection_is_non_repairable_and_never_retried() -> Non
     )
 
     assert len(issues) == 1
-    assert issues[0].code == "ANY_FUTURE_MODEL_REJECTION"
+    assert issues[0].code == "VIDEO_PROVIDER_MODEL_REJECTED"
+    assert issues[0].evidence["provider_reason_code"] == "ANY_FUTURE_MODEL_REJECTION"
     assert issues[0].repairable is False
     plan = route(issues)
     assert plan.is_paid is False

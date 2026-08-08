@@ -202,7 +202,7 @@ def issues_from_job_failure(
 
     if status == "paused_budget":
         return [_mk(
-            reason_code or "VIDEO_BUDGET_PAUSED",
+            "VIDEO_BUDGET_PAUSED",
             IssueSeverity.BLOCKER,
             shot_id=sid,
             message=message or "视频任务因预算暂停",
@@ -213,6 +213,7 @@ def issues_from_job_failure(
             repairable=False,
             category="operational",
             extra={
+                "provider_reason_code": reason_code or None,
                 "pause_state": "WAITING_AUTHORIZATION",
                 "recommended_level": "L6",
                 "runtime_blocking": True,
@@ -221,7 +222,7 @@ def issues_from_job_failure(
 
     if status in {"waiting_human", "paused"} or stage.endswith("waiting_human"):
         return [_mk(
-            reason_code or "VIDEO_OPERATION_WAITING_HUMAN",
+            "VIDEO_OPERATION_WAITING_HUMAN",
             IssueSeverity.BLOCKER,
             shot_id=sid,
             message=message or "视频任务等待人工处理",
@@ -232,6 +233,7 @@ def issues_from_job_failure(
             repairable=False,
             category="operational",
             extra={
+                "provider_reason_code": reason_code or None,
                 "pause_state": "WAITING_HUMAN",
                 "recommended_level": "L6",
                 "runtime_blocking": True,
@@ -242,16 +244,19 @@ def issues_from_job_failure(
         IssueSeverity.WARNING if status == "waiting_retry" else IssueSeverity.BLOCKER
     )
     return [_mk(
-        reason_code or "VIDEO_OPERATION_FAILED",
+        "VIDEO_OPERATION_FAILED",
         severity,
         shot_id=sid,
         message=message or "视频任务未完成",
         shot_no=shot_no,
         version_id=vid,
         job_id=jid,
-        rule_id=reason_code or status or "operation_failed",
+        rule_id=status or "operation_failed",
         category="operational",
-        extra={"recommended_level": "L0" if status == "waiting_retry" else "L1"},
+        extra={
+            "provider_reason_code": reason_code or None,
+            "recommended_level": "L0" if status == "waiting_retry" else "L1",
+        },
     )]
 
 

@@ -1213,6 +1213,12 @@ def test_refresh_portrait_episode_persistence_binds_ready_pack(monkeypatch, tmp_
     reuse_views = list_portrait_views(rows[2]["id"], conn=conn)
     assert len(reuse_views) == 3
     assert all(Path(v["image_path"]).exists() for v in reuse_views)
+    bible = json.loads(conn.execute(
+        "SELECT bible_json FROM projects WHERE id='proj'"
+    ).fetchone()["bible_json"])
+    character = bible["characters"][0]
+    assert character["appearance_canonical"] == "黑发"
+    assert character["ref_image_path"] == str(img)
 
 
 def test_refresh_scene_pack_failure_does_not_switch(monkeypatch, tmp_path) -> None:

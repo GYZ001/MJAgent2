@@ -3454,6 +3454,41 @@ def _update_bible_appearance(conn, project_id: str, name: str, appearance: str, 
     conn.execute("UPDATE projects SET bible_json=? WHERE id=?", (json.dumps(data, ensure_ascii=False), project_id))
 
 
+def reconcile_bible_display_appearances(conn, project_id: str) -> list[str]:
+    """Keep the project card on each character's current persistent portrait segment."""
+    row = conn.execute(
+        "SELECT bible_json FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone()
+    if not row or not row["bible_json"]:
+        return []
+    data = json.loads(row["bible_json"])
+    changed: list[str] = []
+    for character in data.get("characters", []):
+        name = str(character.get("name") or "").strip()
+        if not name:
+            continue
+        portrait = _open_portrait(conn, project_id, name)
+        if portrait is None:
+            continue
+        appearance = str(portrait["appearance"] or "").strip()
+        image_path = str(portrait["image_path"] or "").strip()
+        if appearance and character.get("appearance_canonical") != appearance:
+            character["appearance_canonical"] = appearance
+            changed.append(name)
+        if image_path and character.get("ref_image_path") != image_path:
+            character["ref_image_path"] = image_path
+            if name not in changed:
+                changed.append(name)
+    if changed:
+        conn.execute(
+            "UPDATE projects SET bible_json=? WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), project_id),
+        )
+        conn.commit()
+    return changed
+
+
 async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int,
                                      new_appearance: str, style: str, bible_version: int,
                                      *, change_meta: dict | None = None) -> dict | None:
@@ -3467,6 +3502,7 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
             return None  # 并发已处理，或本集（之后）才登场的图，无需切分
         new_path, new_prompt = await _redraw_portrait(
             project_id, name, style, new_appearance, base_path=cur["image_path"], ep_start=episode_no)
+        persistence = (change_meta or {}).get("persistence") or "persistent"
         artifact_supported = _has_column(conn, "character_portraits", "artifact_id")
         pack_supported = _has_column(conn, "character_portraits", "pack_status")
         artifact = None
@@ -3583,7 +3619,6 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
             pack_status = "ready"
             # 原子切换：关闭旧区间，开放新区间
             conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
-            persistence = (change_meta or {}).get("persistence") or "persistent"
             new_ep_end = episode_no if persistence == "episode" else None
             conn.execute(
                 "UPDATE character_portraits SET ep_end=?, pack_status=? WHERE id=?",
@@ -3605,7 +3640,16 @@ async def _refresh_portrait_on_drift(project_id: str, name: str, episode_no: int
             conn.execute("UPDATE character_portraits SET ep_end=? WHERE id=?", (episode_no - 1, cur["id"]))
             conn.commit()
 
-        _update_bible_appearance(conn, project_id, name, new_appearance, new_path)
+        if persistence == "episode":
+            _update_bible_appearance(
+                conn,
+                project_id,
+                name,
+                str(cur["appearance"] or ""),
+                str(cur["image_path"] or ""),
+            )
+        else:
+            _update_bible_appearance(conn, project_id, name, new_appearance, new_path)
         conn.commit()
         return {"ep_start": episode_no, "image_path": new_path, "pack_status": pack_status,
                 "portrait_id": new_portrait_id}
@@ -3892,6 +3936,8 @@ async def ensure_cards_for_screenplay(project_id: str, episode_no: int, screenpl
                 continue
             if res:
                 redrawn.append({"name": name, "reason": v["reason"], **res})
+
+    reconcile_bible_display_appearances(conn, project_id)
 
     return {
         "checked": len(unknown),
