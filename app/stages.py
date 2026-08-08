@@ -15,7 +15,7 @@ import math
 import re
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import config, hiagent, textmatch
 from app.character_policy import (
@@ -1182,6 +1182,20 @@ class StoryboardShotDraft(BaseModel):
     episode_no: int
     shot: Shot
     is_final: bool = False
+
+    @model_validator(mode="after")
+    def require_production_frames(self) -> "StoryboardShotDraft":
+        """Reject a draft that cannot be handed to keyframe/video production."""
+        missing = [
+            field
+            for field in ("first_frame_desc", "last_frame_desc")
+            if not str(getattr(self.shot, field, "") or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                "shot 缺少分镜生产必填字段：" + ", ".join(missing)
+            )
+        return self
 
 
 class DirectedSceneShotDraft(BaseModel):
@@ -8757,6 +8771,19 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
     if identity_errors:
         raise StageError("分镜人物合同", identity_errors)
     draft.shot = normalized_board.shots[-1]
+    missing_frames = [
+        field
+        for field in ("first_frame_desc", "last_frame_desc")
+        if not str(getattr(draft.shot, field, "") or "").strip()
+    ]
+    if missing_frames:
+        raise StageError(
+            "分镜生产字段合同",
+            [
+                f"第 {shot_no} 镜缺少分镜生产必填字段："
+                + ", ".join(missing_frames)
+            ],
+        )
     return draft
 
 

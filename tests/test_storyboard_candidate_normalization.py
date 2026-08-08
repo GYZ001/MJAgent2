@@ -884,6 +884,8 @@ def test_storyboard_loop_recovers_broken_json_then_null_event_id(monkeypatch) ->
                 "scene_setting": "日，测验广场",
                 "characters": ["萧炎"],
                 "action_desc": "萧炎转身走回队伍最后一排。",
+                "first_frame_desc": "萧炎站在测验碑前，身体朝向队伍末尾。",
+                "last_frame_desc": "同一机位，萧炎已经回到队伍最后一排站定。",
                 "story_event_id": None,
             },
         }, ensure_ascii=False),

@@ -9,6 +9,8 @@
 
 import asyncio
 
+import pytest
+
 from app import config, stages
 from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay,
                          InformationItem, Scene, Shot, StoryboardOutline,
@@ -70,6 +72,15 @@ def _episode() -> dict:
 
 def _draft(shot: Shot, *, is_final: bool) -> StoryboardShotDraft:
     return StoryboardShotDraft(episode_no=2, shot=shot, is_final=is_final)
+
+
+@pytest.mark.parametrize("field", ["first_frame_desc", "last_frame_desc"])
+def test_storyboard_shot_draft_rejects_missing_production_frame(field: str) -> None:
+    shot = _shot(1)
+    setattr(shot, field, "   ")
+
+    with pytest.raises(ValueError, match="分镜生产必填字段"):
+        StoryboardShotDraft(episode_no=2, shot=shot, is_final=False)
 
 
 def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bool,
