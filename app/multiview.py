@@ -230,6 +230,21 @@ def scene_view_prompt(visual_style: str, scene_canonical: str, view_role: str) -
     )
 
 
+def scene_multiview_generation_anchor(
+    scene_canonical: str,
+    parent_prompt: str | None,
+) -> str:
+    """Continue from the exact prompt that successfully produced the parent.
+
+    The approved canonical remains the QA authority.  A parent prompt may be
+    an equivalent provider-compatible representation produced after a
+    technical failure; feeding the original representation back into every
+    derived view would repeat that failure and strand an otherwise usable
+    primary image.
+    """
+    return str(parent_prompt or "").strip() or str(scene_canonical or "").strip()
+
+
 # ---------- 查询 ----------
 
 def portrait_row_for_episode(
@@ -1577,7 +1592,11 @@ async def ensure_scene_multiview_pack(
     est = existing_views.get("establishing")
     parent = conn.execute("SELECT * FROM scene_references WHERE id=?", (scene_reference_id,)).fetchone()
     base_est = base_views.get("establishing") or {}
-    est_prompt = scene_view_prompt(visual_style, scene_canonical, "establishing")
+    generation_anchor = scene_multiview_generation_anchor(
+        scene_canonical,
+        parent["prompt"] if parent else None,
+    )
+    est_prompt = scene_view_prompt(visual_style, generation_anchor, "establishing")
     est_prompt_for_fp = (parent["prompt"] if parent and parent["prompt"] else est_prompt)
     est_fp = view_input_fingerprint(
         view_role="establishing",
@@ -1658,7 +1677,7 @@ async def ensure_scene_multiview_pack(
 
     # reverse_angle（含 fingerprint 幂等）
     rev = existing_views.get("reverse_angle")
-    rev_prompt = scene_view_prompt(visual_style, scene_canonical, "reverse_angle")
+    rev_prompt = scene_view_prompt(visual_style, generation_anchor, "reverse_angle")
     base_rev = base_views.get("reverse_angle") or {}
     rev_fp = view_input_fingerprint(
         view_role="reverse_angle",
@@ -1707,7 +1726,7 @@ async def ensure_scene_multiview_pack(
     if "action_zone" in requested_optional:
         existing_views = {v["view_role"]: v for v in list_scene_views(scene_reference_id, conn=conn)}
         action = existing_views.get("action_zone")
-        action_prompt = scene_view_prompt(visual_style, scene_canonical, "action_zone")
+        action_prompt = scene_view_prompt(visual_style, generation_anchor, "action_zone")
         action_fp = view_input_fingerprint(
             view_role="action_zone", prompt=action_prompt, anchor_text=scene_canonical,
             parent_revision_id=scene_reference_id,

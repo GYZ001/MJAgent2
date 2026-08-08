@@ -1269,3 +1269,25 @@ def test_refresh_scene_pack_failure_does_not_switch(monkeypatch, tmp_path) -> No
     assert len(rows) == 1
     assert rows[0]["id"] == "s_old"
     assert rows[0]["ep_end"] is None
+
+
+def test_scene_multiview_continues_from_successful_parent_prompt() -> None:
+    from app.multiview import (
+        scene_multiview_generation_anchor,
+        scene_view_prompt,
+    )
+
+    canonical = "带专名的批准场景合同，老旧室内，斑驳墙面与积灰纸箱"
+    successful_parent_prompt = (
+        "同一批准场景的纯视觉描述：老旧单位住宅空房，"
+        "斑驳墙面、积灰纸箱、晚间冷灰光线"
+    )
+    anchor = scene_multiview_generation_anchor(
+        canonical,
+        successful_parent_prompt,
+    )
+    reverse_prompt = scene_view_prompt("3D动漫CG", anchor, "reverse_angle")
+
+    assert successful_parent_prompt in reverse_prompt
+    assert canonical not in reverse_prompt
+    assert scene_multiview_generation_anchor(canonical, None) == canonical
