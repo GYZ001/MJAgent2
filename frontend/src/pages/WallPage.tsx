@@ -247,9 +247,10 @@ export function episodeGenerationAction(
   active: boolean,
   pausedCount: number,
   failedCount: number,
+  resumableCompletion = true,
 ): EpisodeGenerationAction {
   if (active) return 'stop'
-  if (pausedCount > 0 || failedCount > 0) return 'resume'
+  if (resumableCompletion && (pausedCount > 0 || failedCount > 0)) return 'resume'
   return 'generate'
 }
 
@@ -698,6 +699,7 @@ export default function WallPage() {
     hasCurrentGeneration,
     Math.max(ep?.pipeline_summary?.paused ?? 0, pausedGenerationCount),
     ep?.pipeline_summary?.failed ?? 0,
+    ep?.video_completion_mode === 'complete',
   )
   const quickGenerationEstimate = shots.reduce((sum, shot) => sum + (shot.est_cost_cny || 0), 0)
   const episodeBudgetCap = episodeCompletionBudgetCap(quickGenerationEstimate)

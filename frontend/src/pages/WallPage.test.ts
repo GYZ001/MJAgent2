@@ -477,6 +477,7 @@ describe('整集生成按钮状态', () => {
     expect(episodeGenerationAction(true, 0, 0)).toBe('stop')
     expect(episodeGenerationAction(false, 2, 0)).toBe('resume')
     expect(episodeGenerationAction(false, 0, 1)).toBe('resume')
+    expect(episodeGenerationAction(false, 2, 1, false)).toBe('generate')
     expect(episodeGenerationAction(false, 0, 0)).toBe('generate')
   })
 
