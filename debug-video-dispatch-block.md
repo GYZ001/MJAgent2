@@ -13,10 +13,10 @@
 ## Hypotheses & Verification
 | ID | Hypothesis | Likelihood | Effort | Evidence |
 |----|------------|------------|--------|----------|
-| A | Synchronous dispatch loop blocks the event loop | High | Low | Pending |
-| B | SQLite transaction remains open across await or a long loop | High | Medium | Pending |
-| C | Concurrent workers contend on a shared connection or write lock | Medium | Medium | Pending |
-| D | CPU-heavy projection, not SQLite locking, blocks requests | Low | Low | Pending |
+| A | Synchronous dispatch loop blocks the event loop | High | Low | Confirmed: lines 2-9 |
+| B | SQLite transaction remains open across await or a long loop | High | Medium | Rejected: all points report false |
+| C | Concurrent workers contend on a shared connection or write lock | Medium | Medium | Rejected: line 1 has no active jobs |
+| D | CPU-heavy projection, not SQLite locking, blocks requests | Low | Low | Confirmed as contributing work |
 
 ## Log Evidence
 Instrumentation added:
@@ -26,5 +26,14 @@ Instrumentation added:
 
 Pre-fix run ID: `pre-fix`.
 
+Key evidence:
+- Lines 2-5: shot 1 dispatch took 12109.9 ms; enqueue took 5256.6 ms.
+- Lines 6-9: shot 2 dispatch took 12102.6 ms; enqueue took 5321.3 ms.
+- Every point reports `db_in_transaction=false`.
+- Concurrent `/docs` request timed out after 5 seconds.
+
 ## Verification Conclusion
-Pending.
+The Supervisor executes the complete synchronous per-shot authority checks and
+enqueue path on the asyncio event-loop thread. Each shot blocks the loop for
+about 12 seconds, and the 137-shot first pass repeats that path without moving
+the work to a worker thread. SQLite lock ownership is not the cause.

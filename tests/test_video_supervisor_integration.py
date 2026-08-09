@@ -228,6 +228,53 @@ async def test_dispatch_refreshes_heartbeat_before_watchdog_can_take_over(
     ).fetchone()["status"] == "RUNNING"
 
 
+@pytest.mark.asyncio
+async def test_async_dispatch_keeps_event_loop_responsive(monkeypatch):
+    import threading
+    import time
+
+    import app.video_supervisor as video_supervisor
+
+    caller_thread = threading.get_ident()
+    dispatch_threads: list[int] = []
+
+    def slow_dispatch(*_args, **_kwargs):
+        dispatch_threads.append(threading.get_ident())
+        time.sleep(0.05)
+        return True
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_supervisor_checks_can_use_worker_thread",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        video_supervisor,
+        "_dispatch_with_heartbeat",
+        slow_dispatch,
+    )
+    entry = ShotCoverageEntry(shot_no=1, shot_id="shot-1")
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id="episode-1",
+        run_id="run-1",
+    )
+
+    dispatch_task = asyncio.create_task(
+        video_supervisor._dispatch_with_heartbeat_async(
+            entry,
+            episode_id="episode-1",
+            run_id="run-1",
+            cp=checkpoint,
+            first=True,
+        )
+    )
+    await asyncio.sleep(0.01)
+
+    assert dispatch_task.done() is False
+    assert await dispatch_task is True
+    assert dispatch_threads and dispatch_threads[0] != caller_thread
+
+
 def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:
     eid, _ = _seed_episode(memdb, 1)
     shot_id = f"{eid}_shot_1"

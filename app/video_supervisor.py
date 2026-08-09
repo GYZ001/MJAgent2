@@ -1768,7 +1768,7 @@ def _dispatch_with_heartbeat(
     """Keep the run live across synchronous request compilation and enqueue."""
     _debug_dispatch_started = time.monotonic()
     # #region debug-point A:dispatch-duration
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
     # #endregion
     _refresh_supervisor_heartbeat(cp, run_id=run_id)
     try:
@@ -1783,8 +1783,38 @@ def _dispatch_with_heartbeat(
     finally:
         _refresh_supervisor_heartbeat(cp, run_id=run_id)
         # #region debug-point A:dispatch-duration
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_dispatch_started)*1000,1),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_dispatch_started)*1000,1),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
         # #endregion
+
+
+async def _dispatch_with_heartbeat_async(
+    entry: ShotCoverageEntry,
+    *,
+    episode_id: str,
+    run_id: str | None,
+    cp: VideoSupervisorCheckpoint,
+    plan: VideoRepairPlan | None = None,
+    first: bool = False,
+) -> bool:
+    """Run synchronous authority checks and enqueue work off the event loop."""
+    if not _supervisor_checks_can_use_worker_thread():
+        return _dispatch_with_heartbeat(
+            entry,
+            episode_id=episode_id,
+            run_id=run_id,
+            cp=cp,
+            plan=plan,
+            first=first,
+        )
+    return await asyncio.to_thread(
+        _dispatch_with_heartbeat,
+        entry,
+        episode_id=episode_id,
+        run_id=run_id,
+        cp=cp,
+        plan=plan,
+        first=first,
+    )
 
 
 def _patch_version_supervisor_meta(version_id: str, meta: dict[str, Any]) -> None:
@@ -3114,7 +3144,7 @@ async def run_video_completion_supervisor(
                     break
                 cp.phase = "DISPATCHING"
                 try:
-                    dispatched = _dispatch_with_heartbeat(
+                    dispatched = await _dispatch_with_heartbeat_async(
                         entry,
                         episode_id=episode_id,
                         run_id=run_id,
@@ -3278,7 +3308,7 @@ async def run_video_completion_supervisor(
                 ):
                     budget_capacity_reached = True
                     break
-                dispatched = _dispatch_with_heartbeat(
+                dispatched = await _dispatch_with_heartbeat_async(
                     entry,
                     episode_id=episode_id,
                     run_id=run_id,
