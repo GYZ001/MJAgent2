@@ -331,6 +331,7 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     request_json TEXT,
     response_json TEXT,
     meta TEXT,
+    project_id TEXT,
     run_id TEXT,
     step_run_id TEXT,
     trace_id TEXT,
@@ -1346,6 +1347,7 @@ MIGRATIONS = (
     "ALTER TABLE provider_calls ADD COLUMN first_chunk_at REAL",
     "ALTER TABLE provider_calls ADD COLUMN last_chunk_at REAL",
     "ALTER TABLE provider_calls ADD COLUMN received_chars INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE provider_calls ADD COLUMN project_id TEXT",
     "ALTER TABLE workflow_runs ADD COLUMN recovered_by_run_id TEXT",
     "ALTER TABLE workflow_runs ADD COLUMN recovered_at REAL",
     "ALTER TABLE workflow_runs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
@@ -1432,6 +1434,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, next_retry_at, lease_e
 CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner_run ON jobs(owner_run_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_provider_calls_operation ON provider_calls(operation_id, attempt_no);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_project ON provider_calls(project_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_provider_calls_ts ON provider_calls(ts, id);
 CREATE INDEX IF NOT EXISTS idx_monitor_audit_object ON monitor_audit(object_type, object_id, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_project_idx ON chapters(project_id, idx);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_episodes_project_no ON episodes(project_id, episode_no);
@@ -1814,6 +1818,44 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+    conn.execute(
+        """UPDATE provider_calls
+              SET project_id=COALESCE(
+                    NULLIF(
+                      CASE WHEN json_valid(meta)
+                           THEN json_extract(meta,'$.project_id') END,
+                      ''
+                    ),
+                    (
+                      SELECT e.project_id FROM episodes e
+                       WHERE e.id=CASE WHEN json_valid(provider_calls.meta)
+                                       THEN json_extract(provider_calls.meta,'$.episode_id') END
+                    ),
+                    (
+                      SELECT e.project_id
+                        FROM shots s JOIN episodes e ON e.id=s.episode_id
+                       WHERE s.id=CASE WHEN json_valid(provider_calls.meta)
+                                       THEN json_extract(provider_calls.meta,'$.shot_id') END
+                    ),
+                    (
+                      SELECT CASE wr.scope_type
+                               WHEN 'project' THEN wr.scope_id
+                               WHEN 'episode' THEN (
+                                 SELECT e.project_id FROM episodes e WHERE e.id=wr.scope_id
+                               )
+                               WHEN 'shot' THEN (
+                                 SELECT e.project_id
+                                   FROM shots s JOIN episodes e ON e.id=s.episode_id
+                                  WHERE s.id=wr.scope_id
+                               )
+                             END
+                        FROM workflow_runs wr
+                       WHERE wr.id=provider_calls.run_id
+                    ),
+                    ''
+                  )
+            WHERE project_id IS NULL"""
+    )
     _quarantine_static_delivery_fallbacks(conn)
     _drop_obsolete_storyboard_columns(conn)
     # 视频补齐授权表；历史分镜自动确认授权会在表初始化时清理。
@@ -2117,6 +2159,61 @@ def log_provider_call(kind: str, model: str, status: str, http_status: int | Non
         pass
 
 
+def _provider_call_project_id(
+    conn: sqlite3.Connection,
+    trace: Any,
+    meta: dict | None,
+) -> str | None:
+    context = meta or {}
+    direct = str(context.get("project_id") or "").strip()
+    if direct:
+        return direct
+    episode_id = str(context.get("episode_id") or "").strip()
+    if episode_id:
+        row = conn.execute(
+            "SELECT project_id FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        if row:
+            return str(row["project_id"])
+    shot_id = str(context.get("shot_id") or "").strip()
+    if shot_id:
+        row = conn.execute(
+            """SELECT e.project_id
+                 FROM shots s JOIN episodes e ON e.id=s.episode_id
+                WHERE s.id=?""",
+            (shot_id,),
+        ).fetchone()
+        if row:
+            return str(row["project_id"])
+    run_id = str(getattr(trace, "run_id", "") or "").strip()
+    if not run_id:
+        return None
+    run = conn.execute(
+        "SELECT scope_type,scope_id FROM workflow_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()
+    if not run:
+        return None
+    if run["scope_type"] == "project":
+        return str(run["scope_id"])
+    if run["scope_type"] == "episode":
+        row = conn.execute(
+            "SELECT project_id FROM episodes WHERE id=?",
+            (run["scope_id"],),
+        ).fetchone()
+        return str(row["project_id"]) if row else None
+    if run["scope_type"] == "shot":
+        row = conn.execute(
+            """SELECT e.project_id
+                 FROM shots s JOIN episodes e ON e.id=s.episode_id
+                WHERE s.id=?""",
+            (run["scope_id"],),
+        ).fetchone()
+        return str(row["project_id"]) if row else None
+    return None
+
+
 def _log_provider_call_inner(
     conn: sqlite3.Connection,
     trace: Any,
@@ -2132,15 +2229,16 @@ def _log_provider_call_inner(
     response_json: Any | None = None,
     operation_id: str | None = None,
 ) -> None:
+    project_id = _provider_call_project_id(conn, trace, meta)
     if not _provider_recovery_ledger_available(conn):
         conn.execute(
             """INSERT INTO provider_calls(
                 ts, kind, model, status, http_status, latency_ms, error, request_json, response_json,
-                meta, run_id, step_run_id, trace_id
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                meta, project_id, run_id, step_run_id, trace_id
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now(), kind, model, status, http_status, latency_ms,
              (error or "")[:500] or None, _dump_call_json(request_json),
-             _dump_call_json(response_json), _dump_meta_json(meta),
+             _dump_call_json(response_json), _dump_meta_json(meta), project_id,
              trace.run_id, trace.step_run_id, trace.trace_id),
         )
         conn.commit()
@@ -2155,11 +2253,11 @@ def _log_provider_call_inner(
     cur = conn.execute(
         """INSERT INTO provider_calls(
             ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta,
-            run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            project_id, run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, status, http_status, latency_ms,
          (error or "")[:500] or None, _dump_call_json(request_json), _dump_call_json(response_json),
-         _dump_meta_json(meta), trace.run_id, trace.step_run_id, trace.trace_id,
+         _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None),
     )
     if previous and status in {"OK", "SUCCEEDED", "SUCCESS"}:
@@ -2195,14 +2293,15 @@ def _start_provider_call_inner(
     meta: dict | None = None,
     request_json: Any | None = None,
 ) -> int:
+    project_id = _provider_call_project_id(conn, trace, meta)
     if not _provider_recovery_ledger_available(conn):
         cur = conn.execute(
             """INSERT INTO provider_calls(
                 ts, kind, model, status, http_status, latency_ms, error, request_json, response_json,
-                meta, run_id, step_run_id, trace_id
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                meta, project_id, run_id, step_run_id, trace_id
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-             _dump_meta_json(meta), trace.run_id, trace.step_run_id,
+             _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id,
              trace.trace_id),
         )
         conn.commit()
@@ -2217,11 +2316,11 @@ def _start_provider_call_inner(
     cur = conn.execute(
         """INSERT INTO provider_calls(
             ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta,
-            run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id,
+            project_id, run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id,
             recovery_disposition
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-         _dump_meta_json(meta), trace.run_id, trace.step_run_id, trace.trace_id,
+         _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None,
          "RETRYING_INTERRUPTED" if previous and previous["status"] == "INTERRUPTED" else None),
     )

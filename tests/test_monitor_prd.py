@@ -153,14 +153,17 @@ def test_calls_query_is_full_count_summary_only_and_detail_is_redacted(monkeypat
     _patch_conn(monkeypatch, conn)
     for index in range(225):
         conn.execute(
-            """INSERT INTO provider_calls(ts,kind,model,status,http_status,latency_ms,error,request_json,response_json,meta)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO provider_calls(
+                   ts,kind,model,status,http_status,latency_ms,error,
+                   request_json,response_json,meta,project_id
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 float(index), "chat", "model-a", "FAILED" if index == 224 else "OK", 500 if index == 224 else 200,
                 10, "boom" if index == 224 else None,
                 json.dumps({"api_key": "sk-supersecret", "path": "/Users/alice/project/input.txt", "prompt": "hello"}),
                 json.dumps({"authorization": "Bearer abcdefghijklmnop", "result": "ok"}),
                 json.dumps({"project_id": "p1", "episode_no": 1}),
+                "p1",
             ),
         )
     conn.commit()

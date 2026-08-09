@@ -39,10 +39,13 @@ def _database() -> sqlite3.Connection:
             (f"job-{index}", "video", project_id, f"e{index}", "failed", index, index),
         )
         conn.execute(
-            """INSERT INTO provider_calls(ts,kind,model,status,latency_ms,request_json,response_json,meta,run_id)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO provider_calls(
+                   ts,kind,model,status,latency_ms,request_json,response_json,
+                   meta,project_id,run_id
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (index, "chat", "model-a", "FAILED", 10, "{}", "{}",
-             json.dumps({"project_id": project_id, "episode_id": f"e{index}"}), f"run-{index}"),
+             json.dumps({"project_id": project_id, "episode_id": f"e{index}"}),
+             project_id, f"run-{index}"),
         )
         conn.execute(
             """INSERT INTO artifacts(id,type,scope_type,scope_id,version,status,trust_level,content_json,
@@ -87,12 +90,14 @@ def test_lists_and_counts_are_project_scoped(scoped_db) -> None:
 
 def test_scope_resolver_uses_run_links_and_rejects_conflicting_metadata(scoped_db) -> None:
     scoped_db.execute(
-        """INSERT INTO provider_calls(ts,kind,status,latency_ms,meta,run_id)
-           VALUES(3,'chat','OK',1,'{}','run-1')"""
+        """INSERT INTO provider_calls(
+               ts,kind,status,latency_ms,meta,project_id,run_id
+           ) VALUES(3,'chat','OK',1,'{}','p1','run-1')"""
     )
     scoped_db.execute(
-        """INSERT INTO provider_calls(ts,kind,status,latency_ms,meta,run_id)
-           VALUES(4,'chat','OK',1,?,'run-1')""",
+        """INSERT INTO provider_calls(
+               ts,kind,status,latency_ms,meta,project_id,run_id
+           ) VALUES(4,'chat','OK',1,?,'p2','run-1')""",
         (json.dumps({"project_id": "p2"}),),
     )
     scoped_db.execute(

@@ -1010,6 +1010,9 @@ def query_calls(
     if selected_ids:
         clauses.append(f"id IN ({','.join('?' for _ in selected_ids)})")
         params.extend(selected_ids)
+    if project_id:
+        clauses.append("project_id=?")
+        params.append(project_id)
     if search.strip():
         needle = f"%{search.strip()}%"
         clauses.append("(kind LIKE ? OR model LIKE ? OR status LIKE ? OR error LIKE ? OR CAST(id AS TEXT) LIKE ? OR meta LIKE ?)")
@@ -1035,7 +1038,6 @@ def query_calls(
              FROM provider_calls {where} ORDER BY id {order}""",
         params,
     ).fetchall())
-    scope_maps = _project_scope_maps() if project_id else None
     catalog = {(item.get("provider"), item.get("model")): item.get("label") for item in _model_catalog()}
     filtered: list[dict] = []
     for row in rows:
@@ -1046,8 +1048,6 @@ def query_calls(
         if category and row["category"] != category:
             continue
         meta_summary = _call_meta_summary(row.pop("meta", None))
-        if project_id and _call_project_id(row, meta_summary, scope_maps) != project_id:
-            continue
         row["context"] = meta_summary
         row["model_label"] = next(
             (label for (_provider, model_id), label in catalog.items() if model_id == row.get("model")),

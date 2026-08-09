@@ -483,24 +483,25 @@ def _video_completion_trace_context(
     conn = get_conn()
     run_id = str(run["id"])
     episode_id = str(run.get("scope_id") or "")
-    checkpoint = None
-    for row in conn.execute(
+    checkpoint_row = conn.execute(
         """SELECT id,content_json,created_at,status FROM artifacts
            WHERE type='video_supervisor_checkpoint'
              AND scope_type='episode' AND scope_id=?
              AND status IN ('candidate','validated','approved')
-           ORDER BY created_at DESC LIMIT 100""",
-        (episode_id,),
-    ).fetchall():
-        content = _trace_json_value(row["content_json"])
-        if isinstance(content, dict) and str(content.get("run_id") or "") == run_id:
-            checkpoint = {
-                "artifact_id": row["id"],
-                "created_at": row["created_at"],
-                "status": row["status"],
-                "content": content,
-            }
-            break
+             AND json_valid(content_json)
+             AND json_extract(content_json,'$.run_id')=?
+           ORDER BY created_at DESC LIMIT 1""",
+        (episode_id, run_id),
+    ).fetchone()
+    checkpoint = (
+        {
+            "artifact_id": checkpoint_row["id"],
+            "created_at": checkpoint_row["created_at"],
+            "status": checkpoint_row["status"],
+            "content": _trace_json_value(checkpoint_row["content_json"]),
+        }
+        if checkpoint_row else None
+    )
 
     checkpoint_content = (
         checkpoint["content"] if checkpoint is not None else {}
@@ -592,20 +593,20 @@ def _video_completion_trace_context(
         """SELECT id,content_json,created_at,status FROM artifacts
            WHERE type='video_coverage_report'
              AND scope_type='episode' AND scope_id=?
-           ORDER BY created_at DESC LIMIT 20""",
-        (episode_id,),
-    ).fetchall()
-    report = None
-    for row in report_row:
-        content = _trace_json_value(row["content_json"])
-        if isinstance(content, dict) and str(content.get("run_id") or "") == run_id:
-            report = {
-                "artifact_id": row["id"],
-                "created_at": row["created_at"],
-                "status": row["status"],
-                "content": content,
-            }
-            break
+             AND json_valid(content_json)
+             AND json_extract(content_json,'$.run_id')=?
+           ORDER BY created_at DESC LIMIT 1""",
+        (episode_id, run_id),
+    ).fetchone()
+    report = (
+        {
+            "artifact_id": report_row["id"],
+            "created_at": report_row["created_at"],
+            "status": report_row["status"],
+            "content": _trace_json_value(report_row["content_json"]),
+        }
+        if report_row else None
+    )
     return {
         "run": run,
         "checkpoint": checkpoint,
