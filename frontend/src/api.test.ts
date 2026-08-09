@@ -51,4 +51,31 @@ describe("api session recovery", () => {
       message: "无法连接本机后端服务，请等待服务恢复后重试",
     });
   });
+
+  it("reuses the current session for mutations until the server rejects it", async () => {
+    let sessionRequests = 0;
+    let mutations = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/api/session") {
+          sessionRequests += 1;
+          return Response.json({ session_token: "current-token" });
+        }
+        if (url === "/api/test-mutation") {
+          mutations += 1;
+          return Response.json({ ok: true });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+
+    const { api } = await import("./api");
+    await api.post("/test-mutation", {});
+    await api.post("/test-mutation", {});
+
+    expect(sessionRequests).toBe(1);
+    expect(mutations).toBe(2);
+  });
 });

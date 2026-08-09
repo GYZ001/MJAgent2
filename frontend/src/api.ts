@@ -117,8 +117,7 @@ async function request(
     _sessionRefreshed?: boolean;
   },
 ): Promise<any> {
-  const mutating = method !== "GET" && method !== "HEAD";
-  await ensureSession(mutating && !options?._sessionRefreshed);
+  await ensureSession(false);
   const isForm = Boolean(options?.form);
   const headers = baseHeaders(
     !isForm && body !== undefined
