@@ -2775,6 +2775,53 @@ def create_local_replan_revision(
     return replacement
 
 
+def _release_unsubmitted_paused_reservations_for_adopted_shot(
+    db,
+    *,
+    shot_id: str,
+    adopted_version_id: str,
+) -> int:
+    """Release only obsolete local work that provably never reached the provider."""
+    rows = db.execute(
+        """SELECT j.id
+             FROM jobs j
+             JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.shot_id=? AND j.kind='video' AND j.status='paused'
+              AND j.version_id!=?
+              AND j.provider_non_cancellable=0
+              AND j.provider_create_state='not_started'
+              AND (v.provider_task_id IS NULL OR v.provider_task_id='')
+              AND NOT EXISTS (
+                  SELECT 1 FROM provider_calls pc
+                   WHERE pc.operation_id=j.provider_operation_id
+                     AND pc.kind='video_create' AND pc.status='OK'
+              )
+              AND EXISTS (
+                  SELECT 1 FROM budget_reservations br
+                   WHERE br.job_id=j.id AND br.status IN ('reserved','running')
+              )""",
+        (shot_id, adopted_version_id),
+    ).fetchall()
+    job_ids = [str(row["id"]) for row in rows]
+    if not job_ids:
+        return 0
+    placeholders = ",".join("?" * len(job_ids))
+    stamp = now()
+    db.execute(
+        f"""UPDATE budget_reservations
+               SET status='released',settled_at=?,actual_cost_cny=0
+             WHERE job_id IN ({placeholders})
+               AND status IN ('reserved','running')""",
+        (stamp, *job_ids),
+    )
+    db.execute(
+        f"""UPDATE jobs SET reserved_cost_cny=0,updated_at=?
+             WHERE id IN ({placeholders})""",
+        (stamp, *job_ids),
+    )
+    return len(job_ids)
+
+
 def reconcile_adopted_revision(
     shot_id: str,
     adopted_version_id: str,
@@ -2812,6 +2859,11 @@ def reconcile_adopted_revision(
             raise ValueError("只能同步已成功的采用版本")
         if current_adoption != adopted_version_id:
             raise ValueError("采用版本与 shots.adopted_version_id 当前指针不一致")
+        _release_unsubmitted_paused_reservations_for_adopted_shot(
+            db,
+            shot_id=shot_id,
+            adopted_version_id=adopted_version_id,
+        )
 
     deps = db.execute(
         """SELECT * FROM video_plan_dependencies

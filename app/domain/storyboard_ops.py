@@ -4545,6 +4545,16 @@ def episode_detail(episode_id: str, view: str | None = None):
     # 视频补齐 Supervisor 面板（生成台）
     if full or view == "wall":
         try:
+            from app.completion_grant import (
+                episode_video_completion_budget_requirement,
+            )
+            ep["video_budget"] = episode_video_completion_budget_requirement(
+                episode_id,
+                conn=conn,
+            )
+        except Exception:  # noqa: BLE001
+            ep["video_budget"] = None
+        try:
             from app.video_supervisor import load_latest_checkpoint, public_checkpoint_projection
             vcp = load_latest_checkpoint(episode_id)
             ep["video_supervisor"] = public_checkpoint_projection(vcp)

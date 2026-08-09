@@ -112,6 +112,66 @@ def test_dispatch_prioritizes_poll_and_unblocked_first_pass(monkeypatch) -> None
     assert result["due"] == 5
 
 
+def test_stage_aware_dispatcher_finishes_dependency_reads_before_stage_writes(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','created',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'generating',1)"
+    )
+    for shot_no in range(1, 5):
+        _seed_shot(conn, f"s{shot_no}", shot_no)
+    _seed_job(
+        conn,
+        job_id="j3",
+        shot_id="s3",
+        version_id="v3",
+        after_shot_id="s1",
+        refs_ready=True,
+    )
+    _seed_job(
+        conn,
+        job_id="j4",
+        shot_id="s4",
+        version_id="v4",
+        after_shot_id="s2",
+        refs_ready=True,
+    )
+    conn.commit()
+
+    transaction_states: list[bool] = []
+
+    def chain_remaining(*_args, **_kwargs) -> int:
+        transaction_states.append(conn.in_transaction)
+        return 1
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        "app.media_pipeline.scheduler.continuity_chain_remaining",
+        chain_remaining,
+    )
+    monkeypatch.setattr(worker._queue, "put_nowait", lambda *_: None)
+    monkeypatch.setattr(worker._video_ready_queue, "put_nowait", lambda *_: None)
+    monkeypatch.setattr(worker._poll_queue, "put_nowait", lambda *_: None)
+    monkeypatch.setattr(worker, "_worker_target", 1)
+    monkeypatch.setattr(worker, "_reference_worker_target", 1)
+    monkeypatch.setattr(worker, "_video_ready_worker_target", 1)
+    monkeypatch.setattr(worker, "_poll_worker_target", 1)
+
+    worker._dispatch_due_jobs_stage_aware()
+
+    assert transaction_states == [False, False]
+    assert conn.in_transaction is False
+    assert {
+        row["pipeline_stage"]
+        for row in conn.execute(
+            "SELECT pipeline_stage FROM jobs WHERE id IN ('j3','j4')"
+        ).fetchall()
+    } == {"waiting_continuity_anchor"}
+
+
 def test_dispatch_legacy_keeps_single_main_queue(monkeypatch) -> None:
     conn = _conn()
     conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','created',1)")

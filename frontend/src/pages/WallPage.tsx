@@ -218,25 +218,47 @@ export type EpisodeGenerationAction = 'generate' | 'stop' | 'resume'
 
 export const EPISODE_COMPLETION_BUDGET_CAP_CNY = 150
 export const EPISODE_COMPLETION_WALL_CLOCK_CAP_S = 4 * 60 * 60
+const EPISODE_COMPLETION_LATENCY_MARGIN = 1.25
 
-export function episodeCompletionBudgetCap(estimatedCostCny: number): number {
+export function episodeCompletionBudgetCap(
+  estimatedCostCny: number,
+  requiredCompletionCapCny = 0,
+): number {
   const estimate = Number.isFinite(estimatedCostCny)
     ? Math.max(0, estimatedCostCny)
+    : 0
+  const required = Number.isFinite(requiredCompletionCapCny)
+    ? Math.max(0, requiredCompletionCapCny)
     : 0
   return Math.max(
     EPISODE_COMPLETION_BUDGET_CAP_CNY,
     Math.ceil(estimate * 100) / 100,
+    Math.ceil(required * 100) / 100,
   )
+}
+
+export function episodeCompletionWallClockCap(criticalPathLatencyMs = 0): number {
+  const criticalPathSeconds = Number.isFinite(criticalPathLatencyMs)
+    ? Math.max(0, criticalPathLatencyMs) / 1000
+    : 0
+  const projected = criticalPathSeconds * EPISODE_COMPLETION_LATENCY_MARGIN
+  const roundedToHour = Math.ceil(projected / 3600) * 3600
+  return Math.max(EPISODE_COMPLETION_WALL_CLOCK_CAP_S, roundedToHour)
 }
 
 export function episodeCompletionRequest(
   qualificationVersion?: string,
   estimatedCostCny = 0,
+  requiredCompletionCapCny = 0,
+  criticalPathLatencyMs = 0,
 ) {
   return {
     mode: 'fresh',
-    budget_cap_cny: episodeCompletionBudgetCap(estimatedCostCny),
-    wall_clock_cap_s: EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
+    budget_cap_cny: episodeCompletionBudgetCap(
+      estimatedCostCny,
+      requiredCompletionCapCny,
+    ),
+    wall_clock_cap_s: episodeCompletionWallClockCap(criticalPathLatencyMs),
     allow_fallback_adopt: true,
     allow_storyboard_edit: false,
     qualification_version: qualificationVersion,
@@ -702,7 +724,10 @@ export default function WallPage() {
     ep?.video_completion_mode === 'complete',
   )
   const quickGenerationEstimate = shots.reduce((sum, shot) => sum + (shot.est_cost_cny || 0), 0)
-  const episodeBudgetCap = episodeCompletionBudgetCap(quickGenerationEstimate)
+  const episodeBudgetCap = episodeCompletionBudgetCap(
+    quickGenerationEstimate,
+    ep?.video_budget?.required_completion_cap_cny,
+  )
   const adoptedCount = shots.filter(shot => shotVideoState(shot).phase === 'adopted').length
   const episodeVideoCandidateCount = shots.reduce(
     (sum, shot) => sum + visibleVideoVersions(shot.versions).length,
@@ -762,6 +787,8 @@ export default function WallPage() {
         episodeCompletionRequest(
           context.upstream.qualification_version,
           quickGenerationEstimate,
+          ep?.video_budget?.required_completion_cap_cny,
+          videoPlan?.critical_path_latency_ms,
         ),
       ) as {
         run_id?: string

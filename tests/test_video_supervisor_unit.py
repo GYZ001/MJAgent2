@@ -311,6 +311,28 @@ def test_covered_within_quota():
     assert ledger3.covered_within_quota() is False  # 有候选但未采用不能冒充完成
 
 
+def test_actionable_skips_unresolved_dependency_but_keeps_later_root() -> None:
+    blocked = ShotCoverageEntry(
+        shot_no=2,
+        shot_id="s2",
+        depends_on_shot_id="s1",
+        dependency_ready=False,
+    )
+    later_root = ShotCoverageEntry(shot_no=31, shot_id="s31")
+    ledger = CoverageLedger(
+        episode_id="ep",
+        shots_total=2,
+        entries=[blocked, later_root],
+    )
+
+    assert [entry.shot_id for entry in ledger.actionable()] == ["s31"]
+    ready = blocked.model_copy(update={"dependency_ready": True})
+    assert [
+        entry.shot_id
+        for entry in ledger.model_copy(update={"entries": [ready, later_root]}).actionable()
+    ] == ["s2", "s31"]
+
+
 def test_video_grant_episode_binding(tmp_path, monkeypatch):
     from app import db
     from app.completion_grant import (

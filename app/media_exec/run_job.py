@@ -699,6 +699,7 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
     reference_normal: list[tuple[float, dict[str, Any]]] = []
     retake_jobs: list[tuple[float, dict[str, Any]]] = []
     continuity_cache: dict[tuple[str, bool], bool] = {}
+    stage_updates: list[tuple[str, str, dict[str, Any]]] = []
 
     for row in rows:
         if row.get("status") == "waiting_provider" or row.get("provider_task_id"):
@@ -748,29 +749,30 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
             static_ready_waiting=static_waiting,
             critical_path=critical,
         )
-        # 持久化车道（轻量，失败忽略）
-        try:
-            if true_ready and ready:
-                set_pipeline_stage(
-                    row["id"], media_stages.STAGE_VIDEO_READY,
-                    scheduler_lane=media_stages.LANE_VIDEO_READY,
-                    priority_class="first_pass" if not is_retake else "retake",
-                    conn=conn,
-                )
-            elif not ready and (refs_ready or static_waiting):
-                set_pipeline_stage(
-                    row["id"],
-                    (
-                        media_stages.STAGE_WAITING_DEPENDENCY
-                        if meta.get("shot_plan_id")
-                        else media_stages.STAGE_WAITING_CONTINUITY
-                    ),
-                    reason_code=(
+        if true_ready and ready:
+            stage_updates.append((
+                row["id"],
+                media_stages.STAGE_VIDEO_READY,
+                {
+                    "scheduler_lane": media_stages.LANE_VIDEO_READY,
+                    "priority_class": "first_pass" if not is_retake else "retake",
+                },
+            ))
+        elif not ready and (refs_ready or static_waiting):
+            stage_updates.append((
+                row["id"],
+                (
+                    media_stages.STAGE_WAITING_DEPENDENCY
+                    if meta.get("shot_plan_id")
+                    else media_stages.STAGE_WAITING_CONTINUITY
+                ),
+                {
+                    "reason_code": (
                         "WAITING_VIDEO_PLAN_DEPENDENCY"
                         if meta.get("shot_plan_id")
                         else "WAITING_CONTINUITY_ANCHOR"
                     ),
-                    reason_text=(
+                    "reason_text": (
                         "等待上一镜采用素材"
                         if meta.get("shot_plan_id")
                         else (
@@ -778,11 +780,9 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
                             if after_shot_id else "等待上一镜尾帧"
                         )
                     ),
-                    scheduler_lane=media_stages.LANE_REFERENCE_CRITICAL,
-                    conn=conn,
-                )
-        except Exception:  # noqa: BLE001
-            pass
+                    "scheduler_lane": media_stages.LANE_REFERENCE_CRITICAL,
+                },
+            ))
 
         if true_ready and ready:
             video_ready.append((score, row))
@@ -796,7 +796,16 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
         else:
             reference_normal.append((score, row))
 
-    conn.commit()
+    # Keep recursive continuity reads outside the single-writer transaction.
+    # Otherwise the first stage UPDATE holds SQLite's writer lock while the
+    # remaining dependency chains are still being traversed.
+    try:
+        for job_id, stage, kwargs in stage_updates:
+            set_pipeline_stage(job_id, stage, conn=conn, **kwargs)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     poll_candidates.sort(key=lambda row: float(row.get("created_at") or stamp))
     video_ready.sort(key=lambda item: -item[0])

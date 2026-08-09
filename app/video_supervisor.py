@@ -191,6 +191,8 @@ class ShotCoverageEntry(BaseModel):
     chain_position: int = 0
     chain_len: int = 1
     blocked_by_shot_no: int | None = None
+    depends_on_shot_id: str | None = None
+    dependency_ready: bool = True
     chain_stale: bool = False
     active_job_id: str | None = None
     human_adopted: bool = False
@@ -235,6 +237,8 @@ class CoverageLedger(BaseModel):
             if e.adopted_version_id:
                 continue
             if e.active_job_id:
+                continue
+            if e.depends_on_shot_id and not e.dependency_ready:
                 continue
             # 技术有效候选一旦存在，就必须先采用并收口；QA 等级、连续性评分
             # 和内容风险不能把它重新送入付费修复循环。
@@ -1103,6 +1107,29 @@ def rebuild_coverage_ledger(
     shot_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall()
+    shot_no_by_id = {str(row["id"]): int(row["shot_no"]) for row in shot_rows}
+    dependency_map: dict[str, tuple[str | None, bool]] = {}
+    plan_row = conn.execute(
+        """SELECT id FROM episode_video_generation_plans
+           WHERE episode_id=? AND status='valid'
+           ORDER BY plan_revision DESC, created_at DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    if plan_row:
+        for dep in conn.execute(
+            """SELECT p.shot_id,p.depends_on_shot_id,
+                      d.upstream_adopted_version_id
+                 FROM shot_video_generation_plans p
+                 LEFT JOIN video_plan_dependencies d
+                   ON d.shot_plan_id=p.id
+                WHERE p.episode_video_plan_id=?""",
+            (plan_row["id"],),
+        ).fetchall():
+            depends_on = str(dep["depends_on_shot_id"] or "") or None
+            dependency_map[str(dep["shot_id"])] = (
+                depends_on,
+                not depends_on or bool(dep["upstream_adopted_version_id"]),
+            )
     chains = _compute_chains(shot_rows)
     ep_sb = ep["storyboard_artifact_id"] if ep else None
     supervisor_run_id = cp.run_id if cp is not None else None
@@ -1275,6 +1302,10 @@ def rebuild_coverage_ledger(
                     last_codes = [i.code for i in job_issues]
 
         observed_attempts = int(attempts_map.get(sid, 0))
+        depends_on_shot_id, dependency_ready = dependency_map.get(
+            str(sid),
+            (None, True),
+        )
         try:
             checkpoint_attempts = int(saved.get("attempts_paid") or 0)
         except (TypeError, ValueError):
@@ -1305,6 +1336,13 @@ def rebuild_coverage_ledger(
             chain_head_shot_no=chain_head,
             chain_position=chain_pos,
             chain_len=chain_len,
+            blocked_by_shot_no=(
+                shot_no_by_id.get(depends_on_shot_id)
+                if depends_on_shot_id and not dependency_ready
+                else None
+            ),
+            depends_on_shot_id=depends_on_shot_id,
+            dependency_ready=dependency_ready,
             chain_stale=bool(saved.get("chain_stale")),
             active_job_id=active_jobs.get(sid),
             human_adopted=_human_adopted(conn, sid),
@@ -1878,6 +1916,7 @@ async def _dispatch_heartbeat(
             raise
         except Exception as exc:  # noqa: BLE001 - transient DB contention is retryable
             try:
+                from app import errors
                 errors.log_error(
                     exc,
                     action="video_supervisor.dispatch_heartbeat",
@@ -2476,12 +2515,14 @@ def _adopt_ready_candidates(
     """正常运行期采用首个技术有效候选；QA 只影响风险展示。"""
     adopted = 0
     from app.video_plan import reconcile_adopted_revision
+    conn = get_conn()
 
     for entry in ledger.entries:
         if entry.adopted_version_id:
             reconcile_adopted_revision(
                 entry.shot_id,
                 entry.adopted_version_id,
+                conn=conn,
             )
             continue
         if not entry.best_version_id:
@@ -2495,6 +2536,7 @@ def _adopt_ready_candidates(
         reconcile_adopted_revision(
             entry.shot_id,
             entry.adopted_version_id,
+            conn=conn,
         )
         entry.fallback_reason = result.get("fallback_reason")
         adopted += 1

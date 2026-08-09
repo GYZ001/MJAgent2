@@ -8,6 +8,7 @@ from app import db, hiagent
 from app.completion_grant import (
     GrantValidationError,
     authorize_episode_video_budget_increment,
+    episode_video_completion_budget_requirement,
     episode_video_budget_snapshot,
     issue_video_completion_grant,
     mark_provider_video_budget_claim,
@@ -130,6 +131,75 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         operation_id="video-create-budget-v2",
         amount_cny=4.0,
     ) is True
+
+
+def test_completion_budget_requirement_includes_sunk_duplicate_claims() -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('required-p','P','created',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('required-e','required-p',1,'confirmed',1)"""
+    )
+    for shot_no in (1, 2):
+        conn.execute(
+            """INSERT INTO shots(
+                   id,episode_id,shot_no,duration_s,characters,dialogues
+               ) VALUES(?,?,?,5,'[]','[]')""",
+            (f"required-s{shot_no}", "required-e", shot_no),
+        )
+    for index in (1, 2):
+        conn.execute(
+            """INSERT INTO shot_versions(
+                   id,shot_id,version_no,prompt_text,idem_key,status,created_at
+               ) VALUES(?,?,?,?,?,'queued',1)""",
+            (
+                f"required-v{index}",
+                "required-s1",
+                index,
+                "prompt",
+                f"required-key-{index}",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO jobs(
+                   id,kind,shot_id,version_id,episode_id,project_id,status,
+                   created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,'queued',1,1)""",
+            (
+                f"required-j{index}",
+                "video",
+                "required-s1",
+                f"required-v{index}",
+                "required-e",
+                "required-p",
+            ),
+        )
+    conn.commit()
+    authorize_episode_video_budget_increment(
+        "required-e",
+        20,
+        source="test-approval",
+    )
+    for index in (1, 2):
+        operation_id = f"video-create-required-v{index}"
+        assert reserve_provider_video_budget(
+            episode_id="required-e",
+            job_id=f"required-j{index}",
+            version_id=f"required-v{index}",
+            operation_id=operation_id,
+            amount_cny=4,
+        ) is True
+        mark_provider_video_budget_claim(operation_id, "accepted")
+
+    assert episode_video_completion_budget_requirement("required-e") == {
+        "used_cny": 8.0,
+        "claimed_current_shots": 1,
+        "shots_total": 2,
+        "unclaimed_first_pass_cny": 4.0,
+        "required_completion_cap_cny": 12.0,
+    }
 
 
 @pytest.mark.parametrize("drift", ["certificate", "shots"])

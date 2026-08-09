@@ -16,6 +16,7 @@ import {
   describeShotUpdate,
   episodeCompletionBudgetCap,
   episodeCompletionRequest,
+  episodeCompletionWallClockCap,
   episodeGenerationAction,
   episodeGenerationIsActive,
   incompleteVideoSupervisorState,
@@ -468,6 +469,21 @@ describe('整集生成按钮状态', () => {
     expect(EPISODE_COMPLETION_BUDGET_CAP_CNY).toBe(150)
     expect(episodeCompletionBudgetCap(20)).toBe(150)
     expect(episodeCompletionBudgetCap(593.601)).toBe(593.61)
+    expect(episodeCompletionBudgetCap(593.6, 621.6)).toBe(621.6)
+    expect(episodeCompletionWallClockCap(29_681_000)).toBe(11 * 60 * 60)
+    expect(episodeCompletionRequest(
+      'qualification-v3',
+      593.6,
+      621.6,
+      29_681_000,
+    )).toEqual({
+      mode: 'fresh',
+      budget_cap_cny: 621.6,
+      wall_clock_cap_s: 11 * 60 * 60,
+      allow_fallback_adopt: true,
+      allow_storyboard_edit: false,
+      qualification_version: 'qualification-v3',
+    })
     expect(EPISODE_COMPLETION_WALL_CLOCK_CAP_S).toBe(4 * 60 * 60)
   })
 

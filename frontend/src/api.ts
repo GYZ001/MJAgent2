@@ -1825,6 +1825,13 @@ export interface Episode {
     finished_at?: number | null;
     last_plan?: Record<string, unknown> | null;
   } | null;
+  video_budget?: {
+    used_cny: number;
+    claimed_current_shots: number;
+    shots_total: number;
+    unclaimed_first_pass_cny: number;
+    required_completion_cap_cny: number;
+  } | null;
   supervisor?: {
     phase: string;
     repair_epoch: number;

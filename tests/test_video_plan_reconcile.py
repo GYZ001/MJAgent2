@@ -461,6 +461,52 @@ def test_first_adoption_binds_dependency_and_changed_adoption_stales_descendant(
     ).fetchone()["status"] == "stale"
 
 
+def test_adoption_releases_only_provably_unsubmitted_paused_reservations() -> None:
+    conn = _conn()
+    for suffix, create_state in (("local", "not_started"), ("unknown", "submitting")):
+        version_id = f"paused-{suffix}"
+        job_id = f"job-{suffix}"
+        conn.execute(
+            """INSERT INTO shot_versions(
+                   id,shot_id,version_no,prompt_text,idem_key,status,created_at
+               ) VALUES(?,?,?,'prompt',?,'paused',1)""",
+            (version_id, "s1", 10 if suffix == "local" else 11, version_id),
+        )
+        conn.execute(
+            """INSERT INTO jobs(
+                   id,kind,shot_id,version_id,episode_id,project_id,status,
+                   provider_create_state,provider_operation_id,reserved_cost_cny,
+                   created_at,updated_at
+               ) VALUES(?,'video','s1',?,'e','p','paused',?,?,4,1,1)""",
+            (
+                job_id,
+                version_id,
+                create_state,
+                f"video-create-{version_id}",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO budget_reservations(
+                   id,job_id,scope_type,scope_id,amount_cny,status,created_at
+               ) VALUES(?,?,'episode','e',4,'reserved',1)""",
+            (f"budget-{suffix}", job_id),
+        )
+    conn.execute("UPDATE shots SET adopted_version_id='v1' WHERE id='s1'")
+    conn.commit()
+
+    reconcile_adopted_revision("s1", "v1", conn=conn)
+
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='job-local'"
+    ).fetchone()["status"] == "released"
+    assert conn.execute(
+        "SELECT reserved_cost_cny FROM jobs WHERE id='job-local'"
+    ).fetchone()["reserved_cost_cny"] == 0
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='job-unknown'"
+    ).fetchone()["status"] == "reserved"
+
+
 def test_non_cancellable_stale_provider_result_remains_pollable_but_cannot_auto_adopt() -> None:
     conn = _conn()
     conn.execute("UPDATE shots SET adopted_version_id='v1' WHERE id='s1'")

@@ -232,6 +232,49 @@ def episode_video_budget_snapshot(episode_id: str, *, conn=None) -> dict[str, fl
     }
 
 
+def episode_video_completion_budget_requirement(
+    episode_id: str,
+    *,
+    conn=None,
+) -> dict[str, float | int]:
+    """Return the absolute provider cap needed for one claim per current shot."""
+    from app.video_cost_model import initial_shot_generation_cost
+
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    snapshot = episode_video_budget_snapshot(episode_id, conn=db)
+    used = float((snapshot or {}).get("used_cny") or 0)
+    claimed_shot_ids = {
+        str(row["shot_id"])
+        for row in db.execute(
+            """SELECT DISTINCT j.shot_id
+                 FROM provider_video_budget_claims c
+                 JOIN jobs j ON j.id=c.job_id
+                 JOIN shots s ON s.id=j.shot_id
+                WHERE c.episode_id=? AND c.status!='released'
+                  AND s.episode_id=?""",
+            (episode_id, episode_id),
+        ).fetchall()
+    }
+    remaining = 0.0
+    total_shots = 0
+    for row in db.execute(
+        "SELECT id,duration_s FROM shots WHERE episode_id=?",
+        (episode_id,),
+    ).fetchall():
+        total_shots += 1
+        if str(row["id"]) in claimed_shot_ids:
+            continue
+        remaining += initial_shot_generation_cost(float(row["duration_s"] or 0))
+    return {
+        "used_cny": round(used, 6),
+        "claimed_current_shots": len(claimed_shot_ids),
+        "shots_total": total_shots,
+        "unclaimed_first_pass_cny": round(remaining, 6),
+        "required_completion_cap_cny": round(used + remaining, 6),
+    }
+
+
 def reserve_provider_video_budget(
     *,
     episode_id: str,
