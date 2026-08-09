@@ -53,10 +53,31 @@ Observed iteration result:
 New hypotheses:
 | ID | Hypothesis | Likelihood | Effort | Evidence |
 |----|------------|------------|--------|----------|
-| E | Media worker calls synchronous job/prompt work on the event loop | High | Low | Pending |
-| F | Worker thread or SQLite contention starves all HTTP work | Medium | Medium | Pending |
-| G | Debug reporting or checkpoint persistence causes the second stall | Low | Low | Pending |
+| E | Media worker calls synchronous job/prompt work on the event loop | High | Low | Rejected: prompt prep/payload are 4-6 ms |
+| F | Worker thread or SQLite contention starves all HTTP work | Medium | Medium | Rejected: setup is 2-30 ms, no transaction |
+| G | Debug reporting or checkpoint persistence causes the second stall | Low | Low | Rejected: reporting active while HTTP remains responsive |
 
 Iteration instrumentation:
 - E: prompt preparation and payload construction before provider await
 - F: worker synchronous setup before its first await
+
+Post-fix evidence:
+- Lines 26-33: shot 1 dispatch still took 14985.3 ms.
+- Lines 34-47: shot 2 dispatch still took 23606.9 ms.
+- Lines 39-42: prompt preparation took 4.8 ms and payload construction 6.3 ms.
+- During those dispatches, five `/docs` requests returned HTTP 200 in
+  0.0007-0.072 seconds.
+
+Conclusion: the same expensive dispatch workload now runs off-loop via
+`asyncio.to_thread`; server responsiveness is restored without weakening
+authority, budget, or ordering checks.
+
+Worker-iteration evidence:
+- Worker setup stayed between 2 and 112 ms.
+- Prompt payload construction stayed between 2 and 6 ms.
+- Provider prompt awaits lasted 45-75 seconds without blocking HTTP.
+- Health requests remained HTTP 200 in 0.001-0.057 seconds while Supervisor
+  dispatch and media prompt generation overlapped.
+
+The apparent second stall came from the old pre-fix process continuing its
+event-loop dispatch before shutdown. No additional worker offload is required.
