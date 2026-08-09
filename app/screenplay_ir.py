@@ -49,7 +49,7 @@ from app.source_excerpt import (
 from app.spoken_contract import content_char_count
 
 
-IR_VERSION = "screenplay-generation-ir.v1.4"
+IR_VERSION = "screenplay-generation-ir.v1.5"
 IR_COMPILER_VERSION = "screenplay-ir-compiler.v1.5"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
@@ -281,6 +281,9 @@ class IRSceneUnit(BaseModel):
     text: str
     event_key: str
     source_segment_ids: list[str] = Field(default_factory=list)
+    # Exact frozen identity keys physically present in this unit.  Dialogue
+    # references and people who can perceive a line are separate relations.
+    onscreen_entity_keys: list[str] = Field(default_factory=list)
     resulting_state: str = ""
     speaker_key: str | None = None
     function: str = "statement"
@@ -301,7 +304,7 @@ class IRSceneUnit(BaseModel):
         normalized["kind"] = kind
         return normalized
 
-    @field_validator("source_segment_ids", mode="before")
+    @field_validator("source_segment_ids", "onscreen_entity_keys", mode="before")
     @classmethod
     def _normalize_source_ids(cls, value: Any) -> list[Any]:
         return _as_list(value)
@@ -350,6 +353,7 @@ class IREvent(BaseModel):
     adaptation_reason: str = ""
     actor_keys: list[str] = Field(default_factory=list)
     target_keys: list[str] = Field(default_factory=list)
+    onscreen_entity_keys: list[str] = Field(default_factory=list)
     causal_parent_keys: list[str] = Field(default_factory=list)
     precondition_state: str = ""
     resulting_state: str = ""
@@ -371,7 +375,7 @@ class IREvent(BaseModel):
     must_keep: bool = True
 
     @field_validator(
-        "source_segment_ids", "actor_keys", "target_keys",
+        "source_segment_ids", "actor_keys", "target_keys", "onscreen_entity_keys",
         "causal_parent_keys", "action_phases", "perceivable_by",
         "information", mode="before",
     )
@@ -626,7 +630,7 @@ def normalize_screenplay_ir_payload(
         if not isinstance(event, dict):
             continue
         for field in (
-            "source_segment_ids", "actor_keys", "target_keys",
+            "source_segment_ids", "actor_keys", "target_keys", "onscreen_entity_keys",
             "causal_parent_keys", "action_phases", "perceivable_by",
             "information",
         ):
@@ -1039,6 +1043,11 @@ def prepare_ir_identity_authorities(
         for key in [
             *scene.character_keys,
             *(
+                key
+                for unit in scene.units
+                for key in unit.onscreen_entity_keys
+            ),
+            *(
                 unit.speaker_key
                 for unit in scene.units
                 if unit.speaker_key
@@ -1052,6 +1061,7 @@ def prepare_ir_identity_authorities(
         for key in [
             *event.actor_keys,
             *event.target_keys,
+            *event.onscreen_entity_keys,
             *(
                 perceiver_key
                 for perceiver_key in event.perceivable_by
@@ -1359,7 +1369,7 @@ def recover_complete_screenplay_ir_prefix(raw: str) -> dict[str, Any] | None:
 def screenplay_ir_prompt_contract() -> str:
     """Compact output contract included in the generation prompt."""
     return """{
-  "format_version":"screenplay-generation-ir.v1.4",
+  "format_version":"screenplay-generation-ir.v1.5",
   "episode_no":1,
   "metadata":{
     "title":"", "logline":"", "script_format_note":"场次化台本稿",
@@ -1387,9 +1397,11 @@ def screenplay_ir_prompt_contract() -> str:
     "summary":"", "conflict":"", "turn":"",
     "units":[
       {"kind":"action","text":"可拍动作","event_key":"ev1",
+       "onscreen_entity_keys":["person_a"],
        "resulting_state":"该动作完成后新成立的局势，禁止复述 text",
        "source_segment_ids":["SRC0001"]},
       {"kind":"dialogue","text":"改编台词","event_key":"ev1",
+       "onscreen_entity_keys":["person_a"],
        "resulting_state":"该话轮交付后人物/信息/决策发生的变化，禁止复述 text",
        "source_segment_ids":["SRC0001"],
        "speaker_key":"person_a","function":"statement",
@@ -1678,6 +1690,7 @@ def compile_screenplay_ir(
     strict_unit_ownership = format_version.startswith((
         "screenplay-generation-ir.v1.3",
         "screenplay-generation-ir.v1.4",
+        "screenplay-generation-ir.v1.5",
     ))
     segments_list = (
         index_compact_source_segments(source_text)
@@ -2334,6 +2347,9 @@ def compile_screenplay_ir(
         explicit_actor_keys_by_event: defaultdict[tuple[str, str], list[str]] = (
             defaultdict(list)
         )
+        onscreen_keys_by_event: defaultdict[tuple[str, str], list[str]] = (
+            defaultdict(list)
+        )
         event_scene_owners: dict[str, str] = {}
         for unit_index, (scene, unit) in enumerate(flat_units, start=1):
             event_key = unit.event_key.strip() or f"derived-event-{unit_index}"
@@ -2348,10 +2364,20 @@ def compile_screenplay_ir(
                     f"{event_key} 同时出现在 {previous_scene_key} 与 {scene.key}"
                 )
             normalized_event_keys[(scene.key, unit_index)] = event_key
+            # Registered identity occurrence is used only as a compatibility
+            # fallback for action units.  Dialogue text may name people who
+            # are absent, so a dialogue unit owns only its declared speaker
+            # unless the typed unit explicitly declares additional on-screen
+            # identities.
+            visual_text = (
+                f"{unit.text}\n{unit.resulting_state}"
+                if unit.kind == "action"
+                else ""
+            )
             mentioned = [
                 key
                 for key, aliases in identity_aliases.items()
-                if any(alias and alias in unit.text for alias in aliases)
+                if any(alias and alias in visual_text for alias in aliases)
             ]
             explicit = list(dict.fromkeys([
                 *(
@@ -2359,12 +2385,21 @@ def compile_screenplay_ir(
                     if unit.kind == "dialogue" and unit.speaker_key
                     else []
                 ),
-                *mentioned,
+                *(mentioned if unit.kind == "action" else []),
             ]))
+            onscreen = list(dict.fromkeys(
+                unit.onscreen_entity_keys
+                or explicit
+            ))
             event_actors = explicit_actor_keys_by_event[(scene.key, event_key)]
             event_actors.extend(
                 key for key in explicit
                 if key not in event_actors
+            )
+            event_onscreen = onscreen_keys_by_event[(scene.key, event_key)]
+            event_onscreen.extend(
+                key for key in onscreen
+                if key not in event_onscreen
             )
         derived_by_key: dict[str, IREvent] = {}
         for unit_index, ((scene, unit), segment_index) in enumerate(
@@ -2374,6 +2409,9 @@ def compile_screenplay_ir(
             event_key = normalized_event_keys[(scene.key, unit_index)]
             actor_keys = list(
                 explicit_actor_keys_by_event[(scene.key, event_key)]
+            )
+            onscreen_entity_keys = list(
+                onscreen_keys_by_event[(scene.key, event_key)]
             )
             contextual_actor = False
             if not actor_keys and unit.kind == "action":
@@ -2409,6 +2447,8 @@ def compile_screenplay_ir(
                         display,
                     }
                     identity_display[contextual_key] = display
+                if not onscreen_entity_keys:
+                    onscreen_entity_keys = [contextual_key]
             source_ids = (
                 list(dict.fromkeys(unit.source_segment_ids))
                 if strict_unit_ownership
@@ -2437,6 +2477,10 @@ def compile_screenplay_ir(
                     *existing.actor_keys,
                     *actor_keys,
                 ]))
+                existing.onscreen_entity_keys = list(dict.fromkeys([
+                    *existing.onscreen_entity_keys,
+                    *onscreen_entity_keys,
+                ]))
                 if not screenplay_beat_fields_repeat(
                     existing.adapted_statement,
                     adapted_statement,
@@ -2454,6 +2498,7 @@ def compile_screenplay_ir(
                 adapted_statement=adapted_statement,
                 resulting_state=unit.resulting_state.strip(),
                 actor_keys=actor_keys,
+                onscreen_entity_keys=onscreen_entity_keys,
                 character_emotion="",
                 decision_required=not contextual_actor,
                 decision_reason=(
@@ -2960,6 +3005,32 @@ def compile_screenplay_ir(
     for event in value.events:
         if event.scene_key not in scene_by_key:
             raise ValueError(f"event {event.key} 引用了不存在的 scene {event.scene_key}")
+        referenced_identity_keys = {
+            *event.actor_keys,
+            *event.target_keys,
+            *event.onscreen_entity_keys,
+            *(
+                key
+                for key in event.perceivable_by
+                if key != "audience"
+            ),
+        }
+        unknown_identity_keys = referenced_identity_keys - set(identity_by_key)
+        if unknown_identity_keys:
+            raise ValueError(
+                f"event {event.key} 引用了不存在的 identity："
+                f"{sorted(unknown_identity_keys)}"
+            )
+        invalid_onscreen_keys = [
+            key
+            for key in event.onscreen_entity_keys
+            if identity_by_key[key].visual_policy == "offscreen_only"
+        ]
+        if invalid_onscreen_keys:
+            raise ValueError(
+                f"event {event.key}.onscreen_entity_keys 含仅允许画外的身份："
+                f"{invalid_onscreen_keys}"
+            )
         unknown_sources = set(event.source_segment_ids) - expected_segment_ids
         if unknown_sources:
             raise ValueError(f"event {event.key} 来源段不存在：{sorted(unknown_sources)}")
@@ -3002,6 +3073,13 @@ def compile_screenplay_ir(
                 "audience",
             ]))
             derived_fields.append("perceivable_by")
+        if not event.onscreen_entity_keys:
+            event.onscreen_entity_keys = list(dict.fromkeys(
+                key
+                for key in [*event.actor_keys, *event.target_keys]
+                if identity_by_key[key].visual_policy != "offscreen_only"
+            ))
+            derived_fields.append("onscreen_entity_keys")
         if derived_fields:
             compiler_audit.append({
                 "path": f"events.{event.key}",
@@ -3387,6 +3465,10 @@ def compile_screenplay_ir(
             identity_id(token) for token in event.target_keys
             if str(token).strip() != "audience"
         ]
+        onscreen_entity_ids = [
+            identity_id(token) for token in event.onscreen_entity_keys
+            if str(token).strip() != "audience"
+        ]
         subject_id = (actor_ids or target_ids or [initial_subject])[0]
         state_facts.append({
             "fact_id": fact_out_id,
@@ -3488,6 +3570,7 @@ def compile_screenplay_ir(
             "causal_parent_ids": parents,
             "precondition_fact_ids": [fact_in_id],
             "action_ids": [action_id],
+            "onscreen_entity_ids": onscreen_entity_ids,
             "effects_add": [fact_out_id],
             "effects_remove": [fact_in_id],
             "character_goal_effects": [],

@@ -747,6 +747,11 @@ def validate_screenplay_narrative(
 
     action_event_owner: dict[str, str] = {}
     fact_producer: dict[str, str] = {}
+    offscreen_only_identity_ids = {
+        contract.identity_id
+        for contract in plan.identity_contracts
+        if contract.visual_policy == "offscreen_only"
+    }
     event_order = {event_id: position for position, event_id in enumerate(index.events)}
     parents: dict[str, list[str]] = {}
     for event_id, event in index.events.items():
@@ -755,6 +760,24 @@ def validate_screenplay_narrative(
         _require_refs(event.causal_parent_ids, index.events, errors, event_id)
         _require_refs(event.precondition_fact_ids, index.facts, errors, event_id)
         _require_refs(event.action_ids, index.actions, errors, event_id)
+        undeclared_onscreen = {
+            entity_id
+            for entity_id in event.onscreen_entity_ids
+            if entity_id not in declared_entity_ids
+        }
+        if undeclared_onscreen:
+            errors.append(
+                f"[NARRATIVE_ENTITY_UNDECLARED] {event_id}.onscreen_entity_ids "
+                f"含未声明身份 {sorted(undeclared_onscreen)}"
+            )
+        invalid_onscreen = (
+            set(event.onscreen_entity_ids) & offscreen_only_identity_ids
+        )
+        if invalid_onscreen:
+            errors.append(
+                f"[EVENT_ONSCREEN_POLICY_INVALID] {event_id}.onscreen_entity_ids "
+                f"含仅允许画外的身份 {sorted(invalid_onscreen)}"
+            )
         _require_refs(
             event.downstream_dependency_event_ids,
             index.events,

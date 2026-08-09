@@ -397,6 +397,14 @@ def validate_screenplay_scene_shard(
                     f"{scene.key}.units[{unit_index}] speaker_key 未冻结："
                     f"{unit.speaker_key}"
                 )
+            unbound_onscreen = sorted(
+                set(unit.onscreen_entity_keys) - identity_keys
+            )
+            if unbound_onscreen:
+                errors.append(
+                    f"{scene.key}.units[{unit_index}] onscreen_entity_keys 未冻结："
+                    f"{unbound_onscreen}"
+                )
             if unit.event_key:
                 # Reuse inside a scene denotes phases of one event; reuse across
                 # scenes is not allowed before global namespacing.
@@ -710,7 +718,9 @@ def _scene_shard_prompt(
         "均由程序拥有，不得改名、跨场挪 SRC 或输出整集 metadata/experience/events/beats/coverage。"
         "每个非标题来源必须由至少一个 action/dialogue unit 消费；dialogue.source_text 必须"
         "逐字来自其声明 SRC。speaker_key 只能逐字引用冻结 identity_key。发现无法绑定的"
-        "参与者时写 unresolved_participants，绝不自行创建 ID。复杂动作可在同一 local event_key"
+        "参与者时写 unresolved_participants，绝不自行创建 ID。每个 unit 的 "
+        "onscreen_entity_keys 只能填写这一动作或话轮当下实际在画面中的冻结 identity_key；"
+        "被台词提到、仅能听见或只感知事件的身份不得因此进入该列表。复杂动作可在同一 local event_key"
         "下写有序 units。\nShard plan：\n"
         + plan.model_dump_json()
         + "\nBlueprint scene plans：\n"

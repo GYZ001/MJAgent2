@@ -18,6 +18,15 @@ class VideoInputRepairRequired(RuntimeError):
     """The planned mode is still valid, but its local input assets need repair."""
 
 
+def _authority_checks_can_use_worker_thread() -> bool:
+    """A private in-memory SQLite database cannot be reopened in a worker thread."""
+    try:
+        rows = get_conn().execute("PRAGMA database_list").fetchall()
+        return any(str(row[2] or "").strip() for row in rows)
+    except Exception:
+        return False
+
+
 def _assert_video_provider_submission_authority(
     conn,
     *,
@@ -58,6 +67,34 @@ def _assert_video_provider_submission_authority(
             "shot_plan_id": shot_plan_id,
             "issues": exc.issues,
         }, ensure_ascii=False)) from exc
+
+
+async def _assert_video_provider_submission_authority_async(
+    *,
+    job,
+    meta: dict[str, Any],
+    actual_mode: str,
+    write_point: str,
+) -> Any | None:
+    if not _authority_checks_can_use_worker_thread():
+        return _assert_video_provider_submission_authority(
+            get_conn(),
+            job=job,
+            meta=meta,
+            actual_mode=actual_mode,
+            write_point=write_point,
+        )
+
+    def verify() -> Any | None:
+        return _assert_video_provider_submission_authority(
+            get_conn(),
+            job=dict(job),
+            meta=meta,
+            actual_mode=actual_mode,
+            write_point=write_point,
+        )
+
+    return await asyncio.to_thread(verify)
 
 
 def _assert_current_storyboard_completion_authority(
@@ -266,6 +303,22 @@ def _assert_review_dependency_fence(job, version_id: str, write_point: str) -> N
     except Exception:  # observability must not weaken the fence
         pass
     raise ReviewDependencyFence(json.dumps(detail, ensure_ascii=False))
+
+
+async def _assert_review_dependency_fence_async(
+    job,
+    version_id: str,
+    write_point: str,
+) -> None:
+    if not _authority_checks_can_use_worker_thread():
+        _assert_review_dependency_fence(job, version_id, write_point)
+        return
+    await asyncio.to_thread(
+        _assert_review_dependency_fence,
+        dict(job),
+        version_id,
+        write_point,
+    )
 
 def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) -> None:
     if not media_scheduler.renew_lease(job_id, owner, lease_seconds=lease_seconds):
@@ -2628,8 +2681,7 @@ async def _prepare_planned_mode_inputs(
     # media publication can all incur external work before the final video
     # submit.  One mode-neutral authority fence must therefore run before mode
     # dispatch, not merely before create_video_task.
-    selected_plan = _assert_video_provider_submission_authority(
-        conn,
+    selected_plan = await _assert_video_provider_submission_authority_async(
         job=job,
         meta=meta,
         actual_mode=str(mode),
@@ -2728,7 +2780,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
 
     started = time.time()
     try:
-        _assert_review_dependency_fence(job, version["id"], "worker_start")
+        await _assert_review_dependency_fence_async(
+            job, version["id"], "worker_start",
+        )
         provider_operation_id = (
             _row_value(job, "provider_operation_id")
             or f"video-create-{version['id']}"
@@ -2815,7 +2869,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             task.add_done_callback(_retry_tasks.discard)
             return
         _assert_job_lease(job_id, owner)
-        _assert_review_dependency_fence(
+        await _assert_review_dependency_fence_async(
             job, version["id"], "provider_input_adoption",
         )
 
@@ -2946,11 +3000,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     )
                     async with semaphore_for(media_stages.RESOURCE_VIDEO_SUBMIT):
                         _assert_job_lease(job_id, owner)
-                        _assert_review_dependency_fence(
+                        await _assert_review_dependency_fence_async(
                             job, version["id"], "provider_submit",
                         )
-                        _assert_video_provider_submission_authority(
-                            conn,
+                        await _assert_video_provider_submission_authority_async(
                             job=job,
                             meta=meta,
                             actual_mode=actual_mode,
@@ -2986,8 +3039,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         conn.commit()
                         try:
                             try:
-                                _assert_video_provider_submission_authority(
-                                    conn,
+                                await _assert_video_provider_submission_authority_async(
                                     job=job,
                                     meta=meta,
                                     actual_mode=actual_mode,
@@ -3121,7 +3173,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             )
             from app.media_pipeline import stages as media_stages
             async with semaphore_for(media_stages.RESOURCE_VIDEO_POLL):
-                _assert_review_dependency_fence(
+                await _assert_review_dependency_fence_async(
                     job, version["id"], "provider_poll",
                 )
                 try:
@@ -3230,7 +3282,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     reason="结果到达时所属 Supervisor 已收口；候选已隔离，不参与自动采用",
                 )
                 return
-        _assert_review_dependency_fence(job, version["id"], "candidate")
+        await _assert_review_dependency_fence_async(
+            job, version["id"], "candidate",
+        )
         latency = round(time.time() - started, 1)
         paid_attempts = max(
             1,
@@ -3287,7 +3341,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         if supervisor_controlled:
             force_best = False
         _assert_job_lease(job_id, owner)
-        _assert_review_dependency_fence(job, version["id"], "candidate_evidence")
+        await _assert_review_dependency_fence_async(
+            job, version["id"], "candidate_evidence",
+        )
         media_evidence.record_video_candidate(
             version["id"], step_run_id=_row_value(job, "step_run_id")
         )
@@ -3344,7 +3400,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 return
             raise ProviderError("视频文件技术校验失败，候选不可采用")
         if not supervisor_controlled:
-            _assert_review_dependency_fence(job, version["id"], "adoption_relation")
+            await _assert_review_dependency_fence_async(
+                job, version["id"], "adoption_relation",
+            )
             media_evidence.select_best_video_candidate(
                 job["shot_id"], force_best=force_best
             )
@@ -3602,7 +3660,7 @@ async def _maybe_auto_qa(
             except Exception:
                 pass
         visual_anchors = _visual_anchors_from_version_meta(meta_for_qa)
-        _assert_review_dependency_fence(job, version_id, "qa_start")
+        await _assert_review_dependency_fence_async(job, version_id, "qa_start")
         qa = await qa_shot(
             frames,
             qa_contract["action_desc"],
@@ -3641,7 +3699,7 @@ async def _maybe_auto_qa(
         qa["runtime_blocking"] = False
         qa["retry_eligible"] = False
         qa["score_status"] = "unavailable" if qa_unavailable else "scored"
-        _assert_review_dependency_fence(job, version_id, "qa_result")
+        await _assert_review_dependency_fence_async(job, version_id, "qa_result")
         _set_version(version_id, qa_json=json.dumps(qa, ensure_ascii=False))
         log_provider_call(
             "vlm_qa", config.MODEL_VLM, "QA_SCORE_ONLY", None, 0,

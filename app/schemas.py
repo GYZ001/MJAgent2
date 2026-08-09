@@ -383,6 +383,11 @@ class NarrativeEvent(BaseModel):
     causal_parent_ids: list[str] = Field(default_factory=list)
     precondition_fact_ids: list[str] = Field(default_factory=list)
     action_ids: list[str] = Field(default_factory=list)
+    # Identities that are physically present and may be rendered while this
+    # event is delivered.  This is deliberately distinct from
+    # NarrativeEvidence.perceivable_by: an observer, addressee, or person
+    # mentioned in dialogue is not thereby a visual subject.
+    onscreen_entity_ids: list[str] = Field(default_factory=list)
     effects_add: list[str] = Field(default_factory=list)
     effects_remove: list[str] = Field(default_factory=list)
     character_goal_effects: list[dict] = Field(default_factory=list)
