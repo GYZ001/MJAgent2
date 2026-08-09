@@ -136,3 +136,20 @@ Confirmed root cause:
 | I | Prompt compilation owns the stall | Rejected | Log lines 194-195 |
 | J | Budget reservation owns the stall | Rejected | Log lines 69-70, 94-95, 132-133, 165-166 |
 | K | Parent/child task connections split one reference-progress transaction | Confirmed | `run_job.py` reference progress ordering plus process sample |
+
+Post-fix evidence for K:
+- The restarted process completed enqueue version/trace/commit/budget boundaries
+  on log lines 5-11 while generation-page polling continued to return HTTP 200.
+- The same process completed Supervisor dispatch for shots 1 and 2 on lines
+  54-75 without entering SQLite's indefinite busy loop.
+
+New fresh-run issue:
+- Lines 61 and 73 show `reused=true` for shots 1 and 2.
+- The fresh owner only received succeeded preflight shell jobs; the exact-match
+  media jobs remained `paused` under their previous Supervisor owner.
+- Coverage filters active jobs by current `owner_run_id`, so the fresh run saw
+  no active jobs and ended without resuming or submitting those versions.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| L | Paused idempotent reuse closes the fresh preflight shell without transferring execution ownership | Confirmed | Post-fix log lines 54-75 and durable job rows |

@@ -1748,7 +1748,7 @@ def _dispatch(
         entry.last_issue_codes = [i.code for i in issues]
         return False
     if result.get("reused"):
-        return False
+        return bool(result.get("resumed"))
     if degrade:
         entry.continuity_degraded = True
     if plan and plan.rebuild_reference:

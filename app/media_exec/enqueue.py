@@ -893,6 +893,132 @@ def _close_reused_preflight_job(job_id: str) -> None:
     conn.commit()
 
 
+def _resume_reused_paused_job(
+    version_id: str,
+    *,
+    supervisor_run_id: str | None,
+    dependency_snapshot: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Transfer an exact paused attempt to the current completion Supervisor."""
+    if not supervisor_run_id:
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT j.*, v.status AS version_status, v.provider_task_id,
+                  v.image_inputs, e.active_video_run_id, e.video_completion_mode
+             FROM jobs j
+             JOIN shot_versions v ON v.id=j.version_id
+             JOIN episodes e ON e.id=j.episode_id
+            WHERE j.version_id=? AND j.kind='video' AND j.status='paused'
+              AND j.cancellation_requested=0 AND j.abandoned=0
+            ORDER BY j.created_at DESC LIMIT 1""",
+        (version_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if (
+        row["video_completion_mode"] != "complete"
+        or row["active_video_run_id"] != supervisor_run_id
+    ):
+        raise ValueError(
+            "[VIDEO_SUPERVISOR_OWNERSHIP_STALE] 暂停任务不能移交给非当前整集生成运行"
+        )
+
+    try:
+        meta = json.loads(row["image_inputs"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta = {}
+    captured = meta.get("review_dependency_snapshot") or {}
+    expected_qualification = str(captured.get("qualification_version") or "")
+    current_qualification = str(
+        (dependency_snapshot or {}).get("qualification_version") or ""
+    )
+    if expected_qualification != current_qualification:
+        raise ValueError(
+            "[REVIEW_DEPENDENCY_STALE] 暂停任务绑定的发布依赖已变化，禁止直接恢复"
+        )
+
+    reservation = conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id=?",
+        (row["id"],),
+    ).fetchone()
+    if (
+        reservation is None
+        or reservation["status"] not in {"reserved", "running"}
+    ):
+        raise ValueError(
+            "[VIDEO_BUDGET_RESERVATION_REQUIRED] 暂停任务缺少有效预算预留，禁止恢复"
+        )
+
+    provider_task_id = str(row["provider_task_id"] or "").strip()
+    submitted_at = row["provider_submitted_at"]
+    provider_may_have_accepted = bool(
+        row["provider_non_cancellable"]
+        or row["provider_create_state"] in {"accepted", "submitting", "unknown"}
+        or provider_task_id
+    )
+    if provider_may_have_accepted and (
+        not provider_task_id or submitted_at is None
+    ):
+        recovered = _recover_paused_provider_handle(conn, row)
+        if recovered is None:
+            raise ValueError(
+                "[VIDEO_PROVIDER_HANDLE_UNRESOLVED] 供应商可能已接单，但原任务号或"
+                "提交时间尚未确认，禁止重复提交"
+            )
+        recovered_task_id, recovered_at = recovered
+        if provider_task_id and provider_task_id != recovered_task_id:
+            raise ValueError(
+                "[VIDEO_PROVIDER_HANDLE_MISMATCH] 本地任务号与供应商账本不一致"
+            )
+        provider_task_id = recovered_task_id
+        submitted_at = recovered_at
+
+    next_status = "waiting_provider" if provider_task_id else "queued"
+    updated = conn.execute(
+        """UPDATE jobs
+              SET status=?, error=NULL, owner_run_id=?,
+                  provider_create_state=?, provider_non_cancellable=?,
+                  provider_submitted_at=?, lease_owner=NULL,
+                  lease_expires_at=NULL, next_retry_at=NULL, updated_at=?
+            WHERE id=? AND status='paused'
+              AND cancellation_requested=0 AND abandoned=0""",
+        (
+            next_status,
+            supervisor_run_id,
+            "accepted" if provider_task_id else "not_started",
+            int(bool(provider_task_id)),
+            submitted_at,
+            now(),
+            row["id"],
+        ),
+    )
+    if updated.rowcount != 1:
+        conn.rollback()
+        raise ValueError("暂停任务状态已变化，请刷新后重试")
+    if provider_task_id:
+        conn.execute(
+            "UPDATE shot_versions SET provider_task_id=? WHERE id=?",
+            (provider_task_id, version_id),
+        )
+    conn.execute(
+        "UPDATE shot_versions SET status='queued', error=NULL WHERE id=? AND status='paused'",
+        (version_id,),
+    )
+    conn.execute(
+        "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+        (row["id"],),
+    )
+    conn.commit()
+    _enqueue_for_current_status(row["id"])
+    return {
+        "resumed": True,
+        "job_id": row["id"],
+        "provider_task_id": provider_task_id or None,
+        "provider_already_accepted": bool(provider_task_id),
+    }
+
+
 def _assert_enqueue_storyboard_authority(shot_id: str):
     """Resolve the immutable screenplay and fence narrative paid work.
 
@@ -1424,6 +1550,14 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             (shot_id, key)).fetchone()
         if existing:
             result = {"reused": True, "version_id": existing["id"]}
+            if existing["status"] == "paused":
+                resumed = _resume_reused_paused_job(
+                    existing["id"],
+                    supervisor_run_id=supervisor_run_id,
+                    dependency_snapshot=dependency_snapshot,
+                )
+                if resumed:
+                    result.update(resumed)
             if preflight_repair:
                 result["preflight_repair"] = preflight_repair
             return result

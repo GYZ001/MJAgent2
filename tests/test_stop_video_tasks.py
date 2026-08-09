@@ -236,3 +236,121 @@ def test_resume_refuses_duplicate_charge_when_provider_handle_is_unknown(monkeyp
     assert [row["status"] for row in conn.execute(
         "SELECT status FROM jobs ORDER BY id"
     )] == ["paused", "paused"]
+
+
+def test_fresh_supervisor_takes_over_exact_paused_jobs(monkeypatch) -> None:
+    conn = _conn()
+    snapshot = json.dumps({
+        "review_dependency_snapshot": {"qualification_version": "release-q1"},
+    })
+    conn.execute(
+        """UPDATE episodes
+              SET video_completion_mode='complete', active_video_run_id='run-new'
+            WHERE id='e'"""
+    )
+    conn.execute(
+        "UPDATE shot_versions SET image_inputs=? WHERE id IN ('v1','v2')",
+        (snapshot,),
+    )
+    for job_id in ("j1", "j2"):
+        conn.execute(
+            """INSERT INTO budget_reservations(
+                   id,job_id,scope_type,scope_id,amount_cny,status,created_at
+               ) VALUES(?,?, 'episode','e',4,'reserved',0)""",
+            (f"budget-{job_id}", job_id),
+        )
+    conn.execute(
+        """UPDATE jobs
+              SET provider_operation_id='video-create-v2',
+                  provider_create_state='accepted', provider_non_cancellable=1
+            WHERE id='j2'"""
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,status,operation_id,response_json
+           ) VALUES(10,'video_create','OK','video-create-v2',?)""",
+        (json.dumps({"id": "provider-existing-2"}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    queued: list[str] = []
+    monkeypatch.setattr(
+        worker, "_enqueue_for_current_status", lambda job_id: queued.append(job_id),
+    )
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+
+    worker.pause_episode_video_tasks("e")
+    resumed_local = worker._resume_reused_paused_job(
+        "v1",
+        supervisor_run_id="run-new",
+        dependency_snapshot={"qualification_version": "release-q1"},
+    )
+    resumed_provider = worker._resume_reused_paused_job(
+        "v2",
+        supervisor_run_id="run-new",
+        dependency_snapshot={"qualification_version": "release-q1"},
+    )
+
+    assert resumed_local == {
+        "resumed": True,
+        "job_id": "j1",
+        "provider_task_id": None,
+        "provider_already_accepted": False,
+    }
+    assert resumed_provider == {
+        "resumed": True,
+        "job_id": "j2",
+        "provider_task_id": "provider-existing-2",
+        "provider_already_accepted": True,
+    }
+    assert [tuple(row) for row in conn.execute(
+        "SELECT id,status,owner_run_id FROM jobs ORDER BY id"
+    )] == [
+        ("j1", "queued", "run-new"),
+        ("j2", "waiting_provider", "run-new"),
+    ]
+    assert [tuple(row) for row in conn.execute(
+        "SELECT id,status,provider_task_id FROM shot_versions ORDER BY id"
+    )] == [
+        ("v1", "queued", None),
+        ("v2", "queued", "provider-existing-2"),
+    ]
+    assert queued == ["j1", "j2"]
+
+
+def test_fresh_supervisor_refuses_paused_job_with_changed_release(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        """UPDATE episodes
+              SET video_completion_mode='complete', active_video_run_id='run-new'
+            WHERE id='e'"""
+    )
+    conn.execute(
+        """UPDATE shot_versions
+              SET image_inputs='{"review_dependency_snapshot":{"qualification_version":"release-old"}}'
+            WHERE id='v1'"""
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('budget-j1','j1','episode','e',4,'reserved',0)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *args, **kwargs: None)
+    worker.pause_episode_video_tasks("e")
+
+    try:
+        worker._resume_reused_paused_job(
+            "v1",
+            supervisor_run_id="run-new",
+            dependency_snapshot={"qualification_version": "release-new"},
+        )
+    except ValueError as exc:
+        assert "[REVIEW_DEPENDENCY_STALE]" in str(exc)
+    else:
+        raise AssertionError("changed release must fail closed")
+
+    assert conn.execute(
+        "SELECT status,owner_run_id FROM jobs WHERE id='j1'"
+    ).fetchone()[:] == ("paused", None)

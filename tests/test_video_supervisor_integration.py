@@ -1208,11 +1208,16 @@ def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
 
     eid, _ = _seed_episode(memdb, 2)
     calls = {"n": 0}
+    resume_reused = {"enabled": False}
 
     def fake_enqueue(shot_id, **kwargs):
         calls["n"] += 1
         if shot_id.endswith("_1"):
-            return {"reused": True, "version_id": "v_old"}
+            return {
+                "reused": True,
+                "resumed": resume_reused["enabled"],
+                "version_id": "v_old",
+            }
         raise CompileError("动作容量超限")
 
     monkeypatch.setattr(worker, "enqueue_shot", fake_enqueue)
@@ -1230,6 +1235,9 @@ def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
     assert _dispatch(e1, episode_id=eid, run_id=None, first=True) is False
     assert _dispatch(e2, episode_id=eid, run_id=None, first=True) is False
     assert calls["n"] == 2
+    resume_reused["enabled"] = True
+    assert _dispatch(e1, episode_id=eid, run_id=None, first=True) is True
+    assert calls["n"] == 3
     # entry 还是未采用的旧快照，但用户已在派发前采用候选：数据库终检必须拒绝。
     _add_succeeded_version(
         memdb,
@@ -1237,7 +1245,7 @@ def test_fake_enqueue_dispatch_reused_and_preflight(memdb, monkeypatch):
         qa={"overall": 0.9, "contract_facts": []},
     )
     assert _dispatch(e2, episode_id=eid, run_id=None, first=True) is False
-    assert calls["n"] == 2
+    assert calls["n"] == 3
     ledger = rebuild_coverage_ledger(eid)
     assert "VIDEO_PREFLIGHT_BLOCKED" in next(
         e for e in ledger.entries if e.shot_no == 2
