@@ -419,7 +419,7 @@ def test_delivery_http_task_is_recreated_as_background_attempt(tmp_path, monkeyp
     assert spawned == [("run", child["id"])]
 
 
-def test_monitor_exposes_recovering_and_recovered_instead_of_stale_pause(
+def test_monitor_tracks_recovery_child_until_it_really_succeeds(
     tmp_path, monkeypatch,
 ) -> None:
     conn = _fresh_database(tmp_path, monkeypatch)
@@ -448,9 +448,49 @@ def test_monitor_exposes_recovering_and_recovered_instead_of_stale_pause(
     after = system_api.jobs_overview()
 
     parent_row = next(row for row in after["recent"] if row["id"] == parent)
+    assert parent_row["status"] == "recovering"
+    assert parent_row["recovered_by_run_id"] == child
+
+    conn.execute(
+        "UPDATE workflow_runs SET status='SUCCEEDED',updated_at=3 WHERE id=?",
+        (child,),
+    )
+    conn.commit()
+    completed = system_api.jobs_overview()
+    parent_row = next(
+        row for row in completed["recent"] if row["id"] == parent
+    )
     assert parent_row["status"] == "recovered"
     assert parent_row["recovered_by_run_id"] == child
-    assert after["counts"]["recovered"] == 1
+    assert completed["counts"]["recovered"] == 1
+
+
+def test_monitor_surfaces_failed_recovery_child_as_failed(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _fresh_database(tmp_path, monkeypatch)
+    parent = _paused_run("screenplay", "project", "p1")
+    child = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="project",
+        scope_id="p1",
+        input_fingerprint="retry",
+        parent_run_id=parent,
+        trigger_type="resume",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='FAILED',failure_message='身份编译失败',"
+        "updated_at=3 WHERE id=?",
+        (child,),
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", db.get_conn)
+
+    result = system_api.jobs_overview()
+    parent_row = next(row for row in result["recent"] if row["id"] == parent)
+
+    assert parent_row["status"] == "failed"
+    assert parent_row["error"] == "身份编译失败"
 
 
 def test_monitor_links_interrupted_provider_call_to_successful_retry(

@@ -1202,3 +1202,113 @@ def test_storyboard_dialogue_framing_blocker_requests_repair(monkeypatch) -> Non
     assert calls == 2
     assert result.disposition == "PASS"
     assert dialogue_framing_errors(result.shot) == []
+
+
+def test_inner_repair_iteration_can_replace_stale_outline_camera(
+    monkeypatch,
+) -> None:
+    base = {
+        "shot_no": 2,
+        "duration_s": 5,
+        "camera_move": "固定",
+        "scene_setting": "日，走廊",
+        "characters": ["甲"],
+        "characters_visible": ["甲"],
+        "visible_entity_ids": ["actor"],
+        "action_desc": "甲边走向门口边说清当前决定。",
+        "first_frame_desc": "甲从走廊内侧开始向门口移动。",
+        "last_frame_desc": "同一机位，甲走到门口并完成说明。",
+        "source_excerpt": "甲一边走向门口，一边说清了自己的决定。",
+        "dialogues": [{
+            "speaker": "甲",
+            "line": "我边走边把这件事说清楚。",
+            "emotion": "坚定",
+            "delivery": "spoken_dialogue",
+        }],
+        "audio_timeline": [{
+            "start_s": 0,
+            "end_s": 4,
+            "type": "spoken_dialogue",
+            "speaker_id": "甲",
+            "text": "我边走边把这件事说清楚。",
+            "lip_sync": True,
+        }],
+        "transition": "硬切",
+    }
+    outputs = [
+        json.dumps(
+            {
+                "episode_no": 1,
+                "is_final": False,
+                "shot": {**base, "shot_size": "近景"},
+            },
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {
+                "episode_no": 1,
+                "is_final": False,
+                "shot": {
+                    **base,
+                    "shot_size": "中景",
+                    "camera_move": "跟随",
+                },
+            },
+            ensure_ascii=False,
+        ),
+    ]
+    calls = 0
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        value = outputs[calls]
+        calls += 1
+        return value
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        stages,
+        "log_provider_call",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = asyncio.run(_run_with_agent_loop(
+        "分镜脚本",
+        "storyboard",
+        "生成第2镜",
+        StoryboardShotDraft,
+        lambda draft: (
+            []
+            if draft.shot.shot_size == "中景"
+            and draft.shot.camera_move == "跟随"
+            else ["shot_no=2 必须用中景跟随完整呈现走位"]
+        ),
+        loop=_dialogue_loop(),
+        prefill={"episode_no": 1},
+        storyboard_candidate_context={
+            "episode_id": "ep1",
+            "episode_no": 1,
+            "shot_no": 2,
+            "outline_narrative_task": {
+                "visible_entity_ids": ["actor"],
+                "characters_visible": ["甲"],
+                "_visual_identities": [{
+                    "identity_id": "actor",
+                    "display_name": "甲",
+                }],
+                "_bound_action_actor_ids": ["actor"],
+                "_bound_action_target_ids": [],
+                "camera_size": "近景",
+                "camera_movement": "固定",
+                "key_line_ids": ["KL01"],
+                "audio_cast": ["甲"],
+                "capacity_budget": {
+                    "spoken_and_text_s": 4,
+                },
+            },
+        },
+    ))
+
+    assert calls == 2
+    assert result.shot.shot_size == "中景"
+    assert result.shot.camera_move == "跟随"

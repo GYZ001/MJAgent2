@@ -828,7 +828,7 @@ def test_jobs_overview_includes_running_screenplay(monkeypatch) -> None:
         CREATE TABLE workflow_runs(
             id TEXT, workflow_type TEXT, scope_type TEXT, scope_id TEXT,
             status TEXT, current_step_key TEXT, updated_at REAL,
-            failure_message TEXT
+            failure_message TEXT, recovered_by_run_id TEXT
         );
         INSERT INTO projects VALUES('p1', '测试项目');
         INSERT INTO episodes VALUES('e1', 'p1', 1, '第一集', 'running', NULL, 100, 120, 10);
@@ -862,17 +862,17 @@ def test_jobs_overview_includes_harness_runs_and_deduplicates_linked_work(monkey
         CREATE TABLE workflow_runs(
             id TEXT, workflow_type TEXT, scope_type TEXT, scope_id TEXT,
             status TEXT, current_step_key TEXT, updated_at REAL,
-            failure_message TEXT
+            failure_message TEXT, recovered_by_run_id TEXT
         );
         INSERT INTO projects VALUES('p1', 'Project');
         INSERT INTO episodes VALUES('e1', 'p1', 1, 'Episode', 'ready', NULL, 100, 120, 10);
         INSERT INTO workflow_runs VALUES(
             'run_refs', 'character_references', 'project', 'p1',
-            'RUNNING', 'character_references', 200, NULL
+            'RUNNING', 'character_references', 200, NULL, NULL
         );
         INSERT INTO workflow_runs VALUES(
             'run_script', 'screenplay', 'episode', 'e1',
-            'SUCCEEDED', 'screenplay', 190, NULL
+            'SUCCEEDED', 'screenplay', 190, NULL, NULL
         );
         INSERT INTO jobs(
             id, kind, episode_id, project_id, status, created_at, updated_at, run_id

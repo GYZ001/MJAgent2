@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from app.narrative_blueprint import NarrativeBlueprint, derive_blueprint_scene_plans
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
-from app.schemas import Bible
+from app.schemas import Bible, World
 from app.screenplay_ir import IRIdentity, IRScene, IRSceneUnit
 from app.screenplay_scene_shards import (
     SCREENPLAY_SCENE_SHARD_VERSION,
@@ -157,7 +157,7 @@ def test_scene_shard_grouping_is_deterministic_and_respects_domains() -> None:
 
 def test_frozen_functional_identity_has_a_visible_contextual_anchor() -> None:
     identities, _registry, _registry_hash = build_frozen_identity_registry(
-        Bible(),
+        Bible(characters=[], world=World(visual_style_canonical="测试")),
         [{
             "source_label": "邮差",
             "canonical_name": "邮差",
