@@ -27,6 +27,13 @@ def _authority_checks_can_use_worker_thread(conn=None) -> bool:
         return False
 
 
+def _connection_for_heartbeat_operation(conn):
+    """Let a child task own its SQLite connection when the DB is reopenable."""
+    if _authority_checks_can_use_worker_thread(conn):
+        return None
+    return conn
+
+
 def _assert_video_provider_submission_authority(
     conn,
     *,
@@ -2873,6 +2880,7 @@ async def _ensure_ai_video_prompt(
     prompt_text: str,
 ) -> tuple[dict, str]:
     """Generate the creative provider prompt once, before preparing video inputs."""
+    conn = conn or get_conn()
     if not meta.get("ai_video_prompt_required"):
         return meta, prompt_text
     _debug_prompt_prep_started = time.monotonic()
@@ -2976,6 +2984,7 @@ async def _prepare_planned_mode_inputs(
     conn, job, version, shot, ep, meta: dict, prompt_text: str,
     *, lease_owner: str,
 ) -> tuple[dict, str]:
+    conn = conn or get_conn()
     mode = meta.get("mode") or video_modes.REFERENCE_IMAGE_MODE
     # Reference/keyframe generation, boundary-frame generation, and provider
     # media publication can all incur external work before the final video
@@ -3140,6 +3149,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             _set_version(version["id"], prompt_text=prompt_text)
         try:
             if not task_id:
+                operation_conn = _connection_for_heartbeat_operation(conn)
                 await _assert_video_provider_submission_authority_async(
                     conn=conn,
                     job=job,
@@ -3153,14 +3163,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 )
                 meta, prompt_text = await _await_with_job_lease_heartbeat(
                     _ensure_ai_video_prompt(
-                        conn, job, version, shot, ep, meta, prompt_text,
+                        operation_conn, job, version, shot, ep, meta, prompt_text,
                     ),
                     job_id=job_id,
                     owner=owner,
                 )
                 meta, prompt_text = await _await_with_job_lease_heartbeat(
                     _prepare_planned_mode_inputs(
-                        conn, job, version, shot, ep, meta, prompt_text,
+                        operation_conn, job, version, shot, ep, meta, prompt_text,
                         lease_owner=owner,
                     ),
                     job_id=job_id,

@@ -95,3 +95,16 @@ def test_cancelled_job_cannot_be_written_back_to_running_version(monkeypatch) ->
     assert conn.execute(
         "SELECT status FROM shot_versions WHERE id='v'"
     ).fetchone()["status"] == "cancelled"
+
+
+def test_heartbeat_operation_owns_file_database_connection(tmp_path) -> None:
+    from app import worker
+
+    file_conn = sqlite3.connect(tmp_path / "worker.db")
+    memory_conn = sqlite3.connect(":memory:")
+    try:
+        assert worker._connection_for_heartbeat_operation(file_conn) is None
+        assert worker._connection_for_heartbeat_operation(memory_conn) is memory_conn
+    finally:
+        file_conn.close()
+        memory_conn.close()

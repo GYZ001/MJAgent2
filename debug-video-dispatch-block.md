@@ -105,3 +105,34 @@ Enqueue instrumentation marks:
 - version INSERT and media trace boundaries
 - persistence commit start/end
 - budget reservation start/end
+
+Latest evidence:
+- H is rejected for the enqueue path: lines 187-196 show preflight and Prompt
+  compilation completed with `db_in_transaction=false`; the stall begins on the
+  first `shot_versions` write because another connection already owns SQLite's
+  writer lock.
+- I is rejected: lines 194-195 show deterministic Prompt compilation completed
+  in about 2 ms after the preceding authority reads.
+- J is rejected as the lock owner: lines 69-70, 94-95, 132-133 and 165-166 show
+  budget reservation completing with no open transaction.
+- A fresh process sample while line 196 was stalled shows both the event-loop
+  thread and the Supervisor offload thread sleeping in
+  `sqlite3_step -> btreeBeginTrans -> sqliteDefaultBusyCallback`.
+
+Confirmed root cause:
+- `_await_with_job_lease_heartbeat` runs input preparation in a child
+  `asyncio.Task`, but passes the parent media worker's SQLite connection into
+  that child.
+- `_persist_reference_progress` first calls `set_pipeline_stage(..., conn=conn)`,
+  opening a write transaction on the parent task connection.
+- It then calls `_set_version()` without the supplied connection. `get_conn()`
+  resolves a different connection for the child task, whose write waits for the
+  parent connection. The parent task is awaiting the child and cannot reach the
+  following `conn.commit()`, creating a deterministic self-deadlock.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| H | Enqueue owns the long writer transaction | Rejected | Log lines 187-196 |
+| I | Prompt compilation owns the stall | Rejected | Log lines 194-195 |
+| J | Budget reservation owns the stall | Rejected | Log lines 69-70, 94-95, 132-133, 165-166 |
+| K | Parent/child task connections split one reference-progress transaction | Confirmed | `run_job.py` reference progress ordering plus process sample |
