@@ -427,8 +427,9 @@ def test_board_ui_exposes_two_stage_human_calibration_without_internal_codes() -
 
     assert "narrative-calibration/freeze" in source
     assert "narrative-calibration/observations" in source
-    assert "narrative-calibration/ai-simulate" not in source
-    assert "运行 AI 一次观看模拟" not in source
+    assert "narrative-calibration/ai-simulate" in source
+    assert "运行 AI 一次观看模拟" in source
+    assert "不会伪造真人参与者或观察记录" in source
     assert "真人一次观看校准" in source
     assert source.index("冻结首次复述") < source.index("提交真人观察")
     assert "title={freezeBlockedReason || undefined}" in source

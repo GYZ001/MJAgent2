@@ -854,13 +854,6 @@ def _storyboard_shot_evidence_requires_rebind(
     )
 
 
-def _storyboard_calibration_mode_is_publishable(mode: str) -> bool:
-    return str(mode or "").strip() in {
-        "human_calibration",
-        "ai_simulation",
-    }
-
-
 def _finalize_storyboard_evidence(
     episode_id: str,
     board: Storyboard,
@@ -947,13 +940,11 @@ def _finalize_storyboard_evidence(
             raise RuntimeError(
                 f"一次观看校准未就绪，禁止发布叙事分镜：{exc}"
             ) from exc
-        if not _storyboard_calibration_mode_is_publishable(
-            calibration_authority.authority_mode
-        ):
-            raise RuntimeError(
-                "一次观看校准未达到发布要求；仅允许真人校准或"
-                "已通过独立 runtime gate 的 AI 一次观看模拟"
-            )
+        # ``assert_report_meets_current_calibration`` already verifies the
+        # authority artifact, lineage, runtime gate and effective threshold.
+        # Publication must consume that typed result directly instead of
+        # maintaining a second mode-name allowlist that can drift from the
+        # calibration contract.
     if _sync_storyboard_scene_bindings(conn, episode_id, board):
         # 这是由当前门禁确定的派生外键修复，即使后续证据发布失败也应保留，
         # 避免下次重试继续读取已经证伪的历史场景绑定。

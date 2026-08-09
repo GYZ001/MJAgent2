@@ -181,6 +181,59 @@ def test_screenplay_generate_preflight_allows_terminal_run_takeover() -> None:
     assert live.state_fingerprint != terminal.state_fingerprint
 
 
+@pytest.mark.asyncio
+async def test_start_screenplay_replaces_terminal_run_owner(monkeypatch) -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    failed_run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="failed-run",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='FAILED',failure_code='TEST' WHERE id=?",
+        (failed_run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET source_chapters='[1]',screenplay_status='failed',"
+        "active_screenplay_run_id=? WHERE id='e1'",
+        (failed_run_id,),
+    )
+    conn.commit()
+
+    class Recorder:
+        run_id = "run_replacement"
+
+        def cancel(self, _message: str) -> None:
+            raise AssertionError("successful takeover must not cancel the new run")
+
+    spawned: list[tuple[str, str]] = []
+
+    def capture_spawn(kind, key, coro, *, project_id=None):
+        spawned.append((kind, key))
+        coro.close()
+
+    monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: Recorder())
+    monkeypatch.setattr(task_registry, "spawn", capture_spawn)
+
+    with enter_handler():
+        result = await api.start_screenplay("e1", body={})
+
+    episode = conn.execute(
+        "SELECT screenplay_status,active_screenplay_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert result["run_id"] == "run_replacement"
+    assert dict(episode) == {
+        "screenplay_status": "queued",
+        "active_screenplay_run_id": "run_replacement",
+    }
+    assert spawned == [("screenplay", "e1")]
+
+
 def test_clear_unpublished_ir_preserves_published_lineage() -> None:
     run_id = repository.create_run(
         workflow_type="screenplay",
