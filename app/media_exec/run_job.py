@@ -462,6 +462,8 @@ def _queue_job(queue: asyncio.Queue[str], job_id: str) -> None:
                 queue.put_nowait,
                 job_id,
             )
+        else:
+            queue.put_nowait(job_id)
         return
     queue.put_nowait(job_id)
 

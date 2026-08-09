@@ -1374,6 +1374,49 @@ def _rebuild_budgeted_coverage_ledger(
     return ledger
 
 
+async def _rebuild_budgeted_coverage_ledger_async(
+    episode_id: str,
+    *,
+    cp: VideoSupervisorCheckpoint,
+    fallback_quota: int,
+    budget_cap_cny: float,
+) -> CoverageLedger:
+    if not _supervisor_checks_can_use_worker_thread():
+        return _rebuild_budgeted_coverage_ledger(
+            episode_id,
+            cp=cp,
+            fallback_quota=fallback_quota,
+            budget_cap_cny=budget_cap_cny,
+        )
+    return await asyncio.to_thread(
+        _rebuild_budgeted_coverage_ledger,
+        episode_id,
+        cp=cp,
+        fallback_quota=fallback_quota,
+        budget_cap_cny=budget_cap_cny,
+    )
+
+
+async def _rebuild_coverage_ledger_async(
+    episode_id: str,
+    *,
+    cp: VideoSupervisorCheckpoint,
+    fallback_quota: int | None = None,
+) -> CoverageLedger:
+    if not _supervisor_checks_can_use_worker_thread():
+        return rebuild_coverage_ledger(
+            episode_id,
+            cp=cp,
+            fallback_quota=fallback_quota,
+        )
+    return await asyncio.to_thread(
+        rebuild_coverage_ledger,
+        episode_id,
+        cp=cp,
+        fallback_quota=fallback_quota,
+    )
+
+
 def _has_dispatch_budget_capacity(
     episode_id: str,
     entry: ShotCoverageEntry,
@@ -2966,20 +3009,23 @@ async def run_video_completion_supervisor(
         _reconcile_terminal_continuity_blocks(episode_id, run_id=run_id)
         cap = float(cp.budget.get("cap_cny") or DEFAULT_VIDEO_BUDGET_CAP_CNY)
         fallback_quota = int(cp.coverage.get("fallback_quota") or 0)
-        ledger = await asyncio.to_thread(
-            _rebuild_budgeted_coverage_ledger,
+        ledger = await _rebuild_budgeted_coverage_ledger_async(
             episode_id,
             cp=cp,
             fallback_quota=fallback_quota,
             budget_cap_cny=cap,
         )
-        if await asyncio.to_thread(
-            _adopt_ready_candidates,
-            ledger,
-            run_id=run_id,
-        ):
-            ledger = await asyncio.to_thread(
-                _rebuild_budgeted_coverage_ledger,
+        adopted_ready = (
+            await asyncio.to_thread(
+                _adopt_ready_candidates,
+                ledger,
+                run_id=run_id,
+            )
+            if _supervisor_checks_can_use_worker_thread()
+            else _adopt_ready_candidates(ledger, run_id=run_id)
+        )
+        if adopted_ready:
+            ledger = await _rebuild_budgeted_coverage_ledger_async(
                 episode_id,
                 cp=cp,
                 fallback_quota=fallback_quota,
@@ -3228,8 +3274,7 @@ async def run_video_completion_supervisor(
             await asyncio.sleep(0)
 
         if budget_capacity_reached:
-            observed = await asyncio.to_thread(
-                rebuild_coverage_ledger,
+            observed = await _rebuild_coverage_ledger_async(
                 episode_id,
                 cp=cp,
                 fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
@@ -3251,8 +3296,7 @@ async def run_video_completion_supervisor(
         if allow_fallback_adopt:
             # 刷新 ledger 状态到 cp
             _merge_shot_state(cp, ledger)
-            ledger2 = await asyncio.to_thread(
-                rebuild_coverage_ledger,
+            ledger2 = await _rebuild_coverage_ledger_async(
                 episode_id,
                 cp=cp,
             )

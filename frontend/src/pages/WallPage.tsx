@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import EpisodeCrumb from '../components/EpisodeCrumb'
-import { useEpisode, useNav } from '../App'
+import { episodeBusy, useEpisode, useNav } from '../App'
 import {
   api,
   type Episode,
@@ -455,7 +455,11 @@ function matchesFilter(shot: Shot, filter: ShotFilter) {
 
 export default function WallPage() {
   const { projectId, episodeId, go } = useNav()
-  const { data: ep, refresh, error, loading } = useEpisode(episodeId || '', 'wall')
+  const { data: ep, refresh, error, loading } = useEpisode(
+    episodeId || '',
+    'wall',
+    current => episodeBusy(current) ? 8000 : 0,
+  )
   // Keep the pre-detail dependency stable. A fresh [] on every render makes
   // the detail effect re-enter and repeatedly write a new idle state.
   const shots = ep?.shots ?? EMPTY_SHOTS
