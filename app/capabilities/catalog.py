@@ -825,7 +825,10 @@ def _register_commands(registry) -> None:
             description="人工门禁：确认分镜并进入付费视频阶段",
             input_model=I.StoryboardConfirmInput,
             risk=RiskLevel.R3_DESTRUCTIVE,
-            confirmation=ConfirmationPolicy.ALWAYS,
+            # confirm-preview already signs a one-time, state-bound approval
+            # that the handler consumes. A second Command Bus approval leaves
+            # the page stuck at HTTP 202 after the user has approved the modal.
+            confirmation=ConfirmationPolicy.NEVER,
             idempotency=IdempotencyPolicy.REQUIRED,
             scopes={"manju:generation-media"},
             side_effect="human_gate_unlocks_paid_video",

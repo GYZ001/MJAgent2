@@ -86,11 +86,19 @@ def test_command_input_models_extend_standard_fields() -> None:
 
 def test_high_risk_commands_require_confirmation_metadata() -> None:
     registry = get_registry()
-    for name in ("project.delete", "video.clear_episode", "delivery.review", "storyboard.confirm"):
+    for name in ("project.delete", "video.clear_episode", "delivery.review"):
         spec = registry.get_command(name)
         assert spec.risk == RiskLevel.R3_DESTRUCTIVE
         assert spec.confirmation == ConfirmationPolicy.ALWAYS
         assert spec.idempotency == IdempotencyPolicy.REQUIRED
+
+
+def test_storyboard_confirmation_consumes_domain_preview_without_double_approval() -> None:
+    spec = get_registry().get_command("storyboard.confirm")
+
+    assert spec.risk == RiskLevel.R3_DESTRUCTIVE
+    assert spec.confirmation == ConfirmationPolicy.NEVER
+    assert spec.idempotency == IdempotencyPolicy.REQUIRED
 
 
 def test_human_only_secrets_never_mcp_exposed() -> None:

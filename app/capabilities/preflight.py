@@ -660,8 +660,8 @@ def storyboard_confirm(args) -> PreflightResult:
             if forced else ["确认后将允许产生付费媒体任务"]
         ),
         state_fingerprint=_fp({"episode_id": args.episode_id, "status": ep["status"], "shots": shots}),
-        requires_confirmation=True,
-        confirmation_policy=ConfirmationPolicy.ALWAYS,
+        requires_confirmation=False,
+        confirmation_policy=ConfirmationPolicy.NEVER,
     )
 
 

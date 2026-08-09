@@ -1874,6 +1874,30 @@ async def test_confirmation_does_not_join_another_async_tasks_transaction(
     ).fetchone()["status"] == "confirmed"
 
 
+@pytest.mark.asyncio
+async def test_dispatch_confirmation_consumes_preview_without_second_approval(
+    storyboard_db,
+):
+    from app.capabilities.dispatch import dispatch
+    from app.capabilities.schemas import CommandStatus
+
+    preview = api.create_storyboard_confirmation_preview("e1")
+    result = await dispatch(
+        "storyboard.confirm",
+        {
+            "episode_id": "e1",
+            "preview_token": preview["preview_token"],
+        },
+        session_id="local-test-session",
+    )
+
+    assert result.status == CommandStatus.SUCCEEDED
+    assert result.data["confirmed"] is True
+    assert storyboard_db.execute(
+        "SELECT status FROM episodes WHERE id='e1'"
+    ).fetchone()["status"] == "confirmed"
+
+
 def test_preview_fingerprint_covers_independent_shot_fields(storyboard_db):
     preview = workspace.create_preview("test_full_fingerprint", "e1", {"ok": True})
     storyboard_db.execute(
