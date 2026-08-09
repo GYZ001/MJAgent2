@@ -2779,6 +2779,15 @@ def _complete_screenplay_from_working_artifact(
     return load_screenplay_from_artifact(working_id)
 
 
+def _checkpoint_after_baseline_generation(
+    previous: dict[str, Any],
+    revision,
+) -> dict[str, Any]:
+    """Merge in progress persisted while the Baseline await was in flight."""
+    latest = dict(getattr(revision, "checkpoint_json", None) or {})
+    return {**previous, **latest}
+
+
 async def run_screenplay_production(
     *,
     episode_id: str,
@@ -3080,6 +3089,10 @@ async def run_screenplay_production(
                 input_fingerprint=input_fp,
                 expected_working_artifact_id=baseline_art["id"],
             )
+        # Pre-Document generation persists live Blueprint/shard progress while
+        # this function is awaiting it.  Refresh from the returned revision so
+        # the older entry snapshot cannot overwrite a recovered shard success.
+        checkpoint = _checkpoint_after_baseline_generation(checkpoint, rev)
         checkpoint = {
             **checkpoint,
             "phase": "STRUCTURE_VALIDATION",

@@ -449,19 +449,58 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             sorted(checkpoint_artifact_ids),
         ).fetchall()
     } if checkpoint_artifact_ids else set()
+    checkpoint_blueprint_hash = str(checkpoint.get("blueprint_hash") or "")
+    checkpoint_identity_hash = str(
+        checkpoint.get("identity_registry_hash") or ""
+    )
+    validated_shard_keys: set[tuple[str, str, str, str, str]] = set()
+    if checkpoint_blueprint_hash and checkpoint_identity_hash:
+        for artifact_row in conn.execute(
+            "SELECT content_json FROM artifacts "
+            "WHERE scope_type='episode' AND scope_id=? "
+            "AND type='screenplay_scene_shard' AND status='validated'",
+            (episode_id,),
+        ).fetchall():
+            try:
+                content = json.loads(artifact_row["content_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            key = (
+                str(content.get("shard_id") or ""),
+                str(content.get("source_hash") or ""),
+                str(content.get("boundary_hash") or ""),
+                str(content.get("blueprint_hash") or ""),
+                str(content.get("identity_registry_hash") or ""),
+            )
+            if all(key):
+                validated_shard_keys.add(key)
 
     def shard_is_validated(item: dict[str, Any]) -> bool:
-        return bool(
+        referenced_artifact_exists = bool(
             item.get("status") == "validated"
             and str(item.get("normalized_artifact_id") or "")
             in available_artifact_ids
         )
+        actual_key = (
+            str(item.get("shard_id") or ""),
+            str(item.get("source_hash") or ""),
+            str(item.get("boundary_hash") or ""),
+            checkpoint_blueprint_hash,
+            checkpoint_identity_hash,
+        )
+        return referenced_artifact_exists or actual_key in validated_shard_keys
 
     projected_shard_progress = {
         "total": len(shard_rows),
         "validated": sum(shard_is_validated(item) for item in shard_rows),
-        "running": sum(item.get("status") == "running" for item in shard_rows),
-        "failed": sum(item.get("status") == "failed" for item in shard_rows),
+        "running": sum(
+            item.get("status") == "running" and not shard_is_validated(item)
+            for item in shard_rows
+        ),
+        "failed": sum(
+            item.get("status") == "failed" and not shard_is_validated(item)
+            for item in shard_rows
+        ),
     }
     has_resumable_baseline = bool(
         not has_working_baseline

@@ -96,6 +96,35 @@ def _minimal_script(**overrides) -> EpisodeScreenplay:
     return EpisodeScreenplay(**data)
 
 
+def test_post_baseline_checkpoint_keeps_live_recovered_shard_progress() -> None:
+    from types import SimpleNamespace
+    from app.production import screenplay_repair
+
+    refreshed = screenplay_repair._checkpoint_after_baseline_generation(
+        {
+            "planner_version": "planner-v1",
+            "shard_progress": {"total": 8, "validated": 7, "failed": 1},
+            "shards": [{"shard_id": "SS006", "status": "failed"}],
+        },
+        SimpleNamespace(checkpoint_json={
+            "planner_version": "planner-v1",
+            "shard_progress": {"total": 8, "validated": 8, "failed": 0},
+            "shards": [{
+                "shard_id": "SS006",
+                "status": "validated",
+                "normalized_artifact_id": "art-ss006",
+            }],
+        }),
+    )
+
+    assert refreshed["shard_progress"] == {
+        "total": 8,
+        "validated": 8,
+        "failed": 0,
+    }
+    assert refreshed["shards"][0]["status"] == "validated"
+
+
 def test_contract_upgrade_supersedes_active_revision_instead_of_resuming_old_loop() -> None:
     old = ensure_production_revision(
         episode_id="ep_p",

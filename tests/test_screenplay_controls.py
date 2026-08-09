@@ -170,6 +170,49 @@ def test_production_state_does_not_count_deleted_checkpoint_artifacts() -> None:
     }
 
 
+def test_production_state_reconciles_recovered_shard_artifact() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    shard = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content={
+            "shard_id": "SS006",
+            "source_hash": "source-6",
+            "boundary_hash": "boundary-6",
+            "blueprint_hash": "blueprint-v1",
+            "identity_registry_hash": "identity-v1",
+        },
+    ))
+    assert repository.get_artifact(shard["id"]) is not None
+    save_checkpoint(revision.id, {
+        "phase": "STRUCTURE_VALIDATION",
+        "blueprint_hash": "blueprint-v1",
+        "identity_registry_hash": "identity-v1",
+        "shards": [{
+            "shard_id": "SS006",
+            "status": "failed",
+            "source_hash": "source-6",
+            "boundary_hash": "boundary-6",
+        }],
+    })
+
+    state = screenplay_production_state("e1")
+
+    assert state["shard_progress"] == {
+        "total": 1,
+        "validated": 1,
+        "running": 0,
+        "failed": 0,
+    }
+
+
 def test_resume_route_has_a_distinct_capability() -> None:
     ensure_catalog_loaded()
     registry = get_registry()
