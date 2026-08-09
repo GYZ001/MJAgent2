@@ -1876,7 +1876,6 @@ async def run_storyboard_supervisor(
         prefer_default_shot_durations,
         relieve_spoken_overflow,
         storyboard_shot_count_range,
-        validate_storyboard_direction_contract,
         validate_storyboard_preserves_key_content,
         validate_storyboard,
     )
@@ -3606,21 +3605,8 @@ async def run_storyboard_supervisor(
             issue for issue in (evaluation.issues or [])
             if _storyboard_warning_requires_auto_repair(issue)
         ]
-        # The broad aesthetic QA remains score-only. Director-scene invariants
-        # are structural: missing context, an empty-purpose shot, or an
-        # unreadable action/emotion camera plan cannot be published.
-        direction_errors = validate_storyboard_direction_contract(
-            evaluation.board,
-            outline,
-        )
-        direction_issues = _storyboard_direction_repair_issues(
-            evaluation.board,
-            outline,
-            direction_errors,
-        )
         runtime_blocking_errors = [
             *evaluation.errors,
-            *direction_issues,
             *(
                 validate_storyboard_visual_identity_contract(
                     evaluation.board,
@@ -3649,7 +3635,6 @@ async def run_storyboard_supervisor(
                     f"整集校验发现 {len(repair_inputs)} 项问题，进入定向修复",
                     payload={
                         "errors": evaluation.errors[:12],
-                        "direction_errors": direction_errors[:12],
                         "repair_required_warnings": [
                             getattr(issue, "message", str(issue))
                             for issue in repair_required_warnings[:12]

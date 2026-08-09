@@ -219,6 +219,8 @@ def evaluate_storyboard_for_confirmation(
     from app.continuity import dialogue_framing_errors
     from app.validators import (
         prefer_default_shot_durations,
+        score_storyboard_direction_readability,
+        validate_storyboard_direction_contract,
         validate_storyboard_screenplay_scene_alignment,
     )
 
@@ -245,6 +247,7 @@ def evaluate_storyboard_for_confirmation(
     compact_target = _compact_episode_target(actual_total or compact_target)
 
     structural_errors = _storyboard_structural_errors(board)
+    outline = None
     if screenplay is not None and screenplay.narrative_plan is not None:
         structural_errors.extend(
             _storyboard_operational_projection_errors(
@@ -372,7 +375,6 @@ def evaluate_storyboard_for_confirmation(
         if screenplay.narrative_plan is not None:
             from app.narrative import validate_storyboard_narrative
 
-            outline = None
             try:
                 raw_outline = episode["storyboard_outline_json"]
             except (KeyError, IndexError, TypeError):
@@ -397,6 +399,13 @@ def evaluate_storyboard_for_confirmation(
                 complete=True,
                 expected_scope_id=str(episode["id"]),
             ))
+    if outline is not None:
+        structural_errors.extend(
+            validate_storyboard_direction_contract(board, outline)
+        )
+        score_warnings.extend(
+            score_storyboard_direction_readability(board, outline)
+        )
     score_warnings.extend(validate_storyboard(
         board,
         bible,

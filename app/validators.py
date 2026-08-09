@@ -4454,6 +4454,31 @@ def validate_storyboard_direction_contract(
                     f"场景 {scene.scene_id} 的上下文 {requirement.requirement_id} "
                     f"到第 {owner} 镜才建立，晚于依赖镜 {requirement.required_before_shot_no}"
                 )
+    return list(dict.fromkeys(errors))
+
+
+def score_storyboard_direction_readability(
+    board: Storyboard,
+    outline: StoryboardOutline | None,
+) -> list[str]:
+    """Return camera-grammar preferences that must not block publication."""
+    if outline is None or not outline.scene_contexts:
+        return []
+    briefs = {int(item.shot_no): item for item in outline.shots}
+    scene_shots: dict[str, list[Shot]] = {}
+    for shot in board.shots:
+        brief = briefs.get(int(shot.shot_no))
+        scene_id = str(
+            shot.scene_id
+            or (brief.scene_id if brief is not None else "")
+            or ""
+        ).strip()
+        if scene_id:
+            scene_shots.setdefault(scene_id, []).append(shot)
+
+    warnings: list[str] = []
+    for scene in outline.scene_contexts:
+        shots = scene_shots.get(scene.scene_id, [])
         action_shots = [
             shot for shot in shots if shot.readability_focus == "action"
         ]
@@ -4462,7 +4487,7 @@ def validate_storyboard_direction_contract(
             and shot.camera_move in {"跟随", "横摇"}
             for shot in action_shots
         ):
-            errors.append(
+            warnings.append(
                 f"场景 {scene.scene_id} 含动作段，但缺少中景/全景/远景配合跟随或横摇的"
                 "空间可读镜头；动作路径、主体和作用对象可能不清楚"
             )
@@ -4474,11 +4499,11 @@ def validate_storyboard_direction_contract(
             and shot.camera_move in {"固定", "推近"}
             for shot in emotion_shots
         ):
-            errors.append(
+            warnings.append(
                 f"场景 {scene.scene_id} 含情绪转折，但缺少近景/特写配合固定或推近的"
                 "情绪可读镜头"
             )
-    return list(dict.fromkeys(errors))
+    return list(dict.fromkeys(warnings))
 
 
 # ---------- C2 基于完整剧本的分镜校验 ----------
