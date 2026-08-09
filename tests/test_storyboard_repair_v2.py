@@ -42,6 +42,7 @@ from app.storyboard_control import request_control
 from app.storyboard_supervisor import (
     STORYBOARD_REPAIR_PLANNER_VERSION,
     SupervisorCheckpoint,
+    _annotate_blind_review_repair,
     _apply_storyboard_planning_target,
     _apply_repair,
     _begin_repair_activation,
@@ -68,6 +69,38 @@ from app.storyboard_supervisor import (
     run_storyboard_supervisor,
     save_checkpoint,
 )
+
+
+def test_blind_review_annotation_preserves_pending_repair_lifecycle() -> None:
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        phase="REPAIRING",
+        last_repair={"status": "candidate_pending", "window_start": 69},
+    )
+
+    _annotate_blind_review_repair(checkpoint, ["review evidence missing"])
+
+    assert _repair_is_pending(checkpoint)
+    assert checkpoint.last_repair == {
+        "status": "candidate_pending",
+        "window_start": 69,
+        "review_status": "blind_review_repair_planned",
+        "blind_review_errors": ["review evidence missing"],
+    }
+
+
+def test_blind_review_annotation_keeps_paused_state_non_pending() -> None:
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_HUMAN",
+        last_repair={"status": "paused"},
+    )
+
+    _annotate_blind_review_repair(checkpoint, ["review failed"])
+
+    assert not _repair_is_pending(checkpoint)
+    assert checkpoint.last_repair["status"] == "paused"
+    assert checkpoint.last_repair["review_status"] == "blind_review_failed_paused"
 
 
 def test_cancelled_run_cannot_overwrite_storyboard_checkpoint(repair_db) -> None:

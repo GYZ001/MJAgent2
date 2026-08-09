@@ -1018,6 +1018,29 @@ def _repair_is_pending(cp: SupervisorCheckpoint) -> bool:
     return repair.get("status") in {"candidate_pending", "candidate_generating"}
 
 
+def _annotate_blind_review_repair(
+    cp: SupervisorCheckpoint,
+    errors: list[str],
+) -> None:
+    """Record review context without overwriting the repair lifecycle state."""
+    repair = dict(cp.last_repair or {})
+    paused = cp.phase in {
+        "WAITING_HUMAN",
+        "WAITING_AUTHORIZATION",
+        "PAUSED_EXTERNAL",
+    }
+    repair["status"] = str(repair.get("status") or (
+        "paused" if paused else "candidate_pending"
+    ))
+    repair["review_status"] = (
+        "blind_review_failed_paused"
+        if paused
+        else "blind_review_repair_planned"
+    )
+    repair["blind_review_errors"] = list(errors)
+    cp.last_repair = repair
+
+
 def _repair_feedback_for_shot(messages: list[str], shot_no: int) -> list[str]:
     localized: list[str] = []
     for message in messages:
@@ -3573,19 +3596,7 @@ async def run_storyboard_supervisor(
                         repair_screenplay=screenplay,
                         narrative_repair_active=narrative_authority,
                     )
-                    cp.last_repair = {
-                        **(cp.last_repair or {}),
-                        "status": (
-                            "blind_review_failed_paused"
-                            if cp.phase in {
-                                "WAITING_HUMAN",
-                                "WAITING_AUTHORIZATION",
-                                "PAUSED_EXTERNAL",
-                            }
-                            else "blind_review_repair_planned"
-                        ),
-                        "blind_review_errors": exc.errors,
-                    }
+                    _annotate_blind_review_repair(cp, exc.errors)
                     save_checkpoint(cp, run_id=run_id)
                     if cp.phase in {
                         "WAITING_HUMAN",
