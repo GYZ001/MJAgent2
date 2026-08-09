@@ -226,6 +226,35 @@ def test_video_batch_preflight_quotes_exact_pending_shot_cost() -> None:
     assert "¥16.8" in result.summary
 
 
+def test_video_completion_preflight_does_not_hide_cost_above_requested_cap() -> None:
+    from app import db
+
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('video-complete-quote-ep','proj_x',2,'confirmed',1)"""
+    )
+    for shot_no in (1, 2):
+        conn.execute(
+            """INSERT INTO shots(
+                   id,episode_id,shot_no,duration_s,characters,dialogues
+               ) VALUES(?,?,?,?, '[]','[]')""",
+            (f"video-complete-quote-s{shot_no}", "video-complete-quote-ep", shot_no, 5),
+        )
+    conn.commit()
+
+    result = get_command_bus().preflight(
+        "video.complete_episode",
+        {
+            "episode_id": "video-complete-quote-ep",
+            "budget_cap_cny": 1,
+        },
+    )
+
+    assert result.estimated_cost_cny is not None
+    assert result.estimated_cost_cny > 1
+
+
 def test_approval_token_single_use() -> None:
     preflight = PreflightResult(
         command="project.delete",
