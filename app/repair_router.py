@@ -61,6 +61,14 @@ class RepairPlan(BaseModel):
 def _extract_shot_nos(issues: list[Issue]) -> list[int]:
     found: list[int] = []
     for issue in issues:
+        for field in ("shot_nos", "affected_shot_nos"):
+            values = issue.evidence.get(field, [])
+            if isinstance(values, (list, tuple, set)):
+                found.extend(
+                    int(value)
+                    for value in values
+                    if str(value or "").strip().isdigit()
+                )
         for text in (issue.message, issue.subject, str(issue.evidence.get("shot_no", ""))):
             for match in _SHOT_NO_RE.finditer(text or ""):
                 found.append(int(match.group(1)))

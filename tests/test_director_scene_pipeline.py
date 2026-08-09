@@ -37,7 +37,10 @@ from app.validators import (
     validate_storyboard_outline_scene_alignment,
     validate_storyboard_screenplay_scene_alignment,
 )
-from app.storyboard_supervisor import _storyboard_scene_pack_batches
+from app.storyboard_supervisor import (
+    _storyboard_direction_repair_issues,
+    _storyboard_scene_pack_batches,
+)
 
 
 def _shot(
@@ -279,6 +282,32 @@ def test_direction_contract_requires_context_and_camera_readability() -> None:
     errors = validate_storyboard_direction_contract(board, _outline())
     assert any("camera_angle" in error for error in errors)
     assert any("情绪转折" in error for error in errors)
+
+
+def test_direction_repair_issue_binds_scene_to_exact_shot_window() -> None:
+    outline = _outline()
+    board = Storyboard(
+        episode_no=1,
+        shots=[
+            _shot(1, focus="context", size="全景", move="固定", context_ids=["CTX-SC001-01"]),
+            _shot(2, focus="action", size="近景", move="固定"),
+            _shot(3, focus="emotion", size="近景", move="固定"),
+        ],
+    )
+    messages = validate_storyboard_direction_contract(board, outline)
+
+    issues = _storyboard_direction_repair_issues(
+        board,
+        outline,
+        messages,
+    )
+
+    action_issue = next(
+        issue for issue in issues if "空间可读镜头" in issue.message
+    )
+    assert action_issue.evidence["scene_id"] == "SC001"
+    assert action_issue.evidence["shot_nos"] == [1, 2, 3]
+    assert action_issue.subject == "storyboard_scene:SC001"
 
 
 def test_direction_fields_are_derived_from_approved_outline() -> None:

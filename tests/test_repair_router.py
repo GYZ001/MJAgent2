@@ -94,6 +94,35 @@ def test_route_action_capacity_to_adjacent_split():
     assert plan.invalidation_frontier == 7
 
 
+def test_route_uses_structured_scene_shot_window() -> None:
+    issue = Issue(
+        code="STORYBOARD_DIRECTION_CONTRACT_INVALID",
+        severity=IssueSeverity.BLOCKER,
+        subject="storyboard_scene:SC09",
+        message="场景 SC09 缺少空间可读镜头",
+        evidence={
+            "scene_id": "SC09",
+            "shot_nos": [37, 38, 39],
+            "rule_id": "storyboard_direction_contract",
+        },
+        repairable=True,
+    )
+
+    plan = route_issues(
+        [issue],
+        validated_prefix_end=76,
+        semantic_diagnosis={
+            "scope": "current_shot",
+            "selected_strategy": "repair_current",
+            "execution_verified": True,
+        },
+    )
+
+    assert plan.invalidation_frontier == 37
+    assert plan.touched_shot_nos == [37, 38, 39]
+    assert 75 not in plan.touched_shot_nos
+
+
 def test_route_compiled_prompt_overflow_to_reported_shot() -> None:
     message = (
         "[ACTION_CAPACITY_EXCEEDED] Prompt 编译失败："

@@ -411,7 +411,16 @@ def _compact_context(
         if focus_shot_no is not None and int(focus_shot_no) > 0
     }
     for issue in issues:
-        path = str((issue.evidence or {}).get("path") or "")
+        evidence = issue.evidence or {}
+        for field in ("shot_nos", "affected_shot_nos"):
+            values = evidence.get(field, [])
+            if isinstance(values, (list, tuple, set)):
+                focus_nos.update(
+                    int(value)
+                    for value in values
+                    if str(value or "").strip().isdigit()
+                )
+        path = str(evidence.get("path") or "")
         for match in re.finditer(r"shots\[(\d+)\]", path):
             focus_nos.add(int(match.group(1)) + 1)
         for pattern in (

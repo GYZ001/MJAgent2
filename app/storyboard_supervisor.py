@@ -18,7 +18,7 @@ from app import config, errors
 from app.db import get_conn
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
-from app.harness.types import Evaluation, EvidenceArtifact, Issue
+from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.repair_router import (
     RepairPlan,
     bump_fingerprint_count,
@@ -91,6 +91,60 @@ _PHASE_LABELS: dict[str, str] = {
 
 def _phase_label(phase: str) -> str:
     return _PHASE_LABELS.get(phase, phase or "未知阶段")
+
+
+def _storyboard_direction_repair_issues(
+    board: Storyboard,
+    outline: StoryboardOutline | None,
+    messages: list[str],
+) -> list[Issue]:
+    """Bind scene-level direction failures to their exact shot windows."""
+    briefs = {
+        int(item.shot_no): item
+        for item in (outline.shots if outline is not None else [])
+    }
+    scene_shot_nos: dict[str, list[int]] = {}
+    for shot in board.shots:
+        brief = briefs.get(int(shot.shot_no))
+        scene_id = str(
+            shot.scene_id
+            or (brief.scene_id if brief is not None else "")
+            or ""
+        ).strip()
+        if scene_id:
+            scene_shot_nos.setdefault(scene_id, []).append(int(shot.shot_no))
+
+    issues: list[Issue] = []
+    for message in messages:
+        scene_match = re.search(r"\b(SC\d+)\b", str(message), re.I)
+        scene_id = scene_match.group(1).upper() if scene_match else ""
+        shot_nos = sorted(set(scene_shot_nos.get(scene_id, [])))
+        issues.append(Issue(
+            code="STORYBOARD_DIRECTION_CONTRACT_INVALID",
+            severity=IssueSeverity.BLOCKER,
+            category="structural",
+            subject=(
+                f"storyboard_scene:{scene_id}"
+                if scene_id else "storyboard_direction"
+            ),
+            message=str(message),
+            evidence={
+                "path": (
+                    f"/scene_contexts/{scene_id}"
+                    if scene_id else "/storyboard"
+                ),
+                "rule_id": "storyboard_direction_contract",
+                "scene_id": scene_id,
+                "shot_nos": shot_nos,
+                "must_fix": True,
+            },
+            repair_hint=(
+                "仅在该场景镜头窗口内调整景别、机位运动或镜头分配，"
+                "保持叙事事件、身份关系和声轨权威不变"
+            ),
+            repairable=True,
+        ))
+    return issues
 
 
 class SupervisorCheckpoint(BaseModel):
@@ -3555,12 +3609,18 @@ async def run_storyboard_supervisor(
         # The broad aesthetic QA remains score-only. Director-scene invariants
         # are structural: missing context, an empty-purpose shot, or an
         # unreadable action/emotion camera plan cannot be published.
+        direction_errors = validate_storyboard_direction_contract(
+            evaluation.board,
+            outline,
+        )
+        direction_issues = _storyboard_direction_repair_issues(
+            evaluation.board,
+            outline,
+            direction_errors,
+        )
         runtime_blocking_errors = [
             *evaluation.errors,
-            *validate_storyboard_direction_contract(
-                evaluation.board,
-                outline,
-            ),
+            *direction_issues,
             *(
                 validate_storyboard_visual_identity_contract(
                     evaluation.board,
@@ -3589,6 +3649,7 @@ async def run_storyboard_supervisor(
                     f"整集校验发现 {len(repair_inputs)} 项问题，进入定向修复",
                     payload={
                         "errors": evaluation.errors[:12],
+                        "direction_errors": direction_errors[:12],
                         "repair_required_warnings": [
                             getattr(issue, "message", str(issue))
                             for issue in repair_required_warnings[:12]

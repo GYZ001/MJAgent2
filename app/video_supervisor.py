@@ -361,6 +361,38 @@ async def _ensure_supervisor_video_plan(
     cp: VideoSupervisorCheckpoint,
 ) -> VideoCompletionGrant | None:
     """Generate/validate and bind the plan before any paid asset or video call."""
+    # #region debug-point C-D:supervisor-plan-probe
+    def _debug_video_plan(hypothesis_id: str, message: str, data: dict[str, Any]) -> None:
+        import urllib.request
+
+        url = "http://127.0.0.1:7778/event"
+        session_id = "video-generation-noop"
+        try:
+            with open(".dbg/video-generation-noop.env", encoding="utf-8") as env_file:
+                for line in env_file:
+                    if line.startswith("DEBUG_SERVER_URL="):
+                        url = line.strip().split("=", 1)[1]
+                    elif line.startswith("DEBUG_SESSION_ID="):
+                        session_id = line.strip().split("=", 1)[1]
+            payload = {
+                "sessionId": session_id,
+                "runId": "pre-fix",
+                "hypothesisId": hypothesis_id,
+                "location": "app/video_supervisor.py:_ensure_supervisor_video_plan",
+                "msg": f"[DEBUG] {message}",
+                "data": data,
+                "ts": int(time.time() * 1000),
+            }
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(payload, ensure_ascii=False).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(request, timeout=0.5).read()
+        except Exception:
+            pass
+    # #endregion
+
     checkpoint_binding = (
         cp.episode_video_plan_id,
         cp.episode_video_plan_revision,
@@ -399,6 +431,22 @@ async def _ensure_supervisor_video_plan(
 
     conn = get_conn()
     plan = load_latest_plan(cp.episode_id, conn=conn)
+    # #region debug-point C-D:supervisor-plan-loaded
+    _debug_video_plan("C", "Supervisor loaded video plan", {
+        "episodeId": cp.episode_id,
+        "runId": cp.run_id,
+        "checkpointPhase": cp.phase,
+        "checkpointBinding": checkpoint_binding,
+        "grantId": grant.grant_id,
+        "grantPlanId": grant.episode_video_plan_id,
+        "grantPlanRevision": grant.episode_video_plan_revision,
+        "planId": plan.episode_video_plan_id if plan else None,
+        "planRevision": plan.plan_revision if plan else None,
+        "planStatus": plan.status if plan else None,
+        "planBlockers": plan.blockers if plan else None,
+        "capabilitySnapshotId": plan.capability_snapshot_id if plan else None,
+    })
+    # #endregion
     if (
         plan is None
         or plan.status != "valid"
@@ -419,12 +467,32 @@ async def _ensure_supervisor_video_plan(
                 conn=conn,
             )
         except (ValueError, VideoPlanValidationError) as exc:
+            # #region debug-point C:supervisor-plan-generation-error
+            _debug_video_plan("C", "Video plan generation failed", {
+                "episodeId": cp.episode_id,
+                "runId": cp.run_id,
+                "errorType": type(exc).__name__,
+                "errorMessage": str(exc),
+                "issues": getattr(exc, "issues", None),
+            })
+            # #endregion
             raise GrantValidationError("VIDEO_PLAN_INVALID", str(exc)) from exc
     if (
         plan.status != "valid"
         or not await _verify_episode_plan_current_async(plan)
         or not video_plan_provider_selection_is_current(plan, conn=conn)
     ):
+        # #region debug-point C-D:supervisor-plan-postcheck-invalid
+        _debug_video_plan("C", "Generated video plan failed current-plan checks", {
+            "episodeId": cp.episode_id,
+            "runId": cp.run_id,
+            "planId": plan.episode_video_plan_id,
+            "planRevision": plan.plan_revision,
+            "planStatus": plan.status,
+            "planBlockers": plan.blockers,
+            "capabilitySnapshotId": plan.capability_snapshot_id,
+        })
+        # #endregion
         raise GrantValidationError(
             "VIDEO_PLAN_INVALID",
             "Supervisor 启动前未取得当前有效的整集视频计划",
