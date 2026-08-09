@@ -327,3 +327,86 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
     assert conn.execute(
         "SELECT COUNT(*) FROM shot_video_generation_plans"
     ).fetchone()[0] == 3
+
+    rebound_manifest = dict(current_storyboard_release_manifest("e", conn=conn))
+    rebound_manifest.update({
+        "published_storyboard_artifact_id": "storyboard_rev_2",
+        "published_storyboard_artifact_hash": "hash-rev-2",
+        "completion_certificate_id": "cert-rev-2",
+        "release_qualification_hash": "qualification-rev-2",
+    })
+    monkeypatch.setattr(
+        video_plan,
+        "current_storyboard_release_manifest",
+        lambda *_args, **_kwargs: rebound_manifest,
+    )
+
+    rebound = await video_plan.generate_episode_plan("e", force=True, conn=conn)
+
+    assert len(calls) == 1
+    assert rebound.plan_revision == 2
+    assert rebound.source_storyboard_revision_id == "storyboard_rev_2"
+    assert rebound.planner_provider == "deterministic"
+    assert rebound.planner_model == "unchanged-execution-release-rebind"
+    assert [item.mode for item in rebound.shots] == [
+        item.mode for item in plan.shots
+    ]
+
+
+@pytest.mark.asyncio
+async def test_large_episode_plan_is_size_windowed_then_validated_as_one_plan(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    oversized_action = "连续动作" * 8_000
+    conn.execute("UPDATE shots SET action_desc=?", (oversized_action,))
+    conn.commit()
+    calls = []
+
+    async def fake_chat(messages, **kwargs):
+        calls.append((messages, kwargs))
+        payload = json.loads(messages[1]["content"].split("\n输出：", 1)[0])
+        return json.dumps({
+            "shots": [
+                {
+                    "shot_id": shot["shot_id"],
+                    "mode": "REFERENCE_IMAGE_MODE",
+                    "relations": {
+                        "temporal": "same_moment",
+                        "spatial": "same_space",
+                        "edit": "angle_cut",
+                        "action": "continues_same_action",
+                    },
+                    "required_assets": [],
+                    "reason_codes": ["RELATION_DRIVEN"],
+                    "confidence": 0.9,
+                    "estimated_latency_ms": 100,
+                    "estimated_cost": 1,
+                }
+                for shot in payload["shots"]
+            ],
+        })
+
+    monkeypatch.setattr(video_plan, "get_conn", lambda: conn)
+    monkeypatch.setattr(hiagent, "chat", fake_chat)
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args, **_kwargs: "model")
+    monkeypatch.setattr(
+        "app.multiview.resolve_shot_asset_dependencies",
+        lambda **kwargs: {
+            "characters": [],
+            "scene": None,
+            "input_fingerprint": f"assets-{kwargs['shot_id']}",
+            "status": "ready",
+        },
+    )
+
+    plan = await video_plan.generate_episode_plan("e", force=True, conn=conn)
+
+    assert len(calls) > 1
+    assert len(plan.shots) == 3
+    assert [item.shot_no for item in plan.shots] == [1, 2, 3]
+    assert all(
+        len(call[0][1]["content"]) < 50_000
+        for call in calls
+    )

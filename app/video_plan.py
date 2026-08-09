@@ -1525,6 +1525,73 @@ async def generate_episode_plan(
                     )
                 db.commit()
             return candidate
+    if current and current.capability_snapshot_id == snapshot.id:
+        # A storyboard may be re-signed because its publication/calibration
+        # evidence changed while every executable shot and bound asset stayed
+        # byte-for-byte equivalent.  Preserve the already validated semantic
+        # plan in that case and bind it to the fresh release identity.  Sending
+        # the entire unchanged episode back through the model is both slower
+        # and vulnerable to provider context limits on long episodes.
+        current_by_shot_id = {item.shot_id: item for item in current.shots}
+        unchanged_execution_inputs = len(current_by_shot_id) == len(rows) and all(
+            (
+                (item := current_by_shot_id.get(str(row["id"]))) is not None
+                and item.input_revision_fingerprints.get("shot_contract")
+                == canonical_shot_contract_fingerprint(row)
+                and item.input_revision_fingerprints.get("asset_revisions")
+                == asset_fingerprints.get(str(row["id"]))
+            )
+            for row in rows
+        )
+        if unchanged_execution_inputs:
+            candidate = current.model_copy(deep=True)
+            candidate.episode_video_plan_id = plan_id
+            candidate.plan_revision = next_revision
+            candidate.source_storyboard_revision_id = revision_id
+            candidate.status = "draft"
+            candidate.planner_provider = "deterministic"
+            candidate.planner_model = "unchanged-execution-release-rebind"
+            candidate.planner_prompt_fingerprint = _hash({
+                "parent_plan_id": current.episode_video_plan_id,
+                "parent_plan_revision": current.plan_revision,
+                "release_manifest": release_manifest,
+                "capability_snapshot_id": snapshot.id,
+                "shot_contract_fingerprints": {
+                    str(row["id"]): canonical_shot_contract_fingerprint(row)
+                    for row in rows
+                },
+                "asset_fingerprints": asset_fingerprints,
+            })
+            candidate.created_at = now()
+            for item in candidate.shots:
+                item.shot_plan_id = new_id("svp")
+                item.episode_video_plan_id = plan_id
+                item.plan_revision = next_revision
+                item.source_storyboard_revision_id = revision_id
+                item.capability_snapshot_id = snapshot.id
+            bind_plan_release_identity(candidate, list(rows), release_manifest)
+            validate_episode_plan(
+                candidate,
+                list(rows),
+                snapshot,
+                release_manifest=release_manifest,
+            )
+            publish_plan(candidate, conn=db)
+            log_provider_call(
+                "episode_video_mode_plan_release_rebind",
+                candidate.planner_model,
+                "REUSED",
+                None,
+                0,
+                meta={
+                    "episode_id": episode_id,
+                    "plan_revision": next_revision,
+                    "source_plan_id": current.episode_video_plan_id,
+                    "shot_count": len(rows),
+                },
+            )
+            db.commit()
+            return candidate
     if len(rows) == 1:
         only_row = rows[0]
         item = ShotVideoGenerationPlan(
@@ -1580,7 +1647,8 @@ async def generate_episode_plan(
     }
     system = (
         "你是视频生产工具层规划器，只能引用输入中的 shot/database_shot ID，不得改写剧情、"
-        "新增/删除/调换镜头。为整集每镜选择 REFERENCE_IMAGE_MODE、FIRST_LAST_FRAME_MODE 或 "
+        "新增/删除/调换镜头。输入可能是整集的一个按请求体大小切分的窗口，只输出输入 shots。"
+        "为每镜选择 REFERENCE_IMAGE_MODE、FIRST_LAST_FRAME_MODE 或 "
         "VIDEO_INPUT_MODE。每个连续场景的首镜固定 REFERENCE_IMAGE_MODE，场景内其余镜头固定 "
         "FIRST_LAST_FRAME_MODE。关系判断只基于时空、剪辑、动作阶段、"
         "状态依赖和运动依赖，禁止按人物名、地点名、题材、打斗词或动作词表决定模式。"
@@ -1596,9 +1664,8 @@ async def generate_episode_plan(
         "relations 四个字段必须逐字使用 relation_enum_contract 对应数组中的枚举值，禁止自造同义词。"
         "只输出 JSON，不要 Markdown。"
     )
-    user = (
-        _json(prompt_payload)
-        + "\n输出：{\"shots\":[{\"shot_id\":数据库或发布shot ID,\"mode\":三种模式之一,"
+    output_contract = (
+        "\n输出：{\"shots\":[{\"shot_id\":数据库或发布shot ID,\"mode\":三种模式之一,"
         "\"video_input_intent\":null或合法枚举,\"depends_on_shot_id\":null或上游ID,"
         "\"relations\":{\"temporal\":\"same_moment|elapsed|jump|new_domain|unknown\","
         "\"spatial\":\"same_space|adjacent_space|new_space|unknown\","
@@ -1610,12 +1677,26 @@ async def generate_episode_plan(
         "\"reason_codes\":[通用关系码],\"confidence\":0到1,\"unknown_dimensions\":[],"
         "\"fallback_order\":[],\"estimated_latency_ms\":整数,\"estimated_cost\":数字}]}"
     )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-    response: str | None = None
-    cached_call_id: int | None = None
+    planner_payload_base = {
+        key: value for key, value in prompt_payload.items() if key != "shots"
+    }
+    planner_windows: list[list[dict[str, Any]]] = []
+    current_window: list[dict[str, Any]] = []
+    # Partition only by serialized request size.  No character, location,
+    # genre or action-name routing is involved, and validation still requires
+    # exact whole-episode coverage after the windows are recombined.
+    planner_window_char_budget = 42_000
+    for shot in shot_payload:
+        candidate_window = [*current_window, shot]
+        candidate_payload = {**planner_payload_base, "shots": candidate_window}
+        if current_window and len(_json(candidate_payload)) > planner_window_char_budget:
+            planner_windows.append(current_window)
+            current_window = [shot]
+        else:
+            current_window = candidate_window
+    if current_window:
+        planner_windows.append(current_window)
+
     cached_rows = db.execute(
         """SELECT id,request_json,response_json FROM provider_calls
            WHERE kind='chat' AND status IN ('OK','SUCCESS','SUCCEEDED')
@@ -1623,65 +1704,94 @@ async def generate_episode_plan(
              AND json_extract(meta,'$.stage')='episode_video_mode_plan'
              AND json_extract(meta,'$.episode_id')=?
              AND response_json IS NOT NULL
-           ORDER BY id DESC LIMIT 8""",
+           ORDER BY id DESC LIMIT 32""",
         (episode_id,),
     ).fetchall()
     active_model = hiagent.active_model("text")
-    for cached in cached_rows:
-        try:
-            request_payload = json.loads(cached["request_json"] or "{}")
-            response_payload = json.loads(cached["response_json"] or "{}")
-            if (
-                request_payload.get("model") != active_model
-                or request_payload.get("messages") != messages
+    raw_shots: list[Any] = []
+    for window_index, window_shots in enumerate(planner_windows):
+        window_payload = {
+            **planner_payload_base,
+            "planning_window": {
+                "index": window_index + 1,
+                "count": len(planner_windows),
+                "shot_start": window_shots[0]["shot_no"],
+                "shot_end": window_shots[-1]["shot_no"],
+            },
+            "shots": window_shots,
+        }
+        user = _json(window_payload) + output_contract
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        response: str | None = None
+        cached_call_id: int | None = None
+        for cached in cached_rows:
+            try:
+                request_payload = json.loads(cached["request_json"] or "{}")
+                response_payload = json.loads(cached["response_json"] or "{}")
+                if (
+                    request_payload.get("model") != active_model
+                    or request_payload.get("messages") != messages
+                ):
+                    continue
+                response = str(
+                    response_payload["choices"][0]["message"]["content"]
+                )
+            except (
+                KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError,
             ):
                 continue
-            response = str(
-                response_payload["choices"][0]["message"]["content"]
+            cached_call_id = int(cached["id"])
+            break
+        if response is None:
+            response = await hiagent.chat(
+                messages,
+                temperature=0.1,
+                max_tokens=max(4096, min(20000, len(window_shots) * 900)),
+                call_meta={
+                    "stage": "episode_video_mode_plan",
+                    "episode_id": episode_id,
+                    "plan_revision": next_revision,
+                    "window_index": window_index + 1,
+                    "window_count": len(planner_windows),
+                    "contract_version": "episode-video-plan.v1",
+                    "planner_prompt_fingerprint": _hash(window_payload),
+                    "planner_episode_fingerprint": _hash(prompt_payload),
+                    "operation_id": (
+                        "op_video_plan_" + _hash({
+                            "model": active_model,
+                            "messages": messages,
+                        })[:24]
+                    ),
+                    "reuse_successful_operation": True,
+                },
             )
-        except (
-            KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError,
-        ):
-            continue
-        cached_call_id = int(cached["id"])
-        break
-    if response is None:
-        response = await hiagent.chat(
-            messages,
-            temperature=0.1,
-            max_tokens=max(4096, min(20000, len(rows) * 900)),
-            call_meta={
-                "stage": "episode_video_mode_plan",
-                "episode_id": episode_id,
-                "plan_revision": next_revision,
-                "contract_version": "episode-video-plan.v1",
-                "planner_prompt_fingerprint": _hash(prompt_payload),
-                "operation_id": (
-                    "op_video_plan_" + _hash({
-                        "model": active_model,
-                        "messages": messages,
-                    })[:24]
-                ),
-                "reuse_successful_operation": True,
-            },
-        )
-    else:
-        log_provider_call(
-            "episode_video_mode_plan_cache",
-            active_model,
-            "REUSED",
-            None,
-            0,
-            meta={
-                "episode_id": episode_id,
-                "plan_revision": next_revision,
-                "source_provider_call_id": cached_call_id,
-            },
-        )
-    parsed = extract_json(response)
-    raw_shots = parsed.get("shots") if isinstance(parsed, dict) else None
-    if not isinstance(raw_shots, list):
-        raise VideoPlanValidationError([{"code": "AI_PLAN_SCHEMA_INVALID", "evidence": response[:500]}])
+        else:
+            log_provider_call(
+                "episode_video_mode_plan_cache",
+                active_model,
+                "REUSED",
+                None,
+                0,
+                meta={
+                    "episode_id": episode_id,
+                    "plan_revision": next_revision,
+                    "window_index": window_index + 1,
+                    "window_count": len(planner_windows),
+                    "source_provider_call_id": cached_call_id,
+                },
+            )
+        parsed = extract_json(response)
+        window_raw_shots = parsed.get("shots") if isinstance(parsed, dict) else None
+        if not isinstance(window_raw_shots, list):
+            raise VideoPlanValidationError([{
+                "code": "AI_PLAN_SCHEMA_INVALID",
+                "window_index": window_index + 1,
+                "evidence": response[:500],
+            }])
+        raw_shots.extend(window_raw_shots)
     shot_plans: list[ShotVideoGenerationPlan] = []
     ai_reference_issues: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_shots):

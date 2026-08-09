@@ -220,6 +220,12 @@ async def test_persisted_active_run_blocks_manual_save_without_local_task() -> N
     assert preflight.allowed is False
     assert preflight.denial_code == "SCREENPLAY_TASK_ACTIVE"
     assert state["task_active"] is True
+    with pytest.raises(ProductionRevisionOwnershipLost):
+        ensure_production_revision(
+            episode_id="e1",
+            kind="screenplay",
+            resume=False,
+        )
     with enter_handler(), pytest.raises(HTTPException) as exc_info:
         await api.edit_screenplay("e1", body={})
     assert exc_info.value.status_code == 409
@@ -560,6 +566,36 @@ def test_atomic_claim_does_not_clear_current_owner_ir() -> None:
     assert conn.execute(
         "SELECT active_screenplay_run_id FROM episodes WHERE id='e1'",
     ).fetchone()["active_screenplay_run_id"] == owner_run_id
+
+
+def test_atomic_claim_rejects_manual_publish_fence() -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_publish_fence=1 WHERE id='e1'"
+    )
+    conn.commit()
+
+    class Recorder:
+        run_id = "run-blocked-by-publish"
+        cancelled = False
+
+        def cancel(self, _message: str) -> None:
+            self.cancelled = True
+
+    recorder = Recorder()
+    with pytest.raises(api.StateConflict):
+        api._spawn_screenplay_activation(
+            "e1",
+            recorder,
+            project_id="p1",
+            status="queued",
+            message="must not claim",
+        )
+
+    assert recorder.cancelled is True
+    assert conn.execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()["active_screenplay_run_id"] is None
 
 
 @pytest.mark.asyncio
@@ -911,3 +947,69 @@ async def test_batch_start_reports_partial_failure_without_stranding_episode(
         (result["batch_run_id"],),
     ).fetchone()
     assert tuple(batch) == ("screenplay_batch", "p1", "RUNNING")
+
+
+@pytest.mark.asyncio
+async def test_batch_start_excludes_episode_owned_by_remote_active_run() -> None:
+    conn = db.get_conn()
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="remote-batch-owner",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='RUNNING' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running',active_screenplay_run_id=? "
+        "WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    with enter_handler(), pytest.raises(HTTPException) as exc_info:
+        await api.start_screenplay_all("p1")
+
+    assert exc_info.value.status_code == 409
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM workflow_runs WHERE workflow_type='screenplay_batch'"
+    ).fetchone()["c"] == 0
+    assert repository.get_run(run_id)["status"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_batch_cancel_stops_remote_runs_and_clears_exact_owner() -> None:
+    conn = db.get_conn()
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="remote-batch-owner",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='WAITING_AUTHORIZATION' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running',active_screenplay_run_id=? "
+        "WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    with enter_handler():
+        result = await api.cancel_screenplay_all("p1")
+
+    assert result["stopped"] == 1
+    assert result["local_stopped"] == 0
+    assert result["persisted_stopped"] == 1
+    assert repository.get_run(run_id)["status"] == "CANCELLED"
+    episode = conn.execute(
+        "SELECT screenplay_status,active_screenplay_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(episode) == {
+        "screenplay_status": "pending",
+        "active_screenplay_run_id": None,
+    }

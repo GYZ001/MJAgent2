@@ -1174,6 +1174,7 @@ def _spawn_screenplay_activation(
         previous_row = conn.execute(
             "SELECT screenplay_status, screenplay_error, screenplay_started_at, "
             "screenplay_updated_at, active_screenplay_run_id, "
+            "screenplay_publish_fence, "
             "screenplay_character_resolutions, screenplay_required_dialogues, "
             "screenplay_required_dialogue_occurrences "
             "FROM episodes WHERE id=?",
@@ -1182,6 +1183,13 @@ def _spawn_screenplay_activation(
         if not previous_row:
             raise ValueError(f"episode not found: {episode_id}")
         previous = dict(previous_row)
+        if previous["screenplay_publish_fence"]:
+            raise StateConflict(
+                "screenplay_publish_fence",
+                episode_id,
+                {"0"},
+                str(previous["screenplay_publish_fence"]),
+            )
         previous_run_id = str(
             previous["active_screenplay_run_id"] or ""
         )
@@ -2104,13 +2112,30 @@ async def delete_screenplay(episode_id: str):
     routed = await ui_route("screenplay.delete", {"episode_id": episode_id})
     if routed is not None:
         return routed
-    _episode_or_404(episode_id)
+    episode = dict(_episode_or_404(episode_id))
+    screenplay_run_id = episode.get("active_screenplay_run_id")
 
     cancelled = 0
     for kind in ("screenplay", "storyboard", "video_completion"):
         cancelled += int(await task_registry.cancel_and_wait(kind, episode_id))
+    try:
+        cancelled += int(_cancel_persisted_screenplay_run(
+            episode_id,
+            screenplay_run_id,
+            message="用户删除剧本，终止持久化剧本运行",
+        ))
+    except StateConflict:
+        raise HTTPException(409, "剧本运行状态已变化，请刷新后重试删除") from None
 
     conn = get_conn()
+    latest_owner = conn.execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if latest_owner and latest_owner["active_screenplay_run_id"] not in {
+        None, screenplay_run_id,
+    }:
+        raise HTTPException(409, "剧本已被新的运行接管，未执行删除")
     shot_count = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"]
@@ -2824,6 +2849,29 @@ async def edit_screenplay(episode_id: str, body: dict):
     )
     # 原子互斥的第一步是持久化写入栅栏。分镜启动路由会检查此位，
     # 因此设置成功后不会再有新下游任务与本次发布竞争。
+    conn.execute("BEGIN IMMEDIATE")
+    owner_row = conn.execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    active_owner = (
+        evidence_repository.get_active_scoped_run(
+            owner_row["active_screenplay_run_id"],
+            workflow_type="screenplay",
+            scope_type="episode",
+            scope_id=episode_id,
+            conn=conn,
+        )
+        if owner_row
+        else None
+    )
+    if active_owner:
+        conn.rollback()
+        raise HTTPException(409, {
+            "code": "screenplay_task_active",
+            "message": "剧本流程已在校验期间启动；未发布人工草稿",
+            "run_id": active_owner["id"],
+        })
     cursor = conn.execute(
         "UPDATE episodes SET screenplay_publish_fence=1, "
         "screenplay_snapshot_version=screenplay_snapshot_version+1 "

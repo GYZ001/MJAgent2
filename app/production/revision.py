@@ -28,13 +28,30 @@ def _assert_screenplay_write_owner(
     from app.observability.tracing import current_trace
 
     run_id = current_trace().run_id
-    if not run_id:
-        return
     episode = db.execute(
         "SELECT active_screenplay_run_id,screenplay_production_revision_id "
         "FROM episodes WHERE id=?",
         (episode_id,),
     ).fetchone()
+    if not run_id:
+        from app.evidence import repository as evidence_repository
+
+        active = (
+            evidence_repository.get_active_scoped_run(
+                episode["active_screenplay_run_id"],
+                workflow_type="screenplay",
+                scope_type="episode",
+                scope_id=episode_id,
+                conn=db,
+            )
+            if episode
+            else None
+        )
+        if active:
+            raise ProductionRevisionOwnershipLost(
+                f"manual screenplay write conflicts with active run {active['id']}"
+            )
+        return
     if episode and episode["active_screenplay_run_id"] == run_id:
         return
     if (
