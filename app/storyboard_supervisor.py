@@ -1382,6 +1382,13 @@ def _merge_repair_candidate(
         for shot_no, shot in enumerate(merged, start=1):
             shot.shot_no = shot_no
         return Storyboard(episode_no=current.episode_no, shots=merged)
+    current_by_no = {
+        int(shot.shot_no): shot for shot in current_shots
+    }
+    for candidate in candidates:
+        official = current_by_no.get(int(candidate.shot_no))
+        if official is not None:
+            candidate.shot_uid = official.shot_uid
     by_no = {int(shot.shot_no): shot for shot in candidates}
     merged = [by_no.get(int(shot.shot_no), shot) for shot in current_shots]
     # A failed initial/append generation has no official target row yet.

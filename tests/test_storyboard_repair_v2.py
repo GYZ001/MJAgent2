@@ -2011,6 +2011,30 @@ def test_candidate_merge_never_mutates_cas_baseline(repair_db) -> None:
     assert _storyboard_hash(current) == baseline_hash
 
 
+def test_replace_candidate_inherits_stable_shot_uid(repair_db) -> None:
+    conn, _screenplay = repair_db
+    current = _current_board(conn)
+    current.shots[0].shot_uid = "shotuid-stable-1"
+    baseline_hash = _storyboard_hash(current)
+    replacement = _shot(1, action="替换候选")
+    replacement.shot_uid = ""
+    checkpoint = SupervisorCheckpoint(
+        episode_id="e1",
+        last_repair={
+            "mode": "replace",
+            "window_start": 1,
+            "window_end": 1,
+        },
+        repair_candidate_shots=[replacement.model_dump(mode="json")],
+    )
+
+    merged = _merge_repair_candidate(current, checkpoint)
+
+    assert merged.shots[0].shot_uid == "shotuid-stable-1"
+    assert current.shots[0].shot_uid == "shotuid-stable-1"
+    assert _storyboard_hash(current) == baseline_hash
+
+
 def test_candidate_checkpoint_preserves_evidence_artifact_id(repair_db) -> None:
     conn, _screenplay = repair_db
     current = _current_board(conn)
