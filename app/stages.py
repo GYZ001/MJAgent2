@@ -1968,7 +1968,9 @@ def normalize_storyboard_shot_candidate(
                     if preserve_director_camera
                     else outline_narrative_task.get("camera_size") or ""
                 )
-                if planned_shot_size in SHOT_SIZES:
+                if preserve_director_camera:
+                    target_shot_size = shot.get("shot_size")
+                elif planned_shot_size in SHOT_SIZES:
                     target_shot_size = planned_shot_size
                 elif not has_relation_authority:
                     target_shot_size = "近景"
@@ -1988,15 +1990,20 @@ def normalize_storyboard_shot_candidate(
                     else outline_narrative_task.get("camera_movement") or ""
                 )
                 target_camera_move = (
-                    planned_camera_move
-                    if planned_camera_move in CAMERA_MOVES
+                    shot.get("camera_move")
+                    if preserve_director_camera
                     else (
-                        shot.get("camera_move")
-                        if has_relation_authority
+                        planned_camera_move
+                        if planned_camera_move in CAMERA_MOVES
                         else (
                             shot.get("camera_move")
-                            if shot.get("camera_move") in {"固定", "推近"}
-                            else "固定"
+                            if has_relation_authority
+                            else (
+                                shot.get("camera_move")
+                                if shot.get("camera_move")
+                                in {"固定", "推近"}
+                                else "固定"
+                            )
                         )
                     )
                 )
@@ -2451,6 +2458,11 @@ async def _run_with_agent_loop(
                     storyboard_candidate_context.get(
                         "previous_scene_time"
                     ) or ""
+                ),
+                preserve_director_camera=bool(
+                    storyboard_candidate_context.get(
+                        "preserve_director_camera"
+                    )
                 ),
             )
             if normalizations:
@@ -9478,6 +9490,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             "episode_id": episode.get("id"),
             "episode_no": episode["episode_no"],
             "shot_no": shot_no,
+            "preserve_director_camera": bool(repair_feedback),
             **storyboard_shot_authority_context(
                 screenplay,
                 brief if narrative_authority else None,
