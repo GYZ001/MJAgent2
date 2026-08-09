@@ -6,12 +6,83 @@ import hashlib
 import sqlite3
 import threading
 import time
+import traceback
+import urllib.request
 import uuid
 from typing import Any
 
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
 
 _local = threading.local()
+
+# #region debug-point A-D:sqlite-transaction-trace
+_DEBUG_SQL_URL = "http://127.0.0.1:7777/event"
+_DEBUG_SQL_SESSION = "backend-sqlite-lock"
+try:
+    with open(".dbg/backend-sqlite-lock.env", encoding="utf-8") as _debug_env:
+        for _debug_line in _debug_env:
+            if _debug_line.startswith("DEBUG_SERVER_URL="):
+                _DEBUG_SQL_URL = _debug_line.strip().split("=", 1)[1]
+            elif _debug_line.startswith("DEBUG_SESSION_ID="):
+                _DEBUG_SQL_SESSION = _debug_line.strip().split("=", 1)[1]
+except OSError:
+    pass
+
+
+def _attach_debug_sql_trace(conn: sqlite3.Connection) -> None:
+    connection_id = hex(id(conn))
+    state = {"writes": 0}
+
+    def report(statement: str) -> None:
+        tokens = statement.strip().split()
+        operation = tokens[0].upper() if tokens else ""
+        if operation not in {
+            "BEGIN", "COMMIT", "ROLLBACK", "INSERT", "UPDATE", "DELETE", "REPLACE",
+        }:
+            return
+        if operation == "BEGIN":
+            state["writes"] = 0
+        elif operation in {"INSERT", "UPDATE", "DELETE", "REPLACE"}:
+            state["writes"] += 1
+            if state["writes"] > 4:
+                return
+        statement_shape = " ".join(tokens[:3])
+        payload = {
+            "sessionId": _DEBUG_SQL_SESSION,
+            "runId": "pre-fix",
+            "hypothesisId": (
+                "A" if operation in {"BEGIN", "INSERT", "UPDATE", "DELETE", "REPLACE"}
+                else "B"
+            ),
+            "location": "app/db.py:get_conn.trace",
+            "msg": f"[DEBUG] SQLite {operation}",
+            "data": {
+                "connectionId": connection_id,
+                "threadId": threading.get_ident(),
+                "threadName": threading.current_thread().name,
+                "operation": operation,
+                "statementShape": statement_shape,
+                "inTransaction": conn.in_transaction,
+                "stack": traceback.format_stack(limit=10)[:-2],
+            },
+            "ts": int(time.time() * 1000),
+        }
+
+        def send() -> None:
+            try:
+                request = urllib.request.Request(
+                    _DEBUG_SQL_URL,
+                    data=json.dumps(payload, ensure_ascii=False).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                urllib.request.urlopen(request, timeout=0.5).read()
+            except Exception:
+                pass
+
+        threading.Thread(target=send, daemon=True).start()
+
+    conn.set_trace_callback(report)
+# #endregion
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -1084,6 +1155,9 @@ def get_conn() -> sqlite3.Connection:
     if conn is None:
         conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # #region debug-point A-D:attach-sqlite-transaction-trace
+        _attach_debug_sql_trace(conn)
+        # #endregion
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         _local.conn = conn
