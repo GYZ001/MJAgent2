@@ -8867,7 +8867,7 @@ async def generate_storyboard_scene_pack(
 你只负责每镜的画面动作、首尾帧、摄影表达和空间构图。
 镜号、叙事 ID、场景、台词、时长、来源证据、连续性边界、信息台账和是否末镜均由程序装配。
 characters 是本层唯一需要输出的身份调度字段：它只能从对应任务的 characters_visible 中选择
-本镜实际进入构图的焦点身份，最多 3 个；不得补入集合外身份。未进入构图的动作参与者由程序按
+本镜实际进入构图的焦点身份；不得补入集合外身份。未进入构图的动作参与者由程序按
 atomic action 的 actor/target 关系登记为画外身份，不得为了同场在场关系强塞群戏。
 
 场景上下文：
@@ -8912,7 +8912,7 @@ atomic action 的 actor/target 关系登记为画外身份，不得为了同场�
     "camera_angle": str,
     "camera_move": "固定|推近|拉远|横摇|跟随",
     "camera_motivation": str,
-    "characters": ["从本镜任务允许身份中选择的实际构图角色，最多 3 个"],
+    "characters": ["从本镜任务允许身份中选择的实际构图角色"],
     "action_desc": str,
     "first_frame_desc": str,
     "last_frame_desc": str,
@@ -9419,7 +9419,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 1. 只输出第 {shot_no} 镜，shot.shot_no 必须等于 {shot_no}。
 2. 本集镜头数不设上限；当前按大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条并产生独立作用，不得停留、复述或发明大纲外内容。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。duration_s 默认 {PREFERRED_SHOT_DURATION_S}。
 2b. 动作容量必须与视频生成门禁一致：{shot_action_capacity_rule}
-2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。visible_entity_ids 是本镜实际进入构图的身份，必须是大纲同字段的子集且最多 3 个；characters/characters_visible 必须与该子集一一对应。绑定动作中未进入构图的 actor/target 分别填入 offscreen_action_actor_ids/offscreen_action_target_ids；可见与画外的并集必须完整覆盖绑定动作参与者。不得改写动作归属，也不得把同场旁观者强塞进画面。
+2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。visible_entity_ids 是本镜实际进入构图的身份，必须是大纲同字段的子集；characters/characters_visible 必须与该子集一一对应。绑定动作中未进入构图的 actor/target 分别填入 offscreen_action_actor_ids/offscreen_action_target_ids；可见与画外的并集必须完整覆盖绑定动作参与者。不得改写动作归属，也不得把无关的同场旁观者强塞进画面。
 2d. primary_action_id 可为 null，但 shot_contribution 必须非空；支撑/反应/建立/吸收镜必须明确交付证据、观众状态差、情绪、时空定向或戏剧压力中至少一项，不得借 null 产生无功能空镜。
 3. 从第 2 镜开始，必须明确承接上一镜的 state_out/observed_state_out；不要重演上一镜完整 action_desc。若 continuity_mode=action_continuation，state_in 必须等于上一镜实际尾状态；若换场或反应切，写清线索带入、时间跳转或视角切换原因。
 3b. audience_state_paths 必须逐一覆盖 narrative_plan 中的全部 audience_prior；从第 2 镜起，每个先验的本镜 audience_state_in_id 必须精确等于上镜 audience_state_out_target_id。边界合同也必须记录同样的逐先验 handoff。
@@ -9713,8 +9713,8 @@ def _storyboard_output_contract(
             "7~10s 最多 3 个；超限时在大纲阶段拆成前后相邻两镜。"
         )
         staging_contract = (
-            "8c. 【导演调度】无对白的建立镜/动作镜 characters ≤3；人物进出画需交代大动作。\n"
-            "8c-1. 【对白构图硬合同】纯台词/表情交付默认使用说话人单人近景或特写；"
+            "8c. 【导演调度】无对白的建立镜/动作镜只写实际进入构图的人物；人物进出画需交代大动作。\n"
+            "8c-1. 【对白构图偏好】纯台词/表情交付优先使用说话人单人近景或特写；"
             "对白同时承担空间调度时必须完整拍出动作。"
         )
         reference_contract = (

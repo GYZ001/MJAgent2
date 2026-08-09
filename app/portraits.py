@@ -58,8 +58,8 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v5"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v5"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v6"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v6"
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -1138,32 +1138,13 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
         errors: list[str] = []
         for item in value.characters:
             source_label = str(item.get("source_label") or "").strip()
-            canonical_name = str(item.get("canonical_name") or "").strip()
             identity_kind = str(
                 item.get("identity_kind") or ""
             ).strip().lower()
-            future_evidence = str(
-                item.get("future_evidence") or ""
-            ).strip()
             if source_label not in allowed:
                 errors.append(f"source_label 越界：{source_label}")
             if identity_kind not in {"named", "functional"}:
                 errors.append(f"identity_kind 非法：{identity_kind}")
-                continue
-            if identity_kind == "functional" and not canonical_name:
-                continue
-            if identity_kind != "named":
-                errors.append(
-                    f"功能身份不得填写 canonical_name：{source_label}"
-                )
-                continue
-            if not canonical_name:
-                errors.append(f"canonical_name 无证据：{canonical_name}")
-                continue
-            if not has_owned_canonical_anchor(future_evidence, canonical_name):
-                errors.append(
-                    f"named 身份缺少可追溯的真名原文锚点：{source_label}"
-                )
         return errors
 
     response = await model_gateway.chat_structured(
@@ -1171,7 +1152,7 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
         model_type=_IdentityCandidateResponse,
         validate=validate_response,
         operation_id=(
-            f"screenplay.identity.future.v5:{episode_no}:"
+            f"screenplay.identity.future.v6:{episode_no}:"
             + evidence_repository.content_hash({
                 "unresolved": unresolved,
                 "future_context": future_context,
@@ -1195,6 +1176,10 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
             str(item.get("source_label") or "").strip()
             and str(item.get("canonical_name") or "").strip()
             and str(item.get("identity_kind") or "").strip().lower() == "named"
+            and has_owned_canonical_anchor(
+                str(item.get("future_evidence") or "").strip(),
+                str(item.get("canonical_name") or "").strip(),
+            )
         )
     }
     group_resolution: dict[str, dict] = {}

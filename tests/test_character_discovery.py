@@ -728,7 +728,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         "evidence": "绿袍男子拦路呵斥",
         "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
         "identity_group": "current-1:绿袍男子",
-        "decision_contract_version": "screenplay-future-identity.v5",
+        "decision_contract_version": "screenplay-future-identity.v6",
         "authority_id": "bible:丁力",
         "authority_version": "screenplay-identity-authority.v1",
     }]
@@ -836,6 +836,53 @@ def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
         (item["source_label"], item["name"], item["identity_kind"])
         for item in candidates
     ] == [("那间学校的校长", "赵振", "named")]
+
+
+def test_future_identity_untraceable_name_falls_back_without_retry(
+    monkeypatch,
+) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="都市漫画"),
+        characters=[Character(
+            name="陈三",
+            role="重要配角",
+            appearance_canonical="成年男子，短发，深色夹克，体格结实，神情强硬",
+        )],
+    )
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["call_meta"]["discovery_phase"] == "future_identity"
+        return json.dumps({"characters": [{
+            "source_label": "三哥",
+            "canonical_name": "陈三",
+            "identity_kind": "named",
+            "future_evidence": "模型自行补写陈三是真名",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "name": "三哥",
+            "source_label": "三哥",
+            "identity_kind": "functional",
+            "identity_group": "current:third-brother",
+            "kind": "onscreen",
+        }],
+        source_text="三哥推门进来。",
+        future_text="后来众人仍只叫他三哥，没有交代真名。",
+        bible=bible,
+        episode_no=7,
+        future_label="后续章节",
+    ))
+
+    assert calls == 1
+    assert [
+        (item["source_label"], item["name"], item["identity_kind"])
+        for item in candidates
+    ] == [("三哥", "三哥", "functional")]
 
 
 def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -> None:

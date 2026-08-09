@@ -73,8 +73,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interval",
         type=float,
-        default=900,
-        help="seconds between scheduled backend restarts (default: 900)",
+        default=1800,
+        help="seconds between scheduled backend restarts (default: 1800)",
     )
     parser.add_argument(
         "--crash-retry-delay",

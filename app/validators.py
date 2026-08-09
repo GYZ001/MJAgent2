@@ -30,7 +30,6 @@ from app.continuity import (
     count_sequential_action_beats,
     narrative_action_capacity_profile,
     dialogue_focus_subject,
-    dialogue_framing_errors,
     dialogue_two_shot_required,
     implicit_speech_without_dialogue_errors,
     spoken_chars_from_shot,
@@ -430,10 +429,6 @@ def validate_storyboard(
         # 口播容量只在 speech_capacity_errors 里实现一次；此处曾重复计算同一规则，
         # 导致同一根因在确认门输出两条不同文案（VAL-422 根因 R5）。
         errors.extend(speech_capacity_errors(shot))
-        errors.extend(dialogue_framing_errors(
-            shot,
-            narrative_authority=narrative_authority,
-        ))
         # 同一镜头只能有一套有效口播：dialogues 与 audio_timeline 分叉即 blocker。
         errors.extend(spoken_contract_coherence_errors(shot))
         errors.extend(implicit_speech_without_dialogue_errors(shot))
@@ -449,11 +444,6 @@ def validate_storyboard(
             errors.append(
                 f"{tag}.characters 为空；每个视频段至少包含 1 个画面角色，"
                 "可以是角色圣经成员或功能性路人"
-            )
-        elif len(shot.characters) > 3:
-            errors.append(
-                f"{tag}.characters 共 {len(shot.characters)} 人，超过单镜可渲染上限 3；"
-                "请减少画面角色或拆到相邻镜，禁止群戏调度"
             )
         for name in shot.characters:
             if narrative_authority:

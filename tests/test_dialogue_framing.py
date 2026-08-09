@@ -8,6 +8,7 @@ from app.continuity import (
     dialogue_focus_subject,
     dialogue_framing_errors,
     effective_characters_visible,
+    preflight_seedance_gates,
     reference_role_plan,
 )
 from app.evaluations.issues import issue_code
@@ -116,7 +117,7 @@ def test_storyboard_dialogue_requires_single_speaker_closeup() -> None:
     assert dialogue_framing_errors(_shot()) == []
 
 
-def test_full_storyboard_gate_rejects_group_dialogue_composition() -> None:
+def test_full_storyboard_gate_allows_group_dialogue_composition() -> None:
     shot = _shot(
         shot_size="全景",
         camera_move="跟随",
@@ -130,8 +131,44 @@ def test_full_storyboard_gate_rejects_group_dialogue_composition() -> None:
         target_duration_s=40,
     )
 
-    assert any("只保留说话人" in error for error in errors)
-    assert any("近景或特写" in error for error in errors)
+    assert not any(
+        "DIALOGUE_FRAMING_INVALID" in error
+        for error in errors
+    )
+
+
+def test_seedance_preflight_allows_group_dialogue_composition() -> None:
+    shot = _shot(
+        shot_size="全景",
+        camera_move="跟随",
+        characters=["甲", "乙", "丙"],
+        characters_visible=["甲", "乙", "丙"],
+    )
+
+    errors = preflight_seedance_gates(shot)
+
+    assert not any(
+        "DIALOGUE_FRAMING_INVALID" in error
+        for error in errors
+    )
+
+
+def test_storyboard_gate_has_no_arbitrary_three_character_limit() -> None:
+    shot = _shot(
+        characters=["甲", "乙", "丙", "路人甲"],
+        characters_visible=["甲", "乙", "丙", "路人甲"],
+    )
+
+    errors = validate_storyboard(
+        Storyboard(episode_no=1, shots=[shot]),
+        _bible(),
+        target_duration_s=40,
+    )
+
+    assert not any(
+        "单镜可渲染上限 3" in error
+        for error in errors
+    )
 
 
 def test_dialogue_focus_normalization_marks_listener_offscreen_before_validation() -> None:
