@@ -316,7 +316,26 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
                 LIMIT 1""",
             (episode_id,),
         ).fetchone())
-    active = task_registry.active("screenplay", episode_id)
+    conn = get_conn()
+    episode = conn.execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    from app.evidence import repository as evidence_repository
+
+    active = bool(
+        task_registry.active("screenplay", episode_id)
+        or (
+            episode
+            and evidence_repository.get_active_scoped_run(
+                episode["active_screenplay_run_id"],
+                workflow_type="screenplay",
+                scope_type="episode",
+                scope_id=episode_id,
+                conn=conn,
+            )
+        )
+    )
     if rev is None:
         return {
             "operation": "baseline",
@@ -675,11 +694,16 @@ def set_published_artifact(
     if row["status"] != "active" or row["working_artifact_id"] != artifact_id:
         raise ValueError("只能发布当前 active revision 的 working Artifact")
     stamp = now()
-    db.execute(
+    cursor = db.execute(
         "UPDATE production_revisions SET published_artifact_id=?, working_artifact_id=?, "
-        "status='published', updated_at=? WHERE id=?",
-        (artifact_id, artifact_id, stamp, revision_id),
+        "status='published', updated_at=? WHERE id=? AND status='active' "
+        "AND working_artifact_id=?",
+        (artifact_id, artifact_id, stamp, revision_id, artifact_id),
     )
+    if cursor.rowcount != 1:
+        if commit:
+            db.rollback()
+        raise ValueError("production revision 发布发生 CAS 冲突")
     kind = row["kind"]
     episode_id = row["episode_id"]
     if kind == "screenplay":

@@ -498,7 +498,8 @@ async def test_confirmable_final_tail_still_rejects_blind_resume(storyboard_db, 
     ))
     storyboard_db.execute(
         "UPDATE episodes SET storyboard_artifact_id='storyboard-v1',"
-        "storyboard_completion_certificate_id='certificate-v1' WHERE id='e1'"
+        "storyboard_completion_certificate_id='certificate-v1',"
+        "storyboard_production_revision_id='revision-v1' WHERE id='e1'"
     )
     storyboard_db.commit()
 

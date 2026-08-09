@@ -375,8 +375,50 @@ def screenplay_lightweight_status(episode_id: str):
         ),
     }
 
+
 def _screenplay_task_active(episode_id: str) -> bool:
-    return task_registry.active("screenplay", episode_id)
+    if task_registry.active("screenplay", episode_id):
+        return True
+    conn = get_conn()
+    episode = conn.execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    return bool(
+        episode
+        and evidence_repository.get_active_scoped_run(
+            episode["active_screenplay_run_id"],
+            workflow_type="screenplay",
+            scope_type="episode",
+            scope_id=episode_id,
+            conn=conn,
+        )
+    )
+
+
+def _assert_screenplay_run_owner(
+    episode_id: str,
+    *,
+    run_id: str | None = None,
+) -> None:
+    if run_id is None:
+        from app.observability.tracing import current_trace
+
+        run_id = current_trace().run_id
+    if not run_id:
+        return
+    row = get_conn().execute(
+        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    actual = str(row["active_screenplay_run_id"] or "") if row else "missing"
+    if not row or actual != run_id:
+        raise StateConflict(
+            "screenplay_owner",
+            episode_id,
+            {run_id},
+            actual,
+        )
 
 
 @router.put("/episodes/{episode_id}/target-duration")
@@ -589,7 +631,10 @@ def recover_screenplay_tasks() -> int:
     resumed = 0
     for row in rows:
         episode_id = row["id"]
-        if _screenplay_task_active(episode_id):
+        # Startup recovery deliberately ignores a persisted PAUSED_EXTERNAL
+        # owner: there cannot yet be a local worker, and this loop is the code
+        # responsible for replacing that interrupted run.
+        if task_registry.active("screenplay", episode_id):
             continue
         orphan_run = conn.execute(
             "SELECT status FROM workflow_runs WHERE id=?",
@@ -710,6 +755,7 @@ async def _screenplay_character_discovery(
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
     if not project:
         raise StageError("新人物发现", ["项目不存在"])
+    _assert_screenplay_run_owner(episode_id)
     if not (project["bible_json"] or "").strip():
         # 剧本允许先于完整人物谱生产，但人物身份不能因此绕过预检。先原子写入
         # 最小骨架，后续仍由既有增量流程建文字卡；bible_status 保持原值，
@@ -738,6 +784,7 @@ async def _screenplay_character_discovery(
             bible,
             draft_text=draft_text,
             generate_portraits=False,
+            write_guard=lambda: _assert_screenplay_run_owner(episode_id),
         )
     except StageError:
         raise
@@ -755,6 +802,7 @@ async def _screenplay_character_discovery(
         ) from exc
     if result.get("errors"):
         raise StageError("新人物发现", list(result["errors"]))
+    _assert_screenplay_run_owner(episode_id)
     result["resolutions"] = persist_screenplay_character_resolutions(
         conn,
         episode_id,
@@ -783,6 +831,7 @@ async def _screenplay_task(
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     try:
+        _assert_screenplay_run_owner(episode_id)
         ep_data = dict(ep)
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
         bible = _project_bible_or_placeholder(p)
@@ -1318,6 +1367,7 @@ async def _recorded_screenplay_task(
                     "phase": "before_screenplay",
                 },
             )
+        _assert_screenplay_run_owner(episode_id, run_id=recorder.run_id)
         # Discovery may advance bible_version. Refresh the persisted fingerprint and
         # context pack before the screenplay step so evidence describes the inputs
         # actually used by generation.
@@ -1386,8 +1436,13 @@ async def _recorded_screenplay_task(
                 pass
             return None
         row = get_conn().execute(
-            "SELECT screenplay_status, screenplay_error FROM episodes WHERE id=?", (episode_id,)
+            "SELECT screenplay_status, screenplay_error,active_screenplay_run_id "
+            "FROM episodes WHERE id=?", (episode_id,)
         ).fetchone()
+        if not row or row["active_screenplay_run_id"] != recorder.run_id:
+            # A remote cancellation or a replacement run owns the terminal
+            # projection now.  The stale worker may only observe the conflict.
+            return None
         if row and row["screenplay_status"] == "running":
             public = errors.record_and_format(
                 exc,
@@ -2157,7 +2212,7 @@ async def _screenplay_guarded(
 
     async def activate() -> EpisodeScreenplay | None:
         conn = get_conn()
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE episodes SET screenplay_status='running',"
             "screenplay_error=COALESCE(screenplay_error, ?),screenplay_updated_at=? "
             "WHERE id=? AND active_screenplay_run_id=? "
@@ -2165,6 +2220,14 @@ async def _screenplay_guarded(
             ("正在生成人物上下文与首版剧本", now(), episode_id, recorder.run_id),
         )
         conn.commit()
+        if cursor.rowcount != 1:
+            _assert_screenplay_run_owner(episode_id, run_id=recorder.run_id)
+            raise StateConflict(
+                "screenplay_activation",
+                episode_id,
+                {"queued", "running", "repairing"},
+                "episode_state_changed",
+            )
         return await _recorded_screenplay_task(episode_id, recorder)
 
     try:
@@ -2401,7 +2464,7 @@ async def cancel_screenplay(episode_id: str):
     )
     conn.commit()
     try:
-        await asyncio.wait_for(
+        cancelled_locally = await asyncio.wait_for(
             task_registry.cancel_and_wait("screenplay", episode_id), timeout=15
         )
     except asyncio.TimeoutError:
@@ -2411,6 +2474,18 @@ async def cancel_screenplay(episode_id: str):
             "requested_at": requested_at,
             "message": "worker 尚未返回终态，系统将继续观察，未宣称已停止",
         }
+    if not cancelled_locally and run_id:
+        # The owner may live in another service process.  Persist cancellation
+        # first; clearing the episode lease below then fences that remote worker
+        # from every screenplay/revision/shard write guarded by run ownership.
+        try:
+            WorkflowRecorder(run_id).cancel("用户从其他服务实例取消剧本任务")
+        except StateConflict:
+            latest_run = evidence_repository.get_run(run_id)
+            if latest_run and latest_run.get("status") not in {
+                "CANCELLED", "FAILED", "SUCCEEDED", "PARTIAL",
+            }:
+                raise HTTPException(409, "剧本运行状态已变化，请刷新后重试")
     latest = dict(_episode_or_404(episode_id))
     fallback = _screenplay_fallback_status(latest)
     retained = bool(

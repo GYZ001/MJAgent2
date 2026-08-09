@@ -519,6 +519,28 @@ def get_run(run_id: str) -> dict[str, Any] | None:
     return _decode_rows([dict(row)])[0] if row else None
 
 
+def get_active_scoped_run(
+    run_id: str | None,
+    *,
+    workflow_type: str,
+    scope_type: str,
+    scope_id: str,
+    conn=None,
+) -> dict[str, Any] | None:
+    """Return an active run only when its persisted identity matches the pointer."""
+    if not run_id:
+        return None
+    db = conn or get_conn()
+    row = db.execute(
+        "SELECT * FROM workflow_runs WHERE id=? AND workflow_type=? "
+        "AND scope_type=? AND scope_id=?",
+        (run_id, workflow_type, scope_type, scope_id),
+    ).fetchone()
+    if row is None or row["status"] not in ACTIVE_RUN_STATUSES:
+        return None
+    return _decode_rows([dict(row)])[0]
+
+
 def list_runs(*, active: bool | None = None, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []

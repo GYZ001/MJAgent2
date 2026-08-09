@@ -221,7 +221,6 @@ def publish_screenplay(
         "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=NULL, "
         "screenplay_updated_at=?, screenplay_artifact_id=?, "
         "published_screenplay_artifact_id=?, "
-        "active_screenplay_run_id=NULL, "
         "status='planned', script_error=NULL WHERE id=?",
         (script.model_dump_json(), now(), artifact_id, artifact_id, episode_id),
     )
@@ -231,6 +230,13 @@ def publish_screenplay(
         certificate_id=cert.certificate_id,
         conn=conn,
         commit=False,
+    )
+    # Keep the run lease through the authority transition.  The revision
+    # publish guard verifies the exact owner above; only then may this same
+    # transaction release the episode for a later run.
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=NULL WHERE id=?",
+        (episode_id,),
     )
     consume_completion_certificate(cert.certificate_id, conn=conn, commit=False)
     conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))

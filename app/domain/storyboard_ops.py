@@ -1392,11 +1392,35 @@ async def _storyboard_task(
             raise StageError("分镜脚本", [f"已发布剧本权威链无效：{exc}"]) from exc
         screenplay = screenplay_context.screenplay
         narrative_authority = screenplay_context.narrative_authority_required
-        published_storyboard_authority = bool(
+        published_storyboard_authority = False
+        if (
             narrative_authority
             and ep["published_storyboard_artifact_id"]
             and ep["storyboard_completion_certificate_id"]
-        )
+        ):
+            try:
+                from app.production.certificate import (
+                    verify_current_storyboard_completion_authority,
+                )
+
+                authority_rows = conn.execute(
+                    "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                    (episode_id,),
+                ).fetchall()
+                authority_board = _board_from_shot_rows(
+                    authority_rows,
+                    ep["episode_no"],
+                )
+                verify_current_storyboard_completion_authority(
+                    episode=ep,
+                    current_storyboard_content=authority_board.model_dump(mode="json"),
+                )
+                published_storyboard_authority = True
+            except Exception:
+                # Presence of old IDs is not publication authority.  When the
+                # exact current projection has only stale evidence, normal
+                # resume reruns the Supervisor gates and signs fresh evidence.
+                published_storyboard_authority = False
         if resume and published_storyboard_authority:
             rows = conn.execute(
                 "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",

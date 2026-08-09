@@ -20,6 +20,7 @@ import base64
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
@@ -2679,6 +2680,7 @@ async def ensure_cards_for_text(
     draft_text: str = "",
     generate_portraits: bool = True,
     _precomputed_candidates: list[dict] | None = None,
+    write_guard: Callable[[], None] | None = None,
 ) -> dict:
     """发现并补人物卡；同时输出供剧本使用的姓名消歧表。"""
     conn = get_conn()
@@ -2708,6 +2710,8 @@ async def ensure_cards_for_text(
             scope_id=str(episode_row["id"]) if episode_row else None,
         )
     )
+    if write_guard:
+        write_guard()
     known = {c.name for c in bible.characters}
     unknown_by_name: dict[str, list[dict]] = {}
     functional_candidates: list[dict] = []
@@ -2779,6 +2783,7 @@ async def ensure_cards_for_text(
             episode_no,
             generate_portrait=generate_portraits,
             require_identity_card=True,
+            write_guard=write_guard,
         )
         if result.get("status") == "added":
             added.append(result)
@@ -3120,6 +3125,7 @@ async def ensure_character_card(
     *,
     generate_portrait: bool = True,
     require_identity_card: bool = False,
+    write_guard: Callable[[], None] | None = None,
 ) -> dict:
     """检查新角色的原文份量，并自动完成建卡与定妆包。
 
@@ -3131,11 +3137,15 @@ async def ensure_character_card(
     name = (name or "").strip()
     if not name:
         return {"status": "skipped", "reason": "empty"}
+    if write_guard:
+        write_guard()
     conn = get_conn()
     if _name_in_bible(conn, project_id, name):
         return {"status": "exists", "name": name}
     lock = await _card_lock(project_id, name)
     async with lock:
+        if write_guard:
+            write_guard()
         if _name_in_bible(conn, project_id, name):  # 拿到锁后复查（并发兜底）
             return {"status": "exists", "name": name}
         if not _has_column(conn, "projects", "bible_auto_changes_json"):
@@ -3213,6 +3223,8 @@ async def ensure_character_card(
                 return {"status": "error", "name": name,
                         "reason": "新角色评估失败" + code_ref(exc, action="assess_new_character",
                                                               context={"project_id": project_id, "name": name})}
+            if write_guard:
+                write_guard()
             card_complete = bool(verdict.get("card_complete")) or (
                 bool(str(verdict.get("role") or "").strip())
                 and APPEARANCE_MIN
@@ -3274,6 +3286,8 @@ async def ensure_character_card(
         card = char_obj.model_dump(mode="json")
         bible_lock = await _bible_lock(project_id)
         async with bible_lock:
+            if write_guard:
+                write_guard()
             appended = _append_character_to_bible(conn, project_id, card)
         if not appended and not _name_in_bible(conn, project_id, name):
             existing["status"] = "auto_apply_failed"
@@ -3337,6 +3351,8 @@ async def ensure_character_card(
                 "portrait_error": public, "character_card": card,
             }
 
+        if write_guard:
+            write_guard()
         existing["status"] = "auto_applied"
         existing["decided_at"] = now()
         existing["decision_reason"] = "AI 判定需要人物卡并已自动生成定妆包"

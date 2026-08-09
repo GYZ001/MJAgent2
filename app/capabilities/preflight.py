@@ -717,11 +717,13 @@ def shot_update(args) -> PreflightResult:
 
 def screenplay_update(args) -> PreflightResult:
     import json
+    from app.evidence import repository as evidence_repository
 
     conn = get_conn()
     ep = conn.execute(
         "SELECT id, episode_no, status, screenplay_json, screenplay_artifact_id, "
-        "screenplay_updated_at, active_storyboard_run_id, screenplay_publish_fence "
+        "screenplay_updated_at, active_screenplay_run_id, active_storyboard_run_id, "
+        "screenplay_publish_fence "
         "FROM episodes WHERE id=?",
         (args.episode_id,),
     ).fetchone()
@@ -736,6 +738,35 @@ def screenplay_update(args) -> PreflightResult:
             confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
             denial_code="not_found",
             denial_message="剧集不存在",
+        )
+    active_screenplay_run = evidence_repository.get_active_scoped_run(
+        ep["active_screenplay_run_id"],
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id=args.episode_id,
+        conn=conn,
+    )
+    if active_screenplay_run:
+        return PreflightResult(
+            command="screenplay.update",
+            allowed=False,
+            risk=RiskLevel.R2_MATERIAL,
+            summary="剧本流程仍在运行，不能覆盖其工作副本",
+            affected=AffectedScope(
+                episodes=[args.episode_id],
+                extra={
+                    "active_run_id": active_screenplay_run["id"],
+                    "active_run_status": active_screenplay_run["status"],
+                },
+            ),
+            state_fingerprint=_fp({
+                "episode_id": args.episode_id,
+                "active_run": active_screenplay_run,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+            denial_code="SCREENPLAY_TASK_ACTIVE",
+            denial_message="剧本流程正在运行；请先停止并等待任务退出",
         )
     current_version = ep["screenplay_artifact_id"] or ""
     expected_version = getattr(args, "expected_version", None)
@@ -881,7 +912,7 @@ def screenplay_repair_draft(args) -> PreflightResult:
 
 def screenplay_generate(args) -> PreflightResult:
     """Read-only generation sizing and reusable-artifact projection."""
-    from app.evidence.repository import ACTIVE_RUN_STATUSES
+    from app.evidence import repository as evidence_repository
 
     conn = get_conn()
     ep = conn.execute(
@@ -909,22 +940,14 @@ def screenplay_generate(args) -> PreflightResult:
     input_projection = dict(projection.get("input") or {})
     cast_impact = dict(projection.get("cast_impact") or {})
     reusable = dict(projection.get("reusable_validated_artifacts") or {})
-    run = (
-        conn.execute(
-            """SELECT id,status,workflow_type,scope_type,scope_id
-                 FROM workflow_runs WHERE id=?""",
-            (ep["active_screenplay_run_id"],),
-        ).fetchone()
-        if ep["active_screenplay_run_id"]
-        else None
+    run = evidence_repository.get_active_scoped_run(
+        ep["active_screenplay_run_id"],
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id=args.episode_id,
+        conn=conn,
     )
-    active_run = bool(
-        run
-        and run["workflow_type"] == "screenplay"
-        and run["scope_type"] == "episode"
-        and run["scope_id"] == args.episode_id
-        and run["status"] in ACTIVE_RUN_STATUSES
-    )
+    active_run = bool(run)
     downstream_impact = bool(ep["screenplay_artifact_id"] or ep["storyboard_artifact_id"])
     return PreflightResult(
         command="screenplay.generate",
@@ -954,7 +977,7 @@ def screenplay_generate(args) -> PreflightResult:
         ),
         state_fingerprint=_fp({
             "episode": dict(ep),
-            "active_run": dict(run) if run else None,
+            "active_run": run,
             "input": input_projection,
             "reusable": reusable,
         }),
@@ -991,7 +1014,7 @@ def screenplay_resume(args) -> PreflightResult:
     state = _screenplay_production_state(args.episode_id)
     can_baseline = bool(state.get("can_resume_baseline"))
     can_repair = bool(state.get("can_resume_repair"))
-    allowed = bool((can_baseline or can_repair) and not ep["active_screenplay_run_id"])
+    allowed = bool((can_baseline or can_repair) and not state.get("task_active"))
     mode = "baseline" if can_baseline else "finalize" if can_repair else "none"
     return PreflightResult(
         command="screenplay.resume",

@@ -200,6 +200,61 @@ def test_outline_action_relation_keeps_canonical_segments_of_one_quote() -> None
     ) == []
 
 
+def test_action_relation_does_not_reuse_short_line_inside_longer_quote() -> None:
+    screenplay = _screenplay()
+    short_action = _attach_generic_action(screenplay)
+    short_action.actor_ids = ["character-1"]
+    short_action.target_ids = []
+    short_action.semantic_intent = "character-1 says 「啊……啊……」"
+    long_action = AtomicAction(
+        action_id="ACT-2",
+        actor_ids=["character-1"],
+        semantic_intent="character-1 says 「前面啊……啊……后面」",
+        completion_condition="character-1 finishes the longer line.",
+        decision_requirement="not_applicable",
+        decision_not_applicable_reason="The event directly requires the line.",
+    )
+    screenplay.narrative_plan.atomic_actions.append(long_action)
+    screenplay.narrative_plan.events.append(NarrativeEvent(
+        event_id="E-2",
+        action_ids=[long_action.action_id],
+    ))
+    screenplay.key_lines = [
+        "character-1：啊……啊……",
+        "character-1：前面啊……啊……后面",
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                primary_action_id=short_action.action_id,
+                key_line_ids=["KL01"],
+            ),
+            StoryboardOutlineShot(
+                shot_no=2,
+                scene_id="SC-generic",
+                story_event_id="E-2",
+                event_ids=["E-2"],
+                primary_action_id=long_action.action_id,
+                key_line_ids=["KL02"],
+            ),
+        ],
+    )
+
+    reconcile_narrative_outline_action_deliveries(outline, screenplay)
+
+    assert outline.shots[0].key_line_ids == ["KL01"]
+    assert outline.shots[1].key_line_ids == ["KL02"]
+    assert narrative_outline_action_delivery_errors(
+        outline,
+        screenplay,
+    ) == []
+
+
 def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)
