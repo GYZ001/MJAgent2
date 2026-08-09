@@ -314,6 +314,10 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
     assert resumed.checkpoint_json["planner_version"] == screenplay_repair.SCREENPLAY_REPAIR_PLANNER_VERSION
     assert resumed.checkpoint_json["yield_reason"] is None
     assert resumed.checkpoint_json.get("quality_issue_count", 0) == 0
+    assert resumed.checkpoint_json["open_issue_ids"] == []
+    assert resumed.checkpoint_json["last_issue_fingerprints"] == []
+    assert len(resumed.checkpoint_json["patch_artifact_ids"]) == 1
+    assert resumed.checkpoint_json["issue_strategy_history"]
     assert result.scene_outline[0].story_function != script.scene_outline[0].story_function
     assert len(result.scene_outline[0].story_function) >= 6
 

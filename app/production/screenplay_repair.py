@@ -2589,6 +2589,12 @@ def _complete_screenplay_from_working_artifact(
     rev = get_production_revision(revision_id)
     if rev is None or not rev.working_artifact_id:
         raise RuntimeError("剧本结构校验缺少 working Artifact")
+    checkpoint = {
+        **checkpoint,
+        **dict(rev.checkpoint_json or {}),
+        "open_issue_ids": [],
+        "last_issue_fingerprints": [],
+    }
     working_id = rev.working_artifact_id
     artifact = evidence_repository.get_artifact(working_id)
     if artifact is None:
