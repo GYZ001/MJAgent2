@@ -2777,13 +2777,17 @@ async def ensure_cards_for_text(
         ))
 
     for name, items in unknown_by_name.items():
+        ensure_kwargs = {
+            "generate_portrait": generate_portraits,
+            "require_identity_card": True,
+        }
+        if write_guard is not None:
+            ensure_kwargs["write_guard"] = write_guard
         result = await ensure_character_card(
             project_id,
             name,
             episode_no,
-            generate_portrait=generate_portraits,
-            require_identity_card=True,
-            write_guard=write_guard,
+            **ensure_kwargs,
         )
         if result.get("status") == "added":
             added.append(result)

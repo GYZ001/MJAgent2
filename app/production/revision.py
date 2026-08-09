@@ -691,14 +691,13 @@ def set_published_artifact(
         kind=row["kind"],
         revision_id=revision_id,
     )
-    if row["status"] != "active" or row["working_artifact_id"] != artifact_id:
-        raise ValueError("只能发布当前 active revision 的 working Artifact")
+    if row["status"] != "active":
+        raise ValueError("只能发布 active revision")
     stamp = now()
     cursor = db.execute(
         "UPDATE production_revisions SET published_artifact_id=?, working_artifact_id=?, "
-        "status='published', updated_at=? WHERE id=? AND status='active' "
-        "AND working_artifact_id=?",
-        (artifact_id, artifact_id, stamp, revision_id, artifact_id),
+        "status='published', updated_at=? WHERE id=? AND status='active'",
+        (artifact_id, artifact_id, stamp, revision_id),
     )
     if cursor.rowcount != 1:
         if commit:

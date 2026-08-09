@@ -215,7 +215,10 @@ class WorkflowRecorder:
         self.refresh_cost()
         transition_run(
             self.run_id,
-            {"CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN", "PAUSED_BUDGET", "PAUSED_EXTERNAL"},
+            {
+                "CREATED", "RUNNING", "WAITING_RETRY", "WAITING_HUMAN",
+                "WAITING_AUTHORIZATION", "PAUSED_BUDGET", "PAUSED_EXTERNAL",
+            },
             "CANCELLED",
             message,
         )

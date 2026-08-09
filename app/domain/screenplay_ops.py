@@ -396,6 +396,32 @@ def _screenplay_task_active(episode_id: str) -> bool:
     )
 
 
+def _cancel_persisted_screenplay_run(
+    episode_id: str,
+    run_id: str | None,
+    *,
+    message: str,
+) -> bool:
+    run = evidence_repository.get_active_scoped_run(
+        run_id,
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id=episode_id,
+    )
+    if not run:
+        return False
+    try:
+        WorkflowRecorder(str(run["id"])).cancel(message)
+        return True
+    except StateConflict:
+        latest = evidence_repository.get_run(str(run["id"]))
+        if latest and latest.get("status") in {
+            "CANCELLED", "FAILED", "SUCCEEDED", "PARTIAL",
+        }:
+            return False
+        raise
+
+
 def _assert_screenplay_run_owner(
     episode_id: str,
     *,
@@ -786,7 +812,7 @@ async def _screenplay_character_discovery(
             generate_portraits=False,
             write_guard=lambda: _assert_screenplay_run_owner(episode_id),
         )
-    except StageError:
+    except (StageError, StateConflict):
         raise
     except Exception as exc:  # noqa: BLE001 - 统一转成剧本阶段可恢复诊断
         from app.errors import code_ref
@@ -2275,7 +2301,7 @@ async def start_screenplay_all(project_id: str):
             )
             or (
                 r["screenplay_status"] in {"queued", "running"}
-                and not task_registry.active("screenplay", r["id"])
+                and not _screenplay_task_active(r["id"])
             )
         )
         and r["screenplay_status"] != "ready"
@@ -2382,7 +2408,7 @@ async def cancel_screenplay_all(project_id: str):
     _project_or_404(project_id)
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, screenplay_json FROM episodes "
+        "SELECT id, screenplay_json, active_screenplay_run_id FROM episodes "
         "WHERE project_id=? AND screenplay_status IN ('queued','running','repairing')",
         (project_id,)).fetchall()
     episode_ids = [row["id"] for row in rows]
@@ -2398,22 +2424,45 @@ async def cancel_screenplay_all(project_id: str):
             cancelled_batches += 1
         except StateConflict:
             continue
-    stopped = await task_registry.cancel_many_and_wait(
+    local_stopped = await task_registry.cancel_many_and_wait(
         "screenplay",
         episode_ids,
     )
+    persisted_stopped = 0
+    released = 0
     for r in rows:
         eid = r["id"]
+        run_id = r["active_screenplay_run_id"]
+        try:
+            persisted_stopped += int(_cancel_persisted_screenplay_run(
+                eid,
+                run_id,
+                message="用户停止批量剧本任务",
+            ))
+        except StateConflict:
+            continue
         full = conn.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
         fallback = _screenplay_fallback_status(full)
-        conn.execute(
-            "UPDATE episodes SET screenplay_status=?,screenplay_error=NULL,"
-            "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
-            (fallback, now(), eid),
-        )
+        if run_id:
+            cursor = conn.execute(
+                "UPDATE episodes SET screenplay_status=?,screenplay_error=NULL,"
+                "active_screenplay_run_id=NULL,screenplay_updated_at=? "
+                "WHERE id=? AND active_screenplay_run_id=?",
+                (fallback, now(), eid, run_id),
+            )
+        else:
+            cursor = conn.execute(
+                "UPDATE episodes SET screenplay_status=?,screenplay_error=NULL,"
+                "active_screenplay_run_id=NULL,screenplay_updated_at=? "
+                "WHERE id=? AND active_screenplay_run_id IS NULL",
+                (fallback, now(), eid),
+            )
+        released += int(cursor.rowcount == 1)
     conn.commit()
     return {
-        "stopped": stopped,
+        "stopped": released,
+        "local_stopped": local_stopped,
+        "persisted_stopped": persisted_stopped,
         "matched": len(rows),
         "cancelled_batches": cancelled_batches,
     }
@@ -2479,13 +2528,13 @@ async def cancel_screenplay(episode_id: str):
         # first; clearing the episode lease below then fences that remote worker
         # from every screenplay/revision/shard write guarded by run ownership.
         try:
-            WorkflowRecorder(run_id).cancel("用户从其他服务实例取消剧本任务")
+            _cancel_persisted_screenplay_run(
+                episode_id,
+                run_id,
+                message="用户从其他服务实例取消剧本任务",
+            )
         except StateConflict:
-            latest_run = evidence_repository.get_run(run_id)
-            if latest_run and latest_run.get("status") not in {
-                "CANCELLED", "FAILED", "SUCCEEDED", "PARTIAL",
-            }:
-                raise HTTPException(409, "剧本运行状态已变化，请刷新后重试")
+            raise HTTPException(409, "剧本运行状态已变化，请刷新后重试") from None
     latest = dict(_episode_or_404(episode_id))
     fallback = _screenplay_fallback_status(latest)
     retained = bool(

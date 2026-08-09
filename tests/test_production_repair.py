@@ -1632,6 +1632,12 @@ async def test_recorded_repair_resume_skips_character_discovery_model_call(monke
         "ep_p",
         trigger_type="resume",
     )
+    db.get_conn().execute(
+        "UPDATE episodes SET screenplay_status='queued',active_screenplay_run_id=? "
+        "WHERE id='ep_p'",
+        (recorder.run_id,),
+    )
+    db.get_conn().commit()
 
     result = await screenplay_ops._recorded_screenplay_task("ep_p", recorder)
 
@@ -2939,6 +2945,12 @@ async def test_recorded_narrative_gate_discards_repair_state_and_fails_run(
         fake_production,
     )
     recorder = screenplay_ops._new_screenplay_recorder("ep_p")
+    db.get_conn().execute(
+        "UPDATE episodes SET screenplay_status='queued',active_screenplay_run_id=? "
+        "WHERE id='ep_p'",
+        (recorder.run_id,),
+    )
+    db.get_conn().commit()
 
     result = await screenplay_ops._recorded_screenplay_task("ep_p", recorder)
 

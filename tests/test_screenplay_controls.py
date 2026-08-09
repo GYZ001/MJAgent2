@@ -12,12 +12,18 @@ from app.capabilities.direct import enter_handler
 from app.capabilities.registry import get_registry
 from app.evidence import repository
 from app.harness.types import EvidenceArtifact
+from app.observability.tracing import bind_trace
 from app.production.revision import (
+    ProductionRevisionOwnershipLost,
     ensure_production_revision,
     mark_baseline_generated,
     save_checkpoint,
     screenplay_production_state,
     set_published_artifact,
+)
+from app.screenplay_scene_shards import (
+    ScreenplaySceneShardOwnershipLost,
+    _assert_episode_owner,
 )
 
 
@@ -179,6 +185,104 @@ def test_screenplay_generate_preflight_allows_terminal_run_takeover() -> None:
     assert live.allowed is False
     assert live.denial_code == "SCREENPLAY_ALREADY_RUNNING"
     assert live.state_fingerprint != terminal.state_fingerprint
+
+
+@pytest.mark.asyncio
+async def test_persisted_active_run_blocks_manual_save_without_local_task() -> None:
+    from app.capabilities.inputs import ScreenplayUpdateInput
+    from app.capabilities.preflight import screenplay_update
+
+    conn = db.get_conn()
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="remote-worker",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='RUNNING' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running',active_screenplay_run_id=? "
+        "WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    preflight = screenplay_update(ScreenplayUpdateInput(
+        episode_id="e1",
+        screenplay={},
+    ))
+    state = screenplay_production_state("e1")
+
+    assert task_registry.active("screenplay", "e1") is False
+    assert preflight.allowed is False
+    assert preflight.denial_code == "SCREENPLAY_TASK_ACTIVE"
+    assert state["task_active"] is True
+    with enter_handler(), pytest.raises(HTTPException) as exc_info:
+        await api.edit_screenplay("e1", body={})
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "screenplay_task_active"
+
+
+@pytest.mark.asyncio
+async def test_cancel_persisted_remote_screenplay_run_releases_owner() -> None:
+    conn = db.get_conn()
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="remote-worker",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='RUNNING' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running',active_screenplay_run_id=? "
+        "WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    with enter_handler():
+        result = await api.cancel_screenplay("e1")
+
+    episode = conn.execute(
+        "SELECT screenplay_status,active_screenplay_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert result["status"] == "pending"
+    assert dict(episode) == {
+        "screenplay_status": "pending",
+        "active_screenplay_run_id": None,
+    }
+    assert repository.get_run(run_id)["status"] == "CANCELLED"
+
+
+def test_old_run_cannot_write_revision_or_scene_shard_after_owner_is_cleared() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=NULL WHERE id='e1'"
+    )
+    conn.commit()
+
+    with bind_trace("run-old", "step-old"):
+        with pytest.raises(ProductionRevisionOwnershipLost):
+            save_checkpoint(revision.id, {"phase": "STALE_WRITE"})
+        with pytest.raises(ScreenplaySceneShardOwnershipLost):
+            _assert_episode_owner("e1")
+
+    stored = conn.execute(
+        "SELECT checkpoint_json FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()
+    assert json.loads(stored["checkpoint_json"] or "{}") == {}
 
 
 @pytest.mark.asyncio
