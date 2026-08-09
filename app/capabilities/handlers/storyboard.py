@@ -1,6 +1,8 @@
 """storyboard.* / shot.update Command Handlers（分镜与逐镜编辑）。"""
 from __future__ import annotations
 
+import asyncio
+
 from app.capabilities import inputs as I
 from app.capabilities.handlers.common import call_guarded, failed, succeeded
 from app.capabilities.schemas import CommandResult
@@ -50,13 +52,20 @@ async def confirm(args: I.StoryboardConfirmInput) -> CommandResult:
     from app.capabilities.handlers.common import from_http_exception
     from fastapi import HTTPException
 
-    try:
+    def confirm_on_isolated_db_thread():
+        # ``get_conn`` is thread-local, while async generation tasks share the
+        # event-loop thread.  Keep the whole synchronous confirmation gate on a
+        # worker thread so its BEGIN/commit cannot join another task's active
+        # SQLite transaction.
         api._episode_or_404(args.episode_id)
-        outcome = api.confirm_episode_core(
+        return api.confirm_episode_core(
             args.episode_id,
             preview_token=args.preview_token,
             reason=args.reason,
         )
+
+    try:
+        outcome = await asyncio.to_thread(confirm_on_isolated_db_thread)
     except HTTPException as exc:
         return from_http_exception(exc)
     except ValueError as exc:

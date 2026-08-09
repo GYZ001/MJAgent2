@@ -1781,6 +1781,37 @@ def test_preview_consume_is_atomic_under_concurrent_submit(storyboard_db):
     assert sorted(results) == ["accepted", "rejected:409"]
 
 
+@pytest.mark.asyncio
+async def test_confirmation_does_not_join_another_async_tasks_transaction(
+    storyboard_db,
+):
+    from app.capabilities.handlers import storyboard as storyboard_handler
+    from app.capabilities.inputs import StoryboardConfirmInput
+
+    preview = api.create_storyboard_confirmation_preview("e1")
+    storyboard_db.execute(
+        "UPDATE settings SET value='concurrent-owner' WHERE key='storyboard_test_mode'"
+    )
+    assert storyboard_db.in_transaction is True
+
+    async def release_concurrent_owner() -> None:
+        await asyncio.sleep(0.05)
+        storyboard_db.commit()
+
+    release_task = asyncio.create_task(release_concurrent_owner())
+    result = await storyboard_handler.confirm(StoryboardConfirmInput(
+        episode_id="e1",
+        preview_token=preview["preview_token"],
+    ))
+    await release_task
+
+    assert result.status.value == "succeeded"
+    assert storyboard_db.in_transaction is False
+    assert storyboard_db.execute(
+        "SELECT status FROM episodes WHERE id='e1'"
+    ).fetchone()["status"] == "confirmed"
+
+
 def test_preview_fingerprint_covers_independent_shot_fields(storyboard_db):
     preview = workspace.create_preview("test_full_fingerprint", "e1", {"ok": True})
     storyboard_db.execute(

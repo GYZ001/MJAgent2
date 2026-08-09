@@ -693,6 +693,147 @@ def test_supervisor_generates_and_commits_scene_packs(
     assert contract["purpose"].startswith("第2镜")
 
 
+def test_full_repair_scene_pack_checkpoints_without_mutating_official_rows(
+    repair_db,
+    monkeypatch,
+) -> None:
+    conn, _screenplay = repair_db
+    before = _storyboard_hash(_current_board(conn))
+    bible = Bible(
+        characters=[Character(
+            name="少年",
+            role="主角",
+            appearance_canonical="十六岁黑发少年，蓝色长衫，目光坚定",
+        )],
+        world=World(visual_style_canonical="国风动画电影感"),
+    )
+    conn.execute(
+        "UPDATE projects SET bible_json=? WHERE id='p1'",
+        (bible.model_dump_json(),),
+    )
+    contexts = [
+        StoryboardSceneContext(
+            scene_id="SC001",
+            scene_no=1,
+            scene_name="广场",
+            scene_time="日",
+            entry_state="少年站在入口",
+            exit_state="少年走到石碑前",
+        ),
+        StoryboardSceneContext(
+            scene_id="SC002",
+            scene_no=2,
+            scene_name="石碑旁",
+            scene_time="日",
+            entry_state="少年开始查看结果",
+            exit_state="少年确认结果",
+        ),
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        scene_contexts=contexts,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                shot_id=f"SH{number:04d}",
+                scene_id="SC001" if number < 3 else "SC002",
+                scene_name="广场" if number < 3 else "石碑旁",
+                scene_time="日",
+                beat=f"少年完成第{number}步动作",
+                state_in=f"第{number}步开始",
+                primary_action=f"少年完成第{number}步动作",
+                state_out=f"第{number}步结束",
+                continuity_mode=(
+                    "same_scene_cut" if number == 2 else "scene_change"
+                ),
+                duration_s=5,
+                characters_visible=["少年"],
+            )
+            for number in range(1, 4)
+        ],
+    )
+    conn.execute(
+        "UPDATE episodes SET status='scripted',storyboard_outline_json=? "
+        "WHERE id='e1'",
+        (outline.model_dump_json(),),
+    )
+    conn.commit()
+    checkpoint = prepare_published_storyboard_repair(
+        "e1",
+        [
+            "第 1 镜的可见身份不属于本镜叙事任务",
+            "第 3 镜的可见身份不属于本镜叙事任务",
+        ],
+    )
+    assert checkpoint.last_repair["window_start"] == 1
+    assert checkpoint.last_repair["window_end"] == 3
+
+    calls: list[str] = []
+
+    async def fake_scene_pack(*args, **kwargs):
+        context = args[-1]
+        calls.append(context.scene_id)
+        shot_nos = sorted(kwargs["shot_nos"])
+        if len(calls) == 1:
+            request_control("e1", "pause")
+        return StoryboardScenePack(
+            episode_no=1,
+            scene_id=context.scene_id,
+            shots=[
+                _shot(number).model_copy(update={
+                    "shot_id": f"SH{number:04d}",
+                    "scene_id": context.scene_id,
+                    "scene_name": context.scene_name,
+                    "scene_time": context.scene_time,
+                    "continuity_mode": (
+                        "same_scene_cut"
+                        if number == 2
+                        else "scene_change"
+                    ),
+                    "transition": (
+                        "硬切" if number == 2 else "叠化"
+                    ),
+                    "is_final": number == 3,
+                })
+                for number in shot_nos
+            ],
+        )
+
+    import app.storyboard_supervisor as supervisor_module
+    import app.domain.video_ops as video_ops
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "generate_storyboard_scene_pack",
+        fake_scene_pack,
+    )
+    monkeypatch.setattr(
+        video_ops,
+        "evaluate_storyboard_for_confirmation",
+        lambda _episode, board, *_args, **_kwargs: SimpleNamespace(
+            passed=False,
+            errors=[
+                "第 1 镜的可见身份不属于本镜叙事任务",
+                "第 3 镜的可见身份不属于本镜叙事任务",
+            ],
+            warnings=[],
+            issues=[],
+            board=board,
+        ),
+    )
+
+    paused = asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=True,
+        preflight_done=True,
+    ))
+
+    assert calls == ["SC001"]
+    assert paused.phase == "PAUSED_EXTERNAL"
+    assert len(paused.repair_candidate_shots) == 2
+    assert _storyboard_hash(_current_board(conn)) == before
+
+
 def test_scene_pack_failure_preserves_successful_later_batch(
     repair_db,
     monkeypatch,

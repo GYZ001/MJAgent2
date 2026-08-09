@@ -2810,11 +2810,10 @@ async def run_storyboard_supervisor(
                 if not _run_has_write_ownership():
                     return cp
                 if full_repair_scene_pack:
-                    new_shots = candidate_board.shots[len(completed):]
-                    cp.repair_candidate_shots.extend(
+                    cp.repair_candidate_shots = [
                         _shot_checkpoint_payload(shot)
-                        for shot in new_shots
-                    )
+                        for shot in candidate_board.shots
+                    ]
                     completed = list(candidate_board.shots)
                     cp.scene_pack_candidates.pop(batch_key, None)
                     cp.phase = "GENERATING_SHOTS"
