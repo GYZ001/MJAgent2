@@ -463,6 +463,402 @@ def _trace_job_label(kind: str | None) -> str:
     return _TRACE_JOB_LABELS.get(str(kind or ""), "执行异步任务")
 
 
+_VIDEO_MODE_LABELS = {
+    "REFERENCE_IMAGE_MODE": "参考图驱动",
+    "FIRST_FRAME_MODE": "首帧衔接",
+    "FIRST_LAST_FRAME_MODE": "首尾帧控制",
+}
+
+
+def _video_mode_label(mode: str | None) -> str:
+    value = str(mode or "")
+    return _VIDEO_MODE_LABELS.get(value, f"未知生成方式（{value or '未记录'}）")
+
+
+def _video_completion_trace_context(
+    run: dict[str, Any],
+    *,
+    jobs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    conn = get_conn()
+    run_id = str(run["id"])
+    episode_id = str(run.get("scope_id") or "")
+    checkpoint = None
+    for row in conn.execute(
+        """SELECT id,content_json,created_at,status FROM artifacts
+           WHERE type='video_supervisor_checkpoint'
+             AND scope_type='episode' AND scope_id=?
+             AND status IN ('candidate','validated','approved')
+           ORDER BY created_at DESC LIMIT 100""",
+        (episode_id,),
+    ).fetchall():
+        content = _trace_json_value(row["content_json"])
+        if isinstance(content, dict) and str(content.get("run_id") or "") == run_id:
+            checkpoint = {
+                "artifact_id": row["id"],
+                "created_at": row["created_at"],
+                "status": row["status"],
+                "content": content,
+            }
+            break
+
+    checkpoint_content = (
+        checkpoint["content"] if checkpoint is not None else {}
+    )
+    plan_id = str(checkpoint_content.get("episode_video_plan_id") or "")
+    plan_row = None
+    if plan_id:
+        plan_row = conn.execute(
+            "SELECT * FROM episode_video_generation_plans WHERE id=?",
+            (plan_id,),
+        ).fetchone()
+    if not plan_row:
+        plan_row = conn.execute(
+            """SELECT * FROM episode_video_generation_plans
+               WHERE episode_id=? AND created_at>=?
+               ORDER BY plan_revision DESC LIMIT 1""",
+            (episode_id, float(run.get("started_at") or 0) - 1),
+        ).fetchone()
+    plan = dict(plan_row) if plan_row else None
+    if plan:
+        plan_id = str(plan["id"])
+
+    shot_plans = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT sp.* FROM shot_video_generation_plans sp
+               WHERE sp.episode_video_plan_id=?
+               ORDER BY sp.shot_no""",
+            (plan_id,),
+        ).fetchall()
+    ] if plan_id else []
+    shot_plan_by_shot = {
+        str(item["shot_id"]): item for item in shot_plans
+    }
+
+    if jobs is None:
+        jobs = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT j.*,s.shot_no FROM jobs j
+                   LEFT JOIN shots s ON s.id=j.shot_id
+                   WHERE j.owner_run_id=? OR j.run_id=?
+                   ORDER BY j.created_at,j.id""",
+                (run_id, run_id),
+            ).fetchall()
+        ]
+    else:
+        jobs = [dict(item) for item in jobs]
+    for job in jobs:
+        shot_plan = shot_plan_by_shot.get(str(job.get("shot_id") or ""))
+        if shot_plan:
+            job["planned_mode"] = shot_plan.get("planned_mode")
+            job["video_input_intent"] = shot_plan.get("video_input_intent")
+
+    attempts = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT a.*,sp.shot_no,sp.shot_id
+               FROM video_generation_attempts a
+               JOIN shot_video_generation_plans sp ON sp.id=a.shot_plan_id
+               WHERE sp.episode_video_plan_id=?
+               ORDER BY a.created_at,a.id""",
+            (plan_id,),
+        ).fetchall()
+    ] if plan_id else []
+    qa_results = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT qa.*,sp.shot_no,sp.shot_id
+               FROM video_mode_qa_results qa
+               JOIN shot_video_generation_plans sp ON sp.id=qa.shot_plan_id
+               WHERE sp.episode_video_plan_id=?
+               ORDER BY qa.created_at,qa.id""",
+            (plan_id,),
+        ).fetchall()
+    ] if plan_id else []
+    events = [
+        {
+            **dict(row),
+            "payload": _trace_json_value(row["payload_json"]),
+        }
+        for row in conn.execute(
+            """SELECT id,ts,event_type,severity,message,payload_json
+               FROM run_events WHERE run_id=? ORDER BY ts,id""",
+            (run_id,),
+        ).fetchall()
+    ]
+    report_row = conn.execute(
+        """SELECT id,content_json,created_at,status FROM artifacts
+           WHERE type='video_coverage_report'
+             AND scope_type='episode' AND scope_id=?
+           ORDER BY created_at DESC LIMIT 20""",
+        (episode_id,),
+    ).fetchall()
+    report = None
+    for row in report_row:
+        content = _trace_json_value(row["content_json"])
+        if isinstance(content, dict) and str(content.get("run_id") or "") == run_id:
+            report = {
+                "artifact_id": row["id"],
+                "created_at": row["created_at"],
+                "status": row["status"],
+                "content": content,
+            }
+            break
+    return {
+        "run": run,
+        "checkpoint": checkpoint,
+        "checkpoint_content": checkpoint_content,
+        "plan": plan,
+        "shot_plans": shot_plans,
+        "shot_plan_by_shot": shot_plan_by_shot,
+        "jobs": jobs,
+        "attempts": attempts,
+        "qa_results": qa_results,
+        "events": events,
+        "report": report,
+    }
+
+
+def _video_stage_statuses(context: dict[str, Any]) -> dict[str, str]:
+    run = context["run"]
+    checkpoint = context["checkpoint_content"]
+    plan = context["plan"]
+    jobs = context["jobs"]
+    attempts = context["attempts"]
+    qa_results = context["qa_results"]
+    phase = str(checkpoint.get("phase") or "")
+    run_status = str(run.get("status") or "PENDING")
+    active_job_statuses = {
+        "queued", "running", "waiting_provider", "waiting_retry",
+        "waiting_budget", "waiting",
+    }
+    terminal_success = phase in {
+        "SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK",
+    }
+    terminal_partial = phase in {
+        "PARTIAL_NO_USABLE_CANDIDATE", "FAILED_CLOSED", "CANCELLED",
+    }
+    has_active_jobs = any(
+        str(item.get("status") or "") in active_job_statuses for item in jobs
+    )
+    jobs_finished = bool(jobs) and not has_active_jobs
+    quality_observed = bool(
+        attempts or qa_results or checkpoint.get("last_plan")
+        or phase in {"EVALUATING", "REPAIRING"}
+    )
+
+    statuses = {
+        "authorization": (
+            "SUCCEEDED" if checkpoint or plan or jobs
+            else "RUNNING" if run_status == "RUNNING"
+            else run_status
+        ),
+        "plan": (
+            "SUCCEEDED" if plan
+            else "WAITING_AUTHORIZATION" if phase == "WAITING_AUTHORIZATION"
+            else "RUNNING" if run_status == "RUNNING"
+            else run_status
+        ),
+        "assets": (
+            "FAILED"
+            if any(
+                item["event_type"] == "VIDEO_REFERENCE_ASSET_PREP_FAILED"
+                for item in context["events"]
+            )
+            else "RUNNING" if phase == "PREPARING_ASSETS"
+            else "SUCCEEDED" if jobs or phase in {
+                "PLANNING_COVERAGE", "DISPATCHING", "OBSERVING",
+                "EVALUATING", "REPAIRING", "FINALIZING",
+                "DEADLINE_CLOSING", "SUCCEEDED_COVERED",
+                "COMPLETED_DEADLINE_FALLBACK",
+                "PARTIAL_NO_USABLE_CANDIDATE", "FAILED_CLOSED",
+            }
+            else "PENDING"
+        ),
+        "coverage": (
+            "SUCCEEDED" if jobs or terminal_success or terminal_partial
+            else "RUNNING" if checkpoint
+            else "PENDING"
+        ),
+        "shots": (
+            "SUCCEEDED" if terminal_success
+            else "PARTIAL" if terminal_partial
+            else "RUNNING" if has_active_jobs
+            else "SUCCEEDED" if jobs_finished
+            else "PENDING"
+        ),
+        "quality": (
+            "SUCCEEDED" if terminal_success
+            else "PARTIAL" if terminal_partial
+            else "RUNNING" if quality_observed
+            else "PENDING"
+        ),
+        "finalize": (
+            "SUCCEEDED" if terminal_success
+            else "PARTIAL" if terminal_partial
+            else "RUNNING" if phase in {"FINALIZING", "DEADLINE_CLOSING"}
+            else "PENDING"
+        ),
+    }
+    return statuses
+
+
+def _video_stage_subtitles(context: dict[str, Any]) -> dict[str, str]:
+    checkpoint = context["checkpoint_content"]
+    plan = context["plan"]
+    shot_plans = context["shot_plans"]
+    jobs = context["jobs"]
+    attempts = context["attempts"]
+    qa_results = context["qa_results"]
+    coverage = checkpoint.get("coverage") or {}
+    total = int(
+        coverage.get("total") or len(shot_plans) or 0
+    )
+    adopted = int(coverage.get("adopted") or 0)
+    modes = Counter(
+        _video_mode_label(item.get("planned_mode")) for item in shot_plans
+    )
+    mode_summary = " · ".join(
+        f"{label} {count} 镜" for label, count in modes.items()
+    )
+    status_counts = Counter(str(item.get("status") or "") for item in jobs)
+    active = sum(
+        status_counts.get(value, 0)
+        for value in (
+            "queued", "running", "waiting_provider", "waiting_retry",
+            "waiting_budget", "waiting",
+        )
+    )
+    succeeded_attempts = sum(
+        str(item.get("status") or "") == "succeeded" for item in attempts
+    )
+    failed_attempts = sum(
+        str(item.get("status") or "") == "failed" for item in attempts
+    )
+    budget = checkpoint.get("budget") or {}
+    budget_cap = budget.get("cap_cny")
+    return {
+        "authorization": (
+            f"补齐 {total or '全部'} 镜"
+            + (f" · 预算上限 ¥{float(budget_cap):.2f}" if budget_cap is not None else "")
+        ),
+        "plan": (
+            mode_summary
+            or (
+                f"计划 revision {plan.get('plan_revision')}"
+                if plan else "等待生成方案"
+            )
+        ),
+        "assets": "确保人物、场景和镜头衔接素材可用于视频生成",
+        "coverage": f"已采用 {adopted}/{total} 镜 · 待补 {max(0, total - adopted)} 镜",
+        "shots": (
+            f"已派发 {len(jobs)}/{total} 镜 · 当前处理中 {active} 镜"
+            if total else "等待镜头计划"
+        ),
+        "quality": (
+            f"生成尝试 {len(attempts)} 次 · 成功 {succeeded_attempts} · 失败 {failed_attempts}"
+            + (f" · 质检 {len(qa_results)} 次" if qa_results else "")
+        ),
+        "finalize": (
+            "等待每个镜头获得可用版本"
+            if not context["report"]
+            else "已生成全片视频覆盖报告"
+        ),
+    }
+
+
+def _video_completion_stage_nodes(
+    primary: dict[str, Any],
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    from app.video_supervisor import VIDEO_COMPLETION_BUSINESS_STAGES
+
+    run_id = str(primary["id"])
+    statuses = _video_stage_statuses(context)
+    subtitles = _video_stage_subtitles(context)
+    stage_times: dict[str, tuple[float | None, float | None]] = {}
+    plan = context["plan"]
+    checkpoint = context["checkpoint"]
+    jobs = context["jobs"]
+    attempts = context["attempts"]
+    qa_results = context["qa_results"]
+    events = context["events"]
+    started_at = primary.get("started_at")
+    stage_times["authorization"] = (started_at, started_at)
+    plan_time = plan.get("created_at") if plan else None
+    stage_times["plan"] = (started_at, plan_time)
+    asset_events = [
+        item for item in events
+        if str(item["event_type"]).startswith("VIDEO_REFERENCE_ASSET_PREP")
+    ]
+    stage_times["assets"] = (
+        min((item["ts"] for item in asset_events), default=plan_time),
+        max((item["ts"] for item in asset_events), default=plan_time),
+    )
+    checkpoint_time = checkpoint.get("created_at") if checkpoint else None
+    stage_times["coverage"] = (checkpoint_time, checkpoint_time)
+    stage_times["shots"] = (
+        min((item.get("created_at") for item in jobs), default=None),
+        max((item.get("updated_at") for item in jobs), default=None),
+    )
+    quality_rows = [*attempts, *qa_results]
+    stage_times["quality"] = (
+        min((item.get("created_at") for item in quality_rows), default=None),
+        max((item.get("updated_at") or item.get("created_at") for item in quality_rows), default=None),
+    )
+    report = context["report"]
+    stage_times["finalize"] = (
+        checkpoint_time if report else None,
+        report.get("created_at") if report else None,
+    )
+
+    nodes: list[dict[str, Any]] = []
+    for sequence, presentation in enumerate(VIDEO_COMPLETION_BUSINESS_STAGES, 1):
+        key = str(presentation["key"])
+        stage_started, stage_finished = stage_times.get(key, (None, None))
+        nodes.append({
+            "id": f"stage:{run_id}:video-{key}",
+            "parent_id": f"run:{run_id}",
+            "kind": "stage",
+            "node_role": "business_stage",
+            "sequence": sequence,
+            "name": presentation["name"],
+            "subtitle": subtitles[key],
+            "status": statuses[key],
+            "started_at": stage_started,
+            "finished_at": stage_finished,
+            "latency_ms": max(
+                0,
+                int(
+                    (
+                        float(stage_finished or stage_started or 0)
+                        - float(stage_started or 0)
+                    )
+                    * 1000
+                ),
+            ),
+        })
+    return nodes
+
+
+def _video_job_presentation(job: dict[str, Any]) -> tuple[str, str]:
+    from app.media_pipeline.stage_state import stage_label
+
+    progress = _trace_json_value(job.get("stage_progress_json"))
+    action = stage_label(
+        job.get("pipeline_stage"),
+        progress=progress if isinstance(progress, dict) else None,
+        reason_text=job.get("reason_text"),
+    )
+    shot_no = job.get("shot_no")
+    name = f"第 {shot_no} 镜 · {action}" if shot_no is not None else action
+    mode = _video_mode_label(job.get("planned_mode"))
+    attempt = int(job.get("retry_count") or 0) + 1
+    return name, f"{mode} · 第 {attempt} 次执行"
+
+
 def _trace_run_id(
     project_id: str,
     object_type: str,
@@ -622,6 +1018,7 @@ def _trace_tree(
         for run_id in run_ids
     ]
     runs = [run for run in runs if run]
+    primary = next(run for run in runs if str(run["id"]) == primary_run_id)
     steps = [
         step
         for run_id in run_ids
@@ -643,9 +1040,10 @@ def _trace_tree(
     jobs = [
         dict(row)
         for row in conn.execute(
-            f"""SELECT * FROM jobs
-                WHERE run_id IN ({run_marks}) OR owner_run_id IN ({run_marks})
-                ORDER BY created_at,id""",
+            f"""SELECT j.*,s.shot_no FROM jobs j
+                LEFT JOIN shots s ON s.id=j.shot_id
+                WHERE j.run_id IN ({run_marks}) OR j.owner_run_id IN ({run_marks})
+                ORDER BY j.created_at,j.id""",
             (*run_ids, *run_ids),
         ).fetchall()
     ]
@@ -666,10 +1064,40 @@ def _trace_tree(
             tuple(call_params),
         ).fetchall()
     ]
+    video_context = (
+        _video_completion_trace_context(primary, jobs=jobs)
+        if primary.get("workflow_type") == "episode_video_completion"
+        else None
+    )
+    if video_context:
+        enriched_jobs = {
+            str(item["id"]): item for item in video_context["jobs"]
+        }
+        jobs = [
+            enriched_jobs.get(str(item["id"]), item)
+            for item in jobs
+        ]
     owner_parent: dict[str, str] = {}
     for job in jobs:
         if job.get("run_id") and job.get("owner_run_id"):
             owner_parent[str(job["run_id"])] = str(job["owner_run_id"])
+    video_job_run_ids = {
+        str(job["run_id"])
+        for job in jobs
+        if video_context
+        and str(job.get("owner_run_id") or "") == primary_run_id
+        and job.get("run_id")
+    }
+    video_job_by_run = {
+        str(job["run_id"]): job
+        for job in jobs
+        if video_context and job.get("run_id")
+    }
+    video_job_by_step = {
+        str(job["step_run_id"]): job
+        for job in jobs
+        if video_context and job.get("step_run_id")
+    }
     for run in sorted(
         runs,
         key=lambda item: (
@@ -678,6 +1106,8 @@ def _trace_tree(
         ),
     ):
         run_id = str(run["id"])
+        if video_context and run_id in video_job_run_ids:
+            continue
         parent_run_id = run.get("parent_run_id") or owner_parent.get(run_id)
         parent_id = (
             f"run:{parent_run_id}"
@@ -720,6 +1150,8 @@ def _trace_tree(
             ),
         })
     for step in steps:
+        if video_context and str(step.get("run_id") or "") in video_job_run_ids:
+            continue
         parent_step = str(step.get("parent_step_run_id") or "")
         is_business_stage = parent_step not in step_ids
         nodes.append({
@@ -747,13 +1179,27 @@ def _trace_tree(
     for job in jobs:
         step_id = str(job.get("step_run_id") or "")
         run_id = str(job.get("run_id") or job.get("owner_run_id") or primary_run_id)
+        is_video_completion_job = bool(
+            video_context
+            and str(job.get("owner_run_id") or "") == primary_run_id
+        )
+        if is_video_completion_job:
+            job_name, job_subtitle = _video_job_presentation(job)
+            job_parent_id = f"stage:{primary_run_id}:video-shots"
+        else:
+            job_name = _trace_job_label(job.get("kind"))
+            job_subtitle = "通过持久化异步任务"
+            job_parent_id = (
+                f"step:{step_id}" if step_id in step_ids else f"run:{run_id}"
+            )
         nodes.append({
             "id": f"job:{job['id']}",
-            "parent_id": f"step:{step_id}" if step_id in step_ids else f"run:{run_id}",
+            "parent_id": job_parent_id,
             "kind": "job",
             "node_role": "program_processing",
-            "name": _trace_job_label(job.get("kind")),
-            "subtitle": "通过持久化异步任务",
+            "sequence": job.get("shot_no"),
+            "name": job_name,
+            "subtitle": job_subtitle,
             "status": job.get("stage_status") or job.get("status") or "unknown",
             "started_at": job.get("stage_started_at") or job.get("created_at"),
             "finished_at": job.get("stage_updated_at") or job.get("updated_at"),
@@ -771,6 +1217,50 @@ def _trace_tree(
     for call in calls:
         step_id = str(call.get("step_run_id") or "")
         run_id = str(call.get("run_id") or primary_run_id)
+        video_job = (
+            video_job_by_step.get(step_id)
+            or video_job_by_run.get(run_id)
+        )
+        if video_context and video_job:
+            call_parent_id = f"job:{video_job['id']}"
+        elif video_context and run_id == primary_run_id:
+            call_ts = float(call.get("ts") or 0)
+            asset_events = [
+                item for item in video_context["events"]
+                if str(item["event_type"]).startswith(
+                    "VIDEO_REFERENCE_ASSET_PREP"
+                )
+            ]
+            asset_start = min(
+                (float(item["ts"]) for item in asset_events),
+                default=None,
+            )
+            asset_finish = max(
+                (float(item["ts"]) for item in asset_events),
+                default=None,
+            )
+            first_job_at = min(
+                (
+                    float(item["created_at"])
+                    for item in video_context["jobs"]
+                    if item.get("created_at") is not None
+                ),
+                default=None,
+            )
+            if (
+                asset_start is not None
+                and asset_finish is not None
+                and asset_start <= call_ts <= asset_finish
+            ):
+                call_parent_id = f"stage:{primary_run_id}:video-assets"
+            elif first_job_at is None or call_ts <= first_job_at:
+                call_parent_id = f"stage:{primary_run_id}:video-plan"
+            else:
+                call_parent_id = f"stage:{primary_run_id}:video-quality"
+        else:
+            call_parent_id = (
+                f"step:{step_id}" if step_id in step_ids else f"run:{run_id}"
+            )
         call_name, call_role, call_method = _trace_call_semantics(
             call.get("kind"),
             call.get("meta"),
@@ -778,7 +1268,7 @@ def _trace_tree(
         )
         nodes.append({
             "id": f"call:{call['id']}",
-            "parent_id": f"step:{step_id}" if step_id in step_ids else f"run:{run_id}",
+            "parent_id": call_parent_id,
             "kind": "call",
             "node_role": call_role,
             "name": call_name,
@@ -789,7 +1279,8 @@ def _trace_tree(
             + float(call.get("latency_ms") or 0) / 1000,
             "latency_ms": int(call.get("latency_ms") or 0),
         })
-    primary = next(run for run in runs if str(run["id"]) == primary_run_id)
+    if video_context:
+        nodes.extend(_video_completion_stage_nodes(primary, video_context))
     primary_node_id = f"run:{primary_run_id}"
     direct_processing = [
         node
@@ -886,6 +1377,311 @@ def _trace_artifact(artifact_id: str | None) -> dict[str, Any] | None:
     }
 
 
+def _video_completion_stage_detail(
+    raw_id: str,
+    node: dict[str, Any],
+) -> tuple[Any, Any, Any] | None:
+    match = re.fullmatch(r"(.+):video-([a-z]+)", raw_id)
+    if not match:
+        return None
+    run_id, stage_key = match.groups()
+    run = repository.get_run(run_id)
+    if not run or run.get("workflow_type") != "episode_video_completion":
+        return None
+    context = _video_completion_trace_context(run)
+    checkpoint = context["checkpoint_content"]
+    plan = context["plan"]
+    shot_plans = context["shot_plans"]
+    jobs = context["jobs"]
+    attempts = context["attempts"]
+    qa_results = context["qa_results"]
+    events = context["events"]
+    coverage = checkpoint.get("coverage") or {}
+    mode_distribution = dict(Counter(
+        _video_mode_label(item.get("planned_mode"))
+        for item in shot_plans
+    ))
+    from app.media_pipeline.stage_state import stage_label
+    from app.video_supervisor import phase_label
+
+    common_metadata = {
+        "virtual_group": True,
+        "source": [
+            "workflow_runs",
+            "episode_video_generation_plans",
+            "shot_video_generation_plans",
+            "video_supervisor_checkpoint",
+            "jobs",
+            "video_generation_attempts",
+            "video_mode_qa_results",
+        ],
+        "run_id": run_id,
+        "episode_id": run.get("scope_id"),
+        "business_stage_key": stage_key,
+        "checkpoint_artifact_id": (
+            context["checkpoint"].get("artifact_id")
+            if context["checkpoint"] else None
+        ),
+    }
+    if stage_key == "authorization":
+        return (
+            {
+                "requested_by": run.get("requested_by"),
+                "trigger_type": run.get("trigger_type"),
+                "policy": run.get("policy_snapshot"),
+                "budget_limit_cny": run.get("budget_limit_cny"),
+                "deadline_at": run.get("deadline_at"),
+            },
+            {
+                "grant_id": checkpoint.get("grant_id"),
+                "storyboard_artifact_id": checkpoint.get(
+                    "storyboard_artifact_id"
+                ),
+                "authorized_shots": coverage.get("total"),
+                "budget": checkpoint.get("budget"),
+            },
+            common_metadata,
+        )
+    if stage_key == "plan":
+        blockers = (
+            _trace_json_value(plan.get("blockers_json"))
+            if plan else []
+        )
+        return (
+            {
+                "storyboard_revision_id": (
+                    plan.get("source_storyboard_revision_id") if plan else None
+                ),
+                "published_storyboard_artifact_id": (
+                    plan.get("published_storyboard_artifact_id") if plan else None
+                ),
+                "capability_snapshot_id": (
+                    plan.get("capability_snapshot_id") if plan else None
+                ),
+            },
+            {
+                "plan_id": plan.get("id") if plan else None,
+                "plan_revision": plan.get("plan_revision") if plan else None,
+                "status": plan.get("status") if plan else "pending",
+                "shot_count": len(shot_plans),
+                "mode_distribution": mode_distribution,
+                "estimated_cost_cny": (
+                    plan.get("estimated_cost") if plan else None
+                ),
+                "estimated_latency_ms": (
+                    plan.get("estimated_latency_ms") if plan else None
+                ),
+                "critical_path_latency_ms": (
+                    plan.get("critical_path_latency_ms") if plan else None
+                ),
+                "blockers": blockers or [],
+            },
+            {
+                **common_metadata,
+                "planner_provider": plan.get("planner_provider") if plan else None,
+                "planner_model": plan.get("planner_model") if plan else None,
+                "planner_prompt_fingerprint": (
+                    plan.get("planner_prompt_fingerprint") if plan else None
+                ),
+            },
+        )
+    if stage_key == "assets":
+        asset_events = [
+            {
+                "event": item["event_type"],
+                "status": item["severity"],
+                "message": item["message"],
+                "payload": item["payload"],
+                "time": item["ts"],
+            }
+            for item in events
+            if str(item["event_type"]).startswith(
+                "VIDEO_REFERENCE_ASSET_PREP"
+            )
+        ]
+        return (
+            {
+                "required_assets_by_shot": [
+                    {
+                        "shot_no": item.get("shot_no"),
+                        "planned_mode": _video_mode_label(
+                            item.get("planned_mode")
+                        ),
+                        "required_assets": _trace_json_value(
+                            item.get("required_assets_json")
+                        ) or [],
+                        "depends_on_shot_id": item.get("depends_on_shot_id"),
+                    }
+                    for item in shot_plans
+                    if (
+                        _trace_json_value(item.get("required_assets_json"))
+                        or item.get("depends_on_shot_id")
+                    )
+                ],
+            },
+            {
+                "status": node.get("status"),
+                "asset_events": asset_events,
+                "ready_for_shot_generation": bool(jobs),
+            },
+            common_metadata,
+        )
+    if stage_key == "coverage":
+        return (
+            {
+                "planned_shots": len(shot_plans),
+                "mode_distribution": mode_distribution,
+                "fallback_quota": coverage.get("fallback_quota"),
+            },
+            {
+                "phase": checkpoint.get("phase"),
+                "phase_name": phase_label(checkpoint.get("phase")),
+                "tick_no": checkpoint.get("tick_no"),
+                "repair_epoch": checkpoint.get("repair_epoch"),
+                "coverage": coverage,
+                "shot_state": checkpoint.get("shot_state") or {},
+            },
+            common_metadata,
+        )
+    if stage_key == "shots":
+        return (
+            {
+                "shot_plans": [
+                    {
+                        "shot_no": item.get("shot_no"),
+                        "shot_id": item.get("shot_id"),
+                        "generation_mode": _video_mode_label(
+                            item.get("planned_mode")
+                        ),
+                        "video_input_intent": item.get("video_input_intent"),
+                        "depends_on_shot_id": item.get("depends_on_shot_id"),
+                        "state_dependency": item.get("state_dependency"),
+                        "motion_dependency": item.get("motion_dependency"),
+                        "max_attempts": item.get("max_attempts"),
+                        "reason_codes": _trace_json_value(
+                            item.get("reason_codes_json")
+                        ) or [],
+                    }
+                    for item in shot_plans
+                ],
+            },
+            {
+                "jobs": [
+                    {
+                        "job_id": item.get("id"),
+                        "shot_no": item.get("shot_no"),
+                        "shot_id": item.get("shot_id"),
+                        "status": item.get("status"),
+                        "current_action": stage_label(
+                            item.get("pipeline_stage"),
+                            progress=(
+                                _trace_json_value(
+                                    item.get("stage_progress_json")
+                                )
+                                if isinstance(
+                                    _trace_json_value(
+                                        item.get("stage_progress_json")
+                                    ),
+                                    dict,
+                                )
+                                else None
+                            ),
+                            reason_text=item.get("reason_text"),
+                        ),
+                        "generation_mode": _video_mode_label(
+                            item.get("planned_mode")
+                        ),
+                        "retry_count": item.get("retry_count"),
+                        "error": item.get("error"),
+                    }
+                    for item in jobs
+                ],
+            },
+            common_metadata,
+        )
+    if stage_key == "quality":
+        return (
+            {
+                "generation_attempts": [
+                    {
+                        "attempt_id": item.get("id"),
+                        "shot_no": item.get("shot_no"),
+                        "attempt_no": item.get("attempt_no"),
+                        "planned_mode": _video_mode_label(
+                            item.get("planned_mode")
+                        ),
+                        "actual_mode": _video_mode_label(
+                            item.get("actual_mode")
+                        ),
+                        "status": item.get("status"),
+                        "error": item.get("error"),
+                        "latency_ms": item.get("latency_ms"),
+                        "cost_cny": item.get("cost"),
+                    }
+                    for item in attempts
+                ],
+            },
+            {
+                "quality_checks": [
+                    {
+                        "qa_id": item.get("id"),
+                        "shot_no": item.get("shot_no"),
+                        "technical_success": bool(
+                            item.get("technical_success")
+                        ),
+                        "semantic_success": (
+                            bool(item.get("semantic_success"))
+                            if item.get("semantic_success") is not None
+                            else None
+                        ),
+                        "boundary_start_match": item.get(
+                            "boundary_start_match"
+                        ),
+                        "boundary_end_match": item.get(
+                            "boundary_end_match"
+                        ),
+                        "result": _trace_json_value(
+                            item.get("result_json")
+                        ),
+                    }
+                    for item in qa_results
+                ],
+                "latest_repair_plan": checkpoint.get("last_plan"),
+                "repair_epoch": checkpoint.get("repair_epoch"),
+            },
+            common_metadata,
+        )
+    if stage_key == "finalize":
+        return (
+            {
+                "coverage": coverage,
+                "missing_shots": checkpoint.get("missing_shots") or [],
+                "quality_target_missed": checkpoint.get(
+                    "quality_target_missed"
+                ),
+            },
+            {
+                "status": node.get("status"),
+                "phase": checkpoint.get("phase"),
+                "phase_name": phase_label(checkpoint.get("phase")),
+                "outcome": checkpoint.get("outcome"),
+                "terminal_reason": checkpoint.get("terminal_reason"),
+                "coverage_report": (
+                    context["report"].get("content")
+                    if context["report"] else None
+                ),
+            },
+            {
+                **common_metadata,
+                "coverage_report_artifact_id": (
+                    context["report"].get("artifact_id")
+                    if context["report"] else None
+                ),
+            },
+        )
+    return None
+
+
 def _trace_node_detail(
     project_id: str,
     object_type: str,
@@ -902,6 +1698,15 @@ def _trace_node_detail(
     except ValueError as exc:
         raise HTTPException(422, "链路节点标识无效") from exc
     if kind == "stage":
+        video_detail = _video_completion_stage_detail(raw_id, node)
+        if video_detail is not None:
+            input_value, output_value, metadata = video_detail
+            return {
+                **node,
+                "input": input_value,
+                "output": output_value,
+                "metadata": metadata,
+            }
         children = [
             item
             for item in tree["nodes"]

@@ -2552,20 +2552,22 @@ async def _recorded_video_completion_task(
     allow_storyboard_edit: bool = False,
 ):
     import asyncio
+    from app.observability.tracing import bind_trace
     from app.video_supervisor import run_video_completion_resilient
     recorder.start()
     try:
-        result = await run_video_completion_resilient(
-            episode_id,
-            resume=resume,
-            grant_id=grant_id,
-            run_id=recorder.run_id,
-            budget_cap_cny=budget_cap_cny,
-            wall_clock_cap_s=wall_clock_cap_s,
-            allow_fallback_adopt=allow_fallback_adopt,
-            max_fallback_shots=max_fallback_shots,
-            allow_storyboard_edit=allow_storyboard_edit,
-        )
+        with bind_trace(recorder.run_id, None):
+            result = await run_video_completion_resilient(
+                episode_id,
+                resume=resume,
+                grant_id=grant_id,
+                run_id=recorder.run_id,
+                budget_cap_cny=budget_cap_cny,
+                wall_clock_cap_s=wall_clock_cap_s,
+                allow_fallback_adopt=allow_fallback_adopt,
+                max_fallback_shots=max_fallback_shots,
+                allow_storyboard_edit=allow_storyboard_edit,
+            )
         if result.phase in {"SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK"}:
             recorder.succeed(result.outcome or "SUCCEEDED_COVERED")
         elif result.phase == "CANCELLED":

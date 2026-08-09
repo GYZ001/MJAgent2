@@ -34,7 +34,11 @@ def detached_trace() -> Iterator[TraceContext]:
 
 
 @contextmanager
-def bind_trace(run_id: str, step_run_id: str, trace_id: str | None = None) -> Iterator[TraceContext]:
+def bind_trace(
+    run_id: str,
+    step_run_id: str | None,
+    trace_id: str | None = None,
+) -> Iterator[TraceContext]:
     context = TraceContext(
         run_id=run_id,
         step_run_id=step_run_id,
