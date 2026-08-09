@@ -306,6 +306,46 @@ def create_evaluation(
     return get_evaluations(artifact_id)[-1]
 
 
+def _active_published_release_ids(conn) -> set[str]:
+    """Return artifacts protected by an atomically consumed release."""
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT pr.published_artifact_id AS artifact_id
+                 FROM production_revisions pr
+                 JOIN episodes e ON e.id=pr.episode_id
+                 JOIN completion_certificates cert
+                   ON cert.production_revision_id=pr.id
+                  AND cert.artifact_id=pr.published_artifact_id
+                  AND cert.kind=pr.kind
+                  AND cert.scope_id=pr.episode_id
+                WHERE pr.status='published'
+                  AND pr.published_artifact_id IS NOT NULL
+                  AND pr.published_artifact_id!=''
+                  AND cert.consumed_at IS NOT NULL
+                  AND (
+                    (
+                      pr.kind='screenplay'
+                      AND e.published_screenplay_artifact_id=pr.published_artifact_id
+                      AND e.screenplay_completion_certificate_id=cert.id
+                    )
+                    OR
+                    (
+                      pr.kind='storyboard'
+                      AND e.published_storyboard_artifact_id=pr.published_artifact_id
+                      AND e.storyboard_completion_certificate_id=cert.id
+                    )
+                  )"""
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Small unit-test and legacy schemas may not own release tables yet.
+        return set()
+    return {
+        str(row["artifact_id"])
+        for row in rows
+        if row["artifact_id"]
+    }
+
+
 def create_and_commit_artifact_in_transaction(
     conn,
     artifact: EvidenceArtifact,
@@ -392,6 +432,7 @@ def create_and_commit_artifact_in_transaction(
                 evaluation.confidence, int(evaluation.recovered), stamp,
             ),
         )
+    release_fences = _active_published_release_ids(conn)
     previous = [
         str(row["id"])
         for row in conn.execute(
@@ -400,13 +441,17 @@ def create_and_commit_artifact_in_transaction(
                    AND status='approved' AND id!=?""",
             (artifact.type, artifact.scope_type, artifact.scope_id, artifact_id),
         ).fetchall()
+        if str(row["id"]) not in release_fences
     ]
     conn.executemany(
         "UPDATE artifacts SET status='superseded',superseded_by_artifact_id=? WHERE id=?",
         [(artifact_id, previous_id) for previous_id in previous],
     )
     for previous_id in previous:
-        descendants = list_descendants(previous_id, exclude_ids={artifact_id})
+        descendants = list_descendants(
+            previous_id,
+            exclude_ids={artifact_id, *release_fences},
+        )
         conn.executemany(
             "UPDATE artifacts SET status='stale',stale_reason=? "
             "WHERE id=? AND status!='rejected'",
@@ -470,12 +515,17 @@ def commit_artifact(
         trust_level = "T2"
 
     conn = get_conn()
+    release_fences = _active_published_release_ids(conn)
     previous = rows_to_dicts(conn.execute(
         """SELECT id FROM artifacts
            WHERE type=? AND scope_type=? AND scope_id=?
              AND status='approved' AND id!=?""",
         (artifact["type"], artifact["scope_type"], artifact["scope_id"], artifact_id),
     ).fetchall())
+    previous = [
+        row for row in previous
+        if str(row["id"]) not in release_fences
+    ]
     conn.execute(
         "UPDATE artifacts SET status='approved', trust_level=?, approved_at=? WHERE id=?",
         (trust_level, now(), artifact_id),
@@ -711,9 +761,11 @@ def invalidate_descendants(
     exclude_ids: set[str] | None = None,
 ) -> list[str]:
     """Mark all descendants stale while preserving their immutable evidence rows."""
-    stale = list_descendants(artifact_id, exclude_ids=exclude_ids)
+    conn = get_conn()
+    excluded = set(exclude_ids or set())
+    excluded.update(_active_published_release_ids(conn))
+    stale = list_descendants(artifact_id, exclude_ids=excluded)
     if stale:
-        conn = get_conn()
         conn.executemany(
             "UPDATE artifacts SET status='stale', stale_reason=? WHERE id=? AND status!='rejected'",
             [(reason, child_id) for child_id in stale],

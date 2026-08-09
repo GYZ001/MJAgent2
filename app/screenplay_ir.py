@@ -39,7 +39,10 @@ from app.schemas import (
     StoryEvent,
     VoiceCanonical,
 )
-from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX
+from app.renderability import (
+    DIALOGUE_CHAIN_TURNS_HARD_MAX,
+    SCENE_STORY_FUNCTION_MIN_CHARS,
+)
 from app.source_excerpt import (
     align_source_excerpt,
     index_compact_source_segments,
@@ -318,7 +321,7 @@ class IRSceneUnit(BaseModel):
 class IRScene(BaseModel):
     key: str
     scene_heading: str
-    story_function: str
+    story_function: str = Field(min_length=SCENE_STORY_FUNCTION_MIN_CHARS)
     character_keys: list[str] = Field(default_factory=list)
     summary: str
     conflict: str = ""
@@ -338,6 +341,17 @@ class IRScene(BaseModel):
     @classmethod
     def _normalize_lists(cls, value: Any) -> list[Any]:
         return _as_list(value)
+
+    @field_validator("story_function")
+    @classmethod
+    def _validate_story_function(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < SCENE_STORY_FUNCTION_MIN_CHARS:
+            raise ValueError(
+                "story_function 必须完整说明本场戏剧功能，"
+                f"至少 {SCENE_STORY_FUNCTION_MIN_CHARS} 个字符"
+            )
+        return normalized
 
 
 class IRActionPhase(BaseModel):

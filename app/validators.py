@@ -69,6 +69,7 @@ from app.renderability import (
     KEY_PLOT_POINTS_MIN,
     PREFERRED_SHOT_DURATION_S,
     SCENE_OUTLINE_MIN,
+    SCENE_STORY_FUNCTION_MIN_CHARS,
     SPINE_BEATS_MIN,
     duration_gt5_errors,
     shot_count_budget_errors,
@@ -2479,7 +2480,10 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             errors.append(f"{tag}.scene_no 必须从 1 连续递增；当前为 {scene.scene_no}")
         if len((scene.scene_heading or "").strip()) < 4:
             errors.append(f"{tag}.scene_heading 过短；请写成可读的场次标题")
-        if len((scene.story_function or "").strip()) < 6:
+        if (
+            len((scene.story_function or "").strip())
+            < SCENE_STORY_FUNCTION_MIN_CHARS
+        ):
             errors.append(
                 f"[SCENE_STORY_FUNCTION_TOO_SHORT] {tag}.story_function "
                 "过短；请说明本场戏剧功能"

@@ -106,7 +106,7 @@ def _shard(plan, blueprint: NarrativeBlueprint) -> ScreenplaySceneShardIR:
         scenes.append(IRScene(
             key=scene_plan.key,
             scene_heading=scene_plan.scene_heading,
-            story_function="交付来源",
+            story_function="完整交付本场来源",
             summary="交付来源",
             entry_state=scene_plan.previous_scene_exit_state,
             exit_state=scene_plan.exit_state,
@@ -226,6 +226,36 @@ def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
     assert any("未冻结参与者" in error for error in errors)
 
 
+def test_scene_shard_rejects_short_story_function() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    shard = _shard(plan, blueprint)
+    shard.scenes[0].story_function = "turn"
+
+    errors = validate_screenplay_scene_shard(
+        shard,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        identity_keys={"narrator"},
+    )
+
+    assert any("story_function 必须完整说明本场戏剧功能" in error for error in errors)
+
+
+def test_ir_scene_schema_rejects_short_story_function() -> None:
+    with pytest.raises(ValidationError, match="story_function"):
+        IRScene(
+            key="bp-sc001",
+            scene_heading="【场1】日 / 门口",
+            story_function="setup",
+            summary="甲推门进入",
+        )
+
+
 def test_merge_fails_closed_on_boundary_hash_or_missing_source() -> None:
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
@@ -261,7 +291,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v1"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v2"
 
 
 def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> None:

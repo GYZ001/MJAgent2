@@ -1881,36 +1881,32 @@ async def run_storyboard_supervisor(
             conn=conn,
             require_narrative=True,
         )
-    published_storyboard_authority = False
+    published_storyboard_baseline = False
     if (
         narrative_authority
         and ep["published_storyboard_artifact_id"]
         and ep["storyboard_completion_certificate_id"]
     ):
-        try:
-            from app.production.certificate import (
-                verify_current_storyboard_completion_authority,
-            )
+        from app.production.certificate import verify_completion_certificate
 
-            authority_rows = conn.execute(
-                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
-                (episode_id,),
-            ).fetchall()
-            authority_board = _board_from_rows(
-                authority_rows,
-                int(ep["episode_no"] or 1),
+        try:
+            baseline_certificate = verify_completion_certificate(
+                str(ep["storyboard_completion_certificate_id"]),
+                expected_kind="storyboard",
+                expected_scope_id=episode_id,
+                expected_artifact_id=str(ep["published_storyboard_artifact_id"]),
+                expected_production_revision_id=str(
+                    ep["storyboard_production_revision_id"] or ""
+                ),
+                allow_consumed=True,
+                allow_stale_artifact_for_revision=True,
             )
-            verify_current_storyboard_completion_authority(
-                episode=ep,
-                current_storyboard_content=authority_board.model_dump(mode="json"),
+            published_storyboard_baseline = (
+                baseline_certificate.consumed_at is not None
             )
-            published_storyboard_authority = True
         except Exception:
-            # A stale certificate must be re-finalized from the exact current
-            # projection; it is not a still-published authority that blocks
-            # resume.  The full Supervisor gates run again before publication.
-            published_storyboard_authority = False
-    if published_storyboard_authority and resume:
+            published_storyboard_baseline = False
+    if published_storyboard_baseline and resume:
         checkpoint_probe = load_latest_checkpoint(episode_id)
         if checkpoint_probe is None or not _repair_is_pending(checkpoint_probe):
             raise StageError(
@@ -1964,7 +1960,7 @@ async def run_storyboard_supervisor(
         cp = _migrate_checkpoint(cp)
     bible = _storyboard_bible_snapshot(p, cp)
     has_real_bible = bool((p["bible_json"] or "").strip()) if p else False
-    if not published_storyboard_authority:
+    if not published_storyboard_baseline:
         _reconcile_storyboard_scene_projection(conn, episode_id, bible)
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     ep_data = dict(ep)
@@ -2094,7 +2090,7 @@ async def run_storyboard_supervisor(
     if (
         outline is not None
         and narrative_authority
-        and not published_storyboard_authority
+        and not published_storyboard_baseline
     ):
         from app.narrative_outline import (
             normalize_narrative_storyboard_outline,
@@ -2319,7 +2315,7 @@ async def run_storyboard_supervisor(
             authority_board,
         )
         shots = list(authority_board.shots)
-        if authority_repairs and not published_storyboard_authority:
+        if authority_repairs and not published_storyboard_baseline:
             for repair in authority_repairs:
                 index = int(repair["shot_no"]) - 1
                 _write_shot_fields(
@@ -2359,7 +2355,7 @@ async def run_storyboard_supervisor(
                 bible,
                 screenplay,
             )
-            if identity_repairs and not published_storyboard_authority:
+            if identity_repairs and not published_storyboard_baseline:
                 outline_identity_repairs: list[dict[str, Any]] = []
                 outline_by_no = {
                     int(brief.shot_no): brief
@@ -3646,7 +3642,7 @@ async def run_storyboard_supervisor(
         _assert_storyboard_write_authorized(
             conn, episode_id, cp.input_versions.get("screenplay_artifact_id")
         )
-        if narrative_authority and not published_storyboard_authority:
+        if narrative_authority and not published_storyboard_baseline:
             current_rows = conn.execute(
                 "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
                 (episode_id,),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app import db
@@ -10,12 +12,23 @@ from app.production.revision import (
     mark_first_evaluation,
     save_checkpoint,
 )
+from app.production.screenplay_document import (
+    apply_field_patch,
+    document_to_screenplay,
+    screenplay_to_document,
+)
 from app.production.structured_issues import (
     enrich_issues,
     issues_from_validator_messages,
     structured_issue,
 )
-from app.schemas import Bible, EpisodeScreenplay, ScriptScene, World
+from app.schemas import (
+    Bible,
+    EpisodeScreenplay,
+    NarrativeContinuityPlan,
+    ScriptScene,
+    World,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -98,6 +111,94 @@ def test_legacy_scene_message_is_not_inferred_as_a_shot():
     assert issue.evidence["path"] == "/scene_blocks/SC01/story_function"
     assert "shot:1" not in issue.evidence["related_node_ids"]
     assert "SC01" in issue.evidence["related_node_ids"]
+
+
+@pytest.mark.asyncio
+async def test_story_function_patch_targets_scene_when_graph_reuses_scene_id(
+    monkeypatch,
+):
+    from app.harness import model_gateway
+    from app.production import screenplay_repair
+
+    script = _script()
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_scene",
+        "scene_contracts": [{"scene_id": "SC01"}],
+    })
+    message = (
+        "[SCENE_STORY_FUNCTION_TOO_SHORT] "
+        "scene_outline 第1场「日 / 萧家测验广场」.story_function "
+        "过短；请说明本场戏剧功能"
+    )
+    issue = issues_from_validator_messages(
+        [message],
+        subject="screenplay",
+        stage="screenplay",
+    )[0]
+    replacement = "建立公开测验冲突并推动萧炎退场"
+    candidate = {
+        "candidate_id": "SCENE-FIELD",
+        "operations": [{
+            "op": "replace_field",
+            "path": "story_function",
+            "target": {"kind": "scene_block", "id": "SC01"},
+            "value": replacement,
+        }],
+        "satisfies_gap_test": True,
+        "passes_deletion_test": True,
+        "passes_marginal_gain_test": True,
+        "preserves_invariants": True,
+        "expected_narrative_gain": 1.0,
+        "destructive_cost": 0.0,
+    }
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({
+            "semantic_gap": "场功能未完整说明",
+            "candidate_plans": [
+                candidate,
+                {
+                    **candidate,
+                    "candidate_id": "REJECTED",
+                    "satisfies_gap_test": False,
+                },
+            ],
+            "selected_candidate_id": "SCENE-FIELD",
+            "selection_reason": "直接补齐场景字段",
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    document = screenplay_to_document(script)
+    plan_data = script.narrative_plan.model_dump(mode="json")
+
+    assert screenplay_repair._candidate_targets_narrative_graph(
+        candidate,
+        plan_data,
+        document=document,
+    ) is False
+
+    operations = await screenplay_repair._llm_field_patch_once(
+        issue,
+        script,
+        source_text="原文第一章测验广场段落",
+    )
+
+    assert len(operations) == 1
+    operation = operations[0]
+    assert operation.target["kind"] == "scene"
+    assert operation.target["id"] == "SC01"
+    patched, touched = apply_field_patch(
+        document,
+        path=operation.path,
+        value=operation.value,
+        target=operation.target,
+    )
+    result = document_to_screenplay(patched)
+    assert result.scene_outline[0].story_function == replacement
+    assert result.scene_outline[0].summary == script.scene_outline[0].summary
+    assert result.scene_outline[0].conflict == script.scene_outline[0].conflict
+    assert result.scene_outline[0].turn == script.scene_outline[0].turn
+    assert touched == ["SC01"]
 
 
 

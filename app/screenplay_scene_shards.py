@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.character_policy import functional_extra_anchor
 from app.db import get_conn, get_setting
@@ -24,6 +24,7 @@ from app.harness.types import EvidenceArtifact
 from app.identity_authority import identity_authority_registry
 from app.narrative_blueprint import BlueprintScenePlan, NarrativeBlueprint
 from app.observability.tracing import current_trace
+from app.renderability import SCENE_STORY_FUNCTION_MIN_CHARS
 from app.schemas import Bible
 from app.screenplay_ir import (
     IRExperience,
@@ -37,7 +38,7 @@ from app.source_excerpt import index_source_segments, structural_front_matter_id
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v1"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v2"
 SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v1"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v1"
 
@@ -128,7 +129,7 @@ class UnresolvedParticipant(BaseModel):
 
 
 class ScreenplaySceneShardIR(BaseModel):
-    contract_version: Literal["screenplay-scene-shard.v1"] = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v2"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
@@ -391,6 +392,11 @@ def validate_screenplay_scene_shard(
             continue
         if scene.scene_heading != expected_scene.scene_heading:
             errors.append(f"{scene.key} scene_heading 必须由 Blueprint 精确拥有")
+        if len(scene.story_function.strip()) < SCENE_STORY_FUNCTION_MIN_CHARS:
+            errors.append(
+                f"{scene.key}.story_function 必须完整说明本场戏剧功能，"
+                f"至少 {SCENE_STORY_FUNCTION_MIN_CHARS} 个字符"
+            )
         allowed = set(expected_scene.source_segment_ids)
         for unit_index, unit in enumerate(scene.units):
             for source_id in unit.source_segment_ids:
@@ -823,25 +829,29 @@ async def generate_screenplay_scene_shards(
                     "shard_id", "source_hash", "boundary_hash",
                     "blueprint_hash", "identity_registry_hash",
                 )
-            ),
+            ) and content.get("contract_version") == SCREENPLAY_SCENE_SHARD_VERSION,
         )
         if cached:
-            shard = ScreenplaySceneShardIR.model_validate(cached["content"])
-            errors = validate_screenplay_scene_shard(
-                shard,
-                plan=plan,
-                scene_plans=scene_plan_map,
-                identity_keys=identity_keys,
-            )
-            if not errors:
-                checkpoint_rows[plan.shard_id].update({
-                    "status": "validated",
-                    "attempt": 0,
-                    "normalized_artifact_id": str(cached["id"]),
-                    "reused": True,
-                })
-                emit_progress()
-                return shard, str(cached["id"])
+            try:
+                shard = ScreenplaySceneShardIR.model_validate(cached["content"])
+            except ValidationError:
+                shard = None
+            if shard is not None:
+                errors = validate_screenplay_scene_shard(
+                    shard,
+                    plan=plan,
+                    scene_plans=scene_plan_map,
+                    identity_keys=identity_keys,
+                )
+                if not errors:
+                    checkpoint_rows[plan.shard_id].update({
+                        "status": "validated",
+                        "attempt": 0,
+                        "normalized_artifact_id": str(cached["id"]),
+                        "reused": True,
+                    })
+                    emit_progress()
+                    return shard, str(cached["id"])
         selected_scene_plans = [scene_plan_map[key] for key in plan.scene_plan_keys]
         selected_node_keys = {
             node_key for scene_plan in selected_scene_plans

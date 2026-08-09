@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from app import db
 from app.domain import video_ops
+from app.harness.types import Evaluation, EvidenceArtifact
 from app.production.publish import publish_storyboard
 from app.video_plan import current_storyboard_release_manifest
 from tests.test_narrative_publish_gate import (
@@ -168,6 +169,84 @@ def _assert_optional_review_does_not_revoke_authority(case: dict) -> None:
     assert video_ops._has_current_storyboard_completion_certificate(db.get_conn(), episode) is True
     assert not any("NARRATIVE_REVIEW_MISSING" in error for error in evaluation.errors)
     video_ops._assert_storyboard_generation_gate("episode-generic")
+
+
+@pytest.mark.asyncio
+async def test_calibration_replacement_cannot_revoke_published_storyboard(
+    monkeypatch,
+) -> None:
+    case = await _published_narrative_case(monkeypatch)
+    from app.evidence import repository as evidence_repository
+
+    calibration = case["calibration_artifact"]
+    published_status = evidence_repository.get_artifact(
+        case["working_candidate"]["id"]
+    )["status"]
+    replacement = evidence_repository.create_artifact(EvidenceArtifact(
+        type=calibration["type"],
+        scope_type=calibration["scope_type"],
+        scope_id=calibration["scope_id"],
+        status="candidate",
+        trust_level="T2",
+        content={
+            **calibration["content"],
+            "calibration_report_id": "replacement-calibration",
+        },
+        parent_artifact_ids=[case["report_artifact"]["id"]],
+        contract_version=calibration["contract_version"],
+    ))
+    evidence_repository.commit_artifact(
+        None,
+        replacement["id"],
+        [Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="replacement_calibration_gate",
+            evaluator_version="test.v1",
+            status="passed",
+            hard_gate_passed=True,
+            score=100,
+        )],
+    )
+
+    assert evidence_repository.get_artifact(calibration["id"])["status"] == "superseded"
+    published = evidence_repository.get_artifact(
+        case["working_candidate"]["id"]
+    )
+    assert published is not None
+    assert published["status"] == published_status
+    episode = db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    assert video_ops._has_current_storyboard_completion_certificate(
+        db.get_conn(),
+        episode,
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_confirmed_stale_release_never_reopens_ordinary_resume(
+    monkeypatch,
+) -> None:
+    case = await _published_narrative_case(monkeypatch)
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET status='stale',stale_reason=? WHERE id=?",
+        ("legacy upstream cascade", case["working_candidate"]["id"]),
+    )
+    conn.commit()
+    from app import api
+    from app.domain.storyboard_ops import _storyboard_resume_decision
+
+    status = api.episode_detail(
+        "episode-generic",
+        view="board",
+    )["storyboard_status"]
+    decision = _storyboard_resume_decision("episode-generic")
+
+    assert status["state"] == "confirmed"
+    assert status["recommended_action"] == "go_review_wall"
+    assert decision["allowed"] is False
+    assert decision["resume_mode"] is None
 
 
 @pytest.mark.asyncio

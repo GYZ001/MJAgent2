@@ -28,6 +28,7 @@ ACTION_DESC_TARGET_MAX = 55
 
 SCENE_OUTLINE_MIN = 1
 SCENE_OUTLINE_MAX: int | None = None
+SCENE_STORY_FUNCTION_MIN_CHARS = 6
 
 _RENDERABILITY_PROMPT_BLOCK = """【Renderability First·视频模型能力边界】
 逐镜可拍性由 ShotTask 的动作阶段、capacity_budget、可见身份、连续性状态差与

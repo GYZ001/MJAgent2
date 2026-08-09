@@ -53,7 +53,7 @@ from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX
 MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
-SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-16"
+SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-17"
 
 
 class ScreenplayIdentityGateError(RuntimeError):
@@ -4263,9 +4263,47 @@ def _narrative_collection_for_new_node(
     return matches[0] if len(matches) == 1 else None
 
 
+def _try_document_patch_operation(
+    operation: PatchOperation,
+    document: Any,
+    plan_data: dict[str, Any],
+) -> tuple[PatchOperation, Any] | None:
+    """Resolve and probe a direct document field before graph ID inference."""
+    if operation.op != "replace_field":
+        return None
+    target = dict(operation.target or {})
+    collection = re.split(
+        r"[.\[]+",
+        str(target.get("collection") or "").strip(),
+        maxsplit=1,
+    )[0]
+    if (
+        str(target.get("kind") or "").strip() == "narrative_node"
+        or (collection and isinstance(plan_data.get(collection), list))
+    ):
+        return None
+
+    from app.production.patch import apply_patch_operation_to_document
+    from app.production.screenplay_document import resolve_field_patch_target
+
+    candidate = operation.model_copy(deep=True)
+    candidate.target = resolve_field_patch_target(
+        document,
+        path=candidate.path,
+        target=target,
+    )
+    try:
+        updated, _ = apply_patch_operation_to_document(document, candidate)
+    except Exception:  # noqa: BLE001 - probe untrusted candidate in isolation
+        return None
+    return candidate, updated
+
+
 def _candidate_targets_narrative_graph(
     candidate: dict[str, Any],
     plan_data: dict[str, Any],
+    *,
+    document: Any | None = None,
 ) -> bool:
     operations = candidate.get("operations")
     if not isinstance(operations, list):
@@ -4274,6 +4312,16 @@ def _candidate_targets_narrative_graph(
         if not isinstance(raw, dict):
             continue
         normalized = _normalize_patch_operation_payload(raw)
+        try:
+            operation = PatchOperation.model_validate(normalized)
+        except Exception:  # noqa: BLE001 - model output is untrusted
+            continue
+        if (
+            document is not None
+            and _try_document_patch_operation(operation, document, plan_data)
+            is not None
+        ):
+            continue
         target = normalized.get("target") or {}
         node_id = str(target.get("id") or "").strip()
         collection = re.split(
@@ -4501,6 +4549,14 @@ def _candidate_is_executable(
                 if plan is not None
                 else {}
             )
+            direct_patch = _try_document_patch_operation(
+                operation,
+                working,
+                plan_data,
+            )
+            if direct_patch is not None:
+                operation, working = direct_patch
+                continue
             collection = re.split(
                 r"[.\[]+",
                 str(target.get("collection") or "").strip(),
@@ -5082,7 +5138,11 @@ async def _llm_field_patch_once(
                 and bool(candidate.get("preserves_invariants"))
             ):
                 continue
-            if not _candidate_targets_narrative_graph(candidate, plan_data):
+            if not _candidate_targets_narrative_graph(
+                candidate,
+                plan_data,
+                document=document,
+            ):
                 preflight = _preflight_document_candidate(
                     candidate,
                     document=document,
@@ -5133,20 +5193,30 @@ async def _llm_field_patch_once(
         return []
     safe: list[PatchOperation] = []
     for operation in operations:
-        target = operation.target or {}
         operation.value = _normalize_character_decision_basis(operation.value)
         operation.value = _normalize_dialogue_source_references(
             operation.value,
             source_text,
         )
+        direct_patch = _try_document_patch_operation(
+            operation,
+            document,
+            plan_data,
+        )
+        is_document_patch = direct_patch is not None
+        if direct_patch is not None:
+            operation, _ = direct_patch
+        target = operation.target or {}
         raw_collection = str(target.get("collection") or "").strip()
         collection = re.split(r"[.\[]+", raw_collection, maxsplit=1)[0]
         node_id = str(target.get("id") or "")
-        if not collection and node_id:
+        if not is_document_patch and not collection and node_id:
             collection = (
                 _narrative_collection_for_node(plan_data, node_id) or ""
             )
         if (
+            not is_document_patch
+            and
             not collection
             and operation.op in {"create_node", "insert_node"}
             and node_id
@@ -5166,7 +5236,7 @@ async def _llm_field_patch_once(
                 collection=collection,
                 plan_data=plan_data,
             )
-        nodes = plan_data.get(collection)
+        nodes = None if is_document_patch else plan_data.get(collection)
         if isinstance(nodes, list) and node_id:
             target = {
                 **target,

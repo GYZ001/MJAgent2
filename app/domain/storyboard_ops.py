@@ -431,6 +431,24 @@ def _storyboard_resume_decision(episode_id: str, ep: dict | None = None) -> dict
     append attempts.
     """
     episode = dict(ep) if ep is not None else dict(_episode_or_404(episode_id))
+    published_release_bound = bool(
+        episode.get("published_storyboard_artifact_id")
+        and episode.get("storyboard_completion_certificate_id")
+        and episode.get("storyboard_production_revision_id")
+    )
+    if (
+        published_release_bound
+        and episode.get("status") in {"confirmed", "generating", "done", "mixed"}
+    ):
+        return {
+            "allowed": False,
+            "resume_mode": None,
+            "blocking_reason": (
+                "当前分镜已有已确认发布基线，不能原地续跑；"
+                "修订必须在隔离候选中完成并重新发布"
+            ),
+            "storyboard_status": None,
+        }
     row = get_conn().execute(
         "SELECT shot_no,shot_contract_json FROM shots WHERE episode_id=? "
         "ORDER BY shot_no DESC LIMIT 1",
@@ -1392,36 +1410,34 @@ async def _storyboard_task(
             raise StageError("分镜脚本", [f"已发布剧本权威链无效：{exc}"]) from exc
         screenplay = screenplay_context.screenplay
         narrative_authority = screenplay_context.narrative_authority_required
-        published_storyboard_authority = False
+        published_storyboard_baseline = False
         if (
             narrative_authority
             and ep["published_storyboard_artifact_id"]
             and ep["storyboard_completion_certificate_id"]
         ):
             try:
-                from app.production.certificate import (
-                    verify_current_storyboard_completion_authority,
-                )
+                from app.production.certificate import verify_completion_certificate
 
-                authority_rows = conn.execute(
-                    "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
-                    (episode_id,),
-                ).fetchall()
-                authority_board = _board_from_shot_rows(
-                    authority_rows,
-                    ep["episode_no"],
+                baseline_certificate = verify_completion_certificate(
+                    str(ep["storyboard_completion_certificate_id"]),
+                    expected_kind="storyboard",
+                    expected_scope_id=episode_id,
+                    expected_artifact_id=str(
+                        ep["published_storyboard_artifact_id"]
+                    ),
+                    expected_production_revision_id=str(
+                        ep["storyboard_production_revision_id"] or ""
+                    ),
+                    allow_consumed=True,
+                    allow_stale_artifact_for_revision=True,
                 )
-                verify_current_storyboard_completion_authority(
-                    episode=ep,
-                    current_storyboard_content=authority_board.model_dump(mode="json"),
+                published_storyboard_baseline = bool(
+                    baseline_certificate.consumed_at is not None
                 )
-                published_storyboard_authority = True
             except Exception:
-                # Presence of old IDs is not publication authority.  When the
-                # exact current projection has only stale evidence, normal
-                # resume reruns the Supervisor gates and signs fresh evidence.
-                published_storyboard_authority = False
-        if resume and published_storyboard_authority:
+                published_storyboard_baseline = False
+        if resume and published_storyboard_baseline:
             rows = conn.execute(
                 "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
                 (episode_id,),
@@ -1643,7 +1659,7 @@ async def _storyboard_task(
                 "SELECT * FROM episodes WHERE id=?",
                 (episode_id,),
             ).fetchone()
-            published_storyboard_authority = False
+            published_storyboard_baseline = False
         conn.execute("UPDATE episodes SET status='scripting', script_error=NULL, storyboard_warning=NULL WHERE id=?", (episode_id,))
         conn.commit()
         p = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
@@ -1665,7 +1681,7 @@ async def _storyboard_task(
 
         # 恢复旧 checkpoint 时先把模型产生的引号漂移/拼接式证据收敛为授权原文中的
         # 连续片段。严格匹配不足的内容保持未解决，仍由确认门禁拦截。
-        if resume and not published_storyboard_authority:
+        if resume and not published_storyboard_baseline:
             from app.storyboard_workspace import repair_generated_source_bindings
 
             evidence_repair = repair_generated_source_bindings(episode_id)
@@ -3339,11 +3355,12 @@ def _storyboard_status_snapshot(
     gate_errors: list[str] = list(dict.fromkeys(active_repair_errors))
     score_warnings: list[str] = []
     gate_system_error: str | None = None
-    publication_evidence_ready = bool(
+    published_release_bound = bool(
         ep.get("storyboard_artifact_id")
         and ep.get("storyboard_completion_certificate_id")
         and ep.get("storyboard_production_revision_id")
     )
+    publication_evidence_ready = published_release_bound
     evidence_refinalize_only = False
     if complete_structure:
         try:
@@ -3431,6 +3448,14 @@ def _storyboard_status_snapshot(
         state, headline, action = "no_screenplay", "尚无可用于分镜的剧本", "go_screenplay"
     elif running:
         state, headline, action = "running", f"分镜任务进行中，当前处理第 {resume_from} 镜", "view_progress"
+    elif confirmed and published_release_bound:
+        state = "confirmed"
+        headline = (
+            "已确认正式版存在证据异常，禁止原地续跑"
+            if gate_errors or not publication_evidence_ready
+            else "当前分镜已确认"
+        )
+        action = "go_review_wall"
     elif paused and not terminal_structure:
         state, headline, action = (
             "paused",
@@ -3449,8 +3474,6 @@ def _storyboard_status_snapshot(
             f"{shot_count}/{planned} 镜已通过，待更新发布证据",
             "resume_storyboard",
         )
-    elif confirmed:
-        state, headline, action = "confirmed", "当前分镜已确认", "go_review_wall"
     elif not shots:
         state, headline, action = "empty", "剧本已就绪，尚未生成分镜", "generate_storyboard"
     elif full_terminal and not publication_evidence_ready:
