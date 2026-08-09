@@ -81,3 +81,27 @@ Worker-iteration evidence:
 
 The apparent second stall came from the old pre-fix process continuing its
 event-loop dispatch before shutdown. No additional worker offload is required.
+
+Later progress-stall evidence:
+- Dispatch shot 5 entered `worker.enqueue_shot` and did not return for more
+  than ten minutes.
+- macOS process sampling showed the main event-loop thread sleeping inside
+  SQLite `btreeBeginTrans -> sqliteDefaultBusyCallback`.
+- HTTP responsiveness can therefore still be lost when the offloaded enqueue
+  thread and event-loop media workers contend for a write transaction.
+
+Next instrumentation will mark enqueue compile, trace, persistence, and budget
+boundaries to identify the lock owner without changing transaction behavior.
+
+| ID | Hypothesis | Likelihood | Effort | Evidence |
+|----|------------|------------|--------|----------|
+| H | Enqueue holds a write transaction across trace/version preparation | High | Low | Pending |
+| I | Deterministic prompt compilation itself is the long operation | Low | Low | Pending |
+| J | Budget reservation opens the conflicting transaction | Medium | Low | Pending |
+
+Enqueue instrumentation marks:
+- authority/preflight completion
+- deterministic Prompt compile start/end
+- version INSERT and media trace boundaries
+- persistence commit start/end
+- budget reservation start/end
