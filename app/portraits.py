@@ -58,8 +58,8 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v3"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v3"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v4"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v4"
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -1091,15 +1091,47 @@ async def resolve_future_identity_candidates(
     prompt = f"""任务：只为当前集尚未确认的身份做后续姓名消歧。
 当前未决身份（不可新增列表外人物）：
 {json.dumps(unresolved, ensure_ascii=False, separators=(',', ':'))}
-候选人物权威（只用于精确绑定，不发送其未来剧情窗口）：
+候选人物权威（用于精确绑定已有角色，不发送其未来剧情窗口）：
 {json.dumps(authority_projection, ensure_ascii=False, separators=(',', ':'))}
 后续局部窗口（{future_label or '后续章节'}）：
 {future_context}
-规则：source_label 必须逐字引用当前未决列表；只有窗口中存在同时包含 source_label 与
-canonical_name 的逐字身份依据时才输出 named，future_evidence 必须逐字引用该最小依据；
-证据不足时必须输出 functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
+规则：source_label 必须逐字引用当前未决列表；请结合称谓、别名、关系和上下文语义判断
+是否为候选人物权威中的同一人，或窗口是否逐字揭示了新的稳定真名。只有窗口中存在
+可追溯的同一性依据时才输出 named；
+future_evidence 必须逐字引用包含 canonical_name 的最小决定性依据，但该依据中的称谓可能
+是 source_label 的别名或语义承接，不要求两个字符串机械共现。证据不足时必须输出
+functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
 不得输出只在后续出场的人。只输出 JSON：
 {{"characters":[{{"source_label":"","canonical_name":"","identity_kind":"named|functional","future_evidence":"逐字依据或空串"}}]}}"""
+
+    def has_owned_canonical_anchor(
+        future_evidence: str,
+        canonical_name: str,
+    ) -> bool:
+        """Verify a short verbatim name anchor without redoing AI coreference."""
+        if (
+            not future_evidence
+            or not canonical_name
+            or canonical_name not in future_evidence
+            or canonical_name not in future_context
+        ):
+            return False
+        anchor_length = min(
+            len(future_evidence),
+            max(8, len(canonical_name) + 4),
+        )
+        search_from = 0
+        while True:
+            name_at = future_evidence.find(canonical_name, search_from)
+            if name_at < 0:
+                return False
+            min_start = max(0, name_at + len(canonical_name) - anchor_length)
+            max_start = min(name_at, len(future_evidence) - anchor_length)
+            for start in range(min_start, max_start + 1):
+                anchor = future_evidence[start:start + anchor_length]
+                if canonical_name in anchor and anchor in future_context:
+                    return True
+            search_from = name_at + len(canonical_name)
 
     def validate_response(value: _IdentityCandidateResponse) -> list[str]:
         allowed = {str(item.get("source_label") or "") for item in unresolved}
@@ -1128,14 +1160,9 @@ canonical_name 的逐字身份依据时才输出 named，future_evidence 必须�
             if not canonical_name:
                 errors.append(f"canonical_name 无证据：{canonical_name}")
                 continue
-            if (
-                not future_evidence
-                or future_evidence not in future_context
-                or source_label not in future_evidence
-                or canonical_name not in future_evidence
-            ):
+            if not has_owned_canonical_anchor(future_evidence, canonical_name):
                 errors.append(
-                    f"named 身份缺少同时包含称谓与真名的逐字依据：{source_label}"
+                    f"named 身份缺少可追溯的真名原文锚点：{source_label}"
                 )
         return errors
 
@@ -1144,7 +1171,7 @@ canonical_name 的逐字身份依据时才输出 named，future_evidence 必须�
         model_type=_IdentityCandidateResponse,
         validate=validate_response,
         operation_id=(
-            f"screenplay.identity.future.v3:{episode_no}:"
+            f"screenplay.identity.future.v4:{episode_no}:"
             + evidence_repository.content_hash({
                 "unresolved": unresolved,
                 "future_context": future_context,

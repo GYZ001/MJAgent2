@@ -29,9 +29,6 @@ from app.continuity import (
     action_capacity_limit,
     count_sequential_action_beats,
     narrative_action_capacity_profile,
-    dialogue_focus_subject,
-    dialogue_framing_errors,
-    dialogue_two_shot_required,
     implicit_speech_without_dialogue_errors,
     spoken_chars_from_shot,
 )
@@ -430,10 +427,6 @@ def validate_storyboard(
         # 口播容量只在 speech_capacity_errors 里实现一次；此处曾重复计算同一规则，
         # 导致同一根因在确认门输出两条不同文案（VAL-422 根因 R5）。
         errors.extend(speech_capacity_errors(shot))
-        errors.extend(dialogue_framing_errors(
-            shot,
-            narrative_authority=narrative_authority,
-        ))
         # 同一镜头只能有一套有效口播：dialogues 与 audio_timeline 分叉即 blocker。
         errors.extend(spoken_contract_coherence_errors(shot))
         errors.extend(implicit_speech_without_dialogue_errors(shot))
@@ -449,11 +442,6 @@ def validate_storyboard(
             errors.append(
                 f"{tag}.characters 为空；每个视频段至少包含 1 个画面角色，"
                 "可以是角色圣经成员或功能性路人"
-            )
-        elif len(shot.characters) > 3:
-            errors.append(
-                f"{tag}.characters 共 {len(shot.characters)} 人，超过单镜可渲染上限 3；"
-                "请减少画面角色或拆到相邻镜，禁止群戏调度"
             )
         for name in shot.characters:
             if narrative_authority:
@@ -638,18 +626,6 @@ def validate_storyboard(
         visual_text = "".join(
             (shot.action_desc or "", shot.first_frame_desc or "", shot.last_frame_desc or "")
         )
-        if not narrative_authority:
-            focus_subject = dialogue_focus_subject(shot)
-            if focus_subject and not dialogue_two_shot_required(shot):
-                for other_name in sorted(bible_names - {focus_subject}):
-                    if other_name not in visual_text:
-                        continue
-                    if _named_character_is_explicitly_offscreen(other_name, visual_text):
-                        continue
-                    errors.append(
-                        f"{tag} 是「{focus_subject}」的单人对白近景，但 action_desc/首尾帧仍把"
-                        f"「{other_name}」写进可见画面；请把听者明确留在画外，下一话轮再切反打"
-                    )
         for name in (
             item for item in shot.characters
             if (
@@ -4761,47 +4737,9 @@ def normalize_dialogue_focus_offscreen_mentions(
     board: Storyboard,
     bible: Bible | None,
 ) -> list[dict]:
-    """Project pure dialogue closeups to one visible speaker before validation."""
-    bible_names = {character.name for character in bible.characters} if bible else set()
-    changes: list[dict] = []
-    for shot in board.shots:
-        focus = dialogue_focus_subject(shot)
-        if not focus or dialogue_two_shot_required(shot):
-            continue
-        mutated_fields: list[str] = []
-        if shot.characters != [focus]:
-            shot.characters = [focus]
-            mutated_fields.append("characters")
-        if shot.characters_visible != [focus]:
-            shot.characters_visible = [focus]
-            mutated_fields.append("characters_visible")
-        offscreen_names: list[str] = []
-        for name in sorted(bible_names - {focus}, key=len, reverse=True):
-            pattern = re.compile(rf"(?<!画外){re.escape(name)}")
-            name_changed = False
-            for field in (
-                "action_desc", "state_in", "primary_action", "state_out",
-                "first_frame_desc", "last_frame_desc", "spatial_anchor",
-            ):
-                value = getattr(shot, field, None)
-                if (
-                    value
-                    and name in value
-                    and not _named_character_is_explicitly_offscreen(name, value)
-                ):
-                    setattr(shot, field, pattern.sub(f"画外{name}", value))
-                    mutated_fields.append(field)
-                    name_changed = True
-            if name_changed:
-                offscreen_names.append(name)
-        if mutated_fields:
-            changes.append({
-                "shot_no": shot.shot_no,
-                "dialogue_focus": focus,
-                "marked_offscreen": offscreen_names,
-                "fields": list(dict.fromkeys(mutated_fields)),
-            })
-    return changes
+    """Compatibility shim: dialogue no longer rewrites visual composition."""
+    _ = board, bible
+    return []
 
 
 def normalize_offbible_characters(board: Storyboard, bible: Bible | None) -> list[dict]:

@@ -728,7 +728,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         "evidence": "绿袍男子拦路呵斥",
         "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
         "identity_group": "current-1:绿袍男子",
-        "decision_contract_version": "screenplay-future-identity.v3",
+        "decision_contract_version": "screenplay-future-identity.v4",
         "authority_id": "bible:丁力",
         "authority_version": "screenplay-identity-authority.v1",
     }]
@@ -786,6 +786,56 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
     assert [(item["source_label"], item["name"], item["identity_kind"]) for item in candidates] == [
         ("青衣人", "丁力", "named"),
     ]
+
+
+def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
+    monkeypatch,
+) -> None:
+    bible = Bible(
+        world=World(visual_style_canonical="都市漫画"),
+        characters=[Character(
+            name="赵振",
+            role="重要配角",
+            appearance_canonical="中年男子，深色西装，方脸短发，体格高大",
+        )],
+    )
+    calls = 0
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["call_meta"]["discovery_phase"] == "future_identity"
+        return json.dumps({"characters": [{
+            "source_label": "那间学校的校长",
+            "canonical_name": "赵振",
+            "identity_kind": "named",
+            "future_evidence": "聪慧的白洁马上反应过来是那个“大象”赵振的主意。",
+        }]}, ensure_ascii=False)
+
+    monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
+    candidates = asyncio.run(portraits.resolve_future_identity_candidates(
+        [{
+            "name": "那间学校的校长",
+            "source_label": "那间学校的校长",
+            "identity_kind": "functional",
+            "identity_group": "current:school-principal",
+            "kind": "onscreen",
+        }],
+        source_text="那间学校的校长从楼上走下来。",
+        future_text=(
+            "到了酒店，原来那个男人是王申学校的校长。"
+            "聪慧的白洁马上反应过来是那个“大象”赵振的主意。"
+        ),
+        bible=bible,
+        episode_no=5,
+        future_label="后续章节",
+    ))
+
+    assert calls == 1
+    assert [
+        (item["source_label"], item["name"], item["identity_kind"])
+        for item in candidates
+    ] == [("那间学校的校长", "赵振", "named")]
 
 
 def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -> None:
