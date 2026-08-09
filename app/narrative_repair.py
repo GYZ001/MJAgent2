@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import re
 from typing import Any, Literal, cast
@@ -263,6 +264,39 @@ def apply_semantic_outline_operations(
             else:
                 index = len(candidate.shots)
             inserted = operation.value.model_copy(deep=True)
+            existing_ids = {
+                str(shot.shot_id or "").strip()
+                for shot in candidate.shots
+                if str(shot.shot_id or "").strip()
+            }
+            if not str(inserted.shot_id or "").strip() or (
+                str(inserted.shot_id).strip() in existing_ids
+            ):
+                identity_payload = inserted.model_dump(mode="json")
+                identity_payload.pop("shot_id", None)
+                identity_payload.pop("shot_no", None)
+                identity_seed = json.dumps(
+                    {
+                        "intent": operation.op,
+                        "executor": executable_op,
+                        "target": target,
+                        "value": identity_payload,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                base_id = (
+                    "SHR-"
+                    + hashlib.sha256(
+                        identity_seed.encode("utf-8")
+                    ).hexdigest()[:12].upper()
+                )
+                inserted.shot_id = base_id
+                suffix = 2
+                while inserted.shot_id in existing_ids:
+                    inserted.shot_id = f"{base_id}-{suffix}"
+                    suffix += 1
             if not inserted.event_ids and not str(
                 inserted.story_event_id or ""
             ).strip():
@@ -288,6 +322,11 @@ def apply_semantic_outline_operations(
                 **event_prefix,
                 "index": index,
                 "after_shot_id": inserted.shot_id,
+                **(
+                    {"requested_shot_id": operation.value.shot_id}
+                    if inserted.shot_id != operation.value.shot_id
+                    else {}
+                ),
             })
         elif executable_op == "delete_outline_shot":
             if len(candidate.shots) <= 1:

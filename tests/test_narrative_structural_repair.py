@@ -106,37 +106,33 @@ def test_semantic_outline_operations_compose_without_story_classification() -> N
     assert [shot.shot_no for shot in official.shots] == [1, 2, 3]
 
 
-@pytest.mark.parametrize(
-    ("operation", "message"),
-    [
-        (
-            SemanticOutlineOperation(
-                op="insert_outline_shot",
-                target={"after_shot_id": "SH-A"},
-                value=_outline_shot(""),
-            ),
-            "empty shot_id",
-        ),
-        (
-            SemanticOutlineOperation(
-                op="insert_outline_shot",
-                target={"after_shot_id": "SH-A"},
-                value=_outline_shot("SH-B"),
-            ),
-            "duplicate shot_id",
-        ),
-    ],
-)
-def test_semantic_outline_operations_reject_invalid_stable_ids(
-    operation: SemanticOutlineOperation,
-    message: str,
+@pytest.mark.parametrize("proposed_id", ["", "SH-B"])
+def test_semantic_insert_mints_deterministic_id_when_model_id_is_unusable(
+    proposed_id: str,
 ) -> None:
     official = _outline("SH-A", "SH-B")
+    operation = SemanticOutlineOperation(
+        op="insert_outline_shot",
+        target={"after_shot_id": "SH-A"},
+        value=_outline_shot(proposed_id),
+    )
 
-    with pytest.raises(ValueError, match=message):
-        apply_semantic_outline_operations(official, [operation])
+    first, first_events = apply_semantic_outline_operations(
+        official,
+        [operation],
+    )
+    second, _second_events = apply_semantic_outline_operations(
+        official,
+        [operation],
+    )
 
     assert _ids(official) == ["SH-A", "SH-B"]
+    assert _ids(first)[0] == "SH-A"
+    assert _ids(first)[2] == "SH-B"
+    assert _ids(first)[1].startswith("SHR-")
+    assert len(set(_ids(first))) == 3
+    assert _ids(second) == _ids(first)
+    assert first_events[0]["requested_shot_id"] == proposed_id
 
 
 def test_semantic_outline_operation_rejects_unknown_stable_target() -> None:
