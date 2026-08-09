@@ -1,6 +1,16 @@
 from app import config, errors
 from app.compiler import CompileError, compile_prompt, SOURCE_EXCERPT_MARKER
-from app.schemas import Bible, Character, Dialogue, Shot, World
+from app.schemas import (
+    Bible,
+    Character,
+    CharacterContinuityState,
+    ContinuityState,
+    Dialogue,
+    PropContinuityState,
+    SceneContinuityState,
+    Shot,
+    World,
+)
 
 
 def test_default_prompt_budget_matches_generation_editor_contract() -> None:
@@ -129,6 +139,84 @@ def test_silent_shot_compacts_without_forcing_dialogue_pacing(monkeypatch) -> No
     assert "指节" not in prompt
     assert "口型和肢体随台词自然推进" not in prompt
     assert prompt.endswith("--ratio 9:16 --dur 10")
+
+
+def test_large_continuity_snapshot_projects_current_pose_and_changed_props() -> None:
+    stable_props = {
+        f"历史道具-{index}": PropContinuityState(
+            canonical_name=f"未参与本镜的历史道具{index}",
+            revision_id=f"PROP-{index}",
+            owner="萧战",
+            location="远处库房",
+            form="收纳",
+        )
+        for index in range(40)
+    }
+    character_in = CharacterContinuityState(
+        look_revision_id="LOOK-XIAOYAN-1",
+        outfit_revision_id="OUTFIT-XIAOYAN-1",
+        screen_side="center",
+        pose="右掌按住石碑",
+        facing="面向石碑",
+        gaze_target="石碑刻度",
+        right_hand="掌心贴住石碑",
+    )
+    character_out = character_in.model_copy(update={
+        "pose": "右掌仍按石碑，肩背绷紧",
+        "gaze_target": "亮起的石碑刻度",
+    })
+    current_prop_in = PropContinuityState(
+        canonical_name="测验石碑",
+        revision_id="PROP-STELE-1",
+        owner="萧家",
+        location="广场中央",
+        form="表面暗淡",
+        required=True,
+    )
+    current_prop_out = current_prop_in.model_copy(update={"form": "表面光纹亮起"})
+    scene = SceneContinuityState(
+        scene_revision_id="SCENE-SQUARE-1",
+        time_of_day="白天",
+        lighting_state="自然日光",
+        axis_id="AXIS-STELE",
+        landmarks={"测验石碑": "center"},
+    )
+    shot = Shot(
+        shot_no=56,
+        duration_s=5,
+        shot_size="中景",
+        camera_move="推近",
+        scene_setting="白天，萧家测验广场",
+        characters=["萧炎"],
+        characters_visible=["萧炎"],
+        action_desc="萧炎右掌按住测验石碑，碑面光纹由暗转亮。",
+        first_frame_desc="萧炎右掌贴住暗淡的测验石碑。",
+        last_frame_desc="萧炎肩背绷紧，测验石碑表面光纹亮起。",
+        state_in="萧炎右掌贴住暗淡的测验石碑。",
+        primary_action="萧炎按住测验石碑使碑面光纹亮起",
+        state_out="萧炎肩背绷紧，测验石碑表面光纹亮起。",
+        continuity_mode="same_scene_cut",
+        continuity_state_in=ContinuityState(
+            scene=scene,
+            characters={"萧炎": character_in},
+            props={**stable_props, "测验石碑": current_prop_in},
+        ),
+        continuity_state_out=ContinuityState(
+            scene=scene,
+            characters={"萧炎": character_out},
+            props={**stable_props, "测验石碑": current_prop_out},
+        ),
+    )
+
+    prompt = compile_prompt(shot, _bible(), with_refs=True)
+
+    assert len(prompt) <= config.PROMPT_CHAR_LIMIT
+    assert "右掌按住石碑" in prompt
+    assert "肩背绷紧" in prompt
+    assert "测验石碑" in prompt
+    assert "表面光纹亮起" in prompt
+    assert "未参与本镜的历史道具39" not in prompt
+    assert "未列出字段继承起始状态" in prompt
 
 
 def test_compile_error_is_correctable_generation_error() -> None:

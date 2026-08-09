@@ -1147,7 +1147,7 @@ def structured_boundary_issues(prev: Shot, current: Shot) -> list[dict[str, Any]
 
 
 def structured_state_prompt(shot: Shot) -> str:
-    """把结构化状态渲染为紧凑的生成约束；空合同不增加 prompt 噪声。"""
+    """Render the full continuity contract as a prompt-sized semantic delta."""
     state_in = shot.continuity_state_in or ContinuityState()
     state_out = shot.continuity_state_out or ContinuityState()
     if not (
@@ -1155,12 +1155,96 @@ def structured_state_prompt(shot: Shot) -> str:
         or any(state_in.scene.model_dump().values()) or any(state_out.scene.model_dump().values())
     ):
         return ""
+
+    def compact(model: Any) -> dict[str, Any]:
+        return model.model_dump(
+            mode="json",
+            exclude_defaults=True,
+            exclude_none=True,
+        )
+
+    visible = set(effective_characters_visible(shot))
+    character_names = list(dict.fromkeys([
+        *state_in.characters,
+        *state_out.characters,
+    ]))
+    if visible:
+        character_names = [name for name in character_names if name in visible]
+
+    current_text = "\n".join(
+        str(value or "")
+        for value in (
+            shot.state_in,
+            shot.primary_action,
+            shot.state_out,
+            shot.action_desc,
+            shot.first_frame_desc,
+            shot.last_frame_desc,
+            shot.spatial_anchor,
+            shot.required_text.surface if shot.required_text else "",
+            shot.required_text.exact_text if shot.required_text else "",
+        )
+    )
+    prop_ids = list(dict.fromkeys([
+        *state_in.props,
+        *state_out.props,
+    ]))
+    relevant_prop_ids: list[str] = []
+    for prop_id in prop_ids:
+        before = state_in.props.get(prop_id)
+        after = state_out.props.get(prop_id)
+        changed = compact(before) != compact(after) if before and after else True
+        aliases = {
+            prop_id,
+            str(before.canonical_name or "") if before else "",
+            str(after.canonical_name or "") if after else "",
+        }
+        mentioned = any(alias and alias in current_text for alias in aliases)
+        if changed or mentioned:
+            relevant_prop_ids.append(prop_id)
+
+    scene_in = compact(state_in.scene)
+    scene_out = compact(state_out.scene)
+    start_payload = {
+        "scene": scene_in,
+        "characters": {
+            name: compact(state_in.characters[name])
+            for name in character_names
+            if name in state_in.characters
+        },
+        "props": {
+            prop_id: compact(state_in.props[prop_id])
+            for prop_id in relevant_prop_ids
+            if prop_id in state_in.props
+        },
+    }
+    end_payload = {
+        "scene_delta": scene_out if scene_out != scene_in else {},
+        "characters": {
+            name: compact(state_out.characters[name])
+            for name in character_names
+            if name in state_out.characters
+        },
+        "props_delta": {
+            prop_id: compact(state_out.props[prop_id])
+            for prop_id in relevant_prop_ids
+            if (
+                prop_id in state_out.props
+                and (
+                    prop_id not in state_in.props
+                    or compact(state_out.props[prop_id])
+                    != compact(state_in.props[prop_id])
+                )
+            )
+        },
+    }
     return (
         "结构化起始状态："
-        + json.dumps(state_in.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
-        + "\n结构化结束状态："
-        + json.dumps(state_out.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
-        + "\n未在当前主动作中明示改变的 revision_id、owner、location、form、手持状态与空间轴线必须保持不变。"
+        + json.dumps(start_payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n结构化结束状态（未列出字段继承起始状态）："
+        + json.dumps(end_payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n完整连续性合同仍是权威；未在当前主动作中明示改变的身份、服装、"
+        "revision_id、owner、location、form、手持状态、固定实体与空间轴线必须保持不变。"
     )
 
 

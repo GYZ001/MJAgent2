@@ -524,10 +524,19 @@ def _restart_project_video_queue_run(run_id: str, trigger_type: str):
     if trigger_type == "retry":
         for item in state.get("plan") or []:
             if item.get("status") in {
-                "failed", "failed_to_schedule", "skipped_budget",
+                "partial", "failed", "cancelled",
+                "failed_to_schedule", "skipped_budget",
             }:
                 item["status"] = "queued"
-                item.pop("error", None)
+                for field in (
+                    "run_id",
+                    "completion_grant_id",
+                    "child_run_status",
+                    "child_failure_code",
+                    "child_message",
+                    "error",
+                ):
+                    item.pop(field, None)
     recorder = WorkflowRecorder.create(
         workflow_type="project_video_completion_queue",
         scope_type="project",

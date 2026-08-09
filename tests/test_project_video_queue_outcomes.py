@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -188,3 +189,72 @@ async def test_project_video_queue_follows_recovered_child_run(monkeypatch) -> N
     assert conn.execute(
         "SELECT status FROM workflow_runs WHERE id='run-project'"
     ).fetchone()["status"] == "FAILED"
+
+
+@pytest.mark.parametrize("item_status", ["partial", "cancelled"])
+def test_project_video_queue_retry_requeues_non_successful_child(
+    monkeypatch,
+    item_status: str,
+) -> None:
+    import app.evidence.repository as evidence_repository
+    import app.orchestration.api as orchestration_api
+    import app.orchestration.engine as orchestration_engine
+    import app.orchestration.state_machine as state_machine
+
+    conn = _conn({"e1": "PARTIAL"})
+    state = _state(["e1"])
+    state["plan"][0].update({
+        "status": item_status,
+        "run_id": "run-e1",
+        "completion_grant_id": "grant-e1",
+        "child_run_status": item_status.upper(),
+        "child_failure_code": "OLD_RESULT",
+        "child_message": "old result",
+        "error": "old error",
+    })
+    conn.execute(
+        """UPDATE workflow_runs
+           SET status=?,config_snapshot_json=?
+           WHERE id='run-project'""",
+        (
+            "PARTIAL" if item_status == "partial" else "CANCELLED",
+            json.dumps({"queue_state": state}),
+        ),
+    )
+    conn.commit()
+    for module in (
+        api,
+        evidence_repository,
+        orchestration_api,
+        orchestration_engine,
+        state_machine,
+    ):
+        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        orchestration_api.task_registry,
+        "active",
+        lambda *_args: False,
+    )
+
+    def capture_spawn(_kind, _key, coro, *, project_id=None):
+        assert project_id == "p"
+        coro.close()
+
+    monkeypatch.setattr(orchestration_api.task_registry, "spawn", capture_spawn)
+
+    recovered = orchestration_api._restart_project_video_queue_run(
+        "run-project",
+        "retry",
+    )
+
+    retry_state = recovered["config_snapshot"]["queue_state"]
+    retry_item = retry_state["plan"][0]
+    assert retry_item["status"] == "queued"
+    assert not {
+        "run_id",
+        "completion_grant_id",
+        "child_run_status",
+        "child_failure_code",
+        "child_message",
+        "error",
+    }.intersection(retry_item)

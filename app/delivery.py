@@ -105,6 +105,83 @@ def _assert_no_delivery_secrets(package_dir: Path) -> None:
                 raise ValueError(f"交付安全扫描失败：{path.name} 包含疑似凭证")
 
 
+def _authorized_source_chapters(conn: Any, episode: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    raw = episode["source_chapters"]
+    parse_error = ""
+    try:
+        decoded = json.loads(raw or "[]") if isinstance(raw, str) else raw
+    except (TypeError, ValueError, json.JSONDecodeError):
+        decoded = []
+        parse_error = "episodes.source_chapters 不是有效 JSON"
+    if not isinstance(decoded, list):
+        decoded = []
+        parse_error = "episodes.source_chapters 必须是章节索引列表"
+
+    invalid_references: list[str] = []
+    indexes: list[int] = []
+    for value in decoded:
+        if isinstance(value, bool):
+            invalid_references.append(str(value))
+            continue
+        if isinstance(value, int):
+            index = value
+        elif isinstance(value, str):
+            try:
+                index = int(value.strip())
+            except ValueError:
+                invalid_references.append(value)
+                continue
+        else:
+            invalid_references.append(str(value))
+            continue
+        indexes.append(index)
+    indexes = list(dict.fromkeys(indexes))
+
+    rows: list[Any] = []
+    if indexes:
+        marks = ",".join("?" for _ in indexes)
+        rows = conn.execute(
+            f"SELECT id,project_id,idx,title,content FROM chapters "
+            f"WHERE project_id=? AND idx IN ({marks}) ORDER BY idx",
+            (episode["project_id"], *indexes),
+        ).fetchall()
+    records = [
+        {
+            "chapter_id": int(row["id"]),
+            "project_id": str(row["project_id"]),
+            "chapter_idx": int(row["idx"]),
+            "title": str(row["title"] or ""),
+            "content_sha256": hashlib.sha256(
+                str(row["content"] or "").encode("utf-8")
+            ).hexdigest(),
+        }
+        for row in rows
+    ]
+    resolved_indexes = {record["chapter_idx"] for record in records}
+    missing_indexes = [index for index in indexes if index not in resolved_indexes]
+    foreign_matches: list[dict[str, Any]] = []
+    if missing_indexes:
+        marks = ",".join("?" for _ in missing_indexes)
+        foreign_rows = conn.execute(
+            f"SELECT idx,project_id FROM chapters "
+            f"WHERE project_id<>? AND idx IN ({marks}) ORDER BY idx,project_id",
+            (episode["project_id"], *missing_indexes),
+        ).fetchall()
+        foreign_matches = [
+            {"chapter_idx": int(row["idx"]), "project_id": str(row["project_id"])}
+            for row in foreign_rows
+        ]
+    evidence = {
+        "authorized_indices": indexes,
+        "resolved_chapters": records,
+        "missing_indices": missing_indexes,
+        "foreign_project_matches": foreign_matches,
+        "invalid_references": invalid_references,
+        "parse_error": parse_error or None,
+    }
+    return records, evidence
+
+
 def delivery_readiness(episode_id: str) -> dict[str, Any]:
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -119,6 +196,19 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
     def check(key: str, passed: bool, message: str, evidence: Any = None) -> None:
         checks.append({"key": key, "passed": bool(passed), "message": message, "evidence": evidence})
 
+    source_chapters, source_chapter_evidence = _authorized_source_chapters(conn, ep)
+    source_chapters_valid = bool(source_chapter_evidence["authorized_indices"]) and not any((
+        source_chapter_evidence["parse_error"],
+        source_chapter_evidence["invalid_references"],
+        source_chapter_evidence["missing_indices"],
+        source_chapter_evidence["foreign_project_matches"],
+    ))
+    check(
+        "source_chapters",
+        source_chapters_valid,
+        "授权章节列表非空，且每章存在并属于当前项目",
+        source_chapter_evidence,
+    )
     check("shots_present", bool(shots), "至少存在一个分镜", {"count": len(shots)})
     numbers = [shot["shot_no"] for shot in shots]
     check("shot_order", numbers == sorted(set(numbers)), "已采纳镜头按镜号递增且不重复", numbers)
@@ -280,6 +370,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         "warnings": warnings,
         "evidence_coverage": round(coverage, 4),
         "source_artifacts": source_artifacts,
+        "source_chapters": source_chapters,
         "videos": video_items,
         "final_edit_report": final_edit_report,
     }
@@ -426,6 +517,15 @@ def build_delivery_package(
             screenplay_context.screenplay.model_dump(mode="json")
         ),
     )
+    _write_json(
+        snapshots / "source-chapters.json",
+        {
+            "schema_version": "1.0.0",
+            "episode_id": episode_id,
+            "project_id": ep["project_id"],
+            "chapters": readiness["source_chapters"],
+        },
+    )
     shot_rows = rows_to_dicts(conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
     ).fetchall())
@@ -472,9 +572,12 @@ def build_delivery_package(
         "episode": {"id": episode_id, "number": ep["episode_no"], "title": ep["title"]},
         "created_at": operation_started_at,
         "source_artifacts": readiness["source_artifacts"],
+        "source_chapters": readiness["source_chapters"],
         "files": files,
         "reproducibility": {
-            "input_fingerprint": fingerprint(readiness["source_artifacts"], files),
+            "input_fingerprint": fingerprint(
+                readiness["source_artifacts"], readiness["source_chapters"], files
+            ),
             "shot_duration_range_s": [config.VIDEO_DURATION_MIN_S, config.VIDEO_DURATION_MAX_S],
             "shot_duration_decided_by": "model",
         },
@@ -535,7 +638,7 @@ def build_delivery_package(
         })
     manifest["files"] = files
     manifest["reproducibility"]["input_fingerprint"] = fingerprint(
-        readiness["source_artifacts"], files
+        readiness["source_artifacts"], readiness["source_chapters"], files
     )
     _write_json(package_dir / "manifest.json", manifest)
     _assert_no_delivery_secrets(package_dir)

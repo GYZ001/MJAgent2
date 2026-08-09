@@ -63,8 +63,12 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
         (json.dumps(bible, ensure_ascii=False), bible_id),
     )
     conn.execute(
-        "INSERT INTO episodes(id,project_id,episode_no,title,screenplay_json,screenplay_artifact_id,storyboard_artifact_id,status,created_at) "
-        "VALUES('e','p',1,'E','{}',?,?,'done',0)", (screenplay_id, storyboard_id),
+        "INSERT INTO chapters(project_id,idx,title,content) "
+        "VALUES('p',1,'第一章','第一章正文')"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,screenplay_json,screenplay_artifact_id,storyboard_artifact_id,status,created_at) "
+        "VALUES('e','p',1,'E','[1]','{}',?,?,'done',0)", (screenplay_id, storyboard_id),
     )
     conn.execute(
         "INSERT INTO shots(id,episode_id,shot_no,duration_s,shot_size,camera_move,scene_setting,characters,action_desc,dialogues,transition,adopted_version_id,storyboard_artifact_id) "
@@ -80,6 +84,13 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
 
     readiness = delivery.delivery_readiness("e")
     assert readiness["ready"] is True and readiness["evidence_coverage"] == 1
+    assert readiness["source_chapters"] == [{
+        "chapter_id": 1,
+        "project_id": "p",
+        "chapter_idx": 1,
+        "title": "第一章",
+        "content_sha256": hashlib.sha256("第一章正文".encode()).hexdigest(),
+    }]
     final_stale = final_video.with_suffix(".stale")
     final_stale.write_text("outdated\n", encoding="utf-8")
     outdated = delivery.delivery_readiness("e")
@@ -98,6 +109,48 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     assert score_only["ready"] is True
     assert not any(item["key"] == "fatal_video_quality" for item in score_only["blockers"])
     assert not any(item["check"] == "fatal_video_quality" for item in score_only["warnings"])
+
+    def assert_source_blocked(package_id: str) -> dict:
+        blocked = delivery.delivery_readiness("e")
+        source_blocker = next(
+            item for item in blocked["blockers"] if item["key"] == "source_chapters"
+        )
+        with pytest.raises(ValueError, match="授权章节列表非空"):
+            delivery.build_delivery_package("e", package_id=package_id)
+        return source_blocker["evidence"]
+
+    conn.execute("UPDATE episodes SET source_chapters='[]' WHERE id='e'")
+    conn.commit()
+    assert assert_source_blocked("delivery_empty_sources")["authorized_indices"] == []
+
+    conn.execute("UPDATE episodes SET source_chapters='[99]' WHERE id='e'")
+    conn.commit()
+    assert assert_source_blocked("delivery_missing_source")["missing_indices"] == [99]
+
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('foreign','Foreign',0)")
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content) "
+        "VALUES('foreign',2,'外部章节','不属于当前项目')"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[2]' WHERE id='e'")
+    conn.commit()
+    cross_project = assert_source_blocked("delivery_cross_project_source")
+    assert cross_project["missing_indices"] == [2]
+    assert cross_project["foreign_project_matches"] == [{
+        "chapter_idx": 2,
+        "project_id": "foreign",
+    }]
+
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e'")
+    conn.execute("DELETE FROM chapters WHERE project_id='p' AND idx=1")
+    conn.commit()
+    assert assert_source_blocked("delivery_deleted_source")["missing_indices"] == [1]
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content) "
+        "VALUES('p',1,'第一章','第一章正文')"
+    )
+    conn.commit()
+
     conn.execute(
         "UPDATE shot_versions SET qa_json=? WHERE id='v'",
         (json.dumps({"overall": 0.9}),),
@@ -105,6 +158,21 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     conn.commit()
     draft = delivery.build_delivery_package(
         "e", package_id="delivery_crash_window", operation_started_at=42,
+    )
+    source_snapshot = json.loads(
+        Path(draft["package_path"], "snapshots", "source-chapters.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert source_snapshot["chapters"] == draft["manifest"]["source_chapters"]
+    assert source_snapshot["chapters"][0]["content_sha256"] == hashlib.sha256(
+        "第一章正文".encode()
+    ).hexdigest()
+    assert any(
+        item["path"] == "snapshots/source-chapters.json"
+        and item["role"] == "snapshot"
+        and len(item["sha256"]) == 64
+        for item in draft["manifest"]["files"]
     )
     draft_manifest = Path(draft["package_path"], "manifest.json").read_bytes()
     draft_hash = repository.get_artifact(draft["artifact_id"])["content_hash"]

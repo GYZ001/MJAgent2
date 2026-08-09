@@ -82,6 +82,41 @@ describe('AdaptivePoller', () => {
     expect(timers).toEqual([])
   })
 
+  it('coalesces refreshes while a slow request is in flight', async () => {
+    let calls = 0
+    let resolveRequest!: (value: { status: string }) => void
+    const timers: Array<() => void> = []
+    const poller = new AdaptivePoller(
+      () => {
+        calls += 1
+        return new Promise(resolve => { resolveRequest = resolve })
+      },
+      1000,
+      {
+        onData: () => undefined,
+        onError: error => { throw error },
+      },
+      {
+        setTimeout: callback => {
+          timers.push(callback)
+          return callback
+        },
+        clearTimeout: () => undefined,
+      },
+    )
+
+    const initial = poller.start()
+    await flush()
+    const refreshes = [poller.refresh(), poller.refresh()]
+
+    expect(calls).toBe(1)
+    resolveRequest({ status: 'running' })
+    await Promise.all([initial, ...refreshes])
+
+    expect(calls).toBe(1)
+    expect(timers).toHaveLength(1)
+  })
+
   it('resumes with one catch-up request after a hidden-tab stop', async () => {
     let calls = 0
     const timers: Array<() => void> = []

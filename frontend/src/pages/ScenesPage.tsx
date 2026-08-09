@@ -3,7 +3,7 @@ import {
   api, Scene, SceneCostPrecheck, SceneGapScan, SceneRefSegment, SceneReferenceCandidate,
   SceneRefsProgress,
 } from '../api'
-import { useNav, useProject } from '../App'
+import { useNav, usePoll, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
@@ -62,13 +62,20 @@ export default function ScenesPage() {
   const [payTitle, setPayTitle] = useState('')
   const payActionRef = useRef<null | ((scenes: string[]) => Promise<void>)>(null)
   const [gapScan, setGapScan] = useState<SceneGapScan | null>(null)
-  const [progress, setProgress] = useState<SceneRefsProgress | null>(null)
   const [scenePreview, setScenePreview] = useState<Scene[] | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   const sceneTimer = useTaskTimer(`project.${projectId}.scene_refs`, p?.scene_refs_status === 'running')
 
   const scenes = p?.bible?.scenes ?? []
   const generating = p?.scene_refs_status === 'running'
+  const {
+    data: progress,
+    refresh: refreshProgress,
+  } = usePoll<SceneRefsProgress>(
+    () => api.sceneRefsProgress(projectId!),
+    () => generating ? 2500 : 0,
+    [p?.id ?? null],
+  )
   const query = search.trim()
   const filtered = [...scenes].filter(s => {
     if (query && !s.name.includes(query) && !(s.scene_canonical || '').includes(query)) return false
@@ -120,14 +127,8 @@ export default function ScenesPage() {
   }, [])
 
   useEffect(() => {
-    if (!generating) return
-    let cancelled = false
-    const poll = async () => {
-      try { const next = await api.sceneRefsProgress(projectId!); if (!cancelled) setProgress(next) } catch { /* refresh owns errors */ }
-    }
-    poll(); const id = window.setInterval(poll, 2500)
-    return () => { cancelled = true; window.clearInterval(id) }
-  }, [generating, projectId])
+    if (generating) void refreshProgress()
+  }, [generating, refreshProgress])
 
   if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>
   if (loading && !p) return <QueryState loading hasData={false} objectName="场景库" onRetry={refresh}>{null}</QueryState>

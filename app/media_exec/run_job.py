@@ -4187,7 +4187,8 @@ def _recover_one_media_job(
     conn, job_id: str, run_id: str | None, step_run_id: str | None, reason: str
 ) -> bool:
     """把一个卡住的媒体 job 复位回 queued，等待持久调度器接管：
-    - running/queued job 统一回到 queued，清空旧 lease；持久化 retry 到期时间保留
+    - running/queued/waiting_provider job 统一回到 queued，清空旧 lease；
+      provider_task_id 与持久化 retry 到期时间保留
     - Run 立即进入 WAITING_RETRY，监控页显示“恢复排队中”
     - 被中断的 Step 保持 FAILED 审计终态，并创建 iteration+1 的 READY attempt
     返回 True 表示实际复位过；False 表示 job 已不存在或被并发改动（调用方忽略）。"""
@@ -4289,7 +4290,7 @@ def recover_media_jobs() -> int:
         """SELECT j.id AS job_id, j.run_id, j.step_run_id
            FROM jobs j
            JOIN workflow_runs wr ON wr.id=j.run_id
-           WHERE j.status IN ('running','queued')
+           WHERE j.status IN ('running','queued','waiting_provider')
              AND wr.status='PAUSED_EXTERNAL'
              AND wr.failure_code='SERVICE_RESTART'
              AND j.cancellation_requested=0
