@@ -173,6 +173,35 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(preview.detail).toContain('不是从第 15 镜续写')
   })
 
+  it('完整镜头只缺发布证据时明确继续审读发布且不改写镜头', () => {
+    const status = storyboardStatus({
+      planned_shots: 14,
+      produced_shots: 14,
+      validated_shots: 14,
+      draft_shots: 14,
+      safe_checkpoint_shots: 14,
+      pending_revalidation_shots: 0,
+      resume_mode: 'finalize_evidence',
+      final_shot_valid: true,
+      hard_gates_passed: true,
+    })
+
+    expect(storyboardProgressCopy(status).detail).toContain('不会改写现有镜头')
+
+    const preview = storyboardStartPreviewCopy({
+      preview_token: 'preview-2',
+      action: 'resume',
+      resume_mode: 'finalize_evidence',
+      kept_validated_shots: 14,
+      planned_shots: 14,
+      remaining_shots: 0,
+      checkpoint: { available: true, phase: 'WAITING_HUMAN', resume_from_shot: 15 },
+    })
+    expect(preview.title).toBe('完成分镜发布证据')
+    expect(preview.confirmLabel).toBe('继续审读发布')
+    expect(preview.detail).toContain('仅继续冷观众审读')
+  })
+
   it('在镜头轨道区分已校验和待校验工作副本', () => {
     expect(storyboardShotCheckpointLabel(2, storyboardStatus())?.label).toBe('已校验')
     expect(storyboardShotCheckpointLabel(3, storyboardStatus())?.label).toBe('待校验')

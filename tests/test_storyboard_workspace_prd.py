@@ -276,8 +276,9 @@ def test_unlocatable_legacy_excerpt_is_not_a_user_facing_gate(storyboard_db):
     episode = api.episode_detail("e1", view="board")
     status = episode["storyboard_status"]
 
-    assert status["state"] == "ready_to_confirm"
-    assert status["recommended_action"] == "confirm_storyboard"
+    assert status["state"] == "paused"
+    assert status["recommended_action"] == "resume_storyboard"
+    assert status["resume_mode"] == "finalize_evidence"
     assert not any("授权原文中定位" in issue for issue in status["hard_gate_issues"])
     assert not episode["shots"][0].get("preflight_errors")
 
@@ -339,7 +340,9 @@ def test_complete_board_uses_current_gate_instead_of_stale_paused_issue(
     detail = api.episode_detail("e1", view="board")
     status = detail["storyboard_status"]
 
-    assert status["state"] == "ready_to_confirm"
+    assert status["state"] == "paused"
+    assert status["recommended_action"] == "resume_storyboard"
+    assert status["resume_mode"] == "finalize_evidence"
     assert status["hard_gate_issues"] == []
     assert detail["script_error"] is None
 

@@ -46,7 +46,7 @@ type SourceBindingInput = {
 export type StartPreview = {
   preview_token: string
   action: 'create' | 'resume'
-  resume_mode?: 'create' | 'continue_generation' | 'repair_existing' | null
+  resume_mode?: 'create' | 'continue_generation' | 'repair_existing' | 'finalize_evidence' | null
   kept_validated_shots: number
   planned_shots?: number | null
   remaining_shots?: number | null
@@ -226,6 +226,12 @@ export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProg
       detail: `当前 ${working} 镜已完成逐镜校验，但整集仍有 ${gateIssueCount} 个确认门禁问题。继续任务会重开整集修复，不是从第 ${resumeFrom} 镜续写；修复候选通过前不会覆盖现有镜头。`,
     }
   }
+  if (status.resume_mode === 'finalize_evidence') {
+    return {
+      summary,
+      detail: '镜头内容与整集硬门禁已通过；继续任务只会完成冷观众审读、校准校验和发布证据签发，不会改写现有镜头。',
+    }
+  }
   const finalDraftNote = status.final_shot_valid
     ? '工作副本中的收尾标记不代表整集已通过。'
     : ''
@@ -275,6 +281,14 @@ export function storyboardStartPreviewCopy(preview: StartPreview): {
       confirmLabel: '开始修复',
       summary: `现有 ${preview.kept_validated_shots} 镜保持不变，重新校验并修复${issueCount ? ` ${issueCount} 个` : ''}确认门禁问题。`,
       detail: `这是重开整集修复，不是从第 ${preview.checkpoint.resume_from_shot} 镜续写；候选通过前不会覆盖现有镜头。`,
+    }
+  }
+  if (preview.resume_mode === 'finalize_evidence') {
+    return {
+      title: '完成分镜发布证据',
+      confirmLabel: '继续审读发布',
+      summary: `现有 ${preview.kept_validated_shots} 镜已完成结构与逐镜校验。`,
+      detail: '将保留全部镜头，仅继续冷观众审读、校准校验与发布证据签发。',
     }
   }
   return {
@@ -1180,7 +1194,8 @@ export default function BoardPage() {
         {startPreview && startPreviewCopy && <div className="storyboard-preview-card">
           <p><b>{startPreviewCopy.summary}</b></p>
           <p>{startPreviewCopy.detail}</p>
-          {startPreview.repair && startPreview.action === 'resume' && <p>
+          {startPreview.repair && startPreview.action === 'resume'
+            && startPreview.resume_mode !== 'finalize_evidence' && <p>
             历史修复 {startPreview.repair.lifetime_repair_count} 次；将开启第 {startPreview.repair.activation_no + 1} 轮，
             每轮最多 {startPreview.repair.max_attempts_per_activation} 次。候选通过校验前不会覆盖现有分镜。
           </p>}

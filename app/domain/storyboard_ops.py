@@ -3332,6 +3332,10 @@ def _storyboard_status_snapshot(
         if localized:
             shot["preflight_errors"] = localized
     full_terminal = bool(terminal_structure and not gate_errors)
+    publication_evidence_ready = bool(
+        ep.get("storyboard_artifact_id")
+        and ep.get("storyboard_completion_certificate_id")
+    )
     repairing_existing = bool(
         final_valid
         and gate_errors
@@ -3370,6 +3374,12 @@ def _storyboard_status_snapshot(
         state, headline, action = "confirmed", "当前分镜已确认", "go_review_wall"
     elif not shots:
         state, headline, action = "empty", "剧本已就绪，尚未生成分镜", "generate_storyboard"
+    elif full_terminal and not publication_evidence_ready:
+        state, headline, action = (
+            "paused",
+            f"{shot_count}/{planned} 镜已通过，待完成发布证据",
+            "resume_storyboard",
+        )
     elif full_terminal:
         state, headline, action = "ready_to_confirm", f"{shot_count}/{planned} 镜已通过，等待确认", "confirm_storyboard"
     else:
@@ -3386,7 +3396,13 @@ def _storyboard_status_snapshot(
         action = "refresh_status"
     resume_mode = None
     if action == "resume_storyboard":
-        resume_mode = "repair_existing" if repairing_existing else "continue_generation"
+        resume_mode = (
+            "finalize_evidence"
+            if full_terminal and not publication_evidence_ready
+            else "repair_existing"
+            if repairing_existing
+            else "continue_generation"
+        )
     return {
         "contract_version": "storyboard-workspace.v1",
         "snapshot_version": monotonic_snapshot_version(ep["id"], fingerprint),
@@ -3419,7 +3435,11 @@ def _storyboard_status_snapshot(
             and not gate_system_error
             and not feature_flags["safe_readonly"]
         ),
-        "confirmable": bool(full_terminal and not feature_flags["safe_readonly"]),
+        "confirmable": bool(
+            full_terminal
+            and publication_evidence_ready
+            and not feature_flags["safe_readonly"]
+        ),
         "recommended_action": action,
         "write_block_reason": (
             "分镜正在生成或修复，请先暂停" if running
