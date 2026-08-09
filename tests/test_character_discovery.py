@@ -995,7 +995,7 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
     }
 
 
-def test_future_identity_suffix_alias_normalization_is_idempotent() -> None:
+def test_future_identity_projects_exact_who_tokens_without_substring_mutation() -> None:
     script = EpisodeScreenplay(
         episode_no=5,
         plot_spine=PlotSpine(
@@ -1015,9 +1015,9 @@ def test_future_identity_suffix_alias_normalization_is_idempotent() -> None:
                 ),
                 PlotSpineBeat(
                     beat_id="S03",
-                    who="阿宾、卢卢卢卢美",
-                    does="修复旧流水线留下的扩增名称",
-                    turn="身份重新收敛",
+                    who="阿宾、小美",
+                    does="保留另一个完整身份 token",
+                    turn="身份不会被误改",
                 ),
             ],
             must_keep_ending="卢美完成本集关系变化。",
@@ -1036,8 +1036,50 @@ def test_future_identity_suffix_alias_normalization_is_idempotent() -> None:
     assert [beat.who for beat in script.plot_spine.spine_beats] == [
         "卢美",
         "阿宾、卢美",
-        "阿宾、卢美",
+        "阿宾、小美",
     ]
+
+
+def test_future_identity_repairs_legacy_expansion_and_blocks_it_before_publish() -> None:
+    script = EpisodeScreenplay(
+        episode_no=6,
+        plot_spine=PlotSpine(
+            spine_beats=[
+                PlotSpineBeat(
+                    beat_id="S01",
+                    who="阿宾、卢卢美、何何钰慧",
+                    does="进入下一场事件",
+                    turn="局势发生变化",
+                ),
+            ],
+        ),
+    )
+    resolutions = [
+        {
+            "source_label": "美",
+            "canonical_name": "卢美",
+            "resolution": "future_identity",
+            "authority_id": "bible:卢美",
+        },
+        {
+            "source_label": "钰慧",
+            "canonical_name": "何钰慧",
+            "resolution": "future_identity",
+            "authority_id": "bible:何钰慧",
+        },
+    ]
+
+    errors = portraits.screenplay_character_resolution_errors(
+        script,
+        resolutions,
+    )
+    assert any("plot_spine.spine_beats[0].who[卢卢美]" in error for error in errors)
+    assert any("plot_spine.spine_beats[0].who[何何钰慧]" in error for error in errors)
+
+    portraits.apply_screenplay_character_resolutions(script, resolutions)
+
+    assert script.plot_spine.spine_beats[0].who == "阿宾、卢美、何钰慧"
+    assert portraits.screenplay_character_resolution_errors(script, resolutions) == []
 
 
 def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> None:

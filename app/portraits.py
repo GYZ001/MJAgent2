@@ -1512,6 +1512,80 @@ def _replace_resolved_label(text: str, source_label: str, canonical_name: str) -
     )
 
 
+_IDENTITY_LIST_SEPARATOR_PATTERN = re.compile(
+    r"([、，,／/；;｜|＆&＋+\s]+)"
+)
+
+
+def _project_identity_token(
+    token: str,
+    source_label: str,
+    canonical_name: str,
+) -> str:
+    """Project one complete identity token through durable authority.
+
+    ``plot_spine.who`` is a structured identity carrier, not prose.  Alias
+    decisions therefore apply only to a complete token.  The expansion branch
+    is a compatibility migration for artifacts produced by the former
+    substring replacement; its shape is derived from this exact authority
+    mapping rather than from any vocabulary list.
+    """
+    value = str(token or "").strip()
+    if not value or source_label == canonical_name:
+        return value
+    if value == source_label or value == canonical_name:
+        return canonical_name
+
+    prefix, separator, suffix = canonical_name.partition(source_label)
+    if not separator:
+        return value
+    if prefix and suffix:
+        repeated = re.fullmatch(
+            rf"(?:{re.escape(prefix)}){{2,}}"
+            rf"{re.escape(source_label)}"
+            rf"(?:{re.escape(suffix)}){{2,}}",
+            value,
+        )
+    elif prefix:
+        repeated = re.fullmatch(
+            rf"(?:{re.escape(prefix)}){{2,}}{re.escape(source_label)}",
+            value,
+        )
+    elif suffix:
+        repeated = re.fullmatch(
+            rf"{re.escape(source_label)}(?:{re.escape(suffix)}){{2,}}",
+            value,
+        )
+    else:
+        repeated = None
+    return canonical_name if repeated is not None else value
+
+
+def _identity_list_tokens(value: str) -> list[str]:
+    """Return complete identities from the structured ``who`` grammar."""
+    return [
+        part.strip()
+        for part in _IDENTITY_LIST_SEPARATOR_PATTERN.split(str(value or ""))
+        if part.strip()
+        and _IDENTITY_LIST_SEPARATOR_PATTERN.fullmatch(part) is None
+    ]
+
+
+def _replace_identity_list_label(
+    value: str,
+    source_label: str,
+    canonical_name: str,
+) -> str:
+    """Apply one authority decision to exact ``who`` identity tokens."""
+    parts = _IDENTITY_LIST_SEPARATOR_PATTERN.split(str(value or ""))
+    return "".join(
+        part
+        if _IDENTITY_LIST_SEPARATOR_PATTERN.fullmatch(part or "") is not None
+        else _project_identity_token(part, source_label, canonical_name)
+        for part in parts
+    )
+
+
 def _replace_screenplay_body_label(
     text: str,
     source_label: str,
@@ -1999,7 +2073,19 @@ def apply_screenplay_character_resolutions(screenplay, resolutions: list[dict] |
                     else ("who",)
                 ):
                     value = getattr(beat, field, "") or ""
-                    replaced = _replace_resolved_label(value, source_label, canonical_name)
+                    replaced = (
+                        _replace_identity_list_label(
+                            value,
+                            source_label,
+                            canonical_name,
+                        )
+                        if field == "who"
+                        else _replace_resolved_label(
+                            value,
+                            source_label,
+                            canonical_name,
+                        )
+                    )
                     if replaced != value:
                         setattr(beat, field, replaced)
                         changed = True
@@ -2487,6 +2573,20 @@ def screenplay_character_resolution_errors(screenplay, resolutions: list[dict] |
         for scene in getattr(screenplay, "scene_outline", None) or []:
             if source_label in (scene.characters or []):
                 residual_paths.append(f"scene_outline[{scene.scene_no}].characters")
+        spine = getattr(screenplay, "plot_spine", None)
+        for beat_index, beat in enumerate(
+            (spine.spine_beats if spine is not None else None) or []
+        ):
+            for token in _identity_list_tokens(beat.who):
+                projected = _project_identity_token(
+                    token,
+                    source_label,
+                    canonical_name,
+                )
+                if token == source_label or projected != token:
+                    residual_paths.append(
+                        f"plot_spine.spine_beats[{beat_index}].who[{token}]"
+                    )
         for chain_index, chain in enumerate(getattr(screenplay, "dialogue_chains", None) or []):
             for turn_index, turn in enumerate(chain.turns or []):
                 if (turn.speaker or "").strip() == source_label:
@@ -2616,6 +2716,16 @@ def screenplay_unknown_identity_errors(
     for scene_index, scene in enumerate(getattr(screenplay, "scene_outline", None) or []):
         for name in scene.characters or []:
             collect(name, f"scene_outline[{scene_index}].characters", usage="visual")
+    spine = getattr(screenplay, "plot_spine", None)
+    for beat_index, beat in enumerate(
+        (spine.spine_beats if spine is not None else None) or []
+    ):
+        for name in _identity_list_tokens(beat.who):
+            collect(
+                name,
+                f"plot_spine.spine_beats[{beat_index}].who",
+                usage="visual",
+            )
     for chain_index, chain in enumerate(getattr(screenplay, "dialogue_chains", None) or []):
         for turn_index, turn in enumerate(chain.turns or []):
             collect(
