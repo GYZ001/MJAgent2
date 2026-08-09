@@ -854,6 +854,57 @@ def _storyboard_shot_evidence_requires_rebind(
     )
 
 
+def _storyboard_publication_evidence_state(
+    episode: dict,
+    board: Storyboard,
+) -> tuple[bool, bool]:
+    """Return ``(current, refinalize_only)`` for the bound release evidence.
+
+    A calibration-authority update can stale an otherwise byte-identical
+    Storyboard Artifact.  That is an evidence-lineage change, not a request to
+    repair or regenerate shots.  Only exact authority-projection equality may
+    take this refinalization path; real projection drift remains a hard gate.
+    """
+    artifact_id = str(episode.get("storyboard_artifact_id") or "")
+    certificate_id = str(
+        episode.get("storyboard_completion_certificate_id") or ""
+    )
+    revision_id = str(episode.get("storyboard_production_revision_id") or "")
+    if not artifact_id or not certificate_id or not revision_id:
+        return False, False
+    artifact = evidence_repository.get_artifact(artifact_id)
+    if (
+        artifact is None
+        or artifact.get("scope_type") != "episode"
+        or artifact.get("scope_id") != episode.get("id")
+    ):
+        # Preserve the evaluator's typed hard-gate explanation for malformed
+        # legacy fixtures and genuinely missing evidence.
+        return True, False
+    try:
+        from app.narrative import storyboard_authority_projection
+
+        projection_matches = storyboard_authority_projection(
+            artifact.get("content") or {}
+        ) == storyboard_authority_projection(board.model_dump(mode="json"))
+    except Exception:  # noqa: BLE001 - malformed authority remains a hard gate
+        return True, False
+    if not projection_matches:
+        return True, False
+    try:
+        from app.production.certificate import (
+            verify_current_storyboard_completion_authority,
+        )
+
+        verify_current_storyboard_completion_authority(
+            episode=episode,
+            current_storyboard_content=board.model_dump(mode="json"),
+        )
+    except Exception:  # noqa: BLE001 - exact content may safely reissue lineage
+        return False, True
+    return True, False
+
+
 def _finalize_storyboard_evidence(
     episode_id: str,
     board: Storyboard,
@@ -3264,6 +3315,12 @@ def _storyboard_status_snapshot(
     gate_errors: list[str] = list(dict.fromkeys(active_repair_errors))
     score_warnings: list[str] = []
     gate_system_error: str | None = None
+    publication_evidence_ready = bool(
+        ep.get("storyboard_artifact_id")
+        and ep.get("storyboard_completion_certificate_id")
+        and ep.get("storyboard_production_revision_id")
+    )
+    evidence_refinalize_only = False
     if complete_structure:
         try:
             try:
@@ -3277,6 +3334,10 @@ def _storyboard_status_snapshot(
                 episode_no=int(ep["episode_no"]),
                 shots=[Shot.model_validate(shot) for shot in shots],
             )
+            (
+                publication_evidence_ready,
+                evidence_refinalize_only,
+            ) = _storyboard_publication_evidence_state(ep, board)
             project = get_conn().execute(
                 "SELECT * FROM projects WHERE id=?", (ep["project_id"],),
             ).fetchone()
@@ -3288,6 +3349,7 @@ def _storyboard_status_snapshot(
                 bible,
                 has_real_bible=bool((project["bible_json"] or "").strip()) if project else False,
                 record_metrics=False,
+                allow_evidence_refinalize=evidence_refinalize_only,
             )
             # 完整镜头投影的当前同源评估才是门禁真值。
             # 暂停 checkpoint 仅是当时的恢复点，不能让已被确定性
@@ -3323,10 +3385,6 @@ def _storyboard_status_snapshot(
         if localized:
             shot["preflight_errors"] = localized
     full_terminal = bool(terminal_structure and not gate_errors)
-    publication_evidence_ready = bool(
-        ep.get("storyboard_artifact_id")
-        and ep.get("storyboard_completion_certificate_id")
-    )
     repairing_existing = bool(
         final_valid
         and gate_errors
@@ -3361,6 +3419,12 @@ def _storyboard_status_snapshot(
         state, headline, action = "failed", f"还有 {len(gate_errors)} 个确认门禁问题，可继续修改", "resume_storyboard"
     elif ep.get("status") == "script_failed" or (ep.get("script_error") and not full_terminal):
         state, headline, action = "failed", f"生成停在第 {max(1, passed + 1)} 镜，可继续处理", "resume_storyboard"
+    elif confirmed and not publication_evidence_ready:
+        state, headline, action = (
+            "paused",
+            f"{shot_count}/{planned} 镜已通过，待更新发布证据",
+            "resume_storyboard",
+        )
     elif confirmed:
         state, headline, action = "confirmed", "当前分镜已确认", "go_review_wall"
     elif not shots:

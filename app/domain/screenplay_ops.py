@@ -900,7 +900,13 @@ async def _screenplay_task(
         owner = conn.execute(
             "SELECT active_screenplay_run_id FROM episodes WHERE id=?", (episode_id,)
         ).fetchone()
-        if not current_run_id or not owner or owner["active_screenplay_run_id"] in {None, current_run_id}:
+        if (
+            not current_run_id
+            or (
+                owner is not None
+                and owner["active_screenplay_run_id"] == current_run_id
+            )
+        ):
             from app.production.revision import get_active_production_revision
 
             active_revision = get_active_production_revision(
@@ -960,7 +966,13 @@ async def _screenplay_task(
         owner = conn.execute(
             "SELECT active_screenplay_run_id FROM episodes WHERE id=?", (episode_id,)
         ).fetchone()
-        if current_run_id and owner and owner["active_screenplay_run_id"] not in {None, current_run_id}:
+        if (
+            current_run_id
+            and (
+                owner is None
+                or owner["active_screenplay_run_id"] != current_run_id
+            )
+        ):
             # 已被恢复任务替代的旧协程可能在 socket 返回后才观察到围栏；
             # 它不得覆盖新运行的剧集状态。
             raise
@@ -1081,6 +1093,7 @@ def _spawn_screenplay_activation(
     """Atomically claim one episode before registering its in-process task."""
     conn = get_conn()
     previous: dict | None = None
+    registered_task = None
     try:
         conn.execute("BEGIN IMMEDIATE")
         previous_row = conn.execute(
@@ -1166,50 +1179,27 @@ def _spawn_screenplay_activation(
                 {previous_run_id},
                 "changed_during_claim",
             )
-        conn.commit()
-
         task_coro = (
             task_factory()
             if task_factory is not None
             else _screenplay_guarded(episode_id, recorder)
         )
-        task_registry.spawn(
+        registered_task = task_registry.spawn(
             "screenplay",
             episode_id,
             task_coro,
             project_id=project_id,
         )
+        # ``spawn`` only schedules the coroutine; it cannot run until this
+        # synchronous function yields back to the event loop.  Commit after the
+        # registry accepts it so a registration failure rolls back the owner
+        # claim, identity columns and deleted retry-only IR in one transaction.
+        conn.commit()
     except BaseException:
+        if registered_task is not None:
+            task_registry.cancel("screenplay", episode_id)
         if conn.in_transaction:
             conn.rollback()
-        if previous is not None:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                conn.execute(
-                    "UPDATE episodes SET screenplay_status=?, "
-                    "screenplay_error=?, screenplay_started_at=?, "
-                    "screenplay_updated_at=?, active_screenplay_run_id=?, "
-                    "screenplay_character_resolutions=?, "
-                    "screenplay_required_dialogues=?, "
-                    "screenplay_required_dialogue_occurrences=? "
-                    "WHERE id=? AND active_screenplay_run_id=?",
-                    (
-                        previous["screenplay_status"],
-                        previous["screenplay_error"],
-                        previous["screenplay_started_at"],
-                        previous["screenplay_updated_at"],
-                        previous["active_screenplay_run_id"],
-                        previous["screenplay_character_resolutions"],
-                        previous["screenplay_required_dialogues"],
-                        previous["screenplay_required_dialogue_occurrences"],
-                        episode_id,
-                        recorder.run_id,
-                    ),
-                )
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
         try:
             recorder.cancel("任务未能启动，剧集状态已回滚")
         except Exception:  # noqa: BLE001 - rollback must not be hidden by run bookkeeping

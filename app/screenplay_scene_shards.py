@@ -164,7 +164,7 @@ def _assert_episode_owner(episode_id: str) -> None:
         "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
         (episode_id,),
     ).fetchone()
-    if row and row["active_screenplay_run_id"] not in {None, trace.run_id}:
+    if not row or row["active_screenplay_run_id"] != trace.run_id:
         raise ScreenplaySceneShardOwnershipLost(
             "场次分片返回时剧集 owner 已变化，旧 worker 不得持久化结果"
         )
@@ -960,6 +960,7 @@ def persist_identity_registry(
     identity_registry_hash: str,
     parent_artifact_ids: list[str] | None = None,
 ) -> str:
+    _assert_episode_owner(episode_id)
     cached = _latest_validated_artifact(
         episode_id=episode_id,
         artifact_type="screenplay_identity_registry",
@@ -998,6 +999,7 @@ def persist_merged_ir(
     blueprint_hash: str,
     identity_registry_hash: str,
 ) -> str:
+    _assert_episode_owner(episode_id)
     trace = current_trace()
     artifact = evidence_repository.create_artifact(
         EvidenceArtifact(

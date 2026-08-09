@@ -1749,11 +1749,35 @@ async def run_storyboard_supervisor(
             conn=conn,
             require_narrative=True,
         )
-    published_storyboard_authority = bool(
+    published_storyboard_authority = False
+    if (
         narrative_authority
         and ep["published_storyboard_artifact_id"]
         and ep["storyboard_completion_certificate_id"]
-    )
+    ):
+        try:
+            from app.production.certificate import (
+                verify_current_storyboard_completion_authority,
+            )
+
+            authority_rows = conn.execute(
+                "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+            authority_board = _board_from_rows(
+                authority_rows,
+                int(ep["episode_no"] or 1),
+            )
+            verify_current_storyboard_completion_authority(
+                episode=ep,
+                current_storyboard_content=authority_board.model_dump(mode="json"),
+            )
+            published_storyboard_authority = True
+        except Exception:
+            # A stale certificate must be re-finalized from the exact current
+            # projection; it is not a still-published authority that blocks
+            # resume.  The full Supervisor gates run again before publication.
+            published_storyboard_authority = False
     if published_storyboard_authority and resume:
         checkpoint_probe = load_latest_checkpoint(episode_id)
         if checkpoint_probe is None or not _repair_is_pending(checkpoint_probe):

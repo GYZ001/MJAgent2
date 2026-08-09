@@ -114,6 +114,55 @@ async def test_live_projection_drift_blocks_confirmation_but_not_active_revision
     )
 
 
+@pytest.mark.asyncio
+async def test_stale_identical_projection_can_refinalize_without_content_repair(
+    monkeypatch,
+) -> None:
+    case = await _published_narrative_case(monkeypatch)
+    conn = db.get_conn()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    conn.execute(
+        "UPDATE artifacts SET status='stale' WHERE id=?",
+        (episode["storyboard_artifact_id"],),
+    )
+    conn.commit()
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id='project-generic'"
+    ).fetchone()
+
+    blocked = video_ops.evaluate_storyboard_for_confirmation(
+        episode,
+        case["board"],
+        case["screenplay"],
+        video_ops._project_bible_or_placeholder(project),
+        has_real_bible=False,
+        record_metrics=False,
+    )
+    assert any(
+        "STORYBOARD_AUTHORITY_PROJECTION_DRIFT" in error
+        for error in blocked.errors
+    )
+
+    refinalize = video_ops.evaluate_storyboard_for_confirmation(
+        episode,
+        case["board"],
+        case["screenplay"],
+        video_ops._project_bible_or_placeholder(project),
+        has_real_bible=False,
+        record_metrics=False,
+        allow_evidence_refinalize=True,
+    )
+    assert not any(
+        "STORYBOARD_AUTHORITY_PROJECTION_DRIFT" in error
+        for error in refinalize.errors
+    )
+
+
 def _assert_optional_review_does_not_revoke_authority(case: dict) -> None:
     episode, evaluation = _episode_and_live_evaluation(case)
     assert video_ops._has_current_storyboard_completion_certificate(db.get_conn(), episode) is True

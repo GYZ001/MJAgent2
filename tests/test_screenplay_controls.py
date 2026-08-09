@@ -483,6 +483,14 @@ async def test_first_screenplay_spawn_failure_restores_state_and_legacy_columns(
         ),
     )
     conn.commit()
+    unpublished_ir = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir",
+        scope_type="episode",
+        scope_id="e1",
+        status="candidate",
+        trust_level="T1",
+        content={"candidate": "must-survive-spawn-failure"},
+    ))
 
     class Recorder:
         run_id = "run_not_started"
@@ -499,12 +507,6 @@ async def test_first_screenplay_spawn_failure_restores_state_and_legacy_columns(
 
     monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
     monkeypatch.setattr(task_registry, "spawn", fail_spawn)
-    cleared: list[str] = []
-    monkeypatch.setattr(
-        api,
-        "_clear_unpublished_screenplay_ir",
-        lambda episode_id, **_kwargs: cleared.append(episode_id) or 0,
-    )
 
     with enter_handler(), pytest.raises(HTTPException) as exc_info:
         await api.start_screenplay("e1", body={})
@@ -528,7 +530,7 @@ async def test_first_screenplay_spawn_failure_restores_state_and_legacy_columns(
         "source_label"
     ] == "旧称谓"
     assert recorder.cancelled is True
-    assert cleared == ["e1"]
+    assert repository.get_artifact(unpublished_ir["id"]) is not None
 
 
 @pytest.mark.asyncio

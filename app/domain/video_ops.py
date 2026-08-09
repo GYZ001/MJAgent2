@@ -208,6 +208,7 @@ def evaluate_storyboard_for_confirmation(
     has_real_bible: bool = True,
     target_duration_s: int | None = None,
     record_metrics: bool = True,
+    allow_evidence_refinalize: bool = False,
 ) -> ConfirmationEvaluation:
     """与 confirm_episode_core 同源的只读确认评估（不写库）。
 
@@ -277,6 +278,7 @@ def evaluate_storyboard_for_confirmation(
             not active_storyboard_run_id
             and storyboard_artifact_id
             and completion_certificate_id
+            and not allow_evidence_refinalize
         ):
             from app.production.certificate import (
                 verify_current_storyboard_completion_authority,

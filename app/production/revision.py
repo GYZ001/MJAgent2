@@ -11,6 +11,50 @@ from app.db import get_conn, new_id, now
 Kind = Literal["screenplay", "storyboard"]
 
 
+class ProductionRevisionOwnershipLost(RuntimeError):
+    """A traced screenplay worker no longer owns the episode write lease."""
+
+
+def _assert_screenplay_write_owner(
+    db,
+    *,
+    episode_id: str,
+    kind: str,
+    revision_id: str | None = None,
+    allow_current_published: bool = False,
+) -> None:
+    if kind != "screenplay":
+        return
+    from app.observability.tracing import current_trace
+
+    run_id = current_trace().run_id
+    if not run_id:
+        return
+    episode = db.execute(
+        "SELECT active_screenplay_run_id,screenplay_production_revision_id "
+        "FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if episode and episode["active_screenplay_run_id"] == run_id:
+        return
+    if (
+        allow_current_published
+        and episode
+        and revision_id
+        and not episode["active_screenplay_run_id"]
+        and episode["screenplay_production_revision_id"] == revision_id
+    ):
+        revision = db.execute(
+            "SELECT status FROM production_revisions WHERE id=?",
+            (revision_id,),
+        ).fetchone()
+        if revision and revision["status"] == "published":
+            return
+    raise ProductionRevisionOwnershipLost(
+        f"screenplay worker {run_id} no longer owns episode {episode_id}"
+    )
+
+
 class ProductionRevision(BaseModel):
     id: str
     episode_id: str
@@ -127,6 +171,18 @@ def rebind_input_fingerprint(
     if not input_fingerprint or not expected_working_artifact_id:
         raise ValueError("revision 指纹重绑缺少权威指纹或 working artifact")
     db = conn or get_conn()
+    owner_row = db.execute(
+        "SELECT episode_id,kind FROM production_revisions WHERE id=?",
+        (revision_id,),
+    ).fetchone()
+    if owner_row is None:
+        raise ValueError("revision 指纹重绑的记录不存在")
+    _assert_screenplay_write_owner(
+        db,
+        episode_id=owner_row["episode_id"],
+        kind=owner_row["kind"],
+        revision_id=revision_id,
+    )
     cursor = db.execute(
         """UPDATE production_revisions
               SET input_fingerprint=?, updated_at=?
@@ -179,6 +235,12 @@ def bind_unpublished_revision_metadata(
     ).fetchone()
     if row is None:
         raise ValueError("revision 元数据绑定的记录不存在")
+    _assert_screenplay_write_owner(
+        db,
+        episode_id=row["episode_id"],
+        kind=row["kind"],
+        revision_id=revision_id,
+    )
     if row["status"] != "active" or row["published_artifact_id"]:
         raise ValueError("只能绑定尚未发布的 active revision")
     requested = {
@@ -383,6 +445,11 @@ def ensure_production_revision(
     """获取或创建 active revision。resume=True 时复用已有 active；False 时归档旧的并新建。"""
     ensure_production_revisions_table()
     conn = get_conn()
+    _assert_screenplay_write_owner(
+        conn,
+        episode_id=episode_id,
+        kind=kind,
+    )
     if resume:
         existing = get_active_production_revision(episode_id, kind)
         if existing:
@@ -448,17 +515,27 @@ def mark_baseline_generated(
     ).fetchone()
     if not row:
         raise ValueError(f"production revision not found: {revision_id}")
-    count = int(row["baseline_generation_count"] or 0) + 1
+    _assert_screenplay_write_owner(
+        conn,
+        episode_id=row["episode_id"],
+        kind=row["kind"],
+        revision_id=revision_id,
+    )
+    if int(row["baseline_generation_count"] or 0) != 0 or row["status"] != "active":
+        raise ValueError("production revision Baseline 已生成或 revision 不再 active")
     stamp = now()
-    conn.execute(
+    cursor = conn.execute(
         """UPDATE production_revisions SET
-            baseline_generation_count=?,
+            baseline_generation_count=1,
             baseline_artifact_id=COALESCE(?, baseline_artifact_id),
             working_artifact_id=COALESCE(?, working_artifact_id),
             updated_at=?
-        WHERE id=?""",
-        (count, baseline_artifact_id, working_artifact_id or baseline_artifact_id, stamp, revision_id),
+        WHERE id=? AND status='active' AND baseline_generation_count=0""",
+        (baseline_artifact_id, working_artifact_id or baseline_artifact_id, stamp, revision_id),
     )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise ValueError("production revision Baseline 发生 CAS 冲突")
     # episode working pointer
     kind = row["kind"]
     episode_id = row["episode_id"]
@@ -481,10 +558,16 @@ def mark_first_evaluation(revision_id: str, evaluation_id: str) -> ProductionRev
     ensure_production_revisions_table()
     conn = get_conn()
     row = conn.execute(
-        "SELECT first_evaluation_id FROM production_revisions WHERE id=?", (revision_id,)
+        "SELECT * FROM production_revisions WHERE id=?", (revision_id,)
     ).fetchone()
     if not row:
         raise ValueError(f"production revision not found: {revision_id}")
+    _assert_screenplay_write_owner(
+        conn,
+        episode_id=row["episode_id"],
+        kind=row["kind"],
+        revision_id=revision_id,
+    )
     if row["first_evaluation_id"]:
         return get_production_revision(revision_id)  # type: ignore[return-value]
     stamp = now()
@@ -505,6 +588,14 @@ def update_working_artifact(revision_id: str, artifact_id: str, *, expected_hash
     ).fetchone()
     if not row:
         raise ValueError(f"production revision not found: {revision_id}")
+    _assert_screenplay_write_owner(
+        conn,
+        episode_id=row["episode_id"],
+        kind=row["kind"],
+        revision_id=revision_id,
+    )
+    if row["status"] != "active":
+        raise RuntimeError("production revision 不再 active")
     if expected_hash:
         current_id = row["working_artifact_id"]
         if current_id:
@@ -535,10 +626,27 @@ def update_working_artifact(revision_id: str, artifact_id: str, *, expected_hash
 def save_checkpoint(revision_id: str, checkpoint: dict[str, Any]) -> None:
     ensure_production_revisions_table()
     conn = get_conn()
-    conn.execute(
-        "UPDATE production_revisions SET checkpoint_json=?, updated_at=? WHERE id=?",
+    row = conn.execute(
+        "SELECT episode_id,kind,status FROM production_revisions WHERE id=?",
+        (revision_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"production revision not found: {revision_id}")
+    _assert_screenplay_write_owner(
+        conn,
+        episode_id=row["episode_id"],
+        kind=row["kind"],
+        revision_id=revision_id,
+        allow_current_published=True,
+    )
+    cursor = conn.execute(
+        "UPDATE production_revisions SET checkpoint_json=?, updated_at=? "
+        "WHERE id=? AND status IN ('active','published')",
         (json.dumps(checkpoint, ensure_ascii=False), now(), revision_id),
     )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise ValueError("production revision checkpoint 已失效")
     conn.commit()
 
 
@@ -558,6 +666,14 @@ def set_published_artifact(
     ).fetchone()
     if not row:
         raise ValueError(f"production revision not found: {revision_id}")
+    _assert_screenplay_write_owner(
+        db,
+        episode_id=row["episode_id"],
+        kind=row["kind"],
+        revision_id=revision_id,
+    )
+    if row["status"] != "active" or row["working_artifact_id"] != artifact_id:
+        raise ValueError("只能发布当前 active revision 的 working Artifact")
     stamp = now()
     db.execute(
         "UPDATE production_revisions SET published_artifact_id=?, working_artifact_id=?, "
