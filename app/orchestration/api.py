@@ -909,6 +909,21 @@ def decide_gate(artifact_id: str, body: dict = Body(...)):
             "code": "GATE_ALREADY_DECIDED", "message": "该门禁已由其他人处理",
             "current_decision": existing_dict["decision"],
         })
+    domain_publish_labels = {
+        "episode_screenplay": "剧本台",
+        "storyboard": "分镜台",
+    }
+    domain_publish_label = domain_publish_labels.get(str(artifact["type"]))
+    if domain_publish_label:
+        raise HTTPException(409, detail={
+            "code": "DOMAIN_PUBLISH_FLOW_REQUIRED",
+            "message": (
+                f"{artifact['type']} 由 {domain_publish_label} 的正式发布事务管理；"
+                f"请回到 {domain_publish_label} 使用页面按钮处理，通用门禁不会直接改写业务状态"
+            ),
+            "artifact_type": artifact["type"],
+            "workspace": domain_publish_label,
+        })
     gate_key = {
         "character_bible": "character_bible", "episode_screenplay": "screenplay",
         "storyboard": "storyboard", "delivery_package": "delivery",
@@ -957,19 +972,6 @@ def decide_gate(artifact_id: str, body: dict = Body(...)):
             )
         else:
             conn.execute("UPDATE projects SET bible_status='failed',bible_error=? WHERE id=?", (reason, artifact["scope_id"]))
-    elif artifact["scope_type"] == "episode":
-        if artifact["type"] == "episode_screenplay":
-            conn.execute(
-                "UPDATE episodes SET screenplay_status=?,screenplay_error=?,screenplay_artifact_id=? WHERE id=?",
-                ("ready" if decision.startswith("approve") else "failed", None if decision.startswith("approve") else reason,
-                 artifact_id if decision.startswith("approve") else None, artifact["scope_id"]),
-            )
-        elif artifact["type"] == "storyboard":
-            conn.execute(
-                "UPDATE episodes SET status=?,script_error=?,storyboard_artifact_id=? WHERE id=?",
-                ("confirmed" if decision.startswith("approve") else "scripted", None if decision.startswith("approve") else reason,
-                 artifact_id if decision.startswith("approve") else None, artifact["scope_id"]),
-            )
     conn.commit()
     if run_id:
         repository.append_event(run_id, "HUMAN_GATE_DECIDED", "info", f"人工门禁已{decision}", payload={

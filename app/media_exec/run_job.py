@@ -2902,6 +2902,8 @@ async def _prepare_planned_mode_inputs(
 
 
 async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
+    from app.media_pipeline.stage_state import set_pipeline_stage
+
     # Workers are spawned during application recovery.  Give the lifespan and
     # HTTP server a scheduling boundary before any JSON decoding, authority
     # verification, or reference preparation below; otherwise a recovered
@@ -2996,7 +2998,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             wait = 15.0
             note = wait_exc.reason
             from app.media_pipeline import stages as media_stages
-            from app.media_pipeline.stage_state import set_pipeline_stage
             set_pipeline_stage(
                 job_id,
                 (
@@ -3036,7 +3037,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         if job["after_shot_id"] and not task_id:
             from app.media_pipeline.scheduler import continuity_anchor_ready
             from app.media_pipeline import stages as media_stages
-            from app.media_pipeline.stage_state import set_pipeline_stage
             ready, reason = continuity_anchor_ready(
                 conn,
                 job["after_shot_id"],
@@ -3086,7 +3086,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         if not task_id:
             from app.media_pipeline.scheduler import can_admit_video_submit
             from app.media_pipeline import stages as media_stages
-            from app.media_pipeline.stage_state import set_pipeline_stage
             is_retake = int(meta.get("auto_retake_count") or 0) > 0
             ok, reason = can_admit_video_submit(
                 episode_id=job["episode_id"], project_id=job["project_id"], is_auto_retake=is_retake,
@@ -3153,7 +3152,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     _set_version(version["id"], image_inputs=json.dumps(meta, ensure_ascii=False))
                 try:
                     from app.media_pipeline import stages as media_stages
-                    from app.media_pipeline.stage_state import set_pipeline_stage
                     set_pipeline_stage(job_id, media_stages.STAGE_VIDEO_SUBMITTING, conn=conn)
                     conn.execute(
                         "UPDATE jobs SET provider_operation_id=?, provider_create_state='submitting', "
@@ -3318,7 +3316,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     )
                 try:
                     from app.media_pipeline import stages as media_stages
-                    from app.media_pipeline.stage_state import set_pipeline_stage
                     set_pipeline_stage(job_id, media_stages.STAGE_VIDEO_GENERATING, conn=conn)
                 except Exception:  # noqa: BLE001
                     pass

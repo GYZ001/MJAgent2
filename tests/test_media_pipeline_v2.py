@@ -1,6 +1,7 @@
 """媒体流水线 V2：非阻塞轮询状态、参考图集、调度配额。"""
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 
 from app import db, worker
@@ -23,8 +24,6 @@ def _conn() -> sqlite3.Connection:
 
 
 def test_defer_sets_waiting_provider(monkeypatch) -> None:
-    import asyncio
-
     conn = _conn()
     conn.execute(
         "INSERT INTO jobs(id, kind, status, created_at, updated_at, lease_owner, lease_expires_at) "
@@ -49,6 +48,119 @@ def test_defer_sets_waiting_provider(monkeypatch) -> None:
     assert row["status"] == "waiting_provider"
     assert main_requeued == []
     assert poll_requeued == ["j1"]
+
+
+def test_recovered_provider_poll_persists_stage_progress(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)"
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,created_at) "
+        "VALUES('e1','p1',1,1)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) "
+        "VALUES('s1','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               provider_task_id,image_inputs,created_at
+           ) VALUES('v1','s1',1,'prompt','idem','running','provider-task','{}',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               lease_owner,lease_expires_at,provider_operation_id,
+               provider_create_state,provider_non_cancellable,
+               provider_submitted_at,created_at,updated_at
+           ) VALUES(
+               'j1','video','s1','v1','e1','p1','running',
+               'worker-1',9999999999,'video-create-v1',
+               'accepted',1,10,1,1
+           )"""
+    )
+    conn.commit()
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def no_fence(*_args, **_kwargs) -> None:
+        return None
+
+    poll_calls: list[str] = []
+
+    async def poll_pending(task_id: str, **_kwargs) -> dict:
+        poll_calls.append(task_id)
+        return {"status": "processing"}
+
+    class Permit:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    stage_updates: list[dict] = []
+
+    def expose_worker_error(exc: Exception, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
+    monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(worker.errors, "log_error", expose_worker_error)
+    monkeypatch.setattr(
+        worker,
+        "ensure_source_excerpt_in_prompt",
+        lambda prompt, _shot: prompt,
+    )
+    monkeypatch.setattr(worker, "_load_shot_model", lambda _shot: object())
+    monkeypatch.setattr(worker, "_set_version", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_pending)
+    monkeypatch.setattr(
+        worker,
+        "_provider_wait_policy",
+        lambda *_args, **_kwargs: {
+            "meta_changed": False,
+            "stage_progress": {"phase": "denoising", "progress": 0.5},
+            "elapsed_s": 1.0,
+            "timeout_s": 60.0,
+            "poll_delay_s": 5.0,
+            "scope": "视频任务",
+        },
+    )
+    monkeypatch.setattr(worker, "_defer_provider_poll", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        "app.media_pipeline.concurrency.semaphore_for",
+        lambda _resource: Permit(),
+    )
+    monkeypatch.setattr(
+        "app.media_pipeline.concurrency.report_healthy",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.media_pipeline.concurrency.report_congestion",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.media_pipeline.stage_state.set_pipeline_stage",
+        lambda _job_id, _stage, **kwargs: stage_updates.append(kwargs),
+    )
+
+    asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
+
+    job = dict(conn.execute(
+        "SELECT status,error FROM jobs WHERE id='j1'"
+    ).fetchone())
+    assert stage_updates, {"job": job, "poll_calls": poll_calls}
+    assert stage_updates[-1]["stage_progress"] == {
+        "phase": "denoising",
+        "progress": 0.5,
+    }
 
 
 def test_channel_defaults_balanced() -> None:

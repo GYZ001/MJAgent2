@@ -276,3 +276,69 @@ def test_gate_decision_is_versioned_and_idempotent(monkeypatch) -> None:
     })
     assert repeated["idempotent"] is True
     assert conn.execute("SELECT COUNT(*) FROM gate_decisions WHERE artifact_id='art-1'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("artifact_type", ["episode_screenplay", "storyboard"])
+def test_generic_gate_cannot_bypass_domain_publish_authority(
+    monkeypatch,
+    artifact_type: str,
+) -> None:
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) "
+        "VALUES('p1','项目一','created',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,status,screenplay_status,
+               screenplay_artifact_id,published_screenplay_artifact_id,
+               storyboard_artifact_id,published_storyboard_artifact_id,created_at
+           ) VALUES(
+               'e1','p1',1,'confirmed','ready',
+               'screenplay-old','screenplay-old',
+               'storyboard-old','storyboard-old',1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,content_json,
+               content_hash,parent_artifact_ids_json,model_snapshot_json,created_at
+           ) VALUES(
+               'art-candidate',?,'episode','e1',2,'validated','T3',
+               '{}','candidate-hash','[]','{}',2
+           )""",
+        (artifact_type,),
+    )
+    conn.commit()
+
+    with pytest.raises(HTTPException) as blocked:
+        orchestration_api.decide_gate("art-candidate", {
+            "decision": "approve",
+            "reason": "尝试从通用观测台批准",
+            "expected_version": 2,
+            "idempotency_key": "generic-gate-candidate-v2",
+        })
+
+    assert blocked.value.status_code == 409
+    assert blocked.value.detail["code"] == "DOMAIN_PUBLISH_FLOW_REQUIRED"
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id='art-candidate'"
+    ).fetchone()[0] == "validated"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM gate_decisions WHERE artifact_id='art-candidate'"
+    ).fetchone()[0] == 0
+    episode = conn.execute(
+        """SELECT status,screenplay_status,screenplay_artifact_id,
+                  published_screenplay_artifact_id,storyboard_artifact_id,
+                  published_storyboard_artifact_id
+             FROM episodes WHERE id='e1'"""
+    ).fetchone()
+    assert tuple(episode) == (
+        "confirmed",
+        "ready",
+        "screenplay-old",
+        "screenplay-old",
+        "storyboard-old",
+        "storyboard-old",
+    )

@@ -164,6 +164,47 @@ def test_delivery_package_id_rejects_path_traversal() -> None:
         delivery.validate_package_id("delivery_../escape")
 
 
+@pytest.mark.parametrize(
+    ("decision", "accepted_risk"),
+    [
+        (None, None),
+        ("approve", None),
+        ("approve_with_risk", "接受已知质量风险"),
+    ],
+)
+def test_delivery_hard_blockers_cannot_build_or_approve(
+    monkeypatch,
+    decision: str | None,
+    accepted_risk: str | None,
+) -> None:
+    monkeypatch.setattr(
+        delivery,
+        "delivery_readiness",
+        lambda _episode_id: {
+            "blockers": [
+                {
+                    "key": "final_video",
+                    "message": "整集成片缺失或不可解码",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        delivery,
+        "get_conn",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("硬门禁失败后不得产生数据库或文件副作用")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="交付硬门禁未通过.*整集成片缺失"):
+        delivery.build_delivery_package(
+            "e",
+            decision=decision,
+            accepted_risk=accepted_risk,
+        )
+
+
 def test_delivery_reject_can_only_be_claimed_once(monkeypatch) -> None:
     conn = _conn()
     monkeypatch.setattr(repository, "get_conn", lambda: conn)

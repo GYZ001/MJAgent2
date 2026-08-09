@@ -309,17 +309,11 @@ def build_delivery_package(
     readiness = delivery_readiness(episode_id)
     gate_findings = list(readiness["blockers"])
     if gate_findings:
-        readiness["warnings"] = [
-            *readiness["warnings"],
-            *[
-                {
-                    **item,
-                    "code": "DELIVERY_GATE_RETRY_EXHAUSTED_FALLBACK",
-                    "message": f"{item['message']}（重试耗尽，已输出当前可用交付包）",
-                }
-                for item in gate_findings
-            ],
-        ]
+        summary = "；".join(
+            str(item.get("message") or item.get("key") or "未知阻塞")
+            for item in gate_findings[:5]
+        )
+        raise ValueError(f"交付硬门禁未通过：{summary}")
     if decision not in {None, "approve", "approve_with_risk"}:
         raise ValueError("decision 必须为 approve 或 approve_with_risk")
     if decision == "approve_with_risk" and not (accepted_risk or "").strip():
