@@ -1435,6 +1435,7 @@ def normalize_storyboard_shot_candidate(
     outline_narrative_task: dict[str, Any] | None = None,
     previous_scene_name: str = "",
     previous_scene_time: str = "",
+    preserve_director_camera: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Losslessly normalize common LLM serialization mistakes at the boundary.
 
@@ -1963,7 +1964,9 @@ def normalize_storyboard_shot_candidate(
                 # multi-person interaction, so it cannot generically imply a
                 # close-up or a static camera.
                 planned_shot_size = str(
-                    outline_narrative_task.get("camera_size") or ""
+                    ""
+                    if preserve_director_camera
+                    else outline_narrative_task.get("camera_size") or ""
                 )
                 if planned_shot_size in SHOT_SIZES:
                     target_shot_size = planned_shot_size
@@ -1980,7 +1983,9 @@ def normalize_storyboard_shot_candidate(
                     })
                     shot["shot_size"] = target_shot_size
                 planned_camera_move = str(
-                    outline_narrative_task.get("camera_movement") or ""
+                    ""
+                    if preserve_director_camera
+                    else outline_narrative_task.get("camera_movement") or ""
                 )
                 target_camera_move = (
                     planned_camera_move
@@ -8621,6 +8626,7 @@ def _hydrate_directed_scene_pack(
             },
             episode_no=draft.episode_no,
             shot_no=int(shot.shot_no),
+            preserve_director_camera=True,
             **storyboard_shot_authority_context(
                 screenplay,
                 brief,
