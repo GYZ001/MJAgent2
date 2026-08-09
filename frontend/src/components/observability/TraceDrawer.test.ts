@@ -115,6 +115,18 @@ describe("调用树根节点识别", () => {
         name: "val422_metric",
         subtitle: "d2a5n9rnvvm49eucvnvg",
       },
+      {
+        ...node("call:3", "step:discovery"),
+        name: "internal_projection",
+      },
+      {
+        ...node("call:4", null),
+        name: "unregistered_business_step",
+      },
+      {
+        ...node("call:5", "step:discovery", "model_processing"),
+        name: "逐场撰写剧本（场次分片 SS003，共 8 片）",
+      },
     ];
 
     const names = traceDisplayNames(nodes);
@@ -122,6 +134,9 @@ describe("调用树根节点识别", () => {
     expect(names.get("step:discovery")).toBe("识别剧本角色");
     expect(names.get("call:1")).toBe("为“识别剧本角色”生成业务内容");
     expect(names.get("call:2")).toBe("记录结构校验指标");
+    expect(names.get("call:3")).toBe("处理“识别剧本角色”相关数据");
+    expect(names.get("call:4")).toBe("业务名称待配置（unregistered_business_step）");
+    expect(names.get("call:5")).toBe("逐场撰写剧本（场次分片 SS003，共 8 片）");
     expect(traceNodeRole(nodes[2])).toBe("model_processing");
     expect(traceNodeRole(nodes[3])).toBe("program_processing");
   });

@@ -288,12 +288,21 @@ def test_trace_tree_and_node_io_follow_persisted_links(scoped_db) -> None:
 
 
 def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
-    assert observability_api._trace_step_label("character_discovery") == "识别剧本角色"
+    assert observability_api._trace_step_label("character_discovery") == "识别本集出场人物"
+    assert observability_api._trace_step_label("screenplay_blueprint") == "规划全剧剧情结构"
+    assert observability_api._trace_step_label("screenplay_identity_freeze") == "统一人物身份与别名"
+    assert observability_api._trace_step_label("screenplay_envelope") == "规划全剧叙事框架"
+    assert observability_api._trace_step_label("screenplay_scene_shards") == "逐场撰写剧本"
+    assert observability_api._trace_step_label("screenplay_merge") == "合并并校验完整剧本"
+    assert observability_api._trace_step_label("screenplay_document") == "生成并验收完整剧本"
     assert (
         observability_api._trace_step_label("storyboard_shot_12.iteration", 2)
         == "生成第12镜分镜"
     )
-    assert observability_api._trace_step_label("unknown_internal_step") == "执行程序处理"
+    assert (
+        observability_api._trace_step_label("unknown_internal_step")
+        == "业务名称待配置（unknown_internal_step）"
+    )
 
     name, role, method = observability_api._trace_call_semantics("val422_metric")
     assert (name, role, method) == (
@@ -303,7 +312,7 @@ def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
     )
     name, role, method = observability_api._trace_call_semantics("future_prompt")
     assert (name, role, method) == (
-        "生成业务内容",
+        "生成当前业务环节所需内容",
         "model_processing",
         "通过业务生成模型",
     )
@@ -320,6 +329,21 @@ def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
     )
     assert (name, role, method) == (
         "生成剧本时空因果蓝图（第 2/5 片，第 3 次尝试）",
+        "model_processing",
+        "通过文本生成模型",
+    )
+
+    name, role, method = observability_api._trace_call_semantics(
+        "chat",
+        {
+            "stage": "剧本场次分片",
+            "shard_id": "SS003",
+            "shard_count": 8,
+        },
+        "逐场撰写剧本",
+    )
+    assert (name, role, method) == (
+        "逐场撰写剧本（场次分片 SS003，共 8 片）",
         "model_processing",
         "通过文本生成模型",
     )

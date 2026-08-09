@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from app.db import get_conn, now
@@ -17,41 +18,114 @@ from app.observability.tracing import bind_trace
 T = TypeVar("T")
 
 
-# 后端事件里的步骤 key 保留英文标识以便审计追踪，但对用户展示的 message 一律走中文映射。
-_STEP_KEY_LABELS: dict[str, str] = {
-    "generate": "生成内容",
-    "validate": "校验内容",
-    "evaluate": "质量评估",
-    "repair": "定向修复",
-    "screenplay": "生成剧本",
-    "character_discovery": "剧本人物解析",
-    "screenplay_blueprint": "剧本蓝图",
-    "screenplay_identity_freeze": "剧本身份冻结",
-    "screenplay_envelope": "剧本全局包络",
-    "screenplay_scene_shards": "剧本场次分片",
-    "screenplay_merge": "剧本 IR 合并",
-    "screenplay_document": "剧本文档校验与发布",
-    "storyboard": "生成分镜",
-    "character_bible": "人物谱生成",
-    "character_references": "生成人物参考图",
-    "scene_bible": "场景设定",
-    "scene_references": "生成场景参考图",
-    "episode_mapping": "分集规划",
-    "scene_generation": "生成关键帧",
-    "video_generation": "生成视频",
-    "episode_video_completion": "补齐整集视频",
-    "delivery": "交付",
-    "delivery_package": "生成交付候选",
-    "build_delivery_snapshot": "生成交付快照",
-    "apply_delivery_gate": "应用交付决定",
+@dataclass(frozen=True, slots=True)
+class WorkflowStepPresentation:
+    name: str
+    description: str
+
+
+# This is domain metadata owned by orchestration, not an observability fallback.
+# Step keys remain the audit identity while these fields explain the workflow to users.
+_STEP_PRESENTATIONS: dict[str, WorkflowStepPresentation] = {
+    "generate": WorkflowStepPresentation(
+        "生成业务内容", "根据当前环节的输入生成候选结果",
+    ),
+    "validate": WorkflowStepPresentation(
+        "检查内容完整性", "检查候选结果是否满足结构与业务要求",
+    ),
+    "evaluate": WorkflowStepPresentation(
+        "评估内容质量", "评估结果质量并确定是否需要修复",
+    ),
+    "repair": WorkflowStepPresentation(
+        "修复未通过项", "根据检查结果定向修复问题",
+    ),
+    "screenplay": WorkflowStepPresentation(
+        "生成完整剧本", "把本集原文转化为可审核、可继续拆镜的剧本",
+    ),
+    "character_discovery": WorkflowStepPresentation(
+        "识别本集出场人物", "从本集原文识别人名、身份和人物关系",
+    ),
+    "character_discovery_resume_audit": WorkflowStepPresentation(
+        "复核人物识别结果", "续跑前确认人物识别结果完整且仍然可用",
+    ),
+    "screenplay_blueprint": WorkflowStepPresentation(
+        "规划全剧剧情结构", "梳理事件顺序、场景归属和关键叙事关系",
+    ),
+    "screenplay_identity_freeze": WorkflowStepPresentation(
+        "统一人物身份与别名", "把原文中的称呼统一到确定的人物身份",
+    ),
+    "screenplay_envelope": WorkflowStepPresentation(
+        "规划全剧叙事框架", "确定整集的开场、体验目标和结尾承接",
+    ),
+    "screenplay_scene_shards": WorkflowStepPresentation(
+        "逐场撰写剧本", "按剧情结构并行撰写每个场次的动作与对白",
+    ),
+    "screenplay_merge": WorkflowStepPresentation(
+        "合并并校验完整剧本", "合并全部场次并检查原文、人物和剧情一致性",
+    ),
+    "screenplay_document": WorkflowStepPresentation(
+        "生成并验收完整剧本", "统筹剧本生成、质量修复和最终发布验收",
+    ),
+    "storyboard": WorkflowStepPresentation(
+        "生成可执行分镜", "把剧本拆解为可以生成画面和视频的镜头",
+    ),
+    "character_bible": WorkflowStepPresentation(
+        "建立人物设定", "整理人物身份、外观和贯穿全片的一致性要求",
+    ),
+    "character_references": WorkflowStepPresentation(
+        "生成人物定妆照", "根据人物设定生成后续画面使用的外观参考",
+    ),
+    "scene_bible": WorkflowStepPresentation(
+        "建立场景设定", "整理场景空间、时间和视觉一致性要求",
+    ),
+    "scene_references": WorkflowStepPresentation(
+        "生成场景参考图", "根据场景设定生成后续画面使用的视觉参考",
+    ),
+    "episode_mapping": WorkflowStepPresentation(
+        "规划分集内容", "把原始故事规划为连续且完整的分集结构",
+    ),
+    "scene_generation": WorkflowStepPresentation(
+        "生成镜头关键帧", "为分镜生成视频制作所需的关键画面",
+    ),
+    "media_generation": WorkflowStepPresentation(
+        "生成镜头素材", "生成当前镜头所需的图片或视频素材",
+    ),
+    "video_generation": WorkflowStepPresentation(
+        "生成镜头视频", "根据分镜和关键帧生成单个镜头视频",
+    ),
+    "episode_video_completion": WorkflowStepPresentation(
+        "补齐整集视频", "检查并补齐本集中尚未完成的视频镜头",
+    ),
+    "delivery": WorkflowStepPresentation(
+        "执行成片交付", "检查成片条件并输出可交付结果",
+    ),
+    "delivery_package": WorkflowStepPresentation(
+        "生成交付候选", "汇总剧本、分镜和视频形成交付候选",
+    ),
+    "build_delivery_snapshot": WorkflowStepPresentation(
+        "汇总交付版本", "固定本次交付所使用的全部业务版本",
+    ),
+    "apply_delivery_gate": WorkflowStepPresentation(
+        "确认交付条件", "根据质量门禁决定是否允许正式交付",
+    ),
 }
+
+
+def step_presentation(step_key: str) -> WorkflowStepPresentation:
+    """Return the user-facing contract declared for a persisted workflow step."""
+    key = str(step_key or "").strip()
+    presentation = _STEP_PRESENTATIONS.get(key)
+    if presentation:
+        return presentation
+    return WorkflowStepPresentation(
+        f"业务名称待配置（{key or '未命名步骤'}）",
+        "该步骤尚未声明用户可理解的业务名称，请补充编排元数据",
+    )
 
 
 def _step_label(step_key: str) -> str:
     """Return the Chinese display label for a workflow step key."""
-    if not step_key:
-        return "未命名步骤"
-    return _STEP_KEY_LABELS.get(step_key, step_key)
+    return step_presentation(step_key).name
 
 
 def fingerprint(*parts: Any) -> str:

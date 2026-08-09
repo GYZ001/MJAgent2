@@ -18,6 +18,7 @@ from fastapi.responses import PlainTextResponse
 from app.db import get_conn
 from app.evidence import repository
 from app.orchestration import api as orchestration_api
+from app.orchestration.engine import step_presentation
 from app import system_api
 
 
@@ -193,26 +194,7 @@ _TRACE_WORKFLOW_LABELS = {
     "delivery": "交付",
     "delivery_package": "交付候选生成",
 }
-_TRACE_STEP_LABELS = {
-    "generate": "生成内容",
-    "validate": "校验内容",
-    "evaluate": "质量评估",
-    "repair": "定向修复",
-    "screenplay": "生成剧本",
-    "storyboard": "生成分镜",
-    "build_delivery_snapshot": "生成交付快照",
-    "apply_delivery_gate": "应用交付决定",
-    "character_references": "生成人物参考图",
-    "media_generation": "媒体生成",
-    "character_discovery": "识别剧本角色",
-    "character_discovery_resume_audit": "核对角色识别恢复状态",
-    "character_bible": "生成人物设定",
-    "scene_bible": "生成场景设定",
-    "scene_references": "生成场景参考图",
-    "video_generation": "生成镜头视频",
-}
 _TRACE_CALL_LABELS = {
-    "chat": "生成文本内容",
     "vlm": "理解画面内容",
     "vlm_qa": "检查视频画面质量",
     "video_create": "提交视频生成",
@@ -327,8 +309,6 @@ def _trace_label(value: str | None, labels: dict[str, str], fallback: str) -> st
 
 def _trace_step_label(step_key: str | None, iteration_no: int | None = None) -> str:
     key = str(step_key or "")
-    if key in _TRACE_STEP_LABELS:
-        return _TRACE_STEP_LABELS[key]
     patterns = (
         (r"screenplay\.iteration", "执行第{iteration}轮剧本生成"),
         (r"character_bible\.iteration", "执行第{iteration}轮人物设定生成"),
@@ -344,7 +324,24 @@ def _trace_step_label(step_key: str | None, iteration_no: int | None = None) -> 
                 iteration=max(1, int(iteration_no or 1)),
                 number=match.group(1) if match.groups() else "",
             )
-    return "执行程序处理"
+    return step_presentation(key).name
+
+
+def _trace_step_description(step_key: str | None) -> str:
+    key = str(step_key or "")
+    if re.fullmatch(r"screenplay\.iteration", key):
+        return "生成或修复一版完整剧本候选"
+    if re.fullmatch(r"character_bible\.iteration", key):
+        return "生成或修复一版人物设定候选"
+    if re.fullmatch(r"scene_bible\.iteration", key):
+        return "生成或修复一版场景设定候选"
+    if re.fullmatch(r"storyboard_outline\.iteration", key):
+        return "生成或修复一版分镜大纲候选"
+    if re.fullmatch(r"storyboard_scene_\d+\.iteration", key):
+        return "生成或修复当前场景的分镜内容"
+    if re.fullmatch(r"storyboard_shot_\d+\.iteration", key):
+        return "生成或修复当前镜头的执行内容"
+    return step_presentation(key).description
 
 
 def _trace_meta(raw: Any) -> dict[str, Any]:
@@ -365,6 +362,12 @@ def _trace_call_suffix(meta: dict[str, Any]) -> str:
     shard_count = meta.get("shard_count")
     if shard_index is not None and shard_count is not None:
         parts.append(f"第 {shard_index}/{shard_count} 片")
+    elif meta.get("shard_id"):
+        shard_id = str(meta["shard_id"])
+        parts.append(
+            f"场次分片 {shard_id}"
+            + (f"，共 {shard_count} 片" if shard_count else "")
+        )
     source_batch = meta.get("source_batch")
     source_batches = meta.get("source_batches")
     if source_batch is not None and source_batches and int(source_batches) > 1:
@@ -399,24 +402,50 @@ def _trace_call_semantics(
     if not name:
         name = _TRACE_STAGE_PURPOSE_LABELS.get(stage)
     if not name:
+        name = business_stage_name
+    if not name and stage:
+        name = (
+            stage
+            if re.match(r"^(识别|解析|复核|检查|审核|评估|诊断|修复|规划|生成|撰写|合并|记录|复用|提交|查询|计算|规范化|补充|保留|执行)", stage)
+            else f"{'生成' if node_role == 'model_processing' else '处理'}{stage}"
+        )
+    if not name:
         name = _TRACE_CALL_LABELS.get(key)
     if not name:
         if key.endswith("_prompt"):
             node_role = "model_processing"
-            name = "生成业务内容"
+            name = (
+                f"生成“{business_stage_name}”所需内容"
+                if business_stage_name
+                else "生成当前业务环节所需内容"
+            )
         elif key.endswith("_loop"):
-            name = "执行自动修复循环"
+            name = (
+                f"自动修复“{business_stage_name}”"
+                if business_stage_name
+                else "执行当前业务环节的自动修复"
+            )
         elif "normalization" in key:
-            name = "规范化业务数据"
+            name = (
+                f"规范化“{business_stage_name}”数据"
+                if business_stage_name
+                else "规范化当前业务数据"
+            )
         elif "compile" in key or "recompile" in key:
-            name = "本地编译业务数据"
+            name = (
+                f"编译“{business_stage_name}”数据"
+                if business_stage_name
+                else "编译当前业务数据"
+            )
         elif "metric" in key:
             name = "记录运行指标"
         else:
             name = (
-                f"为“{business_stage_name}”生成业务内容"
+                f"生成“{business_stage_name}”所需内容"
                 if node_role == "model_processing" and business_stage_name
-                else "执行程序处理"
+                else f"处理“{business_stage_name}”相关数据"
+                if business_stage_name
+                else "处理当前业务环节"
             )
     if node_role == "model_processing":
         name += _trace_call_suffix(meta)
@@ -605,6 +634,12 @@ def _trace_tree(
         )
         for step in steps
     }
+    run_labels = {
+        str(run["id"]): _trace_label(
+            run.get("workflow_type"), _TRACE_WORKFLOW_LABELS, "业务任务",
+        )
+        for run in runs
+    }
     jobs = [
         dict(row)
         for row in conn.execute(
@@ -703,11 +738,7 @@ def _trace_tree(
             "name": _trace_step_label(
                 step.get("step_key"), step.get("iteration_no"),
             ),
-            "subtitle": (
-                "组织模型与程序处理"
-                if is_business_stage
-                else "通过智能体执行流程"
-            ),
+            "subtitle": _trace_step_description(step.get("step_key")),
             "status": step.get("status") or "unknown",
             "started_at": step.get("started_at"),
             "finished_at": step.get("finished_at"),
@@ -743,7 +774,7 @@ def _trace_tree(
         call_name, call_role, call_method = _trace_call_semantics(
             call.get("kind"),
             call.get("meta"),
-            step_labels.get(step_id),
+            step_labels.get(step_id) or run_labels.get(run_id),
         )
         nodes.append({
             "id": f"call:{call['id']}",
