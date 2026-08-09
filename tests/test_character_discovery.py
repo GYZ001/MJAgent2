@@ -691,7 +691,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "绿袍男子拦路呵斥",
-                "future_evidence": "众人认出他正是丁力",
+                "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
             }],
         }, ensure_ascii=False)
 
@@ -726,10 +726,11 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         "resolution": "future_identity",
         "reason": "后续章节已确认该称谓的稳定真名",
         "evidence": "绿袍男子拦路呵斥",
-        "future_evidence": "众人认出他正是丁力",
+        "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
         "identity_group": "current-1:绿袍男子",
-            "authority_id": "bible:丁力",
-            "authority_version": "screenplay-identity-authority.v1",
+        "decision_contract_version": "screenplay-future-identity.v3",
+        "authority_id": "bible:丁力",
+        "authority_version": "screenplay-identity-authority.v1",
     }]
 
 
@@ -760,7 +761,7 @@ def test_future_identity_model_scans_all_batches_and_named_evidence_wins(monkeyp
                 "identity_kind": "named",
                 "kind": "onscreen",
                 "evidence": "青衣人拦路",
-                "future_evidence": "摘下面具后认出是丁力",
+                "future_evidence": "青衣人摘下面具，萧炎这才认出他就是丁力。",
             }]}, ensure_ascii=False)
         return json.dumps({"characters": [{
             "source_label": "青衣人",
@@ -874,7 +875,7 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
             "identity_kind": "named",
             "kind": "mentioned",
             "evidence": "许师姐是同一女子",
-            "future_evidence": "后文明确称许清",
+            "future_evidence": "许师姐转身，众人称她许清。",
         }]}, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
@@ -1004,7 +1005,7 @@ def test_stable_unique_title_is_accepted_as_named_identity(monkeypatch) -> None:
             "identity_kind": "named",
             "kind": "mentioned",
             "evidence": "跨章节唯一指向建立宗门的同一位老祖",
-            "future_evidence": "后续仍以同一专属尊号指代",
+            "future_evidence": "靠山老祖定下门规",
         }]}, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
@@ -1028,7 +1029,10 @@ def test_future_functional_relation_label_is_not_promoted_by_text_presence(
         world=World(visual_style_canonical="都市漫画"),
     )
 
+    phases: list[str] = []
+
     async def fake_chat(*_args, **kwargs):
+        phases.append(kwargs["call_meta"]["discovery_phase"])
         if kwargs["call_meta"]["discovery_phase"] == "current":
             return json.dumps({"characters": [{
                 "source_label": "她男朋友",
@@ -1040,12 +1044,12 @@ def test_future_functional_relation_label_is_not_promoted_by_text_presence(
             }]}, ensure_ascii=False)
         return json.dumps({"characters": [{
             "source_label": "她男朋友",
-            "canonical_name": "她男朋友",
+            "canonical_name": "",
             "identity_kind": "functional",
             "functional_identity_key": "F1",
             "kind": "onscreen",
             "evidence": "她男朋友帮忙拎行李",
-            "future_evidence": "后续仍以她男朋友指代，没有稳定真名",
+            "future_evidence": "",
         }]}, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
@@ -1061,6 +1065,7 @@ def test_future_functional_relation_label_is_not_promoted_by_text_presence(
         (item["source_label"], item["name"], item["identity_kind"])
         for item in candidates
     ] == [("她男朋友", "她男朋友", "functional")]
+    assert phases == ["current", "future_identity"]
 
 
 def test_future_functional_enum_drift_can_use_existing_bible_identity(
@@ -1088,11 +1093,11 @@ def test_future_functional_enum_drift_can_use_existing_bible_identity(
         return json.dumps({"characters": [{
             "source_label": "小胖子",
             "canonical_name": "李富贵",
-            "identity_kind": "functional",
+            "identity_kind": "named",
             "functional_identity_key": "F1",
             "kind": "onscreen",
             "evidence": "小胖子跟随孟浩",
-            "future_evidence": "小胖子自报姓名为李富贵",
+            "future_evidence": "小胖子拍着胸口说，我李富贵认你这个朋友。",
         }]}, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)
@@ -1131,6 +1136,47 @@ def test_character_resolutions_persist_and_future_identity_upgrades_route_fallba
     assert first[0]["canonical_name"] == "路人甲"
     assert upgraded[0]["canonical_name"] == "丁力"
     assert portraits.load_screenplay_character_resolutions(conn, "e1") == upgraded
+
+
+def test_discovery_persistence_retires_only_legacy_future_identity_rows() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE episodes(id TEXT PRIMARY KEY, screenplay_character_resolutions TEXT NOT NULL DEFAULT '[]')"
+    )
+    conn.execute("INSERT INTO episodes(id) VALUES('e1')")
+    portraits.persist_screenplay_character_resolutions(conn, "e1", [
+        {
+            "source_label": "旧称谓",
+            "canonical_name": "旧猜测",
+            "resolution": "future_identity",
+        },
+        {
+            "source_label": "门卫",
+            "canonical_name": "门卫",
+            "resolution": "functional_identity",
+        },
+    ])
+
+    current = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "e1",
+        [{
+            "source_label": "新称谓",
+            "canonical_name": "已证实名",
+            "resolution": "future_identity",
+            "decision_contract_version": portraits.FUTURE_IDENTITY_DECISION_VERSION,
+        }],
+        retire_legacy_future_identity=True,
+    )
+
+    assert {
+        (item["source_label"], item["resolution"])
+        for item in current
+    } == {
+        ("门卫", "functional_identity"),
+        ("新称谓", "future_identity"),
+    }
 
 
 def test_character_resolution_merge_preserves_distinct_scoped_authorities() -> None:

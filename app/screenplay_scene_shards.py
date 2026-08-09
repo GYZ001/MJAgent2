@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.character_policy import functional_extra_anchor
 from app.db import get_conn, get_setting
 from app.evidence import repository as evidence_repository
 from app.harness import model_gateway
@@ -210,7 +211,14 @@ def build_frozen_identity_registry(
             source_names=source_names,
             kind="named_character" if named else "functional_character",
             visual_policy="canonical" if named else "contextual",
-            visual_canonical="",
+            visual_canonical=(
+                ""
+                if named
+                else functional_extra_anchor(
+                    canonical_name,
+                    declared_functional_names={canonical_name},
+                )
+            ),
             asset_requirement="required" if named else "optional",
             voice_canonical="",
             role_type="named_character" if named else "functional_character",

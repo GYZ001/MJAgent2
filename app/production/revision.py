@@ -369,6 +369,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             "task_active": active,
             "can_resume_repair": False,
             "can_resume_baseline": False,
+            "has_working_baseline": False,
+            "has_resumable_baseline": False,
             "shard_progress": {
                 "total": 0, "validated": 0, "running": 0, "failed": 0,
             },
@@ -424,9 +426,40 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         item for item in (checkpoint.get("shards") or [])
         if isinstance(item, dict)
     ]
+    checkpoint_artifact_ids = {
+        str(value)
+        for value in [
+            checkpoint.get("blueprint_artifact_id"),
+            checkpoint.get("identity_artifact_id"),
+            checkpoint.get("envelope_artifact_id"),
+            checkpoint.get("merged_ir_artifact_id"),
+            *(
+                item.get("normalized_artifact_id")
+                for item in shard_rows
+            ),
+        ]
+        if str(value or "").strip()
+    }
+    available_artifact_ids = {
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM artifacts WHERE id IN ("
+            + ",".join("?" for _ in checkpoint_artifact_ids)
+            + ")",
+            sorted(checkpoint_artifact_ids),
+        ).fetchall()
+    } if checkpoint_artifact_ids else set()
+
+    def shard_is_validated(item: dict[str, Any]) -> bool:
+        return bool(
+            item.get("status") == "validated"
+            and str(item.get("normalized_artifact_id") or "")
+            in available_artifact_ids
+        )
+
     projected_shard_progress = {
         "total": len(shard_rows),
-        "validated": sum(item.get("status") == "validated" for item in shard_rows),
+        "validated": sum(shard_is_validated(item) for item in shard_rows),
         "running": sum(item.get("status") == "running" for item in shard_rows),
         "failed": sum(item.get("status") == "failed" for item in shard_rows),
     }
@@ -434,11 +467,15 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         not has_working_baseline
         and not published
         and (
-            checkpoint.get("blueprint_artifact_id")
-            or checkpoint.get("identity_artifact_id")
-            or checkpoint.get("envelope_artifact_id")
-            or any(item.get("status") == "validated" for item in shard_rows)
-            or checkpoint.get("merged_ir_artifact_id")
+            str(checkpoint.get("blueprint_artifact_id") or "")
+            in available_artifact_ids
+            or str(checkpoint.get("identity_artifact_id") or "")
+            in available_artifact_ids
+            or str(checkpoint.get("envelope_artifact_id") or "")
+            in available_artifact_ids
+            or any(shard_is_validated(item) for item in shard_rows)
+            or str(checkpoint.get("merged_ir_artifact_id") or "")
+            in available_artifact_ids
         )
     )
     return {
@@ -456,6 +493,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "task_active": active,
         "can_resume_repair": bool(has_working_baseline and not published and not active),
         "can_resume_baseline": bool(has_resumable_baseline and not active),
+        "has_working_baseline": has_working_baseline,
+        "has_resumable_baseline": has_resumable_baseline,
         "shard_progress": projected_shard_progress,
         "activation_count": int(checkpoint.get("activation_no") or 0),
         "patch_count": len(checkpoint.get("patch_artifact_ids") or []),

@@ -1197,7 +1197,17 @@ def jobs_overview(include_all: bool = False):
 
     def effective_run_status(row: dict) -> str:
         if row.get("recovered_by_run_id"):
-            return "recovered"
+            recovered_status = str(
+                row.get("recovered_run_status") or ""
+            ).upper()
+            if recovered_status == "SUCCEEDED":
+                return "recovered"
+            if recovered_status in {"CREATED", "RUNNING", "PAUSED_EXTERNAL", ""}:
+                return "recovering"
+            return run_statuses.get(
+                recovered_status,
+                recovered_status.lower(),
+            )
         linked = row.get("linked_job_status")
         if row.get("status") == "PAUSED_EXTERNAL" and linked == "queued":
             return "recovering"
@@ -1214,6 +1224,10 @@ def jobs_overview(include_all: bool = False):
     # row in the low-level media jobs table.
     run_recent = rows_to_dicts(conn.execute(
         """SELECT wr.*,
+                  (SELECT child.status FROM workflow_runs child
+                    WHERE child.id=wr.recovered_by_run_id) AS recovered_run_status,
+                  (SELECT child.failure_message FROM workflow_runs child
+                    WHERE child.id=wr.recovered_by_run_id) AS recovered_run_failure_message,
                   CASE
                     WHEN wr.status IN ('PAUSED_EXTERNAL', 'WAITING_RETRY') THEN (
                       SELECT j.status FROM jobs j WHERE j.run_id=wr.id
@@ -1250,10 +1264,18 @@ def jobs_overview(include_all: bool = False):
         row["status"] = effective_run_status(row)
         row["error"] = (
             "服务重启后已自动重新排队，等待 worker 领取"
-            if row["status"] == "recovering" else row.get("failure_message")
+            if row["status"] == "recovering"
+            else (
+                row.get("recovered_run_failure_message")
+                if row.get("recovered_by_run_id")
+                and row.get("status") in {"failed", "cancelled", "partial"}
+                else row.get("failure_message")
+            )
         )
     count_rows = rows_to_dicts(conn.execute(
         """SELECT wr.*,
+                  (SELECT child.status FROM workflow_runs child
+                    WHERE child.id=wr.recovered_by_run_id) AS recovered_run_status,
                   CASE
                     WHEN wr.status IN ('PAUSED_EXTERNAL', 'WAITING_RETRY') THEN (
                       SELECT j.status FROM jobs j WHERE j.run_id=wr.id

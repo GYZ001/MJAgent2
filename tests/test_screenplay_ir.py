@@ -403,6 +403,39 @@ def test_compact_ir_compiles_to_existing_screenplay_contract() -> None:
     ]
 
 
+def test_event_onscreen_only_identity_is_included_in_compiler_registry() -> None:
+    payload = _ir_payload()
+    payload["identities"].append({
+        "key": "observer",
+        "display_name": "门边观察者",
+        "kind": "source_backed_contextual_character",
+        "visual_policy": "contextual",
+        "visual_canonical": "站在门边、外观保持本场连续的观察者",
+        "asset_requirement": "optional",
+        "role_type": "functional_character",
+        "rationale": "来源事件明确要求该身份在画面中",
+    })
+    payload["events"][0]["onscreen_entity_keys"] = ["observer"]
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-onscreen-only",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    contract = next(
+        item for item in screenplay.narrative_plan.identity_contracts
+        if item.display_name == "门边观察者"
+    )
+    assert contract.visual_policy == "contextual"
+    assert contract.visual_canonical
+
+
 def test_compiled_ir_passes_narrative_and_screenplay_gates() -> None:
     screenplay = _compile()
 

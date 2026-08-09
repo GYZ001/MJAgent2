@@ -95,14 +95,34 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
         kind="screenplay",
         resume=False,
     )
+    blueprint = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content={"blueprint": True},
+    ))
+    shard = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content={"shard": "SS001"},
+    ))
     save_checkpoint(revision.id, {
         "phase": "SCENE_SHARD_GENERATION",
-        "blueprint_artifact_id": "art-blueprint",
+        "blueprint_artifact_id": blueprint["id"],
         "identity_artifact_id": "art-identity",
         "envelope_artifact_id": "art-envelope",
         "yield_reason": "user_cancelled",
         "shards": [
-            {"shard_id": "SS001", "status": "validated"},
+            {
+                "shard_id": "SS001",
+                "status": "validated",
+                "normalized_artifact_id": shard["id"],
+            },
             {"shard_id": "SS002", "status": "failed"},
             {"shard_id": "SS003", "status": "pending"},
         ],
@@ -119,6 +139,35 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
         "failed": 1,
     }
     assert state["yield_reason"] == "user_cancelled"
+
+
+def test_production_state_does_not_count_deleted_checkpoint_artifacts() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    save_checkpoint(revision.id, {
+        "phase": "IR_MERGE",
+        "blueprint_artifact_id": "art-deleted-blueprint",
+        "merged_ir_artifact_id": "art-deleted-merged",
+        "shards": [{
+            "shard_id": "SS001",
+            "status": "validated",
+            "normalized_artifact_id": "art-deleted-shard",
+        }],
+    })
+
+    state = screenplay_production_state("e1")
+
+    assert state["can_resume_baseline"] is False
+    assert state["has_resumable_baseline"] is False
+    assert state["shard_progress"] == {
+        "total": 1,
+        "validated": 0,
+        "running": 0,
+        "failed": 0,
+    }
 
 
 def test_resume_route_has_a_distinct_capability() -> None:
@@ -448,6 +497,46 @@ def test_failed_recovery_run_clears_only_its_ir_lineage() -> None:
     assert repository.get_artifact(artifacts[0]["id"]) is None
     assert repository.get_artifact(artifacts[1]["id"]) is None
     assert repository.get_artifact(artifacts[2]["id"]) is not None
+
+
+def test_runtime_failure_preserves_validated_baseline_recovery_point() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    blueprint = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content={"blueprint": True},
+    ))
+    save_checkpoint(revision.id, {
+        "phase": "IDENTITY_FREEZE",
+        "blueprint_artifact_id": blueprint["id"],
+    })
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='running' WHERE id='e1'"
+    )
+    conn.commit()
+
+    preserved = api._project_screenplay_runtime_failure(
+        "e1",
+        run_id=None,
+        public_error="SYS · ERR-test",
+    )
+
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_error FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert preserved is True
+    assert repository.get_artifact(blueprint["id"]) is not None
+    assert episode["screenplay_status"] == "repairing"
+    assert "安全恢复点已保留" in episode["screenplay_error"]
+    assert "ERR-test" in episode["screenplay_error"]
 
 
 def test_exhausted_repair_discards_ir_and_active_revision() -> None:

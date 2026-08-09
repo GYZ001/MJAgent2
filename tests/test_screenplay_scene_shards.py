@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.narrative_blueprint import NarrativeBlueprint, derive_blueprint_scene_plans
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
+from app.schemas import Bible
 from app.screenplay_ir import IRIdentity, IRScene, IRSceneUnit
 from app.screenplay_scene_shards import (
     SCREENPLAY_SCENE_SHARD_VERSION,
@@ -22,6 +23,7 @@ from app.screenplay_scene_shards import (
     ScreenplaySceneShardIR,
     UnresolvedParticipant,
     blueprint_content_hash,
+    build_frozen_identity_registry,
     build_screenplay_scene_shard_plans,
     generate_screenplay_envelope,
     generate_screenplay_scene_shards,
@@ -151,6 +153,26 @@ def test_scene_shard_grouping_is_deterministic_and_respects_domains() -> None:
     assert [item.model_dump() for item in first] == [item.model_dump() for item in second]
     assert [item.shard_id for item in first] == ["SS001", "SS002"]
     assert [item.scene_plan_keys for item in first] == [["bp-sc001"], ["bp-sc002"]]
+
+
+def test_frozen_functional_identity_has_a_visible_contextual_anchor() -> None:
+    identities, _registry, _registry_hash = build_frozen_identity_registry(
+        Bible(),
+        [{
+            "source_label": "邮差",
+            "canonical_name": "邮差",
+            "resolution": "functional_identity",
+            "identity_group": "current-1:F1",
+        }],
+    )
+
+    functional = next(
+        item for item in identities if item.role_type == "functional_character"
+    )
+    assert functional.visual_policy == "contextual"
+    assert functional.asset_requirement == "optional"
+    assert functional.visual_canonical
+    assert "邮差" in functional.visual_canonical
 
 
 def test_validated_shards_merge_in_blueprint_order_with_global_namespaces() -> None:

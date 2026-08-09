@@ -3285,6 +3285,11 @@ def compile_screenplay_ir(
         )
         used_identity_keys.update(
             identity_key(token)
+            for token in event.onscreen_entity_keys
+            if str(token).strip() != "audience"
+        )
+        used_identity_keys.update(
+            identity_key(token)
             for token in event.perceivable_by
             if str(token).strip() != "audience"
         )

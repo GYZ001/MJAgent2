@@ -565,6 +565,42 @@ def _screenplay_production_state(episode_id: str) -> dict:
     return screenplay_production_state(episode_id)
 
 
+def _project_screenplay_runtime_failure(
+    episode_id: str,
+    *,
+    run_id: str | None,
+    public_error: str,
+) -> bool:
+    """Preserve durable baseline evidence and project an actionable UI state."""
+    conn = get_conn()
+    production_state = _screenplay_production_state(episode_id)
+    has_recovery_point = bool(
+        production_state.get("has_working_baseline")
+        or production_state.get("has_resumable_baseline")
+    )
+    if not has_recovery_point:
+        _clear_unpublished_screenplay_ir(
+            episode_id,
+            run_id=run_id,
+        )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
+        "screenplay_updated_at=? WHERE id=?",
+        (
+            "repairing" if has_recovery_point else "failed",
+            (
+                "剧本流程在后续阶段暂停；已验证产物和安全恢复点已保留，"
+                f"可继续流程。{public_error}"
+                if has_recovery_point else public_error
+            ),
+            now(),
+            episode_id,
+        ),
+    )
+    conn.commit()
+    return has_recovery_point
+
+
 def _screenplay_fallback_status(ep) -> str:
     data = dict(ep)
     if not ep["screenplay_json"]:
@@ -833,6 +869,7 @@ async def _screenplay_character_discovery(
         conn,
         episode_id,
         result.get("resolutions") or [],
+        retire_legacy_future_identity=True,
     )
     for warning in result.get("warnings") or []:
         errors.log_error(
@@ -1079,15 +1116,12 @@ async def _screenplay_task(
             )
             conn.commit()
             return None
-        _clear_unpublished_screenplay_ir(
+        public = errors.record_and_format(exc, action="screenplay_generate", context={"episode_id": episode_id})
+        _project_screenplay_runtime_failure(
             episode_id,
             run_id=current_run_id,
+            public_error=public,
         )
-        public = errors.record_and_format(exc, action="screenplay_generate", context={"episode_id": episode_id})
-        conn.execute(
-            "UPDATE episodes SET screenplay_status='failed', screenplay_error=?, screenplay_updated_at=? WHERE id=?",
-            (public, now(), episode_id))
-        conn.commit()
         return None
 
 

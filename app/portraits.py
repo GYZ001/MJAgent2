@@ -58,6 +58,8 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v3"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v3"
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -1093,9 +1095,11 @@ async def resolve_future_identity_candidates(
 {json.dumps(authority_projection, ensure_ascii=False, separators=(',', ':'))}
 后续局部窗口（{future_label or '后续章节'}）：
 {future_context}
-规则：source_label 必须逐字引用当前未决列表；只有窗口或权威投影存在唯一同一性证据时才输出 named；
+规则：source_label 必须逐字引用当前未决列表；只有窗口中存在同时包含 source_label 与
+canonical_name 的逐字身份依据时才输出 named，future_evidence 必须逐字引用该最小依据；
+证据不足时必须输出 functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
 不得输出只在后续出场的人。只输出 JSON：
-{{"characters":[{{"source_label":"","canonical_name":"","identity_kind":"named","future_evidence":""}}]}}"""
+{{"characters":[{{"source_label":"","canonical_name":"","identity_kind":"named|functional","future_evidence":"逐字依据或空串"}}]}}"""
 
     def validate_response(value: _IdentityCandidateResponse) -> list[str]:
         allowed = {str(item.get("source_label") or "") for item in unresolved}
@@ -1103,13 +1107,36 @@ async def resolve_future_identity_candidates(
         for item in value.characters:
             source_label = str(item.get("source_label") or "").strip()
             canonical_name = str(item.get("canonical_name") or "").strip()
+            identity_kind = str(
+                item.get("identity_kind") or ""
+            ).strip().lower()
+            future_evidence = str(
+                item.get("future_evidence") or ""
+            ).strip()
             if source_label not in allowed:
                 errors.append(f"source_label 越界：{source_label}")
-            if not canonical_name or (
-                canonical_name not in future_context
-                and canonical_name not in known_names
-            ):
+            if identity_kind not in {"named", "functional"}:
+                errors.append(f"identity_kind 非法：{identity_kind}")
+                continue
+            if identity_kind == "functional" and not canonical_name:
+                continue
+            if identity_kind != "named":
+                errors.append(
+                    f"功能身份不得填写 canonical_name：{source_label}"
+                )
+                continue
+            if not canonical_name:
                 errors.append(f"canonical_name 无证据：{canonical_name}")
+                continue
+            if (
+                not future_evidence
+                or future_evidence not in future_context
+                or source_label not in future_evidence
+                or canonical_name not in future_evidence
+            ):
+                errors.append(
+                    f"named 身份缺少同时包含称谓与真名的逐字依据：{source_label}"
+                )
         return errors
 
     response = await model_gateway.chat_structured(
@@ -1117,7 +1144,7 @@ async def resolve_future_identity_candidates(
         model_type=_IdentityCandidateResponse,
         validate=validate_response,
         operation_id=(
-            f"screenplay.identity.future.v2:{episode_no}:"
+            f"screenplay.identity.future.v3:{episode_no}:"
             + evidence_repository.content_hash({
                 "unresolved": unresolved,
                 "future_context": future_context,
@@ -1140,10 +1167,7 @@ async def resolve_future_identity_candidates(
         if (
             str(item.get("source_label") or "").strip()
             and str(item.get("canonical_name") or "").strip()
-            and (
-                str(item.get("identity_kind") or "").strip().lower() == "named"
-                or str(item.get("canonical_name") or "").strip() in known_names
-            )
+            and str(item.get("identity_kind") or "").strip().lower() == "named"
         )
     }
     group_resolution: dict[str, dict] = {}
@@ -1173,6 +1197,7 @@ async def resolve_future_identity_candidates(
             "future_evidence": str(
                 resolution.get("future_evidence") or ""
             )[:120],
+            "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
         })
     return merged
 
@@ -1291,7 +1316,7 @@ async def discover_character_candidates(
         get_setting("screenplay_targeted_identity_enabled") or "true"
     ).strip().lower() not in {"0", "false", "off", "no"}
     input_hash = evidence_repository.content_hash({
-        "contract_version": "screenplay-identity-discovery.v2",
+        "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
         "mode": "targeted" if targeted else "legacy",
         "episode_no": episode_no,
         "source_text": source_text,
@@ -1325,7 +1350,7 @@ async def discover_character_candidates(
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if (
-            cached.get("contract_version") == "screenplay-identity-discovery.v2"
+            cached.get("contract_version") == IDENTITY_DISCOVERY_CONTRACT_VERSION
             and cached.get("input_hash") == input_hash
             and isinstance(cached.get("candidates"), list)
         ):
@@ -1383,12 +1408,12 @@ async def discover_character_candidates(
             status="candidate",
             trust_level="T0",
             content={
-                "contract_version": "screenplay-identity-discovery.v2",
+                "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                 "input_hash": input_hash,
                 "mode": "targeted" if targeted else "legacy",
                 "model_candidates": audited,
             },
-            contract_version="screenplay-identity-discovery.v2",
+            contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
         ),
         step_run_id=getattr(trace, "step_run_id", None),
     )
@@ -1400,7 +1425,7 @@ async def discover_character_candidates(
             status="validated",
             trust_level="T1",
             content={
-                "contract_version": "screenplay-identity-discovery.v2",
+                "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                 "episode_no": episode_no,
                 "candidates": audited,
                 "source_hash": evidence_repository.content_hash(source_text),
@@ -1408,7 +1433,7 @@ async def discover_character_candidates(
                 "mode": "targeted" if targeted else "legacy",
             },
             parent_artifact_ids=[raw_artifact["id"]],
-            contract_version="screenplay-identity-discovery.v2",
+            contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
         ),
         step_run_id=getattr(trace, "step_run_id", None),
     )
@@ -1430,6 +1455,7 @@ def _identity_resolution(
         "evidence": str(item.get("evidence") or "").strip()[:80],
         "future_evidence": str(item.get("future_evidence") or "").strip()[:120],
         "identity_group": str(item.get("identity_group") or "").strip()[:96],
+        "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
     })
 
 
@@ -2659,8 +2685,19 @@ def persist_screenplay_character_resolutions(
     conn,
     episode_id: str,
     resolutions: list[dict] | None,
+    *,
+    retire_legacy_future_identity: bool = False,
 ) -> list[dict]:
     current = load_screenplay_character_resolutions(conn, episode_id)
+    if retire_legacy_future_identity:
+        current = [
+            item for item in current
+            if (
+                str(item.get("resolution") or "") != "future_identity"
+                or str(item.get("decision_contract_version") or "")
+                == FUTURE_IDENTITY_DECISION_VERSION
+            )
+        ]
     merged = merge_screenplay_character_resolutions(current, resolutions)
     if _has_column(conn, "episodes", "screenplay_character_resolutions"):
         conn.execute(
@@ -2697,6 +2734,17 @@ async def ensure_cards_for_text(
         if episode_row
         else []
     )
+    # Legacy future-identity rows were accepted when a name appeared anywhere
+    # in a broad future window.  A new discovery run must re-adjudicate them
+    # under the owned-evidence contract before reusing them as authority.
+    existing_resolutions = [
+        item for item in existing_resolutions
+        if (
+            str(item.get("resolution") or "") != "future_identity"
+            or str(item.get("decision_contract_version") or "")
+            == FUTURE_IDENTITY_DECISION_VERSION
+        )
+    ]
     future_text, future_label = _future_chapter_context(
         conn, project_id, episode_no,
     )
@@ -2930,7 +2978,7 @@ async def ensure_structural_identity_coverage(
                     "model_candidates": [],
                 },
                 parent_artifact_ids=[parent_artifact_id] if parent_artifact_id else [],
-                contract_version="screenplay-identity-discovery.v2",
+                contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
             ),
             step_run_id=getattr(trace, "step_run_id", None),
         )
@@ -2942,7 +2990,7 @@ async def ensure_structural_identity_coverage(
                 status="validated",
                 trust_level="T1",
                 content={
-                    "contract_version": "screenplay-identity-discovery.v2",
+                    "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                     "episode_no": episode_no,
                     "mode": "structural_coverage",
                     "candidates": audited,
@@ -2950,7 +2998,7 @@ async def ensure_structural_identity_coverage(
                     "structural_evidence_hash": structural_hash,
                 },
                 parent_artifact_ids=[raw_artifact["id"]],
-                contract_version="screenplay-identity-discovery.v2",
+                contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
             ),
             step_run_id=getattr(trace, "step_run_id", None),
         )
@@ -2996,7 +3044,7 @@ async def ensure_structural_identity_coverage(
                 "model_candidates": additions,
             },
             parent_artifact_ids=[parent_artifact_id] if parent_artifact_id else [],
-            contract_version="screenplay-identity-discovery.v2",
+            contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
         ),
         step_run_id=getattr(trace, "step_run_id", None),
     )
@@ -3008,7 +3056,7 @@ async def ensure_structural_identity_coverage(
             status="validated",
             trust_level="T1",
             content={
-                "contract_version": "screenplay-identity-discovery.v2",
+                "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                 "episode_no": episode_no,
                 "mode": "structural_coverage",
                 "candidates": audited,
@@ -3016,7 +3064,7 @@ async def ensure_structural_identity_coverage(
                 "structural_evidence_hash": structural_hash,
             },
             parent_artifact_ids=[raw_artifact["id"]],
-            contract_version="screenplay-identity-discovery.v2",
+            contract_version=IDENTITY_DISCOVERY_CONTRACT_VERSION,
         ),
         step_run_id=getattr(trace, "step_run_id", None),
     )

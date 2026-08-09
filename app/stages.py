@@ -2248,6 +2248,7 @@ async def _run_with_agent_loop(
             else {}
         ),
     }
+    iteration_state = {"number": 0}
 
     async def producer(
         iteration_no: int,
@@ -2255,6 +2256,7 @@ async def _run_with_agent_loop(
         latest_issues,
         issue_history,
     ) -> str:
+        iteration_state["number"] = iteration_no
         semantic_call_meta: dict[str, Any] = {}
         if semantic_attempt_id:
             digest = hashlib.sha256(
@@ -2463,7 +2465,7 @@ async def _run_with_agent_loop(
                     storyboard_candidate_context.get(
                         "preserve_director_camera"
                     )
-                ),
+                ) or iteration_state["number"] > 1,
             )
             if normalizations:
                 log_provider_call(
