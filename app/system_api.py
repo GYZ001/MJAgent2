@@ -654,16 +654,18 @@ async def test_saved_model(model_id: str, body: dict | None = None):
             )
         except hiagent.ProviderError as exc:
             raise HTTPException(422, f"模型测试失败：{exc}") from exc
-        snapshot = record_minimax_h3_probe_snapshot(
-            result,
-            provider="minimax_h3",
-            model=str(item.get("model") or config.DEFAULT_MINIMAX_H3_MODEL_VIDEO),
-        )
-        return {
-            **result,
-            "capability_snapshot_id": snapshot.id,
-            **normalize_token_limits({}),
-        }
+        response = {**result, **normalize_token_limits({})}
+        if str(result.get("base_url") or "").rstrip("/") == minimax_h3.base_url():
+            snapshot = record_minimax_h3_probe_snapshot(
+                result,
+                provider="minimax_h3",
+                model=str(
+                    item.get("model")
+                    or config.DEFAULT_MINIMAX_H3_MODEL_VIDEO
+                ),
+            )
+            response["capability_snapshot_id"] = snapshot.id
+        return response
     try:
         credentials = json.loads(get_setting("model_credentials") or "{}")
     except (TypeError, json.JSONDecodeError):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import sqlite3
 
 import pytest
@@ -216,6 +217,54 @@ def test_minimax_h3_retry_reuses_exact_checkpoint_without_reupload(monkeypatch) 
     assert {
         headers["Idempotency-Key"] for headers in generation_headers
     } == {"video-create-ver_1"}
+
+
+def test_minimax_h3_checkpoint_rejects_changed_request_for_same_operation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        minimax_h3,
+        "latest_provider_request_json",
+        lambda *_args: {
+            "checkpoint_version": 1,
+            "logical_fingerprint": "different",
+            "provider_request": {"mode": "keyframes"},
+        },
+    )
+
+    with pytest.raises(hiagent.ProviderError) as exc:
+        minimax_h3._load_request_checkpoint("video-create-ver_1", "expected")
+
+    assert exc.value.retryable is False
+    assert "请求内容发生变化" in str(exc.value)
+
+
+def test_provider_request_checkpoint_preserves_exact_long_payload(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    cursor = conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,attempt_no,received_chars
+           ) VALUES(?,?,?,?,?,?,?)""",
+        (1, "video_create", "minimax-h3", "RUNNING", 0, 1, 0),
+    )
+    monkeypatch.setattr(db, "get_conn", lambda: conn)
+    prompt = "x" * 130_000
+
+    db.update_provider_call_request(
+        int(cursor.lastrowid),
+        {"provider_request": {"prompt": prompt}},
+        preserve_exact=True,
+    )
+
+    saved = json.loads(conn.execute(
+        "SELECT request_json FROM provider_calls WHERE id=?",
+        (int(cursor.lastrowid),),
+    ).fetchone()["request_json"])
+    assert saved["provider_request"]["prompt"] == prompt
 
 
 def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:

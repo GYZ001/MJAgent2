@@ -529,6 +529,19 @@ def storyboard_visual_identity_relation(
         ),
         str(shot.last_frame_desc or ""),
     ))
+    # Location authority can legitimately contain a person's display name
+    # (for example, "高义家卧室").  The location label itself is not evidence
+    # that its owner is visible; any separate action/frame mention remains.
+    for scene_surface in sorted(
+        {
+            str(value or "").strip()
+            for value in (shot.scene_name, shot.scene_setting)
+            if str(value or "").strip()
+        },
+        key=len,
+        reverse=True,
+    ):
+        visual_text = visual_text.replace(scene_surface, "")
     unmatched_visual_text = visual_text
     for token in sorted(
         {

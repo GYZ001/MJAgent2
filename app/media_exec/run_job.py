@@ -3386,8 +3386,11 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 raise LeaseLost(f"provider poll defer lost lease: {job_id} / {owner}")
             if result["status"] == "failed":
                 error_text = result["error"][:400]
+                provider_label = str(
+                    result.get("provider_label") or "视频模型"
+                )
                 raise ProviderError(
-                    f"Seedance 任务失败：{error_text}",
+                    f"{provider_label} 任务失败：{error_text}",
                     raw=error_text,
                     failure_kind=str(result.get("failure_kind") or "provider_rejected"),
                 )

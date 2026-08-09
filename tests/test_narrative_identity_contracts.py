@@ -332,6 +332,37 @@ def test_visual_relation_allows_previous_tail_identity_only_at_boundary() -> Non
     assert persisted["unexpected_identity_ids"] == ["newcomer-7"]
 
 
+def test_visual_relation_does_not_treat_scene_owner_as_visible_cast() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        scene_name="阿烬家卧室",
+        scene_setting="深夜，阿烬家卧室",
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        visible_entity_ids=["transient-node"],
+        action_desc="云吞七号独自起身。",
+        first_frame_desc="云吞七号躺在阿烬家卧室的床上。",
+        last_frame_desc="云吞七号独自站在床边。",
+    )
+
+    location_only = storyboard_visual_identity_relation(
+        shot,
+        ["transient-node"],
+        _bible(),
+        screenplay,
+    )
+    assert location_only["unexpected_identity_ids"] == []
+
+    shot.last_frame_desc = "阿烬走进卧室，与云吞七号同处画面。"
+    visible_owner = storyboard_visual_identity_relation(
+        shot,
+        ["transient-node"],
+        _bible(),
+        screenplay,
+    )
+    assert visible_owner["unexpected_identity_ids"] == ["newcomer-7"]
+
+
 def test_authority_text_relation_includes_bible_only_identity() -> None:
     screenplay = _screenplay()
 

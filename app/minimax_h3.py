@@ -343,7 +343,7 @@ def estimated_generation_seconds(
     *,
     acceleration: str | None = None,
 ) -> int:
-    """Estimate warm generation latency from the v1.2.0 576x1024 benchmark."""
+    """Estimate latency from the conservative legacy curve when v1.3 gives none."""
     normalized_mode = provider_mode(mode)
     duration = min(15.0, max(0.2, float(duration_s)))
     points = _TURBO_DURATION_BENCHMARKS_S[normalized_mode]

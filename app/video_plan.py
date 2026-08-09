@@ -937,7 +937,7 @@ def current_capability_snapshot(
                 provider=resolved_provider,
                 model=resolved_model,
             )
-        except Exception as exc:  # noqa: BLE001 - failure becomes explicit capability evidence
+        except hiagent.ProviderError as exc:
             snapshot = _failed_minimax_h3_snapshot(
                 provider=resolved_provider,
                 model=resolved_model,
