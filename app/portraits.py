@@ -1474,15 +1474,42 @@ def _identity_resolution(
 def _replace_resolved_label(text: str, source_label: str, canonical_name: str) -> str:
     if not text or source_label == canonical_name:
         return text
-    if canonical_name.startswith(source_label):
-        suffix = canonical_name[len(source_label):]
-        if suffix:
-            return re.sub(
-                re.escape(source_label) + rf"(?!{re.escape(suffix)})",
+    # Identity normalization can run at several durable pipeline boundaries
+    # (candidate, normalized working copy, approved publication).  Preserve an
+    # already-canonical occurrence before matching its source alias so mappings
+    # such as ``美 -> 卢美`` cannot grow another ``卢`` on every pass.
+    prefix, separator, suffix = canonical_name.partition(source_label)
+    if separator:
+        if prefix and suffix:
+            repeated = (
+                rf"(?:{re.escape(prefix)}){{2,}}"
+                rf"{re.escape(source_label)}"
+                rf"(?:{re.escape(suffix)}){{2,}}"
+            )
+            text = re.sub(repeated, canonical_name, text)
+        elif prefix:
+            text = re.sub(
+                rf"(?:{re.escape(prefix)}){{2,}}{re.escape(source_label)}",
                 canonical_name,
                 text,
             )
-    return text.replace(source_label, canonical_name)
+        elif suffix:
+            text = re.sub(
+                rf"{re.escape(source_label)}(?:{re.escape(suffix)}){{2,}}",
+                canonical_name,
+                text,
+            )
+    pattern = re.compile(
+        rf"{re.escape(canonical_name)}|{re.escape(source_label)}"
+    )
+    return pattern.sub(
+        lambda match: (
+            canonical_name
+            if match.group(0) == source_label
+            else match.group(0)
+        ),
+        text,
+    )
 
 
 def _replace_screenplay_body_label(

@@ -9,7 +9,8 @@ from app.schemas import (Bible, Character, EpisodeScreenplay,
                          IdentityContractEvidence, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn,
                          NarrativeContinuityPlan, NarrativeIdentityContract,
-                         ScriptScene, VoiceCanonical, World)
+                         PlotSpine, PlotSpineBeat, ScriptScene,
+                         VoiceCanonical, World)
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -992,6 +993,51 @@ def test_future_named_identity_upgrades_every_alias_in_same_group(monkeypatch) -
         ("会飞的女人", "许清", "named"),
         ("许师姐", "许清", "named"),
     }
+
+
+def test_future_identity_suffix_alias_normalization_is_idempotent() -> None:
+    script = EpisodeScreenplay(
+        episode_no=5,
+        plot_spine=PlotSpine(
+            episode_premise="阿宾与卢美的关系发生变化。",
+            spine_beats=[
+                PlotSpineBeat(
+                    beat_id="S01",
+                    who="美",
+                    does="确认自己的决定",
+                    turn="关系发生变化",
+                ),
+                PlotSpineBeat(
+                    beat_id="S02",
+                    who="阿宾、卢美",
+                    does="继续交谈",
+                    turn="双方达成共识",
+                ),
+                PlotSpineBeat(
+                    beat_id="S03",
+                    who="阿宾、卢卢卢卢美",
+                    does="修复旧流水线留下的扩增名称",
+                    turn="身份重新收敛",
+                ),
+            ],
+            must_keep_ending="卢美完成本集关系变化。",
+        ),
+    )
+    resolutions = [{
+        "source_label": "美",
+        "canonical_name": "卢美",
+        "resolution": "future_identity",
+        "authority_id": "bible:卢美",
+    }]
+
+    for _ in range(3):
+        portraits.apply_screenplay_character_resolutions(script, resolutions)
+
+    assert [beat.who for beat in script.plot_spine.spine_beats] == [
+        "卢美",
+        "阿宾、卢美",
+        "阿宾、卢美",
+    ]
 
 
 def test_structural_audit_recovers_entity_omitted_by_current_pass(monkeypatch) -> None:

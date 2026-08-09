@@ -2913,7 +2913,7 @@ def test_screenplay_narrative_gate_is_quality_error():
 
 
 @pytest.mark.asyncio
-async def test_recorded_narrative_gate_discards_repair_state_and_fails_run(
+async def test_recorded_narrative_gate_preserves_repair_state_and_fails_run(
     monkeypatch,
 ):
     from app.domain import screenplay_ops
@@ -2925,11 +2925,38 @@ async def test_recorded_narrative_gate_discards_repair_state_and_fails_run(
         return {"added": [], "resolutions": [], "warnings": []}
 
     async def fake_production(*_args, **_kwargs):
+        from app.evidence import repository as evidence_repository
+        from app.production.revision import save_checkpoint
+
         conn = db.get_conn()
+        artifact = evidence_repository.create_artifact(EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id="ep_p",
+            status="validated",
+            trust_level="T2",
+            content={"candidate": "repair-working"},
+        ))
+        revision = ensure_production_revision(
+            episode_id="ep_p",
+            kind="screenplay",
+            resume=False,
+        )
+        mark_baseline_generated(
+            revision.id,
+            baseline_artifact_id=artifact["id"],
+            working_artifact_id=artifact["id"],
+        )
+        save_checkpoint(revision.id, {
+            "phase": "WAITING_HUMAN",
+            "working_artifact_id": artifact["id"],
+            "yield_reason": "narrative_gate_needs_review",
+        })
         conn.execute(
-            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=? "
+            "UPDATE episodes SET screenplay_status='repairing', screenplay_error=?, "
+            "working_screenplay_artifact_id=?, screenplay_production_revision_id=? "
             "WHERE id='ep_p'",
-            (message,),
+            (message, artifact["id"], revision.id),
         )
         conn.commit()
         raise screenplay_repair.ScreenplayNarrativeGateError(message)
@@ -2956,7 +2983,8 @@ async def test_recorded_narrative_gate_discards_repair_state_and_fails_run(
 
     assert result is None
     episode = db.get_conn().execute(
-        "SELECT screenplay_status, screenplay_error FROM episodes WHERE id='ep_p'"
+        "SELECT screenplay_status, screenplay_error,working_screenplay_artifact_id,"
+        "screenplay_production_revision_id FROM episodes WHERE id='ep_p'"
     ).fetchone()
     run = db.get_conn().execute(
         "SELECT status, failure_code, failure_message FROM workflow_runs WHERE id=?",
@@ -2972,8 +3000,14 @@ async def test_recorded_narrative_gate_discards_repair_state_and_fails_run(
         "ORDER BY ts DESC LIMIT 1"
     ).fetchone()
 
-    assert episode["screenplay_status"] == "failed"
+    assert episode["screenplay_status"] == "repairing"
     assert episode["screenplay_error"] == message
+    assert episode["working_screenplay_artifact_id"]
+    assert episode["screenplay_production_revision_id"]
+    assert db.get_conn().execute(
+        "SELECT status FROM production_revisions WHERE id=?",
+        (episode["screenplay_production_revision_id"],),
+    ).fetchone()["status"] == "active"
     assert run["status"] == "FAILED"
     assert run["failure_code"] == "SCREENPLAYNARRATIVEGATEERROR"
     assert run["failure_message"] == message

@@ -154,60 +154,6 @@ def _clear_unpublished_screenplay_ir(
     return len(artifact_ids)
 
 
-def _discard_exhausted_screenplay_working_state(
-    episode_id: str,
-    *,
-    run_id: str | None,
-    message: str,
-) -> int:
-    """Make exhausted repair terminal and remove every recoverable IR."""
-    conn = get_conn()
-    stamp = now()
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        revision_ids = [
-            str(row["id"])
-            for row in conn.execute(
-                "SELECT id FROM production_revisions "
-                "WHERE episode_id=? AND kind='screenplay' AND status='active'",
-                (episode_id,),
-            ).fetchall()
-        ]
-        deleted = _clear_unpublished_screenplay_ir(
-            episode_id,
-            run_id=run_id,
-            conn=conn,
-            commit=False,
-        )
-        if revision_ids:
-            marks = ",".join("?" for _ in revision_ids)
-            conn.execute(
-                f"UPDATE production_grants "
-                f"SET revoked_at=COALESCE(revoked_at, ?) "
-                f"WHERE production_revision_id IN ({marks})",
-                (stamp, *revision_ids),
-            )
-            conn.execute(
-                f"UPDATE production_revisions SET status='superseded', "
-                f"updated_at=? WHERE id IN ({marks})",
-                (stamp, *revision_ids),
-            )
-        conn.execute(
-            "UPDATE episodes SET screenplay_status='failed', "
-            "screenplay_error=?, screenplay_updated_at=?, "
-            "active_screenplay_run_id=NULL, "
-            "working_screenplay_artifact_id=NULL, "
-            "screenplay_production_revision_id=NULL "
-            "WHERE id=?",
-            (message[:800], stamp, episode_id),
-        )
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    return deleted
-
-
 def _screenplay_content_payload(value) -> dict:
     """只比较用户可编辑的语义内容，不让时间戳造成假 diff。"""
     if isinstance(value, EpisodeScreenplay):
@@ -1091,11 +1037,9 @@ async def _screenplay_task(
         from app.production.screenplay_repair import ScreenplayNarrativeGateError
 
         if isinstance(exc, ScreenplayNarrativeGateError):
-            _discard_exhausted_screenplay_working_state(
-                episode_id,
-                run_id=current_run_id,
-                message=str(exc),
-            )
+            # The repair engine has already projected WAITING_HUMAN and saved
+            # the working artifact/checkpoint.  Keep that durable recovery
+            # point; the Run may fail, but the episode remains resumable.
             raise
         msg = str(exc)
         if msg.startswith("WAITING_INPUT"):

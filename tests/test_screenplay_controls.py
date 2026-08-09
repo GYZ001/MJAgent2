@@ -539,69 +539,6 @@ def test_runtime_failure_preserves_validated_baseline_recovery_point() -> None:
     assert "ERR-test" in episode["screenplay_error"]
 
 
-def test_exhausted_repair_discards_ir_and_active_revision() -> None:
-    run_id = repository.create_run(
-        workflow_type="screenplay",
-        scope_type="episode",
-        scope_id="e1",
-        input_fingerprint="input-v1",
-    )
-    step_id = repository.create_step(run_id, "screenplay.iteration")
-    ir = repository.create_artifact(
-        EvidenceArtifact(
-            type="screenplay_generation_ir",
-            scope_type="episode",
-            scope_id="e1",
-            status="approved",
-            trust_level="T2",
-            content={"candidate": "repair-working"},
-        ),
-        step_run_id=step_id,
-    )
-    revision = ensure_production_revision(
-        episode_id="e1",
-        kind="screenplay",
-        resume=False,
-    )
-    mark_baseline_generated(
-        revision.id,
-        baseline_artifact_id=ir["id"],
-        working_artifact_id=ir["id"],
-    )
-    conn = db.get_conn()
-    conn.execute(
-        "UPDATE episodes SET screenplay_status='repairing', "
-        "active_screenplay_run_id=?, working_screenplay_artifact_id=?, "
-        "screenplay_production_revision_id=? WHERE id='e1'",
-        (run_id, ir["id"], revision.id),
-    )
-    conn.commit()
-
-    deleted = api._discard_exhausted_screenplay_working_state(
-        "e1",
-        run_id=run_id,
-        message="修复轮次耗尽",
-    )
-
-    assert deleted == 1
-    assert repository.get_artifact(ir["id"]) is None
-    row = conn.execute(
-        "SELECT screenplay_status,active_screenplay_run_id,"
-        "working_screenplay_artifact_id,screenplay_production_revision_id "
-        "FROM episodes WHERE id='e1'",
-    ).fetchone()
-    assert dict(row) == {
-        "screenplay_status": "failed",
-        "active_screenplay_run_id": None,
-        "working_screenplay_artifact_id": None,
-        "screenplay_production_revision_id": None,
-    }
-    assert conn.execute(
-        "SELECT status FROM production_revisions WHERE id=?",
-        (revision.id,),
-    ).fetchone()["status"] == "superseded"
-
-
 def test_atomic_claim_does_not_clear_current_owner_ir() -> None:
     owner_run_id = repository.create_run(
         workflow_type="screenplay",
