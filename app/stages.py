@@ -8614,6 +8614,21 @@ def _hydrate_directed_scene_pack(
                 shot.source_excerpt = aligned.excerpt
         _normalize_scene_pack_camera(shot)
         ensure_audio_timeline(shot, screenplay.voice_bible)
+        normalized, _changes = normalize_storyboard_shot_candidate(
+            {
+                "episode_no": draft.episode_no,
+                "shot": shot.model_dump(mode="json"),
+            },
+            episode_no=draft.episode_no,
+            shot_no=int(shot.shot_no),
+            **storyboard_shot_authority_context(
+                screenplay,
+                brief,
+                shots[-1] if shots else None,
+                bible=bible,
+            ),
+        )
+        shot = Shot.model_validate(normalized["shot"])
         shots.append(shot)
     normalized_board = Storyboard(
         episode_no=draft.episode_no,

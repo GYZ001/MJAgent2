@@ -1981,7 +1981,8 @@ def validate_storyboard_narrative(
     previous_shot_phase_ids: list[str] = []
     for position, shot in enumerate(items):
         shot_id = _norm(getattr(shot, "shot_id", ""))
-        label = shot_id or f"shot_no={getattr(shot, 'shot_no', position + 1)}"
+        shot_no = int(getattr(shot, "shot_no", position + 1) or position + 1)
+        label = shot_id or f"shot_no={shot_no}"
         if not shot_id:
             errors.append(f"[SHOT_ID_MISSING] {label} 缺少稳定 shot_id")
         elif shot_id in shot_ids:
@@ -2498,10 +2499,16 @@ def validate_storyboard_narrative(
         # validates their sum, so no story/action word list is involved.
         duration_s = float(getattr(shot, "duration_s", 0) or 0)
         budget = getattr(shot, "capacity_budget", None)
+        capacity_label = f"{label}(shot_no={shot_no})"
         if complete and duration_s <= 0:
-            errors.append(f"[SHOT_DURATION_MISSING] {label} 完整分镜缺少正时长")
+            errors.append(
+                f"[SHOT_DURATION_MISSING] {capacity_label} 完整分镜缺少正时长"
+            )
         if complete and budget is None:
-            errors.append(f"[SHOT_CAPACITY_BUDGET_MISSING] {label} 缺少联合观看时间预算")
+            errors.append(
+                f"[SHOT_CAPACITY_BUDGET_MISSING] {capacity_label} "
+                "缺少联合观看时间预算"
+            )
         if budget is not None:
             components = {
                 field: float(getattr(budget, field, 0) or 0)
@@ -2518,16 +2525,26 @@ def validate_storyboard_narrative(
             }
             negative = sorted(field for field, value in components.items() if value < 0)
             if negative:
-                errors.append(f"[SHOT_CAPACITY_NEGATIVE] {label} 时间预算含负值 {negative}")
+                errors.append(
+                    f"[SHOT_CAPACITY_NEGATIVE] {capacity_label} "
+                    f"时间预算含负值 {negative}"
+                )
             if components["other_s"] > 0 and not _norm(budget.other_reason):
-                errors.append(f"[SHOT_CAPACITY_OTHER_REASON_MISSING] {label} 开放预算项缺少理由")
+                errors.append(
+                    f"[SHOT_CAPACITY_OTHER_REASON_MISSING] {capacity_label} "
+                    "开放预算项缺少理由"
+                )
             if components["action_phase_s"] + 1e-9 < minimum_action_s:
                 errors.append(
-                    f"[SHOT_ACTION_CAPACITY_EXCEEDED] {label} 动作阶段最少需要 "
+                    f"[SHOT_ACTION_CAPACITY_EXCEEDED] {capacity_label} "
+                    "动作阶段最少需要 "
                     f"{minimum_action_s:.3f}s"
                 )
             if bound_action_ids and minimum_action_s <= 0 and components["action_phase_s"] <= 0:
-                errors.append(f"[SHOT_ACTION_CAPACITY_UNDECLARED] {label} 执行动作却未分配任何执行时间")
+                errors.append(
+                    f"[SHOT_ACTION_CAPACITY_UNDECLARED] {capacity_label} "
+                    "执行动作却未分配任何执行时间"
+                )
 
             dialogue_text = "".join(
                 _norm(getattr(item, "line", ""))
@@ -2569,7 +2586,8 @@ def validate_storyboard_narrative(
             spoken_min_s = max(text_min_s, timeline_min_s)
             if components["spoken_and_text_s"] + 1e-9 < spoken_min_s:
                 errors.append(
-                    f"[SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED] {label} 口播/屏幕文字最少需要 "
+                    f"[SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED] {capacity_label} "
+                    "口播/屏幕文字最少需要 "
                     f"{spoken_min_s:.3f}s"
                 )
             processing_by_prior: defaultdict[str, float] = defaultdict(float)
@@ -2591,7 +2609,8 @@ def validate_storyboard_narrative(
             )
             if components["inference_processing_s"] + 1e-9 < target_processing_min_s:
                 errors.append(
-                    f"[SHOT_INFERENCE_CAPACITY_EXCEEDED] {label} 目标理解最少需要 "
+                    f"[SHOT_INFERENCE_CAPACITY_EXCEEDED] {capacity_label} "
+                    "目标理解最少需要 "
                     f"{target_processing_min_s:.3f}s"
                 )
             competing_evidence_min_s = sum(
@@ -2602,14 +2621,18 @@ def validate_storyboard_narrative(
             )
             if components["attention_switch_s"] + 1e-9 < competing_evidence_min_s:
                 errors.append(
-                    f"[SHOT_ATTENTION_CAPACITY_EXCEEDED] {label} 竞争注意证据最少需要 "
+                    f"[SHOT_ATTENTION_CAPACITY_EXCEEDED] {capacity_label} "
+                    "竞争注意证据最少需要 "
                     f"{competing_evidence_min_s:.3f}s"
                 )
             if contribution and (
                 contribution.affective_delta
                 or contribution.character_state_delta_ids
             ) and components["reaction_registration_s"] <= 0:
-                errors.append(f"[SHOT_REACTION_CAPACITY_UNDECLARED] {label} 人物/观众情绪变化没有可感知登记时间")
+                errors.append(
+                    f"[SHOT_REACTION_CAPACITY_UNDECLARED] {capacity_label} "
+                    "人物/观众情绪变化没有可感知登记时间"
+                )
             has_spatial_work = bool(
                 contribution and contribution.spatial_temporal_delta
             ) or bool(
@@ -2620,11 +2643,15 @@ def validate_storyboard_narrative(
                 )
             )
             if has_spatial_work and components["spatial_reorientation_s"] <= 0:
-                errors.append(f"[SHOT_SPATIAL_CAPACITY_UNDECLARED] {label} 时空重定向没有分配观看时间")
+                errors.append(
+                    f"[SHOT_SPATIAL_CAPACITY_UNDECLARED] {capacity_label} "
+                    "时空重定向没有分配观看时间"
+                )
             total_budget_s = sum(components.values())
             if duration_s > 0 and total_budget_s > duration_s + 1e-9:
                 errors.append(
-                    f"[SHOT_JOINT_CAPACITY_EXCEEDED] {label} 联合预算 {total_budget_s:.3f}s "
+                    f"[SHOT_JOINT_CAPACITY_EXCEEDED] {capacity_label} "
+                    f"联合预算 {total_budget_s:.3f}s "
                     f"超过镜头 {duration_s:.3f}s"
                 )
 

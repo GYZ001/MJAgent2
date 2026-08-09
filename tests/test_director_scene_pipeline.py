@@ -754,6 +754,88 @@ def test_scene_pack_expands_short_owned_dialogue_to_auditable_source_context() -
     assert len(stages._condense(excerpt)) >= stages.SOURCE_EXCERPT_MIN_CHARS
 
 
+def test_scene_pack_recomputes_spoken_budget_after_dialogue_injection() -> None:
+    line = "门外有人，先停在这里，不要继续向前。"
+    source = f"谷言走到门口停下，压低声音提醒同伴：“{line}”"
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        full_script_text=source,
+        events=[{"event_id": "E1", "source_span": source}],
+        key_lines=[f"谷言：{line}"],
+        dialogue_chains=[KeyDialogueChain(
+            chain_id="DC1",
+            topic="门外危险",
+            turns=[KeyDialogueTurn(
+                speaker="谷言",
+                line=line,
+                source_text=source,
+            )],
+        )],
+        narrative_plan=NarrativeContinuityPlan(scope_id="e1"),
+    )
+    bible = Bible(
+        characters=[Character(
+            name="谷言",
+            role="主角",
+            appearance_canonical="二十八岁男性，黑色短发，深色常服",
+        )],
+        world=World(visual_style_canonical="都市国漫画风"),
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[StoryboardOutlineShot(
+            shot_no=1,
+            shot_id="SH001",
+            scene_id="SC001",
+            event_ids=["E1"],
+            story_event_id="E1",
+            key_line_ids=["KL01"],
+            characters_visible=["谷言"],
+            visible_entity_ids=["谷言"],
+            capacity_budget=ShotCapacityBudget(
+                action_phase_s=1.0,
+                spoken_and_text_s=0.0,
+            ),
+            scene_name="门厅",
+            scene_time="夜",
+            primary_action="谷言走到门口停下并出声提醒同伴",
+            continuity_mode="scene_change",
+            duration_s=5,
+        )],
+    )
+    draft = stages.DirectedScenePackDraft(
+        episode_no=1,
+        scene_id="SC001",
+        shots=[stages.DirectedSceneShotDraft(
+            shot_no=1,
+            shot_size="中景",
+            camera_angle="平视",
+            camera_move="跟随",
+            camera_motivation="完整呈现谷言走到门口并示警的动作",
+            action_desc="谷言走到门口停下，面向同伴压低声音示警。",
+            first_frame_desc="谷言从门厅内侧走向关闭的门。",
+            last_frame_desc="同一机位，谷言停在门前完成示警。",
+        )],
+    )
+
+    shot = stages._hydrate_directed_scene_pack(
+        draft,
+        outline=outline,
+        source_text=source,
+        screenplay=screenplay,
+        bible=bible,
+    ).shots[0]
+
+    spoken_end = max(
+        item.end_s
+        for item in shot.audio_timeline
+        if item.type in {"spoken_dialogue", "offscreen_voice"}
+    )
+    assert shot.capacity_budget is not None
+    assert shot.capacity_budget.spoken_and_text_s >= spoken_end
+    assert shot.capacity_budget.spoken_and_text_s > 0
+
+
 def test_scene_pack_normalizes_program_owned_stale_long_duration() -> None:
     source = "谷言从桌边起身，快步走到门口停下。"
     screenplay = EpisodeScreenplay(

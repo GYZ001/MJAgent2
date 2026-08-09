@@ -260,6 +260,8 @@ def test_storyboard_issue_localization_does_not_prefix_match_shot_numbers() -> N
 def test_partial_filter_drops_prior_shot_no_errors() -> None:
     errors = [
         "shot_no=5 是单人对白镜头，shot_size 应为近景或特写",
+        "[SHOT_SPOKEN_TEXT_CAPACITY_EXCEEDED] SH013(shot_no=13) "
+        "口播/屏幕文字最少需要 1.100s",
         "shot_no=16 是单人对白镜头，camera_move 应为固定或推近",
         "shots[15](shot_no=16).action_desc 缺少当前角色名",
     ]
@@ -268,7 +270,7 @@ def test_partial_filter_drops_prior_shot_no_errors() -> None:
         errors,
         current_index=15,
         current_shot_no=16,
-    ) == errors[1:]
+    ) == errors[2:]
 
 
 def test_typed_two_shot_contract_allows_exactly_two_people() -> None:
