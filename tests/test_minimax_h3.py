@@ -8,7 +8,17 @@ import sqlite3
 import pytest
 from fastapi import HTTPException
 
-from app import config, db, hiagent, minimax_h3, monitoring, system_api, video_plan, worker
+from app import (
+    config,
+    db,
+    hiagent,
+    minimax_h3,
+    monitoring,
+    system_api,
+    video_modes,
+    video_plan,
+    worker,
+)
 
 
 class _Response:
@@ -149,6 +159,7 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
     assert requests[1]["reference_images"] == ["uploaded_3", "uploaded_4"]
     assert "<Picture 1>" in requests[1]["prompt"]
     assert "<Picture 2>" in requests[1]["prompt"]
+    assert "Reference image 1 is the character" not in requests[1]["prompt"]
     assert requests[2]["mode"] == "reference_video"
     assert requests[2]["reference_videos"] == ["uploaded_5"]
     assert requests[2]["use_source_audio"] is True
@@ -196,6 +207,34 @@ def test_minimax_h3_only_consumes_trailing_technical_args() -> None:
     assert "逐字说出“--dur 5”作为口令" in prompt
     assert prompt.endswith("本镜继续动作")
     assert "--ratio 9:16 --dur 5" not in prompt
+
+
+def test_seedance_binding_contract_round_trips_into_h3_picture_tags() -> None:
+    common_prompt = "[FORMAT]\n电影化单镜头。 --ratio 9:16 --dur 5"
+    refs = [{
+        "id": "character",
+        "url": "data:image/jpeg;base64,YQ==",
+        "type": "character",
+        "source": "asset_library",
+        "selectedForSeedance": True,
+        "entity_name": "A",
+        "relatedCharacterIds": ["A"],
+    }]
+    seedance_prompt = video_modes.append_reference_prompt_notes_from_dicts(
+        common_prompt,
+        refs,
+    )
+
+    h3_prompt = minimax_h3._tagged_prompt(
+        seedance_prompt,
+        image_count=1,
+    )
+
+    assert seedance_prompt.endswith("--ratio 9:16 --dur 5")
+    assert "<Picture 1>: use as character" in h3_prompt
+    assert "<Picture 1> 中的唯一人物定义为「A」" in h3_prompt
+    assert "--ratio 9:16" not in h3_prompt
+    assert "--dur 5" not in h3_prompt
 
 
 def test_minimax_h3_retry_reuses_exact_checkpoint_without_reupload(monkeypatch) -> None:

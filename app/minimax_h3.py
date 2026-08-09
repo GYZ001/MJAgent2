@@ -331,8 +331,14 @@ def _tagged_prompt(
     video_input_intent: str = "",
 ) -> str:
     prompt_text, _suffix = _split_trailing_video_args(prompt_text)
+    for index in range(1, image_count + 1):
+        prompt_text = re.sub(
+            rf"\bReference image {index}\b",
+            f"<Picture {index}>",
+            prompt_text,
+        )
     mappings = [
-        f"<Picture {index}> corresponds to Reference image {index}."
+        f"<Picture {index}> is uploaded reference image {index}; keep its declared subject binding."
         for index in range(1, image_count + 1)
     ]
     mappings.extend(

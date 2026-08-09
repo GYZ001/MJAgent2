@@ -715,6 +715,26 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
     assert "禁止中途变性、换脸、换人" in note
 
 
+def test_reference_prompt_notes_preserve_trailing_technical_suffix() -> None:
+    prompt = "[FORMAT]\n电影化单镜头。 --ratio 9:16 --dur 5"
+    refs = [{
+        "id": "character",
+        "url": "data:image/jpeg;base64,YQ==",
+        "type": "character",
+        "source": "asset_library",
+        "selectedForSeedance": True,
+        "entity_name": "A",
+        "relatedCharacterIds": ["A"],
+    }]
+
+    result = video_modes.append_reference_prompt_notes_from_dicts(prompt, refs)
+
+    assert result.endswith("--ratio 9:16 --dur 5")
+    assert result.index("Reference image 1") < result.rindex("--ratio 9:16 --dur 5")
+    assert result.count("--ratio 9:16") == 1
+    assert result.count("--dur 5") == 1
+
+
 def test_continuity_assembly_does_not_restore_discarded_candidates(monkeypatch, tmp_path) -> None:
     """等待连续性尾帧后重新装配时，人工废弃和 QA 淘汰图都不得被重新选中。"""
     keep_path = tmp_path / "keep.jpg"
