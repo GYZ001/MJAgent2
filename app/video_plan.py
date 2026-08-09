@@ -419,8 +419,6 @@ def apply_scene_boundary_strategy(
                 if asset.role in {
                     "identity_reference",
                     "scene_reference",
-                    "prop_reference",
-                    "style_reference",
                 }
             ]
             reason_code = (
@@ -1143,6 +1141,8 @@ def validate_episode_plan(
                 issues.append({"code": "REFERENCE_MODE_ROLE_CONFLICT", "shot_id": item.shot_id})
             if any(role in {"first_frame", "last_frame"} or role.endswith("_video") for role in roles):
                 issues.append({"code": "REFERENCE_MODE_ROLE_CONFLICT", "shot_id": item.shot_id})
+            if any(role not in {"identity_reference", "scene_reference"} for role in roles):
+                issues.append({"code": "REFERENCE_LIBRARY_ROLE_INVALID", "shot_id": item.shot_id})
             if any(
                 asset.source == AssetSource.ASSET_REVISION
                 and not asset.asset_revision_id

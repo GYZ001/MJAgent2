@@ -1483,8 +1483,8 @@ async def create_video_task(
         "first_frame" in image_roles or "last_frame" in image_roles
     ):
         raise ProviderError("reference_image 不能与 first_frame/last_frame 混用")
-    if ("first_frame" in image_roles) != ("last_frame" in image_roles):
-        raise ProviderError("首尾帧模式必须同时提供 first_frame 与 last_frame")
+    if "last_frame" in image_roles and "first_frame" not in image_roles:
+        raise ProviderError("last_frame 不能脱离 first_frame 单独提交")
     for url, _role in video_urls or []:
         if str(url).startswith("data:") or not str(url).startswith(("http://", "https://")):
             raise ProviderError("reference_video 必须是供应商可访问的 http(s) Web URL")

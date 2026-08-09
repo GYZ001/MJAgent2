@@ -94,17 +94,13 @@ def _conn() -> sqlite3.Connection:
                 shot_id="SH-2",
                 published_shot_id="SH-2",
                 shot_no=2,
-                mode=VideoGenerationMode.FIRST_LAST_FRAME_MODE,
+                mode=VideoGenerationMode.FIRST_FRAME_MODE,
                 depends_on_shot_id="SH-1",
                 required_assets=[
                     PlanAssetRequirement(
                         role="first_frame",
                         source=AssetSource.PREVIOUS_ADOPTED_TAIL,
                         source_shot_id="SH-1",
-                    ),
-                    PlanAssetRequirement(
-                        role="last_frame",
-                        source=AssetSource.STATIC_BOUNDARY_ASSET,
                     ),
                 ],
                 confidence=0.9,
@@ -274,7 +270,7 @@ def test_same_space_relation_does_not_force_a_mode() -> None:
     assert normalized["mode"] == "FIRST_LAST_FRAME_MODE"
 
 
-def test_scene_boundary_strategy_only_waits_for_each_scene_second_shot() -> None:
+def test_scene_boundary_strategy_waits_for_each_previous_video_tail() -> None:
     shots = [
         ShotVideoGenerationPlan(
             source_storyboard_revision_id="rev",
@@ -301,14 +297,14 @@ def test_scene_boundary_strategy_only_waits_for_each_scene_second_shot() -> None
 
     assert [item.mode for item in shots] == [
         VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
+        VideoGenerationMode.FIRST_FRAME_MODE,
+        VideoGenerationMode.FIRST_FRAME_MODE,
         VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
+        VideoGenerationMode.FIRST_FRAME_MODE,
+        VideoGenerationMode.FIRST_FRAME_MODE,
     ]
     assert [item.depends_on_shot_id for item in shots] == [
-        None, "shot-1", None, None, "shot-4", None,
+        None, "shot-1", "shot-2", None, "shot-4", "shot-5",
     ]
     assert [
         next(
@@ -323,10 +319,10 @@ def test_scene_boundary_strategy_only_waits_for_each_scene_second_shot() -> None
     ] == [
         None,
         AssetSource.PREVIOUS_ADOPTED_TAIL,
-        AssetSource.PREVIOUS_STATIC_TAIL,
+        AssetSource.PREVIOUS_ADOPTED_TAIL,
         None,
         AssetSource.PREVIOUS_ADOPTED_TAIL,
-        AssetSource.PREVIOUS_STATIC_TAIL,
+        AssetSource.PREVIOUS_ADOPTED_TAIL,
     ]
 
 
@@ -362,9 +358,9 @@ def test_published_scene_identity_overrides_ai_boundary_drift() -> None:
 
     assert [item.mode for item in shots] == [
         VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
+        VideoGenerationMode.FIRST_FRAME_MODE,
         VideoGenerationMode.REFERENCE_IMAGE_MODE,
-        VideoGenerationMode.FIRST_LAST_FRAME_MODE,
+        VideoGenerationMode.FIRST_FRAME_MODE,
     ]
     assert [item.depends_on_shot_id for item in shots] == [
         None, "shot-1", None, "shot-3",
@@ -653,9 +649,9 @@ def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -
     assert active_plan_is_current("svp-2", conn=conn) is True
 
     meta = {
-        "mode": "FIRST_LAST_FRAME_MODE",
-        "planned_mode": "FIRST_LAST_FRAME_MODE",
-        "actual_mode": "FIRST_LAST_FRAME_MODE",
+        "mode": "FIRST_FRAME_MODE",
+        "planned_mode": "FIRST_FRAME_MODE",
+        "actual_mode": "FIRST_FRAME_MODE",
         "episode_video_plan_id": "evp-1",
         "shot_plan_id": "svp-2",
         "plan_revision": 1,
@@ -691,8 +687,8 @@ def test_recover_equivalent_stale_provider_job_without_new_create(monkeypatch) -
         """INSERT INTO video_generation_attempts(
                id,shot_plan_id,version_id,attempt_no,planned_mode,actual_mode,
                status,provider_task_id,created_at,updated_at
-           ) VALUES('attempt-stale','svp-2','stale-v',1,'FIRST_LAST_FRAME_MODE',
-                    'FIRST_LAST_FRAME_MODE','provider_running','provider-task',1,1)"""
+           ) VALUES('attempt-stale','svp-2','stale-v',1,'FIRST_FRAME_MODE',
+                    'FIRST_FRAME_MODE','provider_running','provider-task',1,1)"""
     )
     conn.commit()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)

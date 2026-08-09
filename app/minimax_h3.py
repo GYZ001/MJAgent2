@@ -35,6 +35,7 @@ _SUPPORTED_IMAGE_MIMES = {
 }
 _SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 _APP_MODE_TO_PROVIDER_MODE = {
+    "FIRST_FRAME_MODE": "keyframes",
     "FIRST_LAST_FRAME_MODE": "keyframes",
     "REFERENCE_IMAGE_MODE": "reference_images",
     "VIDEO_INPUT_MODE": "reference_video",
@@ -283,7 +284,7 @@ def _request_mode(
         return "reference_video"
     if roles and all(role == "reference_image" for role in roles):
         return "reference_images"
-    if roles == ["first_frame", "last_frame"]:
+    if roles in (["first_frame"], ["first_frame", "last_frame"]):
         return "keyframes"
     raise ProviderError(f"MiniMaxH3 无法映射输入角色：{roles}")
 
@@ -430,7 +431,8 @@ async def create_video_task(
                 payload["turbo_low_vram"] = config.MINIMAX_H3_TURBO_LOW_VRAM
             if mode == "keyframes":
                 payload["first_frame"] = uploaded_images[0]
-                payload["last_frame"] = uploaded_images[1]
+                if len(uploaded_images) > 1:
+                    payload["last_frame"] = uploaded_images[1]
             elif mode == "reference_images":
                 payload["reference_images"] = uploaded_images
                 payload["ref_image_size"] = "match"

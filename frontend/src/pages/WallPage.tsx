@@ -37,6 +37,7 @@ const EMPTY_SHOTS: Shot[] = []
 
 const VIDEO_MODE_LABEL = {
   REFERENCE_IMAGE_MODE: '参考图',
+  FIRST_FRAME_MODE: '上一视频尾帧首帧',
   FIRST_LAST_FRAME_MODE: '首尾帧',
   VIDEO_INPUT_MODE: '视频参考',
 } as const
@@ -293,7 +294,7 @@ export type MaterialLibraryKind = 'keyframes' | 'references' | 'video'
 export function shotMaterialLibraryKind(shot: Shot): MaterialLibraryKind {
   const mode = shot.mode_plan?.mode
     || shot.versions.find(version => version.image_inputs?.mode)?.image_inputs?.mode
-  if (mode === 'FIRST_LAST_FRAME_MODE') return 'keyframes'
+  if (mode === 'FIRST_FRAME_MODE' || mode === 'FIRST_LAST_FRAME_MODE') return 'keyframes'
   if (mode === 'VIDEO_INPUT_MODE') return 'video'
   return 'references'
 }
@@ -968,16 +969,12 @@ function VideoPlanSummary({ plan }: { plan: EpisodeVideoGenerationPlan }) {
   const waiting = plan.shots.filter(shot =>
     shot.status === 'waiting_dependency' || Boolean(shot.depends_on_shot_id),
   ).length
-  const sharedStatic = plan.shots.filter(shot =>
-    (shot.required_assets ?? []).some(
-      asset => asset.source === 'PREVIOUS_STATIC_TAIL',
-    ),
-  ).length
   const shotNoById = new Map(plan.shots.map(shot => [shot.shot_id, shot.shot_no]))
   return <section className="video-plan-summary" aria-label="AI 视频生成计划">
     <header><div><b>AI 生成计划</b><span>系统已按镜间真实素材依赖安排安全并行</span></div><span className={`stamp ${plan.status === 'valid' ? 'green' : 'gold'}`}>{plan.status === 'valid' ? '可执行' : '需处理'}</span></header>
     <dl>
       <div><dt>参考图</dt><dd>{distribution.REFERENCE_IMAGE_MODE || 0} 镜</dd></div>
+      <div><dt>上一视频尾帧首帧</dt><dd>{distribution.FIRST_FRAME_MODE || 0} 镜</dd></div>
       <div><dt>首尾帧</dt><dd>{distribution.FIRST_LAST_FRAME_MODE || 0} 镜</dd></div>
       <div><dt>视频参考</dt><dd>{distribution.VIDEO_INPUT_MODE || 0} 镜</dd></div>
       <div><dt>等待真实尾帧</dt><dd>{waiting} 镜</dd></div>
@@ -985,7 +982,7 @@ function VideoPlanSummary({ plan }: { plan: EpisodeVideoGenerationPlan }) {
       <div><dt>关键路径</dt><dd>{Math.ceil(plan.critical_path_latency_ms / 60000)} 分钟</dd></div>
     </dl>
     {plan.blockers.length > 0 && <div className="video-plan-blockers" role="alert">计划仍有 {plan.blockers.length} 项阻塞，请返回分镜台或模型能力设置处理。</div>}
-    <details><summary>查看计划依据与依赖</summary><p>每场首镜使用参考图；其余镜头先并行生成自己的静态尾帧。每场第二镜等待首镜真实尾帧，第三镜起直接复用上一镜静态尾帧，不等待上一镜视频。当前 {sharedStatic} 镜使用共享静态边界。模式失败会保留原模式，不会自动切换。计划 revision {plan.plan_revision}，安全并行比例 {Math.round(plan.safe_parallelism_ratio * 100)}%。</p>{plan.shots.filter(shot => shot.depends_on_shot_id).map(shot => <p key={shot.shot_id}>镜 {shot.shot_no} 等待镜 {shotNoById.get(shot.depends_on_shot_id!) || '上游'}的真实尾帧 · {videoModeLabel(shot.mode)}</p>)}</details>
+    <details><summary>查看计划依据与依赖</summary><p>每场首镜只使用人物谱与场景库现有图片；同场景后续镜头依次等待上一镜视频，并把真实尾帧作为本镜唯一首帧输入，不再生成剧情关键帧或静态尾帧。模式失败会保留原模式，不会自动切换。计划 revision {plan.plan_revision}，安全并行比例 {Math.round(plan.safe_parallelism_ratio * 100)}%。</p>{plan.shots.filter(shot => shot.depends_on_shot_id).map(shot => <p key={shot.shot_id}>镜 {shot.shot_no} 等待镜 {shotNoById.get(shot.depends_on_shot_id!) || '上游'}的真实尾帧 · {videoModeLabel(shot.mode)}</p>)}</details>
   </section>
 }
 
@@ -1126,6 +1123,7 @@ export function MaterialGallery({ shot, productionEligible, onOpen, onRefresh, o
       : '请先完成上游人工确认。'
   const renderReferences = (title: string, items: ReferenceImage[], discarded = false) => <section className={`material-group${discarded ? ' discarded' : ''}`}><header>{title} · {items.length}</header>{items.length ? <div className="material-strip">{items.map(ref => { const score = refScore(ref); const label = referenceLibraryLabel(ref); const reject = rejectReasonInfo(ref.rejectReason); const hard = ref.qa?.hard_failures || ref.hard_failures || []; const eligible = Boolean(ref.image_url); return <figure key={ref.id} className={`material-card${discarded ? ' material-card-discarded' : ''}`}><button type="button" className="mc-thumb" disabled={!ref.image_url} aria-label={`预览${label}`} onClick={() => ref.image_url && onOpen(ref.image_url, label)}>{ref.image_url ? <img src={ref.image_url} alt={label} loading="lazy" /> : <span className="mc-noimg">无图</span>}{score != null && <span className={`mc-qa-badge${score < 0.8 ? ' bad' : ''}`}>质检 {score.toFixed(2)}</span>}{!!hard.length && <span className="mc-gate-badge">⚠ 质检提示</span>}</button><figcaption><b>{label}</b>{ref.selection_reason && <span>选择：{ref.selection_reason}</span>}{discarded && <span className={`mc-reject risk-${reject.risk}`}>{reject.label}</span>}<span>来源 {ref.entity_name || ref.source} · 资产版本 {ref.library_revision_id || ref.library_view_id || '未关联'}</span><span>引用版本 {ref.referenced_by_version_ids?.join('、') || '未关联'}</span>{ref.soft_warnings?.map(warning => <span className="warn" key={warning}>提示：{warning}</span>)}<details><summary>技术信息与修复建议</summary><code>素材标识：{ref.id}</code><code>淘汰原因：{ref.rejectReason || '无'}</code><p>{reject.suggestion}</p><p>规则版本 {ref.rule_version || '未知'}</p></details>{discarded ? <button className="mc-action restore" disabled={!productionEligible || !eligible} title={!eligible ? '图片文件不可用' : !productionEligible ? '上游资格不满足' : '质检仅作提示，可恢复为生产输入'} onClick={() => { setRestore(ref); setReason('') }}>恢复使用</button> : <button className="mc-action discard" onClick={() => { void discard(ref) }}>废弃/隔离</button>}</figcaption></figure> })}</div> : <div className="review-state-empty"><b>暂无该类参考图</b><p>{emptyHint}</p></div>}</section>
   const inputs = version?.image_inputs
+  const materialMode = shot.mode_plan?.mode || inputs?.mode
   const keyframes = [
     {
       id: 'first_frame',
@@ -1139,13 +1137,15 @@ export function MaterialGallery({ shot, productionEligible, onOpen, onRefresh, o
       imageUrl: inputs?.last_frame_image_url,
       source: inputs?.last_frame_source || inputs?.last_frame_src,
     },
-  ]
+  ].filter(frame => materialMode !== 'FIRST_FRAME_MODE' || frame.id === 'first_frame')
   const subtitle = kind === 'keyframes'
-    ? '仅展示首尾帧模式实际使用的首帧与尾帧'
+    ? materialMode === 'FIRST_FRAME_MODE'
+      ? '仅展示从上一镜视频真实尾帧抽取的本镜首帧'
+      : '仅展示历史首尾帧模式实际使用的首帧与尾帧'
     : kind === 'video'
       ? '仅展示视频参考模式绑定的上游视频'
       : '仅展示参考图模式的实际参考图和质检依据'
-  return <div className="candidate-compare material-review"><header className="asset-workspace-toolbar"><div><b>{materialLibraryTitle(kind)}</b><span>{subtitle}</span></div><div className="asset-workspace-actions"><button type="button" className="btn ghost small" disabled={refreshing} title="重新加载当前模式素材" onClick={() => { void refreshReferences() }}>{refreshing ? '刷新中…' : '刷新状态'}</button>{kind === 'references' && <button type="button" className="btn ghost small danger" disabled={Boolean(clearReferencesDisabledReason)} aria-label={clearReferencesDisabledReason ? `清空参考图，暂不可用：${clearReferencesDisabledReason}` : `清空镜 ${shot.shot_no} 的参考图`} title={clearReferencesDisabledReason || '只删除本镜创建的参考图，不删除已有视频'} onClick={() => setClearReferencesConfirm(true)}>{clearing ? '清空中…' : '清空参考图'}</button>}</div></header>{material?.isFallback && <div className="material-fallback-note">当前版本素材未就绪，暂显示最近有素材版本 v{version?.version_no}</div>}{kind === 'keyframes' && <section className="material-group"><header>关键帧 · {keyframes.filter(frame => frame.imageUrl).length}/2</header><div className="material-strip">{keyframes.map(frame => <figure key={frame.id} className="material-card material-card-keyframe"><button type="button" className="mc-thumb" disabled={!frame.imageUrl} aria-label={`预览${frame.label}`} onClick={() => frame.imageUrl && onOpen(frame.imageUrl, frame.label)}>{frame.imageUrl ? <img src={frame.imageUrl} alt={frame.label} loading="lazy" /> : <span className="mc-noimg">待生成</span>}</button><figcaption><b>{frame.label}</b><span>来源 {boundarySourceLabel(frame.source)}</span><span>引用视频版本 v{version?.version_no ?? '—'}</span></figcaption></figure>)}</div></section>}{kind === 'video' && <section className="material-group"><header>视频输入 · {inputs?.video_input_url ? 1 : 0}</header>{inputs?.video_input_url ? <div className="material-video-input"><video controls preload="metadata" src={inputs.video_input_url}>当前浏览器不支持视频预览。</video><div><b>上游视频</b><span>来源版本 {inputs.video_input_source_revision_id || '未关联'}</span></div></div> : <div className="review-state-empty"><b>暂无可用视频输入</b><p>{emptyHint}</p></div>}</section>}{kind === 'references' && <>{renderReferences('实际提交参考图', buckets.video)}{renderReferences('质检依据参考图', buckets.evidence)}{buckets.discarded.length > 0 && renderReferences('废弃参考图', buckets.discarded, true)}</>}{restore && version && kind === 'references' && <Dialog title={`恢复参考图·${referenceLibraryLabel(restore)}`} onClose={() => setRestore(null)}><div className="review-impact"><p>原因：{rejectReasonInfo(restore.rejectReason).label}；质检分 {refScore(restore)?.toFixed(2) || '未评估'}；风险 {REFERENCE_RISK_LABEL[rejectReasonInfo(restore.rejectReason).risk]}。</p><p>恢复后只会成为后续新视频的候选输入，不改写已有历史视频。</p></div><label className="review-field">必填理由<textarea value={reason} onChange={event => setReason(event.target.value)} rows={4} /></label><div className="dialog-actions"><button className="btn ghost" onClick={() => setRestore(null)}>取消</button><button className="btn primary" disabled={!reason.trim()} onClick={() => { void act(() => api.restoreReferenceImage(version.id, restore.id, reason.trim()), '参考图已恢复'); setRestore(null) }}>确认恢复并记录审计</button></div></Dialog>}{clearReferencesConfirm && kind === 'references' && <DecisionDialog title={`清空镜 ${shot.shot_no} 的参考图？`} summary={`${refs.length} 张参考图将被删除`} message="将删除本镜创建或收集的参考图记录；已有视频、剧本和分镜不会删除。" details={['此操作不可撤销', '后续再次生成视频时需要重新准备参考图']} confirmLabel="确认清空参考图" cancelLabel="保留参考图" danger onClose={() => setClearReferencesConfirm(false)} onConfirm={() => { setClearReferencesConfirm(false); void clearReferences() }} />}</div>
+  return <div className="candidate-compare material-review"><header className="asset-workspace-toolbar"><div><b>{materialLibraryTitle(kind)}</b><span>{subtitle}</span></div><div className="asset-workspace-actions"><button type="button" className="btn ghost small" disabled={refreshing} title="重新加载当前模式素材" onClick={() => { void refreshReferences() }}>{refreshing ? '刷新中…' : '刷新状态'}</button>{kind === 'references' && <button type="button" className="btn ghost small danger" disabled={Boolean(clearReferencesDisabledReason)} aria-label={clearReferencesDisabledReason ? `清空参考图，暂不可用：${clearReferencesDisabledReason}` : `清空镜 ${shot.shot_no} 的参考图`} title={clearReferencesDisabledReason || '只删除本镜创建的参考图，不删除已有视频'} onClick={() => setClearReferencesConfirm(true)}>{clearing ? '清空中…' : '清空参考图'}</button>}</div></header>{material?.isFallback && <div className="material-fallback-note">当前版本素材未就绪，暂显示最近有素材版本 v{version?.version_no}</div>}{kind === 'keyframes' && <section className="material-group"><header>关键帧 · {keyframes.filter(frame => frame.imageUrl).length}/{keyframes.length}</header><div className="material-strip">{keyframes.map(frame => <figure key={frame.id} className="material-card material-card-keyframe"><button type="button" className="mc-thumb" disabled={!frame.imageUrl} aria-label={`预览${frame.label}`} onClick={() => frame.imageUrl && onOpen(frame.imageUrl, frame.label)}>{frame.imageUrl ? <img src={frame.imageUrl} alt={frame.label} loading="lazy" /> : <span className="mc-noimg">待生成</span>}</button><figcaption><b>{frame.label}</b><span>来源 {boundarySourceLabel(frame.source)}</span><span>引用视频版本 v{version?.version_no ?? '—'}</span></figcaption></figure>)}</div></section>}{kind === 'video' && <section className="material-group"><header>视频输入 · {inputs?.video_input_url ? 1 : 0}</header>{inputs?.video_input_url ? <div className="material-video-input"><video controls preload="metadata" src={inputs.video_input_url}>当前浏览器不支持视频预览。</video><div><b>上游视频</b><span>来源版本 {inputs.video_input_source_revision_id || '未关联'}</span></div></div> : <div className="review-state-empty"><b>暂无可用视频输入</b><p>{emptyHint}</p></div>}</section>}{kind === 'references' && <>{renderReferences('实际提交参考图', buckets.video)}{renderReferences('质检依据参考图', buckets.evidence)}{buckets.discarded.length > 0 && renderReferences('废弃参考图', buckets.discarded, true)}</>}{restore && version && kind === 'references' && <Dialog title={`恢复参考图·${referenceLibraryLabel(restore)}`} onClose={() => setRestore(null)}><div className="review-impact"><p>原因：{rejectReasonInfo(restore.rejectReason).label}；质检分 {refScore(restore)?.toFixed(2) || '未评估'}；风险 {REFERENCE_RISK_LABEL[rejectReasonInfo(restore.rejectReason).risk]}。</p><p>恢复后只会成为后续新视频的候选输入，不改写已有历史视频。</p></div><label className="review-field">必填理由<textarea value={reason} onChange={event => setReason(event.target.value)} rows={4} /></label><div className="dialog-actions"><button className="btn ghost" onClick={() => setRestore(null)}>取消</button><button className="btn primary" disabled={!reason.trim()} onClick={() => { void act(() => api.restoreReferenceImage(version.id, restore.id, reason.trim()), '参考图已恢复'); setRestore(null) }}>确认恢复并记录审计</button></div></Dialog>}{clearReferencesConfirm && kind === 'references' && <DecisionDialog title={`清空镜 ${shot.shot_no} 的参考图？`} summary={`${refs.length} 张参考图将被删除`} message="将删除本镜创建或收集的参考图记录；已有视频、剧本和分镜不会删除。" details={['此操作不可撤销', '后续再次生成视频时需要重新准备参考图']} confirmLabel="确认清空参考图" cancelLabel="保留参考图" danger onClose={() => setClearReferencesConfirm(false)} onConfirm={() => { setClearReferencesConfirm(false); void clearReferences() }} />}</div>
 }
 
 export function resolvePreviewVersionId(versions: ShotVersion[], currentId: string | null): string | null {

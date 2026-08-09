@@ -2098,6 +2098,109 @@ def _resolve_current_execution_plan(
     return current
 
 
+async def _prepare_first_frame_mode_inputs(
+    conn, job, version, shot, ep, meta: dict, prompt_text: str,
+    *, lease_owner: str,
+) -> tuple[dict, str]:
+    """Use the immediately previous adopted video's real tail as the sole frame input."""
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.stage_state import set_pipeline_stage
+    from app.video_plan import AssetSource
+
+    shot_plan = _resolve_current_execution_plan(
+        conn, str(job["shot_id"]), meta,
+    )
+    if shot_plan is None:
+        raise VideoInputRepairRequired("首帧计划已过期，需要重新规划")
+    requirements = list(shot_plan.required_assets)
+    if len(requirements) != 1 or requirements[0].role != "first_frame":
+        raise VideoInputRepairRequired("首帧计划必须且只能声明一个 first_frame")
+    first_req = requirements[0]
+    if first_req.source != AssetSource.PREVIOUS_ADOPTED_TAIL:
+        raise VideoInputRepairRequired("首帧必须来自紧邻上一镜采用视频的真实尾帧")
+    source_shot_id = first_req.source_shot_id or shot_plan.depends_on_shot_id
+    if not source_shot_id or source_shot_id != shot_plan.depends_on_shot_id:
+        raise VideoInputRepairRequired("首帧来源镜头与视频计划依赖不一致")
+
+    current = str(meta.get("first_frame_path") or "")
+    if current and Path(current).is_file() and not meta.get("last_frame_path"):
+        return meta, prompt_text
+
+    previous = conn.execute(
+        "SELECT * FROM shots WHERE id=? AND episode_id=?",
+        (source_shot_id, job["episode_id"]),
+    ).fetchone()
+    source_contract = video_modes.previous_tail_source_contract(conn, previous)
+    if not source_contract:
+        raise _ContinuityWait("等待上一镜采用后提取真实尾帧")
+    fingerprint = hashlib.sha256(json.dumps({
+        "shot_plan_id": shot_plan.shot_plan_id,
+        "role": "first_frame",
+        "source": first_req.source.value,
+        "continuity_source": source_contract,
+        "policy": "previous_video_tail_first_frame_v1",
+    }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    cached = _load_boundary_asset(
+        conn, shot_plan.shot_plan_id, "first_frame", fingerprint,
+    )
+    if cached:
+        first_path = str(cached["path"])
+    else:
+        _assert_job_lease(job["id"], lease_owner)
+        dest_dir = (
+            config.PROJECTS_DIR / job["project_id"] / "episodes"
+            / str(ep["episode_no"]) / "shots" / str(shot["shot_no"])
+            / "boundaries"
+        )
+        asset = video_modes.previous_tail_reference_asset(
+            conn, previous, dest_dir=dest_dir,
+        )
+        if not asset or not asset.path or not Path(asset.path).is_file():
+            raise VideoInputRepairRequired("上一镜采用视频无法稳定抽取尾帧")
+        first_path = str(asset.path)
+        _persist_boundary_asset(
+            conn,
+            shot_plan=shot_plan,
+            role="first_frame",
+            source=first_req.source.value,
+            source_revision_id=str(source_contract["adopted_version_id"]),
+            source_shot_id=source_shot_id,
+            source_adopted_version_id=str(source_contract["adopted_version_id"]),
+            path=first_path,
+            fingerprint=fingerprint,
+            qa={
+                "source_adopted_version_id": source_contract["adopted_version_id"],
+                "extracted_from_previous_video": True,
+            },
+        )
+        conn.commit()
+
+    meta["first_frame_path"] = first_path
+    meta["first_frame_source"] = AssetSource.PREVIOUS_ADOPTED_TAIL.value
+    meta["first_frame_source_shot_id"] = source_shot_id
+    meta["upstream_adopted_video_revision"] = source_contract["adopted_version_id"]
+    meta["reference_images"] = []
+    meta.pop("last_frame_path", None)
+    meta.pop("last_frame_url", None)
+    meta.pop("video_input_url", None)
+    meta["reference_generation_complete"] = True
+    meta["video_input_manifest_frozen"] = True
+    meta["plan_status"] = "ready"
+    set_pipeline_stage(
+        job["id"], media_stages.STAGE_VIDEO_READY,
+        scheduler_lane=media_stages.LANE_VIDEO_READY,
+        ready_at=now(),
+        conn=conn,
+    )
+    _set_version(
+        version["id"],
+        image_inputs=json.dumps(meta, ensure_ascii=False),
+        prompt_text=prompt_text,
+    )
+    conn.commit()
+    return meta, prompt_text
+
+
 async def _prepare_first_last_mode_inputs(
     conn, job, version, shot, ep, meta: dict, prompt_text: str,
     *, lease_owner: str,
@@ -2690,6 +2793,11 @@ async def _prepare_planned_mode_inputs(
             conn, job, version, shot, ep, meta, prompt_text,
             lease_owner=lease_owner,
         )
+    if mode == video_modes.FIRST_FRAME_MODE:
+        return await _prepare_first_frame_mode_inputs(
+            conn, job, version, shot, ep, meta, prompt_text,
+            lease_owner=lease_owner,
+        )
     if mode == video_modes.FIRST_LAST_FRAME_MODE:
         return await _prepare_first_last_mode_inputs(
             conn, job, version, shot, ep, meta, prompt_text,
@@ -2931,6 +3039,13 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     if meta.get("mode") == video_modes.REFERENCE_IMAGE_MODE:
                         meta["reference_image_used"] = bool(image_inputs)
                         meta["first_frame_used"] = False
+                        meta["last_frame_used"] = False
+                        meta["reference_video_used"] = False
+                    elif meta.get("mode") == video_modes.FIRST_FRAME_MODE:
+                        meta["reference_image_used"] = False
+                        meta["first_frame_used"] = any(
+                            role == "first_frame" for _, role in image_inputs
+                        )
                         meta["last_frame_used"] = False
                         meta["reference_video_used"] = False
                     elif meta.get("mode") == video_modes.FIRST_LAST_FRAME_MODE:
@@ -3438,11 +3553,13 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             or video_modes.REFERENCE_IMAGE_MODE
         )
         repair_label = {
+            video_modes.FIRST_FRAME_MODE: "上一视频尾帧首帧",
             video_modes.FIRST_LAST_FRAME_MODE: "首尾帧",
             video_modes.REFERENCE_IMAGE_MODE: "参考图",
             video_modes.VIDEO_INPUT_MODE: "参考视频",
         }.get(repair_mode, "视频输入")
         repair_code = {
+            video_modes.FIRST_FRAME_MODE: "FIRST_FRAME_REPAIR_REQUIRED",
             video_modes.FIRST_LAST_FRAME_MODE: "FIRST_LAST_FRAME_REPAIR_REQUIRED",
             video_modes.REFERENCE_IMAGE_MODE: "REFERENCE_IMAGE_REPAIR_REQUIRED",
             video_modes.VIDEO_INPUT_MODE: "VIDEO_INPUT_REPAIR_REQUIRED",

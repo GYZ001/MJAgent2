@@ -1968,6 +1968,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         VideoPlanValidationError,
         generate_episode_plan,
         load_latest_plan,
+        verify_episode_plan_is_current,
     )
     try:
         plan = load_latest_plan(episode_id, conn=conn)
@@ -1975,6 +1976,8 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         if requested_plan_id:
             if not plan or plan.episode_video_plan_id != requested_plan_id:
                 raise HTTPException(409, "请求执行的计划不是当前有效 revision")
+            if not verify_episode_plan_is_current(plan, conn=conn):
+                raise HTTPException(409, "请求执行的计划已不符合当前生成台输入策略，请重新生成计划")
         else:
             plan = await generate_episode_plan(
                 episode_id, force=bool(body.get("force_replan")), conn=conn,
@@ -2143,6 +2146,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             mode: sum(1 for item in plan.shots if item.mode.value == mode)
             for mode in (
                 "REFERENCE_IMAGE_MODE",
+                "FIRST_FRAME_MODE",
                 "FIRST_LAST_FRAME_MODE",
                 "VIDEO_INPUT_MODE",
             )

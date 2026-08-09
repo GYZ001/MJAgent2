@@ -90,6 +90,7 @@ interface VideoModeAudit {
 function monitorVideoModeLabel(mode?: string | null) {
   return ({
     REFERENCE_IMAGE_MODE: "参考图",
+    FIRST_FRAME_MODE: "上一视频尾帧首帧",
     FIRST_LAST_FRAME_MODE: "首尾帧",
     VIDEO_INPUT_MODE: "视频参考",
   } as Record<string, string>)[mode || ""] || mode || "待执行";

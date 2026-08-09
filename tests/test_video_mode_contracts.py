@@ -4,7 +4,7 @@ import sqlite3
 from types import SimpleNamespace
 from PIL import Image
 
-from app import db, worker
+from app import db, video_modes, worker
 from app.hiagent import ProviderError
 from app.schemas import Bible, Shot, World
 from app.stages import evaluate_video_mode_qa
@@ -14,6 +14,7 @@ from app.video_plan import (
     ProviderMediaPublicationService,
 )
 from app.video_modes import (
+    FIRST_FRAME_MODE,
     FIRST_LAST_FRAME_MODE,
     REFERENCE_IMAGE_MODE,
     ReferenceImageAsset,
@@ -31,11 +32,18 @@ def test_three_provider_payload_contracts_are_mutually_exclusive(tmp_path) -> No
 
     reference = build_seedance_image_inputs({
         "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_images": [{
             "url": "data:image/jpeg;base64,YQ==",
             "selectedForSeedance": True,
             "type": "character",
+            "entity_type": "character",
+            "source": "asset_library",
         }],
+    })
+    first_only = build_seedance_image_inputs({
+        "mode": FIRST_FRAME_MODE,
+        "first_frame_path": str(first),
     })
     boundary = build_seedance_image_inputs({
         "mode": FIRST_LAST_FRAME_MODE,
@@ -49,6 +57,7 @@ def test_three_provider_payload_contracts_are_mutually_exclusive(tmp_path) -> No
     })
 
     assert [role for _, role in reference] == ["reference_image"]
+    assert [role for _, role in first_only] == ["first_frame"]
     assert [role for _, role in boundary] == ["first_frame", "last_frame"]
     assert video == [("https://media.example.test/source.mp4", "reference_video")]
 

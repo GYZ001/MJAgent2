@@ -10317,6 +10317,21 @@ def evaluate_video_mode_qa(
                 )
             except (TypeError, ValueError):
                 result["semantic_success"] = None
+    elif mode == "FIRST_FRAME_MODE":
+        result["input_roles_valid"] = bool(
+            meta.get("first_frame_used")
+            and not meta.get("last_frame_used")
+            and not meta.get("reference_image_used")
+            and not meta.get("reference_video_used")
+        )
+        result["boundary_start_match"] = qa.get("start_state_match")
+        if qa.get("status") != "unverified" and qa.get("start_state_match") is not None:
+            try:
+                result["semantic_success"] = bool(
+                    float(qa.get("start_state_match")) >= 0.6
+                )
+            except (TypeError, ValueError):
+                result["semantic_success"] = None
     elif mode == "VIDEO_INPUT_MODE":
         result["input_roles_valid"] = bool(
             meta.get("reference_video_used")

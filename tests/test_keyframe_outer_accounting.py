@@ -5,11 +5,11 @@ from app.media_exec import run_job
 from app.media_pipeline import retry_policy
 
 
-def test_default_generation_budget_is_two_keyframes_with_three_candidates_each(monkeypatch) -> None:
+def test_default_generation_budget_has_no_generated_images(monkeypatch) -> None:
     monkeypatch.setattr(video_modes, "keyframe_candidate_count", lambda: 3)
     monkeypatch.setattr(video_modes, "supporting_keyframe_candidate_count", lambda: 3)
 
-    assert video_modes.estimated_keyframe_generation_count() == 6
+    assert video_modes.estimated_keyframe_generation_count() == 0
 
 
 def test_timeline_keyframe_progress_aggregates_master_and_supporting_slots(monkeypatch) -> None:

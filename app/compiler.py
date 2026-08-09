@@ -851,6 +851,19 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
         collective_names=collective_names,
     )
     lines: list[str] = []
+    if video_generation_mode == "FIRST_FRAME_MODE":
+        source_label = {
+            "PREVIOUS_ADOPTED_TAIL": "上一镜采用视频的真实尾帧",
+        }.get(first_frame_source or "", "上一镜视频的真实尾帧")
+        lines.extend([
+            f"输入中的 first_frame 是{source_label}，也是本视频 0.0 秒必须逐像素承接的真实起点；"
+            "不得先重画、换人、换景或跳到另一构图。",
+            "first_frame 是唯一关键帧输入；从该画面连续执行本镜动作，并按文字状态自然完成结尾，"
+            "不得补造或假定另一个静态尾帧。",
+        ])
+        if roles:
+            lines.append("当前镜角色/场景锚点映射：" + "、".join(roles) + "。")
+        return "\n".join(lines)
     if video_generation_mode == "FIRST_LAST_FRAME_MODE":
         source_label = {
             "PREVIOUS_ADOPTED_TAIL": "上一镜采用视频的真实尾帧",
@@ -1090,6 +1103,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     if mode not in {"action_continuation", "same_scene_cut", "reaction_cut",
                     "reverse_angle", "insert_detail", "scene_change"}:
         mode = derive_continuity_mode(shot)
+    first_frame_boundary = video_generation_mode in {
+        "FIRST_FRAME_MODE",
+        "FIRST_LAST_FRAME_MODE",
+    }
     first_last_boundary = video_generation_mode == "FIRST_LAST_FRAME_MODE"
     shot.continuity_mode = mode
     shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
@@ -1127,7 +1144,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
 
     shot_dur = clip_duration(shot)
     state_in = effective_state_in(shot)
-    if first_last_boundary and (boundary_start_state or "").strip():
+    if first_frame_boundary and (boundary_start_state or "").strip():
         state_in = boundary_start_state.strip()
     elif uses_previous_tail_frame(mode) and (prev_state_out or "").strip():
         # 连续动作：以实际/计划尾状态为强制起点（不使用上一镜完整 action_desc）
@@ -1154,7 +1171,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         bible_names=known_identity_tokens,
         continuity_mode=mode,
     )
-    if first_last_boundary and (boundary_start_state or "").strip():
+    if first_frame_boundary and (boundary_start_state or "").strip():
         # 0 秒画面由真实首帧控制。可见角色投影只约束当前动作，不得把上游
         # 边界人物从 START STATE 文本中抹掉后再要求模型重画首帧。
         state_in = boundary_start_state.strip()
@@ -1201,7 +1218,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     if (shot.camera_motivation or "").strip():
         camera_line += f"。摄影意图：{shot.camera_motivation.strip()}"
     if dialogue_focus:
-        boundary_camera_prefix = "完成首帧边界的连续运镜后，" if first_last_boundary else ""
+        boundary_camera_prefix = "完成首帧边界的连续运镜后，" if first_frame_boundary else ""
         camera_line += (
             f"。{boundary_camera_prefix}竖屏单人对白构图只拍「{dialogue_focus}」"
             "一人的面部、上半身与自然口型，"
@@ -1309,7 +1326,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     if transition_bits:
         action_block += "。" + "".join(transition_bits)
     if dialogue_focus:
-        if first_last_boundary:
+        if first_frame_boundary:
             action_block += (
                 f"。首帧边界运镜完成后，对白构图以「{dialogue_focus}」为唯一可见主体；"
                 "输入首帧已有听者只能通过连续运镜自然出画，之后保持为画外关系"

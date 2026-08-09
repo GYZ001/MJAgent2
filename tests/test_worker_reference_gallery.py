@@ -201,7 +201,7 @@ def test_enqueue_dispatch_error_keeps_job_durably_accepted(monkeypatch) -> None:
     assert "持久队列" in job["error"]
 
 
-def test_edited_reference_gallery_changes_enqueue_idempotency(monkeypatch) -> None:
+def test_generated_reference_gallery_cannot_change_enqueue_idempotency(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -255,8 +255,7 @@ def test_edited_reference_gallery_changes_enqueue_idempotency(monkeypatch) -> No
     conn.commit()
 
     changed = worker.enqueue_shot("s1")
-    assert changed["reused"] is False
-    assert changed["version_id"] != first["version_id"]
+    assert changed == {"reused": True, "version_id": first["version_id"]}
 
     new_meta = json.loads(conn.execute(
         "SELECT image_inputs FROM shot_versions WHERE id=?", (changed["version_id"],)
@@ -320,7 +319,7 @@ def test_new_portrait_revision_prevents_old_gallery_and_video_reuse(monkeypatch)
     assert "reference_gallery_source_version_id" not in new_meta
 
 
-def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
+def test_reroll_does_not_reuse_gallery_containing_generated_keyframe(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -384,8 +383,8 @@ def test_reroll_reuses_unedited_shot_reference_gallery(monkeypatch) -> None:
     ).fetchone()["image_inputs"])
 
     assert rerolled["version_id"] != first["version_id"]
-    assert rerolled_meta["reference_gallery_source_version_id"] == first["version_id"]
-    assert rerolled_meta["reference_images"] == refs
+    assert "reference_gallery_source_version_id" not in rerolled_meta
+    assert "reference_images" not in rerolled_meta
     assert rerolled_meta["reference_manifest"] == {"input_fingerprint": "frozen-manifest"}
     assert rerolled_meta["reference_manifest_frozen"] is True
     rerolled_prompt = conn.execute(
@@ -458,7 +457,7 @@ def test_gallery_with_missing_selected_continuity_tail_is_not_technically_reusab
     ) is False
 
 
-def test_failed_video_reference_gallery_is_reused_by_next_attempt(monkeypatch) -> None:
+def test_failed_generated_reference_gallery_is_not_reused_by_next_attempt(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -489,8 +488,8 @@ def test_failed_video_reference_gallery_is_reused_by_next_attempt(monkeypatch) -
         (retried["version_id"],),
     ).fetchone()["image_inputs"])
 
-    assert retried_meta["reference_gallery_source_version_id"] == failed["version_id"]
-    assert retried_meta["reference_images"] == refs
+    assert "reference_gallery_source_version_id" not in retried_meta
+    assert "reference_images" not in retried_meta
 
 
 def test_auto_retake_count_is_persisted_on_child_video_version(monkeypatch) -> None:

@@ -1258,6 +1258,7 @@ export interface NarrativeBoundaryContract {
 
 export type VideoGenerationMode =
   | "REFERENCE_IMAGE_MODE"
+  | "FIRST_FRAME_MODE"
   | "FIRST_LAST_FRAME_MODE"
   | "VIDEO_INPUT_MODE";
 
