@@ -45,4 +45,16 @@ Root cause confirmed. Minimal fix applied:
   changed fingerprints still re-read under `BEGIN IMMEDIATE`.
 - Added focused regression coverage; 108 related tests pass.
 
-Pending post-fix runtime comparison and user confirmation.
+Post-fix runtime comparison complete; pending user confirmation.
+
+## Post-Fix Evidence
+- The identical three-board polling load produced zero debug events: no SQLite
+  transaction or lock wait exceeded 500 ms.
+- All 36 health probes returned HTTP 200; the maximum latency was 431 ms.
+- The large board-detail responses can still take several seconds under forced
+  concurrent serialization, but health stayed responsive throughout.
+- 108 directly related recovery/workspace tests pass.
+- Full backend suite: 1999 passed, 4 skipped, 2 unrelated existing screenplay
+  identity expectation failures. Both failures reproduce independently.
+- Default development startup now runs stable uvicorn directly; the fixed-interval
+  backend cycle is no longer part of normal startup.

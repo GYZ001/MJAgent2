@@ -80,7 +80,10 @@ def _attach_debug_sql_trace(conn: sqlite3.Connection) -> None:
             if elapsed < 0.5:
                 continue
             state["reported"] = True
-            in_transaction = conn.in_transaction
+            try:
+                in_transaction = conn.in_transaction
+            except sqlite3.ProgrammingError:
+                return
             payload = {
                 "sessionId": _DEBUG_SQL_SESSION,
                 "runId": "post-fix",
