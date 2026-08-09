@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from app import stages
+from app.errors import ContentGenerationError
 from app.narrative_blueprint import (
     BlueprintDecision,
     BlueprintSemanticReview,
@@ -583,6 +584,75 @@ def test_blueprint_patch_repairs_malformed_provider_json(
     ]
 
 
+def test_blueprint_review_exhaustion_is_quality_gate(
+    monkeypatch,
+) -> None:
+    review = BlueprintSemanticReview.model_validate({
+        "issues": [{
+            "code": "spatial_action_gap",
+            "node_keys": ["n4"],
+            "source_segment_ids": ["SRC0004"],
+            "message": "开门后的空间位置过渡不清",
+            "required_resolution": "补充连续的位置转换",
+            "must_fix": True,
+        }],
+    })
+    reviewer_calls = 0
+    repair_calls = 0
+
+    class EmptyRows:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class EmptyConnection:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return EmptyRows()
+
+    async def fake_chat_structured(*_args, **_kwargs):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        return review.model_copy(deep=True)
+
+    async def fake_repair(blueprint, **_kwargs):
+        nonlocal repair_calls
+        repair_calls += 1
+        return blueprint
+
+    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else 1,
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_chat_structured,
+    )
+    monkeypatch.setattr(stages, "_repair_narrative_blueprint", fake_repair)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+
+    with pytest.raises(
+        ContentGenerationError,
+        match="蓝图语义共识复审仍有必须修复问题",
+    ):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            _blueprint(),
+            episode={"id": "episode-quality-gate"},
+            source_text=SOURCE,
+        ))
+
+    assert reviewer_calls == 8
+    assert repair_calls == 3
+
+
 def test_blueprint_patch_can_split_one_node_without_losing_sources() -> None:
     blueprint = _blueprint()
     original = blueprint.nodes[0]
@@ -746,7 +816,7 @@ def test_blueprint_review_fails_closed_when_one_reviewer_is_unavailable(
         "get_setting",
         lambda key: "true" if key == "screenplay_targeted_blueprint_review_enabled" else "1",
     )
-    with pytest.raises(RuntimeError, match="不足两份"):
+    with pytest.raises(ContentGenerationError, match="不足两份"):
         asyncio.run(stages._semantic_review_narrative_blueprint(
             blueprint,
             episode={"id": f"ep-blueprint-review-unavailable-{uuid.uuid4()}", "episode_no": 8},

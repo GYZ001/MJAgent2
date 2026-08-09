@@ -27,6 +27,7 @@ from app.continuity import (adaptation_hook_errors, ensure_audio_timeline,
                             sync_shot_continuity_fields)
 from app.db import get_conn, get_setting, log_provider_call
 from app.evaluations.issues import issues_from_messages
+from app.errors import ContentGenerationError
 from app.harness import model_gateway
 from app.harness.types import Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
@@ -4208,7 +4209,7 @@ async def _semantic_review_narrative_blueprint(
                 ),
                 step_run_id=trace.step_run_id,
             )
-            raise RuntimeError(
+            raise ContentGenerationError(
                 "蓝图语义审稿人不足两份，已停止而非静默视为无问题"
             )
 
@@ -4277,7 +4278,7 @@ async def _semantic_review_narrative_blueprint(
         if not consensus_issues:
             return blueprint
         if review_round >= 4:
-            raise ValueError(
+            raise ContentGenerationError(
                 "蓝图语义共识复审仍有必须修复问题："
                 + "；".join(
                     issue.message for issue in consensus_issues[:10]
