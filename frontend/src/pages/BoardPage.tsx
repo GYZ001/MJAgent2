@@ -235,6 +235,43 @@ type StoryboardProgressCopy = {
   detail: string | null
 }
 
+export type StoryboardPrimaryAction = {
+  intent: StoryboardStatus['recommended_action'] | 'activate_ai_one_watch'
+  label: string
+}
+
+export function storyboardPrimaryAction(
+  status: StoryboardStatus,
+  calibration: Episode['narrative_calibration_summary'],
+  review: Episode['narrative_review_summary'],
+): StoryboardPrimaryAction {
+  const finalizingEvidence = status.recommended_action === 'resume_storyboard'
+    && status.resume_mode === 'finalize_evidence'
+  if (
+    finalizingEvidence
+    && calibration?.status === 'needs_review'
+    && review?.decision === 'pass'
+  ) {
+    return {
+      intent: 'activate_ai_one_watch',
+      label: '运行 AI 一次观看模拟',
+    }
+  }
+  const labels: Record<StoryboardStatus['recommended_action'], string> = {
+    go_screenplay: '先去剧本台',
+    generate_storyboard: '开始分镜任务',
+    view_progress: '查看任务详情',
+    resume_storyboard: finalizingEvidence ? '完成发布证据' : '继续分镜任务',
+    confirm_storyboard: '确认分镜',
+    go_review_wall: '进入生成台',
+    refresh_status: '状态同步中',
+  }
+  return {
+    intent: status.recommended_action,
+    label: labels[status.recommended_action],
+  }
+}
+
 export function storyboardProgressCopy(status: StoryboardStatus): StoryboardProgressCopy {
   const working = status.draft_shots ?? status.produced_shots
   const validated = Math.min(working, status.safe_checkpoint_shots ?? status.validated_shots)
@@ -465,9 +502,7 @@ function HumanCalibrationControls({
   async function runAiOneWatchSimulation() {
     setBusy(true)
     try {
-      const result = await api.post(
-        `/episodes/${episode.id}/narrative-calibration/ai-simulate`,
-      ) as Record<string, any>
+      const result = await activateAiOneWatchSimulation(episode.id)
       await onChanged()
       notify(String(result.message || 'AI 一次观看模拟权威已激活'))
     } catch (caught) {
@@ -573,7 +608,7 @@ function HumanCalibrationControls({
   }
 
   return <details className="narrative-calibration-controls">
-    <summary>真人一次观看校准</summary>
+    <summary>一次观看权威与真人校准</summary>
     <div className="narrative-calibration-rebuild">
       <button type="button" className="btn primary" disabled={busy}
         onClick={() => void runAiOneWatchSimulation()}>
@@ -662,8 +697,8 @@ function NarrativeReadinessPanel({
   const ready = metrics.narrative_ready === true && calibration?.ready === true
   const reviewCopy = review?.decision === 'pass'
     ? calibration?.ready
-      ? '冷观众与真人校准通过'
-      : '等待真人校准'
+      ? '冷观众与一次观看权威通过'
+      : '等待一次观看权威'
     : review?.decision === 'revise'
       ? '冷观众要求修订'
       : review?.decision === 'needs_human_review'
@@ -682,7 +717,13 @@ function NarrativeReadinessPanel({
       <div><dt>重复主动作</dt><dd>{duplicateActions ?? '待计算'}</dd></div>
       <div><dt>状态回退</dt><dd>{stateRegressions ?? '待计算'}</dd></div>
       <div><dt>观众处理欠债</dt><dd>{processingDebt === null ? '待计算' : `${processingDebt.toFixed(1)}s`}</dd></div>
-      <div><dt>真人校准</dt><dd>{calibration?.ready ? '当前版本已绑定' : '待完成'}</dd></div>
+      <div><dt>一次观看权威</dt><dd>{
+        calibration?.ready
+          ? '当前版本已绑定'
+          : calibration?.status === 'awaiting_republish'
+            ? '已就绪，待发布绑定'
+            : '待激活'
+      }</dd></div>
     </dl>
     {review?.reason && <p>{review.reason}</p>}
     {calibration?.blockers?.length ? <p className="narrative-calibration-blocker">{calibration.blockers[0]}</p> : null}
@@ -844,6 +885,11 @@ export default function BoardPage() {
     )
   }
   const currentEpisodeId = ep.id
+  const primaryAction = storyboardPrimaryAction(
+    status,
+    ep.narrative_calibration_summary,
+    ep.narrative_review_summary,
+  )
 
   const run = async <T,>(fn: () => Promise<T>, message?: string): Promise<T | undefined> => {
     setBusy(true)
@@ -904,7 +950,12 @@ export default function BoardPage() {
   }
 
   const runPrimary = async () => {
-    switch (status.recommended_action) {
+    if (primaryAction.intent === 'activate_ai_one_watch') {
+      const result = await run(() => activateAiOneWatchSimulation(ep.id))
+      if (result) toast(result.message || 'AI 一次观看模拟权威已激活')
+      return
+    }
+    switch (primaryAction.intent) {
       case 'go_screenplay': go('script', projectId, ep.id); break
       case 'generate_storyboard': await loadStartPreview(); break
       case 'resume_storyboard': await loadStartPreview(); break
@@ -1015,11 +1066,6 @@ export default function BoardPage() {
     if (result) storyboardTimer.clear()
   }
 
-  const primaryLabel: Record<StoryboardStatus['recommended_action'], string> = {
-    go_screenplay: '先去剧本台', generate_storyboard: '开始分镜任务', view_progress: '查看任务详情',
-    resume_storyboard: '继续分镜任务', confirm_storyboard: '确认分镜',
-    go_review_wall: '进入生成台', refresh_status: '状态同步中',
-  }
   const showLaunchPanel = !shots.length && (status.state === 'empty' || status.state === 'no_screenplay')
   const primaryBlocked = status.recommended_action === 'refresh_status'
   const gateIssueCount = status.hard_gate_issue_count ?? status.hard_gate_issues?.length ?? 0
@@ -1063,9 +1109,9 @@ export default function BoardPage() {
               </button>
             </> : <>
               <button id="storyboard-primary-action" type="button" className="btn board-primary-action primary" disabled={busy || primaryBlocked}
-                aria-label={busy ? `${primaryLabel[status.recommended_action]}，暂不可用：正在处理上一项操作` : primaryBlocked ? `${primaryLabel[status.recommended_action]}，暂不可操作` : primaryLabel[status.recommended_action]}
+                aria-label={busy ? `${primaryAction.label}，暂不可用：正在处理上一项操作` : primaryBlocked ? `${primaryAction.label}，暂不可操作` : primaryAction.label}
                 onClick={() => void runPrimary()}>
-                {busy ? '处理中…' : primaryLabel[status.recommended_action]}
+                {busy ? '处理中…' : primaryAction.label}
               </button>
               {toolbarActions.clear && <button type="button" className="btn danger"
                 disabled={busy || shotEditDirty}

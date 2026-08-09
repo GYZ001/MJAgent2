@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from pathlib import Path
 import time
 from typing import Any, Literal
 
@@ -252,6 +253,28 @@ class CoverageLedger(BaseModel):
             if e.best_version_id:
                 out.append(e)
         return out
+
+
+def _adopted_video_is_usable(adopted_row: Any) -> bool:
+    if adopted_row is None or adopted_row["status"] != "succeeded":
+        return False
+    try:
+        metadata = json.loads(adopted_row["image_inputs"] or "{}")
+        technical = json.loads(
+            adopted_row["technical_validation_json"] or "{}"
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if metadata.get("delivery_fallback") or technical.get("passed") is not True:
+        return False
+    path = Path(str(adopted_row["video_path"] or ""))
+    try:
+        if not path.is_file() or path.stat().st_size <= 0:
+            return False
+        with path.open("rb") as handle:
+            return b"ftyp" in handle.read(32)
+    except OSError:
+        return False
 
 
 class VideoSupervisorCheckpoint(BaseModel):
@@ -1184,18 +1207,12 @@ def rebuild_coverage_ledger(
         adopted_version_id = row["adopted_version_id"]
         if adopted_version_id:
             adopted_row = conn.execute(
-                "SELECT status,image_inputs FROM shot_versions WHERE id=?",
+                """SELECT status,image_inputs,video_path,
+                          technical_validation_json
+                     FROM shot_versions WHERE id=?""",
                 (adopted_version_id,),
             ).fetchone()
-            try:
-                adopted_meta = json.loads(adopted_row["image_inputs"] or "{}") if adopted_row else {}
-            except (TypeError, ValueError, json.JSONDecodeError):
-                adopted_meta = {}
-            if (
-                not adopted_row
-                or adopted_meta.get("delivery_fallback")
-                or adopted_row["status"] != "succeeded"
-            ):
+            if not _adopted_video_is_usable(adopted_row):
                 adopted_version_id = None
         graded = grade_shot_video(
             sid,

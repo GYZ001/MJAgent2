@@ -4335,6 +4335,7 @@ def pack_reference_images_for_seedance(
     refs: list[dict[str, Any]], *, max_images: int | None = None,
     continuity_required: bool = False,
     max_keyframes: int | None = None,
+    required_identity_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """必需用途优先装箱；分数只在同类候选内排序。关键帧不会被高分定妆照挤掉。"""
     from app.multiview import pack_references_by_purpose
@@ -4445,7 +4446,11 @@ def pack_reference_images_for_seedance(
         max_character_reference_images(), len(distinct_character_identities),
     )
     return pack_references_by_purpose(
-        usable, max_images=limit, continuity_required=continuity_required, char_limit=char_limit,
+        usable,
+        max_images=limit,
+        continuity_required=continuity_required,
+        char_limit=char_limit,
+        required_identity_names=required_identity_names,
     )
 
 
@@ -4481,12 +4486,9 @@ def _dedupe_assets(assets: list[ReferenceImageAsset]) -> list[ReferenceImageAsse
     return out
 
 
-# 反分身/单实例约束（真正发给 Seedance 视频的 prompt 用）：参考图只锁「身份+环境」，绝不能被当成额外主体
-# 再画一遍。不加这句时，满屏全身定妆照常被模型原样贴进画面 → 前景巨人 + 脚本里的小人 = 同一角色两份/穿模。
 REFERENCE_SINGLE_INSTANCE_NOTE = (
-    " 重要：以上参考图仅用于锁定每个角色的长相/发型/服装与场景的环境/光线；"
-    "每个角色在整个画面里只能出现一次，严禁把参考图里的人物当作额外的前景或背景对象再画一遍，"
-    "不要分身/复制/双重同一角色，不要出现一个贴满画面的巨大人物剪影遮挡主体，不要人物与人物穿模重叠。"
+    " Reference images bind identity/environment only; each named character "
+    "appears exactly once."
 )
 REFERENCE_PROMPT_NOTE_MARKER = " Use the provided reference images as follows: "
 
@@ -4503,11 +4505,15 @@ def append_reference_prompt_notes_from_dicts(
     """
     from app.compiler import _split_video_args
 
+    if REFERENCE_PROMPT_NOTE_MARKER in prompt_text:
+        return prompt_text
     prompt_body, prompt_args = _split_video_args(prompt_text)
-    lines = []
+    lines: list[str] = []
     subject_images: dict[str, list[int]] = {}
     definitions: list[str] = []
-    timeline_count = sum(1 for ref in packed_refs if ref.get("type") == "plot_key_frame")
+    timeline_count = sum(
+        1 for ref in packed_refs if ref.get("type") == "plot_key_frame"
+    )
     for idx, ref in enumerate(packed_refs, 1):
         label = {
             "character": "character",
@@ -4517,7 +4523,6 @@ def append_reference_prompt_notes_from_dicts(
             "previous_shot_frame": "previous shot clean frame",
             "plot_key_frame": "plot key frame",
         }.get(str(ref.get("type") or "reference"), str(ref.get("type") or "reference"))
-        source = str(ref.get("source") or "pipeline").replace("_", " ")
         related = [
             str(name).strip()
             for name in (
@@ -4539,36 +4544,39 @@ def append_reference_prompt_notes_from_dicts(
             )
         elif ref.get("type") == "plot_key_frame" and related:
             definitions.append(
-                f"Reference image {idx} 的画面人物必须且仅能解释为：{'、'.join(related)}；"
-                "不得把其中任何人改成其他性别、其他身份或额外人物。"
+                f"Reference image {idx} 的画面人物必须且仅能解释为："
+                f"{'、'.join(related)}；不得改成其他身份或额外人物。"
             )
-        chars = f"; related characters: {', '.join(related)}" if related else ""
+        subject = f"「{'、'.join(related)}」" if related else ""
         timeline = ""
         if ref.get("type") == "plot_key_frame":
-            qa_beat = (ref.get("qa") or {}).get("keyframe_beat") if isinstance(ref.get("qa"), dict) else {}
-            beat_index = ref.get("keyframe_index") or (qa_beat or {}).get("beat_index")
-            beat_total = ref.get("keyframe_total") or (qa_beat or {}).get("beat_total") or timeline_count
+            target = str(ref.get("keyframe_target_desc") or "").strip()
+            beat_index = ref.get("keyframe_index") or "?"
+            beat_total = ref.get("keyframe_total") or "?"
             time_ratio = ref.get("keyframe_time_ratio")
-            if time_ratio is None:
-                time_ratio = (qa_beat or {}).get("time_ratio")
-            target = ref.get("keyframe_target_desc") or (qa_beat or {}).get("target_desc")
             timing = ""
             try:
                 timing = f", at {round(float(time_ratio) * 100)}% of the shot"
             except (TypeError, ValueError):
                 pass
             timeline = (
-                f"; chronological timeline beat {beat_index or '?'} of {beat_total or timeline_count}{timing}"
-                + (f"; freeze only: {target}" if target else "")
+                f"; chronological timeline beat {beat_index} of {beat_total}"
+                f"{timing}"
             )
-        lines.append(f"Reference image {idx}: use as {label}; source: {source}{chars}{timeline}.")
+            if target:
+                timeline += f"; freeze only: {target}"
+        lines.append(
+            f"Reference image {idx}: use as {label}{subject}; "
+            f"identity/appearance only{timeline}."
+        )
     if not lines:
         return prompt_text
     for name, indexes in subject_images.items():
         if len(indexes) > 1:
             definitions.append(
-                f"Reference images {', '.join(str(index) for index in indexes)} 中的「{name}」"
-                "是同一个且仅一个人物，不是多个相似人物；全程保持该身份不变。"
+                f"Reference images {', '.join(str(index) for index in indexes)} "
+                f"中的「{name}」是同一个且仅一个人物，不是多个相似人物；"
+                "全程保持该身份不变。"
             )
     binding = (
         "[SUBJECT DEFINITIONS | HIGHEST PRIORITY]\n"
@@ -4580,8 +4588,9 @@ def append_reference_prompt_notes_from_dicts(
     sequence_note = ""
     if timeline_count > 1:
         sequence_note = (
-            " Treat the plot key frames as chronological waypoints of ONE continuous shot and interpolate through "
-            "them in the numbered order. Do not show them simultaneously; no montage, split screen, collage, "
+            " Treat the plot key frames as chronological waypoints of ONE "
+            "continuous shot and interpolate through them in the numbered order. "
+            "Do not show them simultaneously; no montage, split screen, collage, "
             "hard cuts, duplicated actors, or frozen slideshow. "
             + _MULTI_KEYFRAME_INVARIANCE_NOTE
         )
@@ -4605,10 +4614,13 @@ def append_reference_prompt_notes_from_dicts(
 def append_reference_prompt_notes(
     prompt_text: str,
     assets: list[ReferenceImageAsset],
+    *,
+    required_identity_names: list[str] | None = None,
 ) -> str:
     # Notes and provider inputs must use the exact same packed order.
     packed_refs = pack_reference_images_for_seedance(
         [asset.public_dict() for asset in assets],
+        required_identity_names=required_identity_names,
     )
     return append_reference_prompt_notes_from_dicts(prompt_text, packed_refs)
 
@@ -4637,10 +4649,32 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
         sequence = meta.get("keyframe_sequence") or {}
         beats = sequence.get("beats") if isinstance(sequence, dict) else None
         keyframe_limit = len(beats) if isinstance(beats, list) and beats else _MAX_TIMELINE_KEYFRAMES
-        usable = pack_reference_images_for_seedance(refs, max_keyframes=keyframe_limit)
+        required_identities = [
+            str(name).strip()
+            for name in (meta.get("required_reference_characters") or [])
+            if str(name).strip()
+        ]
+        usable = pack_reference_images_for_seedance(
+            refs,
+            max_keyframes=keyframe_limit,
+            required_identity_names=required_identities,
+        )
         if not usable:
             raise ProviderError(
                 "REFERENCE_IMAGE_MODE 没有可提交的 reference_image"
+            )
+        covered_identities = set().union(*(
+            _reference_identity_names(ref)
+            for ref in usable
+        ))
+        missing_identities = [
+            name for name in required_identities
+            if name not in covered_identities
+        ]
+        if missing_identities:
+            raise ProviderError(
+                "REFERENCE_IMAGE_MODE 缺少必需人物身份参考图："
+                + "、".join(missing_identities)
             )
         out: list[tuple[str, str]] = []
         for ref in usable:

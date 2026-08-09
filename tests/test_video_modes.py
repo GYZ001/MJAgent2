@@ -704,15 +704,14 @@ def test_reference_prompt_numbering_uses_exact_packed_order(monkeypatch) -> None
     packed = video_modes.pack_reference_images_for_seedance([asset.public_dict() for asset in assets])
 
     assert [ref["id"] for ref in packed] == ["early", "late", "scene", "character"]
-    assert "Reference image 1: use as plot key frame" in note and "freeze only: opening target" in note
-    assert "Reference image 2: use as plot key frame" in note and "freeze only: closing target" in note
+    assert "Reference image 1: use as plot key frame" in note and "target: opening target" in note
+    assert "Reference image 2: use as plot key frame" in note and "target: closing target" in note
     assert "Reference image 3: use as scene" in note
     assert "Reference image 4: use as character" in note
-    assert "chronological waypoints of ONE continuous shot" in note
-    assert "[SUBJECT DEFINITIONS | HIGHEST PRIORITY]" in note
-    assert "定义为「A」" in note
-    assert "是同一个且仅一个人物" in note
-    assert "禁止中途变性、换脸、换人" in note
+    assert "beat 1/2@0%" in note
+    assert "beat 2/2@100%" in note
+    assert "each named character appears exactly once" in note
+    assert "[SUBJECT DEFINITIONS | HIGHEST PRIORITY]" not in note
 
 
 def test_reference_prompt_notes_preserve_trailing_technical_suffix() -> None:

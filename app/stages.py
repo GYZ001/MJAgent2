@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -1210,6 +1210,19 @@ class StoryboardShotDraft(BaseModel):
         return self
 
 
+class DirectedPhysicalInteraction(BaseModel):
+    kind: Literal[
+        "none",
+        "person_person_contact",
+        "person_object_contact",
+        "spatial_interaction",
+    ] = "none"
+    participants: list[str] = Field(default_factory=list)
+    phase: Literal["none", "approach", "established", "separated"] = "none"
+    contact_point: str = ""
+    contact_point_visible: bool = False
+
+
 class DirectedSceneShotDraft(BaseModel):
     """Only fields that still require directing judgement.
 
@@ -1227,6 +1240,9 @@ class DirectedSceneShotDraft(BaseModel):
     first_frame_desc: str
     last_frame_desc: str
     spatial_anchor: str = ""
+    physical_interaction: DirectedPhysicalInteraction = Field(
+        default_factory=DirectedPhysicalInteraction
+    )
     dialogue_emotions: dict[str, str] = Field(default_factory=dict)
     required_text: RequiredOnScreenText | None = None
     source_excerpt: str = ""
@@ -8693,6 +8709,19 @@ def normalize_storyboard_direction_fields(
     return changes
 
 
+def _directed_interaction_risk_tags(
+    interaction: DirectedPhysicalInteraction,
+) -> list[str]:
+    if interaction.kind == "none":
+        return []
+    tags = ["dialogue_action_staging"]
+    if interaction.kind == "person_person_contact":
+        tags.append("dialogue_two_shot_required")
+    if interaction.phase != "none":
+        tags.append(f"contact_phase:{interaction.phase}")
+    return tags
+
+
 def _hydrate_directed_scene_pack(
     draft: DirectedScenePackDraft,
     *,
@@ -8813,6 +8842,9 @@ def _hydrate_directed_scene_pack(
                 bible=bible,
                 screenplay=screenplay,
                 usage="voice",
+            ),
+            risk_tags=_directed_interaction_risk_tags(
+                item.physical_interaction
             ),
             required_text=item.required_text,
             spatial_anchor=item.spatial_anchor,
@@ -9010,6 +9042,17 @@ async def generate_storyboard_scene_pack(
                 fallback=list(brief.characters_visible),
             ),
             "visible_entity_ids": brief.visible_entity_ids,
+            "action_phase_ids": brief.action_phase_ids,
+            "bound_action_actor_ids": _bound_action_relation_ids(
+                screenplay,
+                brief,
+                bible=planning_bible,
+            )[0],
+            "bound_action_target_ids": _bound_action_relation_ids(
+                screenplay,
+                brief,
+                bible=planning_bible,
+            )[1],
             "key_line_ids": brief.key_line_ids,
             "speech_allowed": bool(brief.key_line_ids),
             "program_dialogue_count": len(brief.key_line_ids),
@@ -9065,6 +9108,10 @@ atomic action 的 actor/target 关系登记为画外身份，不得为了同场�
    speech_allowed=false 的镜头必须全程闭口，只写无声动作或反应，禁止出现“开口、说话、嘴唇张开”等口播动作。
 8. required_text 仅在本镜确实需要画面精确文字时填写，否则为 null。
 9. source_excerpt 通常留空，由程序按 event/spine/台词证据回绑；只有任务证据不足时才逐字复制原文。
+10. physical_interaction 必须由你根据本镜 actor/target、temporal phase、首尾姿态和实际画面语义判断，
+    不得按动作关键词套模板。双人身体接触使用 person_person_contact，participants 必须同时保留在
+    characters，phase 写 approach/established/separated，contact_point 写清双方哪个部位接触，
+    contact_point_visible 必须为 true；只有确实无互动时才写 none。
 
 输出 JSON：
 {{
@@ -9081,6 +9128,13 @@ atomic action 的 actor/target 关系登记为画外身份，不得为了同场�
     "first_frame_desc": str,
     "last_frame_desc": str,
     "spatial_anchor": str,
+    "physical_interaction": {{
+      "kind": "none|person_person_contact|person_object_contact|spatial_interaction",
+      "participants": ["本镜实际互动且进入构图的角色名"],
+      "phase": "none|approach|established|separated",
+      "contact_point": str,
+      "contact_point_visible": bool
+    }},
     "dialogue_emotions": {{"KL01": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定"}},
     "required_text": null,
     "source_excerpt": ""
@@ -9101,6 +9155,44 @@ atomic action 的 actor/target 关系登记为画外身份，不得为了同场�
         if actual_nos != shot_nos:
             errors.append(f"场景镜号必须精确为 {shot_nos}，当前 {actual_nos}")
             return errors
+        for item in draft.shots:
+            interaction = item.physical_interaction
+            participants = list(dict.fromkeys(interaction.participants))
+            if participants != interaction.participants:
+                errors.append(
+                    f"shot_no={item.shot_no}.physical_interaction.participants 不得重复"
+                )
+            undeclared = [
+                name for name in participants
+                if name not in item.characters
+            ]
+            if undeclared:
+                errors.append(
+                    f"shot_no={item.shot_no}.physical_interaction 含未入画参与者 "
+                    + "、".join(undeclared)
+                )
+            if interaction.kind == "person_person_contact":
+                if len(participants) < 2:
+                    errors.append(
+                        f"shot_no={item.shot_no} 双人接触必须声明至少两名参与者"
+                    )
+                if (
+                    interaction.phase == "none"
+                    or not interaction.contact_point.strip()
+                    or not interaction.contact_point_visible
+                ):
+                    errors.append(
+                        f"shot_no={item.shot_no} 双人接触必须给出阶段和画面可见接触点"
+                    )
+            elif interaction.kind == "none" and (
+                participants
+                or interaction.phase != "none"
+                or interaction.contact_point.strip()
+                or interaction.contact_point_visible
+            ):
+                errors.append(
+                    f"shot_no={item.shot_no} 无互动时不得填写参与者、阶段或接触点"
+                )
         try:
             pack = _hydrate_directed_scene_pack(
                 draft,

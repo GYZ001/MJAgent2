@@ -1682,7 +1682,10 @@ async def _prepare_reference_mode_inputs(
                 meta["reference_manifest_frozen"] = True
                 if video_modes.REFERENCE_PROMPT_NOTE_MARKER not in prompt_text:
                     packed_refs = video_modes.pack_reference_images_for_seedance(
-                        list(meta.get("reference_images") or [])
+                        list(meta.get("reference_images") or []),
+                        required_identity_names=list(
+                            meta.get("required_reference_characters") or []
+                        ),
                     )
                     prompt_text = (
                         video_modes.append_reference_prompt_notes_from_dicts(
@@ -1811,7 +1814,13 @@ async def _prepare_reference_mode_inputs(
             meta["video_input_manifest_frozen"] = True
             meta.pop("first_frame_path", None)
             meta.pop("last_frame_path", None)
-            prompt_text = video_modes.append_reference_prompt_notes(prompt_text, assets)
+            prompt_text = video_modes.append_reference_prompt_notes(
+                prompt_text,
+                assets,
+                required_identity_names=list(
+                    meta.get("required_reference_characters") or []
+                ),
+            )
             try:
                 from app.media_pipeline.reference_store import upsert_reference_set_from_meta
                 upsert_reference_set_from_meta(
@@ -1992,7 +2001,13 @@ async def _prepare_reference_mode_inputs(
         meta.pop("last_frame_path", None)
         meta.pop("first_frame_scene_id", None)
         meta.pop("last_frame_scene_id", None)
-        prompt_text = video_modes.append_reference_prompt_notes(prompt_text, assets)
+        prompt_text = video_modes.append_reference_prompt_notes(
+            prompt_text,
+            assets,
+            required_identity_names=list(
+                meta.get("required_reference_characters") or []
+            ),
+        )
         _assert_reference_lease()
         try:
             from app.media_pipeline.reference_store import upsert_reference_set_from_meta

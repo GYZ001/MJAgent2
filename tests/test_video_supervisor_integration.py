@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
@@ -42,6 +43,8 @@ from app.video_supervisor import (
     save_checkpoint,
 )
 
+_TEST_MEDIA_DIR: Path | None = None
+
 
 def _memory_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
@@ -56,8 +59,11 @@ def _memory_conn() -> sqlite3.Connection:
 
 
 @pytest.fixture
-def memdb(monkeypatch):
+def memdb(monkeypatch, tmp_path):
+    global _TEST_MEDIA_DIR
+
     conn = _memory_conn()
+    _TEST_MEDIA_DIR = tmp_path
 
     def _get():
         return conn
@@ -83,7 +89,8 @@ def memdb(monkeypatch):
         video_supervisor,
     ):
         monkeypatch.setattr(mod, "get_conn", _get)
-    return conn
+    yield conn
+    _TEST_MEDIA_DIR = None
 
 
 def _seed_episode(conn, n_shots: int = 11, *, episode_id: str = "ep_int", project_id: str = "proj_int"):
@@ -129,16 +136,21 @@ def _add_succeeded_version(
     meta = {}
     if continuity_degraded:
         meta["continuity_degraded"] = True
+    if _TEST_MEDIA_DIR is None:
+        raise AssertionError("video fixture requires memdb")
+    video_path = _TEST_MEDIA_DIR / f"{vid}.mp4"
+    video_path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"test-video")
     conn.execute(
         """INSERT INTO shot_versions(
             id, shot_id, version_no, prompt_text, idem_key, status, created_at,
-            qa_json, cost_cny, technical_validation_json, provider_task_id, image_inputs
-        ) VALUES(?,?,?,?,?, 'succeeded', ?, ?, ?, ?, ?, ?)""",
+            qa_json, cost_cny, technical_validation_json, provider_task_id,
+            image_inputs, video_path
+        ) VALUES(?,?,?,?,?, 'succeeded', ?, ?, ?, ?, ?, ?, ?)""",
         (
             vid, shot_id, no, "p", f"idem-{vid}", 1.0,
             json.dumps(qa, ensure_ascii=False), cost,
             json.dumps(tech, ensure_ascii=False), f"task-{vid}",
-            json.dumps(meta, ensure_ascii=False),
+            json.dumps(meta, ensure_ascii=False), str(video_path),
         ),
     )
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (vid, shot_id))
@@ -381,6 +393,32 @@ def test_integration_all_a_covered(memdb):
     ).fetchone()["c"]
     assert rows == 1
     assert cp.phase == "SUCCEEDED_COVERED"
+
+
+@pytest.mark.parametrize("damage", ["missing", "empty", "invalid_container"])
+def test_adopted_video_without_usable_file_is_not_covered(memdb, damage):
+    eid, _ = _seed_episode(memdb, 1)
+    version_id = _add_succeeded_version(
+        memdb,
+        f"{eid}_shot_1",
+        qa={"overall": 0.9, "contract_facts": []},
+    )
+    video_path = Path(memdb.execute(
+        "SELECT video_path FROM shot_versions WHERE id=?",
+        (version_id,),
+    ).fetchone()["video_path"])
+    if damage == "missing":
+        video_path.unlink()
+    elif damage == "empty":
+        video_path.write_bytes(b"")
+    else:
+        video_path.write_bytes(b"not-an-mp4-container")
+
+    ledger = rebuild_coverage_ledger(eid)
+
+    assert ledger.entries[0].adopted_version_id is None
+    assert ledger.covered_within_quota() is False
+    assert ledger.count_uncovered() == 1
 
 
 @pytest.mark.asyncio
@@ -673,7 +711,9 @@ def test_deadline_closeout_adopts_best_candidate_without_image_fallback(memdb, t
         memdb, f"{eid}_shot_4", qa={"overall": 0.2, "contract_facts": ["end_state_match_below_contract"]},
     )
     candidate_path = tmp_path / "candidate-shot-4.mp4"
-    candidate_path.write_bytes(b"candidate")
+    candidate_path.write_bytes(
+        b"\x00\x00\x00\x18ftypmp42" + b"candidate-video"
+    )
     memdb.execute("UPDATE shot_versions SET video_path=? WHERE id=?", (str(candidate_path), candidate))
     memdb.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (f"{eid}_shot_4",))
     # 镜2永远等待镜1尾帧；收口必须把它停止，不能继续显示 active。

@@ -232,7 +232,8 @@ def test_seedance_binding_contract_round_trips_into_h3_picture_tags() -> None:
 
     assert seedance_prompt.endswith("--ratio 9:16 --dur 5")
     assert "<Picture 1>: use as character" in h3_prompt
-    assert "<Picture 1> 中的唯一人物定义为「A」" in h3_prompt
+    assert "<Picture 1>: use as character「A」" in h3_prompt
+    assert "identity/appearance only" in h3_prompt
     assert "--ratio 9:16" not in h3_prompt
     assert "--dur 5" not in h3_prompt
 
