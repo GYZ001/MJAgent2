@@ -2691,6 +2691,11 @@ async def _prepare_planned_mode_inputs(
 
 
 async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
+    # Workers are spawned during application recovery.  Give the lifespan and
+    # HTTP server a scheduling boundary before any JSON decoding, authority
+    # verification, or reference preparation below; otherwise a recovered
+    # cohort can monopolize the event loop before the socket starts listening.
+    await asyncio.sleep(0)
     conn = get_conn()
     owner = lease_owner or f"direct-{id(asyncio.current_task())}"
     if lease_owner is None:

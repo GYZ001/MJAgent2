@@ -30,6 +30,7 @@ from app.video_supervisor import (
     _apply_cascade,
     _deadline_closeout,
     _finalize_covered,
+    _has_dispatch_budget_capacity,
     _reconcile_terminal_continuity_blocks,
     attempts_for,
     preview_video_completion_repair,
@@ -166,6 +167,40 @@ def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:
     assert entry.attempts_dispatched == 0
     assert entry.never_attempted is True
     assert entry.cost_spent_cny == 0
+
+
+def test_active_budget_reservations_fence_expensive_supervisor_preflight(memdb) -> None:
+    eid, _ = _seed_episode(memdb, 2)
+    entry = rebuild_coverage_ledger(eid).entries[1]
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,episode_id,project_id,status,created_at,updated_at
+           ) VALUES('job-reserved','video',?,?,'proj_int','queued',1,1)""",
+        (f"{eid}_shot_1", eid),
+    )
+    memdb.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('budget-reserved','job-reserved','episode',?,149,'reserved',1)""",
+        (eid,),
+    )
+    memdb.commit()
+
+    assert not _has_dispatch_budget_capacity(
+        eid,
+        entry,
+        budget_cap_cny=150,
+    )
+
+    memdb.execute(
+        "UPDATE budget_reservations SET status='released' WHERE id='budget-reserved'"
+    )
+    memdb.commit()
+    assert _has_dispatch_budget_capacity(
+        eid,
+        entry,
+        budget_cap_cny=150,
+    )
 
 
 @pytest.mark.asyncio

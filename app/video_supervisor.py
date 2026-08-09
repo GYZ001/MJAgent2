@@ -1107,6 +1107,45 @@ def attempts_for(entry: ShotCoverageEntry, ledger: CoverageLedger, *, budget_cap
     return max(MIN_ATTEMPTS_PER_SHOT, min(MAX_ATTEMPTS_PER_SHOT, min(base + affordable, MAX_ATTEMPTS_PER_SHOT)))
 
 
+def _has_dispatch_budget_capacity(
+    episode_id: str,
+    entry: ShotCoverageEntry,
+    *,
+    budget_cap_cny: float,
+) -> bool:
+    """Project budget capacity before running the expensive shot preflight.
+
+    ``media_scheduler.reserve_budget`` remains the atomic authority. This
+    projection reads the same durable costs and active reservations so the
+    Supervisor observes in-flight jobs instead of compiling versions which can
+    only enter ``paused_budget``.
+    """
+    from app.video_cost_model import initial_shot_generation_cost
+
+    conn = get_conn()
+    shot = conn.execute(
+        "SELECT duration_s FROM shots WHERE id=? AND episode_id=?",
+        (entry.shot_id, episode_id),
+    ).fetchone()
+    if shot is None:
+        return False
+    estimate = initial_shot_generation_cost(float(shot["duration_s"] or 5.0))
+    spent = float(conn.execute(
+        """SELECT COALESCE(SUM(v.cost_cny), 0) AS amount
+             FROM shot_versions v JOIN shots s ON s.id=v.shot_id
+            WHERE s.episode_id=? AND v.status='succeeded'""",
+        (episode_id,),
+    ).fetchone()["amount"] or 0)
+    reserved = float(conn.execute(
+        """SELECT COALESCE(SUM(amount_cny), 0) AS amount
+             FROM budget_reservations
+            WHERE scope_type='episode' AND scope_id=?
+              AND status IN ('reserved','running')""",
+        (episode_id,),
+    ).fetchone()["amount"] or 0)
+    return spent + reserved + float(estimate) <= float(budget_cap_cny) + 1e-9
+
+
 def _budget_view(cp: VideoSupervisorCheckpoint, ledger: CoverageLedger) -> dict[str, float]:
     cap = float((cp.budget or {}).get("cap_cny") or DEFAULT_VIDEO_BUDGET_CAP_CNY)
     return {
@@ -2665,6 +2704,7 @@ async def run_video_completion_supervisor(
 
         cp.phase = "EVALUATING"
         progressed = False
+        budget_capacity_reached = False
         soft_cap = cap * FIRST_PASS_BUDGET_FRACTION
         per_shot_cap = (cap / max(1, ledger.shots_total)) * SHOT_BUDGET_MULTIPLIER
 
@@ -2680,6 +2720,13 @@ async def run_video_completion_supervisor(
                 # 首轮软预算
                 if not cp.first_pass_done and spent >= soft_cap:
                     continue
+                if not _has_dispatch_budget_capacity(
+                    episode_id,
+                    entry,
+                    budget_cap_cny=cap,
+                ):
+                    budget_capacity_reached = True
+                    break
                 cp.phase = "DISPATCHING"
                 try:
                     dispatched = _dispatch(
@@ -2697,6 +2744,10 @@ async def run_video_completion_supervisor(
                 if dispatched:
                     progressed = True
                     spent = float(rebuild_coverage_ledger(episode_id, cp=cp).cost_spent)
+                # Narrative-authority request compilation is intentionally
+                # thorough and synchronous. Yield after each dispatch so a
+                # large first pass cannot starve HTTP and media workers.
+                await asyncio.sleep(0)
                 continue
 
             issues = _collect_issues(entry)
@@ -2835,6 +2886,13 @@ async def run_video_completion_supervisor(
                     plan.reason, payload=cp.last_plan,
                 )
             try:
+                if plan.is_paid and not _has_dispatch_budget_capacity(
+                    episode_id,
+                    entry,
+                    budget_cap_cny=cap,
+                ):
+                    budget_capacity_reached = True
+                    break
                 dispatched = _dispatch(
                     entry,
                     episode_id=episode_id,
@@ -2862,6 +2920,25 @@ async def run_video_completion_supervisor(
                         f"第 {entry.shot_no} 镜降链",
                         payload={"shot_no": entry.shot_no},
                     )
+            await asyncio.sleep(0)
+
+        if budget_capacity_reached:
+            observed = rebuild_coverage_ledger(
+                episode_id,
+                cp=cp,
+                fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
+            )
+            _merge_shot_state(cp, observed)
+            if observed.has_active_jobs():
+                cp.phase = "OBSERVING"
+                cp.outcome = "VIDEO_BUDGET_CAPACITY_RESERVED_BY_ACTIVE_JOBS"
+                save_checkpoint(cp, run_id=run_id)
+                await asyncio.sleep(cp.tick_interval_s)
+                continue
+            cp.phase = "PAUSED_BUDGET"
+            cp.outcome = "VIDEO_BUDGET_CAPACITY_REACHED"
+            save_checkpoint(cp, run_id=run_id)
+            return cp
 
         # 尝试预算耗尽后统一 best-effort 兜底；质量等级和旧 fallback quota
         # 只用于报告，不得让任何已有可播候选继续空置。
