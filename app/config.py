@@ -204,9 +204,8 @@ VIDEO_CONTINUITY_ORPHAN_TIMEOUT = max(
     30.0, float(os.environ.get("VIDEO_CONTINUITY_ORPHAN_TIMEOUT", "180"))
 )
 
-# 文本模型调用由 Harness 网关做外层有界重试。provider adapter 内部的 1.5s / 3s
-# 快速重试只处理瞬时网络抖动，跨不过按分钟计算的 TPM 限流窗口；外层退避仍重放
-# 同一份请求，因此不会额外消耗 AgentLoop 的内容修复轮次。
+# 文本模型调用只在连接阶段能证明请求未送达时，由 Harness 做外层有界重试。
+# ReadTimeout、流中断和其他已发送后的不确定结果必须等待页面显式重试，避免重复计费。
 TEXT_PROVIDER_MAX_RETRIES = max(0, int(os.environ.get("TEXT_PROVIDER_MAX_RETRIES", "3")))
 TEXT_PROVIDER_RETRY_BASE_DELAY = max(
     0.0, float(os.environ.get("TEXT_PROVIDER_RETRY_BASE_DELAY", "30"))

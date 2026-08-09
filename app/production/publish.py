@@ -11,6 +11,7 @@ from app.production.certificate import (
     issue_completion_certificate,
     verify_completion_certificate,
 )
+from app.production.metrics import record_certificate_issued
 from app.production.patch import load_screenplay_from_artifact
 from app.production.revision import get_production_revision, set_published_artifact
 from app.production.structured_issues import blocker_count, must_fix_count
@@ -149,15 +150,38 @@ def publish_screenplay(
             for item in direct_parents
         ):
             raise ValueError("merged IR 只能引用 validated 上游 Artifact")
-    original_status = str(artifact["status"] or "")
-    if original_status not in {"candidate", "working", "validated", "approved"}:
-        raise ValueError("待发布 working Artifact 状态不可用")
-    if original_status in {"candidate", "working"}:
-        conn.execute(
-            "UPDATE artifacts SET status='validated' WHERE id=? AND status=?",
-            (artifact_id, original_status),
-        )
+    projection_json = script.model_dump_json()
+    if conn.in_transaction:
+        raise RuntimeError("剧本发布前存在未收口事务")
+    conn.execute("BEGIN IMMEDIATE")
     try:
+        current_revision = conn.execute(
+            "SELECT status,working_artifact_id FROM production_revisions WHERE id=?",
+            (revision_id,),
+        ).fetchone()
+        if (
+            current_revision is None
+            or current_revision["status"] != "active"
+            or current_revision["working_artifact_id"] != artifact_id
+        ):
+            raise ValueError("待发布 production revision 已失效")
+        current_artifact = conn.execute(
+            "SELECT status,type FROM artifacts WHERE id=?",
+            (artifact_id,),
+        ).fetchone()
+        if current_artifact is None or current_artifact["type"] != "screenplay_document":
+            raise ValueError("待发布 working Artifact 已失效")
+        original_status = str(current_artifact["status"] or "")
+        if original_status not in {"candidate", "working", "validated", "approved"}:
+            raise ValueError("待发布 working Artifact 状态不可用")
+        if original_status in {"candidate", "working"}:
+            cursor = conn.execute(
+                "UPDATE artifacts SET status='validated' WHERE id=? AND status=?",
+                (artifact_id, original_status),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("待发布 working Artifact 状态发生冲突")
+
         cert = issue_completion_certificate(
             kind="screenplay",
             scope_id=episode_id,
@@ -170,77 +194,86 @@ def publish_screenplay(
             blockers=0,
             must_fix_issues=0,
             production_revision_id=revision_id,
+            conn=conn,
+            commit=False,
         )
-    except Exception:
-        if original_status in {"candidate", "working"}:
-            conn.execute(
-                "UPDATE artifacts SET status=? WHERE id=?",
-                (original_status, artifact_id),
-            )
-            conn.commit()
-        raise
-    verify_completion_certificate(
-        cert,
-        expected_artifact_id=artifact_id,
-        expected_artifact_hash=artifact_hash,
-        expected_input_fingerprint=input_fingerprint or rev.input_fingerprint or None,
-        expected_contract_version=effective_contract_version or None,
-    )
-    assert_publish_has_certificate(
-        kind="screenplay", episode_id=episode_id, certificate_id=cert.certificate_id,
-    )
+        verify_completion_certificate(
+            cert,
+            expected_artifact_id=artifact_id,
+            expected_artifact_hash=artifact_hash,
+            expected_input_fingerprint=input_fingerprint or rev.input_fingerprint or None,
+            expected_contract_version=effective_contract_version or None,
+            conn=conn,
+        )
+        assert_publish_has_certificate(
+            kind="screenplay", episode_id=episode_id, certificate_id=cert.certificate_id,
+        )
 
-    previous = conn.execute(
-        "SELECT screenplay_artifact_id FROM episodes WHERE id=?", (episode_id,)
-    ).fetchone()
-    previous_artifact_id = previous["screenplay_artifact_id"] if previous else None
-    # 在发布事务中先切断下游权威指针。旧镜头/文件的物理清理必须在
-    # 新剧本提交后执行；否则发布后半段失败会同时丢失旧下游和新发布。
-    if clear_downstream:
+        previous = conn.execute(
+            "SELECT screenplay_artifact_id FROM episodes WHERE id=?", (episode_id,)
+        ).fetchone()
+        if previous is None:
+            raise ValueError("待发布剧集不存在")
+        previous_artifact_id = previous["screenplay_artifact_id"]
+        # 在发布事务中先切断下游权威指针。旧镜头/文件的物理清理必须在
+        # 新剧本提交后执行；否则发布后半段失败会同时丢失旧下游和新发布。
+        if clear_downstream:
+            conn.execute(
+                """UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL,
+                          storyboard_warning=NULL, published_storyboard_artifact_id=NULL,
+                          working_storyboard_artifact_id=NULL, active_storyboard_run_id=NULL,
+                          storyboard_production_revision_id=NULL,
+                          storyboard_completion_certificate_id=NULL,
+                          narrative_status='needs_review', narrative_review_artifact_id=NULL,
+                          narrative_calibration_artifact_id=NULL,
+                          active_video_run_id=NULL, video_control_json=NULL,
+                          delivery_artifact_id=NULL, delivery_status='not_ready'
+                    WHERE id=?""",
+                (episode_id,),
+            )
+
         conn.execute(
-            """UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL,
-                      storyboard_warning=NULL, published_storyboard_artifact_id=NULL,
-                      working_storyboard_artifact_id=NULL, active_storyboard_run_id=NULL,
-                      storyboard_production_revision_id=NULL,
-                      storyboard_completion_certificate_id=NULL,
-                      narrative_status='needs_review', narrative_review_artifact_id=NULL,
-                      narrative_calibration_artifact_id=NULL,
-                      active_video_run_id=NULL, video_control_json=NULL,
-                      delivery_artifact_id=NULL, delivery_status='not_ready'
-                WHERE id=?""",
+            "UPDATE artifacts SET status='approved', trust_level='T2' WHERE id=?",
+            (artifact_id,),
+        )
+        episode_cursor = conn.execute(
+            "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', "
+            "screenplay_error=NULL, screenplay_updated_at=?, screenplay_artifact_id=?, "
+            "published_screenplay_artifact_id=?, status='planned', script_error=NULL "
+            "WHERE id=?",
+            (projection_json, now(), artifact_id, artifact_id, episode_id),
+        )
+        if episode_cursor.rowcount != 1:
+            raise ValueError("剧本发布 episode 更新发生冲突")
+        set_published_artifact(
+            revision_id,
+            artifact_id,
+            certificate_id=cert.certificate_id,
+            conn=conn,
+            commit=False,
+        )
+        # Keep the run lease through the authority transition. The revision
+        # publish guard verifies the exact owner above; only then may this same
+        # transaction release the episode for a later run.
+        conn.execute(
+            "UPDATE episodes SET active_screenplay_run_id=NULL WHERE id=?",
             (episode_id,),
         )
-
-    # commit artifact approved
-    conn.execute(
-        "UPDATE artifacts SET status='approved', trust_level='T2' WHERE id=?",
-        (artifact_id,),
-    )
-
-    conn.execute(
-        "UPDATE episodes SET screenplay_json=?, screenplay_status='ready', screenplay_error=NULL, "
-        "screenplay_updated_at=?, screenplay_artifact_id=?, "
-        "published_screenplay_artifact_id=?, "
-        "status='planned', script_error=NULL WHERE id=?",
-        (script.model_dump_json(), now(), artifact_id, artifact_id, episode_id),
-    )
-    set_published_artifact(
-        revision_id,
-        artifact_id,
-        certificate_id=cert.certificate_id,
-        conn=conn,
-        commit=False,
-    )
-    # Keep the run lease through the authority transition.  The revision
-    # publish guard verifies the exact owner above; only then may this same
-    # transaction release the episode for a later run.
-    conn.execute(
-        "UPDATE episodes SET active_screenplay_run_id=NULL WHERE id=?",
-        (episode_id,),
-    )
-    consume_completion_certificate(cert.certificate_id, conn=conn, commit=False)
-    conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))
-    conn.commit()
+        consume_completion_certificate(cert.certificate_id, conn=conn, commit=False)
+        conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    try:
+        record_certificate_issued(
+            kind="screenplay",
+            episode_id=episode_id,
+            certificate_id=cert.certificate_id,
+        )
+    except Exception:
+        pass
     downstream_cleanup_error = None
     if clear_downstream:
         try:

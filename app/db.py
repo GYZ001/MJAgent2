@@ -2481,10 +2481,14 @@ def _finish_provider_call_inner(
 ) -> None:
     updated = conn.execute(
         """UPDATE provider_calls
-           SET status=?, http_status=?, latency_ms=?, error=?, response_json=?
+           SET status=?, http_status=?, latency_ms=?, error=?, response_json=?,
+               recovery_disposition=CASE
+                 WHEN ?='INTERRUPTED' THEN 'REQUIRES_EXPLICIT_RETRY'
+                 ELSE recovery_disposition
+               END
            WHERE id=? AND status='RUNNING'""",
         (status, http_status, latency_ms, (error or "")[:500] or None,
-         _dump_call_json(response_json), call_id),
+         _dump_call_json(response_json), status, call_id),
     )
     # A previous process may finish a socket after the replacement process has
     # fenced it as INTERRUPTED.  Its late result must not rewrite restart audit

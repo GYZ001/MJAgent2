@@ -4112,19 +4112,126 @@ def _shot_high_risk_for_qa(shot_row, shot_model=None) -> bool:
 
 # ---------- worker 生命周期 ----------
 
-async def _worker_loop(name: str, queue: asyncio.Queue[str] | None = None) -> None:
+async def _wait_for_worker_job(
+    work_queue: asyncio.Queue[str],
+    retire_event: asyncio.Event,
+) -> str | None:
+    """Wake an idle worker for either work or retirement without cancelling it."""
+    if retire_event.is_set():
+        return None
+    job_waiter = asyncio.create_task(work_queue.get())
+    retire_waiter = asyncio.create_task(retire_event.wait())
+    delivered = False
+    try:
+        done, _ = await asyncio.wait(
+            (job_waiter, retire_waiter),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if job_waiter in done and not retire_event.is_set():
+            delivered = True
+            return job_waiter.result()
+        return None
+    finally:
+        for waiter in (job_waiter, retire_waiter):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(job_waiter, retire_waiter, return_exceptions=True)
+        if not delivered and not job_waiter.cancelled():
+            try:
+                job_id = job_waiter.result()
+            except (asyncio.CancelledError, Exception):
+                pass
+            else:
+                # Retirement won after queue.get() consumed an item. Put the
+                # durable job back and balance unfinished_tasks.
+                work_queue.put_nowait(job_id)
+                work_queue.task_done()
+
+
+def _release_interrupted_worker_job(job_id: str, owner: str) -> bool:
+    """Release a shutdown-cancelled claim into a restart-safe durable state."""
+    conn = get_conn()
+    try:
+        if conn.in_transaction:
+            conn.rollback()
+        row = conn.execute(
+            """SELECT j.status,j.lease_owner,j.provider_non_cancellable,
+                      j.provider_create_state,j.run_id,j.step_run_id,
+                      v.provider_task_id
+                 FROM jobs j
+                 LEFT JOIN shot_versions v ON v.id=j.version_id
+                WHERE j.id=?""",
+            (job_id,),
+        ).fetchone()
+        if not row or row["status"] != "running" or row["lease_owner"] != owner:
+            return False
+        provider_may_exist = bool(row["provider_task_id"]) or (
+            bool(row["provider_non_cancellable"])
+            and row["provider_create_state"] in {"submitting", "accepted", "unknown"}
+        )
+        recoverable_status = "waiting_provider" if provider_may_exist else "queued"
+        message = "媒体服务停机，任务已释放并等待恢复"
+        stamp = now()
+        changed = conn.execute(
+            """UPDATE jobs
+                  SET status=?,error=?,next_retry_at=?,
+                      lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+                WHERE id=? AND status='running' AND lease_owner=?""",
+            (recoverable_status, message, stamp, stamp, job_id, owner),
+        )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.execute(
+            """UPDATE budget_reservations
+                  SET status='reserved'
+                WHERE job_id=? AND status='running'""",
+            (job_id,),
+        )
+        conn.commit()
+        mark_media_job_state(
+            row["run_id"], row["step_run_id"], "queued", message,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 shutdown cleanup remains best-effort
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        errors.log_error(
+            exc,
+            action="media_worker_shutdown_release",
+            context={"job_id": job_id, "worker": owner},
+        )
+        return False
+
+
+async def _worker_loop(
+    name: str,
+    queue: asyncio.Queue[str] | None = None,
+    retire_event: asyncio.Event | None = None,
+) -> None:
     work_queue = queue or _queue
-    while True:
-        job_id = await work_queue.get()
+    retirement = retire_event or asyncio.Event()
+    while not retirement.is_set():
+        job_id = await _wait_for_worker_job(work_queue, retirement)
+        if job_id is None:
+            return
+        claimed = False
         try:
             claim = media_scheduler.claim_job(job_id, name, lease_seconds=180.0)
             if claim:
+                claimed = True
                 row = get_conn().execute(
                     "SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)
                 ).fetchone()
                 if row:
                     mark_media_job_state(row["run_id"], row["step_run_id"], "running")
                 await _run_job(job_id, lease_owner=name)
+        except asyncio.CancelledError:
+            if claimed:
+                _release_interrupted_worker_job(job_id, name)
+            raise
         except Exception as exc:  # noqa: BLE001 worker 永不死亡，但错误必须落库
             public = errors.record_and_format(exc, action="worker_loop", context={"job_id": job_id})
             try:
@@ -4641,15 +4748,40 @@ def ensure_workers(n: int | None = None) -> None:
     except RuntimeError:
         return
 
+    def _discard_worker(pool: list[asyncio.Task], task: asyncio.Task) -> None:
+        _worker_retire_events.pop(task, None)
+        try:
+            pool.remove(task)
+        except ValueError:
+            pass
+
     def _resize(pool: list[asyncio.Task], target: int, prefix: str, queue: asyncio.Queue[str]) -> None:
-        alive = [t for t in pool if not t.done()]
-        pool.clear()
-        pool.extend(alive)
-        while len(pool) < target:
-            pool.append(loop.create_task(_worker_loop(f"{prefix}{len(pool)}", queue)))
-        while len(pool) > target:
-            task = pool.pop()
-            task.cancel()
+        for task in tuple(pool):
+            if task.done():
+                _discard_worker(pool, task)
+        accepting = [
+            task for task in pool
+            if not _worker_retire_events[task].is_set()
+        ]
+        while len(accepting) < target:
+            used_names = {task.get_name() for task in pool}
+            index = 0
+            while f"{prefix}{index}" in used_names:
+                index += 1
+            name = f"{prefix}{index}"
+            retirement = asyncio.Event()
+            task = loop.create_task(
+                _worker_loop(name, queue, retirement),
+                name=name,
+            )
+            _worker_retire_events[task] = retirement
+            task.add_done_callback(
+                lambda done, worker_pool=pool: _discard_worker(worker_pool, done)
+            )
+            pool.append(task)
+            accepting.append(task)
+        for task in reversed(accepting[target:]):
+            _worker_retire_events[task].set()
 
     _resize(_workers, ref_n, "ref", _queue)
     _resize(_video_ready_workers, video_n, "vr", _video_ready_queue)
@@ -4681,6 +4813,9 @@ async def stop() -> None:
         await asyncio.gather(*tuple(_retry_tasks), return_exceptions=True)
     _retry_tasks.clear()
     for t in (*_workers, *_video_ready_workers, *_poll_workers):
+        retirement = _worker_retire_events.get(t)
+        if retirement is not None:
+            retirement.set()
         t.cancel()
     for t in (*_workers, *_video_ready_workers, *_poll_workers):
         try:
@@ -4690,6 +4825,7 @@ async def stop() -> None:
     _workers.clear()
     _video_ready_workers.clear()
     _poll_workers.clear()
+    _worker_retire_events.clear()
     _worker_target = 0
     _reference_worker_target = 0
     _video_ready_worker_target = 0

@@ -156,6 +156,30 @@ def _append_retry_event(
     )
 
 
+def _append_interrupted_event(
+    exc: hiagent.ProviderError,
+    call_meta: dict[str, Any],
+) -> None:
+    trace = current_trace()
+    if not trace.run_id:
+        return
+    repository.append_event(
+        trace.run_id,
+        "PROVIDER_RESULT_INTERRUPTED",
+        "error",
+        "文本模型请求已发送但结果不确定，已停止自动重试；请在页面确认后重试",
+        step_run_id=trace.step_run_id,
+        trace_id=trace.trace_id,
+        payload={
+            "delivery_state": exc.delivery_state,
+            "failure_kind": exc.failure_kind,
+            "requires_explicit_retry": True,
+            "stage_key": call_meta.get("stage_key"),
+            "call_role": call_meta.get("call_role"),
+        },
+    )
+
+
 async def chat(
     messages: list[dict[str, str]],
     *,
@@ -198,13 +222,19 @@ async def chat(
                 )
             return result
         except hiagent.ProviderError as exc:
-            if not exc.retryable or failure_no >= max_retries:
+            if exc.requires_explicit_retry:
+                _append_interrupted_event(exc, meta)
+            if (
+                not exc.retryable
+                or not exc.replay_safe
+                or failure_no >= max_retries
+            ):
                 raise
 
             retry_no = failure_no + 1
             delay = config.TEXT_PROVIDER_RETRY_BASE_DELAY * (2 ** failure_no)
             message = (
-                f"文本模型临时限流/故障，约 {int(delay)} 秒后自动执行"
+                f"文本模型请求明确未送达，约 {int(delay)} 秒后自动执行"
                 f"第 {retry_no}/{max_retries} 次重试"
             )
             trace = current_trace()

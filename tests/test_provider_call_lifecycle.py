@@ -97,17 +97,19 @@ def test_post_json_write_timeout_is_logged_and_not_retried(monkeypatch) -> None:
     assert "phase=write" in events[1][2]
 
 
-def test_harness_chat_read_timeout_is_not_immediately_replayed(monkeypatch) -> None:
+def test_harness_chat_read_timeout_is_interrupted_without_replay(
+    tmp_path, monkeypatch,
+) -> None:
     attempts = 0
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-read-timeout.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
 
     class ReadTimeoutClient:
         async def post(self, url, *, json, headers):
             nonlocal attempts
             attempts += 1
             raise httpx.ReadTimeout("generation still running")
-
-    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 7)
-    monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
 
     with pytest.raises(hiagent.ProviderError) as caught:
         asyncio.run(hiagent._post_json(
@@ -123,7 +125,19 @@ def test_harness_chat_read_timeout_is_not_immediately_replayed(monkeypatch) -> N
 
     assert caught.value.retryable is True
     assert caught.value.timeout_phase == "read"
+    assert caught.value.delivery_state == "unknown"
+    assert caught.value.replay_safe is False
+    assert caught.value.requires_explicit_retry is True
     assert attempts == 1
+    row = db.get_conn().execute(
+        "SELECT status,recovery_disposition,response_json "
+        "FROM provider_calls ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert dict(row) == {
+        "status": "INTERRUPTED",
+        "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
+        "response_json": None,
+    }
 
 
 @pytest.mark.parametrize("heartbeat", [b"\n", b": keepalive\n\n"], ids=["blank-line", "keepalive"])
@@ -183,8 +197,10 @@ def test_stream_total_timeout_covers_keepalive_and_blank_lines(
 
     assert caught.value.timeout_phase == "总时长"
     assert caught.value.retryable is True
+    assert caught.value.replay_safe is False
+    assert caught.value.requires_explicit_retry is True
     assert len(events) == 1
-    assert events[0][0:3] == (17, "TIMEOUT", None)
+    assert events[0][0:3] == (17, "INTERRUPTED", None)
     assert events[0][4] is None
 
 
@@ -244,17 +260,77 @@ def test_stream_eof_without_done_fails_lifecycle_and_discards_partial_tool_call(
 
     assert caught.value.failure_kind == "stream_interrupted"
     assert caught.value.retryable is True
+    assert caught.value.delivery_state == "unknown"
+    assert caught.value.replay_safe is False
+    assert caught.value.requires_explicit_retry is True
     assert emitted == [("content", partial_text)]
     row = db.get_conn().execute(
-        "SELECT status,http_status,error,response_json,received_chars "
+        "SELECT status,http_status,error,response_json,received_chars,recovery_disposition "
         "FROM provider_calls WHERE kind='chat_tools' ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    assert row["status"] == "FAILED"
+    assert row["status"] == "INTERRUPTED"
     assert row["http_status"] == 200
     assert row["error"].startswith("stream interrupted before [DONE] (latency_ms=")
     assert row["error"].endswith(f", received_chars={len(partial_text)})")
     assert row["response_json"] is None
     assert row["received_chars"] == len(partial_text)
+    assert row["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
+
+
+def test_harness_zero_token_stream_interruption_does_not_fallback_to_second_request(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-zero-token.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    stream_requests = 0
+    fallback_requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal stream_requests
+        stream_requests += 1
+        return httpx.Response(
+            200,
+            text="",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def forbidden_post_json(*_args, **_kwargs):
+        nonlocal fallback_requests
+        fallback_requests += 1
+        raise AssertionError("interrupted stream must not create a second generation")
+
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+    monkeypatch.setattr(hiagent, "_post_json", forbidden_post_json)
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await hiagent._stream_or_fallback(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+                key_name="TEST_API_KEY",
+                meta={"gateway": "execution_harness"},
+                on_token=lambda _kind, _text: None,
+            )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.failure_kind == "stream_interrupted"
+    assert caught.value.requires_explicit_retry is True
+    assert stream_requests == 1
+    assert fallback_requests == 0
+    row = db.get_conn().execute(
+        "SELECT status,recovery_disposition FROM provider_calls ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert dict(row) == {
+        "status": "INTERRUPTED",
+        "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
+    }
 
 
 def test_harness_chat_network_error_has_single_adapter_attempt(monkeypatch) -> None:
@@ -269,7 +345,7 @@ def test_harness_chat_network_error_has_single_adapter_attempt(monkeypatch) -> N
     monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 7)
     monkeypatch.setattr(hiagent, "finish_provider_call", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(hiagent.ProviderError, match="网络错误"):
+    with pytest.raises(hiagent.ProviderError, match="网络错误") as caught:
         asyncio.run(hiagent._post_json(
             NetworkErrorClient(),
             "https://example.invalid/chat",
@@ -282,6 +358,9 @@ def test_harness_chat_network_error_has_single_adapter_attempt(monkeypatch) -> N
         ))
 
     assert attempts == 1
+    assert caught.value.delivery_state == "not_sent"
+    assert caught.value.replay_safe is True
+    assert caught.value.requires_explicit_retry is False
 
 
 def test_harness_chat_429_is_not_immediately_replayed(monkeypatch) -> None:
@@ -313,6 +392,8 @@ def test_harness_chat_429_is_not_immediately_replayed(monkeypatch) -> None:
         ))
 
     assert caught.value.retryable is True
+    assert caught.value.delivery_state == "responded"
+    assert caught.value.replay_safe is False
     assert attempts == 1
 
 

@@ -17,7 +17,7 @@ def _fresh_database(tmp_path, monkeypatch):
     return db.get_conn()
 
 
-def test_retryable_text_failure_waits_and_replays_same_harness_step(tmp_path, monkeypatch) -> None:
+def test_not_sent_text_failure_waits_and_replays_same_harness_step(tmp_path, monkeypatch) -> None:
     _fresh_database(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 3)
     monkeypatch.setattr(config, "TEXT_PROVIDER_RETRY_BASE_DELAY", 30.0)
@@ -38,7 +38,13 @@ def test_retryable_text_failure_waits_and_replays_same_harness_step(tmp_path, mo
     async def fake_chat(messages, **_kwargs):
         attempts.append(messages)
         if len(attempts) < 3:
-            raise hiagent.ProviderError("HTTP 429 TPM exceeded", retryable=True)
+            raise hiagent.ProviderError(
+                "connect failed before delivery",
+                retryable=True,
+                failure_kind="connection_failed",
+                delivery_state="not_sent",
+                replay_safe=True,
+            )
         return '{"ok":true}'
 
     async def fake_sleep(delay: float) -> None:
@@ -77,25 +83,117 @@ def test_retryable_text_failure_waits_and_replays_same_harness_step(tmp_path, mo
     assert scheduled["payload"]["call_role"] == "stage_repair"
 
 
-def test_text_retry_budget_is_bounded(monkeypatch) -> None:
+def test_not_sent_text_retry_budget_is_bounded(monkeypatch) -> None:
     monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 2)
     monkeypatch.setattr(config, "TEXT_PROVIDER_RETRY_BASE_DELAY", 0.0)
     attempts = 0
 
-    async def always_throttled(*_args, **_kwargs):
+    async def always_not_sent(*_args, **_kwargs):
         nonlocal attempts
         attempts += 1
-        raise hiagent.ProviderError("HTTP 429", retryable=True)
+        raise hiagent.ProviderError(
+            "connect failed",
+            retryable=True,
+            failure_kind="connection_failed",
+            delivery_state="not_sent",
+            replay_safe=True,
+        )
 
     async def no_wait(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr(model_gateway.hiagent, "chat", always_throttled)
+    monkeypatch.setattr(model_gateway.hiagent, "chat", always_not_sent)
     monkeypatch.setattr(model_gateway.asyncio, "sleep", no_wait)
+
+    with pytest.raises(hiagent.ProviderError, match="connect failed"):
+        asyncio.run(model_gateway.chat([{"role": "user", "content": "x"}]))
+    assert attempts == 3  # one initial call plus two configured retries
+
+
+def test_ambiguous_text_result_is_not_replayed_and_requires_page_retry(
+    tmp_path, monkeypatch,
+) -> None:
+    _fresh_database(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 3)
+    attempts = 0
+    sleeps = 0
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="ambiguous-read-timeout",
+    )
+    recorder.start()
+
+    async def read_timeout_after_send(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise hiagent.ProviderError(
+            "read timeout after request delivery",
+            retryable=True,
+            failure_kind="request_outcome_unknown",
+            delivery_state="unknown",
+            requires_explicit_retry=True,
+        )
+
+    async def forbidden_sleep(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+
+    monkeypatch.setattr(model_gateway.hiagent, "chat", read_timeout_after_send)
+    monkeypatch.setattr(model_gateway.asyncio, "sleep", forbidden_sleep)
+
+    async def operation() -> str:
+        return await model_gateway.chat(
+            [{"role": "user", "content": "same paid generation"}],
+            call_meta={"stage_key": "storyboard", "call_role": "stage_generate"},
+        )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(recorder.step("storyboard", operation))
+    recorder.fail(caught.value)
+
+    assert attempts == 1
+    assert sleeps == 0
+    assert repository.get_run(recorder.run_id)["status"] == "FAILED"
+    events = repository.get_events(recorder.run_id, limit=100)
+    interrupted = [
+        event for event in events
+        if event["event_type"] == "PROVIDER_RESULT_INTERRUPTED"
+    ]
+    assert len(interrupted) == 1
+    assert interrupted[0]["payload"] == {
+        "delivery_state": "unknown",
+        "failure_kind": "request_outcome_unknown",
+        "requires_explicit_retry": True,
+        "stage_key": "storyboard",
+        "call_role": "stage_generate",
+    }
+    assert not any(
+        event["event_type"] == "PROVIDER_RETRY_SCHEDULED"
+        for event in events
+    )
+
+
+def test_retryable_http_response_is_not_treated_as_not_sent(monkeypatch) -> None:
+    monkeypatch.setattr(config, "TEXT_PROVIDER_MAX_RETRIES", 3)
+    attempts = 0
+
+    async def rate_limited(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise hiagent.ProviderError(
+            "HTTP 429",
+            retryable=True,
+            failure_kind="rate_limited",
+            delivery_state="responded",
+        )
+
+    monkeypatch.setattr(model_gateway.hiagent, "chat", rate_limited)
 
     with pytest.raises(hiagent.ProviderError, match="429"):
         asyncio.run(model_gateway.chat([{"role": "user", "content": "x"}]))
-    assert attempts == 3  # one initial call plus two configured retries
+    assert attempts == 1
 
 
 def test_shared_auto_run_records_retry_without_pausing_siblings(tmp_path, monkeypatch) -> None:
@@ -113,17 +211,23 @@ def test_shared_auto_run_records_retry_without_pausing_siblings(tmp_path, monkey
     )
     recorder.start()
 
-    async def once_throttled(*_args, **_kwargs):
+    async def once_not_sent(*_args, **_kwargs):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise hiagent.ProviderError("HTTP 429", retryable=True)
+            raise hiagent.ProviderError(
+                "connect failed before delivery",
+                retryable=True,
+                failure_kind="connection_failed",
+                delivery_state="not_sent",
+                replay_safe=True,
+            )
         return "ok"
 
     async def inspect_shared_run(_delay: float) -> None:
         states_while_waiting.append(repository.get_run(recorder.run_id)["status"])
 
-    monkeypatch.setattr(model_gateway.hiagent, "chat", once_throttled)
+    monkeypatch.setattr(model_gateway.hiagent, "chat", once_not_sent)
     monkeypatch.setattr(model_gateway.asyncio, "sleep", inspect_shared_run)
 
     async def operation() -> str:

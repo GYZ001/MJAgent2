@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from app import hiagent
 
 
@@ -22,7 +24,7 @@ def test_bailian_fallback_models_skip_failed_free_model() -> None:
     hiagent._BAILIAN_FAILED_MODELS["text"].clear()
 
 
-def test_bailian_chat_tries_next_model_after_request_failure(monkeypatch) -> None:
+def test_bailian_chat_tries_next_model_after_not_sent_failure(monkeypatch) -> None:
     hiagent._BAILIAN_FAILED_MODELS["text"].clear()
     first = "qwen3.7-max-2026-06-08"
     second = "qwen3.7-max-2026-05-20"
@@ -31,7 +33,13 @@ def test_bailian_chat_tries_next_model_after_request_failure(monkeypatch) -> Non
     async def fake_post_json(client, url, payload, *, kind, model, retries=2, headers=None, key_name="", meta=None):
         calls.append(model)
         if model == first:
-            raise hiagent.ProviderError("quota exhausted")
+            raise hiagent.ProviderError(
+                "connect failed",
+                retryable=True,
+                failure_kind="connection_failed",
+                delivery_state="not_sent",
+                replay_safe=True,
+            )
         return {"choices": [{"message": {"content": "ok"}}]}
 
     monkeypatch.setattr(hiagent, "active_provider", lambda kind: "bailian")
@@ -48,7 +56,7 @@ def test_bailian_chat_tries_next_model_after_request_failure(monkeypatch) -> Non
     hiagent._BAILIAN_FAILED_MODELS["text"].clear()
 
 
-def test_bailian_stream_tries_next_model_only_before_any_token(monkeypatch) -> None:
+def test_bailian_stream_tries_next_model_only_when_request_was_not_sent(monkeypatch) -> None:
     hiagent._BAILIAN_FAILED_MODELS["text"].clear()
     first = "qwen3.7-max-2026-06-08"
     second = "qwen3.7-max-2026-05-20"
@@ -58,7 +66,13 @@ def test_bailian_stream_tries_next_model_only_before_any_token(monkeypatch) -> N
     async def fake_stream(client, url, payload, *, model, on_token, **kwargs):
         calls.append(model)
         if model == first:
-            raise hiagent.ProviderError("quota exhausted")
+            raise hiagent.ProviderError(
+                "connect failed",
+                retryable=True,
+                failure_kind="connection_failed",
+                delivery_state="not_sent",
+                replay_safe=True,
+            )
         on_token("content", "ok")
         return {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
 
@@ -80,6 +94,47 @@ def test_bailian_stream_tries_next_model_only_before_any_token(monkeypatch) -> N
     assert first in hiagent._BAILIAN_FAILED_MODELS["text"]
 
     hiagent._BAILIAN_FAILED_MODELS["text"].clear()
+
+
+def test_bailian_does_not_switch_model_after_ambiguous_read_failure(monkeypatch) -> None:
+    hiagent._BAILIAN_FAILED_MODELS["text"].clear()
+    first = "qwen3.7-max-2026-06-08"
+    calls: list[str] = []
+
+    async def fake_post_json(
+        client, url, payload, *, kind, model, retries=2, headers=None,
+        key_name="", meta=None,
+    ):
+        calls.append(model)
+        raise hiagent.ProviderError(
+            "read timeout after delivery",
+            retryable=True,
+            failure_kind="request_outcome_unknown",
+            delivery_state="unknown",
+            requires_explicit_retry=True,
+        )
+
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *args: ("https://bailian.test/v1", {}),
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    async def run():
+        return await hiagent._post_bailian_chat_with_fallback(
+            object(),
+            {"messages": []},
+            fallback_kind="text",
+            log_kind="chat",
+            preferred_model=first,
+        )
+
+    with pytest.raises(hiagent.ProviderError, match="read timeout") as caught:
+        asyncio.run(run())
+
+    assert caught.value.requires_explicit_retry is True
+    assert calls == [first]
+    assert first not in hiagent._BAILIAN_FAILED_MODELS["text"]
 
 
 def test_bailian_stream_never_replays_after_a_token_was_emitted(monkeypatch) -> None:

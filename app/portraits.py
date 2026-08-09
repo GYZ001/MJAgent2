@@ -2716,16 +2716,11 @@ def screenplay_unknown_identity_errors(
     for scene_index, scene in enumerate(getattr(screenplay, "scene_outline", None) or []):
         for name in scene.characters or []:
             collect(name, f"scene_outline[{scene_index}].characters", usage="visual")
-    spine = getattr(screenplay, "plot_spine", None)
-    for beat_index, beat in enumerate(
-        (spine.spine_beats if spine is not None else None) or []
-    ):
-        for name in _identity_list_tokens(beat.who):
-            collect(
-                name,
-                f"plot_spine.spine_beats[{beat_index}].who",
-                usage="visual",
-            )
+    # PlotSpineBeat.who is an event subject, not a visual-identity declaration.
+    # It may carry a typed identity, prop, spatial boundary, or offscreen source.
+    # Identity policy comes from the typed carriers above/below and the narrative
+    # graph. Exact character resolutions still project into ``who`` and retain
+    # their dedicated residual check in screenplay_character_resolution_errors.
     for chain_index, chain in enumerate(getattr(screenplay, "dialogue_chains", None) or []):
         for turn_index, turn in enumerate(chain.turns or []):
             collect(

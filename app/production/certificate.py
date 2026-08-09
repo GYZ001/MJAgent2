@@ -61,11 +61,12 @@ def ensure_completion_certificates_table(conn=None) -> None:
     db.commit()
 
 
-def _load_evaluation_rows(evaluation_ids: list[str]) -> list[Any]:
+def _load_evaluation_rows(evaluation_ids: list[str], *, conn=None) -> list[Any]:
     if not evaluation_ids:
         return []
     marks = ",".join("?" for _ in evaluation_ids)
-    return list(get_conn().execute(
+    db = conn or get_conn()
+    return list(db.execute(
         f"""SELECT id,artifact_id,status,hard_gate_passed,evaluation_role,
                    evaluator_name,evaluator_version,runtime_blocking,issues_json
               FROM evaluations WHERE id IN ({marks})""",
@@ -184,6 +185,7 @@ def _narrative_screenplay_for_artifact(
     kind: Literal["screenplay", "storyboard"],
     scope_id: str,
     artifact: dict[str, Any],
+    conn=None,
 ):
     """Return the authoritative screenplay only when this artifact uses it.
 
@@ -211,7 +213,8 @@ def _narrative_screenplay_for_artifact(
         except Exception as exc:  # noqa: BLE001 - immutable authority boundary
             raise ValueError(f"剧本 Artifact 的叙事权威契约无法验证：{exc}") from exc
 
-    episode = get_conn().execute(
+    db = conn or get_conn()
+    episode = db.execute(
         "SELECT screenplay_json FROM episodes WHERE id=?",
         (scope_id,),
     ).fetchone()
@@ -237,10 +240,12 @@ def _validate_revision_binding(
     qa_profile_version: str,
     production_revision_id: str | None,
     allow_published: bool = False,
+    conn=None,
 ) -> None:
     if not production_revision_id:
         raise ValueError("叙事完成凭证必须绑定 production revision")
-    row = get_conn().execute(
+    db = conn or get_conn()
+    row = db.execute(
         "SELECT * FROM production_revisions WHERE id=?",
         (production_revision_id,),
     ).fetchone()
@@ -276,11 +281,13 @@ def _validate_narrative_certificate_authority(
     rows: list[Any],
     contract_version: str,
     qa_profile_version: str,
+    conn=None,
 ) -> bool:
     screenplay = _narrative_screenplay_for_artifact(
         kind=kind,
         scope_id=scope_id,
         artifact=artifact,
+        conn=conn,
     )
     if screenplay is None:
         if kind == "screenplay":
@@ -327,13 +334,16 @@ def issue_completion_certificate(
     blockers: int = 0,
     must_fix_issues: int = 0,
     production_revision_id: str | None = None,
+    conn=None,
+    commit: bool = True,
 ) -> CompletionCertificate:
     """Issue a certificate only when its bound evaluations prove zero blockers."""
     if not artifact_id or not artifact_hash:
         raise ValueError("完成凭证必须绑定 artifact_id 与 artifact_hash")
 
     # 校验 artifact 存在且 hash 一致
-    art = evidence_repository.get_artifact(artifact_id)
+    db = conn or get_conn()
+    art = evidence_repository.get_artifact(artifact_id, conn=db)
     if not art:
         raise ValueError(f"artifact 不存在: {artifact_id}")
     if (
@@ -346,7 +356,7 @@ def issue_completion_certificate(
     if stored_hash != artifact_hash:
         raise ValueError("artifact_hash 与存储内容不一致，拒绝签发凭证")
     evaluation_ids = list(evaluation_ids or [])
-    rows = _load_evaluation_rows(evaluation_ids)
+    rows = _load_evaluation_rows(evaluation_ids, conn=db)
     by_id = {row["id"]: row for row in rows}
     if len(by_id) != len(set(evaluation_ids)):
         raise ValueError("完成凭证引用了不存在的 Evaluation")
@@ -389,6 +399,7 @@ def issue_completion_certificate(
         rows=rows,
         contract_version=contract_version,
         qa_profile_version=qa_profile_version,
+        conn=db,
     )
     if narrative_authority:
         _validate_revision_binding(
@@ -399,9 +410,11 @@ def issue_completion_certificate(
             contract_version=contract_version,
             qa_profile_version=qa_profile_version,
             production_revision_id=production_revision_id,
+            conn=db,
         )
 
-    ensure_completion_certificates_table()
+    if conn is None:
+        ensure_completion_certificates_table()
     certificate_id = new_id("cert")
     issued_at = now()
     cert = CompletionCertificate(
@@ -419,8 +432,7 @@ def issue_completion_certificate(
         issued_at=issued_at,
         production_revision_id=production_revision_id,
     )
-    conn = get_conn()
-    conn.execute(
+    db.execute(
         """INSERT INTO completion_certificates(
             id, kind, scope_id, artifact_id, artifact_hash, input_fingerprint,
             contract_version, qa_profile_version, evaluation_ids_json,
@@ -447,12 +459,20 @@ def issue_completion_certificate(
                 content=cert.model_dump(mode="json"),
                 parent_artifact_ids=[artifact_id],
                 contract_version=contract_version or None,
-            )
+            ),
+            conn=db,
+            commit=False,
         )
     except Exception:  # noqa: BLE001
-        pass
-    conn.commit()
-    record_certificate_issued(kind=kind, episode_id=scope_id, certificate_id=certificate_id)
+        if not commit:
+            raise
+    if commit:
+        db.commit()
+        record_certificate_issued(
+            kind=kind,
+            episode_id=scope_id,
+            certificate_id=certificate_id,
+        )
     return cert
 
 
@@ -523,6 +543,7 @@ def verify_completion_certificate(
     expected_production_revision_id: str | None = None,
     allow_consumed: bool = False,
     allow_stale_artifact_for_revision: bool = False,
+    conn=None,
 ) -> CompletionCertificate:
     # The database row is authoritative even when the caller passes a model.
     # Otherwise a caller could construct a look-alike certificate object and
@@ -530,7 +551,7 @@ def verify_completion_certificate(
     certificate_id = (
         certificate if isinstance(certificate, str) else certificate.certificate_id
     )
-    cert = get_completion_certificate(certificate_id)
+    cert = get_completion_certificate(certificate_id, conn=conn)
     if cert is None:
         raise ValueError("完成凭证不存在")
     if cert.consumed_at is not None and not allow_consumed:
@@ -555,7 +576,7 @@ def verify_completion_certificate(
     if expected_qa_profile_version and cert.qa_profile_version != expected_qa_profile_version:
         raise ValueError("完成凭证 qa_profile_version 已变化")
     # 再次核对 artifact 当前 hash
-    art = evidence_repository.get_artifact(cert.artifact_id)
+    art = evidence_repository.get_artifact(cert.artifact_id, conn=conn)
     if not art:
         raise ValueError("凭证绑定的 artifact 已不存在")
     allowed_artifact_statuses = {"validated", "approved"}
@@ -573,7 +594,7 @@ def verify_completion_certificate(
     if cert.blockers or cert.must_fix_issues:
         raise ValueError("完成凭证仍含 blocker 或 must-fix")
 
-    rows = _load_evaluation_rows(cert.evaluation_ids)
+    rows = _load_evaluation_rows(cert.evaluation_ids, conn=conn)
     if len({row["id"] for row in rows}) != len(set(cert.evaluation_ids)):
         raise ValueError("完成凭证引用的 Evaluation 已缺失")
     if any(row["artifact_id"] != cert.artifact_id for row in rows):
@@ -588,6 +609,7 @@ def verify_completion_certificate(
         rows=rows,
         contract_version=cert.contract_version,
         qa_profile_version=cert.qa_profile_version,
+        conn=conn,
     )
     if narrative_authority:
         blocking_roles = {"business_safety"}
@@ -614,6 +636,7 @@ def verify_completion_certificate(
             qa_profile_version=cert.qa_profile_version,
             production_revision_id=cert.production_revision_id,
             allow_published=allow_consumed,
+            conn=conn,
         )
     return cert
 

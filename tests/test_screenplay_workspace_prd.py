@@ -370,6 +370,113 @@ def test_qa_failed_manual_draft_never_publishes() -> None:
     assert published["screenplay_status"] == "ready"
 
 
+def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanup(
+    monkeypatch,
+) -> None:
+    _seed_episode(with_artifact=True)
+    first = _valid_script()
+    first.logline += "（首个正式发布版）"
+    first.full_script_text += "\n谷言把钥匙收进掌心。"
+    with enter_handler():
+        initial = asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": first.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+
+    conn = db.get_conn()
+    authority_columns = (
+        "screenplay_json,screenplay_artifact_id,published_screenplay_artifact_id,"
+        "screenplay_production_revision_id,screenplay_completion_certificate_id,"
+        "screenplay_status"
+    )
+    before = conn.execute(
+        f"SELECT {authority_columns} FROM episodes WHERE id='e1'"
+    ).fetchone()
+    old_revision = conn.execute(
+        "SELECT status,working_artifact_id,published_artifact_id "
+        "FROM production_revisions WHERE id=?",
+        (before["screenplay_production_revision_id"],),
+    ).fetchone()
+    old_certificate = conn.execute(
+        "SELECT artifact_id,production_revision_id,consumed_at,payload_json "
+        "FROM completion_certificates WHERE id=?",
+        (before["screenplay_completion_certificate_id"],),
+    ).fetchone()
+    old_artifact = conn.execute(
+        "SELECT status,trust_level FROM artifacts WHERE id=?",
+        (before["screenplay_artifact_id"],),
+    ).fetchone()
+    certificate_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM completion_certificates"
+    ).fetchone()["c"]
+    certificate_artifact_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM artifacts WHERE type='completion_certificate'"
+    ).fetchone()["c"]
+
+    def fail_consumption(*_args, **_kwargs):
+        raise RuntimeError("injected certificate consumption failure")
+
+    monkeypatch.setattr(
+        "app.production.publish.consume_completion_certificate",
+        fail_consumption,
+    )
+    second = _valid_script()
+    second.logline += "（不应发布的新版本）"
+    second.full_script_text += "\n谷言没有收下钥匙。"
+    with enter_handler(), pytest.raises(
+        RuntimeError,
+        match="injected certificate consumption failure",
+    ):
+        asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": second.model_dump(mode="json"),
+            "expected_version": initial["artifact_id"],
+        }))
+
+    after = conn.execute(
+        f"SELECT {authority_columns},screenplay_publish_fence "
+        "FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert tuple(after[:-1]) == tuple(before)
+    assert after["screenplay_publish_fence"] == 0
+    assert tuple(conn.execute(
+        "SELECT status,working_artifact_id,published_artifact_id "
+        "FROM production_revisions WHERE id=?",
+        (before["screenplay_production_revision_id"],),
+    ).fetchone()) == tuple(old_revision)
+    assert tuple(conn.execute(
+        "SELECT artifact_id,production_revision_id,consumed_at,payload_json "
+        "FROM completion_certificates WHERE id=?",
+        (before["screenplay_completion_certificate_id"],),
+    ).fetchone()) == tuple(old_certificate)
+    assert tuple(conn.execute(
+        "SELECT status,trust_level FROM artifacts WHERE id=?",
+        (before["screenplay_artifact_id"],),
+    ).fetchone()) == tuple(old_artifact)
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM completion_certificates"
+    ).fetchone()["c"] == certificate_count
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM artifacts WHERE type='completion_certificate'"
+    ).fetchone()["c"] == certificate_artifact_count
+
+    failed_candidate = conn.execute(
+        """SELECT status,working_artifact_id,published_artifact_id
+             FROM production_revisions
+            WHERE episode_id='e1' AND id<>?
+            ORDER BY created_at DESC LIMIT 1""",
+        (before["screenplay_production_revision_id"],),
+    ).fetchone()
+    assert tuple(failed_candidate) == (
+        "active",
+        failed_candidate["working_artifact_id"],
+        None,
+    )
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (failed_candidate["working_artifact_id"],),
+    ).fetchone()["status"] == "candidate"
+
+
 def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(
     monkeypatch,
 ) -> None:

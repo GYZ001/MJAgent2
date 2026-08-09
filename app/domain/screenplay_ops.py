@@ -2979,19 +2979,6 @@ async def edit_screenplay(episode_id: str, body: dict):
             qa_profile_version="screenplay-qa-gate-2",
             clear_downstream=True,
         )
-        conn = get_conn()
-        conn.execute(
-            """UPDATE episodes SET screenplay_publish_fence=0,
-               screenplay_snapshot_version=screenplay_snapshot_version+1,
-               active_storyboard_run_id=NULL,
-               storyboard_production_revision_id=NULL,
-               storyboard_completion_certificate_id=NULL,
-               delivery_artifact_id=NULL, delivery_status='not_ready'
-               WHERE id=?""",
-            (episode_id,),
-        )
-        conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))
-        conn.commit()
         return {
             "saved": True,
             "unchanged": False,
@@ -3006,12 +2993,20 @@ async def edit_screenplay(episode_id: str, body: dict):
         }
     finally:
         conn = get_conn()
-        conn.execute(
-            "UPDATE episodes SET screenplay_publish_fence=0, "
-            "screenplay_snapshot_version=screenplay_snapshot_version+1 "
-            "WHERE id=? AND screenplay_publish_fence=1",
-            (episode_id,),
-        )
-        conn.commit()
+        if conn.in_transaction:
+            conn.rollback()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE episodes SET screenplay_publish_fence=0, "
+                "screenplay_snapshot_version=screenplay_snapshot_version+1 "
+                "WHERE id=? AND screenplay_publish_fence=1",
+                (episode_id,),
+            )
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
 
 __all__ = [name for name in globals() if not name.startswith("__")]

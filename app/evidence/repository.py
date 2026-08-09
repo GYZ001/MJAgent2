@@ -239,18 +239,20 @@ def create_artifact(
     artifact: EvidenceArtifact,
     *,
     step_run_id: str | None = None,
+    conn=None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     if artifact.content is None and artifact.file_path and not Path(artifact.file_path).is_file():
         raise FileNotFoundError(artifact.file_path)
-    conn = get_conn()
-    version = conn.execute(
+    db = conn or get_conn()
+    version = db.execute(
         "SELECT COALESCE(MAX(version),0)+1 AS version FROM artifacts "
         "WHERE type=? AND scope_type=? AND scope_id=?",
         (artifact.type, artifact.scope_type, artifact.scope_id),
     ).fetchone()["version"]
     artifact_id = artifact.id or new_id("art")
     digest = content_hash(artifact.content, artifact.file_path)
-    conn.execute(
+    db.execute(
         """INSERT INTO artifacts(
             id, type, scope_type, scope_id, version, status, trust_level, content_json,
             file_path, content_hash, created_by_step_run_id, parent_artifact_ids_json,
@@ -265,15 +267,18 @@ def create_artifact(
             now(), now() if artifact.status == "approved" else None,
         ),
     )
-    conn.commit()
+    if commit:
+        db.commit()
     if step_run_id:
-        row = conn.execute("SELECT run_id FROM step_runs WHERE id=?", (step_run_id,)).fetchone()
+        if not commit:
+            raise ValueError("事务内创建 Artifact 不支持立即写入 run event")
+        row = db.execute("SELECT run_id FROM step_runs WHERE id=?", (step_run_id,)).fetchone()
         if row:
             append_event(
                 row["run_id"], "ARTIFACT_CREATED", "info", f"产物已创建：{artifact.type} v{version}",
                 step_run_id=step_run_id, payload={"artifact_id": artifact_id, "content_hash": digest},
             )
-    return get_artifact(artifact_id) or {}
+    return get_artifact(artifact_id, conn=db) or {}
 
 
 def create_evaluation(
@@ -632,8 +637,9 @@ def get_events(run_id: str, *, after: float | None = None, limit: int = 500) -> 
     return _decode_rows(rows)
 
 
-def get_artifact(artifact_id: str) -> dict[str, Any] | None:
-    row = get_conn().execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+def get_artifact(artifact_id: str, *, conn=None) -> dict[str, Any] | None:
+    db = conn or get_conn()
+    row = db.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
     return _decode_rows([dict(row)])[0] if row else None
 
 

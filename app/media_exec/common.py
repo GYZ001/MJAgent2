@@ -50,6 +50,7 @@ _workers: list[asyncio.Task] = []
 _reference_workers: list[asyncio.Task] = _workers  # 同列表，命名清晰
 _video_ready_workers: list[asyncio.Task] = []
 _poll_workers: list[asyncio.Task] = []
+_worker_retire_events: dict[asyncio.Task, asyncio.Event] = {}
 _worker_target = 0
 _reference_worker_target = 0
 _video_ready_worker_target = 0

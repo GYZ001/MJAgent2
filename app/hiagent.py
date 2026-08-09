@@ -109,12 +109,17 @@ class ProviderError(Exception):
     """对外调用失败。message 面向 UI，包含分类结论 + 原始报文摘要。"""
 
     def __init__(self, message: str, *, retryable: bool = False, raw: str = "",
-                 timeout_phase: str | None = None, failure_kind: str = ""):
+                 timeout_phase: str | None = None, failure_kind: str = "",
+                 delivery_state: str = "unknown", replay_safe: bool = False,
+                 requires_explicit_retry: bool = False):
         super().__init__(message)
         self.retryable = retryable
         self.raw = raw[:500]
         self.timeout_phase = timeout_phase
         self.failure_kind = failure_kind
+        self.delivery_state = delivery_state
+        self.replay_safe = replay_safe
+        self.requires_explicit_retry = requires_explicit_retry
 
 
 def _channel_semaphore(
@@ -166,6 +171,38 @@ def _timeout_phase(exc: httpx.TimeoutException) -> str:
     if isinstance(exc, httpx.PoolTimeout):
         return "pool"
     return "unknown"
+
+
+def _transport_replay_state(exc: httpx.HTTPError) -> tuple[str, bool]:
+    """Return delivery evidence without inferring from provider error text."""
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError)):
+        return "not_sent", True
+    return "unknown", False
+
+
+def _transport_provider_error(
+    exc: httpx.HTTPError,
+    message: str,
+    *,
+    raw: str,
+    timeout_phase: str | None = None,
+) -> ProviderError:
+    delivery_state, replay_safe = _transport_replay_state(exc)
+    uncertain_suffix = (
+        ""
+        if replay_safe
+        else "；请求结果不确定，已禁止自动重试，请在页面确认后重试"
+    )
+    return ProviderError(
+        message + uncertain_suffix,
+        retryable=True,
+        raw=raw,
+        timeout_phase=timeout_phase,
+        failure_kind="connection_failed" if replay_safe else "request_outcome_unknown",
+        delivery_state=delivery_state,
+        replay_safe=replay_safe,
+        requires_explicit_retry=not replay_safe,
+    )
 
 
 def _request_size_bytes(payload: Any) -> int:
@@ -232,6 +269,7 @@ def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KE
             f"鉴权失败，请检查 .env 中的 {key_name}（HTTP {status}）：{body[:300]}",
             raw=body,
             failure_kind="authentication",
+            delivery_state="responded",
         )
     if status == 429:
         return ProviderError(
@@ -239,6 +277,7 @@ def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KE
             retryable=True,
             raw=body,
             failure_kind="rate_limited",
+            delivery_state="responded",
         )
     if status >= 500:
         return ProviderError(
@@ -246,11 +285,13 @@ def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KE
             retryable=True,
             raw=body,
             failure_kind="upstream_unavailable",
+            delivery_state="responded",
         )
     return ProviderError(
         f"请求被拒绝（HTTP {status}）：{body[:300]}",
         raw=body,
         failure_kind="provider_rejected",
+        delivery_state="responded",
     )
 
 
@@ -522,15 +563,15 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
                         f"上游返回非法 JSON：{exc}",
                         retryable=True,
                         raw=snippet,
+                        failure_kind="malformed_response",
+                        delivery_state="responded",
                     )
                     finish_provider_call(
                         call_id, "FAILED", 200, latency, error=str(err),
                         response_json={"status_code": 200, "body": snippet},
                     )
                     last_err = err
-                    if harness_text_request:
-                        raise err
-                    continue
+                    raise err
                 finish_provider_call(call_id, "OK", 200, latency, response_json=data)
                 return data
             err = _classify_http_error(resp.status_code, resp.text, key_name)
@@ -540,9 +581,9 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             if not err.retryable:
                 raise err
             last_err = err
-            # Harness 已为文本模型提供分钟级指数退避。429 若仍在 adapter 内按
-            # 1.5s/3s 立即重放，只会在同一个 TPM 窗口连续失败，并放大限流。
-            if harness_text_request:
+            # HTTP 错误证明请求已经到达对端。即使错误本身可恢复，也不在
+            # adapter/Harness 内静默创建第二次文本生成。
+            if harness_text_request or not err.replay_safe:
                 raise err
         except ProviderError:
             raise
@@ -551,21 +592,37 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             phase = _timeout_phase(exc)
             detail = (f"{type(exc).__name__}(phase={phase}, latency_ms={latency}, "
                       f"request_bytes={request_bytes}): {exc!r}")
-            last_err = ProviderError(
+            last_err = _transport_provider_error(
+                exc,
                 f"调用{phase}阶段超时（{latency}ms，请求 {request_bytes} bytes）",
-                retryable=True, raw=detail, timeout_phase=phase)
-            finish_provider_call(call_id, "TIMEOUT", None, latency, error=detail)
-            # Base64 大图写超时时，原样重传三次只会持续占满上行。
-            # 立即交给上层：图生图可快速降级为无种子生成，VLM 则明确失败。
-            # Harness 文本请求的 read timeout 也必须交给外层分钟级退避：
-            # 服务端可能仍在生成，adapter 立即重放会制造并行幽灵请求并吃满 TPM。
-            if phase == "write" or harness_text_request:
+                raw=detail,
+                timeout_phase=phase,
+            )
+            finish_provider_call(
+                call_id,
+                "TIMEOUT" if last_err.replay_safe else "INTERRUPTED",
+                None,
+                latency,
+                error=detail,
+            )
+            if harness_text_request or not last_err.replay_safe:
                 raise last_err
         except httpx.HTTPError as exc:
             latency = int((time.time() - start) * 1000)
-            last_err = ProviderError(f"网络错误：{exc}", retryable=True)
-            finish_provider_call(call_id, "NETWORK_ERROR", None, latency, error=str(exc))
-            if harness_text_request:
+            detail = f"{type(exc).__name__}(latency_ms={latency}): {exc!r}"
+            last_err = _transport_provider_error(
+                exc,
+                f"网络错误：{exc}",
+                raw=detail,
+            )
+            finish_provider_call(
+                call_id,
+                "NETWORK_ERROR" if last_err.replay_safe else "INTERRUPTED",
+                None,
+                latency,
+                error=detail,
+            )
+            if harness_text_request or not last_err.replay_safe:
                 raise last_err
         except Exception as exc:
             latency = int((time.time() - start) * 1000)
@@ -599,6 +656,8 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
                 )
             return data, candidate
         except ProviderError as exc:
+            if not exc.replay_safe:
+                raise
             _remember_bailian_failure(fallback_kind, candidate)
             last_err = exc
             errors.append(f"{candidate}: {exc}")
@@ -606,7 +665,12 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
     if last_err is None:
         raise ProviderError("百炼模型候选列表为空，请检查模型配置")
     raise ProviderError(f"百炼 {fallback_kind} 模型全部请求失败，已按降级序列尝试：{detail}",
-                        retryable=last_err.retryable, raw=last_err.raw)
+                        retryable=last_err.retryable, raw=last_err.raw,
+                        timeout_phase=last_err.timeout_phase,
+                        failure_kind=last_err.failure_kind,
+                        delivery_state=last_err.delivery_state,
+                        replay_safe=last_err.replay_safe,
+                        requires_explicit_retry=last_err.requires_explicit_retry)
 
 
 async def _stream_bailian_chat_with_fallback(
@@ -616,8 +680,8 @@ async def _stream_bailian_chat_with_fallback(
 ) -> tuple[dict, str]:
     """百炼的逐模型流式降级链。
 
-    某候选在尚未产出 token 时失败，可安全尝试下一个模型；一旦已经向前端
-    推送过内容就立即报错，禁止换模型重放导致文字重复。
+    只有连接阶段能证明请求未送达时才可尝试下一个模型；尚未收到 token
+    不能证明上游没有开始生成。
     """
     base_url, headers = _model_connection(
         "bailian", preferred_model, config.BAILIAN_BASE_URL, config.BAILIAN_API_KEY)
@@ -642,7 +706,7 @@ async def _stream_bailian_chat_with_fallback(
             )
             return data, candidate
         except ProviderError as exc:
-            if emitted:
+            if emitted or not exc.replay_safe:
                 raise
             _remember_bailian_failure(fallback_kind, candidate)
             last_err = exc
@@ -653,6 +717,11 @@ async def _stream_bailian_chat_with_fallback(
     raise ProviderError(
         f"百炼 {fallback_kind} 模型全部请求失败，已按降级序列尝试：{detail}",
         retryable=last_err.retryable, raw=last_err.raw,
+        timeout_phase=last_err.timeout_phase,
+        failure_kind=last_err.failure_kind,
+        delivery_state=last_err.delivery_state,
+        replay_safe=last_err.replay_safe,
+        requires_explicit_retry=last_err.requires_explicit_retry,
     )
 
 
@@ -1234,7 +1303,7 @@ async def _stream_chat_completion(
 ) -> dict:
     """SSE 流式消费 chat/completions，逐 token 回调 on_token，最终重组为非流式等价 `data`。
 
-    不做重试：流式一旦开始产出 token，重发会重复推送；失败交由上层决定是否降级为非流式。
+    不做重试：请求一旦送达，是否已收到 token 都不能证明上游没有开始生成。
     """
     merged_meta = _merge_call_meta(meta)
     req_headers = dict(headers if headers is not None else _headers())
@@ -1325,12 +1394,15 @@ async def _stream_chat_completion(
                 "stream interrupted before [DONE] "
                 f"(latency_ms={latency}, received_chars={received_chars})"
             )
-            finish_provider_call(call_id, "FAILED", 200, latency, error=detail)
+            finish_provider_call(call_id, "INTERRUPTED", 200, latency, error=detail)
             raise ProviderError(
-                "流式响应在 [DONE] 前中断，已丢弃不完整结果",
+                "流式响应在 [DONE] 前中断，结果不确定；"
+                "已丢弃不完整结果并禁止自动重试，请在页面确认后重试",
                 retryable=True,
                 raw=detail,
                 failure_kind="stream_interrupted",
+                delivery_state="unknown",
+                requires_explicit_retry=True,
             )
         data = _reconstruct_stream_data(content_parts, reasoning_parts, tool_slots, state)
         finish_provider_call(call_id, "OK", 200, latency, response_json=data)
@@ -1345,12 +1417,48 @@ async def _stream_chat_completion(
             else _timeout_phase(exc)
         )
         detail = f"{type(exc).__name__}(phase={phase}, latency_ms={latency}): {exc!r}"
-        finish_provider_call(call_id, "TIMEOUT", None, latency, error=detail)
-        raise ProviderError(f"流式调用{phase}阶段超时（{latency}ms）", retryable=True, raw=detail, timeout_phase=phase)
+        if isinstance(exc, httpx.HTTPError):
+            err = _transport_provider_error(
+                exc,
+                f"流式调用{phase}阶段超时（{latency}ms）",
+                raw=detail,
+                timeout_phase=phase,
+            )
+        else:
+            err = ProviderError(
+                f"流式调用{phase}阶段超时（{latency}ms）；"
+                "请求结果不确定，已禁止自动重试，请在页面确认后重试",
+                retryable=True,
+                raw=detail,
+                timeout_phase=phase,
+                failure_kind="request_outcome_unknown",
+                delivery_state="unknown",
+                requires_explicit_retry=True,
+            )
+        finish_provider_call(
+            call_id,
+            "TIMEOUT" if err.replay_safe else "INTERRUPTED",
+            None,
+            latency,
+            error=detail,
+        )
+        raise err
     except httpx.HTTPError as exc:
         latency = int((time.time() - start) * 1000)
-        finish_provider_call(call_id, "NETWORK_ERROR", None, latency, error=str(exc))
-        raise ProviderError(f"流式网络错误：{exc}", retryable=True)
+        detail = f"{type(exc).__name__}(latency_ms={latency}): {exc!r}"
+        err = _transport_provider_error(
+            exc,
+            f"流式网络错误：{exc}",
+            raw=detail,
+        )
+        finish_provider_call(
+            call_id,
+            "NETWORK_ERROR" if err.replay_safe else "INTERRUPTED",
+            None,
+            latency,
+            error=detail,
+        )
+        raise err
 
 
 async def _stream_or_fallback(
@@ -1358,7 +1466,7 @@ async def _stream_or_fallback(
     kind: str, model: str, headers: dict | None, key_name: str,
     meta: dict | None, on_token: Callable[[str, str], None],
 ) -> dict:
-    """优先流式；若尚未推送任何 token 就失败，则安全降级为非流式（避免重复推送）。"""
+    """优先流式；仅在能证明请求未送达时降级为非流式。"""
     emitted = 0
 
     def _wrapped(token_kind: str, text: str) -> None:
@@ -1371,7 +1479,12 @@ async def _stream_or_fallback(
             client, url, payload, kind=kind, model=model, headers=headers,
             key_name=key_name, meta=meta, on_token=_wrapped)
     except ProviderError as exc:
-        if emitted > 0 or _looks_like_tools_unsupported(exc):
+        if (
+            emitted > 0
+            or not exc.replay_safe
+            or (meta or {}).get("gateway") == "execution_harness"
+            or _looks_like_tools_unsupported(exc)
+        ):
             raise
         fallback_meta = {**(meta or {}), "stream_degraded": True, "stream_degraded_cause": str(exc)[:120]}
         return await _post_json(client, url, payload, kind=kind, model=model,
@@ -1424,8 +1537,8 @@ async def chat_with_tools(
     - 供应商不支持 `tools`（能力标志关闭或网关以客户端错误拒绝）时，回退到手写 JSON 协议，
       对上层返回同一种 AssistantTurn，编排器无需感知差异。
     - 传入 `on_token(kind, text)` 且未关闭 agent_stream_tokens 时，走 SSE 流式并逐 token 回调
-      （kind ∈ {"content","reasoning"}）；流式在推送前失败会自动降级为非流式。百炼多模型回退路径
-      与 JSON 回退协议暂不流式，最终结果一致。
+      （kind ∈ {"content","reasoning"}）；只有能证明请求未送达时才降级为非流式。百炼多模型回退
+      路径与 JSON 回退协议暂不流式，最终结果一致。
     """
     provider = active_provider("text")
     if not _provider_supports_tools(provider):
