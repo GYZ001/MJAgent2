@@ -578,6 +578,36 @@ def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None)
     return artifact["id"]
 
 
+def _refresh_supervisor_heartbeat(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None,
+) -> bool:
+    """Refresh liveness without writing a full checkpoint artifact."""
+    rid = run_id or cp.run_id
+    stamp = now()
+    if not rid:
+        cp.last_heartbeat_at = stamp
+        return True
+    conn = get_conn()
+    cursor = conn.execute(
+        """UPDATE workflow_runs
+              SET updated_at=?, deadline_at=COALESCE(deadline_at, ?)
+            WHERE id=? AND finished_at IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM episodes e
+                   WHERE e.id=? AND e.active_video_run_id=workflow_runs.id
+                     AND e.video_completion_mode='complete'
+              )""",
+        (stamp, cp.deadline_at, rid, cp.episode_id),
+    )
+    conn.commit()
+    if cursor.rowcount != 1:
+        return False
+    cp.last_heartbeat_at = stamp
+    return True
+
+
 def public_checkpoint_projection(cp: VideoSupervisorCheckpoint | None) -> dict[str, Any] | None:
     if cp is None:
         return None
@@ -1498,6 +1528,30 @@ def _dispatch(
     if plan and plan.rebuild_reference:
         entry.rebuilt_reference = True
     return True
+
+
+def _dispatch_with_heartbeat(
+    entry: ShotCoverageEntry,
+    *,
+    episode_id: str,
+    run_id: str | None,
+    cp: VideoSupervisorCheckpoint,
+    plan: VideoRepairPlan | None = None,
+    first: bool = False,
+) -> bool:
+    """Keep the run live across synchronous request compilation and enqueue."""
+    _refresh_supervisor_heartbeat(cp, run_id=run_id)
+    try:
+        return _dispatch(
+            entry,
+            episode_id=episode_id,
+            run_id=run_id,
+            cp=cp,
+            plan=plan,
+            first=first,
+        )
+    finally:
+        _refresh_supervisor_heartbeat(cp, run_id=run_id)
 
 
 def _patch_version_supervisor_meta(version_id: str, meta: dict[str, Any]) -> None:
@@ -2816,7 +2870,7 @@ async def run_video_completion_supervisor(
                     break
                 cp.phase = "DISPATCHING"
                 try:
-                    dispatched = _dispatch(
+                    dispatched = _dispatch_with_heartbeat(
                         entry,
                         episode_id=episode_id,
                         run_id=run_id,
@@ -2981,7 +3035,7 @@ async def run_video_completion_supervisor(
                 ):
                     budget_capacity_reached = True
                     break
-                dispatched = _dispatch(
+                dispatched = _dispatch_with_heartbeat(
                     entry,
                     episode_id=episode_id,
                     run_id=run_id,

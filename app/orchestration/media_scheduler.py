@@ -150,6 +150,48 @@ def settle_budget(job_id: str, actual_cost_cny: float, *, success: bool) -> None
     db.commit()
 
 
+def reconcile_cancelled_version_states(
+    episode_id: str | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    """Project durable job cancellation onto its version after late worker writes."""
+    db = conn or get_conn()
+    rows = db.execute(
+        """SELECT j.version_id, j.abandoned, j.error AS job_error,
+                  v.status AS version_status, v.error AS version_error
+             FROM jobs j
+             JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.cancellation_requested=1
+              AND (? IS NULL OR j.episode_id=?)""",
+        (episode_id, episode_id),
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        target_status = "abandoned" if bool(row["abandoned"]) else "cancelled"
+        target_error = row["job_error"] or row["version_error"]
+        if (
+            row["version_status"] == target_status
+            and row["version_error"] == target_error
+        ):
+            continue
+        cursor = db.execute(
+            """UPDATE shot_versions
+                  SET status=?, error=?
+                WHERE id=?
+                  AND EXISTS (
+                      SELECT 1 FROM jobs j
+                       WHERE j.version_id=shot_versions.id
+                         AND j.cancellation_requested=1
+                  )""",
+            (target_status, target_error, row["version_id"]),
+        )
+        changed += int(cursor.rowcount)
+    if changed:
+        db.commit()
+    return changed
+
+
 def claim_job(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> Claim | None:
     """CAS claim a due queued / waiting_provider job, or reclaim an expired lease."""
     db = get_conn()
@@ -228,7 +270,10 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
     """Cancel locally; paid provider work may continue and is marked abandoned on completion."""
     db = get_conn()
     row = db.execute(
-        "SELECT status, provider_non_cancellable, version_id, run_id, step_run_id FROM jobs WHERE id=?", (job_id,)
+        """SELECT status, provider_non_cancellable, version_id, run_id,
+                  step_run_id, episode_id
+             FROM jobs WHERE id=?""",
+        (job_id,),
     ).fetchone()
     if not row:
         raise KeyError(job_id)
@@ -249,12 +294,12 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
     # paid upstream work can still complete, so cancellation must stay abandoned.
     status = "abandoned" if non_cancellable else "cancelled"
     cursor = db.execute(
-        """UPDATE jobs SET cancellation_requested=1, abandoned=?, status=?,
+        """UPDATE jobs SET cancellation_requested=1, abandoned=?, status=?, error=?,
                   lease_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, updated_at=?
            WHERE id=? AND status IN (
                'queued','running','paused_budget','waiting_provider','waiting_retry','waiting','waiting_human'
            )""",
-        (int(status == "abandoned"), status, now(), job_id),
+        (int(status == "abandoned"), status, reason, now(), job_id),
     )
     if cursor.rowcount != 1:
         db.rollback()
@@ -290,6 +335,10 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
         db.commit()
     else:
         settle_budget(job_id, 0.0, success=False)
+    reconcile_cancelled_version_states(
+        episode_id=row["episode_id"],
+        conn=db,
+    )
     from app.orchestration.media_runs import mark_media_job_state
     mark_media_job_state(row["run_id"], row["step_run_id"], status, reason)
     return {

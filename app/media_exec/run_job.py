@@ -1204,11 +1204,24 @@ def _set_job(
     return True
 
 
-def _set_version(version_id: str, **fields) -> None:
+def _set_version(version_id: str, **fields) -> bool:
     conn = get_conn()
     cols = ", ".join(f"{k}=?" for k in fields)
-    conn.execute(f"UPDATE shot_versions SET {cols} WHERE id=?", (*fields.values(), version_id))
+    cancellation_guard = (
+        """ AND NOT EXISTS (
+                SELECT 1 FROM jobs j
+                 WHERE j.version_id=shot_versions.id
+                   AND j.cancellation_requested=1
+            )"""
+        if "status" in fields
+        else ""
+    )
+    cursor = conn.execute(
+        f"UPDATE shot_versions SET {cols} WHERE id=?{cancellation_guard}",
+        (*fields.values(), version_id),
+    )
     conn.commit()
+    return cursor.rowcount == 1
 
 
 def _video_model_rejection_guidance(
@@ -3497,7 +3510,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         return
     except VideoBudgetAuthorizationError as exc:
         message = str(exc)
-        conn.execute(
+        changed = conn.execute(
             """UPDATE jobs
                   SET status='paused_budget',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
                       reason_text=?,provider_non_cancellable=0,
@@ -3507,10 +3520,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 WHERE id=? AND status='running' AND lease_owner=?""",
             (message, message, now(), job_id, owner),
         )
-        conn.execute(
-            "UPDATE shot_versions SET status='paused_budget',error=? WHERE id=?",
-            (message, version["id"]),
-        )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return
+        _set_version(version["id"], status="paused_budget", error=message)
         conn.execute(
             """UPDATE budget_reservations
                   SET status='released',settled_at=?,actual_cost_cny=0
@@ -3577,19 +3590,19 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             "未切换生成方式，也未提交不合格输入。"
             f"（{repair_code} · {record.error_id}）"
         )
-        conn.execute(
+        changed = conn.execute(
             """UPDATE jobs
                   SET status='waiting_human',error=?,
                       reason_code=?,
                       reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
                       next_retry_at=NULL,updated_at=?
-                WHERE id=? AND lease_owner=?""",
+                WHERE id=? AND status='running' AND lease_owner=?""",
             (message, repair_code, message, now(), job_id, owner),
         )
-        conn.execute(
-            "UPDATE shot_versions SET status='waiting_human',error=? WHERE id=?",
-            (message, version["id"]),
-        )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return
+        _set_version(version["id"], status="waiting_human", error=message)
         conn.execute(
             """UPDATE shot_video_generation_plans
                   SET status='waiting_asset',updated_at=?
