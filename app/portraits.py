@@ -58,8 +58,8 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v4"
-FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v4"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v5"
+FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v5"
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -1118,7 +1118,7 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
             return False
         anchor_length = min(
             len(future_evidence),
-            max(8, len(canonical_name) + 4),
+            max(4, len(canonical_name) + 2),
         )
         search_from = 0
         while True:
@@ -1171,7 +1171,7 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
         model_type=_IdentityCandidateResponse,
         validate=validate_response,
         operation_id=(
-            f"screenplay.identity.future.v4:{episode_no}:"
+            f"screenplay.identity.future.v5:{episode_no}:"
             + evidence_repository.content_hash({
                 "unresolved": unresolved,
                 "future_context": future_context,

@@ -728,7 +728,7 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         "evidence": "绿袍男子拦路呵斥",
         "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
         "identity_group": "current-1:绿袍男子",
-        "decision_contract_version": "screenplay-future-identity.v4",
+        "decision_contract_version": "screenplay-future-identity.v5",
         "authority_id": "bible:丁力",
         "authority_version": "screenplay-identity-authority.v1",
     }]
@@ -809,7 +809,7 @@ def test_future_identity_accepts_semantic_alias_with_verbatim_name_anchor(
             "source_label": "那间学校的校长",
             "canonical_name": "赵振",
             "identity_kind": "named",
-            "future_evidence": "聪慧的白洁马上反应过来是那个“大象”赵振的主意。",
+            "future_evidence": "聪慧的白洁马上反应过来是那个‘大象’赵振的主意。",
         }]}, ensure_ascii=False)
 
     monkeypatch.setattr(portraits.model_gateway, "chat", fake_chat)

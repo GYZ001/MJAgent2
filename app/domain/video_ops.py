@@ -216,6 +216,7 @@ def evaluate_storyboard_for_confirmation(
     """
     from app.evaluations.issues import issues_from_messages
     from app.harness.types import IssueSeverity
+    from app.continuity import dialogue_framing_errors
     from app.validators import (
         prefer_default_shot_durations,
         validate_storyboard_screenplay_scene_alignment,
@@ -385,6 +386,15 @@ def evaluate_storyboard_for_confirmation(
         narrative_plan=narrative_plan,
         screenplay=screenplay,
     ))
+    dialogue_findings = [
+        message
+        for shot in board.shots
+        for message in dialogue_framing_errors(
+            shot,
+            narrative_authority=narrative_plan is not None,
+        )
+    ]
+    score_warnings.extend(dialogue_findings)
     if screenplay is not None:
         score_warnings.extend(validate_storyboard_soundtrack(board, screenplay, compact_target))
         score_warnings.extend(validate_storyboard_preserves_key_content(board, screenplay))

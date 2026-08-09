@@ -1847,6 +1847,37 @@ def normalize_storyboard_shot_candidate(
                     "reason": "derived_spoken_timing",
                 })
                 shot["audio_timeline"] = normalized_timeline
+            primary_onscreen_speaker = next(
+                (
+                    str(item.get("speaker_id") or "").strip()
+                    for item in normalized_timeline
+                    if (
+                        isinstance(item, dict)
+                        and item.get("type") == "spoken_dialogue"
+                        and str(item.get("speaker_id") or "").strip()
+                    )
+                ),
+                "",
+            )
+            dialogue_framing_changed = False
+            if primary_onscreen_speaker:
+                for item in normalized_timeline:
+                    if (
+                        not isinstance(item, dict)
+                        or item.get("type") != "spoken_dialogue"
+                        or str(item.get("speaker_id") or "").strip()
+                        in {"", primary_onscreen_speaker}
+                    ):
+                        continue
+                    item["type"] = "offscreen_voice"
+                    item["lip_sync"] = False
+                    dialogue_framing_changed = True
+            if dialogue_framing_changed:
+                changes.append({
+                    "field": "shot.audio_timeline",
+                    "reason": "single_onscreen_speaker",
+                })
+                shot["audio_timeline"] = normalized_timeline
             spoken_segments = [
                 item
                 for item in normalized_timeline
@@ -1895,6 +1926,11 @@ def normalize_storyboard_shot_candidate(
             unique_onscreen_speakers = list(dict.fromkeys(
                 onscreen_speaker_ids
             ))
+            # Lip sync proves that a speaker must be visible; it does not prove
+            # that every other action participant should disappear.  The
+            # narrative task's actor/target partition owns the composition, so
+            # audio normalization may add a declared on-screen speaker but must
+            # never collapse an already valid multi-person staging to a solo.
             if has_relation_authority:
                 declared_characters = set(_tokens(shot.get("characters")))
                 normalized_visible = list(dict.fromkeys([
@@ -1906,10 +1942,14 @@ def normalize_storyboard_shot_candidate(
                     ),
                 ]))
             else:
-                normalized_visible = list(dict.fromkeys([
-                    *visible_characters,
-                    *unique_onscreen_speakers,
-                ]))
+                normalized_visible = (
+                    unique_onscreen_speakers
+                    if len(unique_onscreen_speakers) == 1
+                    else list(dict.fromkeys([
+                        *visible_characters,
+                        *unique_onscreen_speakers,
+                    ]))
+                )
             if normalized_visible != visible_characters:
                 changes.append({
                     "field": "shot.characters_visible",
@@ -1918,6 +1958,119 @@ def normalize_storyboard_shot_candidate(
                     "reason": "lip_sync_speaker_visible",
                 })
                 shot["characters_visible"] = normalized_visible
+            if has_relation_authority and len(unique_onscreen_speakers) == 1:
+                try:
+                    from app.continuity import dialogue_focus_subject
+
+                    focus = dialogue_focus_subject(
+                        Shot.model_validate(shot),
+                        narrative_authority=True,
+                    )
+                except (TypeError, ValueError):
+                    focus = None
+                focus_identity_id = (
+                    identity_id_by_display_name.get(focus or "")
+                    if focus
+                    else None
+                )
+                if focus and focus_identity_id:
+                    canonical_offscreen_actors = [
+                        identity_id
+                        for identity_id in _tokens(
+                            outline_narrative_task.get(
+                                "_bound_action_actor_ids"
+                            )
+                        )
+                        if identity_id != focus_identity_id
+                    ]
+                    canonical_offscreen_targets = [
+                        identity_id
+                        for identity_id in _tokens(
+                            outline_narrative_task.get(
+                                "_bound_action_target_ids"
+                            )
+                        )
+                        if identity_id != focus_identity_id
+                    ]
+                    for field, value in (
+                        ("characters", [focus]),
+                        ("characters_visible", [focus]),
+                        ("visible_entity_ids", [focus_identity_id]),
+                        (
+                            "offscreen_action_actor_ids",
+                            canonical_offscreen_actors,
+                        ),
+                        (
+                            "offscreen_action_target_ids",
+                            canonical_offscreen_targets,
+                        ),
+                    ):
+                        if shot.get(field) == value:
+                            continue
+                        changes.append({
+                            "field": f"shot.{field}",
+                            "from": shot.get(field),
+                            "to": value,
+                            "reason": "typed_dialogue_focus_projection",
+                        })
+                        shot[field] = value
+            if unique_onscreen_speakers:
+                # Only an explicit outline camera choice is authoritative.
+                # A single spoken voice can accompany a full-body action or a
+                # multi-person interaction, so it cannot generically imply a
+                # close-up or a static camera.
+                planned_shot_size = str(
+                    ""
+                    if preserve_director_camera
+                    else outline_narrative_task.get("camera_size") or ""
+                )
+                if preserve_director_camera:
+                    target_shot_size = shot.get("shot_size")
+                elif planned_shot_size in SHOT_SIZES:
+                    target_shot_size = planned_shot_size
+                elif not has_relation_authority:
+                    target_shot_size = "近景"
+                else:
+                    target_shot_size = shot.get("shot_size")
+                if shot.get("shot_size") != target_shot_size:
+                    changes.append({
+                        "field": "shot.shot_size",
+                        "from": shot.get("shot_size"),
+                        "to": target_shot_size,
+                        "reason": "outline_camera_authority",
+                    })
+                    shot["shot_size"] = target_shot_size
+                planned_camera_move = str(
+                    ""
+                    if preserve_director_camera
+                    else outline_narrative_task.get("camera_movement") or ""
+                )
+                target_camera_move = (
+                    shot.get("camera_move")
+                    if preserve_director_camera
+                    else (
+                        planned_camera_move
+                        if planned_camera_move in CAMERA_MOVES
+                        else (
+                            shot.get("camera_move")
+                            if has_relation_authority
+                            else (
+                                shot.get("camera_move")
+                                if shot.get("camera_move")
+                                in {"固定", "推近"}
+                                else "固定"
+                            )
+                        )
+                    )
+                )
+                if shot.get("camera_move") != target_camera_move:
+                    changes.append({
+                        "field": "shot.camera_move",
+                        "from": shot.get("camera_move"),
+                        "to": target_camera_move,
+                        "reason": "outline_camera_authority",
+                    })
+                    shot["camera_move"] = target_camera_move
 
             dialogue_text = "".join(
                 str(item.get("line") or "")

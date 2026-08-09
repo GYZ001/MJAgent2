@@ -191,9 +191,16 @@ def dialogue_focus_subject(
     *,
     narrative_authority: bool = False,
 ) -> str | None:
-    """Compatibility shim: dialogue no longer narrows visual composition."""
-    _ = shot, narrative_authority
-    return None
+    """返回专业对白镜头的唯一画面主体；双人肢体互动属于显式例外。"""
+    speakers = onscreen_dialogue_speakers(shot)
+    if (
+        len(speakers) != 1
+        or dialogue_two_shot_required(shot, narrative_authority=narrative_authority)
+        or dialogue_action_staging_kind(shot, narrative_authority=narrative_authority)
+    ):
+        return None
+    visible = raw_characters_visible(shot)
+    return speakers[0] if speakers[0] in visible else None
 
 
 def dialogue_framing_errors(
@@ -202,9 +209,77 @@ def dialogue_framing_errors(
     strict_composition: bool = True,
     narrative_authority: bool = False,
 ) -> list[str]:
-    """Compatibility shim: dialogue composition is not a hard gate."""
-    _ = shot, strict_composition, narrative_authority
-    return []
+    """对白镜头构图门禁：一镜一位画内说话人，默认单人近景/特写。"""
+    speakers = onscreen_dialogue_speakers(shot)
+    if not speakers:
+        return []
+    if len(speakers) > 1:
+        return [
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            f"同一镜包含多个画内说话人 {speakers}；"
+            "优秀漫剧对白应按话轮拆成相邻正反打，每镜只保留一位画内说话人"
+        ]
+
+    speaker = speakers[0]
+    visible = raw_characters_visible(shot)
+    errors: list[str] = []
+    if speaker not in visible:
+        errors.append(
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            f"画内说话人「{speaker}」不在 characters_visible；"
+            "需要口型的说话人必须入画，画外说话请改为 offscreen_voice"
+        )
+        return errors
+    if dialogue_two_shot_required(shot, narrative_authority=narrative_authority):
+        if len(visible) > 2:
+            errors.append(
+                f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+                f"虽有双人肢体互动，但画面声明了 {len(visible)} 人；"
+                "对白双人镜最多保留说话人与直接互动对象，其余人物留在画外"
+            )
+        return errors
+    staging_kind = dialogue_action_staging_kind(
+        shot,
+        narrative_authority=narrative_authority,
+    )
+    if staging_kind:
+        # 动作对白仍只允许一个画内说话人，但不可为了口型裁掉走位、肢体或剧情道具。
+        # 其他可见角色可作为无台词的直接互动对象/背景关系存在。
+        if staging_kind == "spatial" and shot.shot_size not in {"远景", "全景", "中景"}:
+            errors.append(
+                f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+                "的对白同时包含走位/离场等大形体动作，"
+                f"shot_size 应为中景、全景或远景，当前为「{shot.shot_size}」；"
+                "必须完整拍出动作，不能用单人大近景替代"
+            )
+        elif staging_kind == "prop" and shot.shot_size == "特写":
+            errors.append(
+                f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+                "的对白同时包含剧情道具操作，shot_size 不得为特写；"
+                "请至少使用近景并完整保留双手、道具和接触关系"
+            )
+        return errors
+    if not strict_composition:
+        return errors
+    if visible != [speaker]:
+        errors.append(
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            f"是「{speaker}」的对白镜头，但画面可见角色为 {visible}；"
+            "请只保留说话人，听者和人群留在画外，下一话轮再切反打/反应镜"
+        )
+    if shot.shot_size not in DIALOGUE_CLOSEUP_SHOT_SIZES:
+        errors.append(
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            "是单人对白镜头，shot_size 应为近景或特写，"
+            f"当前为「{shot.shot_size}」"
+        )
+    if shot.camera_move not in DIALOGUE_CLOSEUP_CAMERA_MOVES:
+        errors.append(
+            f"[DIALOGUE_FRAMING_INVALID] shot_no={shot.shot_no} "
+            "是单人对白镜头，camera_move 应为固定或推近，"
+            f"当前为「{shot.camera_move}」"
+        )
+    return errors
 
 
 def effective_state_in(shot: Shot) -> str:
@@ -224,6 +299,9 @@ def effective_primary_action(shot: Shot) -> str:
 
 
 def effective_characters_visible(shot: Shot) -> list[str]:
+    focus = dialogue_focus_subject(shot)
+    if focus:
+        return [focus]
     return list(dict.fromkeys([
         *raw_characters_visible(shot),
         *required_visual_action_characters(shot),
@@ -248,6 +326,9 @@ def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
     当成链首，否则会误报「第一个镜头没有上一镜可承接」。
     """
     mode = (shot.continuity_mode or "").strip()
+    if mode == "action_continuation" and dialogue_focus_subject(shot):
+        # 对白近景是一次明确切镜，不能把上一镜尾帧当作 0 秒构图继续复制。
+        mode = "same_scene_cut"
     if prev is None:
         if mode == "action_continuation" or mode not in CONTINUITY_MODES:
             return "scene_change" if int(shot.shot_no or 0) == 1 else "same_scene_cut"
@@ -415,9 +496,16 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
         shot.characters_visible = list(shot.characters or [])
     if not shot.audio_cast:
         shot.audio_cast = effective_audio_cast(shot)
+    focus = dialogue_focus_subject(shot)
     tags = list(shot.risk_tags or [])
-    if DIALOGUE_FOCUS_RISK_TAG in tags:
+    if focus and DIALOGUE_FOCUS_RISK_TAG not in tags:
+        tags.append(DIALOGUE_FOCUS_RISK_TAG)
+    elif not focus and DIALOGUE_FOCUS_RISK_TAG in tags:
         tags.remove(DIALOGUE_FOCUS_RISK_TAG)
+    if dialogue_two_shot_required(shot) and DIALOGUE_TWO_SHOT_RISK_TAG not in tags:
+        tags.append(DIALOGUE_TWO_SHOT_RISK_TAG)
+    if dialogue_action_staging_kind(shot) and "dialogue_action_staging" not in tags:
+        tags.append("dialogue_action_staging")
     shot.risk_tags = tags
     if not shot.prompt_contract_version:
         shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
@@ -1276,6 +1364,11 @@ def preflight_seedance_gates(
             narrative_plan=None,
         ))
         errors.extend(speech_capacity_errors(shot))
+        errors.extend(dialogue_framing_errors(
+            shot,
+            strict_composition=False,
+            narrative_authority=False,
+        ))
     errors.extend(state_chain_errors(
         Storyboard(episode_no=0, shots=([prev, shot] if prev else [shot])),
         narrative_authority=narrative_plan is not None,
