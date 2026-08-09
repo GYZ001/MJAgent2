@@ -2122,6 +2122,49 @@ def _start_provider_call_inner(
     return int(cur.lastrowid)
 
 
+def latest_provider_request_json(
+    kind: str,
+    model: str,
+    operation_id: str,
+) -> Any | None:
+    """Return the newest durable request checkpoint for one business operation."""
+    if not operation_id:
+        return None
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT request_json FROM provider_calls
+               WHERE kind=? AND model=? AND operation_id=?
+                 AND request_json IS NOT NULL
+               ORDER BY id DESC""",
+            (kind, model, operation_id),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    for row in rows:
+        try:
+            return json.loads(row["request_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def update_provider_call_request(call_id: int, request_json: Any) -> None:
+    """Persist the exact outbound request before the non-idempotent write."""
+    if not call_id:
+        return
+    conn = get_conn()
+    try:
+        conn.execute(
+            """UPDATE provider_calls SET request_json=?
+               WHERE id=? AND status='RUNNING'""",
+            (_dump_call_json(request_json), call_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        conn.rollback()
+
+
 def update_provider_call_progress(
     call_id: int,
     *,

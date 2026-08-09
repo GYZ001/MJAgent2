@@ -275,6 +275,24 @@ class WorkflowRecorder:
         transition_run(self.run_id, "RUNNING", "PARTIAL", message, failure_code="PARTIAL_RESULT")
         repository.append_event(self.run_id, "RUN_PARTIAL", "warning", message)
 
+    def fail_result(self, message: str, *, failure_code: str) -> None:
+        """Persist a deterministic unsuccessful result without inventing an exception."""
+        self.refresh_cost()
+        transition_run(
+            self.run_id,
+            "RUNNING",
+            "FAILED",
+            message[:1000],
+            failure_code=failure_code,
+        )
+        repository.append_event(
+            self.run_id,
+            "RUN_FAILED",
+            "error",
+            message,
+            payload={"failure_code": failure_code, "message": message[:1000]},
+        )
+
     def fail(self, exc: BaseException) -> None:
         self.refresh_cost()
         transition_run(

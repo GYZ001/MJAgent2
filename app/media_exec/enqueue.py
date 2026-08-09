@@ -410,18 +410,23 @@ def recover_equivalent_stale_provider_jobs(episode_id: str) -> dict[str, object]
             "stale_plan_recovered": True,
             "stale_plan_recovered_at": now(),
         })
-        conn.execute(
-            "UPDATE shot_versions SET status='running',error=NULL,image_inputs=? WHERE id=?",
-            (json.dumps(meta, ensure_ascii=False), row["version_id"]),
-        )
-        conn.execute(
+        updated = conn.execute(
             """UPDATE jobs
                   SET status='waiting_provider',error=NULL,
                       lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,
                       provider_create_state='accepted',provider_non_cancellable=1,
                       updated_at=?
-                WHERE id=? AND status='stale'""",
+                WHERE id=? AND status='stale'
+                  AND cancellation_requested=0 AND abandoned=0""",
             (now(), now(), row["job_id"]),
+        )
+        if updated.rowcount != 1:
+            conn.rollback()
+            media_scheduler.settle_budget(row["job_id"], 0.0, success=False)
+            continue
+        conn.execute(
+            "UPDATE shot_versions SET status='running',error=NULL,image_inputs=? WHERE id=?",
+            (json.dumps(meta, ensure_ascii=False), row["version_id"]),
         )
         conn.execute(
             """UPDATE video_generation_attempts

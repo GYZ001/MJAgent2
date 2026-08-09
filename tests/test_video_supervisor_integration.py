@@ -29,6 +29,7 @@ from app.video_supervisor import (
     VideoSupervisorCheckpoint,
     _apply_cascade,
     _deadline_closeout,
+    _dispatch_with_heartbeat,
     _finalize_covered,
     _has_dispatch_budget_capacity,
     _reconcile_terminal_continuity_blocks,
@@ -143,6 +144,76 @@ def _add_succeeded_version(
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (vid, shot_id))
     conn.commit()
     return vid
+
+
+@pytest.mark.asyncio
+async def test_dispatch_refreshes_heartbeat_before_watchdog_can_take_over(
+    memdb,
+    monkeypatch,
+):
+    import app.task_registry as task_registry
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+    run_id = evidence_repository.create_run(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=eid,
+        input_fingerprint="dispatch-heartbeat",
+        deadline_at=500,
+    )
+    memdb.execute(
+        "UPDATE workflow_runs SET status='RUNNING',started_at=100,updated_at=100 WHERE id=?",
+        (run_id,),
+    )
+    memdb.execute(
+        """UPDATE episodes
+              SET status='generating',video_completion_mode='complete',
+                  active_video_run_id=?
+            WHERE id=?""",
+        (run_id, eid),
+    )
+    memdb.commit()
+    clock = {"now": 100.0}
+    monkeypatch.setattr(video_supervisor, "now", lambda: clock["now"])
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        run_id=run_id,
+        phase="DISPATCHING",
+        started_at=100,
+        deadline_at=500,
+        budget={"cap_cny": 150},
+        coverage={"total": 1, "adopted": 0},
+    )
+    save_checkpoint(checkpoint, run_id=run_id)
+
+    def slow_dispatch(*_args, **_kwargs):
+        clock["now"] = 161.0
+        return True
+
+    monkeypatch.setattr(video_supervisor, "_dispatch", slow_dispatch)
+    entry = ShotCoverageEntry(shot_no=1, shot_id=f"{eid}_shot_1")
+
+    assert _dispatch_with_heartbeat(
+        entry,
+        episode_id=eid,
+        run_id=run_id,
+        cp=checkpoint,
+        first=True,
+    )
+    updated_at = memdb.execute(
+        "SELECT updated_at FROM workflow_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()["updated_at"]
+    assert updated_at == 161.0
+
+    clock["now"] = 220.0
+    monkeypatch.setattr(task_registry, "active", lambda *_args: True)
+    assert await reconcile_stale_video_supervisors() == 0
+    assert memdb.execute(
+        "SELECT status FROM workflow_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()["status"] == "RUNNING"
 
 
 def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:

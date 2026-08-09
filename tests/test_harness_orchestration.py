@@ -110,6 +110,27 @@ def test_workflow_recorder_process_shutdown_remains_recoverable(tmp_path, monkey
     }
 
 
+def test_workflow_recorder_persists_deterministic_failed_result(tmp_path, monkeypatch) -> None:
+    _fresh_database(tmp_path, monkeypatch)
+    recorder = WorkflowRecorder.create(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="zero-completed-shots",
+    )
+    recorder.start()
+
+    recorder.fail_result(
+        "PARTIAL_NO_USABLE_CANDIDATE",
+        failure_code="NO_COMPLETED_OUTPUT",
+    )
+
+    run = repository.get_run(recorder.run_id)
+    assert run["status"] == "FAILED"
+    assert run["failure_code"] == "NO_COMPLETED_OUTPUT"
+    assert run["failure_message"] == "PARTIAL_NO_USABLE_CANDIDATE"
+
+
 def test_commit_rejects_blockers_and_recovered_evidence(tmp_path, monkeypatch) -> None:
     _fresh_database(tmp_path, monkeypatch)
     recorder = WorkflowRecorder.create(

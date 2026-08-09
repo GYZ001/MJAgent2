@@ -905,6 +905,7 @@ def _stop_supervised_video_jobs(episode_id: str, *, run_id: str | None, reason: 
             results.append(media_scheduler.request_cancel(row["id"], reason=reason))
         except Exception as exc:  # noqa: BLE001 — 逐任务 best effort，其余任务仍必须停止
             results.append({"job_id": row["id"], "cancelled": False, "error": str(exc)})
+    media_scheduler.reconcile_cancelled_version_states(episode_id=episode_id)
     return results
 
 

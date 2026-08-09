@@ -2571,7 +2571,16 @@ async def _recorded_video_completion_task(
         elif result.phase == "CANCELLED":
             recorder.cancel()
         else:
-            recorder.partial(result.outcome or result.phase)
+            coverage = result.coverage or {}
+            completed_shots = int(coverage.get("adopted") or 0)
+            total_shots = int(coverage.get("total") or 0)
+            if result.finished_at is not None and total_shots > 0 and completed_shots == 0:
+                recorder.fail_result(
+                    result.outcome or result.phase,
+                    failure_code="NO_COMPLETED_OUTPUT",
+                )
+            else:
+                recorder.partial(result.outcome or result.phase)
         if result.phase in {
             "SUCCEEDED_COVERED", "COMPLETED_DEADLINE_FALLBACK",
             "PARTIAL_NO_USABLE_CANDIDATE", "FAILED_CLOSED", "CANCELLED",

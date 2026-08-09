@@ -56,3 +56,42 @@ def test_recovery_keeps_future_retry_and_cancel_marks_provider_work_abandoned(mo
     assert result["status"] == "abandoned" and result["provider_may_continue"] is True
     row = conn.execute("SELECT abandoned,cancellation_requested FROM jobs WHERE id='j2'").fetchone()
     assert tuple(row) == (1, 1)
+
+
+def test_cancelled_job_cannot_be_written_back_to_running_version(monkeypatch) -> None:
+    from app import worker
+
+    conn = _conn()
+    monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_scheduler, "now", lambda: 100.0)
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s','e',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v','s',1,'p','idem','running',1)"""
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET shot_id='s',version_id='v',status='running',lease_owner='worker'
+            WHERE id='j1'"""
+    )
+    conn.commit()
+
+    result = media_scheduler.request_cancel("j1", reason="Supervisor 收口")
+
+    assert result["status"] == "cancelled"
+    assert worker._set_version("v", status="running", error=None) is False
+    version = conn.execute(
+        "SELECT status,error FROM shot_versions WHERE id='v'"
+    ).fetchone()
+    assert dict(version) == {"status": "cancelled", "error": "Supervisor 收口"}
+
+    conn.execute("UPDATE shot_versions SET status='running' WHERE id='v'")
+    conn.commit()
+    assert media_scheduler.reconcile_cancelled_version_states(episode_id="e") == 1
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v'"
+    ).fetchone()["status"] == "cancelled"

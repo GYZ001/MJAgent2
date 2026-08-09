@@ -335,6 +335,55 @@ async def test_deadline_fallback_completion_records_success(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adopted", "expected"),
+    [(0, "failed"), (1, "partial")],
+)
+async def test_video_completion_terminal_status_uses_completed_shot_count(
+    monkeypatch,
+    adopted: int,
+    expected: str,
+) -> None:
+    import app.video_supervisor as video_supervisor
+    from app.media_exec import enqueue as media_enqueue
+
+    class Recorder:
+        run_id = "run-terminal-count"
+        recorded = None
+
+        def start(self):
+            return None
+
+        def partial(self, outcome):
+            self.recorded = ("partial", outcome, None)
+
+        def fail_result(self, outcome, *, failure_code):
+            self.recorded = ("failed", outcome, failure_code)
+
+    async def completed(*_args, **_kwargs):
+        return SimpleNamespace(
+            phase="PARTIAL_NO_USABLE_CANDIDATE",
+            outcome="PARTIAL_NO_USABLE_CANDIDATE",
+            coverage={"adopted": adopted, "total": 2},
+            finished_at=100.0,
+        )
+
+    recorder = Recorder()
+    monkeypatch.setattr(video_supervisor, "run_video_completion_resilient", completed)
+    monkeypatch.setattr(media_enqueue, "reconcile_episode_generation_status", lambda _eid: None)
+
+    await api._recorded_video_completion_task(
+        "e", recorder, resume=True, grant_id="grant",
+    )
+
+    assert recorder.recorded[0] == expected
+    assert recorder.recorded[1] == "PARTIAL_NO_USABLE_CANDIDATE"
+    assert recorder.recorded[2] == (
+        "NO_COMPLETED_OUTPUT" if expected == "failed" else None
+    )
+
+
+@pytest.mark.asyncio
 async def test_project_video_queue_spawn_failure_keeps_started_episode_and_reports_retry(
     monkeypatch,
 ) -> None:

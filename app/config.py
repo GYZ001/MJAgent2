@@ -69,6 +69,12 @@ MINIMAX_H3_ACCELERATION = (
     if _minimax_h3_acceleration in {"standard", "turbo"}
     else "turbo"
 )
+MINIMAX_H3_TURBO_PROFILE = (
+    os.environ.get("MINIMAX_H3_TURBO_PROFILE", "quality").strip() or "quality"
+)
+MINIMAX_H3_VIDEO_VAE = (
+    os.environ.get("MINIMAX_H3_VIDEO_VAE", "fp16").strip() or "fp16"
+)
 _minimax_h3_step_min, _minimax_h3_step_max = (
     (4, 8) if MINIMAX_H3_ACCELERATION == "turbo" else (1, 100)
 )

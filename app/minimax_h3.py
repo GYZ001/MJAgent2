@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import ipaddress
 import json
 import mimetypes
@@ -20,8 +21,11 @@ from app.atomic_io import atomic_write_bytes
 from app.db import (
     finish_provider_call,
     get_setting,
+    latest_provider_request_json,
     log_provider_call,
+    provider_operation_id,
     start_provider_call,
+    update_provider_call_request,
 )
 from app.hiagent import ProviderError
 
@@ -46,6 +50,37 @@ _TURBO_DURATION_BENCHMARKS_S = {
     "reference_video": ((1.0, 155.0), (5.0, 358.0), (10.0, 652.0), (15.0, 3918.0)),
 }
 _STANDARD_LATENCY_MULTIPLIER = 1.86
+_REQUEST_CHECKPOINT_VERSION = 1
+_PROVIDER_STAGE_PHASES = {
+    "queued": "queued",
+    "checking_comfyui": "waiting",
+    "waiting_for_comfyui": "waiting",
+    "submitting": "waiting",
+    "queued_in_comfyui": "waiting",
+    "conditioning": "generating",
+    "sampling": "generating",
+    "video_vae": "generating",
+    "audio_vae": "generating",
+    "video_encoding": "generating",
+    "locating_comfyui_job": "generating",
+    "generating": "generating",
+    "completed": "completed",
+}
+_PROVIDER_STAGE_LABELS = {
+    "queued": "H3 队列等待",
+    "checking_comfyui": "检查 ComfyUI",
+    "waiting_for_comfyui": "等待 ComfyUI 恢复",
+    "submitting": "提交 H3 工作流",
+    "queued_in_comfyui": "等待 ComfyUI 执行",
+    "conditioning": "编码提示词与参考素材",
+    "sampling": "H3 去噪采样",
+    "video_vae": "Video VAE 解码",
+    "audio_vae": "Audio VAE 解码",
+    "video_encoding": "封装音视频",
+    "locating_comfyui_job": "恢复 ComfyUI 任务定位",
+    "generating": "H3 生成",
+    "completed": "H3 任务完成",
+}
 
 
 def base_url() -> str:
@@ -77,7 +112,7 @@ def _error_from_response(action: str, response: httpx.Response) -> ProviderError
         pass
     return ProviderError(
         f"MiniMaxH3 {action}失败 HTTP {response.status_code}：{detail}",
-        retryable=response.status_code in {408, 409, 425, 429} or response.status_code >= 500,
+        retryable=response.status_code in {408, 425, 429} or response.status_code >= 500,
         raw=response.text,
     )
 
@@ -249,7 +284,7 @@ def _tagged_prompt(
     prompt_text: str,
     *,
     image_count: int = 0,
-    has_video: bool = False,
+    video_count: int = 0,
     use_source_audio: bool = False,
 ) -> str:
     prompt_text = re.sub(
@@ -261,10 +296,15 @@ def _tagged_prompt(
         f"<Picture {index}> corresponds to Reference image {index}."
         for index in range(1, image_count + 1)
     ]
-    if has_video:
-        mappings.append("<Video 1> is the reference video for motion and camera behavior.")
-    if has_video and use_source_audio:
-        mappings.append("<Audio 1> is the source audio reference.")
+    mappings.extend(
+        f"<Video {index}> is reference video {index} for motion and camera behavior."
+        for index in range(1, video_count + 1)
+    )
+    if use_source_audio:
+        mappings.extend(
+            f"<Audio {index}> is source audio reference {index}."
+            for index in range(1, video_count + 1)
+        )
     return (
         "[MiniMax H3 input mapping]\n"
         + " ".join(mappings)
@@ -335,18 +375,100 @@ def generation_timeout_seconds(
     duration_s: float,
     *,
     acceleration: str | None = None,
+    expected_seconds: float | None = None,
 ) -> int:
     """Return a generation-only timeout with cold-load and runtime headroom."""
-    expected = estimated_generation_seconds(
-        mode,
-        duration_s,
-        acceleration=acceleration,
-    )
+    try:
+        expected = float(expected_seconds or 0)
+    except (TypeError, ValueError):
+        expected = 0
+    if expected <= 0:
+        expected = estimated_generation_seconds(
+            mode,
+            duration_s,
+            acceleration=acceleration,
+        )
     return max(900, round(expected * 1.75 + 600))
 
 
 def poll_interval_seconds() -> float:
     return float(config.MINIMAX_H3_POLL_INTERVAL)
+
+
+def provider_task_phase(result: dict[str, Any]) -> str:
+    """Classify provider progress by protocol state, with forward-compatible inference."""
+    status = str(result.get("status") or "").strip().lower()
+    if status in {"succeeded", "failed", "not_found"}:
+        return "completed"
+    stage = str(result.get("stage") or "").strip().lower()
+    phase = _PROVIDER_STAGE_PHASES.get(stage)
+    if phase:
+        return phase
+    if status == "queued":
+        return "queued"
+    if status == "running":
+        try:
+            queue_position = int(result.get("queue_position") or 0)
+        except (TypeError, ValueError):
+            queue_position = 0
+        return "queued" if queue_position > 0 else "generating"
+    return "waiting"
+
+
+def provider_stage_label(stage: str) -> str:
+    normalized = str(stage or "").strip().lower()
+    return _PROVIDER_STAGE_LABELS.get(
+        normalized,
+        f"H3 阶段：{normalized}" if normalized else "H3 处理中",
+    )
+
+
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _input_fingerprint(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8", "replace")).hexdigest()
+
+
+def _idempotency_key(operation_id: str) -> str:
+    value = str(operation_id or "").strip()
+    if re.fullmatch(r"[!-~]{1,200}", value):
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
+    return f"h3_{digest}"
+
+
+def _load_request_checkpoint(
+    operation_id: str,
+    logical_fingerprint: str,
+) -> dict[str, Any] | None:
+    saved = latest_provider_request_json(
+        "video_create",
+        config.DEFAULT_MINIMAX_H3_MODEL_VIDEO,
+        operation_id,
+    )
+    if not isinstance(saved, dict):
+        return None
+    if saved.get("checkpoint_version") != _REQUEST_CHECKPOINT_VERSION:
+        return None
+    saved_fingerprint = str(saved.get("logical_fingerprint") or "")
+    if saved_fingerprint != logical_fingerprint:
+        raise ProviderError(
+            "MiniMaxH3 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
+            "请为新的生成意图创建新的 operation_id",
+            retryable=False,
+        )
+    provider_request = saved.get("provider_request")
+    if not isinstance(provider_request, dict):
+        return None
+    return provider_request
 
 
 async def create_video_task(
@@ -360,90 +482,146 @@ async def create_video_task(
     videos = list(video_urls or [])
     mode = _request_mode(images, videos)
     model = config.DEFAULT_MINIMAX_H3_MODEL_VIDEO
-    operation_id = str((call_meta or {}).get("operation_id") or "").strip()
     width, height = _output_dimensions(prompt_text)
-    request_summary = {
+    intent = str((call_meta or {}).get("video_input_intent") or "")
+    use_source_audio = intent in {"AUDIO_REFERENCE", "CONTINUE_PREVIOUS_TAKE"}
+    provider_prompt = _tagged_prompt(
+        prompt_text,
+        image_count=len(images) if mode == "reference_images" else 0,
+        video_count=len(videos) if mode == "reference_video" else 0,
+        use_source_audio=use_source_audio,
+    )
+    logical_request: dict[str, Any] = {
         "mode": mode,
-        "image_roles": [role for _url, role in images],
-        "video_roles": [role for _url, role in videos],
+        "prompt": provider_prompt,
+        "image_inputs": [
+            {"role": role, "fingerprint": _input_fingerprint(value)}
+            for value, role in images
+        ],
+        "video_inputs": [
+            {"role": role, "fingerprint": _input_fingerprint(value)}
+            for value, role in videos
+        ],
         "width": width,
         "height": height,
         "duration": _duration(prompt_text, call_meta),
         "acceleration": config.MINIMAX_H3_ACCELERATION,
-        "steps": config.MINIMAX_H3_STEPS,
+        "turbo_profile": (
+            config.MINIMAX_H3_TURBO_PROFILE
+            if config.MINIMAX_H3_ACCELERATION == "turbo"
+            else None
+        ),
+        "steps": (
+            config.MINIMAX_H3_STEPS
+            if config.MINIMAX_H3_ACCELERATION != "turbo"
+            else None
+        ),
+        "video_vae": config.MINIMAX_H3_VIDEO_VAE,
         "scheduler": "simple",
         "use_te_speed": config.MINIMAX_H3_USE_TE_SPEED,
+        "use_source_audio": use_source_audio,
     }
+    logical_fingerprint = _request_fingerprint(logical_request)
+    operation_id = (
+        str((call_meta or {}).get("operation_id") or "").strip()
+        or provider_operation_id("video_create", model, logical_request)
+    )
+    recovered_payload = _load_request_checkpoint(
+        operation_id,
+        logical_fingerprint,
+    )
+    request_checkpoint: dict[str, Any] = {
+        "checkpoint_version": _REQUEST_CHECKPOINT_VERSION,
+        "logical_fingerprint": logical_fingerprint,
+        "request_summary": logical_request,
+    }
+    if recovered_payload is not None:
+        request_checkpoint["provider_request"] = recovered_payload
     ledger_meta = {**(call_meta or {}), "operation_id": operation_id}
     call_id = start_provider_call(
         "video_create",
         model,
         meta=ledger_meta,
-        request_json=request_summary,
+        request_json=request_checkpoint,
     )
     started = time.time()
     status_code: int | None = None
     try:
         timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_CREATE, write=180, pool=10)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            uploaded_images = []
-            for index, (value, _role) in enumerate(images, 1):
-                uploaded_images.append(
-                    await _upload_file(
-                        client,
-                        await _materialize_input(value, media_kind="image", index=index),
-                    )
-                )
-            uploaded_videos = []
-            for index, (value, _role) in enumerate(videos, 1):
-                uploaded_videos.append(
-                    await _upload_file(
-                        client,
-                        await _materialize_input(value, media_kind="video", index=index),
-                    )
-                )
-
-            intent = str((call_meta or {}).get("video_input_intent") or "")
-            use_source_audio = intent in {"AUDIO_REFERENCE", "CONTINUE_PREVIOUS_TAKE"}
-            payload: dict[str, Any] = {
-                "mode": mode,
-                "prompt": _tagged_prompt(
-                    prompt_text,
-                    image_count=len(uploaded_images) if mode == "reference_images" else 0,
-                    has_video=mode == "reference_video",
-                    use_source_audio=use_source_audio,
-                ),
-                "width": width,
-                "height": height,
-                "duration": request_summary["duration"],
-                "acceleration": config.MINIMAX_H3_ACCELERATION,
-                "steps": config.MINIMAX_H3_STEPS,
-                "seed": -1,
-                "scheduler": "simple",
-                "use_te_speed": config.MINIMAX_H3_USE_TE_SPEED,
-                "output_prefix": (
-                    "video/manju_"
-                    + re.sub(r"[^A-Za-z0-9_-]+", "_", operation_id or str(int(started)))
-                )[:180],
-            }
-            if config.MINIMAX_H3_ACCELERATION == "turbo":
-                payload["turbo_strength"] = config.MINIMAX_H3_TURBO_STRENGTH
-                payload["turbo_low_vram"] = config.MINIMAX_H3_TURBO_LOW_VRAM
-            if mode == "keyframes":
-                payload["first_frame"] = uploaded_images[0]
-                if len(uploaded_images) > 1:
-                    payload["last_frame"] = uploaded_images[1]
-            elif mode == "reference_images":
-                payload["reference_images"] = uploaded_images
-                payload["ref_image_size"] = "match"
+            if recovered_payload is not None:
+                payload = dict(recovered_payload)
             else:
-                payload["reference_videos"] = uploaded_videos
-                payload["use_source_audio"] = use_source_audio
-                payload["ref_image_size"] = "match"
+                uploaded_images = []
+                for index, (value, _role) in enumerate(images, 1):
+                    uploaded_images.append(
+                        await _upload_file(
+                            client,
+                            await _materialize_input(
+                                value,
+                                media_kind="image",
+                                index=index,
+                            ),
+                        )
+                    )
+                uploaded_videos = []
+                for index, (value, _role) in enumerate(videos, 1):
+                    uploaded_videos.append(
+                        await _upload_file(
+                            client,
+                            await _materialize_input(
+                                value,
+                                media_kind="video",
+                                index=index,
+                            ),
+                        )
+                    )
+
+                payload = {
+                    "mode": mode,
+                    "prompt": provider_prompt,
+                    "width": width,
+                    "height": height,
+                    "duration": logical_request["duration"],
+                    "acceleration": config.MINIMAX_H3_ACCELERATION,
+                    "video_vae": config.MINIMAX_H3_VIDEO_VAE,
+                    "seed": -1,
+                    "scheduler": "simple",
+                    "use_te_speed": config.MINIMAX_H3_USE_TE_SPEED,
+                    "output_prefix": (
+                        "video/manju_"
+                        + re.sub(r"[^A-Za-z0-9_-]+", "_", operation_id)
+                    )[:180],
+                }
+                if config.MINIMAX_H3_ACCELERATION == "turbo":
+                    payload.update({
+                        "turbo_profile": config.MINIMAX_H3_TURBO_PROFILE,
+                        "turbo_strength": config.MINIMAX_H3_TURBO_STRENGTH,
+                        "turbo_low_vram": config.MINIMAX_H3_TURBO_LOW_VRAM,
+                    })
+                else:
+                    payload["steps"] = config.MINIMAX_H3_STEPS
+                if mode == "keyframes":
+                    payload["first_frame"] = uploaded_images[0]
+                    if len(uploaded_images) > 1:
+                        payload["last_frame"] = uploaded_images[1]
+                elif mode == "reference_images":
+                    payload["reference_images"] = uploaded_images
+                    payload["ref_image_size"] = "match"
+                else:
+                    payload["reference_videos"] = uploaded_videos
+                    payload["use_source_audio"] = use_source_audio
+                    payload["ref_image_size"] = "match"
+
+                request_checkpoint["provider_request"] = payload
+                update_provider_call_request(call_id, request_checkpoint)
 
             response = await client.post(
                 f"{base_url()}/v1/videos/generations",
-                headers=_headers(json_content=True),
+                headers={
+                    **_headers(json_content=True),
+                    "Idempotency-Key": _idempotency_key(operation_id),
+                },
                 json=payload,
             )
             status_code = response.status_code
@@ -457,17 +635,17 @@ async def create_video_task(
             if not provider_id:
                 raise ProviderError("MiniMaxH3 创建任务响应缺少 id")
             task_id = TASK_PREFIX + provider_id
+            response_record = dict(data)
+            response_record.update({
+                "id": task_id,
+                "provider_id": provider_id,
+            })
             finish_provider_call(
                 call_id,
                 "OK",
                 status_code,
                 int((time.time() - started) * 1000),
-                response_json={
-                    "id": task_id,
-                    "provider_id": provider_id,
-                    "status": data.get("status"),
-                    "metadata": data.get("metadata"),
-                },
+                response_json=response_record,
             )
             return task_id
     except httpx.RequestError as exc:
@@ -582,10 +760,19 @@ async def poll_video_task(
     if status == "succeeded" and not output.get("url"):
         status = "failed"
         error_text = "MiniMaxH3 任务成功但未返回 MP4 文件"
+    timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     return {
         "status": status,
         "stage": stage,
+        "stage_label": provider_stage_label(stage),
+        "provider": "minimax_h3",
+        "provider_label": "MiniMax H3",
+        "sequence": data.get("sequence"),
         "queue_position": data.get("queue_position"),
+        "estimated_seconds": data.get("estimated_seconds"),
+        "timings": timings,
+        "metadata": metadata,
         "video_url": str(output.get("url") or ""),
         "last_frame_url": "",
         "error": error_text,
@@ -620,60 +807,193 @@ async def download_output(url: str, dest_path: str) -> None:
     atomic_write_bytes(dest_path, response.content)
 
 
-async def probe_connection(override_base_url: str | None = None) -> dict[str, Any]:
+def _probe_target(override_base_url: str | None = None) -> str:
     target = str(override_base_url or base_url()).strip().rstrip("/")
     if not re.fullmatch(r"https?://[^\s]+", target):
         raise ProviderError("MiniMaxH3 Base URL 必须是有效的 http(s) 地址")
+    return target
+
+
+def _probe_response_json(
+    action: str,
+    response: httpx.Response,
+) -> dict[str, Any]:
+    if response.status_code != 200:
+        raise _error_from_response(action, response)
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ProviderError(f"MiniMaxH3 {action}响应不是合法 JSON") from exc
+    if not isinstance(data, dict):
+        raise ProviderError(f"MiniMaxH3 {action}响应必须是 JSON 对象")
+    return data
+
+
+def _probe_result(
+    root: dict[str, Any],
+    health: dict[str, Any],
+    *,
+    target: str,
+    latency_ms: int,
+) -> dict[str, Any]:
+    advertised_modes = [
+        str(name)
+        for name in (root.get("modes") or [])
+        if str(name).strip()
+    ]
+    health_modes = health.get("modes") if isinstance(health.get("modes"), dict) else {}
+    modes = {
+        name: bool(
+            isinstance(health_modes.get(name), dict)
+            and health_modes[name].get("ready") is True
+        )
+        for name in advertised_modes
+    }
+    advertised_accelerations = [
+        str(name)
+        for name in (root.get("accelerations") or [])
+        if str(name).strip()
+    ]
+    health_accelerations = (
+        health.get("accelerations")
+        if isinstance(health.get("accelerations"), dict)
+        else {}
+    )
+    accelerations = {
+        name: bool(
+            isinstance(health_accelerations.get(name), dict)
+            and health_accelerations[name].get("ready") is True
+        )
+        for name in advertised_accelerations
+    }
+    turbo_profiles = (
+        root.get("turbo_profiles")
+        if isinstance(root.get("turbo_profiles"), dict)
+        else {}
+    )
+    advertised_vaes = [
+        str(name)
+        for name in (root.get("video_vae_profiles") or [])
+        if str(name).strip()
+    ]
+    health_vaes = (
+        health.get("video_vae_profiles")
+        if isinstance(health.get("video_vae_profiles"), dict)
+        else {}
+    )
+    video_vae_profiles = {
+        name: bool(
+            isinstance(health_vaes.get(name), dict)
+            and health_vaes[name].get("ready") is True
+        )
+        for name in advertised_vaes
+    }
+    selected_acceleration = config.MINIMAX_H3_ACCELERATION
+    selected_profile = config.MINIMAX_H3_TURBO_PROFILE
+    selected_vae = config.MINIMAX_H3_VIDEO_VAE
+    api_version = str(root.get("version") or "").strip()
+    problems: list[str] = []
+    if health.get("status") != "ok":
+        problems.append("health")
+    if not api_version:
+        problems.append("api_version")
+    if not any(modes.values()):
+        problems.append("generation_modes")
+    if accelerations.get(selected_acceleration) is not True:
+        problems.append(f"acceleration:{selected_acceleration}")
+    profile_steps = turbo_profiles.get(selected_profile)
+    if selected_acceleration == "turbo":
+        if not isinstance(profile_steps, int) or isinstance(profile_steps, bool):
+            problems.append(f"turbo_profile:{selected_profile}")
+    if video_vae_profiles.get(selected_vae) is not True:
+        problems.append(f"video_vae:{selected_vae}")
+    if problems:
+        raise ProviderError(
+            "MiniMaxH3 服务能力与当前配置不匹配：" + ", ".join(problems)
+        )
+    ready_modes = [name for name, ready in modes.items() if ready]
+    return {
+        "ok": True,
+        "base_url": target,
+        "api_version": api_version,
+        "latency_ms": latency_ms,
+        "preview": (
+            f"可用模式：{', '.join(ready_modes)}；"
+            f"当前 {selected_acceleration}"
+            + (
+                f"/{selected_profile}"
+                if selected_acceleration == "turbo"
+                else ""
+            )
+            + f"，Video VAE={selected_vae}"
+        ),
+        "modes": modes,
+        "accelerations": accelerations,
+        "acceleration": selected_acceleration,
+        "turbo_profiles": turbo_profiles,
+        "turbo_profile": (
+            selected_profile if selected_acceleration == "turbo" else None
+        ),
+        "steps": (
+            int(profile_steps)
+            if selected_acceleration == "turbo"
+            else config.MINIMAX_H3_STEPS
+        ),
+        "video_vae_profiles": video_vae_profiles,
+        "video_vae": selected_vae,
+        "te_speed_available": bool(health.get("te_speed_available")),
+    }
+
+
+async def probe_connection(override_base_url: str | None = None) -> dict[str, Any]:
+    target = _probe_target(override_base_url)
     started = time.time()
     timeout = httpx.Timeout(connect=5, read=30, write=10, pool=5)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(f"{target}/health", headers=_headers())
+            root_response = await client.get(f"{target}/", headers=_headers())
+            health_response = await client.get(
+                f"{target}/health",
+                headers=_headers(),
+            )
     except httpx.RequestError as exc:
         raise ProviderError(
             f"MiniMaxH3 连接失败：{type(exc).__name__}: {exc}",
             retryable=True,
             raw=repr(exc),
         ) from exc
-    if response.status_code != 200:
-        raise _error_from_response("健康检查", response)
+    root = _probe_response_json("版本检查", root_response)
+    health = _probe_response_json("健康检查", health_response)
+    return _probe_result(
+        root,
+        health,
+        target=target,
+        latency_ms=int((time.time() - started) * 1000),
+    )
+
+
+def probe_connection_sync(
+    override_base_url: str | None = None,
+) -> dict[str, Any]:
+    """Synchronous capability discovery for sync planning boundaries."""
+    target = _probe_target(override_base_url)
+    started = time.time()
+    timeout = httpx.Timeout(connect=5, read=30, write=10, pool=5)
     try:
-        data = response.json()
-    except ValueError as exc:
-        raise ProviderError("MiniMaxH3 健康检查响应不是合法 JSON") from exc
-    modes = data.get("modes") if isinstance(data.get("modes"), dict) else {}
-    required = ("keyframes", "reference_images", "reference_video")
-    unavailable = [
-        name for name in required
-        if not isinstance(modes.get(name), dict) or modes[name].get("ready") is not True
-    ]
-    accelerations = (
-        data.get("accelerations")
-        if isinstance(data.get("accelerations"), dict)
-        else {}
-    )
-    selected_acceleration = config.MINIMAX_H3_ACCELERATION
-    acceleration_ready = (
-        isinstance(accelerations.get(selected_acceleration), dict)
-        and accelerations[selected_acceleration].get("ready") is True
-    )
-    if data.get("status") != "ok" or unavailable or not acceleration_ready:
-        problems = list(unavailable)
-        if not acceleration_ready:
-            problems.append(f"acceleration:{selected_acceleration}")
+        with httpx.Client(timeout=timeout) as client:
+            root_response = client.get(f"{target}/", headers=_headers())
+            health_response = client.get(f"{target}/health", headers=_headers())
+    except httpx.RequestError as exc:
         raise ProviderError(
-            "MiniMaxH3 服务未就绪"
-            + (f"：{', '.join(problems)}" if problems else "")
-        )
-    return {
-        "ok": True,
-        "latency_ms": int((time.time() - started) * 1000),
-        "preview": (
-            "首尾帧、参考图、视频输入三种模式均可用；"
-            f"当前默认 {selected_acceleration}"
-        ),
-        "modes": {name: True for name in required},
-        "acceleration": selected_acceleration,
-        "steps": config.MINIMAX_H3_STEPS,
-        "te_speed_available": bool(data.get("te_speed_available")),
-    }
+            f"MiniMaxH3 连接失败：{type(exc).__name__}: {exc}",
+            retryable=True,
+            raw=repr(exc),
+        ) from exc
+    root = _probe_response_json("版本检查", root_response)
+    health = _probe_response_json("健康检查", health_response)
+    return _probe_result(
+        root,
+        health,
+        target=target,
+        latency_ms=int((time.time() - started) * 1000),
+    )
