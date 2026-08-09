@@ -90,6 +90,7 @@ COST_PER_SECOND_CNY = 0.8
 CONTROL_PLANE_MAX_RECOVERIES = 3
 SUPERVISOR_HEARTBEAT_STALE_S = 60.0
 ASSET_PREP_HEARTBEAT_INTERVAL_S = 20.0
+DISPATCH_HEARTBEAT_INTERVAL_S = 20.0
 TERMINAL_SUPERVISOR_PHASES = {
     "SUCCEEDED_COVERED",
     "COMPLETED_DEADLINE_FALLBACK",
@@ -1795,6 +1796,7 @@ async def _dispatch_with_heartbeat_async(
     cp: VideoSupervisorCheckpoint,
     plan: VideoRepairPlan | None = None,
     first: bool = False,
+    heartbeat_interval_s: float = DISPATCH_HEARTBEAT_INTERVAL_S,
 ) -> bool:
     """Run synchronous authority checks and enqueue work off the event loop."""
     if not _supervisor_checks_can_use_worker_thread():
@@ -1806,15 +1808,84 @@ async def _dispatch_with_heartbeat_async(
             plan=plan,
             first=first,
         )
-    return await asyncio.to_thread(
-        _dispatch_with_heartbeat,
-        entry,
-        episode_id=episode_id,
-        run_id=run_id,
-        cp=cp,
-        plan=plan,
-        first=first,
+
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        _dispatch_heartbeat(
+            cp,
+            run_id=run_id,
+            stop=heartbeat_stop,
+            interval_s=heartbeat_interval_s,
+        ),
+        name=f"video-dispatch-heartbeat:{episode_id}:{entry.shot_no}",
     )
+    worker_task = asyncio.create_task(
+        asyncio.to_thread(
+            _dispatch_with_heartbeat,
+            entry,
+            episode_id=episode_id,
+            run_id=run_id,
+            cp=cp,
+            plan=plan,
+            first=first,
+        ),
+        name=f"video-dispatch-worker:{episode_id}:{entry.shot_no}",
+    )
+    cancelled = False
+    try:
+        while True:
+            try:
+                result = await asyncio.shield(worker_task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                continue
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+    finally:
+        heartbeat_stop.set()
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+
+async def _dispatch_heartbeat(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None,
+    stop: asyncio.Event,
+    interval_s: float = DISPATCH_HEARTBEAT_INTERVAL_S,
+) -> None:
+    wait_s = max(
+        0.01,
+        min(float(interval_s), SUPERVISOR_HEARTBEAT_STALE_S / 3.0),
+    )
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=wait_s)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            refreshed = await asyncio.to_thread(
+                _refresh_supervisor_heartbeat,
+                cp,
+                run_id=run_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - transient DB contention is retryable
+            try:
+                errors.log_error(
+                    exc,
+                    action="video_supervisor.dispatch_heartbeat",
+                    context={"episode_id": cp.episode_id, "run_id": run_id},
+                )
+            except Exception:  # noqa: BLE001 - heartbeat retry must stay alive
+                pass
+            continue
+        if not refreshed:
+            return
 
 
 def _patch_version_supervisor_meta(version_id: str, meta: dict[str, Any]) -> None:
@@ -3532,6 +3603,30 @@ async def reconcile_stale_video_supervisors() -> int:
             cp.outcome = exc.code
             save_checkpoint(cp, run_id=cp.run_id)
             return False
+        current = conn.execute(
+            """SELECT e.active_video_run_id, e.video_completion_mode,
+                      r.updated_at AS run_updated_at
+                 FROM episodes e
+                 LEFT JOIN workflow_runs r ON r.id=e.active_video_run_id
+                WHERE e.id=?""",
+            (episode_id,),
+        ).fetchone()
+        latest_cp = load_latest_checkpoint(episode_id)
+        current_heartbeat = max(
+            float((latest_cp.last_heartbeat_at if latest_cp else 0) or 0),
+            float((current["run_updated_at"] if current else 0) or 0),
+        )
+        if (
+            current is None
+            or current["video_completion_mode"] != "complete"
+            or current["active_video_run_id"] != row["active_video_run_id"]
+            or (
+                current_heartbeat
+                and now() - current_heartbeat <= SUPERVISOR_HEARTBEAT_STALE_S
+            )
+        ):
+            return False
+        task_running = task_registry.active("video_completion", episode_id)
         if task_running:
             await task_registry.cancel_and_wait("video_completion", episode_id)
         recorder = WorkflowRecorder.create(

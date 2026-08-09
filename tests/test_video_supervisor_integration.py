@@ -275,6 +275,58 @@ async def test_async_dispatch_keeps_event_loop_responsive(monkeypatch):
     assert dispatch_threads and dispatch_threads[0] != caller_thread
 
 
+@pytest.mark.asyncio
+async def test_async_dispatch_refreshes_heartbeat_while_worker_is_busy(monkeypatch):
+    import time
+
+    import app.video_supervisor as video_supervisor
+
+    state = {"dispatch_running": False, "heartbeats_during_dispatch": 0}
+
+    def slow_dispatch(*_args, **_kwargs):
+        state["dispatch_running"] = True
+        time.sleep(0.08)
+        state["dispatch_running"] = False
+        return True
+
+    def refresh(_checkpoint, *, run_id):
+        assert run_id == "run-1"
+        if state["dispatch_running"]:
+            state["heartbeats_during_dispatch"] += 1
+        return True
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_supervisor_checks_can_use_worker_thread",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        video_supervisor,
+        "_dispatch_with_heartbeat",
+        slow_dispatch,
+    )
+    monkeypatch.setattr(
+        video_supervisor,
+        "_refresh_supervisor_heartbeat",
+        refresh,
+    )
+    entry = ShotCoverageEntry(shot_no=1, shot_id="shot-1")
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id="episode-1",
+        run_id="run-1",
+    )
+
+    assert await video_supervisor._dispatch_with_heartbeat_async(
+        entry,
+        episode_id="episode-1",
+        run_id="run-1",
+        cp=checkpoint,
+        first=True,
+        heartbeat_interval_s=0.01,
+    )
+    assert state["heartbeats_during_dispatch"] >= 2
+
+
 def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:
     eid, _ = _seed_episode(memdb, 1)
     shot_id = f"{eid}_shot_1"

@@ -153,3 +153,20 @@ New fresh-run issue:
 | ID | Hypothesis | Status | Evidence |
 |----|------------|--------|----------|
 | L | Paused idempotent reuse closes the fresh preflight shell without transferring execution ownership | Confirmed | Post-fix log lines 54-75 and durable job rows |
+
+Post-fix evidence for L:
+- Fresh run `run_d3084479bb38` transferred paused shot-1 job
+  `job_58f753338545` to the current owner and resumed it.
+- That job reached provider `accepted` with a durable task ID while the
+  successful provider-create ledger count increased by exactly one.
+
+New watchdog issue:
+- Dispatch reached shot 5 but that single dispatch took 68.2 seconds.
+- `SUPERVISOR_HEARTBEAT_STALE_S` is 60 seconds, while dispatch refreshed
+  liveness only before and after synchronous work.
+- The watchdog therefore replaced the still-running Supervisor and closed its
+  jobs with `SUPERVISOR_HEARTBEAT_STALE`.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| M | Long offloaded dispatch lacks an in-flight heartbeat and is falsely taken over by the watchdog | Confirmed | 68.2-second dispatch versus 60-second stale threshold |
