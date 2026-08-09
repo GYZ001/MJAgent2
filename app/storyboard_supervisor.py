@@ -2116,6 +2116,8 @@ async def run_storyboard_supervisor(
             )
         )
         pending_repair_dialogue_repairs: list[dict[str, Any]] = []
+        pending_authority_repairs: list[dict[str, Any]] = []
+        updated_pending_repair = False
         discarded_repair = None
         if _repair_is_pending(cp):
             pending_outline = _repair_outline_for_checkpoint(cp, outline)
@@ -2135,7 +2137,17 @@ async def run_storyboard_supervisor(
                     )
                 )
                 if pending_repair_dialogue_repairs or pending_authority_repairs:
-                    discarded_repair = cp.last_repair
+                    if "relation_migration_count" in (cp.last_repair or {}):
+                        cp.last_repair = {
+                            **(cp.last_repair or {}),
+                            "candidate_outline": pending_outline.model_dump(
+                                mode="json"
+                            ),
+                        }
+                        updated_pending_repair = True
+                        save_checkpoint(cp, run_id=run_id)
+                    else:
+                        discarded_repair = cp.last_repair
         if dialogue_repairs or authority_repairs:
             ensure_storyboard_scene_contexts(
                 outline,
@@ -2158,7 +2170,11 @@ async def run_storyboard_supervisor(
             cp.phase = "GENERATING_SHOTS"
             cp.outcome = None
             save_checkpoint(cp, run_id=run_id)
-        if dialogue_repairs or discarded_repair is not None:
+        if (
+            dialogue_repairs
+            or updated_pending_repair
+            or discarded_repair is not None
+        ):
             if run_id:
                 evidence_repository.append_event(
                     run_id,
@@ -2171,6 +2187,10 @@ async def run_storyboard_supervisor(
                             pending_repair_dialogue_repairs
                         ),
                         "authority_repairs": authority_repairs,
+                        "pending_authority_repairs": (
+                            pending_authority_repairs
+                        ),
+                        "updated_pending_repair": updated_pending_repair,
                         "discarded_pending_repair": discarded_repair is not None,
                     },
                 )
