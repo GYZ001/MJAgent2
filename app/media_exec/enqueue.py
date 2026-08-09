@@ -930,10 +930,62 @@ def _resume_reused_paused_job(
         meta = {}
     captured = meta.get("review_dependency_snapshot") or {}
     expected_qualification = str(captured.get("qualification_version") or "")
-    current_qualification = str(
-        (dependency_snapshot or {}).get("qualification_version") or ""
+    current_snapshot = dependency_snapshot or {}
+    upstream_keys = (
+        "published_screenplay_artifact_id",
+        "confirmed_storyboard_artifact_id",
+        "screenplay_revision",
+        "storyboard_revision",
     )
-    if expected_qualification != current_qualification:
+    upstream_equal = all(
+        captured.get(key) == current_snapshot.get(key)
+        for key in upstream_keys
+    )
+    expected_authority = (
+        expected_qualification.split(":", 1)[0]
+        if ":" in expected_qualification
+        else None
+    )
+    current_requires_authority = bool(
+        current_snapshot.get("narrative_authority_required")
+    )
+    authority_equal = bool(
+        (
+            not current_requires_authority
+            and expected_authority is None
+        )
+        or (
+            current_requires_authority
+            and expected_authority
+            and expected_authority
+            == current_snapshot.get("narrative_authority_version")
+            and current_snapshot.get("narrative_authority_verified")
+        )
+    )
+
+    def asset_contract(items):
+        return sorted(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key != "version_id"
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            for item in items
+            if item.get("shot_id") != row["shot_id"]
+        )
+
+    expected_assets = captured.get("asset_inputs") or []
+    current_assets = current_snapshot.get("asset_inputs") or []
+    assets_equal = bool(
+        current_requires_authority
+        or not expected_assets
+        or asset_contract(expected_assets) == asset_contract(current_assets)
+    )
+    if not upstream_equal or not authority_equal or not assets_equal:
         raise ValueError(
             "[REVIEW_DEPENDENCY_STALE] 暂停任务绑定的发布依赖已变化，禁止直接恢复"
         )

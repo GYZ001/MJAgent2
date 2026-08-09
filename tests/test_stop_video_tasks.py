@@ -240,9 +240,21 @@ def test_resume_refuses_duplicate_charge_when_provider_handle_is_unknown(monkeyp
 
 def test_fresh_supervisor_takes_over_exact_paused_jobs(monkeypatch) -> None:
     conn = _conn()
-    snapshot = json.dumps({
-        "review_dependency_snapshot": {"qualification_version": "release-q1"},
-    })
+    authority_snapshot = {
+        "qualification_version": "authority-q1:asset-old",
+        "published_screenplay_artifact_id": "screenplay-artifact",
+        "confirmed_storyboard_artifact_id": "storyboard-artifact",
+        "screenplay_revision": "screenplay-revision",
+        "storyboard_revision": "storyboard-revision",
+    }
+    snapshot = json.dumps({"review_dependency_snapshot": authority_snapshot})
+    current_snapshot = {
+        **authority_snapshot,
+        "qualification_version": "authority-q1:asset-new",
+        "narrative_authority_required": True,
+        "narrative_authority_verified": True,
+        "narrative_authority_version": "authority-q1",
+    }
     conn.execute(
         """UPDATE episodes
               SET video_completion_mode='complete', active_video_run_id='run-new'
@@ -283,12 +295,12 @@ def test_fresh_supervisor_takes_over_exact_paused_jobs(monkeypatch) -> None:
     resumed_local = worker._resume_reused_paused_job(
         "v1",
         supervisor_run_id="run-new",
-        dependency_snapshot={"qualification_version": "release-q1"},
+        dependency_snapshot=current_snapshot,
     )
     resumed_provider = worker._resume_reused_paused_job(
         "v2",
         supervisor_run_id="run-new",
-        dependency_snapshot={"qualification_version": "release-q1"},
+        dependency_snapshot=current_snapshot,
     )
 
     assert resumed_local == {
@@ -327,7 +339,7 @@ def test_fresh_supervisor_refuses_paused_job_with_changed_release(monkeypatch) -
     )
     conn.execute(
         """UPDATE shot_versions
-              SET image_inputs='{"review_dependency_snapshot":{"qualification_version":"release-old"}}'
+              SET image_inputs='{"review_dependency_snapshot":{"qualification_version":"authority-q1:asset-old","storyboard_revision":"storyboard-old"}}'
             WHERE id='v1'"""
     )
     conn.execute(
@@ -344,7 +356,13 @@ def test_fresh_supervisor_refuses_paused_job_with_changed_release(monkeypatch) -
         worker._resume_reused_paused_job(
             "v1",
             supervisor_run_id="run-new",
-            dependency_snapshot={"qualification_version": "release-new"},
+            dependency_snapshot={
+                "qualification_version": "authority-q1:asset-new",
+                "storyboard_revision": "storyboard-new",
+                "narrative_authority_required": True,
+                "narrative_authority_verified": True,
+                "narrative_authority_version": "authority-q1",
+            },
         )
     except ValueError as exc:
         assert "[REVIEW_DEPENDENCY_STALE]" in str(exc)
