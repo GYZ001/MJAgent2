@@ -250,6 +250,43 @@ async def test_confirmed_stale_release_never_reopens_ordinary_resume(
 
 
 @pytest.mark.asyncio
+async def test_stale_published_baseline_blocks_direct_supervisor_resume(
+    monkeypatch,
+) -> None:
+    case = await _published_narrative_case(monkeypatch)
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET status='stale',stale_reason=? WHERE id=?",
+        ("legacy upstream cascade", case["working_candidate"]["id"]),
+    )
+    conn.commit()
+    from app.domain.storyboard_ops import _board_from_shot_rows
+    from app.stages import StageError
+    from app.storyboard_supervisor import run_storyboard_supervisor
+
+    before = _board_from_shot_rows(
+        conn.execute(
+            "SELECT * FROM shots WHERE episode_id='episode-generic' ORDER BY shot_no"
+        ).fetchall(),
+        1,
+    ).model_dump(mode="json")
+    with pytest.raises(StageError, match="已发布叙事分镜不能作为普通续跑工作区"):
+        await run_storyboard_supervisor(
+            "episode-generic",
+            resume=True,
+            preflight_done=True,
+        )
+    after = _board_from_shot_rows(
+        conn.execute(
+            "SELECT * FROM shots WHERE episode_id='episode-generic' ORDER BY shot_no"
+        ).fetchall(),
+        1,
+    ).model_dump(mode="json")
+
+    assert after == before
+
+
+@pytest.mark.asyncio
 async def test_live_evaluation_is_diagnostic_and_cannot_replace_narrative_certificate(
     monkeypatch,
 ) -> None:
