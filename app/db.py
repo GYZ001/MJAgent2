@@ -83,7 +83,7 @@ def _attach_debug_sql_trace(conn: sqlite3.Connection) -> None:
             in_transaction = conn.in_transaction
             payload = {
                 "sessionId": _DEBUG_SQL_SESSION,
-                "runId": "pre-fix",
+                "runId": "post-fix",
                 "hypothesisId": "A" if in_transaction else "D",
                 "location": "app/db.py:get_conn.long-transaction-watch",
                 "msg": "[DEBUG] SQLite transaction or lock wait exceeded 500ms",

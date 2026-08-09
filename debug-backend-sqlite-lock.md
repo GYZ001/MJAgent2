@@ -39,4 +39,10 @@
   affected zero rows, but commit was conditional on a positive row count.
 
 ## Verification Conclusion
-Root cause confirmed. Pending minimal fix and post-fix comparison.
+Root cause confirmed. Minimal fix applied:
+- Commit media recovery/sweeper transactions even when an UPDATE affects zero rows.
+- Return an unchanged storyboard snapshot version without acquiring a write lock;
+  changed fingerprints still re-read under `BEGIN IMMEDIATE`.
+- Added focused regression coverage; 108 related tests pass.
+
+Pending post-fix runtime comparison and user confirmation.

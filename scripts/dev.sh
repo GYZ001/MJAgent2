@@ -4,7 +4,7 @@
 # 服务以独立会话（start_new_session）后台常驻：父进程/终端退出后由 init 接管，
 # 不会随终端关闭或父进程被杀而退出——只有手动 `scripts/dev.sh stop` 或 kill 端口进程才会停。
 #
-#   后端  uvicorn  http://127.0.0.1:8230  （默认每 30 分钟周期重启；MJ_BACKEND_RELOAD=1 开启热重载）
+#   后端  uvicorn  http://127.0.0.1:8230  （默认稳定常驻；MJ_BACKEND_RELOAD=1 开启热重载）
 #   前端  vite     http://127.0.0.1:5230  （/api、/media 反代到后端）
 #
 # 用法：scripts/dev.sh [start|stop|status|restart]   （缺省 start）
@@ -100,14 +100,12 @@ if backend_reload:
     ]
     backend_mode = "reload"
 else:
-    restart_interval = be_env.get(
-        "MJ_BACKEND_RESTART_INTERVAL_SECONDS", "1800"
-    ).strip()
     backend_args = [
-        "./.venv/bin/python", "scripts/backend_cycle.py",
-        "--interval", restart_interval,
+        "./.venv/bin/uvicorn", "app.main:app",
+        "--host", "127.0.0.1", "--port", "8230",
+        "--timeout-graceful-shutdown", "30",
     ]
-    backend_mode = f"periodic restart every {restart_interval}s"
+    backend_mode = "stable"
 b = subprocess.Popen(
     backend_args,
     cwd=root, stdin=dn, stdout=be, stderr=be, env=be_env, start_new_session=True)
