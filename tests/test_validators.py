@@ -460,7 +460,7 @@ def test_scene_contiguity_key_ignores_sublocation_suffix() -> None:
 
 
 def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
-    """同场景换焦点人物用 same_scene_cut/reaction_cut：不要求共同角色，也不误用尾帧。"""
+    """同场景换焦点人物不要求共同角色，但仍统一使用真实视频尾帧。"""
     board = Storyboard(
         episode_no=1,
         shots=[
@@ -481,7 +481,7 @@ def test_continuity_same_scene_new_focus_char_with_movement_passes() -> None:
     )
     errors = validate_storyboard(board, _bible(), target_duration_s=50)
     assert not any("没有共同角色" in e for e in errors), errors
-    assert not any("continuity_from_prev=true 但 continuity_mode=reaction_cut" in e for e in errors), errors
+    assert board.shots[1].continuity_from_prev is True
 
 
 def test_action_continuation_without_shared_char_or_movement_fails() -> None:

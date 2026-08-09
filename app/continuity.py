@@ -478,7 +478,7 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
     """回填 state/continuity/visible 字段，并同步 legacy continuity_from_prev。"""
     mode = derive_continuity_mode(shot, prev)
     shot.continuity_mode = mode
-    shot.continuity_from_prev = uses_previous_tail_frame(mode)
+    shot.continuity_from_prev = prev is not None and uses_previous_tail_frame(mode)
     inherit_structured_continuity_state(shot, prev)
     if not (shot.state_in or "").strip():
         shot.state_in = (shot.first_frame_desc or "").strip()

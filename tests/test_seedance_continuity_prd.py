@@ -12,6 +12,7 @@ from app.continuity import (
     prompt_source_provenance_errors,
     information_items_for_shot,
     information_ledger_errors,
+    normalize_board_continuity,
     preflight_seedance_gates,
     reference_role_plan,
     resolve_first_last_boundary_relation,
@@ -215,13 +216,13 @@ def test_first_last_relation_uses_reverse_angle_when_speaker_changes() -> None:
     )
 
 
-def test_only_action_continuation_uses_previous_tail_frame() -> None:
+def test_all_same_scene_modes_use_previous_tail_frame() -> None:
     expected = {
         "action_continuation": True,
-        "same_scene_cut": False,
-        "reaction_cut": False,
-        "reverse_angle": False,
-        "insert_detail": False,
+        "same_scene_cut": True,
+        "reaction_cut": True,
+        "reverse_angle": True,
+        "insert_detail": True,
         "scene_change": False,
     }
 
@@ -438,10 +439,10 @@ def test_required_prompt_sections_not_truncated_when_required_content_over_limit
 
 def test_reference_role_plan_sequence_for_continuity_modes() -> None:
     sequence = [
-        ("reaction_cut", False),
-        ("same_scene_cut", False),
+        ("reaction_cut", True),
+        ("same_scene_cut", True),
         ("action_continuation", True),
-        ("insert_detail", False),
+        ("insert_detail", True),
     ]
 
     for mode, needs_tail in sequence:
@@ -450,6 +451,26 @@ def test_reference_role_plan_sequence_for_continuity_modes() -> None:
         assert ("start_state_reference" in roles) is needs_tail
         assert "scene_reference" in roles
         assert "character_identity:林风" in roles
+
+
+def test_normalize_board_copies_previous_end_target_into_same_scene_start() -> None:
+    first = _shot(
+        shot_no=1,
+        last_frame_desc="林风按住铜环，门缝微光落在右手上。",
+    )
+    second = _shot(
+        shot_no=2,
+        continuity_mode="reaction_cut",
+        first_frame_desc="模型另行设计的错误首帧",
+        state_in="另一个错误起点",
+    )
+    board = Storyboard(episode_no=1, shots=[first, second])
+
+    normalize_board_continuity(board)
+
+    assert second.continuity_from_prev is True
+    assert second.first_frame_desc == first.last_frame_desc
+    assert second.state_in == first.last_frame_desc
 
 
 def test_classify_video_hard_failures_uses_only_structured_contract_facts() -> None:

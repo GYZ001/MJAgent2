@@ -747,13 +747,6 @@ def validate_storyboard(
                     errors.append(
                         f"{tag}.transition=「{shot.transition}」不适合换场；"
                         f"换场请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一")
-            if same_scene and (prev.last_frame_desc or "").strip() and (
-                (shot.first_frame_desc or "").strip()
-                != (prev.last_frame_desc or "").strip()
-            ):
-                errors.append(
-                    f"{tag}.first_frame_desc 与上一镜 last_frame_desc 不一致；"
-                    "同场景镜头的生成起点必须精确继承上一条采用视频的真实尾帧描述")
     # V7 shot_no 连续
     expected = list(range(1, len(shots) + 1))
     actual = [s.shot_no for s in shots]

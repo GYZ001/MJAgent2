@@ -6649,6 +6649,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
                                     screenplay: EpisodeScreenplay, completed_shots: list[Shot],
                                     shot_no: int, allow_finish: bool, must_finish: bool,
                                     narrative_authority: bool | None = None,
+                                    outline: StoryboardOutline | None = None,
                                     outline_covers: str = "", later_planned_covers: str = "",
                                     outline_scene_name: str = "",
                                     outline_narrative_task: StoryboardOutlineShot | None = None,
@@ -6811,6 +6812,7 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     errors.extend(validate_storyboard_narrative(
         board,
         screenplay,
+        outline=outline,
         complete=bool(draft.is_final or must_finish),
         expected_scope_id=str(
             episode.get("id") or f"episode-{episode['episode_no']}"
@@ -9634,6 +9636,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
             allow_finish=allow_finish,
             must_finish=must_finish,
             narrative_authority=narrative_authority,
+            outline=outline,
             outline_covers=(brief.covers if brief is not None else ""),
             outline_scene_name=((brief.scene_name or brief.scene_setting) if brief is not None else ""),
             outline_narrative_task=brief,

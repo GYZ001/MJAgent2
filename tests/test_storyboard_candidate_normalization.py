@@ -874,6 +874,7 @@ def test_storyboard_candidate_derives_scene_change_and_transition() -> None:
     assert shot["scene_time"] == "午后三点"
     assert shot["continuity_mode"] == "scene_change"
     assert shot["transition"] == "叠化"
+    assert shot["continuity_from_prev"] is False
     assert {change["reason"] for change in changes} >= {
         "outline_scene_authority",
         "derived_scene_continuity",
@@ -902,15 +903,21 @@ def test_storyboard_candidate_uses_hard_cut_for_derived_same_scene_mode() -> Non
         },
         previous_scene_name="同一办公室",
         previous_scene_time="白天",
+        previous_last_frame_desc="上一条采用视频结束于人物转身看向门口",
     )
 
     assert normalized["shot"]["continuity_mode"] == "same_scene_cut"
     assert normalized["shot"]["transition"] == "硬切"
+    assert normalized["shot"]["continuity_from_prev"] is True
+    assert normalized["shot"]["first_frame_desc"] == "上一条采用视频结束于人物转身看向门口"
+    assert normalized["shot"]["state_in"] == "上一条采用视频结束于人物转身看向门口"
     assert {
         change["reason"] for change in changes
     } >= {
         "derived_scene_continuity",
         "derived_scene_transition",
+        "derived_video_tail_input",
+        "previous_video_tail_first_frame",
     }
 
 

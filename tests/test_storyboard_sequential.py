@@ -344,6 +344,43 @@ def test_partial_nonfinal_skips_episode_level_checks() -> None:
     assert not any("继续补镜" in e for e in errors)
 
 
+def test_final_shot_narrative_gate_uses_compiled_outline(monkeypatch) -> None:
+    screenplay = _screenplay()
+    screenplay.narrative_plan = NarrativeContinuityPlan(scope_id="e2")
+    compiled_outline = StoryboardOutline(episode_no=2)
+    calls: list[tuple[StoryboardOutline | None, bool]] = []
+
+    def capture_gate(
+        _board,
+        _screenplay,
+        *,
+        outline=None,
+        complete=True,
+        expected_scope_id=None,
+    ):
+        calls.append((outline, complete))
+        return []
+
+    monkeypatch.setattr(
+        "app.narrative.validate_storyboard_narrative",
+        capture_gate,
+    )
+
+    _validate_storyboard_shot_draft(
+        _draft(_shot(1), is_final=True),
+        episode=_episode(),
+        bible=_bible(),
+        screenplay=screenplay,
+        completed_shots=[],
+        shot_no=1,
+        allow_finish=True,
+        must_finish=True,
+        outline=compiled_outline,
+    )
+
+    assert calls == [(compiled_outline, True)]
+
+
 def test_current_outline_covers_are_checked_before_final_shot() -> None:
     # 本镜大纲声明要落实的内容必须在当前镜正文中出现，不能拖到收尾时才发现漏戏。
     errors = _validate(
