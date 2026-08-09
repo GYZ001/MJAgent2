@@ -881,6 +881,8 @@ def screenplay_repair_draft(args) -> PreflightResult:
 
 def screenplay_generate(args) -> PreflightResult:
     """Read-only generation sizing and reusable-artifact projection."""
+    from app.evidence.repository import ACTIVE_RUN_STATUSES
+
     conn = get_conn()
     ep = conn.execute(
         """SELECT id,episode_no,project_id,screenplay_status,
@@ -907,10 +909,26 @@ def screenplay_generate(args) -> PreflightResult:
     input_projection = dict(projection.get("input") or {})
     cast_impact = dict(projection.get("cast_impact") or {})
     reusable = dict(projection.get("reusable_validated_artifacts") or {})
+    run = (
+        conn.execute(
+            """SELECT id,status,workflow_type,scope_type,scope_id
+                 FROM workflow_runs WHERE id=?""",
+            (ep["active_screenplay_run_id"],),
+        ).fetchone()
+        if ep["active_screenplay_run_id"]
+        else None
+    )
+    active_run = bool(
+        run
+        and run["workflow_type"] == "screenplay"
+        and run["scope_type"] == "episode"
+        and run["scope_id"] == args.episode_id
+        and run["status"] in ACTIVE_RUN_STATUSES
+    )
     downstream_impact = bool(ep["screenplay_artifact_id"] or ep["storyboard_artifact_id"])
     return PreflightResult(
         command="screenplay.generate",
-        allowed=not bool(ep["active_screenplay_run_id"]),
+        allowed=not active_run,
         risk=RiskLevel.R2_MATERIAL,
         summary=(
             f"第 {ep['episode_no']} 集将按 {input_projection.get('source_segment_count', 0)} 个 SRC，"
@@ -936,13 +954,14 @@ def screenplay_generate(args) -> PreflightResult:
         ),
         state_fingerprint=_fp({
             "episode": dict(ep),
+            "active_run": dict(run) if run else None,
             "input": input_projection,
             "reusable": reusable,
         }),
         requires_confirmation=downstream_impact,
         confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
-        denial_code="SCREENPLAY_ALREADY_RUNNING" if ep["active_screenplay_run_id"] else None,
-        denial_message="本集已有剧本任务运行中" if ep["active_screenplay_run_id"] else None,
+        denial_code="SCREENPLAY_ALREADY_RUNNING" if active_run else None,
+        denial_message="本集已有剧本任务运行中或等待恢复" if active_run else None,
     )
 
 

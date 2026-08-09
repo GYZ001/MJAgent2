@@ -124,6 +124,63 @@ def test_resume_route_has_a_distinct_capability() -> None:
     assert registry.commands["screenplay.resume"].title == "继续剧本流程"
 
 
+def test_screenplay_generation_preflight_sizes_source_without_side_effects() -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。\\n他说：别走。',12)"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+
+    result = api._screenplay_generation_preflight("e1")
+
+    assert result["action"] == "generate_screenplay"
+    assert result["input"]["source_segment_count"] >= 1
+    assert result["input"]["estimated_blueprint_shards"] >= 1
+    assert result["input"]["estimated_scene_writing_shards"] >= 1
+    assert conn.execute("SELECT COUNT(*) AS c FROM workflow_runs").fetchone()["c"] == 0
+
+
+def test_screenplay_generate_preflight_allows_terminal_run_takeover() -> None:
+    from app.capabilities.inputs import ScreenplayGenerateInput
+    from app.capabilities.preflight import screenplay_generate
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="failed-run",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='FAILED',failure_code='TEST' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET source_chapters='[1]',active_screenplay_run_id=? WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    terminal = screenplay_generate(ScreenplayGenerateInput(episode_id="e1"))
+
+    assert terminal.allowed is True
+    assert terminal.denial_code is None
+
+    conn.execute("UPDATE workflow_runs SET status='RUNNING' WHERE id=?", (run_id,))
+    conn.commit()
+    live = screenplay_generate(ScreenplayGenerateInput(episode_id="e1"))
+
+    assert live.allowed is False
+    assert live.denial_code == "SCREENPLAY_ALREADY_RUNNING"
+    assert live.state_fingerprint != terminal.state_fingerprint
+
+
 def test_clear_unpublished_ir_preserves_published_lineage() -> None:
     run_id = repository.create_run(
         workflow_type="screenplay",
