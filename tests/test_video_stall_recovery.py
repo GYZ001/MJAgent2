@@ -79,6 +79,19 @@ def _patch_enqueue_runtime(monkeypatch, conn: sqlite3.Connection) -> None:
     monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
 
 
+def test_noop_stall_reconciliation_releases_write_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _seed(conn)
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+
+    report = worker.reconcile_stalled_video_jobs()
+
+    assert sum(report.values()) == 0
+    assert conn.in_transaction is False
+
+
 def test_embedded_source_dialogue_is_not_inferred_or_mutated_during_enqueue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

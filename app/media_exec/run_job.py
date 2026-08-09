@@ -4132,8 +4132,7 @@ def recover_media_jobs() -> int:
             conn, r["job_id"], r["run_id"], r["step_run_id"], "服务重启后自动恢复任务"
         ):
             resumed += 1
-    if resumed:
-        conn.commit()
+    conn.commit()
     try:
         reconcile_stalled_video_jobs()
     except Exception as exc:  # noqa: BLE001 启动恢复各子域隔离，媒体 lease 恢复仍需成功
@@ -4261,8 +4260,10 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
              )""",
         (stamp,),
     ).rowcount
+    # SQLite starts a write transaction even when UPDATE affects zero rows.
+    # Release it before the read-heavy reconciliation passes below.
+    conn.commit()
     if redundant:
-        conn.commit()
         report["redundant_preflight_closed"] = int(redundant)
 
     # 兼容修复上线前的历史事故：当时 preflight 发生在 jobs INSERT 之前，
@@ -4423,8 +4424,7 @@ async def _stale_lease_sweeper(interval_seconds: float = _SWEEPER_INTERVAL_SECON
                         "lease 过期，自动回收并重新入队",
                     ):
                         resumed += 1
-                if resumed:
-                    conn.commit()
+                conn.commit()
                 reconcile_stalled_video_jobs()
             except Exception:  # noqa: BLE001 周期任务不能死
                 pass

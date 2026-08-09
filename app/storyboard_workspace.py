@@ -92,6 +92,13 @@ def episode_fingerprint(episode_id: str) -> str:
 def monotonic_snapshot_version(episode_id: str, fingerprint: str | None = None) -> int:
     fingerprint = fingerprint or episode_fingerprint(episode_id)
     conn = get_conn()
+    row = conn.execute(
+        "SELECT snapshot_version, state_fingerprint FROM storyboard_workspace_state WHERE episode_id=?",
+        (episode_id,),
+    ).fetchone()
+    if row is not None and row["state_fingerprint"] == fingerprint:
+        return int(row["snapshot_version"])
+
     owns_transaction = not conn.in_transaction
     if owns_transaction:
         conn.execute("BEGIN IMMEDIATE")

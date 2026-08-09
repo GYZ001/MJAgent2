@@ -2114,6 +2114,23 @@ def test_snapshot_versions_are_distinct_under_concurrent_state_changes(storyboar
     assert sorted(versions) == [baseline + 1, baseline + 2]
 
 
+def test_unchanged_snapshot_does_not_wait_for_another_writer(storyboard_db):
+    baseline = workspace.monotonic_snapshot_version("e1", "stable-snapshot")
+    database_path = storyboard_db.execute("PRAGMA database_list").fetchone()["file"]
+    writer = sqlite3.connect(database_path, timeout=0.02)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("BEGIN IMMEDIATE")
+    storyboard_db.execute("PRAGMA busy_timeout=20")
+    try:
+        current = workspace.monotonic_snapshot_version("e1", "stable-snapshot")
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert current == baseline
+    assert storyboard_db.in_transaction is False
+
+
 def test_starting_owner_is_treated_as_live_and_not_replaced(
     storyboard_db,
     monkeypatch,
