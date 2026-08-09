@@ -255,3 +255,16 @@ Planned fix for S:
   prompt path.
 - Keep the original provider evidence and pause for an explicit content/model
   decision instead of bypassing the provider's safety policy.
+
+Post-fix evidence for S:
+- Shot 51 provider call `28449` returned one exact top-level `error` envelope.
+- The gateway emitted no format-repair call after that response.
+- Job `job_f7fa40a6ac00` ended with
+  `reason_code=VIDEO_PROMPT_PROVIDER_REJECTED` and
+  `provider_create_state=not_started`; no `video_create` operation exists for
+  that version.
+- The same classification was observed independently for shot 78.
+- Shot 82 later produced a valid structured prompt through ordinary transport
+  retry and reached Minimax H3 task
+  `minimax_h3:4e59bd53-8f3c-489b-9a0d-3b63b7a3f56d`, proving the fix does not
+  blanket-block similar shots or substitute deterministic content.
