@@ -19,7 +19,12 @@
 | D | CPU-heavy projection, not SQLite locking, blocks requests | Low | Low | Pending |
 
 ## Log Evidence
-Pending.
+Instrumentation added:
+- A: synchronous dispatch start/end and elapsed time
+- B: worker enqueue start/end and elapsed time
+- C: actionable batch size, active-job state, and transaction state
+
+Pre-fix run ID: `pre-fix`.
 
 ## Verification Conclusion
 Pending.

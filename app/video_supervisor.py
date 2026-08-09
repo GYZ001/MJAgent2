@@ -1701,9 +1701,16 @@ def _dispatch(
                 authority_checkpoint,
                 stage="video_provider_enqueue_commit",
             )
+        _debug_enqueue_started = time.monotonic()
+        # #region debug-point B:enqueue-duration
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        # #endregion
         result = worker.enqueue_shot(entry.shot_id, **{
             k: v for k, v in kwargs.items() if k != "supervisor_meta"
         })
+        # #region debug-point B:enqueue-duration
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_enqueue_started)*1000,1),"db_in_transaction":get_conn().in_transaction,"reused":bool(result.get("reused"))},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        # #endregion
         # 把 supervisor meta 写入新建 version
         if result.get("version_id") and kwargs.get("supervisor_meta"):
             _patch_version_supervisor_meta(result["version_id"], kwargs["supervisor_meta"])
@@ -1759,6 +1766,10 @@ def _dispatch_with_heartbeat(
     first: bool = False,
 ) -> bool:
     """Keep the run live across synchronous request compilation and enqueue."""
+    _debug_dispatch_started = time.monotonic()
+    # #region debug-point A:dispatch-duration
+    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+    # #endregion
     _refresh_supervisor_heartbeat(cp, run_id=run_id)
     try:
         return _dispatch(
@@ -1771,6 +1782,9 @@ def _dispatch_with_heartbeat(
         )
     finally:
         _refresh_supervisor_heartbeat(cp, run_id=run_id)
+        # #region debug-point A:dispatch-duration
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_dispatch_started)*1000,1),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        # #endregion
 
 
 def _patch_version_supervisor_meta(version_id: str, meta: dict[str, Any]) -> None:
@@ -3076,6 +3090,9 @@ async def run_video_completion_supervisor(
         soft_cap = cap * FIRST_PASS_BUDGET_FRACTION
         per_shot_cap = (cap / max(1, ledger.shots_total)) * SHOT_BUDGET_MULTIPLIER
 
+        # #region debug-point C:dispatch-batch
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"C","location":"app/video_supervisor.py:run_video_supervisor","msg":"[DEBUG] actionable batch","data":{"tick_no":cp.tick_no,"actionable_count":len(ledger.actionable()),"active_jobs":ledger.has_active_jobs(),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        # #endregion
         for entry in ledger.actionable():
             # 单镜上限
             if entry.cost_spent_cny >= per_shot_cap and entry.grade == "C":
