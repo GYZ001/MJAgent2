@@ -308,6 +308,114 @@ def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
     assert outline.shots[-1].offscreen_action_actor_ids == ["ID-CONTEXT"]
 
 
+def test_outline_projection_uses_event_onscreen_relation_not_scene_or_perceivers() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.target_ids = []
+    screenplay.narrative_plan.identity_contracts = [
+        NarrativeIdentityContract(
+            identity_id="character-1",
+            display_name="当前人物",
+            kind="person",
+            visual_policy="canonical",
+            visual_canonical="当前人物的稳定外观",
+            asset_requirement="required",
+        ),
+        NarrativeIdentityContract(
+            identity_id="future-character",
+            display_name="后续人物",
+            kind="person",
+            visual_policy="canonical",
+            visual_canonical="后续人物的稳定外观",
+            asset_requirement="required",
+        ),
+    ]
+    screenplay.narrative_plan.events[0].onscreen_entity_ids = ["character-1"]
+    screenplay.narrative_plan.evidence[0].perceivable_by.append(
+        "future-character"
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                characters_visible=["当前人物", "后续人物"],
+                beat="当前人物完成本事件。",
+                covers="当前人物完成本事件。",
+            )
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert outline.shots[0].visible_entity_ids == ["character-1"]
+    assert outline.shots[0].characters_visible == ["当前人物"]
+
+
+def test_legacy_action_projection_does_not_promote_quoted_identity_to_actor() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["speaker-id", "mentioned-id"]
+    action.target_ids = []
+    action.semantic_intent = "发言者说出对白「被提及者欠了三枚银币。」"
+    action.completion_condition = "发言者说完本话轮。"
+    screenplay.narrative_plan.identity_contracts = [
+        NarrativeIdentityContract(
+            identity_id="speaker-id",
+            display_name="发言者",
+            kind="person",
+            visual_policy="canonical",
+            visual_canonical="发言者的稳定外观",
+            asset_requirement="required",
+        ),
+        NarrativeIdentityContract(
+            identity_id="mentioned-id",
+            display_name="被提及者",
+            kind="person",
+            visual_policy="canonical",
+            visual_canonical="被提及者的稳定外观",
+            asset_requirement="required",
+        ),
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                characters_visible=["发言者", "被提及者"],
+                beat="发言者说完本话轮。",
+                covers="发言者说完本话轮。",
+            )
+        ],
+    )
+
+    changes = normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert action.actor_ids == ["speaker-id", "mentioned-id"]
+    assert outline.shots[0].visible_entity_ids == ["speaker-id"]
+    assert outline.shots[0].characters_visible == ["发言者"]
+    assert any(
+        change.get("reason") == "legacy_action_typed_relation_projection"
+        for change in changes
+    )
+    validation_errors = validate_storyboard_narrative(
+        None,
+        screenplay,
+        outline=outline,
+        complete=False,
+    )
+    assert not any(
+        "[SHOT_ACTION_ACTOR_UNDELIVERED]" in error
+        for error in validation_errors
+    )
+
+
 def test_outline_dialogue_ownership_repairs_split_fragments_and_duplicates() -> None:
     screenplay = _screenplay()
     screenplay.dialogue_chains = [

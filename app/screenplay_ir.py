@@ -281,6 +281,8 @@ class IRSceneUnit(BaseModel):
     text: str
     event_key: str
     source_segment_ids: list[str] = Field(default_factory=list)
+    actor_keys: list[str] = Field(default_factory=list)
+    target_keys: list[str] = Field(default_factory=list)
     # Exact frozen identity keys physically present in this unit.  Dialogue
     # references and people who can perceive a line are separate relations.
     onscreen_entity_keys: list[str] = Field(default_factory=list)
@@ -304,7 +306,10 @@ class IRSceneUnit(BaseModel):
         normalized["kind"] = kind
         return normalized
 
-    @field_validator("source_segment_ids", "onscreen_entity_keys", mode="before")
+    @field_validator(
+        "source_segment_ids", "actor_keys", "target_keys",
+        "onscreen_entity_keys", mode="before",
+    )
     @classmethod
     def _normalize_source_ids(cls, value: Any) -> list[Any]:
         return _as_list(value)
@@ -1045,7 +1050,11 @@ def prepare_ir_identity_authorities(
             *(
                 key
                 for unit in scene.units
-                for key in unit.onscreen_entity_keys
+                for key in (
+                    *unit.actor_keys,
+                    *unit.target_keys,
+                    *unit.onscreen_entity_keys,
+                )
             ),
             *(
                 unit.speaker_key
@@ -1397,10 +1406,12 @@ def screenplay_ir_prompt_contract() -> str:
     "summary":"", "conflict":"", "turn":"",
     "units":[
       {"kind":"action","text":"可拍动作","event_key":"ev1",
+       "actor_keys":["person_a"],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
        "resulting_state":"该动作完成后新成立的局势，禁止复述 text",
        "source_segment_ids":["SRC0001"]},
       {"kind":"dialogue","text":"改编台词","event_key":"ev1",
+       "actor_keys":[],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
        "resulting_state":"该话轮交付后人物/信息/决策发生的变化，禁止复述 text",
        "source_segment_ids":["SRC0001"],
@@ -1692,6 +1703,9 @@ def compile_screenplay_ir(
         "screenplay-generation-ir.v1.4",
         "screenplay-generation-ir.v1.5",
     ))
+    typed_visual_unit_contract = format_version.startswith(
+        "screenplay-generation-ir.v1.5"
+    )
     segments_list = (
         index_compact_source_segments(source_text)
         if format_version.startswith("screenplay-generation-ir.v1.2")
@@ -2347,6 +2361,9 @@ def compile_screenplay_ir(
         explicit_actor_keys_by_event: defaultdict[tuple[str, str], list[str]] = (
             defaultdict(list)
         )
+        explicit_target_keys_by_event: defaultdict[tuple[str, str], list[str]] = (
+            defaultdict(list)
+        )
         onscreen_keys_by_event: defaultdict[tuple[str, str], list[str]] = (
             defaultdict(list)
         )
@@ -2364,14 +2381,29 @@ def compile_screenplay_ir(
                     f"{event_key} 同时出现在 {previous_scene_key} 与 {scene.key}"
                 )
             normalized_event_keys[(scene.key, unit_index)] = event_key
-            # Registered identity occurrence is used only as a compatibility
-            # fallback for action units.  Dialogue text may name people who
-            # are absent, so a dialogue unit owns only its declared speaker
-            # unless the typed unit explicitly declares additional on-screen
-            # identities.
+            if (
+                typed_visual_unit_contract
+                and "onscreen_entity_keys" not in unit.model_fields_set
+            ):
+                raise ScreenplayIRFidelityError(
+                    f"IR v1.5 {scene.key}.{event_key} 缺少显式 "
+                    "onscreen_entity_keys，禁止从姓名词面推断在场关系"
+                )
+            if (
+                typed_visual_unit_contract
+                and unit.kind == "action"
+                and "actor_keys" not in unit.model_fields_set
+            ):
+                raise ScreenplayIRFidelityError(
+                    f"IR v1.5 {scene.key}.{event_key} 动作单元缺少显式 "
+                    "actor_keys，禁止从动作文本猜测执行者"
+                )
+            # Name occurrences remain a pre-v1.5 compatibility fallback only.
+            # Current contracts carry actor/target/on-screen relations as
+            # frozen identity keys and never infer them from story words.
             visual_text = (
                 f"{unit.text}\n{unit.resulting_state}"
-                if unit.kind == "action"
+                if unit.kind == "action" and not typed_visual_unit_contract
                 else ""
             )
             mentioned = [
@@ -2385,16 +2417,27 @@ def compile_screenplay_ir(
                     if unit.kind == "dialogue" and unit.speaker_key
                     else []
                 ),
-                *(mentioned if unit.kind == "action" else []),
+                *(
+                    unit.actor_keys
+                    if unit.kind == "action" and typed_visual_unit_contract
+                    else mentioned if unit.kind == "action" else []
+                ),
             ]))
+            targets = list(dict.fromkeys(unit.target_keys))
             onscreen = list(dict.fromkeys(
                 unit.onscreen_entity_keys
-                or explicit
+                if typed_visual_unit_contract
+                else unit.onscreen_entity_keys or explicit
             ))
             event_actors = explicit_actor_keys_by_event[(scene.key, event_key)]
             event_actors.extend(
                 key for key in explicit
                 if key not in event_actors
+            )
+            event_targets = explicit_target_keys_by_event[(scene.key, event_key)]
+            event_targets.extend(
+                key for key in targets
+                if key not in event_targets
             )
             event_onscreen = onscreen_keys_by_event[(scene.key, event_key)]
             event_onscreen.extend(
@@ -2409,6 +2452,9 @@ def compile_screenplay_ir(
             event_key = normalized_event_keys[(scene.key, unit_index)]
             actor_keys = list(
                 explicit_actor_keys_by_event[(scene.key, event_key)]
+            )
+            target_keys = list(
+                explicit_target_keys_by_event[(scene.key, event_key)]
             )
             onscreen_entity_keys = list(
                 onscreen_keys_by_event[(scene.key, event_key)]
@@ -2477,6 +2523,10 @@ def compile_screenplay_ir(
                     *existing.actor_keys,
                     *actor_keys,
                 ]))
+                existing.target_keys = list(dict.fromkeys([
+                    *existing.target_keys,
+                    *target_keys,
+                ]))
                 existing.onscreen_entity_keys = list(dict.fromkeys([
                     *existing.onscreen_entity_keys,
                     *onscreen_entity_keys,
@@ -2498,6 +2548,7 @@ def compile_screenplay_ir(
                 adapted_statement=adapted_statement,
                 resulting_state=unit.resulting_state.strip(),
                 actor_keys=actor_keys,
+                target_keys=target_keys,
                 onscreen_entity_keys=onscreen_entity_keys,
                 character_emotion="",
                 decision_required=not contextual_actor,

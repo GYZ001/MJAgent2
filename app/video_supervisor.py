@@ -315,6 +315,15 @@ def _verify_supervisor_paid_authority(
     return grant
 
 
+def _supervisor_checks_can_use_worker_thread() -> bool:
+    """A private in-memory SQLite connection must stay on its owner thread."""
+    try:
+        database_rows = get_conn().execute("PRAGMA database_list").fetchall()
+        return any(str(row[2] or "").strip() for row in database_rows)
+    except Exception:
+        return False
+
+
 async def _verify_supervisor_paid_authority_async(
     cp: VideoSupervisorCheckpoint,
     *,
@@ -323,10 +332,28 @@ async def _verify_supervisor_paid_authority_async(
     """Keep modern grant verification off-loop; legacy plan-null stays local."""
     if not cp.grant_id:
         return _verify_supervisor_paid_authority(cp, stage=stage)
+    if not _supervisor_checks_can_use_worker_thread():
+        return _verify_supervisor_paid_authority(cp, stage=stage)
     return await asyncio.to_thread(
         _verify_supervisor_paid_authority,
         cp,
         stage=stage,
+    )
+
+
+async def _verify_episode_plan_current_async(plan) -> bool:
+    from app.video_plan import verify_episode_plan_is_current
+
+    if not _supervisor_checks_can_use_worker_thread():
+        return verify_episode_plan_is_current(
+            plan,
+            conn=get_conn(),
+            mark_stale=False,
+        )
+    return await asyncio.to_thread(
+        verify_episode_plan_is_current,
+        plan,
+        mark_stale=False,
     )
 
 
@@ -343,12 +370,19 @@ async def _ensure_supervisor_video_plan(
     if cp.grant_id and not any(value is not None for value in checkpoint_binding):
         # New and pre-migration checkpoints acquire their binding exactly once
         # from the content-addressed grant before paid work begins.
-        grant = await asyncio.to_thread(
-            validate_video_grant,
-            cp.grant_id,
-            episode_id=cp.episode_id,
-            storyboard_artifact_id=cp.storyboard_artifact_id,
-        )
+        if _supervisor_checks_can_use_worker_thread():
+            grant = await asyncio.to_thread(
+                validate_video_grant,
+                cp.grant_id,
+                episode_id=cp.episode_id,
+                storyboard_artifact_id=cp.storyboard_artifact_id,
+            )
+        else:
+            grant = validate_video_grant(
+                cp.grant_id,
+                episode_id=cp.episode_id,
+                storyboard_artifact_id=cp.storyboard_artifact_id,
+            )
     else:
         grant = await _verify_supervisor_paid_authority_async(
             cp,
@@ -360,7 +394,7 @@ async def _ensure_supervisor_video_plan(
         VideoPlanValidationError,
         generate_episode_plan,
         load_latest_plan,
-        verify_episode_plan_is_current,
+        video_plan_provider_selection_is_current,
     )
 
     conn = get_conn()
@@ -368,11 +402,8 @@ async def _ensure_supervisor_video_plan(
     if (
         plan is None
         or plan.status != "valid"
-        or not await asyncio.to_thread(
-            verify_episode_plan_is_current,
-            plan,
-            mark_stale=False,
-        )
+        or not await _verify_episode_plan_current_async(plan)
+        or not video_plan_provider_selection_is_current(plan, conn=conn)
     ):
         # Planning may itself call an external model, so recheck the release
         # immediately before it.  A pending plan slot is the only permitted
@@ -391,11 +422,8 @@ async def _ensure_supervisor_video_plan(
             raise GrantValidationError("VIDEO_PLAN_INVALID", str(exc)) from exc
     if (
         plan.status != "valid"
-        or not await asyncio.to_thread(
-            verify_episode_plan_is_current,
-            plan,
-            mark_stale=False,
-        )
+        or not await _verify_episode_plan_current_async(plan)
+        or not video_plan_provider_selection_is_current(plan, conn=conn)
     ):
         raise GrantValidationError(
             "VIDEO_PLAN_INVALID",
@@ -731,7 +759,11 @@ def _video_stale_for_shot(conn, shot_row, episode_storyboard_id: str | None) -> 
     return not any(parent in valid_storyboard_parents for parent in parents)
 
 
-def _reconcile_terminal_continuity_blocks(episode_id: str) -> int:
+def _reconcile_terminal_continuity_blocks(
+    episode_id: str,
+    *,
+    run_id: str | None = None,
+) -> int:
     """把不可能再获得上游尾帧的等待任务转成可路由 Issue。
 
     queued + waiting_continuity 过去会永远被当成 active，Supervisor 因而永远
@@ -747,8 +779,9 @@ def _reconcile_terminal_continuity_blocks(episode_id: str) -> int:
              AND s.adopted_version_id IS NULL
              AND j.status IN ('queued','waiting','waiting_retry')
              AND j.after_shot_id IS NOT NULL
-             AND j.pipeline_stage=?""",
-        (episode_id, media_stages.STAGE_WAITING_CONTINUITY),
+             AND j.pipeline_stage=?
+             AND (? IS NULL OR j.owner_run_id=?)""",
+        (episode_id, media_stages.STAGE_WAITING_CONTINUITY, run_id, run_id),
     ).fetchall()
     changed = 0
     for row in rows:
@@ -769,8 +802,9 @@ def _reconcile_terminal_continuity_blocks(episode_id: str) -> int:
             """SELECT 1 FROM jobs
                WHERE shot_id=? AND kind='video'
                  AND status IN ('queued','running','waiting_provider','waiting_retry','waiting')
+                 AND (? IS NULL OR owner_run_id=?)
                LIMIT 1""",
-            (row["after_shot_id"],),
+            (row["after_shot_id"], run_id, run_id),
         ).fetchone()
         if upstream_candidate or upstream_active:
             continue
@@ -810,6 +844,7 @@ def _reconcile_terminal_continuity_blocks(episode_id: str) -> int:
                 repair_hint="取消尾帧依赖并按独立首帧重建本镜",
             )],
             source="supervisor_continuity_reconcile",
+            run_id=run_id,
         )
         changed += 1
     if changed:
@@ -877,6 +912,7 @@ def rebuild_coverage_ledger(
     ).fetchall()
     chains = _compute_chains(shot_rows)
     ep_sb = ep["storyboard_artifact_id"] if ep else None
+    supervisor_run_id = cp.run_id if cp is not None else None
 
     # 批量读 jobs / versions / costs
     shot_ids = [r["id"] for r in shot_rows]
@@ -889,8 +925,9 @@ def rebuild_coverage_ledger(
             f"""SELECT id, shot_id FROM jobs
                 WHERE shot_id IN ({placeholders}) AND kind='video'
                   AND status IN ({status_ph})
+                  AND (? IS NULL OR owner_run_id=?)
                 ORDER BY created_at DESC""",
-            (*shot_ids, *status_list),
+            (*shot_ids, *status_list, supervisor_run_id, supervisor_run_id),
         ).fetchall():
             if row["shot_id"] not in active_jobs:
                 active_jobs[row["shot_id"]] = row["id"]
@@ -917,7 +954,11 @@ def rebuild_coverage_ledger(
             if is_delivery_fallback:
                 # 清理前遗留的图片兜底不算视频版本、尝试次数或覆盖率。
                 continue
-            dispatch_map[sid] = dispatch_map.get(sid, 0) + 1
+            if (
+                supervisor_run_id is None
+                or version_meta.get("supervisor_run_id") == supervisor_run_id
+            ):
+                dispatch_map[sid] = dispatch_map.get(sid, 0) + 1
             cost_map[sid] = cost_map.get(sid, 0.0) + float(row["cost_cny"] or 0)
             if (
                 row["provider_task_id"]
@@ -1016,7 +1057,10 @@ def rebuild_coverage_ledger(
         if len(qa_history) >= 2:
             gain = qa_history[-1] - qa_history[-2]
 
-        persisted = load_persisted_shot_issues(sid)
+        persisted = load_persisted_shot_issues(
+            sid,
+            run_id=supervisor_run_id,
+        )
         last_codes = list(saved.get("last_issue_codes") or [])
         if persisted:
             last_codes = [i.code for i in persisted]
@@ -1026,8 +1070,9 @@ def rebuild_coverage_ledger(
             fail_job = conn.execute(
                 """SELECT * FROM jobs WHERE shot_id=? AND kind='video'
                    AND status IN ('failed','paused_budget','waiting_human')
+                   AND (? IS NULL OR owner_run_id=?)
                    ORDER BY created_at DESC LIMIT 1""",
-                (sid,),
+                (sid, supervisor_run_id, supervisor_run_id),
             ).fetchone()
             if fail_job:
                 fail_ver = None
@@ -1373,7 +1418,7 @@ def _dispatch(
             )
             persist_shot_issue(
                 episode_id=episode_id, shot_id=entry.shot_id, shot_no=entry.shot_no,
-                issues=issues, source="supervisor_dependency_fence",
+                issues=issues, source="supervisor_dependency_fence", run_id=run_id,
             )
             entry.last_issue_codes = [i.code for i in issues]
             return False
@@ -1419,7 +1464,7 @@ def _dispatch(
         issues = issues_from_enqueue_error(exc, shot_id=entry.shot_id, shot_no=entry.shot_no)
         persist_shot_issue(
             episode_id=episode_id, shot_id=entry.shot_id, shot_no=entry.shot_no,
-            issues=issues, source="supervisor_enqueue",
+            issues=issues, source="supervisor_enqueue", run_id=run_id,
         )
         entry.last_issue_codes = [i.code for i in issues]
         for issue in issues:
@@ -1431,7 +1476,7 @@ def _dispatch(
         issues = issues_from_enqueue_error(exc, shot_id=entry.shot_id, shot_no=entry.shot_no)
         persist_shot_issue(
             episode_id=episode_id, shot_id=entry.shot_id, shot_no=entry.shot_no,
-            issues=issues, source="supervisor_enqueue",
+            issues=issues, source="supervisor_enqueue", run_id=run_id,
         )
         entry.last_issue_codes = [i.code for i in issues]
         return False
@@ -1442,7 +1487,7 @@ def _dispatch(
         )
         persist_shot_issue(
             episode_id=episode_id, shot_id=entry.shot_id, shot_no=entry.shot_no,
-            issues=issues, source="supervisor_budget",
+            issues=issues, source="supervisor_budget", run_id=run_id,
         )
         entry.last_issue_codes = [i.code for i in issues]
         return False
@@ -1476,8 +1521,12 @@ def _patch_version_supervisor_meta(version_id: str, meta: dict[str, Any]) -> Non
     conn.commit()
 
 
-def _collect_issues(entry: ShotCoverageEntry) -> list[Issue]:
-    issues = load_persisted_shot_issues(entry.shot_id)
+def _collect_issues(
+    entry: ShotCoverageEntry,
+    *,
+    run_id: str | None = None,
+) -> list[Issue]:
+    issues = load_persisted_shot_issues(entry.shot_id, run_id=run_id)
     conn = get_conn()
     if entry.best_version_id:
         row = conn.execute(
@@ -1495,8 +1544,9 @@ def _collect_issues(entry: ShotCoverageEntry) -> list[Issue]:
             """SELECT * FROM jobs
                WHERE shot_id=? AND kind='video'
                  AND status IN ('failed','paused_budget','waiting_human')
+                 AND (? IS NULL OR owner_run_id=?)
                ORDER BY created_at DESC LIMIT 1""",
-            (entry.shot_id,),
+            (entry.shot_id, run_id, run_id),
         ).fetchone()
         if failed:
             failed_version = None
@@ -2700,7 +2750,7 @@ async def run_video_completion_supervisor(
 
         cp.tick_no += 1
         cp.phase = "PLANNING_COVERAGE"
-        _reconcile_terminal_continuity_blocks(episode_id)
+        _reconcile_terminal_continuity_blocks(episode_id, run_id=run_id)
         ledger = rebuild_coverage_ledger(
             episode_id, cp=cp,
             fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
@@ -2787,7 +2837,7 @@ async def run_video_completion_supervisor(
                 await asyncio.sleep(0)
                 continue
 
-            issues = _collect_issues(entry)
+            issues = _collect_issues(entry, run_id=run_id)
             model_rejected = any(
                 not issue.repairable
                 and (issue.evidence or {}).get("pause_state") == "PAUSED_EXTERNAL"
@@ -2895,8 +2945,9 @@ async def run_video_completion_supervisor(
                 job = conn.execute(
                     """SELECT id FROM jobs WHERE shot_id=? AND kind='video'
                        AND status IN ('failed','waiting_retry','paused_budget')
+                       AND (? IS NULL OR owner_run_id=?)
                        ORDER BY created_at DESC LIMIT 1""",
-                    (entry.shot_id,),
+                    (entry.shot_id, run_id, run_id),
                 ).fetchone()
                 if job and entry.no_charge_requeues < 2:
                     conn.execute(

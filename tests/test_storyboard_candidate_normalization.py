@@ -110,6 +110,178 @@ def test_storyboard_candidate_normalizes_nullable_contract_fields() -> None:
     }
 
 
+def test_storyboard_candidate_rebinds_visual_cast_to_outline_authority() -> None:
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 1,
+            "characters": ["future-character"],
+            "characters_visible": ["future-character"],
+        },
+    }
+    task = {
+        "visible_entity_ids": ["current-character"],
+        "characters_visible": ["current-character"],
+    }
+
+    normalized, changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=1,
+        outline_narrative_task=task,
+    )
+
+    assert normalized["shot"]["visible_entity_ids"] == ["current-character"]
+    assert normalized["shot"]["characters_visible"] == ["current-character"]
+    assert normalized["shot"]["characters"] == ["current-character"]
+    assert any(
+        change["reason"] == "outline_visual_identity_authority"
+        for change in changes
+    )
+
+
+def test_storyboard_candidate_preserves_renderable_structured_visual_partition() -> None:
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 7,
+            "characters": ["主体", "对象甲", "对象乙"],
+            "characters_visible": ["主体", "对象甲", "对象乙"],
+            "visible_entity_ids": ["actor", "target-a", "target-b"],
+            # The model chose the right offscreen identity but put it in the
+            # wrong relation bucket.  The graph, not a name rule, owns actor vs
+            # target classification.
+            "offscreen_action_actor_ids": [],
+            "offscreen_action_target_ids": ["context-actor"],
+        },
+    }
+    task = {
+        "visible_entity_ids": [
+            "actor", "context-actor", "target-a", "target-b",
+        ],
+        "characters_visible": ["主体", "同场执行者", "对象甲", "对象乙"],
+        "offscreen_action_actor_ids": [],
+        "offscreen_action_target_ids": [],
+        "_bound_action_actor_ids": ["actor", "context-actor"],
+        "_bound_action_target_ids": ["target-a", "target-b"],
+    }
+
+    normalized, changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=7,
+        outline_narrative_task=task,
+    )
+
+    shot = normalized["shot"]
+    assert shot["characters"] == ["主体", "对象甲", "对象乙"]
+    assert shot["visible_entity_ids"] == ["actor", "target-a", "target-b"]
+    assert shot["offscreen_action_actor_ids"] == ["context-actor"]
+    assert shot["offscreen_action_target_ids"] == []
+    assert any(
+        change["reason"] == "structured_visual_staging_partition"
+        for change in changes
+    )
+
+
+def test_single_spoken_voice_does_not_collapse_structured_action_staging() -> None:
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 8,
+            "shot_size": "中景",
+            "camera_move": "跟随",
+            "characters": ["执行者", "作用对象"],
+            "characters_visible": ["执行者", "作用对象"],
+            "visible_entity_ids": ["actor", "target"],
+            "offscreen_action_actor_ids": [],
+            "offscreen_action_target_ids": [],
+            "audio_timeline": [{
+                "start_s": 0.0,
+                "end_s": 1.0,
+                "type": "spoken_dialogue",
+                "speaker_id": "执行者",
+                "text": "站稳。",
+                "lip_sync": True,
+                "emotion": "坚定",
+                "voice_canonical": "稳定的声音",
+            }],
+        },
+    }
+    task = {
+        "visible_entity_ids": ["actor", "target"],
+        "characters_visible": ["执行者", "作用对象"],
+        "offscreen_action_actor_ids": [],
+        "offscreen_action_target_ids": [],
+        "camera_size": "",
+        "camera_movement": "",
+        "_bound_action_actor_ids": ["actor"],
+        "_bound_action_target_ids": ["target"],
+    }
+
+    normalized, _changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=8,
+        outline_narrative_task=task,
+    )
+
+    shot = normalized["shot"]
+    assert shot["characters"] == ["执行者", "作用对象"]
+    assert shot["characters_visible"] == ["执行者", "作用对象"]
+    assert shot["visible_entity_ids"] == ["actor", "target"]
+    assert shot["shot_size"] == "中景"
+    assert shot["camera_move"] == "跟随"
+
+
+def test_visual_identity_ids_are_derived_from_selected_display_names() -> None:
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 9,
+            "characters": ["主体", "对象甲", "对象乙"],
+            "characters_visible": ["主体", "对象甲", "对象乙"],
+            # A model may repeat the complete task relation even after choosing
+            # a smaller focal cast.  Exact contract pairs own the projection.
+            "visible_entity_ids": [
+                "actor", "context-a", "target-a", "target-b", "context-b",
+            ],
+            "offscreen_action_actor_ids": [],
+            "offscreen_action_target_ids": [],
+        },
+    }
+    task = {
+        "visible_entity_ids": [
+            "actor", "context-a", "target-a", "target-b", "context-b",
+        ],
+        "characters_visible": [
+            "主体", "同场甲", "对象甲", "对象乙", "同场乙",
+        ],
+        "offscreen_action_actor_ids": [],
+        "offscreen_action_target_ids": [],
+        "_bound_action_actor_ids": ["actor"],
+        "_bound_action_target_ids": ["target-a", "target-b"],
+        "_visual_identities": [
+            {"identity_id": "actor", "display_name": "主体"},
+            {"identity_id": "context-a", "display_name": "同场甲"},
+            {"identity_id": "target-a", "display_name": "对象甲"},
+            {"identity_id": "target-b", "display_name": "对象乙"},
+            {"identity_id": "context-b", "display_name": "同场乙"},
+        ],
+    }
+
+    normalized, _changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=9,
+        outline_narrative_task=task,
+    )
+
+    shot = normalized["shot"]
+    assert shot["characters"] == ["主体", "对象甲", "对象乙"]
+    assert shot["visible_entity_ids"] == ["actor", "target-a", "target-b"]
+
+
 def test_storyboard_source_evidence_can_use_source_backed_audio() -> None:
     source = "门外忽然传来一阵急促的敲门声，屋内两人同时停下动作。"
     draft = StoryboardShotDraft.model_validate({

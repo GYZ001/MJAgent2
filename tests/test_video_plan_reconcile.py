@@ -811,6 +811,7 @@ def test_reference_mode_paid_submission_rejects_current_shot_contract_drift(
     assert conn.execute(
         "SELECT status FROM shot_video_generation_plans WHERE id='svp-1'",
     ).fetchone()["status"] == "stale"
+    assert conn.in_transaction is False
 
 
 @pytest.mark.asyncio

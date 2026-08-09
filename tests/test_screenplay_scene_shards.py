@@ -96,6 +96,9 @@ def _shard(plan, blueprint: NarrativeBlueprint) -> ScreenplaySceneShardIR:
                 text=f"交付 {source_id}",
                 event_key="local-event-1",
                 source_segment_ids=[source_id],
+                actor_keys=[],
+                target_keys=[],
+                onscreen_entity_keys=[],
                 resulting_state=f"完成 {source_id}",
             ))
         scenes.append(IRScene(

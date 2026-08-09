@@ -238,6 +238,101 @@ def test_stale_run_cannot_write_after_model_await(repair_db, monkeypatch) -> Non
     ).fetchone()["c"] == 3
 
 
+def test_supervisor_stops_when_child_agent_loop_exhausts(
+    repair_db,
+    monkeypatch,
+) -> None:
+    from app.harness.types import Issue, IssueSeverity
+    from app.loops.base import AgentLoopFailure
+    from app.stages import StageError
+    import app.storyboard_supervisor as supervisor_module
+
+    conn, _screenplay = repair_db
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=number,
+                scene_setting="日，广场",
+                beat=f"少年完成第{number}步动作",
+            )
+            for number in range(1, 5)
+        ],
+    )
+    conn.execute(
+        "UPDATE episodes SET status='scripting',storyboard_outline_json=? WHERE id='e1'",
+        (outline.model_dump_json(),),
+    )
+    conn.commit()
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="GENERATING_SHOTS",
+        validated_prefix_end=3,
+        next_shot_no=4,
+        expected_total=4,
+        input_versions={"screenplay_artifact_id": "sp1"},
+    ))
+    issue = Issue(
+        code="DIALOGUE_FRAMING_INVALID",
+        severity=IssueSeverity.BLOCKER,
+        subject="storyboard:e1",
+        message="第 4 镜景别不满足对白动作合同",
+        category="structural",
+        repairable=True,
+    )
+
+    async def exhausted_generation(*_args, **_kwargs):
+        failure = AgentLoopFailure(
+            "storyboard_shot_4",
+            [issue],
+            "authority_blockers_exhausted",
+            4,
+        )
+        error = StageError(
+            "分镜脚本",
+            [issue.message, "Agent Loop 退出：authority_blockers_exhausted（4 轮）"],
+            exit_reason=failure.exit_reason,
+            iterations=failure.iterations,
+            issues=failure.issues,
+        )
+        raise error from failure
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "generate_storyboard_next_shot",
+        exhausted_generation,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "route_issues",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("子 Agent Loop 耗尽后不得再进入 Repair Router")
+        ),
+    )
+
+    checkpoint = asyncio.run(run_storyboard_supervisor(
+        "e1",
+        resume=True,
+        preflight_done=True,
+        new_activation=False,
+    ))
+
+    assert checkpoint.phase == "WAITING_HUMAN"
+    assert checkpoint.outcome == "REPAIR_FAILED_AGENT_LOOP_EXHAUSTED"
+    assert checkpoint.last_repair["iterations"] == 4
+    assert checkpoint.last_repair["issue_codes"] == [
+        "DIALOGUE_FRAMING_INVALID"
+    ]
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+    ).fetchone()["c"] == 3
+    episode = conn.execute(
+        "SELECT status,script_error FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["status"] == "scripted"
+    assert "达到 4 轮上限" in episode["script_error"]
+
+
 @pytest.mark.parametrize("narrative_authority", [False, True])
 def test_storyboard_planning_target_preserves_published_narrative_duration(
     repair_db,

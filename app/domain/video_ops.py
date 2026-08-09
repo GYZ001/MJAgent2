@@ -252,6 +252,30 @@ def evaluate_storyboard_for_confirmation(
                 screenplay,
             )
         )
+        from app.identity_contracts import (
+            IdentityContractError,
+            storyboard_visual_identity_relation,
+        )
+
+        try:
+            for shot in board.shots:
+                relation = storyboard_visual_identity_relation(
+                    shot,
+                    list(shot.visible_entity_ids or []),
+                    bible,
+                    screenplay,
+                )
+                unexpected = list(relation["unexpected_display_names"])
+                if unexpected:
+                    structural_errors.append(
+                        "[SHOT_VISIBLE_IDENTITY_NOT_GROUNDED] "
+                        f"第 {shot.shot_no} 镜可见身份 {unexpected} "
+                        "不属于本镜叙事任务"
+                    )
+        except IdentityContractError:
+            # The existing narrative identity validator reports the complete
+            # malformed-contract diagnostic.  Do not duplicate partial text.
+            pass
         try:
             active_storyboard_run_id = episode["active_storyboard_run_id"]
             storyboard_artifact_id = episode["storyboard_artifact_id"]

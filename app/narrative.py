@@ -1950,6 +1950,16 @@ def validate_storyboard_narrative(
         for event_id, event in index.events.items()
         for action_id in event.action_ids
     }
+    from app.identity_contracts import storyboard_action_relation_ids
+
+    action_relations = {
+        action_id: storyboard_action_relation_ids(
+            screenplay,
+            action_event_owner.get(action_id, ""),
+            action,
+        )
+        for action_id, action in index.actions.items()
+    }
     phase_deliveries: defaultdict[str, list[tuple[int, int, str]]] = defaultdict(list)
     action_delivery_positions: defaultdict[str, list[int]] = defaultdict(list)
     contribution_character_owners: dict[str, str] = {}
@@ -2048,16 +2058,12 @@ def validate_storyboard_narrative(
         bound_actor_ids = {
             actor_id
             for action_id in bound_action_ids
-            for action in [index.actions.get(action_id)]
-            if action is not None
-            for actor_id in action.actor_ids
+            for actor_id in action_relations.get(action_id, ([], []))[0]
         }
         bound_target_ids = {
             target_id
             for action_id in bound_action_ids
-            for action in [index.actions.get(action_id)]
-            if action is not None
-            for target_id in action.target_ids
+            for target_id in action_relations.get(action_id, ([], []))[1]
         }
         invalid_offscreen_actors = offscreen_actors - bound_actor_ids
         if invalid_offscreen_actors:
@@ -2091,13 +2097,25 @@ def validate_storyboard_narrative(
                 errors.append(
                     f"[PHASELESS_SUPPORTING_ACTION_INVALID] {label}/{action_id} 没有可拆阶段，不得作为辅动作提前/重演"
                 )
-            missing_actors = set(action.actor_ids) - visible_or_audible_entities - offscreen_actors
+            effective_actor_ids, effective_target_ids = action_relations.get(
+                action_id,
+                (list(action.actor_ids), list(action.target_ids)),
+            )
+            missing_actors = (
+                set(effective_actor_ids)
+                - visible_or_audible_entities
+                - offscreen_actors
+            )
             if missing_actors:
                 errors.append(
                     f"[SHOT_ACTION_ACTOR_UNDELIVERED] {label}/{action_id} 的执行者既未可见/可听也未显式画外交付："
                     f"{sorted(missing_actors)}"
                 )
-            missing_targets = set(action.target_ids) - visible_or_audible_entities - offscreen_targets
+            missing_targets = (
+                set(effective_target_ids)
+                - visible_or_audible_entities
+                - offscreen_targets
+            )
             if missing_targets:
                 errors.append(
                     f"[SHOT_ACTION_TARGET_UNDELIVERED] {label}/{action_id} 的作用对象既未可见/可听"

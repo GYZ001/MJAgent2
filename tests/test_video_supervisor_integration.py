@@ -367,6 +367,52 @@ def test_integration_preflight_issue_in_ledger(memdb):
     assert "VIDEO_PREFLIGHT_BLOCKED" in entry.last_issue_codes
 
 
+def test_fresh_manual_run_ignores_cancelled_prior_run_preflight_state(memdb):
+    eid, _ = _seed_episode(memdb, 1)
+    shot_id = f"{eid}_shot_1"
+    issues = issues_from_enqueue_error(
+        CompileError("旧编译契约已被修复"),
+        shot_id=shot_id,
+        shot_no=1,
+    )
+    persist_shot_issue(
+        episode_id=eid,
+        shot_id=shot_id,
+        shot_no=1,
+        issues=issues,
+        source="supervisor_enqueue",
+        run_id="run-old",
+    )
+    memdb.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
+           ) VALUES('v-old-preflight',?,1,'p','old-preflight','cancelled',?,1)""",
+        (shot_id, json.dumps({"supervisor_run_id": "run-old"})),
+    )
+    memdb.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,error,
+               owner_run_id,created_at,updated_at
+           ) VALUES(
+               'j-old-preflight','video',?,'v-old-preflight',?,'proj_int',
+               'waiting_human','old preflight','run-old',1,1
+           )""",
+        (shot_id, eid),
+    )
+    memdb.commit()
+
+    old_cp = VideoSupervisorCheckpoint(episode_id=eid, run_id="run-old")
+    old_entry = rebuild_coverage_ledger(eid, cp=old_cp).entries[0]
+    assert old_entry.never_attempted is False
+    assert old_entry.last_issue_codes == ["VIDEO_PREFLIGHT_BLOCKED"]
+
+    fresh_cp = VideoSupervisorCheckpoint(episode_id=eid, run_id="run-new")
+    fresh_entry = rebuild_coverage_ledger(eid, cp=fresh_cp).entries[0]
+    assert fresh_entry.never_attempted is True
+    assert fresh_entry.active_job_id is None
+    assert fresh_entry.last_issue_codes == []
+
+
 def test_integration_adopted_b_over_quota_is_still_complete(memdb):
     eid, _ = _seed_episode(memdb, 5)
     for i in range(1, 4):

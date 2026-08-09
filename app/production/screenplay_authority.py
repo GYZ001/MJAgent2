@@ -18,9 +18,18 @@ SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-2"
 
 
 @lru_cache(maxsize=16)
-def _validated_screenplay_projection(raw_projection: str) -> EpisodeScreenplay:
-    """Parse a projection by its complete persisted JSON value."""
+def _cached_validated_screenplay_projection(
+    raw_projection: str,
+) -> EpisodeScreenplay:
+    """Parse one persisted projection into a process-local template."""
     return EpisodeScreenplay.model_validate_json(raw_projection)
+
+
+def _validated_screenplay_projection(raw_projection: str) -> EpisodeScreenplay:
+    """Return an isolated model for a complete persisted JSON projection."""
+    return _cached_validated_screenplay_projection(raw_projection).model_copy(
+        deep=True,
+    )
 
 # ``screenplay-source-authority.v1`` is an append-only serialization contract,
 # not a live dump of whichever fields the current Pydantic models expose.

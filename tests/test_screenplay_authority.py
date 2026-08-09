@@ -10,6 +10,7 @@ from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.narrative_review import NarrativeReviewError, run_blind_audience_review
 from app.production.publish import publish_screenplay
+from app.production.patch import load_screenplay_from_artifact
 from app.production.revision import ensure_production_revision, mark_baseline_generated
 from app.production.screenplay_authority import (
     SCREENPLAY_QA_PROFILE_VERSION,
@@ -35,6 +36,23 @@ def _published_case():
     artifact, _shot_artifacts = _persist_review_projection(screenplay, _board())
     authority = resolve_current_screenplay_authority("episode-generic")
     return screenplay, artifact, authority
+
+
+def test_cached_screenplay_artifact_model_is_isolated_from_mutable_readers() -> None:
+    screenplay, artifact, _authority = _published_case()
+
+    first_reader = load_screenplay_from_artifact(artifact["id"])
+    first_reader.title = "caller-local mutation"
+    first_reader.narrative_plan.events[0].effects_add.append("caller-local-fact")
+
+    second_reader = load_screenplay_from_artifact(artifact["id"])
+    resolved = resolve_current_screenplay_authority("episode-generic")
+
+    assert first_reader is not second_reader
+    assert second_reader.model_dump(mode="json") == screenplay.model_dump(mode="json")
+    assert resolved.screenplay.model_dump(mode="json") == screenplay.model_dump(
+        mode="json",
+    )
 
 
 def _seed_test_bible_authority() -> tuple[dict, dict]:

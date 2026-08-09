@@ -18,10 +18,10 @@ class VideoInputRepairRequired(RuntimeError):
     """The planned mode is still valid, but its local input assets need repair."""
 
 
-def _authority_checks_can_use_worker_thread() -> bool:
+def _authority_checks_can_use_worker_thread(conn=None) -> bool:
     """A private in-memory SQLite database cannot be reopened in a worker thread."""
     try:
-        rows = get_conn().execute("PRAGMA database_list").fetchall()
+        rows = (conn or get_conn()).execute("PRAGMA database_list").fetchall()
         return any(str(row[2] or "").strip() for row in rows)
     except Exception:
         return False
@@ -71,14 +71,15 @@ def _assert_video_provider_submission_authority(
 
 async def _assert_video_provider_submission_authority_async(
     *,
+    conn=None,
     job,
     meta: dict[str, Any],
     actual_mode: str,
     write_point: str,
 ) -> Any | None:
-    if not _authority_checks_can_use_worker_thread():
+    if not _authority_checks_can_use_worker_thread(conn):
         return _assert_video_provider_submission_authority(
-            get_conn(),
+            conn or get_conn(),
             job=job,
             meta=meta,
             actual_mode=actual_mode,
@@ -2682,6 +2683,7 @@ async def _prepare_planned_mode_inputs(
     # submit.  One mode-neutral authority fence must therefore run before mode
     # dispatch, not merely before create_video_task.
     selected_plan = await _assert_video_provider_submission_authority_async(
+        conn=conn,
         job=job,
         meta=meta,
         actual_mode=str(mode),
@@ -3004,6 +3006,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             job, version["id"], "provider_submit",
                         )
                         await _assert_video_provider_submission_authority_async(
+                            conn=conn,
                             job=job,
                             meta=meta,
                             actual_mode=actual_mode,
@@ -3040,6 +3043,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         try:
                             try:
                                 await _assert_video_provider_submission_authority_async(
+                                    conn=conn,
                                     job=job,
                                     meta=meta,
                                     actual_mode=actual_mode,
@@ -3794,8 +3798,19 @@ async def _worker_loop(name: str, queue: asyncio.Queue[str] | None = None) -> No
                 await _run_job(job_id, lease_owner=name)
         except Exception as exc:  # noqa: BLE001 worker 永不死亡，但错误必须落库
             public = errors.record_and_format(exc, action="worker_loop", context={"job_id": job_id})
-            if _set_job(job_id, "failed", public, lease_owner=name):
-                media_scheduler.settle_budget(job_id, 0.0, success=False)
+            try:
+                if _set_job(job_id, "failed", public, lease_owner=name):
+                    media_scheduler.settle_budget(job_id, 0.0, success=False)
+            except Exception as persist_exc:  # noqa: BLE001 worker 本身不能因落库失败退出
+                try:
+                    get_conn().rollback()
+                except Exception:  # noqa: BLE001 best-effort lock release
+                    pass
+                errors.log_error(
+                    persist_exc,
+                    action="worker_loop_error_persist",
+                    context={"job_id": job_id, "worker": name},
+                )
         finally:
             work_queue.task_done()
 

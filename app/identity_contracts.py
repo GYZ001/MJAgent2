@@ -7,13 +7,16 @@ person's name, title, gender, occupation, or story genre.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal
+import re
+from typing import Any, Literal
 
 from app.schemas import (
     Bible,
     EpisodeScreenplay,
     NarrativeIdentityContract,
+    Shot,
     Storyboard,
+    StoryboardOutlineShot,
 )
 
 
@@ -330,6 +333,311 @@ def narrative_identity_resolver(
 ) -> NarrativeIdentityResolver:
     """Build the sole identity-policy resolver for a narrative screenplay."""
     return NarrativeIdentityResolver(bible, screenplay)
+
+
+def identity_ids_in_authority_text(
+    screenplay: EpisodeScreenplay,
+    value: object,
+    *,
+    bible: Bible | None = None,
+    strip_dialogue: bool = False,
+) -> set[str]:
+    """Resolve exact authority tokens from open-vocabulary relation prose.
+
+    Tokens come only from the current typed identity registry.  Longest tokens
+    consume their matched surface first so one display name cannot also trigger
+    a shorter identity whose name happens to be its suffix.
+    """
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return set()
+    text = str(value or "")
+    if strip_dialogue:
+        for pattern in (
+            r"「[^」]*」", r"“[^”]*”", r"『[^』]*』", r'"[^"]*"',
+        ):
+            text = re.sub(pattern, "", text)
+    identities: list[object]
+    if bible is not None:
+        identities = list(
+            narrative_identity_resolver(bible, screenplay).identities
+        )
+    else:
+        identities = list(plan.identity_contracts)
+    token_owners = sorted(
+        {
+            (str(token), str(identity.identity_id))
+            for identity in identities
+            for token in (
+                identity.identity_id,
+                identity.display_name,
+                *identity.voice_ids,
+            )
+            if str(token or "").strip()
+        },
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+    matched: set[str] = set()
+    unmatched = text
+    for token, identity_id in token_owners:
+        if token not in unmatched:
+            continue
+        matched.add(identity_id)
+        unmatched = unmatched.replace(token, "")
+    return matched
+
+
+def storyboard_action_relation_ids(
+    screenplay: EpisodeScreenplay,
+    event_id: str,
+    action: Any,
+    *,
+    bible: Bible | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return immutable graph relations with a legacy text-backed projection.
+
+    Modern events own explicit onscreen identities and keep their typed action
+    relation unchanged.  For older events without that field, quoted dialogue
+    is excluded and only exact current-registry tokens in action/state prose may
+    narrow a relation.  An empty projection preserves the typed relation rather
+    than guessing from pronouns.
+    """
+    actor_ids = list(getattr(action, "actor_ids", None) or [])
+    target_ids = list(getattr(action, "target_ids", None) or [])
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return actor_ids, target_ids
+    event = next(
+        (
+            candidate
+            for candidate in plan.events
+            if candidate.event_id == str(event_id or "").strip()
+        ),
+        None,
+    )
+    if event is None or event.onscreen_entity_ids:
+        return actor_ids, target_ids
+    relation_ids = identity_ids_in_authority_text(
+        screenplay,
+        "\n".join((
+            str(getattr(action, "semantic_intent", "") or ""),
+            str(getattr(action, "completion_condition", "") or ""),
+            *(
+                str(getattr(phase, "start_condition", "") or "")
+                for phase in (getattr(action, "temporal_phases", None) or [])
+            ),
+            *(
+                str(getattr(phase, "end_condition", "") or "")
+                for phase in (getattr(action, "temporal_phases", None) or [])
+            ),
+        )),
+        bible=bible,
+        strip_dialogue=True,
+    )
+    projected_actors = [
+        identity_id for identity_id in actor_ids if identity_id in relation_ids
+    ]
+    projected_targets = [
+        identity_id for identity_id in target_ids if identity_id in relation_ids
+    ]
+    return (
+        projected_actors or actor_ids,
+        projected_targets or target_ids,
+    )
+
+
+def _longest_shared_authority_surface(left: str, right: str) -> str:
+    """Return the longest exact alphanumeric surface shared by two texts."""
+    left_key = _semantic_alias_key(left)
+    right_key = _semantic_alias_key(right)
+    if not left_key or not right_key:
+        return ""
+    previous = [0] * (len(right_key) + 1)
+    best_length = 0
+    best_end = 0
+    for left_index, left_char in enumerate(left_key, start=1):
+        current = [0] * (len(right_key) + 1)
+        for right_index, right_char in enumerate(right_key, start=1):
+            if left_char != right_char:
+                continue
+            current[right_index] = previous[right_index - 1] + 1
+            if current[right_index] > best_length:
+                best_length = current[right_index]
+                best_end = left_index
+        previous = current
+    return left_key[best_end - best_length:best_end]
+
+
+def storyboard_visual_identity_relation(
+    shot: Shot,
+    allowed_entity_ids: list[str],
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+) -> dict[str, object]:
+    """Resolve a shot's visual cast against its exact narrative relation.
+
+    The comparison is wholly contract-driven.  It does not classify identities
+    from names, titles, occupations, or story vocabulary.
+    """
+    resolver = narrative_identity_resolver(bible, screenplay)
+    allowed = []
+    allowed_ids: set[str] = set()
+    for token in allowed_entity_ids:
+        try:
+            identity = resolver.resolve(token, usage="visual")
+        except IdentityContractError:
+            continue
+        if identity.identity_id not in allowed_ids:
+            allowed.append(identity)
+            allowed_ids.add(identity.identity_id)
+
+    visual_tokens = [
+        *(
+            str(value or "").strip()
+            for value in (shot.characters or [])
+            if str(value or "").strip()
+        ),
+        *(
+            str(value or "").strip()
+            for value in (shot.characters_visible or [])
+            if str(value or "").strip()
+        ),
+    ]
+    for role in shot.reference_roles or []:
+        prefix, separator, value = str(role or "").partition(":")
+        if separator and prefix in {"character_identity", "collective_group"}:
+            visual_tokens.append(value.strip())
+
+    unexpected: dict[str, str] = {}
+    for token in dict.fromkeys(visual_tokens):
+        try:
+            identity = resolver.resolve(token, usage="visual")
+        except IdentityContractError:
+            continue
+        if identity.identity_id not in allowed_ids:
+            unexpected[identity.identity_id] = identity.display_name
+
+    visual_text = "\n".join((
+        str(shot.action_desc or ""),
+        str(shot.first_frame_desc or ""),
+        str(shot.last_frame_desc or ""),
+    ))
+    unmatched_visual_text = visual_text
+    for token in sorted(
+        {
+            token
+            for identity in allowed
+            for token in (identity.identity_id, identity.display_name)
+            if token
+        },
+        key=len,
+        reverse=True,
+    ):
+        unmatched_visual_text = unmatched_visual_text.replace(token, "")
+    for identity in resolver.identities:
+        if not identity.can_be_visible or identity.identity_id in allowed_ids:
+            continue
+        if any(
+            token and token in unmatched_visual_text
+            for token in (identity.identity_id, identity.display_name)
+        ):
+            unexpected[identity.identity_id] = identity.display_name
+
+    # A model may describe a contracted identity by its canonical appearance
+    # instead of repeating its display name.  Match only an exact, sufficiently
+    # long appearance surface that is unique across the current typed identity
+    # registry.  The evidence is generated from authority data at runtime; no
+    # name, title, role, costume, or story-vocabulary list is maintained here.
+    visible_identities = [
+        identity for identity in resolver.identities
+        if identity.can_be_visible and identity.visual_canonical.strip()
+    ]
+    authority_anchors = {
+        identity.identity_id: _semantic_alias_key(identity.visual_canonical)
+        for identity in visible_identities
+    }
+    for identity in visible_identities:
+        if identity.identity_id in allowed_ids or identity.identity_id in unexpected:
+            continue
+        surface = _longest_shared_authority_surface(
+            visual_text,
+            identity.visual_canonical,
+        )
+        if len(surface) < 5 or surface.isdigit():
+            continue
+        surface_owner_ids = {
+            owner_id
+            for owner_id, owner_anchor in authority_anchors.items()
+            if surface in owner_anchor
+        }
+        # Multiple contracts may intentionally share one group appearance.
+        # The surface is still decisive when every matching contract is outside
+        # this shot.  If even one allowed identity shares it, attribution is
+        # genuinely ambiguous and deterministic projection leaves it alone.
+        if surface_owner_ids & allowed_ids:
+            continue
+        unexpected[identity.identity_id] = identity.display_name
+
+    return {
+        "allowed_identity_ids": sorted(allowed_ids),
+        "allowed_display_names": list(dict.fromkeys(
+            identity.display_name for identity in allowed
+        )),
+        "unexpected_identity_ids": sorted(unexpected),
+        "unexpected_display_names": list(dict.fromkeys(unexpected.values())),
+    }
+
+
+def repair_shot_visual_prose_from_authority(
+    shot: Shot,
+    brief: StoryboardOutlineShot,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, object]]:
+    """Project visual prose onto the exact typed shot identity relation.
+
+    Structured identity authority wins when an upstream task summary mentions
+    a participant that was not allocated to this shot's composition.  Once any
+    part of the visual envelope is proven contaminated, rebuild all three prose
+    fields from the approved visible subjects; a second generic description of
+    the same excluded person must not survive merely because it omits the
+    display name.  This uses no name, title, occupation, or story-vocabulary
+    classification.
+    """
+    allowed_ids = list(shot.visible_entity_ids or [])
+    allowed_relation = storyboard_visual_identity_relation(
+        shot,
+        allowed_ids,
+        bible,
+        screenplay,
+    )
+    if not allowed_relation["unexpected_identity_ids"]:
+        return []
+
+    allowed_names = list(allowed_relation["allowed_display_names"])
+    subject = "、".join(allowed_names) or "本镜既有可见主体"
+    neutral = {
+        "action_desc": (
+            f"{subject}保持在画面主体位置，连续完成本镜批准任务中的可见主动作"
+        ),
+        "first_frame_desc": f"{subject}处于本镜动作开始前的连续状态",
+        "last_frame_desc": f"{subject}完成本镜动作并保持结果状态",
+    }
+    repairs: list[dict[str, object]] = []
+    for field in ("action_desc", "first_frame_desc", "last_frame_desc"):
+        current = str(getattr(shot, field) or "").strip()
+        replacement = neutral[field]
+        if current == replacement:
+            continue
+        setattr(shot, field, replacement)
+        repairs.append({
+            "field": field,
+            "from": current,
+            "to": replacement,
+            "reason": "shot_visual_identity_authority",
+        })
+    return repairs
 
 
 def canonicalize_storyboard_operational_identities(

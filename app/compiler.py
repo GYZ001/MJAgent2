@@ -1067,6 +1067,14 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     identity_resolver = _assert_shot_character_contract(
         shot, bible, screenplay=screenplay,
     )
+    # Shot/task ownership is validated while accepting each storyboard
+    # candidate and again by the whole-episode publication gate. The compiler
+    # receives only the accepted Shot, not its independent outline task, so it
+    # cannot repeat that relation check without comparing the shot against its
+    # own (possibly narrower) ``visible_entity_ids``. Paid enqueue is already
+    # fenced by the exact published Artifact projection and its consumed
+    # completion certificate. Keep this boundary responsible only for the
+    # complete episode-level identity contract below.
     if shot.duration_s not in config.ALLOWED_DURATIONS:
         raise CompileError(
             f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长必须为 "

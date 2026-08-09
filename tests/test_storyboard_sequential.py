@@ -143,6 +143,38 @@ def test_shot_visual_identity_must_belong_to_current_narrative_task() -> None:
     assert "lip_sync=false" in issues[0].repair_hint
 
 
+def test_shot_visual_identity_gate_reads_visual_prose_not_only_cast_lists() -> None:
+    bible = _bible()
+    bible.characters.append(Character(
+        name="未来出场者",
+        role="后续事件人物",
+        appearance_canonical="成年人物，深色长袍，外观稳定清晰",
+    ))
+    screenplay = _screenplay()
+    screenplay.narrative_plan = NarrativeContinuityPlan(scope_id="e2")
+    shot = _shot(1)
+    shot.characters = ["萧炎"]
+    shot.characters_visible = ["萧炎"]
+    shot.action_desc = "未来出场者站在萧炎身旁，听完他的话后闭口作出反应。"
+    task = StoryboardOutlineShot(
+        shot_no=1,
+        visible_entity_ids=["萧炎"],
+    )
+
+    issues = _storyboard_shot_visual_identity_issues(
+        shot,
+        task,
+        bible,
+        screenplay,
+        episode_id="e2",
+    )
+
+    assert [issue.code for issue in issues] == [
+        "SHOT_VISIBLE_IDENTITY_NOT_GROUNDED"
+    ]
+    assert issues[0].evidence["unexpected_identity_ids"] == ["未来出场者"]
+
+
 def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bool,
              screenplay: EpisodeScreenplay, completed: list[Shot] | None = None) -> list[str]:
     return _validate_storyboard_shot_draft(

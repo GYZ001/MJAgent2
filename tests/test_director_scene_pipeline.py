@@ -8,6 +8,7 @@ from app.production.screenplay_document import (
     screenplay_to_document,
 )
 from app.schemas import (
+    AtomicAction,
     Bible,
     Character,
     EpisodeScreenplay,
@@ -433,7 +434,7 @@ def test_scene_pack_hydrates_director_fields_without_per_shot_calls(monkeypatch)
                 name="谷言",
                 role="主角",
                 appearance_canonical="二十八岁男性，黑色短发，深灰西装，佩戴银色手表",
-            )
+            ),
         ],
         world=World(visual_style_canonical="都市国漫厚涂风，统一电影光影"),
     )
@@ -567,7 +568,12 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
                 name="谷言",
                 role="主角",
                 appearance_canonical="二十八岁男性，黑色短发，深灰西装，佩戴银色手表",
-            )
+            ),
+            Character(
+                name="观察者",
+                role="角色",
+                appearance_canonical="成年女性，黑色长发，浅色外套，外观稳定清晰",
+            ),
         ],
         world=World(visual_style_canonical="都市国漫厚涂风，统一电影光影"),
     )
@@ -602,6 +608,10 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
                 state_out="谷言停在门前保持警觉",
                 continuity_mode="scene_change",
                 duration_s=7,
+                camera_size="近景",
+                camera_angle="粗略平视",
+                camera_movement="固定",
+                camera_motivation="大纲阶段的粗略摄影建议",
             )
         ],
     )
@@ -617,9 +627,9 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
                 camera_angle="平视侧面角度",
                 camera_move="跟随",
                 camera_motivation="完整看清谷言从桌边走到门前的动作路径",
-                action_desc="谷言从桌边起身走向门口，在门前停下并压低声音示警。",
-                first_frame_desc="谷言坐在咖啡厅桌边，门位于画面右侧。",
-                last_frame_desc="同一机位，谷言停在右侧门前保持警觉。",
+                action_desc="观察者站在谷言身旁，谷言从桌边起身走向门口并压低声音示警。",
+                first_frame_desc="观察者站在桌边，谷言坐在咖啡厅桌边准备起身。",
+                last_frame_desc="同一机位，观察者仍在画内，谷言停在右侧门前保持警觉。",
                 dialogue_emotions={"KL01": "警觉"},
             )
         ],
@@ -647,6 +657,26 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
     assert shot.source_excerpt in source
     assert shot.context_requirement_ids == ["CTX-SC01-01"]
     assert shot.is_final is True
+    assert shot.shot_size == "中景"
+    assert shot.camera_angle == "平视侧面角度"
+    assert shot.camera_move == "跟随"
+    assert shot.camera_motivation == "完整看清谷言从桌边走到门前的动作路径"
+    visual_prose = "\n".join((
+        shot.action_desc,
+        shot.first_frame_desc,
+        shot.last_frame_desc,
+    ))
+    assert "观察者" in visual_prose
+    assert any(
+        "观察者" in error
+        for error in stages.validate_storyboard_visual_identity_contract(
+            Storyboard(episode_no=1, shots=[shot]),
+            outline,
+            bible,
+            screenplay,
+            episode_id="e1",
+        )
+    )
 
 
 def test_scene_pack_expands_short_owned_dialogue_to_auditable_source_context() -> None:
@@ -828,6 +858,103 @@ def test_scene_pack_preserves_offscreen_voice_without_forcing_speaker_visible() 
     assert dialogues[0].speaker == "门外人"
     assert dialogues[0].delivery == "offscreen_voice"
     assert characters == ["谷言"]
+
+
+def test_narrative_scene_pack_never_repopulates_empty_visual_authority_from_model() -> None:
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=NarrativeContinuityPlan(scope_id="e1"),
+    )
+    bible = Bible(
+        characters=[
+            Character(
+                name="当前人物",
+                role="当前事件人物",
+                appearance_canonical="当前人物的稳定外观",
+            ),
+            Character(
+                name="后续人物",
+                role="后续事件人物",
+                appearance_canonical="后续人物的稳定外观",
+            ),
+        ],
+        world=World(visual_style_canonical="都市国漫"),
+    )
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        characters_visible=[],
+        visible_entity_ids=[],
+    )
+
+    characters = stages._scene_pack_characters(
+        brief,
+        [],
+        bible=bible,
+        screenplay=screenplay,
+        fallback=["后续人物"],
+    )
+
+    assert characters == []
+
+
+def test_scene_pack_uses_model_focal_subset_and_graph_offscreen_partition() -> None:
+    identities = [
+        "主体",
+        "同场执行者",
+        "对象甲",
+        "对象乙",
+    ]
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=NarrativeContinuityPlan(
+            scope_id="e1",
+            atomic_actions=[AtomicAction(
+                action_id="ACT-1",
+                actor_ids=["主体", "同场执行者"],
+                target_ids=["对象甲", "对象乙"],
+                semantic_intent="主体完成面向两个对象的单一可见动作。",
+                completion_condition="两个对象接收到动作结果。",
+            )],
+        ),
+    )
+    bible = Bible(
+        characters=[
+            Character(
+                name=display_name,
+                role="测试身份",
+                appearance_canonical=f"{display_name}的稳定测试外观",
+            )
+            for display_name in identities
+        ],
+        world=World(visual_style_canonical="测试画风"),
+    )
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        primary_action_id="ACT-1",
+        characters_visible=list(identities),
+        visible_entity_ids=list(identities),
+    )
+
+    characters = stages._scene_pack_characters(
+        brief,
+        [],
+        bible=bible,
+        screenplay=screenplay,
+        fallback=["主体", "对象甲", "对象乙"],
+    )
+    visible, offscreen_actors, offscreen_targets = (
+        stages._scene_pack_visual_partition(
+            characters,
+            brief,
+            screenplay,
+            bible,
+        )
+    )
+
+    assert characters == ["主体", "对象甲", "对象乙"]
+    assert visible == ["主体", "对象甲", "对象乙"]
+    assert offscreen_actors == ["同场执行者"]
+    assert offscreen_targets == []
 
 
 def test_scene_pack_normalizes_same_scene_continuity() -> None:

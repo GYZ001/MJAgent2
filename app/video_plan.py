@@ -833,6 +833,46 @@ def capability_snapshot_by_id(
     return _snapshot_from_row(row) if row else None
 
 
+def video_plan_provider_selection_is_current(
+    plan: EpisodeVideoGenerationPlan,
+    *,
+    conn=None,
+) -> bool:
+    """Return whether the plan is executable by the provider selected now.
+
+    Storyboard/release validity and provider selection are separate authorities:
+    a plan may remain content-current while the operator switches the active
+    video provider.  Grant issue and Supervisor preflight use this cheap,
+    read-only comparison so they can rebind before any payable work instead of
+    discovering the drift independently in every media worker.
+    """
+    from app import hiagent
+
+    snapshot = capability_snapshot_by_id(plan.capability_snapshot_id, conn=conn)
+    if snapshot is None:
+        return False
+    active_provider = hiagent.active_provider("video")
+    active_model = hiagent.active_model("video", active_provider)
+    if snapshot.provider != active_provider or snapshot.model != active_model:
+        return False
+    latest_row = (conn or get_conn()).execute(
+        """SELECT * FROM provider_video_capability_snapshots
+           WHERE provider=? AND model=?
+           ORDER BY probe_time DESC,created_at DESC LIMIT 1""",
+        (active_provider, active_model),
+    ).fetchone()
+    if latest_row is None:
+        return False
+    latest = _snapshot_from_row(latest_row)
+    return bool(
+        latest.technical_success
+        and all(
+            capability_allows(latest, item.mode, item.video_input_intent)
+            for item in plan.shots
+        )
+    )
+
+
 def save_capability_snapshot(
     snapshot: ProviderVideoCapabilitySnapshot,
     *,
@@ -1525,7 +1565,7 @@ async def generate_episode_plan(
                     )
                 db.commit()
             return candidate
-    if current and current.capability_snapshot_id == snapshot.id:
+    if current:
         # A storyboard may be re-signed because its publication/calibration
         # evidence changed while every executable shot and bound asset stayed
         # byte-for-byte equivalent.  Preserve the already validated semantic
@@ -1548,9 +1588,14 @@ async def generate_episode_plan(
             candidate.episode_video_plan_id = plan_id
             candidate.plan_revision = next_revision
             candidate.source_storyboard_revision_id = revision_id
+            candidate.capability_snapshot_id = snapshot.id
             candidate.status = "draft"
             candidate.planner_provider = "deterministic"
-            candidate.planner_model = "unchanged-execution-release-rebind"
+            candidate.planner_model = (
+                "unchanged-execution-release-rebind"
+                if current.capability_snapshot_id == snapshot.id
+                else "compatible-capability-rebind"
+            )
             candidate.planner_prompt_fingerprint = _hash({
                 "parent_plan_id": current.episode_video_plan_id,
                 "parent_plan_revision": current.plan_revision,
@@ -1569,29 +1614,41 @@ async def generate_episode_plan(
                 item.plan_revision = next_revision
                 item.source_storyboard_revision_id = revision_id
                 item.capability_snapshot_id = snapshot.id
+                item.status = (
+                    "degraded"
+                    if item.degraded_to_mode is not None
+                    else "planned"
+                )
             bind_plan_release_identity(candidate, list(rows), release_manifest)
-            validate_episode_plan(
-                candidate,
-                list(rows),
-                snapshot,
-                release_manifest=release_manifest,
-            )
-            publish_plan(candidate, conn=db)
-            log_provider_call(
-                "episode_video_mode_plan_release_rebind",
-                candidate.planner_model,
-                "REUSED",
-                None,
-                0,
-                meta={
-                    "episode_id": episode_id,
-                    "plan_revision": next_revision,
-                    "source_plan_id": current.episode_video_plan_id,
-                    "shot_count": len(rows),
-                },
-            )
-            db.commit()
-            return candidate
+            try:
+                validate_episode_plan(
+                    candidate,
+                    list(rows),
+                    snapshot,
+                    release_manifest=release_manifest,
+                )
+            except VideoPlanValidationError:
+                # The new provider cannot execute the existing semantic modes;
+                # fall through to the normal planner instead of weakening or
+                # silently changing the plan.
+                pass
+            else:
+                publish_plan(candidate, conn=db)
+                log_provider_call(
+                    "episode_video_mode_plan_release_rebind",
+                    candidate.planner_model,
+                    "REUSED",
+                    None,
+                    0,
+                    meta={
+                        "episode_id": episode_id,
+                        "plan_revision": next_revision,
+                        "source_plan_id": current.episode_video_plan_id,
+                        "shot_count": len(rows),
+                    },
+                )
+                db.commit()
+                return candidate
     if len(rows) == 1:
         only_row = rows[0]
         item = ShotVideoGenerationPlan(
@@ -2306,7 +2363,10 @@ def assert_video_provider_submission_authority(
     if issues:
         if plan is not None:
             _mark_episode_video_plan_stale(plan, conn=db)
-        if conn is None:
+            # This assertion is a terminal paid-work fence.  When it rejects,
+            # there is no successful caller transaction to commit later.  A
+            # worker-thread connection would otherwise retain the stale-plan
+            # UPDATE and hold SQLite's single writer lock indefinitely.
             db.commit()
         raise VideoPlanValidationError(issues)
     assert selected is not None and latest_snapshot is not None

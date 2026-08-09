@@ -46,6 +46,7 @@ from app.stages import (
     normalize_storyboard_shot_candidate,
     storyboard_planning_bible,
     storyboard_shot_authority_context,
+    validate_storyboard_visual_identity_contract,
 )
 
 SupervisorPhase = Literal[
@@ -561,6 +562,63 @@ def _blocker_messages(draft) -> list[str]:
     if disposition not in {"PASS", "WARNING", None}:
         return []
     return []
+
+
+def _stop_after_exhausted_agent_loop(
+    cp: SupervisorCheckpoint,
+    exc: StageError,
+    *,
+    shot_no: int,
+    run_id: str | None = None,
+) -> SupervisorCheckpoint | None:
+    """Promote a child loop's terminal budget signal to the supervisor."""
+    if exc.exit_reason != "authority_blockers_exhausted":
+        return None
+    iterations = max(1, int(exc.iterations or 0))
+    issue_messages = [
+        str(issue.message).strip()
+        for issue in exc.issues
+        if str(issue.message).strip()
+    ] or [
+        str(message).strip()
+        for message in exc.errors
+        if str(message).strip()
+    ]
+    issue_codes = list(dict.fromkeys(
+        str(issue.code).strip()
+        for issue in exc.issues
+        if str(issue.code).strip()
+    ))
+    cp.phase = "WAITING_HUMAN"
+    cp.outcome = "REPAIR_FAILED_AGENT_LOOP_EXHAUSTED"
+    cp.last_repair = {
+        "level": "L5",
+        "strategy": "waiting_human",
+        "status": "paused",
+        "reason": "child_agent_loop_authority_blockers_exhausted",
+        "invalidation_frontier": shot_no,
+        "touched_shot_nos": [shot_no],
+        "issue_codes": issue_codes,
+        "issue_messages": issue_messages,
+        "iterations": iterations,
+        "exit_reason": exc.exit_reason,
+    }
+    cp.repair_candidate_shots = []
+    save_checkpoint(cp, run_id=run_id)
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            "STORYBOARD_AGENT_LOOP_EXHAUSTED",
+            "warning",
+            f"第 {shot_no} 镜自动修复达到 {iterations} 轮上限，任务已停止",
+            payload={
+                "shot_no": shot_no,
+                "iterations": iterations,
+                "exit_reason": exc.exit_reason,
+                "issue_codes": issue_codes,
+            },
+        )
+    return cp
 
 
 def _is_structural_storyboard_issue(category: Any = None) -> bool:
@@ -1094,10 +1152,6 @@ def _retarget_spine_repair_brief(
     brief.covers = does
     brief.spine_beat_ids = [beat_id]
     brief.primary_action = does
-    visible = [str(name).strip() for name in (brief.characters_visible or []) if str(name).strip()]
-    if who and who not in visible:
-        visible.insert(0, who)
-    brief.characters_visible = visible
     audio_cast = [str(name).strip() for name in (brief.audio_cast or []) if str(name).strip()]
     if brief.key_line_ids and who and who not in audio_cast:
         audio_cast.insert(0, who)
@@ -1115,14 +1169,6 @@ def _retarget_spine_repair_shot(
     beat_id, who, does = target
     shot.primary_action = does
     shot.spine_beat_ids = [beat_id]
-    visible = [
-        str(name).strip()
-        for name in (shot.characters_visible or [])
-        if str(name).strip()
-    ]
-    if who and who not in visible:
-        visible.insert(0, who)
-    shot.characters_visible = visible
     if brief is not None:
         for field_name in (
             "key_line_ids",
@@ -1340,6 +1386,24 @@ def _write_shot_fields(
             json.dumps(shot_contract_dict(shot), ensure_ascii=False),
             shot.continuity_mode, shot.observed_state_out, artifact_id, row_id,
         ),
+    )
+
+
+def _repair_shot_visual_prose_from_authority(
+    shot: Shot,
+    brief: StoryboardOutlineShot,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+) -> list[dict[str, Any]]:
+    from app.identity_contracts import (
+        repair_shot_visual_prose_from_authority,
+    )
+
+    return repair_shot_visual_prose_from_authority(
+        shot,
+        brief,
+        bible,
+        screenplay,
     )
 
 
@@ -1969,35 +2033,43 @@ async def run_storyboard_supervisor(
         )
         from app.validators import normalize_outline_dialogue_ownership
 
+        authority_repairs = normalize_narrative_storyboard_outline(
+            outline,
+            screenplay,
+            preserve_shot_ids=True,
+        )
         dialogue_repairs = normalize_outline_dialogue_ownership(
             outline,
             screenplay,
+        )
+        authority_repairs.extend(
+            normalize_narrative_storyboard_outline(
+                outline,
+                screenplay,
+                preserve_shot_ids=True,
+            )
         )
         pending_repair_dialogue_repairs: list[dict[str, Any]] = []
         discarded_repair = None
         if _repair_is_pending(cp):
             pending_outline = _repair_outline_for_checkpoint(cp, outline)
             if pending_outline is not None and pending_outline is not outline:
+                pending_authority_repairs = (
+                    normalize_narrative_storyboard_outline(
+                        pending_outline,
+                        screenplay,
+                        preserve_shot_ids=True,
+                    )
+                )
                 pending_repair_dialogue_repairs = (
                     normalize_outline_dialogue_ownership(
                         pending_outline,
                         screenplay,
                     )
                 )
-                if pending_repair_dialogue_repairs:
+                if pending_repair_dialogue_repairs or pending_authority_repairs:
                     discarded_repair = cp.last_repair
-        authority_repairs: list[dict[str, Any]] = []
-        if dialogue_repairs:
-            authority_repairs = normalize_narrative_storyboard_outline(
-                outline,
-                screenplay,
-            )
-            dialogue_repairs.extend(
-                normalize_outline_dialogue_ownership(
-                    outline,
-                    screenplay,
-                )
-            )
+        if dialogue_repairs or authority_repairs:
             ensure_storyboard_scene_contexts(
                 outline,
                 screenplay,
@@ -2061,14 +2133,25 @@ async def run_storyboard_supervisor(
                     screenplay,
                     brief,
                     board.shots[index - 1] if index > 0 else None,
+                    bible=bible,
                 ),
             )
-            if not changes:
+            normalized_shot = Shot.model_validate(normalized["shot"])
+            prose_repairs = _repair_shot_visual_prose_from_authority(
+                normalized_shot,
+                brief,
+                bible,
+                screenplay,
+            )
+            if not changes and not prose_repairs:
                 continue
-            board.shots[index] = Shot.model_validate(normalized["shot"])
+            board.shots[index] = normalized_shot
             repairs.append({
                 "shot_no": int(shot.shot_no),
-                "fields": [change["field"] for change in changes],
+                "fields": [
+                    *[change["field"] for change in changes],
+                    *[change["field"] for change in prose_repairs],
+                ],
             })
         return repairs
 
@@ -2648,6 +2731,16 @@ async def run_storyboard_supervisor(
                     if narrative_authority
                     else []
                 )
+                if narrative_authority:
+                    candidate_errors.extend(
+                        validate_storyboard_visual_identity_contract(
+                            candidate_board,
+                            outline,
+                            storyboard_planning_bible(bible, outline),
+                            screenplay,
+                            episode_id=episode_id,
+                        )
+                    )
                 if candidate_errors:
                     failed_scene_ids.add(context.scene_id)
                     failed_batch_ends.append(scene_end)
@@ -2850,6 +2943,24 @@ async def run_storyboard_supervisor(
             except StageError as exc:
                 if not _run_has_write_ownership():
                     return cp
+                stopped = _stop_after_exhausted_agent_loop(
+                    cp,
+                    exc,
+                    shot_no=shot_no,
+                    run_id=run_id,
+                )
+                if stopped is not None:
+                    iterations = max(1, int(exc.iterations or 0))
+                    message = (
+                        f"第 {shot_no} 镜自动修复已达到 {iterations} 轮上限，"
+                        f"任务已安全停止；已保留前 {len(completed)} 个通过镜头。"
+                    )
+                    conn.execute(
+                        "UPDATE episodes SET status='scripted',script_error=? WHERE id=?",
+                        (message[:800], episode_id),
+                    )
+                    conn.commit()
+                    return stopped
                 plan = await _route_with_narrative_diagnosis(
                     list(exc.errors) if hasattr(exc, "errors") else [str(exc)],
                     board=Storyboard(episode_no=ep_data["episode_no"], shots=list(completed)),
@@ -3287,6 +3398,17 @@ async def run_storyboard_supervisor(
             *validate_storyboard_direction_contract(
                 evaluation.board,
                 outline,
+            ),
+            *(
+                validate_storyboard_visual_identity_contract(
+                    evaluation.board,
+                    outline,
+                    evaluation_bible,
+                    screenplay,
+                    episode_id=episode_id,
+                )
+                if outline is not None and narrative_authority
+                else []
             ),
         ]
         if runtime_blocking_errors:

@@ -269,6 +269,7 @@ def validate_storyboard(
     declared_functional_names = typed_functional_identity_names(screenplay)
     narrative_character_ids: set[str] = set()
     narrative_actions: dict[str, Any] = {}
+    narrative_action_relations: dict[str, tuple[list[str], list[str]]] = {}
     identity_resolver = None
     if narrative_authority and narrative_plan is not None:
         narrative_actions = {
@@ -323,6 +324,21 @@ def validate_storyboard(
         else:
             try:
                 identity_resolver = narrative_identity_resolver(bible, screenplay)
+                from app.identity_contracts import storyboard_action_relation_ids
+
+                action_event_owner = {
+                    action_id: event.event_id
+                    for event in narrative_plan.events
+                    for action_id in event.action_ids
+                }
+                narrative_action_relations = {
+                    action_id: storyboard_action_relation_ids(
+                        screenplay,
+                        action_event_owner.get(action_id, ""),
+                        action,
+                    )
+                    for action_id, action in narrative_actions.items()
+                }
             except IdentityContractError as exc:
                 errors.append(f"[NARRATIVE_IDENTITY_CONTRACT_INVALID] {exc}")
 
@@ -470,9 +486,14 @@ def validate_storyboard(
                 *([shot.primary_action_id] if shot.primary_action_id else []),
                 *(shot.supporting_action_ids or []),
             ]
-            for action in [narrative_actions.get(action_id)]
-            if action is not None
-            for actor_id in action.actor_ids
+            for actor_id in narrative_action_relations.get(
+                action_id,
+                (
+                    list(narrative_actions[action_id].actor_ids)
+                    if action_id in narrative_actions else [],
+                    [],
+                ),
+            )[0]
         }
         task_target_ids = {
             target_id
@@ -480,9 +501,14 @@ def validate_storyboard(
                 *([shot.primary_action_id] if shot.primary_action_id else []),
                 *(shot.supporting_action_ids or []),
             ]
-            for action in [narrative_actions.get(action_id)]
-            if action is not None
-            for target_id in action.target_ids
+            for target_id in narrative_action_relations.get(
+                action_id,
+                (
+                    [],
+                    list(narrative_actions[action_id].target_ids)
+                    if action_id in narrative_actions else [],
+                ),
+            )[1]
         }
         spoken_identity_names = set(spoken_speakers(shot))
         delivered_actor_ids = {
@@ -3680,6 +3706,12 @@ def normalize_outline_dialogue_ownership(
 
     def _reaction_actor(index: int, excluded_speakers: set[str]) -> str:
         current = outline.shots[index]
+        current_visible = {
+            str(name or "").strip()
+            for name in (current.characters_visible or [])
+            if str(name or "").strip()
+        }
+        relation_is_authoritative = bool(current.visible_entity_ids)
         for positions in (
             range(index + 1, len(outline.shots)),
             range(index - 1, -1, -1),
@@ -3690,9 +3722,16 @@ def normalize_outline_dialogue_ownership(
                     continue
                 for key_id in candidate.key_line_ids or []:
                     speaker = speaker_by_key.get(str(key_id).upper(), "")
-                    if speaker and speaker not in excluded_speakers:
+                    if (
+                        speaker
+                        and speaker not in excluded_speakers
+                        and (
+                            not relation_is_authoritative
+                            or speaker in current_visible
+                        )
+                    ):
                         return speaker
-        return next(
+        non_speaker = next(
             (
                 name
                 for name in current.characters_visible or []
@@ -3700,6 +3739,11 @@ def normalize_outline_dialogue_ownership(
             ),
             "",
         )
+        if non_speaker:
+            return non_speaker
+        # A redundant dialogue node with no source-backed listener remains on
+        # the actual speaker instead of inventing a scene-cast reaction actor.
+        return next(iter(current.characters_visible or []), "")
 
     # Structured owners always deliver the canonical screenplay line. This
     # removes stale split prose from their beat/action fields.
@@ -3772,9 +3816,11 @@ def normalize_outline_dialogue_ownership(
         else:
             actor = _reaction_actor(index, speakers)
             reaction = (
-                f"{actor}听完上一话轮后闭口作出可见反应"
+                f"{actor}说完本话轮后闭口呈现状态变化"
+                if actor in speakers
+                else f"{actor}听完上一话轮后闭口作出可见反应"
                 if actor
-                else "听者闭口作出可见反应"
+                else "当前画面以原有可见状态承接下一动作"
             )
             shot.beat = reaction
             shot.covers = reaction

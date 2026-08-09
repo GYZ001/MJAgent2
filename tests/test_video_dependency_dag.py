@@ -352,6 +352,48 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
         item.mode for item in plan.shots
     ]
 
+    switched_snapshot = ProviderVideoCapabilitySnapshot(
+        id="cap-provider-2",
+        provider="provider-2",
+        model="model-2",
+        supports_reference_image=True,
+        supports_first_frame=True,
+        supports_last_frame=True,
+        supports_first_last_pair=True,
+        supports_reference_video=True,
+        probe_time=2,
+        technical_success=True,
+    )
+    video_plan.save_capability_snapshot(switched_snapshot, conn=conn)
+    conn.commit()
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider-2")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda *_args, **_kwargs: "model-2",
+    )
+    assert hiagent.active_provider("video") == "provider-2"
+    assert video_plan.current_capability_snapshot(conn=conn).provider == "provider-2"
+
+    provider_rebound = await video_plan.generate_episode_plan(
+        "e", force=True, conn=conn,
+    )
+
+    assert len(calls) == 1
+    assert provider_rebound.plan_revision == 3
+    provider_rebound_snapshot = conn.execute(
+        "SELECT provider,model FROM provider_video_capability_snapshots WHERE id=?",
+        (provider_rebound.capability_snapshot_id,),
+    ).fetchone()
+    assert dict(provider_rebound_snapshot) == {
+        "provider": "provider-2",
+        "model": "model-2",
+    }
+    assert provider_rebound.planner_model == "compatible-capability-rebind"
+    assert [item.mode for item in provider_rebound.shots] == [
+        item.mode for item in rebound.shots
+    ]
+
 
 @pytest.mark.asyncio
 async def test_large_episode_plan_is_size_windowed_then_validated_as_one_plan(

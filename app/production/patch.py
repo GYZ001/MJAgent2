@@ -310,7 +310,13 @@ def apply_screenplay_patch(
 
 
 def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
-    """Validate a content-addressed immutable screenplay Artifact once."""
+    """Validate an immutable Artifact once and isolate every mutable reader.
+
+    ``EpisodeScreenplay`` is a mutable Pydantic model.  Returning the cached
+    instance directly lets any downstream normalization contaminate the
+    process-wide authority template, so a later resolver can report drift even
+    though neither the Artifact nor the persisted page projection changed.
+    """
     artifact_id = str(art.get("id") or "")
     content = art.get("content") or {}
     content_fingerprint = evidence_repository.content_hash(content)
@@ -320,7 +326,7 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
         if cached is not None:
             _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
     if cached is not None:
-        return cached
+        return cached.model_copy(deep=True)
     if "_projection" in content:
         screenplay = EpisodeScreenplay.model_validate(content["_projection"])
     elif "screenplay_metadata" in content:
@@ -332,7 +338,7 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
         _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
         while len(_SCREENPLAY_ARTIFACT_MODEL_CACHE) > _SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE:
             _SCREENPLAY_ARTIFACT_MODEL_CACHE.popitem(last=False)
-    return screenplay
+    return screenplay.model_copy(deep=True)
 
 
 def load_screenplay_from_artifact(artifact_id: str) -> EpisodeScreenplay:

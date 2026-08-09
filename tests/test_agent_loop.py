@@ -228,6 +228,50 @@ def test_agent_loop_fails_closed_when_authority_blockers_are_exhausted() -> None
         asyncio.run(loop.run(producer, evaluate))
 
 
+@pytest.mark.asyncio
+async def test_stage_adapter_preserves_agent_loop_exhaustion_metadata(
+    monkeypatch,
+) -> None:
+    async def fixed_candidate(*_args, **_kwargs):
+        return '{"value": 1}'
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fixed_candidate)
+    issue = Issue(
+        code="DIALOGUE_FRAMING_INVALID",
+        severity=IssueSeverity.BLOCKER,
+        subject="storyboard:e1",
+        message="镜头景别不满足对白动作合同",
+        category="structural",
+        repairable=True,
+    )
+    loop = AgentLoop(
+        stage_key="storyboard_shot_4",
+        contract_key="storyboard",
+        goal="preserve terminal metadata",
+        scope_type="storyboard_checkpoint",
+        scope_id="e1:4",
+        artifact_type="storyboard_shot",
+        policy=AgentLoopPolicy(
+            max_iterations=1,
+            repair_all_blockers=True,
+        ),
+    )
+
+    with pytest.raises(stages.StageError) as exc_info:
+        await stages._run_with_agent_loop(
+            "分镜脚本",
+            "storyboard",
+            "生成镜头",
+            Candidate,
+            lambda _candidate: [issue],
+            loop=loop,
+        )
+
+    assert exc_info.value.exit_reason == "authority_blockers_exhausted"
+    assert exc_info.value.iterations == 1
+    assert exc_info.value.issues == [issue]
+
+
 def test_baseline_only_hands_off_first_parseable_candidate() -> None:
     calls = 0
 

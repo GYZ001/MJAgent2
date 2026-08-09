@@ -7,9 +7,14 @@ import re
 from typing import Any
 
 from app import config
+from app.identity_contracts import (
+    identity_ids_in_authority_text,
+    storyboard_action_relation_ids,
+)
 from app.narrative import _target_state_fragment_matches
 from app.schemas import (
     AudienceStatePathRef,
+    Bible,
     EpisodeScreenplay,
     NarrativeBoundaryContract,
     ShotCapacityBudget,
@@ -410,6 +415,7 @@ def normalize_narrative_storyboard_outline(
     outline: StoryboardOutline,
     screenplay: EpisodeScreenplay,
     *,
+    bible: Bible | None = None,
     preserve_shot_ids: bool = False,
 ) -> list[dict[str, Any]]:
     """Project graph-owned fields while preserving model-authored directing text.
@@ -425,6 +431,93 @@ def normalize_narrative_storyboard_outline(
 
     events = {item.event_id: item for item in plan.events}
     actions = {item.action_id: item for item in plan.atomic_actions}
+    if bible is not None:
+        from app.identity_contracts import narrative_identity_resolver
+
+        identity_contracts = {
+            identity.identity_id: identity
+            for identity in narrative_identity_resolver(
+                bible,
+                screenplay,
+            ).identities
+        }
+    else:
+        identity_contracts = {
+            identity.identity_id: identity
+            for identity in plan.identity_contracts
+        }
+    legacy_events = {
+        str(item.event_id or "").strip(): item
+        for item in screenplay.events or []
+        if str(item.event_id or "").strip()
+    }
+
+    def _visual_capable(identity_id: str) -> bool:
+        contract = identity_contracts.get(identity_id)
+        return contract is None or contract.visual_policy != "offscreen_only"
+
+    def _legacy_visual_identity_ids(event_id: str) -> set[str]:
+        legacy = legacy_events.get(event_id)
+        if legacy is None:
+            return set()
+        relation_ids = identity_ids_in_authority_text(
+            screenplay,
+            "\n".join((
+                str(legacy.trigger or ""),
+                str(legacy.visible_change or ""),
+                str(legacy.state_out or ""),
+            )),
+            bible=bible,
+            strip_dialogue=True,
+        )
+        return {
+            identity_id for identity_id in relation_ids
+            if _visual_capable(identity_id)
+        }
+
+    legacy_event_relation_ids: dict[str, set[str]] = {}
+    legacy_action_relation_changes: list[dict[str, Any]] = []
+    for event_id, event in events.items():
+        if event.onscreen_entity_ids:
+            continue
+        relation_ids = _legacy_visual_identity_ids(event_id)
+        for action_id in event.action_ids:
+            action = actions.get(action_id)
+            if action is None:
+                continue
+            projected_actor_ids, projected_target_ids = (
+                storyboard_action_relation_ids(
+                    screenplay,
+                    event_id,
+                    action,
+                    bible=bible,
+                )
+            )
+            relation_ids.update(projected_actor_ids)
+            relation_ids.update(projected_target_ids)
+            if projected_actor_ids != action.actor_ids:
+                legacy_action_relation_changes.append({
+                    "field": f"narrative_plan.atomic_actions.{action_id}.actor_ids",
+                    "from": list(action.actor_ids),
+                    "to": projected_actor_ids,
+                    "reason": "legacy_action_typed_relation_projection",
+                })
+            if projected_target_ids != action.target_ids:
+                legacy_action_relation_changes.append({
+                    "field": f"narrative_plan.atomic_actions.{action_id}.target_ids",
+                    "from": list(action.target_ids),
+                    "to": projected_target_ids,
+                    "reason": "legacy_action_typed_relation_projection",
+                })
+        legacy_event_relation_ids[event_id] = relation_ids
+
+    def _display_names(identity_ids: set[str]) -> list[str]:
+        return list(dict.fromkeys(
+            contract.display_name
+            for identity_id, contract in identity_contracts.items()
+            if identity_id in identity_ids
+            and _visual_capable(identity_id)
+        ))
     compiler_context_identity_names = {
         identity.identity_id: identity.display_name
         for identity in plan.identity_contracts
@@ -1162,14 +1255,24 @@ def normalize_narrative_storyboard_outline(
             action = actions.get(action_id)
             if action is None:
                 continue
-            actor_ids = set(action.actor_ids)
+            actor_ids = set(
+                storyboard_action_relation_ids(
+                    screenplay,
+                    event_id,
+                    action,
+                    bible=bible,
+                )[0]
+            )
             if actor_ids - set(compiler_context_identity_names):
                 redundant_ids.update(
                     actor_ids & set(compiler_context_identity_names)
                 )
         redundant_context_ids_by_event[event_id] = redundant_ids
     normalized_shots = []
-    changes: list[dict[str, Any]] = list(action_delivery_changes)
+    changes: list[dict[str, Any]] = [
+        *action_delivery_changes,
+        *legacy_action_relation_changes,
+    ]
 
     for position, (event_id, role, shot) in enumerate(nodes):
         event = events[event_id]
@@ -1188,17 +1291,100 @@ def normalize_narrative_storyboard_outline(
 
         visible_ids = {
             entity_id
-            for evidence in evidence_by_event[event_id]
-            for entity_id in evidence.perceivable_by
-            if entity_id != "audience"
+            for entity_id in event.onscreen_entity_ids
+            if entity_id != "audience" and _visual_capable(entity_id)
         }
+        # Old published narrative plans predate onscreen_entity_ids.  Their
+        # migration is relation-based: action ownership plus exact identity
+        # occurrences in visual state text.  Evidence perceivers and scene cast
+        # are intentionally excluded because neither denotes shot presence.
+        if not event.onscreen_entity_ids:
+            relation_ids = legacy_event_relation_ids.get(event_id) or set()
+            if relation_ids:
+                visible_ids.update(
+                    identity_id
+                    for identity_id in relation_ids
+                    if _visual_capable(identity_id)
+                )
+            else:
+                # Some historical physical actions use only pronouns in their
+                # prose.  With no exact relation evidence at all, preserve the
+                # already-typed actor/target ownership rather than guessing.
+                for event_action_id in event.action_ids:
+                    event_action = actions.get(event_action_id)
+                    if event_action is None:
+                        continue
+                    effective_actor_ids, effective_target_ids = (
+                        storyboard_action_relation_ids(
+                            screenplay,
+                            event_id,
+                            event_action,
+                            bible=bible,
+                        )
+                    )
+                    visible_ids.update(
+                        identity_id
+                        for identity_id in (
+                            *effective_actor_ids,
+                            *effective_target_ids,
+                        )
+                        if _visual_capable(identity_id)
+                    )
         redundant_context_ids = redundant_context_ids_by_event[event_id]
-        for action_id in action_ids:
-            action = actions.get(action_id)
-            if action is not None:
-                visible_ids.update(action.actor_ids)
-                visible_ids.update(action.target_ids)
         visible_ids.difference_update(redundant_context_ids)
+        allowed_names = _display_names(visible_ids)
+        # This is the event's permitted composition relation, not the final
+        # shot cast. Historical outlines often copied a whole scene roster or
+        # retained a wrong first-mentioned actor here. The directing layer
+        # chooses the actual visible subset later and records the three visual
+        # fields together.
+        projected_names = allowed_names
+        if projected_names != list(shot.characters_visible or []):
+            changes.append({
+                "shot_no": shot.shot_no,
+                "field": "characters_visible",
+                "from": list(shot.characters_visible or []),
+                "to": projected_names,
+                "reason": "event_onscreen_identity_authority",
+            })
+            shot.characters_visible = projected_names
+        unexpected_visual_names = [
+            contract.display_name
+            for identity_id, contract in identity_contracts.items()
+            if identity_id not in visible_ids
+            and contract.visual_policy != "offscreen_only"
+            and any(
+                contract.display_name in str(value or "")
+                for value in (
+                    shot.primary_action,
+                    shot.beat,
+                    shot.covers,
+                    shot.state_out,
+                )
+            )
+        ]
+        if unexpected_visual_names and (
+            role == "reaction" or shot.continuity_mode == "reaction_cut"
+        ):
+            reaction = (
+                f"{projected_names[0]}闭口呈现当前事件完成后的状态变化"
+                if projected_names
+                else "当前画面以原有可见状态承接下一动作"
+            )
+            for field_name in (
+                "primary_action", "beat", "covers", "state_out",
+            ):
+                before = str(getattr(shot, field_name) or "")
+                if before == reaction:
+                    continue
+                setattr(shot, field_name, reaction)
+                changes.append({
+                    "shot_no": shot.shot_no,
+                    "field": field_name,
+                    "from": before,
+                    "to": reaction,
+                    "reason": "reaction_visual_identity_authority",
+                })
         if redundant_context_ids:
             redundant_names = {
                 compiler_context_identity_names[identity_id]
@@ -1688,7 +1874,7 @@ def compile_narrative_storyboard_outline(
                 else "same_scene_cut"
             ),
             duration_s=config.DEFAULT_VIDEO_DURATION_S,
-            characters_visible=list(scene.characters),
+            characters_visible=[],
             audio_cast=speakers,
             purpose=observable or scene.story_function,
             resulting_change=(
@@ -1710,7 +1896,7 @@ def compile_narrative_storyboard_outline(
         outline,
         "_compile_audit",
         {
-            "compiler": "narrative-storyboard-outline.v1",
+            "compiler": "narrative-storyboard-outline.v2",
             "event_count": len(events),
             "scene_count": len(scenes),
             "base_shot_count": len(shots),

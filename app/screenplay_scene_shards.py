@@ -405,6 +405,25 @@ def validate_screenplay_scene_shard(
                     f"{scene.key}.units[{unit_index}] onscreen_entity_keys 未冻结："
                     f"{unbound_onscreen}"
                 )
+            unbound_action_relations = sorted(
+                set([*unit.actor_keys, *unit.target_keys]) - identity_keys
+            )
+            if unbound_action_relations:
+                errors.append(
+                    f"{scene.key}.units[{unit_index}] actor/target 未冻结："
+                    f"{unbound_action_relations}"
+                )
+            if "onscreen_entity_keys" not in unit.model_fields_set:
+                errors.append(
+                    f"{scene.key}.units[{unit_index}] 必须显式声明 onscreen_entity_keys"
+                )
+            if (
+                unit.kind == "action"
+                and "actor_keys" not in unit.model_fields_set
+            ):
+                errors.append(
+                    f"{scene.key}.units[{unit_index}] 动作单元必须显式声明 actor_keys"
+                )
             if unit.event_key:
                 # Reuse inside a scene denotes phases of one event; reuse across
                 # scenes is not allowed before global namespacing.
@@ -719,6 +738,7 @@ def _scene_shard_prompt(
         "每个非标题来源必须由至少一个 action/dialogue unit 消费；dialogue.source_text 必须"
         "逐字来自其声明 SRC。speaker_key 只能逐字引用冻结 identity_key。发现无法绑定的"
         "参与者时写 unresolved_participants，绝不自行创建 ID。每个 unit 的 "
+        "actor_keys/target_keys 只能填写当前 unit 的实际动作执行者与受作用对象；"
         "onscreen_entity_keys 只能填写这一动作或话轮当下实际在画面中的冻结 identity_key；"
         "被台词提到、仅能听见或只感知事件的身份不得因此进入该列表。复杂动作可在同一 local event_key"
         "下写有序 units。\nShard plan：\n"

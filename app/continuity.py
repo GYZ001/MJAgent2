@@ -1714,4 +1714,3 @@ def classify_video_hard_failures(
         ]
         facts.extend(blocking or ["typed_runtime_gate_failed"])
     return list(dict.fromkeys(facts))
-

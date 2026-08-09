@@ -314,9 +314,20 @@ def _recover_screenplay_ir_candidate(
 class StageError(Exception):
     """阶段失败：errors 面向 UI 展示（PRD 原则 P2：失败要响）。"""
 
-    def __init__(self, stage: str, errors: list[str]):
+    def __init__(
+        self,
+        stage: str,
+        errors: list[str],
+        *,
+        exit_reason: str | None = None,
+        iterations: int | None = None,
+        issues: list[Issue] | None = None,
+    ):
         self.stage = stage
         self.errors = errors
+        self.exit_reason = exit_reason
+        self.iterations = iterations
+        self.issues = list(issues or [])
         super().__init__(f"[{stage}] " + "；".join(errors[:5]))
 
 
@@ -1257,6 +1268,7 @@ _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS = (
     "shot_id", "scene_id", "event_ids", "spine_beat_ids", "key_line_ids",
     "primary_action_id",
     "supporting_action_ids", "action_phase_ids", "visible_entity_ids",
+    "characters_visible",
     "offscreen_action_actor_ids", "offscreen_action_target_ids",
     "shot_contribution", "audience_state_paths",
     "planned_state_in_fact_ids", "planned_delta_add_fact_ids",
@@ -1265,6 +1277,56 @@ _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS = (
     "reserved_future_event_ids", "readability_window_ids",
     "narrative_boundary_from_previous",
 )
+_STORYBOARD_VISUAL_STAGING_FIELDS = frozenset({
+    "visible_entity_ids",
+    "characters_visible",
+    "offscreen_action_actor_ids",
+    "offscreen_action_target_ids",
+})
+
+
+def _bound_action_relation_ids(
+    screenplay: EpisodeScreenplay,
+    brief: StoryboardOutlineShot | None,
+    *,
+    bible: Bible | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return graph-owned actor/target relations for one shot task."""
+    if brief is None or screenplay.narrative_plan is None:
+        return [], []
+    actions = {
+        action.action_id: action
+        for action in screenplay.narrative_plan.atomic_actions
+    }
+    action_event_owner = {
+        action_id: event.event_id
+        for event in screenplay.narrative_plan.events
+        for action_id in event.action_ids
+    }
+    action_ids = [
+        *([brief.primary_action_id] if brief.primary_action_id else []),
+        *(brief.supporting_action_ids or []),
+    ]
+    from app.identity_contracts import storyboard_action_relation_ids
+
+    relations = [
+        storyboard_action_relation_ids(
+            screenplay,
+            action_event_owner.get(action_id, ""),
+            action,
+            bible=bible,
+        )
+        for action_id in action_ids
+        for action in [actions.get(action_id)]
+        if action is not None
+    ]
+    actor_ids = list(dict.fromkeys(
+        actor_id for actors, _targets in relations for actor_id in actors
+    ))
+    target_ids = list(dict.fromkeys(
+        target_id for _actors, targets in relations for target_id in targets
+    ))
+    return actor_ids, target_ids
 
 
 def _resolve_legacy_story_event_id(
@@ -1298,8 +1360,46 @@ def storyboard_shot_authority_context(
     screenplay: EpisodeScreenplay,
     brief: StoryboardOutlineShot | None,
     previous_shot: Shot | None = None,
+    *,
+    bible: Bible | None = None,
 ) -> dict[str, Any]:
     """Build the single authority context used by generation and rebound."""
+    narrative_task = (
+        brief.model_dump(mode="json")
+        if brief is not None
+        else None
+    )
+    if narrative_task is not None:
+        actor_ids, target_ids = _bound_action_relation_ids(
+            screenplay,
+            brief,
+            bible=bible,
+        )
+        narrative_task["_bound_action_actor_ids"] = actor_ids
+        narrative_task["_bound_action_target_ids"] = target_ids
+        if bible is not None and screenplay.narrative_plan is not None:
+            from app.identity_contracts import (
+                IdentityContractError,
+                narrative_identity_resolver,
+            )
+
+            resolver = narrative_identity_resolver(bible, screenplay)
+            visual_identities: list[dict[str, str]] = []
+            for token in brief.visible_entity_ids:
+                try:
+                    identity = resolver.resolve(token, usage="visual")
+                except IdentityContractError:
+                    continue
+                if any(
+                    item["identity_id"] == identity.identity_id
+                    for item in visual_identities
+                ):
+                    continue
+                visual_identities.append({
+                    "identity_id": identity.identity_id,
+                    "display_name": identity.display_name,
+                })
+            narrative_task["_visual_identities"] = visual_identities
     return {
         "outline_story_event_id": (
             str(brief.story_event_id or "")
@@ -1311,11 +1411,7 @@ def storyboard_shot_authority_context(
             for event in (screenplay.events or [])
             if str(event.event_id or "").strip()
         ],
-        "outline_narrative_task": (
-            brief.model_dump(mode="json")
-            if brief is not None
-            else None
-        ),
+        "outline_narrative_task": narrative_task,
         "previous_scene_name": (
             str(previous_shot.scene_name or "")
             if previous_shot is not None
@@ -1433,6 +1529,8 @@ def normalize_storyboard_shot_candidate(
     # reinterpret these server-owned IDs, ledgers, budgets, and boundaries.
     if isinstance(outline_narrative_task, dict):
         for field in _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS:
+            if field in _STORYBOARD_VISUAL_STAGING_FIELDS:
+                continue
             if field not in outline_narrative_task:
                 continue
             planned = outline_narrative_task[field]
@@ -1445,6 +1543,140 @@ def normalize_storyboard_shot_candidate(
                 "reason": "outline_narrative_authority",
             })
             shot[field] = deepcopy(planned)
+
+        def _tokens(value: object) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            return list(dict.fromkeys(
+                token
+                for item in value
+                if (token := str(item or "").strip())
+            ))
+
+        planned_entity_ids = _tokens(
+            outline_narrative_task.get("visible_entity_ids")
+        )
+        planned_names = _tokens(
+            outline_narrative_task.get("characters_visible")
+        )
+        candidate_entity_ids = _tokens(shot.get("visible_entity_ids"))
+        candidate_characters = _tokens(shot.get("characters"))
+        candidate_visible_names = _tokens(shot.get("characters_visible"))
+        visual_identity_rows = [
+            item
+            for item in outline_narrative_task.get("_visual_identities", [])
+            if isinstance(item, dict)
+        ]
+        identity_id_by_display_name = {
+            str(item.get("display_name") or "").strip():
+                str(item.get("identity_id") or "").strip()
+            for item in visual_identity_rows
+            if (
+                str(item.get("display_name") or "").strip()
+                and str(item.get("identity_id") or "").strip()
+            )
+        }
+        mapped_candidate_entity_ids = [
+            identity_id_by_display_name[name]
+            for name in candidate_characters
+            if name in identity_id_by_display_name
+        ]
+        if (
+            candidate_characters
+            and len(mapped_candidate_entity_ids) == len(candidate_characters)
+        ):
+            candidate_entity_ids = list(dict.fromkeys(
+                mapped_candidate_entity_ids
+            ))
+        bound_actor_ids = set(_tokens(
+            outline_narrative_task.get("_bound_action_actor_ids")
+        ))
+        bound_target_ids = set(_tokens(
+            outline_narrative_task.get("_bound_action_target_ids")
+        ))
+        has_relation_authority = (
+            "_bound_action_actor_ids" in outline_narrative_task
+            and "_bound_action_target_ids" in outline_narrative_task
+        )
+        declared_offscreen = set(_tokens([
+            *_tokens(shot.get("offscreen_action_actor_ids")),
+            *_tokens(shot.get("offscreen_action_target_ids")),
+        ]))
+        participant_ids = bound_actor_ids | bound_target_ids
+        visual_partition_is_valid = bool(
+            has_relation_authority
+            and candidate_entity_ids
+            and candidate_characters
+            and candidate_visible_names
+            and set(candidate_entity_ids).issubset(planned_entity_ids)
+            and (
+                not planned_names
+                or set(candidate_characters).issubset(planned_names)
+            )
+            and set(candidate_characters) == set(candidate_visible_names)
+            and len(candidate_entity_ids) == len(candidate_characters)
+            and declared_offscreen.issubset(participant_ids)
+        )
+        if visual_partition_is_valid:
+            canonical_offscreen_actors = [
+                identity_id
+                for identity_id in _tokens(
+                    outline_narrative_task.get("_bound_action_actor_ids")
+                )
+                if identity_id not in candidate_entity_ids
+            ]
+            canonical_offscreen_targets = [
+                identity_id
+                for identity_id in _tokens(
+                    outline_narrative_task.get("_bound_action_target_ids")
+                )
+                if identity_id not in candidate_entity_ids
+            ]
+            for field, value in (
+                ("visible_entity_ids", candidate_entity_ids),
+                ("characters", candidate_characters),
+                ("characters_visible", candidate_visible_names),
+                ("offscreen_action_actor_ids", canonical_offscreen_actors),
+                ("offscreen_action_target_ids", canonical_offscreen_targets),
+            ):
+                if shot.get(field) == value:
+                    continue
+                changes.append({
+                    "field": f"shot.{field}",
+                    "from": shot.get(field),
+                    "to": value,
+                    "reason": "structured_visual_staging_partition",
+                })
+                shot[field] = value
+        else:
+            for field in (
+                "visible_entity_ids",
+                "offscreen_action_actor_ids",
+                "offscreen_action_target_ids",
+            ):
+                if field not in outline_narrative_task:
+                    continue
+                planned = _tokens(outline_narrative_task.get(field))
+                if shot.get(field) == planned:
+                    continue
+                changes.append({
+                    "field": f"shot.{field}",
+                    "from": shot.get(field),
+                    "to": planned,
+                    "reason": "outline_narrative_authority",
+                })
+                shot[field] = planned
+            if planned_names:
+                for field in ("characters", "characters_visible"):
+                    if shot.get(field) == planned_names:
+                        continue
+                    changes.append({
+                        "field": f"shot.{field}",
+                        "from": shot.get(field),
+                        "to": planned_names,
+                        "reason": "outline_visual_identity_authority",
+                    })
+                    shot[field] = deepcopy(planned_names)
 
         for field in ("scene_name", "scene_time"):
             planned = str(outline_narrative_task.get(field) or "")
@@ -1693,14 +1925,30 @@ def normalize_storyboard_shot_candidate(
             unique_onscreen_speakers = list(dict.fromkeys(
                 onscreen_speaker_ids
             ))
-            normalized_visible = (
-                unique_onscreen_speakers
-                if len(unique_onscreen_speakers) == 1
-                else list(dict.fromkeys([
+            # Lip sync proves that a speaker must be visible; it does not prove
+            # that every other action participant should disappear.  The
+            # narrative task's actor/target partition owns the composition, so
+            # audio normalization may add a declared on-screen speaker but must
+            # never collapse an already valid multi-person staging to a solo.
+            if has_relation_authority:
+                declared_characters = set(_tokens(shot.get("characters")))
+                normalized_visible = list(dict.fromkeys([
                     *visible_characters,
-                    *unique_onscreen_speakers,
+                    *(
+                        speaker_id
+                        for speaker_id in unique_onscreen_speakers
+                        if speaker_id in declared_characters
+                    ),
                 ]))
-            )
+            else:
+                normalized_visible = (
+                    unique_onscreen_speakers
+                    if len(unique_onscreen_speakers) == 1
+                    else list(dict.fromkeys([
+                        *visible_characters,
+                        *unique_onscreen_speakers,
+                    ]))
+                )
             if normalized_visible != visible_characters:
                 changes.append({
                     "field": "shot.characters_visible",
@@ -1709,25 +1957,26 @@ def normalize_storyboard_shot_candidate(
                     "reason": "lip_sync_speaker_visible",
                 })
                 shot["characters_visible"] = normalized_visible
-            if len(unique_onscreen_speakers) == 1:
+            if unique_onscreen_speakers:
+                # Only an explicit outline camera choice is authoritative.
+                # A single spoken voice can accompany a full-body action or a
+                # multi-person interaction, so it cannot generically imply a
+                # close-up or a static camera.
                 planned_shot_size = str(
                     outline_narrative_task.get("camera_size") or ""
                 )
-                target_shot_size = (
-                    planned_shot_size
-                    if planned_shot_size in SHOT_SIZES
-                    else "近景"
-                )
+                if planned_shot_size in SHOT_SIZES:
+                    target_shot_size = planned_shot_size
+                elif not has_relation_authority:
+                    target_shot_size = "近景"
+                else:
+                    target_shot_size = shot.get("shot_size")
                 if shot.get("shot_size") != target_shot_size:
                     changes.append({
                         "field": "shot.shot_size",
                         "from": shot.get("shot_size"),
                         "to": target_shot_size,
-                        "reason": (
-                            "outline_camera_authority"
-                            if planned_shot_size in SHOT_SIZES
-                            else "single_speaker_framing"
-                        ),
+                        "reason": "outline_camera_authority",
                     })
                     shot["shot_size"] = target_shot_size
                 planned_camera_move = str(
@@ -1738,8 +1987,12 @@ def normalize_storyboard_shot_candidate(
                     if planned_camera_move in CAMERA_MOVES
                     else (
                         shot.get("camera_move")
-                        if shot.get("camera_move") in {"固定", "推近"}
-                        else "固定"
+                        if has_relation_authority
+                        else (
+                            shot.get("camera_move")
+                            if shot.get("camera_move") in {"固定", "推近"}
+                            else "固定"
+                        )
                     )
                 )
                 if shot.get("camera_move") != target_camera_move:
@@ -1747,11 +2000,7 @@ def normalize_storyboard_shot_candidate(
                         "field": "shot.camera_move",
                         "from": shot.get("camera_move"),
                         "to": target_camera_move,
-                        "reason": (
-                            "outline_camera_authority"
-                            if planned_camera_move in CAMERA_MOVES
-                            else "single_speaker_framing"
-                        ),
+                        "reason": "outline_camera_authority",
                     })
                     shot["camera_move"] = target_camera_move
 
@@ -2278,6 +2527,9 @@ async def _run_with_agent_loop(
             stage,
             [issue.message for issue in exc.issues]
             + [f"Agent Loop 退出：{exc.exit_reason}（{exc.iterations} 轮）"],
+            exit_reason=exc.exit_reason,
+            iterations=exc.iterations,
+            issues=exc.issues,
         ) from exc
     if result.status == "warning":
         object.__setattr__(result.value, "residual_errors", [issue.message for issue in result.issues])
@@ -6358,7 +6610,11 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     # task instead of re-inferring it from prose, while leaving legacy outlines
     # (whose narrative fields are all empty) on their existing compatibility path.
     if outline_narrative_task is not None:
-        narrative_fields = _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS
+        narrative_fields = tuple(
+            field
+            for field in _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS
+            if field not in _STORYBOARD_VISUAL_STAGING_FIELDS
+        )
         planned = outline_narrative_task.model_dump(mode="json", include=set(narrative_fields))
         if any(value not in (None, "", [], {}) for value in planned.values()):
             actual = current.model_dump(mode="json", include=set(narrative_fields))
@@ -6426,61 +6682,35 @@ def _storyboard_shot_visual_identity_issues(
     person.  Free-form background action remains prose; only persistent visual
     identities must be owned by ``task.visible_entity_ids``.
     """
-    if (
-        task is None
-        or screenplay.narrative_plan is None
-        or not task.visible_entity_ids
-    ):
+    if task is None or screenplay.narrative_plan is None:
         return []
 
     from app.identity_contracts import (
         IdentityContractError,
         narrative_identity_resolver,
+        storyboard_visual_identity_relation,
     )
 
     try:
-        resolver = narrative_identity_resolver(bible, screenplay)
+        narrative_identity_resolver(bible, screenplay)
     except IdentityContractError:
         # The downstream compiler reports a malformed episode identity
         # contract with its complete diagnostic; do not duplicate it here.
         return []
 
-    task_identities = []
-    for token in task.visible_entity_ids:
-        try:
-            task_identities.append(resolver.resolve(token, usage="visual"))
-        except IdentityContractError:
-            # Outline graph validation owns broken task references.  This gate
-            # only checks successfully resolved identity relations.
-            continue
-    task_identity_ids = {identity.identity_id for identity in task_identities}
-    if not task_identity_ids:
+    relation = storyboard_visual_identity_relation(
+        shot,
+        list(task.visible_entity_ids),
+        bible,
+        screenplay,
+    )
+    unexpected_ids = list(relation["unexpected_identity_ids"])
+    unexpected_names = list(relation["unexpected_display_names"])
+    if not unexpected_ids:
         return []
 
-    visual_tokens = [
-        *((value or "").strip() for value in (shot.characters or [])),
-        *((value or "").strip() for value in (shot.characters_visible or [])),
-    ]
-    for role in shot.reference_roles or []:
-        prefix, separator, value = str(role or "").partition(":")
-        if separator and prefix in {"character_identity", "collective_group"}:
-            visual_tokens.append(value.strip())
-
-    unexpected = {}
-    for token in dict.fromkeys(value for value in visual_tokens if value):
-        try:
-            identity = resolver.resolve(token, usage="visual")
-        except IdentityContractError:
-            # Unknown identities are reported by the downstream compile gate.
-            continue
-        if identity.identity_id not in task_identity_ids:
-            unexpected[identity.identity_id] = identity.display_name
-    if not unexpected:
-        return []
-
-    task_names = list(dict.fromkeys(
-        identity.display_name for identity in task_identities
-    ))
+    task_identity_ids = set(relation["allowed_identity_ids"])
+    task_names = list(relation["allowed_display_names"])
     task_audio_names = list(dict.fromkeys(
         str(value or "").strip()
         for value in (task.audio_cast or [])
@@ -6498,24 +6728,51 @@ def _storyboard_shot_visual_identity_issues(
         category="structural",
         subject=f"storyboard_checkpoint:{episode_id}:{shot.shot_no}",
         message=(
-            f"第 {shot.shot_no} 镜的持久可见身份 {list(unexpected.values())} "
+            f"第 {shot.shot_no} 镜的持久可见身份 {unexpected_names} "
             f"不属于本镜叙事任务；本镜 visible_entity_ids 仅绑定 {task_names}"
         ),
         evidence={
             "path": f"shots[{max(0, shot.shot_no - 1)}]",
             "rule_id": "shot_visible_identity_relation",
             "task_identity_ids": sorted(task_identity_ids),
-            "unexpected_identity_ids": sorted(unexpected),
+            "unexpected_identity_ids": unexpected_ids,
         },
         repair_hint=(
             f"将 characters、characters_visible 与角色 reference_roles 精确收敛到"
             f"本镜 visible_entity_ids 对应的 {task_names}，并从 action_desc、"
-            f"first_frame_desc、last_frame_desc 移除 {list(unexpected.values())} 的"
+            f"first_frame_desc、last_frame_desc 移除 {unexpected_names} 的"
             f"可见描写{audio_repair}；原文中的非持久背景群体可保留为不绑定身份的"
             "环境动作"
         ),
         repairable=True,
     )]
+
+
+def validate_storyboard_visual_identity_contract(
+    board: Storyboard,
+    outline: StoryboardOutline,
+    bible: Bible,
+    screenplay: EpisodeScreenplay,
+    *,
+    episode_id: str,
+) -> list[str]:
+    """Apply the same shot/task visual relation gate to any board path."""
+    briefs = {
+        int(brief.shot_no): brief
+        for brief in outline.shots
+    }
+    issues = [
+        issue
+        for shot in board.shots
+        for issue in _storyboard_shot_visual_identity_issues(
+            shot,
+            briefs.get(int(shot.shot_no)),
+            bible,
+            screenplay,
+            episode_id=episode_id,
+        )
+    ]
+    return list(dict.fromkeys(issue.message for issue in issues))
 
 
 async def _generate_episode_director_outline(
@@ -6778,6 +7035,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
         projection_changes = normalize_narrative_storyboard_outline(
             outline,
             screenplay,
+            bible=bible,
         )
         assign_outline_delivery_ids(outline, screenplay)
         split_changes = [
@@ -6804,6 +7062,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             normalize_narrative_storyboard_outline(
                 outline,
                 screenplay,
+                bible=bible,
             )
         )
         projection_changes.extend(
@@ -7042,6 +7301,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
             projection_changes = normalize_narrative_storyboard_outline(
                 o,
                 screenplay,
+                bible=bible,
             )
             if projection_changes:
                 log_provider_call(
@@ -7094,6 +7354,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
                     normalize_narrative_storyboard_outline(
                         o,
                         screenplay,
+                        bible=bible,
                     )
                 )
                 projection_changes.extend(
@@ -7790,32 +8051,98 @@ def _scene_pack_characters(
     screenplay: EpisodeScreenplay,
     fallback: list[str],
 ) -> list[str]:
+    if screenplay.narrative_plan is not None:
+        permitted = _canonical_scene_pack_names(
+            list(brief.visible_entity_ids),
+            bible=bible,
+            screenplay=screenplay,
+            usage="visual",
+        )
+        planned = _canonical_scene_pack_names(
+            list(brief.characters_visible),
+            bible=bible,
+            screenplay=screenplay,
+            usage="visual",
+        )
+        authorized = [
+            name for name in planned if name in set(permitted)
+        ] or permitted
+        requested = _canonical_scene_pack_names(
+            [
+                *fallback,
+                *[
+                    dialogue.speaker
+                    for dialogue in dialogues
+                    if dialogue.delivery == "spoken_dialogue"
+                ],
+            ],
+            bible=bible,
+            screenplay=screenplay,
+            usage="visual",
+        )
+        if requested and set(requested).issubset(authorized):
+            return requested
+        # The outline owns the permitted identity relation.  An empty or
+        # out-of-relation directing choice falls back to that relation and is
+        # then rejected by the ordinary render-capacity gate when necessary.
+        return authorized
     visual_candidates = (
         list(brief.characters_visible)
         if brief.characters_visible
         else list(brief.visible_entity_ids)
     )
-    candidates = [
-        *visual_candidates,
-        *[
-            dialogue.speaker
-            for dialogue in dialogues
-            if dialogue.delivery == "spoken_dialogue"
+    return _canonical_scene_pack_names(
+        [
+            *visual_candidates,
+            *fallback,
+            *[
+                dialogue.speaker
+                for dialogue in dialogues
+                if dialogue.delivery == "spoken_dialogue"
+            ],
         ],
-    ]
-    resolved = _canonical_scene_pack_names(
-        candidates,
         bible=bible,
         screenplay=screenplay,
         usage="visual",
     )
-    if resolved:
-        return resolved
-    return _canonical_scene_pack_names(
-        fallback,
+
+
+def _scene_pack_visual_partition(
+    characters: list[str],
+    brief: StoryboardOutlineShot,
+    screenplay: EpisodeScreenplay,
+    bible: Bible,
+) -> tuple[list[str], list[str], list[str]]:
+    """Project a model-chosen focal cast onto graph actor/target relations."""
+    if screenplay.narrative_plan is None:
+        return list(brief.visible_entity_ids), [], []
+    from app.identity_contracts import (
+        IdentityContractError,
+        narrative_identity_resolver,
+    )
+
+    resolver = narrative_identity_resolver(bible, screenplay)
+    permitted_ids = set(brief.visible_entity_ids)
+    visible_ids: list[str] = []
+    for character in characters:
+        try:
+            identity = resolver.resolve(character, usage="visual")
+        except IdentityContractError:
+            continue
+        if (
+            identity.identity_id in permitted_ids
+            and identity.identity_id not in visible_ids
+        ):
+            visible_ids.append(identity.identity_id)
+    actor_ids, target_ids = _bound_action_relation_ids(
+        screenplay,
+        brief,
         bible=bible,
-        screenplay=screenplay,
-        usage="visual",
+    )
+    return (
+        visible_ids,
+        [identity_id for identity_id in actor_ids if identity_id not in visible_ids],
+        [identity_id for identity_id in target_ids if identity_id not in visible_ids],
     )
 
 
@@ -7980,19 +8307,30 @@ def _scene_pack_task_fields(
 
 
 def _normalize_scene_pack_camera(shot: Shot) -> None:
-    """Apply only the deterministic camera grammar already enforced by QA."""
+    """Fill invalid camera fields without replacing valid director choices.
+
+    The scene-pack model has the complete shot-local action and composition.
+    Focus metadata is useful as a fallback, but it is too coarse to prove that
+    an already valid middle shot, tracking move, or other realization is
+    wrong.  Semantic disagreements remain evaluator/repair work.
+    """
     from app.continuity import dialogue_action_staging_kind
+
+    size_is_valid = shot.shot_size in SHOT_SIZES
+    move_is_valid = shot.camera_move in CAMERA_MOVES
+    if size_is_valid and move_is_valid:
+        return
 
     focus = str(shot.readability_focus or "")
     if focus == "action":
-        if shot.shot_size not in {"中景", "全景", "远景"}:
+        if not size_is_valid:
             shot.shot_size = "中景"
-        if shot.camera_move not in {"跟随", "横摇"}:
+        if not move_is_valid:
             shot.camera_move = "跟随"
     elif focus == "emotion":
-        if shot.shot_size not in {"近景", "特写"}:
+        if not size_is_valid:
             shot.shot_size = "近景"
-        if shot.camera_move not in {"固定", "推近"}:
+        if not move_is_valid:
             shot.camera_move = "固定"
     elif focus == "dialogue":
         staging = dialogue_action_staging_kind(
@@ -8000,13 +8338,20 @@ def _normalize_scene_pack_camera(shot: Shot) -> None:
             narrative_authority=bool(shot.event_ids),
         )
         if staging == "spatial":
-            if shot.shot_size not in {"中景", "全景", "远景"}:
+            if not size_is_valid:
                 shot.shot_size = "中景"
+            if not move_is_valid:
+                shot.camera_move = "跟随"
         else:
-            if shot.shot_size not in {"近景", "特写"}:
+            if not size_is_valid:
                 shot.shot_size = "近景"
-            if shot.camera_move not in {"固定", "推近"}:
+            if not move_is_valid:
                 shot.camera_move = "固定"
+    else:
+        if not size_is_valid:
+            shot.shot_size = "中景"
+        if not move_is_valid:
+            shot.camera_move = "固定"
 
 
 def normalize_storyboard_direction_fields(
@@ -8158,21 +8503,25 @@ def _hydrate_directed_scene_pack(
             or item.duration_s
             or config.DEFAULT_VIDEO_DURATION_S
         )
+        # The outline camera is a coarse planning suggestion.  The directed
+        # scene pack is the later, shot-local realization that has the actual
+        # action path and composition in view, so a valid pack decision must
+        # not be overwritten by an earlier generic close-up/static default.
         shot_size = (
-            brief.camera_size
-            if brief.camera_size in SHOT_SIZES
-            else item.shot_size
+            item.shot_size
+            if item.shot_size in SHOT_SIZES
+            else brief.camera_size
         )
         camera_angle = str(
-            brief.camera_angle or item.camera_angle
+            item.camera_angle or brief.camera_angle
         ).strip()
         camera_move = (
-            brief.camera_movement
-            if brief.camera_movement in CAMERA_MOVES
-            else item.camera_move
+            item.camera_move
+            if item.camera_move in CAMERA_MOVES
+            else brief.camera_movement
         )
         camera_motivation = str(
-            brief.camera_motivation or item.camera_motivation
+            item.camera_motivation or brief.camera_motivation
         ).strip()
         continuity_mode = str(brief.continuity_mode or "").strip()
         transition = (
@@ -8239,9 +8588,21 @@ def _hydrate_directed_scene_pack(
             prompt_contract_version="director_scene_pack_v2",
         )
         for field in _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS:
+            if field in _STORYBOARD_VISUAL_STAGING_FIELDS:
+                continue
             if not hasattr(brief, field):
                 continue
             setattr(shot, field, deepcopy(getattr(brief, field)))
+        (
+            shot.visible_entity_ids,
+            shot.offscreen_action_actor_ids,
+            shot.offscreen_action_target_ids,
+        ) = _scene_pack_visual_partition(
+            characters,
+            brief,
+            screenplay,
+            bible,
+        )
         shot.capacity_budget = deepcopy(brief.capacity_budget)
         if len(_condense(shot.source_excerpt)) < SOURCE_EXCERPT_MIN_CHARS:
             aligned = align_storyboard_source_evidence(
@@ -8388,7 +8749,13 @@ async def generate_storyboard_scene_pack(
             "state_in": brief.state_in,
             "primary_action": brief.primary_action,
             "state_out": brief.state_out,
-            "characters_visible": brief.characters_visible,
+            "characters_visible": _scene_pack_characters(
+                brief,
+                [],
+                bible=planning_bible,
+                screenplay=screenplay,
+                fallback=list(brief.characters_visible),
+            ),
             "visible_entity_ids": brief.visible_entity_ids,
             "key_line_ids": brief.key_line_ids,
             "speech_allowed": bool(brief.key_line_ids),
@@ -8407,8 +8774,10 @@ async def generate_storyboard_scene_pack(
 
 本场镜号必须精确为 {shot_nos}，数量不得增删；导演规划已经决定了完整剧情覆盖和拆镜边界。
 你只负责每镜的画面动作、首尾帧、摄影表达和空间构图。
-镜号、叙事 ID、场景、人物、台词、时长、来源证据、连续性边界、信息台账和是否末镜均由程序装配，
-不得在输出中重复这些字段。
+镜号、叙事 ID、场景、台词、时长、来源证据、连续性边界、信息台账和是否末镜均由程序装配。
+characters 是本层唯一需要输出的身份调度字段：它只能从对应任务的 characters_visible 中选择
+本镜实际进入构图的焦点身份，最多 3 个；不得补入集合外身份。未进入构图的动作参与者由程序按
+atomic action 的 actor/target 关系登记为画外身份，不得为了同场在场关系强塞群戏。
 
 场景上下文：
 {json.dumps(scene_context.model_dump(mode='json'), ensure_ascii=False, indent=2)}
@@ -8452,6 +8821,7 @@ async def generate_storyboard_scene_pack(
     "camera_angle": str,
     "camera_move": "固定|推近|拉远|横摇|跟随",
     "camera_motivation": str,
+    "characters": ["从本镜任务允许身份中选择的实际构图角色，最多 3 个"],
     "action_desc": str,
     "first_frame_desc": str,
     "last_frame_desc": str,
@@ -8527,6 +8897,18 @@ async def generate_storyboard_scene_pack(
                     outline,
                     scene_context,
                     briefs,
+                ),
+            ))
+            errors.extend(validate_storyboard_visual_identity_contract(
+                Storyboard(
+                    episode_no=episode["episode_no"],
+                    shots=pack.shots,
+                ),
+                outline,
+                planning_bible,
+                screenplay,
+                episode_id=str(
+                    episode.get("id") or episode["episode_no"]
                 ),
             ))
         return list(dict.fromkeys(errors))
@@ -8821,7 +9203,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
             + (f"- key_line_ids：{', '.join(brief.key_line_ids)}\n" if brief.key_line_ids else "")
             + (f"- 本镜新交付信息ID：{', '.join(current_info_ids)}\n" if current_info_ids else "")
             + (f"- 建议时长：{brief.duration_s}s\n" if brief.duration_s else "")
-            + (f"- 画面可见角色：{', '.join(brief.characters_visible)}\n" if brief.characters_visible else "")
+            + (f"- 本镜允许进入构图的身份：{', '.join(brief.characters_visible)}\n" if brief.characters_visible else "")
             + (f"- 声音演员/声源：{', '.join(brief.audio_cast)}\n" if brief.audio_cast else "")
             + (f"- 落实关键内容：{brief.covers}\n"
                "  这些内容必须明确写进本镜 action_desc 或有效口播（dialogues/audio_timeline）；"
@@ -8946,7 +9328,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 1. 只输出第 {shot_no} 镜，shot.shot_no 必须等于 {shot_no}。
 2. 本集镜头数不设上限；当前按大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条并产生独立作用，不得停留、复述或发明大纲外内容。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。duration_s 默认 {PREFERRED_SHOT_DURATION_S}。
 2b. 动作容量必须与视频生成门禁一致：{shot_action_capacity_rule}
-2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。只能补全可拍表达，不得重新分配 ID 归属。
+2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。visible_entity_ids 是本镜实际进入构图的身份，必须是大纲同字段的子集且最多 3 个；characters/characters_visible 必须与该子集一一对应。绑定动作中未进入构图的 actor/target 分别填入 offscreen_action_actor_ids/offscreen_action_target_ids；可见与画外的并集必须完整覆盖绑定动作参与者。不得改写动作归属，也不得把同场旁观者强塞进画面。
 2d. primary_action_id 可为 null，但 shot_contribution 必须非空；支撑/反应/建立/吸收镜必须明确交付证据、观众状态差、情绪、时空定向或戏剧压力中至少一项，不得借 null 产生无功能空镜。
 3. 从第 2 镜开始，必须明确承接上一镜的 state_out/observed_state_out；不要重演上一镜完整 action_desc。若 continuity_mode=action_continuation，state_in 必须等于上一镜实际尾状态；若换场或反应切，写清线索带入、时间跳转或视角切换原因。
 3b. audience_state_paths 必须逐一覆盖 narrative_plan 中的全部 audience_prior；从第 2 镜起，每个先验的本镜 audience_state_in_id 必须精确等于上镜 audience_state_out_target_id。边界合同也必须记录同样的逐先验 handoff。
@@ -9079,6 +9461,7 @@ source_excerpt 内的双引号必须按 JSON 规范转义，或改用中文引�
                 screenplay,
                 brief if narrative_authority else None,
                 completed_shots[-1] if completed_shots else None,
+                bible=bible,
             ),
         },
         semantic_attempt_id=semantic_attempt_id,

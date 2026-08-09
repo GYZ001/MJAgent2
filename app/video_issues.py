@@ -306,6 +306,7 @@ def persist_shot_issue(
     shot_no: int | None,
     issues: list[Issue],
     source: str = "enqueue",
+    run_id: str | None = None,
 ) -> str | None:
     """把入队/失败 Issue 持久化为 episode 级 artifact，供 Coverage Ledger 合并。
 
@@ -327,6 +328,7 @@ def persist_shot_issue(
             "shot_id": shot_id,
             "shot_no": shot_no,
             "source": source,
+            "run_id": run_id,
             "issues": [i.model_dump(mode="json") for i in issues],
         },
         contract_version="video-issue-1.0.0",
@@ -347,22 +349,37 @@ def persist_shot_issue(
     return artifact["id"]
 
 
-def load_persisted_shot_issues(shot_id: str) -> list[Issue]:
-    """读取该镜最近持久化的 Issue 列表。"""
+def load_persisted_shot_issues(
+    shot_id: str,
+    *,
+    run_id: str | None = None,
+) -> list[Issue]:
+    """读取该镜最近持久化的 Issue 列表。
+
+    Supervisor 传入当前 ``run_id`` 时，只消费本运行产生的诊断，
+    避免已取消任务的历史预检错误污染新的手动重跑。
+    """
     import json
     from app.db import get_conn
 
-    row = get_conn().execute(
+    rows = get_conn().execute(
         """SELECT content_json FROM artifacts
            WHERE type='video_shot_issue' AND scope_type='shot' AND scope_id=?
              AND status IN ('candidate','validated','approved')
-           ORDER BY created_at DESC LIMIT 1""",
+           ORDER BY created_at DESC LIMIT 32""",
         (shot_id,),
-    ).fetchone()
-    if not row:
-        return []
-    try:
-        raw = json.loads(row["content_json"] or "{}")
-        return [Issue.model_validate(item) for item in (raw.get("issues") or [])]
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
+    ).fetchall()
+    for row in rows:
+        try:
+            raw = json.loads(row["content_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if run_id is not None and str(raw.get("run_id") or "") != run_id:
+            continue
+        try:
+            return [
+                Issue.model_validate(item) for item in (raw.get("issues") or [])
+            ]
+        except (TypeError, ValueError):
+            continue
+    return []

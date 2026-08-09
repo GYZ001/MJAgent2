@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app import db
+from app import db, hiagent
 from app.completion_grant import (
     GrantValidationError,
     authorize_episode_video_budget_increment,
@@ -223,6 +223,12 @@ def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> Non
     from tests.test_video_plan_reconcile import _conn
 
     conn = _conn()
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "model",
+    )
     for module in (completion_grant, evidence_repository, video_plan):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
     grant, _token = issue_video_completion_grant(
@@ -249,6 +255,40 @@ def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> Non
     assert stale.value.code == "RELEASE_QUALIFICATION_CHANGED"
 
 
+def test_grant_leaves_plan_pending_after_provider_selection_changes(
+    monkeypatch,
+) -> None:
+    from app.evidence import repository as evidence_repository
+    import app.completion_grant as completion_grant
+    import app.video_plan as video_plan
+    from tests.test_video_plan_reconcile import _conn
+
+    conn = _conn()
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider-2")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "model-2",
+    )
+    for module in (completion_grant, evidence_repository, video_plan):
+        monkeypatch.setattr(module, "get_conn", lambda: conn)
+
+    grant, _token = issue_video_completion_grant(
+        episode_id="e",
+        project_id="p",
+        storyboard_artifact_id="storyboard_rev_1",
+        shots_total=2,
+    )
+
+    assert grant.episode_video_plan_id is None
+    assert grant.episode_video_plan_revision is None
+    assert grant.capability_snapshot_id is None
+    assert grant.release_qualification["generation_plan"] == {
+        "applicable": False,
+        "compatibility": "plan_pending_at_grant_issue",
+    }
+
+
 @pytest.mark.asyncio
 async def test_supervisor_checkpoint_acquires_exact_grant_plan_binding(monkeypatch) -> None:
     from app.evidence import repository as evidence_repository
@@ -258,6 +298,12 @@ async def test_supervisor_checkpoint_acquires_exact_grant_plan_binding(monkeypat
     from tests.test_video_plan_reconcile import _conn
 
     conn = _conn()
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "provider")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "model",
+    )
     for module in (
         completion_grant,
         evidence_repository,

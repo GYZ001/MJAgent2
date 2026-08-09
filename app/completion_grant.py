@@ -640,6 +640,7 @@ def _generation_plan_material(
         capability_snapshot_by_id,
         load_latest_plan,
         shot_video_execution_contract_fingerprint,
+        video_plan_provider_selection_is_current,
         verify_episode_plan_is_current,
     )
 
@@ -654,7 +655,7 @@ def _generation_plan_material(
         plan,
         conn=conn,
         mark_stale=False,
-    ):
+    ) or not video_plan_provider_selection_is_current(plan, conn=conn):
         if applicable is None:
             return {
                 "applicable": False,

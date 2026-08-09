@@ -9,6 +9,8 @@ from app.identity_contracts import (
     IdentityContractError,
     canonicalize_storyboard_operational_identities,
     narrative_identity_resolver,
+    repair_shot_visual_prose_from_authority,
+    storyboard_visual_identity_relation,
 )
 from app.schemas import (
     Bible,
@@ -22,6 +24,7 @@ from app.schemas import (
     ScriptScene,
     Shot,
     Storyboard,
+    StoryboardOutlineShot,
     SourceEvidence,
     SourceSpan,
     VoiceCanonical,
@@ -224,6 +227,144 @@ def test_keyframe_contract_uses_text_verification_for_contextual_identity() -> N
     assert verification["visual_canonical"] == (
         "浅褐短袍，素面木簪，面容普通且不抢主体"
     )
+
+
+def test_authority_rebound_repairs_legacy_visual_prose_without_identity_lists() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        visible_entity_ids=["transient-node"],
+        action_desc="阿烬站在云吞七号身旁回头。",
+        first_frame_desc="阿烬与云吞七号并肩站立。",
+        last_frame_desc="阿烬仍留在画面里。",
+    )
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        primary_action="云吞七号独自推开木门。",
+        beat="云吞七号完成开门动作。",
+        state_in="云吞七号站在关闭的木门前。",
+        state_out="云吞七号已推开木门。",
+    )
+
+    repairs = repair_shot_visual_prose_from_authority(
+        shot,
+        brief,
+        _bible(),
+        screenplay,
+    )
+
+    assert {repair["field"] for repair in repairs} == {
+        "action_desc",
+        "first_frame_desc",
+        "last_frame_desc",
+    }
+    assert "阿烬" not in "\n".join((
+        shot.action_desc,
+        shot.first_frame_desc,
+        shot.last_frame_desc,
+    ))
+
+
+def test_visual_prose_repair_keeps_action_desc_complete_after_identity_projection() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        visible_entity_ids=["transient-node"],
+        action_desc="阿烬站在云吞七号身旁回头。",
+        first_frame_desc="云吞七号独自站在门前。",
+        last_frame_desc="云吞七号独自完成动作。",
+    )
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        primary_action="云吞七号完成动作",
+        beat="云吞七号独自行动",
+        state_in="云吞七号站在关闭的木门前。",
+        state_out="云吞七号已推开木门。",
+    )
+
+    repairs = repair_shot_visual_prose_from_authority(
+        shot,
+        brief,
+        _bible(),
+        screenplay,
+    )
+
+    assert any(repair["field"] == "action_desc" for repair in repairs)
+    assert len(shot.action_desc) >= 18
+    assert "阿烬" not in shot.action_desc
+
+
+def test_visual_prose_repair_uses_unique_typed_appearance_evidence() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        visible_entity_ids=["transient-node"],
+        action_desc="银灰短发、暗红披肩的身影站在云吞七号身旁。",
+        first_frame_desc="云吞七号独自站在门前。",
+        last_frame_desc="云吞七号独自完成动作。",
+    )
+    brief = StoryboardOutlineShot(
+        shot_no=1,
+        primary_action="云吞七号独自推开木门并站稳。",
+        beat="云吞七号完成开门动作。",
+        state_in="云吞七号站在关闭的木门前。",
+        state_out="云吞七号已推开木门。",
+    )
+
+    repairs = repair_shot_visual_prose_from_authority(
+        shot,
+        brief,
+        _bible(),
+        screenplay,
+    )
+
+    assert any(repair["field"] == "action_desc" for repair in repairs)
+    assert "银灰短发" not in shot.action_desc
+    assert "暗红披肩" not in shot.action_desc
+
+
+def test_allowed_longer_display_name_masks_shorter_identity_prefix() -> None:
+    screenplay = _screenplay()
+    screenplay.narrative_plan.identity_contracts.extend([
+        NarrativeIdentityContract(
+            identity_id="guard-a",
+            display_name="守门人",
+            kind="scene participant",
+            visual_policy="contextual",
+            visual_canonical="青色长衣，黑色腰带，木质腰牌",
+            asset_requirement="optional",
+            evidence=_evidence("来源分别定义两个同场但不同的守门身份"),
+        ),
+        NarrativeIdentityContract(
+            identity_id="guard-b",
+            display_name="另一个守门人",
+            kind="scene participant",
+            visual_policy="contextual",
+            visual_canonical="青色长衣，黑色腰带，木质腰牌",
+            asset_requirement="optional",
+            evidence=_evidence("来源分别定义两个同场但不同的守门身份"),
+        ),
+    ])
+    shot = _shot(
+        characters=["另一个守门人"],
+        characters_visible=["另一个守门人"],
+        visible_entity_ids=["guard-b"],
+        action_desc="另一个守门人独自完成本镜动作。",
+        first_frame_desc="另一个守门人站在门前。",
+        last_frame_desc="另一个守门人仍留在原位。",
+    )
+
+    relation = storyboard_visual_identity_relation(
+        shot,
+        ["guard-b"],
+        _bible(),
+        screenplay,
+    )
+
+    assert relation["unexpected_identity_ids"] == []
 
 
 def test_bible_identity_overrides_redundant_model_identity_contract() -> None:

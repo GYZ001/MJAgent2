@@ -492,6 +492,48 @@ def test_open_audience_stance_is_audited_and_normalized() -> None:
     )
 
 
+def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor() -> None:
+    payload = _ir_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.5"
+    relation_rows = (
+        (("g",), (), ("g",)),
+        ((), (), ("g",)),
+        (("friend",), ("g",), ("g", "friend")),
+        ((), (), ("g", "friend")),
+        (("g", "friend"), (), ("g", "friend")),
+        ((), (), ("g", "friend")),
+    )
+    units = [
+        unit
+        for scene in payload["scenes"]
+        for unit in scene["units"]
+    ]
+    for index, (unit, (actors, targets, onscreen)) in enumerate(zip(
+        units, relation_rows, strict=True,
+    )):
+        unit["source_segment_ids"] = [f"SRC{index // 2 + 1:04d}"]
+        unit["actor_keys"] = list(actors)
+        unit["target_keys"] = list(targets)
+        unit["onscreen_entity_keys"] = list(onscreen)
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-v15-relations",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    first_action = screenplay.narrative_plan.atomic_actions[0]
+    first_event = screenplay.narrative_plan.events[0]
+    assert first_action.actor_ids == ["谷言"]
+    assert "旧友" not in first_action.actor_ids
+    assert first_event.onscreen_entity_ids == ["谷言"]
+
+
 def test_compiler_derives_removed_model_fields_without_downstream_drift() -> None:
     payload = _ir_payload()
     payload["beats"] = []
