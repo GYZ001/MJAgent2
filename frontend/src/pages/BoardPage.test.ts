@@ -8,6 +8,7 @@ import {
   storyboardEmptyCopy,
   storyboardCharacterFilterOptions,
   storyboardProgressCopy,
+  storyboardInputStrategy,
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
   storyboardSpokenChars,
@@ -118,10 +119,25 @@ describe('分镜台结构化 diff 与问题筛选', () => {
 
   it('把门禁字段翻译为可执行的制作语言', () => {
     expect(storyboardGateIssueLabel('shots[1](shot_no=2).first_frame_desc 太短'))
-      .toBe('第 2 镜：首帧画面 太短')
+      .toBe('第 2 镜：生成起点 太短')
     expect(storyboardGateIssueLabel('shot_no=3.primary_action 缺失'))
       .toBe('第 3 镜：镜头动作 缺失')
     expect(storyboardGateIssueLabel('QA 门禁未通过')).toBe('质检 必检项未通过')
+  })
+
+  it('按场景边界展示分镜输入策略，参考视频逻辑保持不变', () => {
+    const previous = shot({ last_frame_desc: '上一镜真实结束状态' })
+    expect(storyboardInputStrategy(previous).kind).toBe('scene_library')
+    expect(storyboardInputStrategy(shot({ id: 's2', shot_no: 2 }), previous)).toMatchObject({
+      kind: 'previous_video_tail',
+      label: '上一视频真实尾帧 → 本镜唯一首帧',
+    })
+    expect(storyboardInputStrategy(shot({
+      id: 's2', shot_no: 2, scene_time: '夜晚',
+    }), previous).kind).toBe('scene_library')
+    expect(storyboardInputStrategy(shot({
+      mode_plan: { mode: 'VIDEO_INPUT_MODE' } as Shot['mode_plan'],
+    }), previous).kind).toBe('reference_video')
   })
 
   it('保存预览禁用时给出具体恢复路径', () => {

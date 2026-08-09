@@ -134,6 +134,38 @@ function cloneShot(shot: Shot): Shot {
   return JSON.parse(JSON.stringify(shot)) as Shot
 }
 
+export type StoryboardInputStrategy = {
+  kind: 'scene_library' | 'previous_video_tail' | 'reference_video'
+  label: string
+  detail: string
+}
+
+export function storyboardInputStrategy(shot: Shot, previous?: Shot): StoryboardInputStrategy {
+  if (shot.mode_plan?.mode === 'VIDEO_INPUT_MODE') {
+    return {
+      kind: 'reference_video',
+      label: '参考视频（原逻辑）',
+      detail: '继续按既有参考视频计划执行，不改变视频来源与依赖关系。',
+    }
+  }
+  const scene = (shot.scene_name || shot.scene_setting || '').trim()
+  const previousScene = (previous?.scene_name || previous?.scene_setting || '').trim()
+  const sceneTime = (shot.scene_time || '').replace(/\s+/g, '')
+  const previousSceneTime = (previous?.scene_time || '').replace(/\s+/g, '')
+  if (previous && scene === previousScene && sceneTime === previousSceneTime) {
+    return {
+      kind: 'previous_video_tail',
+      label: '上一视频真实尾帧 → 本镜唯一首帧',
+      detail: '同场景自动承接上一条采用视频的真实尾帧，不单独生成剧情首帧或静态尾帧。',
+    }
+  }
+  return {
+    kind: 'scene_library',
+    label: '人物谱 + 场景库',
+    detail: '换场起点只使用人物谱与场景库中的图片，不额外生成剧情参考图。',
+  }
+}
+
 function same(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 }
@@ -181,8 +213,8 @@ export function storyboardGateIssueLabel(message: string): string {
     .replace(/^shot_no=(\d+)\./, '第 $1 镜：')
     .replaceAll('action_desc', '画面动作')
     .replaceAll('primary_action', '镜头动作')
-    .replaceAll('first_frame_desc', '首帧画面')
-    .replaceAll('last_frame_desc', '尾帧画面')
+    .replaceAll('first_frame_desc', '生成起点')
+    .replaceAll('last_frame_desc', '结束状态')
     .replaceAll('QA', '质检')
     .replaceAll('门禁', '必检项')
 }
@@ -1265,6 +1297,15 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
   const [reloadLatestOpen, setReloadLatestOpen] = useState(false)
   const sourceTextRef = useRef<HTMLTextAreaElement>(null)
   const current = edit ?? shot
+  const inputStrategy = storyboardInputStrategy(current, previous)
+  const effectiveFirstFrameDesc = inputStrategy.kind === 'previous_video_tail'
+    ? (previous?.last_frame_desc || current.first_frame_desc)
+    : current.first_frame_desc
+  const firstFrameLabel = inputStrategy.kind === 'previous_video_tail'
+    ? '生成起点（继承前镜视频尾帧）'
+    : inputStrategy.kind === 'reference_video'
+      ? '参考视频起点（原逻辑）'
+      : '场景首镜起点（人物谱/场景库）'
   const changes = edit && baseline ? buildStoryboardChanges(baseline, edit, sourceBinding) : {}
   const dirty = Object.keys(changes).length > 0
   const currentChars = storyboardSpokenChars(current)
@@ -1483,6 +1524,7 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
         <div className="shot-head-copy"><span className="sn">镜{String(shot.shot_no).padStart(2, '0')}</span>
           <span className="meta">{current.duration_s}s · {current.shot_size} · {current.camera_angle || '平视'} · {current.camera_move} · {current.transition}</span>
           <span className="meta shot-characters">{current.characters.join(' / ') || '缺角色（需修改）'}</span>
+          <span className="shot-badge gate" title={inputStrategy.detail}>{inputStrategy.label}</span>
           {isStoryboardProblemShot(shot) && <span className="shot-badge status-needs_revision">需处理</span>}
           {shot.is_final && <span className="shot-badge gate">收尾镜</span>}
         </div>
@@ -1548,8 +1590,8 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
             <label htmlFor={fieldId(shot.id, 'purpose')}>本镜作用<textarea id={fieldId(shot.id, 'purpose')} rows={2} value={edit.purpose ?? ''} onChange={event => setEdit({ ...edit, purpose: event.target.value })} /></label>
             <label htmlFor={fieldId(shot.id, 'resulting-change')}>本镜结果变化<textarea id={fieldId(shot.id, 'resulting-change')} rows={2} value={edit.resulting_change ?? ''} onChange={event => setEdit({ ...edit, resulting_change: event.target.value })} /></label>
             <label htmlFor={fieldId(shot.id, 'camera-motivation')}>摄影动机<textarea id={fieldId(shot.id, 'camera-motivation')} rows={2} value={edit.camera_motivation ?? ''} onChange={event => setEdit({ ...edit, camera_motivation: event.target.value })} /></label>
-            <div className="shot-edit-grid frames"><label htmlFor={fieldId(shot.id, 'first')}>首帧画面<textarea id={fieldId(shot.id, 'first')} rows={2} value={edit.first_frame_desc} onChange={event => setEdit({ ...edit, first_frame_desc: event.target.value })} /></label>
-              <label htmlFor={fieldId(shot.id, 'last')}>尾帧画面<textarea id={fieldId(shot.id, 'last')} rows={2} value={edit.last_frame_desc} onChange={event => setEdit({ ...edit, last_frame_desc: event.target.value })} /></label></div>
+            <div className="shot-edit-grid frames"><label htmlFor={fieldId(shot.id, 'first')}>{firstFrameLabel}<textarea id={fieldId(shot.id, 'first')} rows={2} value={effectiveFirstFrameDesc} readOnly={inputStrategy.kind === 'previous_video_tail'} onChange={event => setEdit({ ...edit, first_frame_desc: event.target.value })} /><small>{inputStrategy.detail}</small></label>
+              <label htmlFor={fieldId(shot.id, 'last')}>结束状态（仅作视频目标）<textarea id={fieldId(shot.id, 'last')} rows={2} value={edit.last_frame_desc} onChange={event => setEdit({ ...edit, last_frame_desc: event.target.value })} /><small>不生成静态尾帧参考图</small></label></div>
           </section>
 
           <section><h3>画面角色与信息点</h3><fieldset className="token-picker"><legend>画面角色（人物谱）</legend>{characterOptions.map(name => <label key={name}><input type="checkbox" checked={edit.characters.includes(name)} onChange={() => toggleCharacter(name)} />{name}</label>)}{!characterOptions.length && <small>人物谱暂无可选角色</small>}</fieldset>
@@ -1622,8 +1664,8 @@ function ShotWorkspace({ shot, episode, status, previous, next, onChanged, onSel
           <div className="shot-frame-pair shot-continuity-chain" aria-label="镜头状态链"><div className="shot-frame-card"><b>进入状态</b><p>{current.state_in || current.first_frame_desc || '未设置'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>镜头动作</b><p>{current.primary_action || current.action_desc}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>离开状态</b><p>{current.state_out || current.last_frame_desc || '未设置'}</p></div></div>
           <section className="shot-spoken-panel"><header className="shot-context-head"><b>本镜台词</b><span>{currentChars} / {spokenLimit} 字</span></header>{overCapacity && <p className="shot-spoken-warn">口播已超出本镜容量</p>}{current.dialogues.length ? current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}<small>{line.emotion}</small></b><p>「{line.line}」</p></div>) : <p>本镜无台词</p>}</section>
           <section className="shot-context-panel"><h3>镜头要素</h3><dl className="shot-context-grid"><div><dt>本镜作用</dt><dd>{current.purpose || '旧版镜头未单列'}</dd></div><div><dt>结果变化</dt><dd>{current.resulting_change || current.state_out || '未单列'}</dd></div><div><dt>摄影动机</dt><dd>{current.camera_motivation || '旧版镜头未单列'}</dd></div><div><dt>画面角色</dt><dd>{current.characters.join('、') || '无'}</dd></div><div><dt>声音角色</dt><dd>{current.audio_cast?.join('、') || '无'}</dd></div><div><dt>本镜新信息</dt><dd>{current.new_information_items?.map(item => item.content).join('；') || '无'}</dd></div></dl></section>
-          <div className="shot-detail-tabs" role="tablist" aria-label="镜头详情"><button id={`shot-detail-tab-${shot.id}-frames`} type="button" role="tab" aria-selected={detailTab === 'frames'} aria-controls={detailPanelId} tabIndex={detailTab === 'frames' ? 0 : -1} className={detailTab === 'frames' ? 'active' : ''} onClick={() => setDetailTab('frames')} onKeyDown={event => { if (event.key === 'ArrowRight' || event.key === 'End') { event.preventDefault(); focusDetailTab('script') } }}>起止画面</button><button id={`shot-detail-tab-${shot.id}-script`} type="button" role="tab" aria-selected={detailTab === 'script'} aria-controls={detailPanelId} tabIndex={detailTab === 'script' ? 0 : -1} className={detailTab === 'script' ? 'active' : ''} onClick={() => setDetailTab('script')} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'Home') { event.preventDefault(); focusDetailTab('frames') } }}>声音与原文</button></div>
-          {detailTab === 'frames' ? <div id={detailPanelId} className="shot-frame-pair" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-frames`}><div className="shot-frame-card"><b>01 · 首帧</b><p>{current.first_frame_desc || '暂未描述'}</p></div><span aria-hidden>→</span><div className="shot-frame-card"><b>02 · 尾帧</b><p>{current.last_frame_desc || '暂未描述'}</p></div></div>
+          <div className="shot-detail-tabs" role="tablist" aria-label="镜头详情"><button id={`shot-detail-tab-${shot.id}-frames`} type="button" role="tab" aria-selected={detailTab === 'frames'} aria-controls={detailPanelId} tabIndex={detailTab === 'frames' ? 0 : -1} className={detailTab === 'frames' ? 'active' : ''} onClick={() => setDetailTab('frames')} onKeyDown={event => { if (event.key === 'ArrowRight' || event.key === 'End') { event.preventDefault(); focusDetailTab('script') } }}>生成起点与结束状态</button><button id={`shot-detail-tab-${shot.id}-script`} type="button" role="tab" aria-selected={detailTab === 'script'} aria-controls={detailPanelId} tabIndex={detailTab === 'script' ? 0 : -1} className={detailTab === 'script' ? 'active' : ''} onClick={() => setDetailTab('script')} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'Home') { event.preventDefault(); focusDetailTab('frames') } }}>声音与原文</button></div>
+          {detailTab === 'frames' ? <div id={detailPanelId} className="shot-frame-pair" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-frames`}><div className="shot-frame-card"><b>01 · {inputStrategy.kind === 'previous_video_tail' ? '上一视频真实尾帧' : inputStrategy.kind === 'reference_video' ? '参考视频起点' : '图库生成起点'}</b><p>{effectiveFirstFrameDesc || '暂未描述'}</p><small>{inputStrategy.detail}</small></div><span aria-hidden>→</span><div className="shot-frame-card"><b>02 · 视频结束状态目标</b><p>{current.last_frame_desc || '暂未描述'}</p><small>不生成静态尾帧参考图</small></div></div>
             : <div id={detailPanelId} className="shot-script-grid" role="tabpanel" aria-labelledby={`shot-detail-tab-${shot.id}-script`}><div className="shot-script-copy"><b>原文依据（不送视频模型）</b><p>{current.source_excerpt || '暂无对应原文'}</p><small>{current.source_binding ? `已绑定第 ${current.source_binding.chapter_idx} 章原文片段` : '当前只保留原文内容，确认前会检查来源位置'}</small></div><div className="shot-audio-copy">{current.dialogues.map((line, index) => <div key={index} className="shot-audio-line"><b>{line.speaker}</b><p>「{line.line}」</p></div>)}</div></div>}
         </div>
       )}

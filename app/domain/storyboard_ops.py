@@ -4778,6 +4778,17 @@ async def edit_shot(shot_id: str, body: dict):
         board.shots.append(instance)
         board.shots.sort(key=lambda s: s.shot_no)
 
+    if not narrative_authority:
+        # 手工编辑也必须服从与自动分镜相同的媒体输入合同。尤其同场景镜头
+        # 的起点只投影上一镜结束状态，不能通过直接请求重新引入一张独立首帧图。
+        from app.continuity import normalize_board_continuity
+
+        normalize_board_continuity(board)
+        instance = next(
+            item for item in board.shots
+            if item.shot_no == instance.shot_no
+        )
+
     if not narrative_authority and outline and outline.shots:
         brief = next((s for s in outline.shots if s.shot_no == instance.shot_no), None)
         if brief is not None and (brief.covers or "").strip():

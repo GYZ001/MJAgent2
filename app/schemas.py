@@ -25,9 +25,9 @@ TRANSITIONS = {
 }
 EMOTIONS = {"平静", "愤怒", "悲伤", "惊恐", "喜悦", "讥讽", "坚定"}
 
-# 镜头连续性模式（PRD：删除「同场景即连续」布尔推断）
+# 镜头连续性模式；除 scene_change 外均使用上一条采用视频的真实尾帧作首帧。
 CONTINUITY_MODES = {
-    "action_continuation",  # 同一人物同一动作跨镜延续；唯一可传上一镜尾帧
+    "action_continuation",  # 同一人物同一动作跨镜延续
     "same_scene_cut",       # 同场景换景别/构图
     "reaction_cut",         # 切到另一人物或人群反应
     "reverse_angle",        # 正反打
@@ -1103,7 +1103,8 @@ class Shot(BaseModel):
     scene_name: str = ""
     characters: list[str] = Field(default_factory=list)
     action_desc: str
-    # 首尾帧画面描述：本镜【开始】与【结束】两个静止画面，必须明显不同（5~10s 视频的起点/终点）
+    # 生成起点与结束目标：同场景起点继承上一条采用视频真实尾帧；换场起点只依赖人物谱/场景库。
+    # last_frame_desc 是视频结束状态目标，不代表另行生成一张静态尾帧参考图。
     first_frame_desc: str = ""
     last_frame_desc: str = ""
     source_excerpt: str = ""

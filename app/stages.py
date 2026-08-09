@@ -1422,6 +1422,11 @@ def storyboard_shot_authority_context(
             if previous_shot is not None
             else ""
         ),
+        "previous_last_frame_desc": (
+            str(previous_shot.last_frame_desc or "")
+            if previous_shot is not None
+            else ""
+        ),
     }
 
 
@@ -1435,6 +1440,7 @@ def normalize_storyboard_shot_candidate(
     outline_narrative_task: dict[str, Any] | None = None,
     previous_scene_name: str = "",
     previous_scene_time: str = "",
+    previous_last_frame_desc: str = "",
     preserve_director_camera: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Losslessly normalize common LLM serialization mistakes at the boundary.
@@ -1799,6 +1805,44 @@ def normalize_storyboard_shot_candidate(
                 "reason": "derived_scene_transition",
             })
             shot["transition"] = "硬切"
+        inherits_video_tail = bool(
+            expected_continuity
+            and expected_continuity != "scene_change"
+            and (
+                previous_scene_name
+                or previous_scene_time
+                or previous_last_frame_desc
+            )
+        )
+        if shot.get("continuity_from_prev") != inherits_video_tail:
+            changes.append({
+                "field": "shot.continuity_from_prev",
+                "from": shot.get("continuity_from_prev"),
+                "to": inherits_video_tail,
+                "reason": "derived_video_tail_input",
+            })
+            shot["continuity_from_prev"] = inherits_video_tail
+        previous_tail_desc = str(previous_last_frame_desc or "").strip()
+        if (
+            inherits_video_tail
+            and previous_tail_desc
+            and shot.get("first_frame_desc") != previous_tail_desc
+        ):
+            changes.append({
+                "field": "shot.first_frame_desc",
+                "from": shot.get("first_frame_desc"),
+                "to": previous_tail_desc,
+                "reason": "previous_video_tail_first_frame",
+            })
+            shot["first_frame_desc"] = previous_tail_desc
+            if shot.get("state_in") != previous_tail_desc:
+                changes.append({
+                    "field": "shot.state_in",
+                    "from": shot.get("state_in"),
+                    "to": previous_tail_desc,
+                    "reason": "previous_video_tail_state_in",
+                })
+                shot["state_in"] = previous_tail_desc
 
         planned_audio_cast = outline_narrative_task.get("audio_cast")
         if isinstance(planned_audio_cast, list):
@@ -2569,6 +2613,11 @@ async def _run_with_agent_loop(
                 previous_scene_time=str(
                     storyboard_candidate_context.get(
                         "previous_scene_time"
+                    ) or ""
+                ),
+                previous_last_frame_desc=str(
+                    storyboard_candidate_context.get(
+                        "previous_last_frame_desc"
                     ) or ""
                 ),
                 preserve_director_camera=bool(
@@ -8918,7 +8967,7 @@ async def generate_storyboard_scene_pack(
     prompt = f"""任务：按导演规划生成 {scene_context.scene_id} 的有界场景分镜块。
 
 本场镜号必须精确为 {shot_nos}，数量不得增删；导演规划已经决定了完整剧情覆盖和拆镜边界。
-你只负责每镜的画面动作、首尾帧、摄影表达和空间构图。
+你只负责每镜的画面动作、生成起点描述、结束状态目标、摄影表达和空间构图。
 镜号、叙事 ID、场景、台词、时长、来源证据、连续性边界、信息台账和是否末镜均由程序装配。
 characters 是本层唯一需要输出的身份调度字段：它只能从对应任务的 characters_visible 中选择
 本镜实际进入构图的焦点身份；不得补入集合外身份。未进入构图的动作参与者由程序按
@@ -8949,7 +8998,9 @@ atomic action 的 actor/target 关系登记为画外身份，不得为了同场�
    完整展示动作路径、主体和作用对象。
 4. 情绪任务用近景/特写配合固定或推近，
    让情绪变化可读，不依赖微表情堆砌。
-5. first_frame_desc 与 last_frame_desc 保持同机位、同场景、同构图，只推进本镜动作。
+5. 本场第一镜的 first_frame_desc 只按人物谱和场景库建立起点，不生成任何额外剧情图；
+   本场后续镜的 first_frame_desc 必须逐字复制上一镜 last_frame_desc，因为实际生成只会使用
+   上一条采用视频的真实尾帧。last_frame_desc 只描述本镜视频结束状态目标，不代表生成静态尾帧图。
 6. 相邻镜承接人物位置、视线、道具和动作结果；人物不得凭空出现、消失或换装。
 7. dialogue_emotions 只按 key_line_id 填情绪；台词文本和说话人由程序从剧本原样注入。
    speech_allowed=false 的镜头必须全程闭口，只写无声动作或反应，禁止出现“开口、说话、嘴唇张开”等口播动作。
@@ -9475,7 +9526,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 2b. 动作容量必须与视频生成门禁一致：{shot_action_capacity_rule}
 2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。visible_entity_ids 是本镜实际进入构图的身份，必须是大纲同字段的子集；characters/characters_visible 必须与该子集一一对应。绑定动作中未进入构图的 actor/target 分别填入 offscreen_action_actor_ids/offscreen_action_target_ids；可见与画外的并集必须完整覆盖绑定动作参与者。不得改写动作归属，也不得把无关的同场旁观者强塞进画面。
 2d. primary_action_id 可为 null，但 shot_contribution 必须非空；支撑/反应/建立/吸收镜必须明确交付证据、观众状态差、情绪、时空定向或戏剧压力中至少一项，不得借 null 产生无功能空镜。
-3. 从第 2 镜开始，必须明确承接上一镜的 state_out/observed_state_out；不要重演上一镜完整 action_desc。若 continuity_mode=action_continuation，state_in 必须等于上一镜实际尾状态；若换场或反应切，写清线索带入、时间跳转或视角切换原因。
+3. 从第 2 镜开始，必须明确承接上一镜的 state_out/observed_state_out；不要重演上一镜完整 action_desc。同场景时，first_frame_desc 与 state_in 必须逐字继承上一镜 last_frame_desc，因为实际输入是上一条采用视频的真实尾帧；换场时才按人物谱和场景库建立新的起点。反应切、正反打等剪辑语义不改变这条输入规则。
 3b. audience_state_paths 必须逐一覆盖 narrative_plan 中的全部 audience_prior；从第 2 镜起，每个先验的本镜 audience_state_in_id 必须精确等于上镜 audience_state_out_target_id。边界合同也必须记录同样的逐先验 handoff。
 3c. 第 1 镜 narrative_boundary_from_previous 必须为 null；从第 2 镜起必须连接上一镜与本镜真实 shot_id，列出不变量、允许差量、已完成禁止重演的 action_id，并给出非空 cut_motivation。
 4. {final_shot_rule}
@@ -9508,7 +9559,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 上一集结尾：{prev_ending or "（本集为第一集）"}
 
 输出 JSON Schema：
-{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_time": "直接引用本场 scene_contract 的开放文本", "scene_name": "上方场景库规范名", "characters": ["画面中实际可见且受人物谱或叙事权威图定义的身份"], "characters_visible": ["本镜画面实际可见的已定义身份"], "action_desc": str, "state_in": "本镜开始的精确实体/信息状态", "primary_action": "本镜权威任务的可拍表达", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "continuity_state_in": {{"scene": {{"scene_revision_id": str, "time_of_day": str, "lighting_state": str, "axis_id": str, "landmarks": {{"landmark": "screen_side"}}}}, "characters": {{"权威身份ID": {{"look_revision_id": str, "outfit_revision_id": str, "visibility": str, "screen_side": str, "pose": str, "facing": str, "gaze_target": str, "left_hand": str, "right_hand": str}}}}, "props": {{"实体ID": {{"canonical_name": str, "revision_id": str, "owner": str, "location": str, "form": str, "visibility": "required|optional|hidden", "text_state": str, "required": bool}}}}}}, "continuity_state_out": "与 continuity_state_in 同结构，只改写本镜任务真正改变的字段", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的内部编号"], "do_not_repeat": ["只能填写已交付信息的语义内容，禁止裸 ID"], "risk_tags": ["根据当前 ShotTask 实际导演风险填写"], "audio_cast": ["本镜受权威图/voice_bible 定义的发声身份"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "引用 voice_bible.speaker_id 或 null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "当前事件实际定义的可读承载实体", "exact_text": "需要画面准确出现的文字；无则为空", "strategy": "deterministic_insert|audio_only|embedded_prop|none", "delivery_owner_shot_no": int, "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false, "max_other_text": 0, "font_role": "classical_serif", "reading_priority": "plot_critical"}}, "spatial_anchor": "continuity_state 中未被本镜动作改变的固定环境实体方位", "first_frame_desc": "本镜开始的静止画面，只呈现权威任务的起始条件", "last_frame_desc": "与首帧同机位同场景同构图，只呈现本镜 allowed state delta 与完成条件", "source_excerpt": "对应本镜头的授权来源逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据", "narration": "", "dialogues": [{{"speaker": "必须引用本镜 characters/audio_cast 中已定义的身份", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
+{{"episode_no": {episode['episode_no']}, "is_final": bool, "shot": {{"shot_no": {shot_no}, "duration_s": int, "shot_size": "远景|全景|中景|近景|特写", "camera_move": "固定|推近|拉远|横摇|跟随", "scene_time": "直接引用本场 scene_contract 的开放文本", "scene_name": "上方场景库规范名", "characters": ["画面中实际可见且受人物谱或叙事权威图定义的身份"], "characters_visible": ["本镜画面实际可见的已定义身份"], "action_desc": str, "state_in": "同场景逐字继承上一镜 last_frame_desc；换场写新起点", "primary_action": "本镜权威任务的可拍表达", "state_out": "本镜结束后交给下一镜的精确状态", "continuity_mode": "action_continuation|same_scene_cut|reaction_cut|reverse_angle|insert_detail|scene_change", "continuity_state_in": {{"scene": {{"scene_revision_id": str, "time_of_day": str, "lighting_state": str, "axis_id": str, "landmarks": {{"landmark": "screen_side"}}}}, "characters": {{"权威身份ID": {{"look_revision_id": str, "outfit_revision_id": str, "visibility": str, "screen_side": str, "pose": str, "facing": str, "gaze_target": str, "left_hand": str, "right_hand": str}}}}, "props": {{"实体ID": {{"canonical_name": str, "revision_id": str, "owner": str, "location": str, "form": str, "visibility": "required|optional|hidden", "text_state": str, "required": bool}}}}}}, "continuity_state_out": "与 continuity_state_in 同结构，只改写本镜任务真正改变的字段", "story_event_id": "对应 screenplay.events[].event_id（E*）；没有对应事件时必须输出空字符串，禁止输出 null，禁止写 S*", "spine_beat_ids": ["本镜落地的主线节拍 S*，可空"], "key_line_ids": ["本镜说出的关键台词 KL*，可空"], "new_information_ids": ["仅填写 information_ledger 中已有的内部编号"], "do_not_repeat": ["只能填写已交付信息的语义内容，禁止裸 ID"], "risk_tags": ["根据当前 ShotTask 实际导演风险填写"], "audio_cast": ["本镜受权威图/voice_bible 定义的发声身份"], "audio_timeline": [{{"start_s": float, "end_s": float, "type": "spoken_dialogue|offscreen_voice|ambient_sound", "speaker_id": "引用 voice_bible.speaker_id 或 null", "text": str, "lip_sync": bool, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "voice_canonical": str}}], "required_text": {{"surface": "当前事件实际定义的可读承载实体", "exact_text": "需要画面准确出现的文字；无则为空", "strategy": "deterministic_insert|audio_only|embedded_prop|none", "delivery_owner_shot_no": int, "appear_start_s": 0.0, "stable_until_s": null, "style": "", "allow_other_text": false, "max_other_text": 0, "font_role": "classical_serif", "reading_priority": "plot_critical"}}, "spatial_anchor": "continuity_state 中未被本镜动作改变的固定环境实体方位", "first_frame_desc": "同场景逐字复制上一镜 last_frame_desc；换场只按人物谱和场景库描述生成起点", "last_frame_desc": "本镜视频结束状态目标，不代表另行生成静态尾帧图", "source_excerpt": "对应本镜头的授权来源逐字摘录，至少 {SOURCE_EXCERPT_MIN_CHARS} 字，仅作审计证据", "narration": "", "dialogues": [{{"speaker": "必须引用本镜 characters/audio_cast 中已定义的身份", "line": str, "emotion": "平静|愤怒|悲伤|惊恐|喜悦|讥讽|坚定", "delivery": "spoken_dialogue|offscreen_voice"}}], "transition": "{transition_options}"}}}}"""
     source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     log_provider_call(
@@ -9792,10 +9843,10 @@ def _storyboard_output_contract(
 {action_capacity_contract}
 7. 声轨纪律（重要）：分镜只保留【真实台词】（dialogues）；禁止旁白、内心OS、画外解说。人群/气氛声写进 action_desc。不能把有对白的剧本压成纯画面卡；是否开口由本镜信息交付与口播容量决定。同一镜最多一个 spoken_dialogue 说话人；问答双方必须按话轮拆成相邻正反打。
 8. action_desc 目标 {ACTION_DESC_TARGET_MIN}~{ACTION_DESC_TARGET_MAX} 字：写清主体姓名与这一个大形体主动作；不要罗列多个镜头，不要写运镜术语。
-8b. 【关键·首尾帧】每条 shot 必须给出 first_frame_desc 与 last_frame_desc：
-   - 二者必须是【同一机位、同一场景、同一构图】下，这一个连贯动作的开始与结束瞬间。
-   - 首帧写主动作尚未完成的可见起始状态；尾帧保留同一机位、同一主体与同一固定参照物，只呈现本镜实际交付的状态增量。
-   - 各约 20~40 字；不要写超纲微细节、字幕、运镜。
+8b. 【关键·生成起点与结束目标】每条 shot 必须给出 first_frame_desc 与 last_frame_desc：
+   - 换场首镜的 first_frame_desc 只按人物谱和场景库建立画面，不得要求生成任何额外剧情图。
+   - 同场景后续镜的 first_frame_desc 必须逐字复制上一镜 last_frame_desc；实际生成只使用上一条采用视频的真实尾帧作为本镜唯一首帧。
+   - last_frame_desc 只描述本镜视频结束状态目标，不生成静态尾帧参考图；约 20~40 字，不要写超纲微细节、字幕、运镜。
 {staging_contract}
 {reference_contract}
 {contact_contract}
@@ -9814,7 +9865,7 @@ def _storyboard_output_contract(
 18. shot_size 只能取：{'|'.join(sorted(SHOT_SIZES))}；camera_move 只能取：{'|'.join(sorted(CAMERA_MOVES))}；transition 只能取：{'|'.join(sorted(TRANSITIONS))}。
 19. 同一 scene_name 的镜头尽量连续排列；时间变化只改 scene_time，不得改写 scene_name 来伪造新场景。
 20. shot_size 由当前动作、人物调度和情绪表达决定；剧情需要时允许连续镜头使用相同景别，禁止仅为形式变化牺牲可拍性。
-21. 相邻镜头用 continuity_mode 表达承接；action_continuation 仅用于同一人物同一动作跨镜延续。
+21. 相邻镜头用 continuity_mode 表达剪辑语义；action_continuation 仅用于同一人物同一动作跨镜延续，但所有同场景模式都继承上一条采用视频的真实尾帧。
 22. 转场设计：同场景连续镜只能用"硬切"；换场不得硬切。
 {_first_shot_rule(episode, narrative_authority=narrative_authority)}
 24. 特效服从剧情，日常对话写实克制。
@@ -9836,7 +9887,7 @@ def _storyboard_preflight_contract(
 4. 若超容，由 AI 在 AtomicAction.splittable_boundaries 声明的边界提出新的相邻 ShotTask 阶段分配；必须保持事件拓扑、状态方程、action owner、阶段顺序、观众路径、deadline 与可读窗口。无合法边界时上溯重构动作与任务，禁止文本分隔器自动拆镜。
 5. 第一镜 boundary 必须为 null；后续镜头必须精确连接相邻 shot_id，传递状态不变量、允许差量、已完成动作与每个 audience prior 的状态。
 6. 画面角色、声源与参考身份只能引用叙事图/voice_bible 中由当前来源和戏剧职责定义的身份，不得从固定功能角色名单选择。
-7. 首尾帧保持同一构图和未被本镜动作改变的 continuity_state，只呈现 allowed state delta；固定参照对象由实际状态合同确定，不套题材道具模板。
+7. 换场首镜只以人物谱和场景库建立生成起点；同场景镜头的 first_frame_desc 必须逐字继承上一镜 last_frame_desc，对应上一条采用视频的真实尾帧。last_frame_desc 只定义结束状态目标，不生成静态尾帧图。
 8. 景别、可见角色、作用对象与对白切分必须让当前 temporal phase、evidence 和注意任务可观察；不依赖预设互动/道具词组触发。
 9. 声轨按本镜信息交付与口播容量决定；同镜对白语义、dialogues 和 audio_timeline 必须一致。
 10. source_excerpt 必须是当前授权来源的可追溯证据，不得进入视频提示词。
@@ -9847,6 +9898,7 @@ def _storyboard_preflight_contract(
 3. 如果本镜 scene_name 与 scene_time 均与上一镜相同：
    - continuity_mode 必须是 same_scene_cut / reaction_cut / reverse_angle / insert_detail / action_continuation 之一；
    - 只有同一人物同一动作跨镜延续时才能使用 action_continuation，且 state_in 必须承接上一镜 state_out/observed_state_out；
+   - 无论采用上述哪种同场景模式，first_frame_desc 与 state_in 都必须逐字继承上一镜 last_frame_desc；
    - transition 必须为"硬切"；
    - characters 至少保留上一镜的 1 个核心人物；
    - action_desc/state_in 必须承接上一镜结尾的人物位置、道具/屏幕内容、动作或情绪，不能重新介绍场景或重复上一镜发现；
@@ -9863,8 +9915,8 @@ def _storyboard_preflight_contract(
 8. 每条 shot 的 source_excerpt 必填（≥{SOURCE_EXCERPT_MIN_CHARS} 字），可与相邻镜共享主线段落；仅作审计，不得进入 Seedance。
 9. 声轨预检：若完整剧本对应段落有“角色名：台词”且本镜负责交付该信息，必须写 dialogues；内心独白禁止写进 narration（narration 必须为空），改用画面姿态表达；人群嘲讽/恭维写进 action_desc。是否发声服从本镜信息交付与口播容量，禁止为比例凑对白。
 9b. 对白构图预检：统计 spoken_dialogue 的唯一说话人。超过 1 人必须按话轮拆镜。正好 1 人且只有台词/表情交付时，characters/characters_visible 只含说话人，shot_size=近景或特写，camera_move=固定或推近；若台词同时包含走位、离场或剧情道具操作，改用中景/全景并写 dialogue_action_staging，完整保留动作路径；双人接触动作写 dialogue_two_shot_required。
-10. first_frame_desc 与 last_frame_desc 必须同机位、同场景、同构图，只让人物动作从"开始"推进到"结束"；不要让首尾帧变成两个不同的镜头/景别/场景。
-10b. spatial_anchor 必须写清当前构图内固定地标/大型道具的位置；同一视频的首尾帧中，同一石碑、门、桌台或屏幕不得消失、复制、变形或换位。
+10. first_frame_desc 表示实际生成起点：同场景逐字继承上一镜结束目标，换场只按人物谱与场景库建立；last_frame_desc 表示本镜结束目标，不是待生成的静态图片。
+10b. spatial_anchor 必须写清当前构图内固定地标/大型道具的位置；同一视频从真实输入首帧到结束状态中，同一石碑、门、桌台或屏幕不得消失、复制、变形或换位。
 11. 人物调度预检：逐条核对上一镜 last_frame_desc、本镜 first_frame_desc、characters、action_desc。任何角色的入画、出画、开口、转身、靠近、退后都必须有可见动作链；如果一句话解释不清，就拆成相邻两镜，不要让视频模型自行脑补。
 
 常见错误 → 正确写法（以下角色A/场景A仅为占位示例，请替换成本集真实角色与场景）：

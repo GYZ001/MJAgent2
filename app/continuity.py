@@ -316,7 +316,9 @@ def effective_audio_cast(shot: Shot) -> list[str]:
 
 
 def uses_previous_tail_frame(mode: str) -> bool:
-    return (mode or "").strip() == "action_continuation"
+    """同场景镜头统一从上一条采用视频的真实尾帧起步。"""
+    normalized = (mode or "").strip()
+    return normalized in CONTINUITY_MODES and normalized != "scene_change"
 
 
 def derive_continuity_mode(shot: Shot, prev: Shot | None = None) -> str:
@@ -520,7 +522,7 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
 
 
 def normalize_board_continuity(board: Storyboard) -> None:
-    """按连续性模式规范化整板；不再把同场景强制写成 action_continuation。"""
+    """按连续性模式规范化整板，并建立真实视频尾帧的描述链。"""
     for i, shot in enumerate(board.shots):
         prev = board.shots[i - 1] if i > 0 else None
         mode = sync_shot_continuity_fields(shot, prev)
@@ -542,7 +544,13 @@ def normalize_board_continuity(board: Storyboard) -> None:
         else:
             if shot.continuity_mode == "scene_change":
                 shot.continuity_mode = "same_scene_cut"
-            shot.continuity_from_prev = uses_previous_tail_frame(shot.continuity_mode)
+            shot.continuity_from_prev = True
+            previous_tail_desc = (prev.last_frame_desc or "").strip()
+            if previous_tail_desc:
+                # first_frame_desc 是实际生成输入的文字投影：同场景时唯一输入
+                # 来自上一条采用视频的真实尾帧，不再另行设计或生成静态首帧。
+                shot.first_frame_desc = previous_tail_desc
+                shot.state_in = previous_tail_desc
             if shot.continuity_mode != "scene_change":
                 shot.transition = "硬切"
 

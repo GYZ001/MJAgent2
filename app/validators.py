@@ -685,7 +685,7 @@ def validate_storyboard(
         if scene_key in scene_last_seen and scene_last_seen[scene_key] != i - 1:
             errors.append(f"场景「{scene}」在 shots[{scene_last_seen[scene_key]}] 与 shots[{i}] 间被其他场景打断，同场景镜头必须连续排列")
         scene_last_seen[scene_key] = i
-        # V6+ 连贯性：使用 continuity_mode 表达“是否使用上一镜尾帧”，不再把同场景布尔等同动作连续。
+        # V6+ 连贯性：continuity_mode 表达剪辑语义；所有同场景模式都使用上一镜真实视频尾帧。
         # 始终 sync：无 prev 时会降级 action_continuation，与 derive_continuity_mode / 入队门禁一致。
         prev_for_mode = shots[i - 1] if i > 0 else None
         mode = (
@@ -719,6 +719,10 @@ def validate_storyboard(
                     errors.append(
                         f"{tag}.continuity_mode=action_continuation 但与上一镜没有共同角色；"
                         "动作连续必须由同一权威身份承接")
+                if not shot.continuity_from_prev:
+                    errors.append(
+                        f"{tag}.continuity_from_prev=false 但 continuity_mode=action_continuation；"
+                        "同场景镜头必须使用上一镜采用视频的真实尾帧作为唯一首帧输入")
             elif mode in SAME_SCENE_CONTINUITY_MODES:
                 if not same_scene:
                     errors.append(
@@ -726,10 +730,10 @@ def validate_storyboard(
                         "同场景切换模式必须沿用同一场景与时间")
                 if shot.transition != "硬切":
                     errors.append(f"{tag}.transition=「{shot.transition}」，{mode} 必须使用「硬切」")
-                if shot.continuity_from_prev:
+                if not shot.continuity_from_prev:
                     errors.append(
-                        f"{tag}.continuity_from_prev=true 但 continuity_mode={mode}；"
-                        "只有 action_continuation 可以使用上一镜尾帧作为起始连续参考")
+                        f"{tag}.continuity_from_prev=false 但 continuity_mode={mode}；"
+                        "同场景镜头必须使用上一镜采用视频的真实尾帧作为唯一首帧输入")
             elif mode == "scene_change":
                 if shot.continuity_from_prev:
                     errors.append(
@@ -743,6 +747,13 @@ def validate_storyboard(
                     errors.append(
                         f"{tag}.transition=「{shot.transition}」不适合换场；"
                         f"换场请用 {sorted(SCENE_CUT_TRANSITIONS)} 之一")
+            if same_scene and (prev.last_frame_desc or "").strip() and (
+                (shot.first_frame_desc or "").strip()
+                != (prev.last_frame_desc or "").strip()
+            ):
+                errors.append(
+                    f"{tag}.first_frame_desc 与上一镜 last_frame_desc 不一致；"
+                    "同场景镜头的生成起点必须精确继承上一条采用视频的真实尾帧描述")
     # V7 shot_no 连续
     expected = list(range(1, len(shots) + 1))
     actual = [s.shot_no for s in shots]

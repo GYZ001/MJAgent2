@@ -1084,6 +1084,10 @@ def _restore_misplaced_shot_fields_from_provider(
                         str(board.shots[index - 1].scene_time or "")
                         if index > 0 else ""
                     ),
+                    previous_last_frame_desc=(
+                        str(board.shots[index - 1].last_frame_desc or "")
+                        if index > 0 else ""
+                    ),
                 )
                 moved_fields = {
                     str(change.get("field") or "").removeprefix("shot.")
