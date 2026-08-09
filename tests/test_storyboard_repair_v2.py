@@ -1182,7 +1182,7 @@ def test_cognitive_bridge_is_isolated_until_candidate_commit(
             "affected_relation_ids": ["XI-1"],
             "candidate_assessments": [{
                 "strategy": "repair_current",
-                "passes_deletion_test": True,
+                "passes_deletion_test": False,
                 "passes_marginal_gain_test": True,
                 "expected_narrative_gain": 0.7,
             }],
@@ -1215,6 +1215,11 @@ def test_cognitive_bridge_is_isolated_until_candidate_commit(
     assert [item.assimilation_task_ids for item in candidate_outline.cognitive_bridge_plans] == [
         ["AT-1"]
     ]
+    assert candidate_outline.cognitive_bridge_plans[0].deletion_test_result == {
+        "applicable": False,
+        "passed": True,
+        "reason": "selected operation does not delete an outline node",
+    }
 
     current = _current_board(conn)
     replacement = _shot(2, action="少年指向石碑结果，让证据在画面中完整停留。")

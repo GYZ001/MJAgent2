@@ -3761,6 +3761,24 @@ def _apply_repair(
             item for item in assessments
             if _assessment_strategy(item.get("strategy")) == strategy
         ), {})
+        deletion_test_applicable = False
+        for raw_operation in list(
+            selected_assessment.get("outline_operations") or []
+        ):
+            try:
+                from app.narrative_repair import SemanticOutlineOperation
+
+                operation = SemanticOutlineOperation.model_validate(
+                    raw_operation
+                )
+                if operation.executable_op() == "delete_outline_shot":
+                    deletion_test_applicable = True
+                    break
+            except (TypeError, ValueError):
+                # Invalid typed operations are rejected again at the executor
+                # boundary. Until then, keep the bridge gate fail-closed.
+                deletion_test_applicable = True
+                break
         affected_ids = [
             shot.shot_id
             for shot in completed
@@ -3780,7 +3798,17 @@ def _apply_repair(
                 affected_shot_ids=affected_ids,
                 estimated_screen_time_delta=0.0,
                 deletion_test_result={
-                    "passed": bool(selected_assessment.get("passes_deletion_test")),
+                    "applicable": deletion_test_applicable,
+                    "passed": (
+                        bool(selected_assessment.get("passes_deletion_test"))
+                        if deletion_test_applicable
+                        else True
+                    ),
+                    "reason": (
+                        "selected operation deletes an outline node"
+                        if deletion_test_applicable
+                        else "selected operation does not delete an outline node"
+                    ),
                 },
                 marginal_gain_result={
                     "passed": bool(selected_assessment.get("passes_marginal_gain_test")),
