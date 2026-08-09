@@ -402,6 +402,8 @@ def _trace_call_semantics(
     if not name:
         name = _TRACE_STAGE_PURPOSE_LABELS.get(stage)
     if not name:
+        name = _TRACE_CALL_LABELS.get(key)
+    if not name:
         name = business_stage_name
     if not name and stage:
         name = (
@@ -409,8 +411,6 @@ def _trace_call_semantics(
             if re.match(r"^(识别|解析|复核|检查|审核|评估|诊断|修复|规划|生成|撰写|合并|记录|复用|提交|查询|计算|规范化|补充|保留|执行)", stage)
             else f"{'生成' if node_role == 'model_processing' else '处理'}{stage}"
         )
-    if not name:
-        name = _TRACE_CALL_LABELS.get(key)
     if not name:
         if key.endswith("_prompt"):
             node_role = "model_processing"
