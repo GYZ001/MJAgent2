@@ -1958,6 +1958,62 @@ def normalize_storyboard_shot_candidate(
                     "reason": "lip_sync_speaker_visible",
                 })
                 shot["characters_visible"] = normalized_visible
+            if has_relation_authority and len(unique_onscreen_speakers) == 1:
+                try:
+                    from app.continuity import dialogue_focus_subject
+
+                    focus = dialogue_focus_subject(
+                        Shot.model_validate(shot),
+                        narrative_authority=True,
+                    )
+                except (TypeError, ValueError):
+                    focus = None
+                focus_identity_id = (
+                    identity_id_by_display_name.get(focus or "")
+                    if focus
+                    else None
+                )
+                if focus and focus_identity_id:
+                    canonical_offscreen_actors = [
+                        identity_id
+                        for identity_id in _tokens(
+                            outline_narrative_task.get(
+                                "_bound_action_actor_ids"
+                            )
+                        )
+                        if identity_id != focus_identity_id
+                    ]
+                    canonical_offscreen_targets = [
+                        identity_id
+                        for identity_id in _tokens(
+                            outline_narrative_task.get(
+                                "_bound_action_target_ids"
+                            )
+                        )
+                        if identity_id != focus_identity_id
+                    ]
+                    for field, value in (
+                        ("characters", [focus]),
+                        ("characters_visible", [focus]),
+                        ("visible_entity_ids", [focus_identity_id]),
+                        (
+                            "offscreen_action_actor_ids",
+                            canonical_offscreen_actors,
+                        ),
+                        (
+                            "offscreen_action_target_ids",
+                            canonical_offscreen_targets,
+                        ),
+                    ):
+                        if shot.get(field) == value:
+                            continue
+                        changes.append({
+                            "field": f"shot.{field}",
+                            "from": shot.get(field),
+                            "to": value,
+                            "reason": "typed_dialogue_focus_projection",
+                        })
+                        shot[field] = value
             if unique_onscreen_speakers:
                 # Only an explicit outline camera choice is authoritative.
                 # A single spoken voice can accompany a full-body action or a

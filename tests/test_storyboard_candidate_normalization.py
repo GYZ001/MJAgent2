@@ -1002,6 +1002,69 @@ def test_repair_candidate_can_replace_stale_outline_camera_plan() -> None:
     assert normalized["shot"]["camera_move"] == "跟随"
 
 
+def test_typed_pure_dialogue_focus_projects_only_onscreen_speaker() -> None:
+    normalized, changes = normalize_storyboard_shot_candidate(
+        {
+            "episode_no": 1,
+            "shot": {
+                "shot_no": 12,
+                "duration_s": 5,
+                "shot_size": "近景",
+                "camera_move": "固定",
+                "scene_setting": "日，办公室",
+                "characters": ["甲", "乙"],
+                "characters_visible": ["甲", "乙"],
+                "visible_entity_ids": ["actor", "listener"],
+                "action_desc": "甲保持原位，清楚说出自己的决定。",
+                "first_frame_desc": "甲处于画面中央，尚未开口。",
+                "last_frame_desc": "同一机位，甲说完后仍看向画外。",
+                "source_excerpt": "甲抬起头，清楚说出了自己的决定。",
+                "dialogues": [{
+                    "speaker": "甲",
+                    "line": "这件事由我来做。",
+                    "emotion": "坚定",
+                    "delivery": "spoken_dialogue",
+                }],
+                "audio_timeline": [{
+                    "start_s": 0,
+                    "end_s": 4,
+                    "type": "spoken_dialogue",
+                    "speaker_id": "甲",
+                    "text": "这件事由我来做。",
+                    "lip_sync": True,
+                }],
+                "transition": "硬切",
+            },
+        },
+        episode_no=1,
+        shot_no=12,
+        outline_narrative_task={
+            "visible_entity_ids": ["actor", "listener"],
+            "characters_visible": ["甲", "乙"],
+            "_visual_identities": [
+                {"identity_id": "actor", "display_name": "甲"},
+                {"identity_id": "listener", "display_name": "乙"},
+            ],
+            "_bound_action_actor_ids": ["actor"],
+            "_bound_action_target_ids": [],
+            "key_line_ids": ["KL01"],
+            "audio_cast": ["甲"],
+            "capacity_budget": {
+                "spoken_and_text_s": 4,
+            },
+        },
+    )
+
+    shot = normalized["shot"]
+    assert shot["characters"] == ["甲"]
+    assert shot["characters_visible"] == ["甲"]
+    assert shot["visible_entity_ids"] == ["actor"]
+    assert any(
+        change["reason"] == "typed_dialogue_focus_projection"
+        for change in changes
+    )
+
+
 def test_silent_outline_does_not_reintroduce_character_audio_cast() -> None:
     normalized, changes = normalize_storyboard_shot_candidate(
         {
