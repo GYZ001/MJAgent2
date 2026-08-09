@@ -81,6 +81,87 @@ def test_three_provider_payload_contracts_are_mutually_exclusive(tmp_path) -> No
         })
 
 
+def test_reference_mode_uses_only_existing_character_and_scene_library_images(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    character = tmp_path / "character.jpg"
+    scene = tmp_path / "scene.jpg"
+    Image.new("RGB", (720, 1280), "red").save(character)
+    Image.new("RGB", (720, 1280), "blue").save(scene)
+    monkeypatch.setattr(
+        "app.multiview.resolve_shot_asset_dependencies",
+        lambda **_kwargs: {"input_fingerprint": "library-revisions"},
+    )
+    monkeypatch.setattr(
+        "app.multiview.assert_manifest_allows_production",
+        lambda _manifest: [],
+    )
+    monkeypatch.setattr(
+        "app.multiview.library_anchor_assets_from_manifest",
+        lambda _manifest: [
+            {
+                "entity_type": "character",
+                "entity_name": "A",
+                "image_path": str(character),
+                "library_revision_id": "character-r1",
+                "view_role": "front_full",
+            },
+            {
+                "entity_type": "scene",
+                "entity_name": "室内",
+                "image_path": str(scene),
+                "library_revision_id": "scene-r1",
+                "view_role": "establishing",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        video_modes,
+        "_generate_one_reference",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("reference mode must not generate images")
+        ),
+    )
+    bible = Bible(
+        characters=[{"name": "A", "role": "lead", "appearance_canonical": "red coat"}],
+        world=World(visual_style_canonical="film"),
+    )
+    shot = Shot(
+        shot_no=1,
+        duration_s=4,
+        shot_size="中景",
+        camera_move="固定",
+        scene_setting="室内",
+        scene_name="室内",
+        characters=["A"],
+        characters_visible=["A"],
+        action_desc="A站在室内。",
+        source_excerpt="A站在室内。",
+        dialogues=[],
+    )
+    meta: dict = {}
+
+    assets = asyncio.run(video_modes.build_reference_assets(
+        conn=sqlite3.connect(":memory:"),
+        project_id="p",
+        episode_no=1,
+        episode_id="e",
+        shot_id="s",
+        shot=shot,
+        bible=bible,
+        decision=video_modes.default_reference_decision(),
+        existing_meta=meta,
+    ))
+
+    selected = [asset for asset in assets if asset.selectedForSeedance]
+    assert {asset.entity_type for asset in selected} == {"character", "scene"}
+    assert {asset.source for asset in selected} == {"asset_library"}
+    assert {asset.path for asset in selected} == {str(character), str(scene)}
+    assert meta["reference_input_policy_version"] == video_modes.REFERENCE_INPUT_POLICY_VERSION
+    assert meta["keyframe_sequence"] == {"beats": [], "beat_count": 0}
+
+
 def test_reference_video_technical_success_is_not_true_continuation_success() -> None:
     result = evaluate_video_mode_qa(
         meta={
@@ -271,6 +352,94 @@ def _first_last_runtime_fixture(
         ),
     )
     return conn, plan, persisted_roles, generated_seed_inputs
+
+
+def test_first_frame_mode_extracts_previous_video_tail_without_generating_image(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p','P',0)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,created_at) VALUES('e','p',1,0)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s,adopted_version_id) "
+        "VALUES('s1','e',1,4,'v1')"
+    )
+    conn.execute("INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s2','e',2,4)")
+    conn.commit()
+    plan = SimpleNamespace(
+        episode_video_plan_id="evp",
+        shot_plan_id="svp-current",
+        shot_id="s2",
+        depends_on_shot_id="s1",
+        required_assets=[PlanAssetRequirement(
+            role="first_frame",
+            source=AssetSource.PREVIOUS_ADOPTED_TAIL,
+            source_shot_id="s1",
+        )],
+    )
+    tail = tmp_path / "previous-video-tail.jpg"
+    Image.new("RGB", (720, 1280), "black").save(tail)
+    persisted: list[str] = []
+    monkeypatch.setattr(worker, "_resolve_current_execution_plan", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_load_boundary_asset", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_persist_boundary_asset", lambda *_args, **kwargs: persisted.append(kwargs["role"]))
+    monkeypatch.setattr(worker, "_set_version", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "app.media_pipeline.stage_state.set_pipeline_stage",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker.video_modes,
+        "previous_tail_source_contract",
+        lambda *_args, **_kwargs: {
+            "shot_id": "s1",
+            "adopted_version_id": "v1",
+            "video_path": "/owned/v1.mp4",
+            "video_size": 1,
+            "video_mtime_ns": 1,
+        },
+    )
+    monkeypatch.setattr(
+        worker.video_modes,
+        "previous_tail_reference_asset",
+        lambda *_args, **_kwargs: ReferenceImageAsset(
+            id="tail",
+            url="",
+            type="previous_shot_frame",
+            source="previous_shot",
+            path=str(tail),
+        ),
+    )
+    monkeypatch.setattr(
+        worker.video_modes,
+        "_generate_one_reference",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("first-frame mode must not generate images")
+        ),
+    )
+
+    meta, _ = asyncio.run(worker._prepare_first_frame_mode_inputs(
+        conn,
+        {"id": "j", "project_id": "p", "episode_id": "e", "shot_id": "s2"},
+        {"id": "v2"},
+        {"shot_no": 2},
+        {"episode_no": 1},
+        {},
+        "prompt",
+        lease_owner="lease",
+    ))
+
+    assert persisted == ["first_frame"]
+    assert meta["first_frame_path"] == str(tail)
+    assert meta["first_frame_source"] == AssetSource.PREVIOUS_ADOPTED_TAIL.value
+    assert "last_frame_path" not in meta
+    assert meta["reference_images"] == []
 
 
 def test_scene_second_shot_prefetches_tail_before_waiting_for_first_frame(

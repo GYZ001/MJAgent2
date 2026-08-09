@@ -459,7 +459,7 @@ def invalidate_episode_final(episode_id: str) -> bool:
 
 
 def _delete_shot_reference_dir(conn, shot_row) -> int:
-    """删除某镜的参考图目录（REFERENCE_IMAGE_MODE 生成的参考图都落在此处）。返回删除的文件数。"""
+    """删除某镜的历史参考图缓存目录。返回删除的文件数。"""
     ep = conn.execute(
         "SELECT project_id, episode_no FROM episodes WHERE id=?", (shot_row["episode_id"],)).fetchone()
     if not ep:

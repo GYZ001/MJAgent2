@@ -521,7 +521,7 @@ def test_default_reference_build_respects_one_or_two_keyframe_policy(monkeypatch
     monkeypatch.setattr(mv, "keyframe_gate_passed", lambda _qa: True)
     meta: dict = {}
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(
             state_in="A低头坐在桌前。", primary_action="A拿起桌上的信封并拆开。",
@@ -551,7 +551,7 @@ def test_default_reference_build_respects_one_or_two_keyframe_policy(monkeypatch
 
     generation_calls.clear()
     long_meta: dict = {}
-    long_assets = asyncio.run(video_modes.build_reference_assets(
+    long_assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="long",
         shot=_shot(
             duration_s=10,
@@ -593,7 +593,7 @@ def test_default_reference_build_respects_one_or_two_keyframe_policy(monkeypatch
 
     monkeypatch.setattr(video_modes, "review_reference_consistency", review_consistency_with_drift)
     fallback_meta: dict = {}
-    fallback_assets = asyncio.run(video_modes.build_reference_assets(
+    fallback_assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="long-drift",
         shot=_shot(
             duration_s=10,
@@ -844,7 +844,7 @@ def test_build_reference_assets_collects_score_only_warning_without_discard(monk
         referenceImagePlan=ReferenceImagePlan(totalCount=1, reusePreviousSceneCount=0,
                                               generateNewCount=1, types=["plot_key_frame"], prompts=[]))
     rejected: list = []
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
@@ -888,7 +888,7 @@ def test_qa_pending_slot_resumes_existing_file_without_paid_regeneration(monkeyp
         },
     }
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
         existing_meta=existing_meta,
@@ -938,7 +938,7 @@ def test_keyframe_best_of_three_selects_highest_and_deletes_losers(monkeypatch, 
     rejected: list[ReferenceImageAsset] = []
     progress_snapshots: list[tuple[list[str], list[str]]] = []
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
         existing_meta=existing_meta, rejected_out=rejected,
@@ -1028,7 +1028,7 @@ def test_all_three_structurally_invalid_keyframes_fail_closed_after_retry_exhaus
     monkeypatch.setattr(mv, "review_keyframe_with_evidence", reject_geometry)
     meta: dict = {}
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
         existing_meta=meta,
@@ -1100,7 +1100,7 @@ def test_multi_character_height_contract_fails_closed_when_all_keyframes_fail(mo
     )
     meta: dict = {}
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=video_modes.default_reference_decision(),
         existing_meta=meta,
@@ -1156,7 +1156,7 @@ def test_keyframe_best_of_three_all_unverified_fails_closed(monkeypatch, tmp_pat
     existing_meta: dict = {}
     rejected: list[ReferenceImageAsset] = []
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
         existing_meta=existing_meta, rejected_out=rejected,
@@ -1278,7 +1278,7 @@ def test_all_identity_bad_keyframes_are_deleted_and_fall_back_to_truth_anchors(
     monkeypatch.setattr(mv, "review_keyframe_with_evidence", reject_identity)
     meta: dict = {}
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None,
         project_id="p",
         episode_no=1,
@@ -1362,7 +1362,7 @@ def test_keyframe_three_qa_pending_candidates_resume_without_paid_regeneration(m
     }
     rejected: list[ReferenceImageAsset] = []
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
         existing_meta=existing_meta, rejected_out=rejected,
@@ -1438,7 +1438,7 @@ def test_narrative_slot_forces_plot_keyframe_and_drops_wrong_type_brief(monkeypa
         },
     }
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=decision, existing_meta=existing_meta,
     ))
@@ -1478,7 +1478,7 @@ def test_prompt_checkpoint_is_persisted_before_provider_and_reused_after_restart
     monkeypatch.setattr(video_modes, "_generate_reference_keep_best", crash_provider)
 
     with pytest.raises(RuntimeError, match="simulated worker crash"):
-        asyncio.run(video_modes.build_reference_assets(
+        asyncio.run(video_modes._build_generated_reference_assets_legacy(
             conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
             shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
             existing_meta=existing_meta, on_progress=progress,
@@ -1509,7 +1509,7 @@ def test_prompt_checkpoint_is_persisted_before_provider_and_reused_after_restart
     monkeypatch.setattr(mv, "review_keyframe_with_evidence", pass_review)
     monkeypatch.setattr(mv, "keyframe_gate_passed", lambda _qa: True)
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
         existing_meta=existing_meta,
@@ -1559,7 +1559,7 @@ def test_deterministic_prompt_checkpoint_with_none_skips_writer_on_restart(monke
     monkeypatch.setattr(mv, "review_keyframe_with_evidence", pass_review)
     monkeypatch.setattr(mv, "keyframe_gate_passed", lambda _qa: True)
 
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=_shot(), bible=_bible(), decision=video_modes.default_reference_decision(),
         existing_meta=existing_meta,
@@ -2073,7 +2073,7 @@ def test_reference_candidates_stay_hidden_until_winner_is_selected(monkeypatch, 
         ),
     )
 
-    result = asyncio.run(video_modes.build_reference_assets(
+    result = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None,
         project_id="p",
         episode_no=1,
@@ -2151,7 +2151,7 @@ def test_build_reference_assets_fallback_keyframe_yields_to_clean_portrait(monke
         referenceImagePlan=ReferenceImagePlan(totalCount=1, reusePreviousSceneCount=0,
                                               generateNewCount=0, types=["plot_key_frame"], prompts=[]))
     rejected: list = []
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
@@ -2213,7 +2213,7 @@ def test_build_reference_assets_all_low_scores_still_keep_best_without_gate(monk
         referenceImagePlan=ReferenceImagePlan(totalCount=1, reusePreviousSceneCount=0,
                                               generateNewCount=0, types=["plot_key_frame"], prompts=[]))
     rejected: list = []
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None, rejected_out=rejected))
 
@@ -2274,7 +2274,7 @@ def test_generated_references_get_i2i_seeds(monkeypatch, tmp_path) -> None:
         mode=REFERENCE_IMAGE_MODE, reason="x", confidence=1.0,
         referenceImagePlan=ReferenceImagePlan(totalCount=2, reusePreviousSceneCount=0,
                                               generateNewCount=2, types=["plot_key_frame", "scene"], prompts=[]))
-    asyncio.run(video_modes.build_reference_assets(
+    asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None))
 
@@ -2674,7 +2674,7 @@ def test_build_reference_assets_warns_and_continues_with_incomplete_pack(monkeyp
         referenceImagePlan=ReferenceImagePlan(totalCount=0, generateNewCount=0, types=[]),
     )
     meta = {}
-    assets = asyncio.run(video_modes.build_reference_assets(
+    assets = asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None, existing_meta=meta))
     assert assets == []
@@ -2738,7 +2738,7 @@ def test_build_reference_assets_reuses_frozen_manifest_when_revisions_match(monk
         "reference_manifest_frozen": True,
         "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
     }
-    asyncio.run(video_modes.build_reference_assets(
+    asyncio.run(video_modes._build_generated_reference_assets_legacy(
         conn=None, project_id="p", episode_no=1, episode_id="e", shot_id="s",
         shot=shot, bible=bible, decision=decision, prev_shot=None, existing_meta=meta))
 

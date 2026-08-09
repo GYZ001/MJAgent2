@@ -260,8 +260,8 @@ def test_generated_reference_gallery_cannot_change_enqueue_idempotency(monkeypat
     new_meta = json.loads(conn.execute(
         "SELECT image_inputs FROM shot_versions WHERE id=?", (changed["version_id"],)
     ).fetchone()["image_inputs"])
-    assert new_meta["reference_gallery_source_version_id"] == first["version_id"]
-    assert [r["id"] for r in new_meta["reference_images"]] == ["r_keep", "r_gone"]
+    assert "reference_gallery_source_version_id" not in new_meta
+    assert all(ref["source"] == "seedream_generated" for ref in new_meta["reference_images"])
 
 
 def test_new_portrait_revision_prevents_old_gallery_and_video_reuse(monkeypatch) -> None:
@@ -385,17 +385,12 @@ def test_reroll_does_not_reuse_gallery_containing_generated_keyframe(monkeypatch
     assert rerolled["version_id"] != first["version_id"]
     assert "reference_gallery_source_version_id" not in rerolled_meta
     assert "reference_images" not in rerolled_meta
-    assert rerolled_meta["reference_manifest"] == {"input_fingerprint": "frozen-manifest"}
-    assert rerolled_meta["reference_manifest_frozen"] is True
+    assert rerolled_meta["reference_input_policy_version"] == video_modes.REFERENCE_INPUT_POLICY_VERSION
     rerolled_prompt = conn.execute(
         "SELECT prompt_text FROM shot_versions WHERE id=?",
         (rerolled["version_id"],),
     ).fetchone()["prompt_text"]
-    assert "Reference image 1: use as plot key frame" in rerolled_prompt
-    assert "Reference image 2: use as scene" in rerolled_prompt
-    assert "Reference image 3: use as character" in rerolled_prompt
-    assert "定义为「A」" in rerolled_prompt
-    assert "禁止中途变性、换脸、换人" in rerolled_prompt
+    assert "Reference image" not in rerolled_prompt
 
 
 def test_legacy_keyframe_gallery_is_not_reused_after_prompt_contract_upgrade(monkeypatch) -> None:

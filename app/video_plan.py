@@ -289,8 +289,6 @@ def normalize_ai_shot_plan_candidate(
             versioned_reference_roles = {
                 "identity_reference",
                 "scene_reference",
-                "prop_reference",
-                "style_reference",
             }
             kept = [
                 item
@@ -323,13 +321,6 @@ def normalize_ai_shot_plan_candidate(
             and first_frame.get("source_shot_id")
         ):
             desired_dependency = str(first_frame["source_shot_id"])
-        elif first_frame and normalized.get("mode") == VideoGenerationMode.FIRST_FRAME_MODE.value:
-            desired_dependency = (
-                str(first_frame["source_shot_id"])
-                if first_frame.get("source") == AssetSource.PREVIOUS_ADOPTED_TAIL.value
-                and first_frame.get("source_shot_id")
-                else None
-            )
         elif (
             first_frame
             and first_frame.get("source") in {

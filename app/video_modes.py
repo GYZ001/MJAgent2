@@ -4619,14 +4619,14 @@ def build_seedance_image_inputs(meta: dict[str, Any]) -> list[tuple[str, str]]:
             raise ProviderError(
                 "REFERENCE_IMAGE_MODE 不能混入 first_frame、last_frame 或 reference_video"
             )
-        if not reference_gallery_matches_library_policy(meta):
-            raise ProviderError(
-                "REFERENCE_IMAGE_MODE 只允许人物谱与场景库中的现有图片"
-            )
         refs = meta.get("reference_images") or []
         if not refs:
             raise ProviderError(
                 "REFERENCE_IMAGE_MODE 缺少通过门禁的 reference_image，禁止纯文本提交"
+            )
+        if not reference_gallery_matches_library_policy(meta):
+            raise ProviderError(
+                "REFERENCE_IMAGE_MODE 只允许人物谱与场景库中的现有图片"
             )
         # 使用中的图按综合分 Top-N 装箱；截断不改 selected，高分未入选仍留在画廊。
         sequence = meta.get("keyframe_sequence") or {}
