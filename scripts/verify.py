@@ -98,6 +98,17 @@ def _depends_on(imports: set[str], affected_modules: set[str]) -> bool:
     )
 
 
+def _runtime_facade_modules(paths: list[str]) -> set[str]:
+    """Return compatibility facades that execute implementation slices."""
+    facades: set[str] = set()
+    for path in paths:
+        if path.startswith("app/domain/") and path.endswith(".py"):
+            facades.add("app.api")
+        if path.startswith("app/media_exec/") and path.endswith(".py"):
+            facades.add("app.worker")
+    return facades
+
+
 def affected_python_tests(paths: list[str]) -> list[str]:
     """Find changed tests and tests directly importing a changed app module.
 
@@ -120,6 +131,7 @@ def affected_python_tests(paths: list[str]) -> list[str]:
         for path in changed_app_paths
         if _module_name(ROOT / Path(path))
     }
+    affected_modules.update(_runtime_facade_modules(list(changed_app_paths)))
 
     selected = set(changed_test_paths)
     for file_path in python_files:

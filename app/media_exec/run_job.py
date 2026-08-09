@@ -1680,6 +1680,29 @@ async def _prepare_reference_mode_inputs(
             if isinstance(frozen_manifest, dict) and manifest_revisions_match(frozen_manifest, current_manifest):
                 meta["reference_manifest"] = frozen_manifest
                 meta["reference_manifest_frozen"] = True
+                if video_modes.REFERENCE_PROMPT_NOTE_MARKER not in prompt_text:
+                    packed_refs = video_modes.pack_reference_images_for_seedance(
+                        list(meta.get("reference_images") or [])
+                    )
+                    prompt_text = (
+                        video_modes.append_reference_prompt_notes_from_dicts(
+                            prompt_text,
+                            packed_refs,
+                        )
+                    )
+                set_pipeline_stage(
+                    job["id"],
+                    media_stages.STAGE_VIDEO_READY,
+                    scheduler_lane=media_stages.LANE_VIDEO_READY,
+                    ready_at=now(),
+                    conn=conn,
+                )
+                _set_version(
+                    version["id"],
+                    image_inputs=json.dumps(meta, ensure_ascii=False),
+                    prompt_text=prompt_text,
+                )
+                conn.commit()
                 return meta, prompt_text
             _invalidate_reference_checkpoint("reference_dependency_manifest_changed")
     # 复用入队时已确定的模式决策，不在生成时再跑一次 LLM 选择：既省每镜一次文本调用，
@@ -2825,6 +2848,105 @@ async def _prepare_video_input_mode(
     return meta, prompt_text
 
 
+async def _ensure_ai_video_prompt(
+    conn,
+    job,
+    version,
+    shot,
+    ep,
+    meta: dict,
+    prompt_text: str,
+) -> tuple[dict, str]:
+    """Generate the creative provider prompt once, before preparing video inputs."""
+    if not meta.get("ai_video_prompt_required"):
+        return meta, prompt_text
+
+    from app.video_prompt_ai import (
+        AI_VIDEO_PROMPT_CONTRACT_VERSION,
+        generate_ai_video_prompt,
+    )
+
+    if (
+        meta.get("ai_video_prompt_contract_version")
+        == AI_VIDEO_PROMPT_CONTRACT_VERSION
+        and isinstance(meta.get("ai_video_prompt_draft"), dict)
+        and str(meta.get("ai_video_prompt_base") or "").strip()
+    ):
+        return meta, prompt_text
+
+    from app.media_pipeline import stages as media_stages
+    from app.media_pipeline.stage_state import set_pipeline_stage
+    from app.schemas import Bible
+
+    set_pipeline_stage(
+        job["id"],
+        media_stages.STAGE_VIDEO_PROMPT,
+        conn=conn,
+    )
+    conn.commit()
+
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?",
+        (job["project_id"],),
+    ).fetchone()
+    bible = Bible.model_validate(json.loads(project["bible_json"]))
+    from app.portraits import bible_for_episode
+
+    bible = bible_for_episode(job["project_id"], bible, ep["episode_no"])
+    shot_model = _load_shot_model(shot)
+    from app.continuity import apply_shot_contract
+
+    apply_shot_contract(shot_model, meta.get("shot_contract_json"))
+    continuity_contract = str(
+        meta.get("continuity_contract_prompt") or prompt_text
+    ).strip()
+    prompt, draft = await generate_ai_video_prompt(
+        shot=shot_model,
+        bible=bible,
+        continuity_contract=continuity_contract,
+        video_generation_mode=str(
+            meta.get("planned_mode")
+            or meta.get("mode")
+            or video_modes.REFERENCE_IMAGE_MODE
+        ),
+        operation_scope=str(version["id"]),
+        user_instruction=str(meta.get("prompt_user_instruction") or ""),
+        critique=[
+            str(item).strip()
+            for item in (meta.get("prompt_critique") or [])
+            if str(item).strip()
+        ],
+    )
+    meta["continuity_contract_prompt"] = continuity_contract
+    meta["ai_video_prompt_contract_version"] = (
+        AI_VIDEO_PROMPT_CONTRACT_VERSION
+    )
+    meta["ai_video_prompt_draft"] = draft.model_dump(mode="json")
+    meta["ai_video_prompt_base"] = prompt
+    meta["ai_video_prompt_generated_at"] = now()
+    bible_character_names = {item.name for item in bible.characters}
+    meta["required_reference_characters"] = [
+        name
+        for name in draft.visible_characters
+        if name in bible_character_names
+    ]
+    if draft.interaction_kind == "person_person_contact":
+        meta["required_interaction_reference_characters"] = [
+            name
+            for name in draft.interaction_participants
+            if name in bible_character_names
+        ]
+    else:
+        meta.pop("required_interaction_reference_characters", None)
+    _set_version(
+        version["id"],
+        image_inputs=json.dumps(meta, ensure_ascii=False),
+        prompt_text=prompt,
+    )
+    conn.commit()
+    return meta, prompt
+
+
 async def _prepare_planned_mode_inputs(
     conn, job, version, shot, ep, meta: dict, prompt_text: str,
     *, lease_owner: str,
@@ -2986,6 +3108,13 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             _set_version(version["id"], prompt_text=prompt_text)
         try:
             if not task_id:
+                meta, prompt_text = await _await_with_job_lease_heartbeat(
+                    _ensure_ai_video_prompt(
+                        conn, job, version, shot, ep, meta, prompt_text,
+                    ),
+                    job_id=job_id,
+                    owner=owner,
+                )
                 meta, prompt_text = await _await_with_job_lease_heartbeat(
                     _prepare_planned_mode_inputs(
                         conn, job, version, shot, ep, meta, prompt_text,

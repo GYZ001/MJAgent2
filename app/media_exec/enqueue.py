@@ -1043,6 +1043,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         VIDEO_PROMPT_CONTRACT_VERSION,
         compile_prompt,
     )
+    from app.video_prompt_ai import AI_VIDEO_PROMPT_CONTRACT_VERSION
     from app.continuity import (
         derive_continuity_mode,
         effective_state_out,
@@ -1283,29 +1284,42 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     if preflight_errors:
         raise CompileError("；".join(preflight_errors))
 
-    raw_prompt_text = (prompt_override if prompt_override else
-                       compile_prompt(shot, bible, extra_negative,
-                                  with_refs=True,
-                                  from_scene=False,
-                                  chained=bool(chain_after_shot_id),
-                                  critique=critique, prev_tail_action=None,
-                                  with_last_frame=False,
-                                  incoming_transition=incoming_transition,
-                                  outgoing_transition=outgoing_transition["transition"] if outgoing_transition else None,
-                                  next_scene=outgoing_transition["next_scene"] if outgoing_transition else None,
-                                  next_first_frame_desc=outgoing_transition["next_first_frame_desc"] if outgoing_transition else None,
-                                  continuity_mode=continuity_mode,
-                                  prev_state_out=prompt_prev_state_out,
-                                  voice_bible=screenplay.voice_bible,
-                                  screenplay=screenplay,
-                                  video_generation_mode=(
-                                      shot_plan.mode.value if shot_plan is not None else decision.mode
-                                  ),
-                                  first_frame_source=first_frame_source,
-                                  boundary_relation_edit=boundary_relation_edit,
-                                  boundary_relation_action=boundary_relation_action,
-                                  boundary_start_state=boundary_start_state,
-                                  previous_prompt_text=previous_prompt_text))
+    raw_prompt_text = compile_prompt(
+        shot,
+        bible,
+        extra_negative,
+        with_refs=True,
+        from_scene=False,
+        chained=bool(chain_after_shot_id),
+        critique=critique,
+        prev_tail_action=None,
+        with_last_frame=False,
+        incoming_transition=incoming_transition,
+        outgoing_transition=(
+            outgoing_transition["transition"]
+            if outgoing_transition else None
+        ),
+        next_scene=(
+            outgoing_transition["next_scene"]
+            if outgoing_transition else None
+        ),
+        next_first_frame_desc=(
+            outgoing_transition["next_first_frame_desc"]
+            if outgoing_transition else None
+        ),
+        continuity_mode=continuity_mode,
+        prev_state_out=prompt_prev_state_out,
+        voice_bible=screenplay.voice_bible,
+        screenplay=screenplay,
+        video_generation_mode=(
+            shot_plan.mode.value if shot_plan is not None else decision.mode
+        ),
+        first_frame_source=first_frame_source,
+        boundary_relation_edit=boundary_relation_edit,
+        boundary_relation_action=boundary_relation_action,
+        boundary_start_state=boundary_start_state,
+        previous_prompt_text=previous_prompt_text,
+    )
     raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
     prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
     if raw_source_errors:
@@ -1369,6 +1383,8 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         + f"|after_version:{chain_after_version_id or ''}"
         + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
         + f"|video_prompt_contract:{VIDEO_PROMPT_CONTRACT_VERSION}"
+        + f"|ai_video_prompt_contract:{AI_VIDEO_PROMPT_CONTRACT_VERSION}"
+        + f"|prompt_user_instruction:{(prompt_override or '').strip()}"
         + f"|previous_prompt:{previous_prompt_fingerprint}"
         + f"|reference_input_policy:{video_modes.REFERENCE_INPUT_POLICY_VERSION}"
         + f"|reference_dependencies:{current_reference_manifest.get('input_fingerprint') or ''}"
@@ -1398,10 +1414,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                 result["preflight_repair"] = preflight_repair
             return result
 
-    if reference_gallery:
-        prompt_text = _append_reference_notes_from_dicts(
-            prompt_text, reference_gallery["reference_images"])
-
     version_no = (conn.execute(
         "SELECT COALESCE(MAX(version_no), 0) AS m FROM shot_versions WHERE shot_id=?",
         (shot_id,)).fetchone()["m"]) + 1
@@ -1420,6 +1432,15 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
         "video_prompt_contract_version": VIDEO_PROMPT_CONTRACT_VERSION,
+        "ai_video_prompt_required": True,
+        "ai_video_prompt_contract_target": AI_VIDEO_PROMPT_CONTRACT_VERSION,
+        "continuity_contract_prompt": prompt_text,
+        "prompt_user_instruction": (prompt_override or "").strip(),
+        "prompt_critique": [
+            str(item).strip()
+            for item in (critique or [])
+            if str(item).strip()
+        ],
         "previous_prompt_version_id": (
             previous_prompt_version["id"]
             if previous_prompt_version is not None

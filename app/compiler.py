@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
 
 from app import config
 from app.character_policy import (
@@ -28,8 +27,7 @@ QUALITY_SUFFIX = (
 NO_BGM_SUFFIX = "全程不要任何背景音乐、不要配乐、不要 BGM；声音只保留人物台词、旁白人声与必要的环境音"
 SOURCE_EXCERPT_PROMPT_MAX = 260
 SOURCE_EXCERPT_MARKER = "小说原文兜底参考："
-CONTINUITY_CONTRACT_VERSION = "cinematic_continuity_v1"
-VIDEO_PROMPT_CONTRACT_VERSION = "physical_generation_v2"
+VIDEO_PROMPT_CONTRACT_VERSION = "cinematic_continuity_v1"
 
 def _clean_transition(transition: str | None) -> str:
     transition = (transition or "").strip()
@@ -304,306 +302,6 @@ def ensure_source_excerpt_in_prompt(prompt_text: str, shot: Shot) -> str:
 
     text = f"{body}{args}" if body.strip() else args.strip()
     return sanitize_seedance_prompt(text)
-
-
-@dataclass(frozen=True)
-class PhysicalPerformance:
-    start_pose: str
-    motion: str
-    end_pose: str
-    camera: str
-    performance: str
-    dialogue: str
-
-
-def _contract_section(
-    sections: dict[str, str],
-    title: str,
-) -> str:
-    return next(
-        (
-            content
-            for section_title, content in sections.items()
-            if section_title == title or section_title.startswith(f"{title} |")
-        ),
-        "",
-    )
-
-
-def _structured_pose_details(shot: Shot, *, start: bool) -> str:
-    state = shot.continuity_state_in if start else shot.continuity_state_out
-    lines: list[str] = []
-    for name, raw in (state.characters or {}).items():
-        character = raw if not isinstance(raw, dict) else None
-
-        def value(field: str) -> str:
-            if isinstance(raw, dict):
-                return str(raw.get(field) or "").strip()
-            return str(getattr(character, field, "") or "").strip()
-
-        details = [
-            value("pose"),
-            f"朝向{value('facing')}" if value("facing") else "",
-            f"视线看向{value('gaze_target')}" if value("gaze_target") else "",
-            f"左手{value('left_hand')}" if value("left_hand") else "",
-            f"右手{value('right_hand')}" if value("right_hand") else "",
-        ]
-        physical = "，".join(item for item in details if item)
-        if physical:
-            lines.append(f"{name}：{physical}")
-    return "；".join(lines)
-
-
-def _pose_with_structured_details(
-    base: str,
-    shot: Shot,
-    *,
-    start: bool,
-) -> str:
-    text = re.sub(r"\s+", " ", str(base or "")).strip("。； ")
-    details = _structured_pose_details(shot, start=start)
-    if details and details not in text:
-        return f"{text}。身体状态：{details}" if text else details
-    return text
-
-
-def _audio_item_value(item: object, field: str, default: object = "") -> object:
-    if isinstance(item, dict):
-        return item.get(field, default)
-    return getattr(item, field, default)
-
-
-def _spoken_audio_items(shot: Shot) -> list[object]:
-    return [
-        item
-        for item in (shot.audio_timeline or [])
-        if str(_audio_item_value(item, "type") or "") in SPOKEN_DELIVERIES
-        and str(_audio_item_value(item, "text") or "").strip()
-    ]
-
-
-def _compile_physical_motion(
-    shot: Shot,
-    primary_action: str,
-) -> str:
-    duration = max(0.2, float(shot.duration_s))
-    spoken = _spoken_audio_items(shot)
-    settle_duration = min(0.5, max(0.3, duration * 0.08))
-    settle_start = max(0.0, duration - settle_duration)
-    if spoken:
-        first_spoken = min(float(_audio_item_value(item, "start_s", 0.0) or 0.0) for item in spoken)
-        last_spoken = max(float(_audio_item_value(item, "end_s", 0.0) or 0.0) for item in spoken)
-        motion_start = max(0.0, min(first_spoken, min(0.4, duration * 0.08)))
-        settle_start = min(settle_start, max(motion_start, last_spoken))
-    else:
-        motion_start = min(0.4, duration * 0.08)
-    if settle_start <= motion_start:
-        motion_start = 0.0
-        settle_start = max(0.0, duration - settle_duration)
-
-    lines: list[str] = []
-    if motion_start >= 0.1:
-        lines.append(
-            f"0–{_format_prompt_time(motion_start)}秒：保持 START POSE，动作自然起势。"
-        )
-    lines.append(
-        f"{_format_prompt_time(motion_start)}–{_format_prompt_time(settle_start)}秒："
-        f"{primary_action.strip('。； ')}。动作连续完成，不在对白边界重置姿势。"
-    )
-    if spoken:
-        windows = "；".join(
-            (
-                f"{float(_audio_item_value(item, 'start_s', 0.0) or 0.0):g}–"
-                f"{float(_audio_item_value(item, 'end_s', 0.0) or 0.0):g}秒"
-                f"{str(_audio_item_value(item, 'speaker_id') or '说话人')}说话"
-            )
-            for item in spoken
-        )
-        lines.append(f"对白同步窗口：{windows}；身体动作在这些窗口内继续推进。")
-    lines.append(
-        f"{_format_prompt_time(settle_start)}–{_format_prompt_time(duration)}秒："
-        "动作收束到 END POSE，并稳定保持至结束。"
-    )
-    return "\n".join(lines)
-
-
-def _compile_generation_dialogue(shot: Shot) -> str:
-    spoken = _spoken_audio_items(shot)
-    if not spoken:
-        return "无台词、画外音或旁白；人物不做说话口型，不生成可辨识人声。"
-    lines: list[str] = []
-    for item in spoken:
-        start = float(_audio_item_value(item, "start_s", 0.0) or 0.0)
-        end = float(_audio_item_value(item, "end_s", 0.0) or 0.0)
-        item_type = str(_audio_item_value(item, "type") or "")
-        speaker = str(_audio_item_value(item, "speaker_id") or "未知")
-        text = str(_audio_item_value(item, "text") or "").strip()
-        emotion = str(_audio_item_value(item, "emotion") or "平静")
-        voice = str(_audio_item_value(item, "voice_canonical") or "").strip()
-        delivery = (
-            "画内自然对口型"
-            if item_type == "spoken_dialogue"
-            and bool(_audio_item_value(item, "lip_sync", False))
-            else "画外发声，不生成画内口型"
-        )
-        voice_note = f"，声音：{voice}" if voice else ""
-        lines.append(
-            f"{start:g}–{end:g}秒：{speaker}以{emotion}语气说「{text}」；"
-            f"{delivery}{voice_note}。"
-        )
-    return "\n".join(lines)
-
-
-def _compile_physical_performance(
-    shot: Shot,
-    continuity_prompt: str,
-    *,
-    video_generation_mode: str | None,
-) -> PhysicalPerformance:
-    sections = _structured_prompt_sections(continuity_prompt)
-    contract_start = _contract_section(sections, "START STATE")
-    contract_end = _contract_section(sections, "END STATE")
-    boundary_mode = video_generation_mode in {"FIRST_FRAME_MODE", "FIRST_LAST_FRAME_MODE"}
-    start_base = (
-        contract_start
-        if boundary_mode
-        else (shot.first_frame_desc or contract_start)
-    )
-    end_base = shot.last_frame_desc or contract_end
-    end_base = re.sub(r"。?结尾稳定，可供下镜承接。?$", "", end_base).strip()
-
-    action = _contract_section(sections, "ONE CURRENT ACTION")
-    action = re.split(r"。必须从起始状态|。只完成这一项主要动作", action, maxsplit=1)[0]
-    action = re.sub(r"^主动作：", "", action).strip()
-    if not action:
-        action = (shot.primary_action or shot.action_desc or "").strip()
-
-    return PhysicalPerformance(
-        start_pose=_pose_with_structured_details(start_base, shot, start=True),
-        motion=_compile_physical_motion(shot, action),
-        end_pose=_pose_with_structured_details(end_base, shot, start=False),
-        camera=_contract_section(sections, "CAMERA"),
-        performance=_contract_section(sections, "PERFORMANCE"),
-        dialogue=_compile_generation_dialogue(shot),
-    )
-
-
-def compile_h3_generation_prompt(
-    shot: Shot,
-    bible: Bible,
-    continuity_prompt: str,
-    *,
-    video_generation_mode: str | None = None,
-    extra_negative: list[str] | None = None,
-    critique: list[str] | None = None,
-) -> str:
-    """Project the internal continuity contract into the prompt sent to H3."""
-    from app.continuity import effective_characters_visible
-
-    physical = _compile_physical_performance(
-        shot,
-        continuity_prompt,
-        video_generation_mode=video_generation_mode,
-    )
-    visible = effective_characters_visible(shot)
-    contact_two_shot = has_contact_action(shot) and len(visible) >= 2
-    character_line = (
-        "画面角色：" + "、".join(visible) + "。每个角色只出现一次。"
-        if visible
-        else "画面中没有可辨识人物。"
-    )
-    scene_bits = [
-        (shot.scene_name or shot.scene_setting or "").strip(),
-        f"时间：{shot.scene_time.strip()}" if (shot.scene_time or "").strip() else "",
-        f"空间关系：{shot.spatial_anchor.strip()}" if (shot.spatial_anchor or "").strip() else "",
-        f"画风：{(bible.world.visual_style_canonical or '').strip()}",
-    ]
-    scene_line = "；".join(item for item in scene_bits if item)
-
-    camera = physical.camera
-    if contact_two_shot:
-        camera = re.sub(r"^(特写|近景)", "中景", camera)
-        camera += (
-            "。双人互动构图必须同时拍到双方身体、肢体接触点与相对位置；"
-            "对白口型与接触动作同等可见。"
-        )
-
-    input_line = ""
-    if video_generation_mode == "FIRST_FRAME_MODE":
-        input_line = "first_frame 是 0.0 秒不可重画的真实起点，从该姿态继续动作。"
-    elif video_generation_mode == "FIRST_LAST_FRAME_MODE":
-        input_line = (
-            "first_frame 和 last_frame 是不可重画的时间端点，"
-            "用同一连续动作从首帧到达尾帧。"
-        )
-    elif video_generation_mode == "REFERENCE_IMAGE_MODE":
-        input_line = "参考图只绑定角色身份、服装与场景，不复制参考图姿势或构图。"
-    elif video_generation_mode == "VIDEO_INPUT_MODE":
-        input_line = "参考视频只按已声明用途提供运动、摄影、节奏或声音条件。"
-
-    negative = [
-        "不新增、复制或合并人物",
-        "不换脸、换装或改变角色体型",
-        "不跳切、分屏、瞬移或用表情代替主动作",
-        "不出现多余肢体、穿模、接触点悬空或场景物体漂移",
-        "不生成未指定文字、水印或背景音乐",
-    ]
-    negative.extend(
-        str(item).strip()
-        for item in (extra_negative or [])
-        if str(item).strip()
-    )
-    fix_lines = [
-        str(item).strip()
-        for item in (critique or [])
-        if str(item).strip()
-    ][:3]
-
-    sections = [
-        ("CHARACTERS", character_line),
-        ("SCENE", scene_line),
-        ("INPUT", input_line),
-        ("START POSE | 0.0s", physical.start_pose),
-        ("MOTION", physical.motion),
-        (f"END POSE | {shot.duration_s}.0s", physical.end_pose),
-        ("CAMERA", camera),
-        (
-            "PERFORMANCE",
-            physical.performance
-            + "。情绪必须落实为眼睑、眉毛、嘴角、下颌、呼吸、肩膀、脊柱、手部和重心的可见变化。",
-        ),
-        ("DIALOGUE", physical.dialogue),
-        ("FIX", "；".join(fix_lines)),
-        ("NEGATIVE", "；".join(dict.fromkeys(negative))),
-    ]
-    body = "\n\n".join(
-        f"[{title}]\n{content.strip()}"
-        for title, content in sections
-        if content and content.strip()
-    )
-    _contract_body, args = _split_video_args(continuity_prompt, shot.duration_s)
-    prompt = sanitize_seedance_prompt(body + args)
-    if len(prompt) > config.PROMPT_CHAR_LIMIT:
-        raise CompileError(
-            f"镜头 {shot.shot_no} H3 Generation Prompt 长度 {len(prompt)} "
-            f"超过上限 {config.PROMPT_CHAR_LIMIT}；请拆分镜头任务"
-        )
-    return prompt
-
-
-def compile_prompt(
-    shot: Shot,
-    bible: Bible,
-    extra_negative: list[str] | None = None,
-    **kwargs: object,
-) -> str:
-    """Compile the internal supervisor continuity contract."""
-    return compile_continuity_contract(
-        shot,
-        bible,
-        extra_negative,
-        **kwargs,
-    )
 
 
 def _framing_scale_hint(shot_size: str) -> str:
@@ -1501,35 +1199,28 @@ def _first_last_boundary_path(
     return path, camera_move
 
 
-def compile_continuity_contract(
-    shot: Shot,
-    bible: Bible,
-    extra_negative: list[str] | None = None,
-    *,
-    with_refs: bool = False,
-    chained: bool = False,
-    prev_action: str | None = None,
-    from_scene: bool = False,
-    critique: list[str] | None = None,
-    prev_tail_action: str | None = None,
-    with_last_frame: bool = False,
-    incoming_transition: str | None = None,
-    outgoing_transition: str | None = None,
-    next_scene: str | None = None,
-    next_first_frame_desc: str | None = None,
-    continuity_mode: str | None = None,
-    prev_state_out: str | None = None,
-    voice_bible: list | None = None,
-    screenplay: EpisodeScreenplay | None = None,
-    visual_style: str | None = None,
-    aspect_ratio: str = "9:16",
-    video_generation_mode: str | None = None,
-    first_frame_source: str | None = None,
-    boundary_relation_edit: str | None = None,
-    boundary_relation_action: str | None = None,
-    boundary_start_state: str | None = None,
-    previous_prompt_text: str | None = None,
-) -> str:
+def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = None,
+                   *, with_refs: bool = False, chained: bool = False,
+                   prev_action: str | None = None, from_scene: bool = False,
+                   critique: list[str] | None = None,
+                   prev_tail_action: str | None = None,
+                   with_last_frame: bool = False,
+                   incoming_transition: str | None = None,
+                   outgoing_transition: str | None = None,
+                   next_scene: str | None = None,
+                   next_first_frame_desc: str | None = None,
+                   continuity_mode: str | None = None,
+                   prev_state_out: str | None = None,
+                   voice_bible: list | None = None,
+                   screenplay: EpisodeScreenplay | None = None,
+                   visual_style: str | None = None,
+                   aspect_ratio: str = "9:16",
+                   video_generation_mode: str | None = None,
+                   first_frame_source: str | None = None,
+                   boundary_relation_edit: str | None = None,
+                   boundary_relation_action: str | None = None,
+                   boundary_start_state: str | None = None,
+                   previous_prompt_text: str | None = None) -> str:
     """编译视频模型提示词：固定电影化段落、禁止原文/前镜动作/未来剧情。"""
     from app.continuity import (
         dialogue_action_staging_kind,
@@ -1774,7 +1465,7 @@ def compile_continuity_contract(
         post_text_note += "与精确文字插入"
     post_text_note += "；不得依赖后期补齐剧情动作、配音或关键音效。"
     format_block = (
-        f"提示词合同 {CONTINUITY_CONTRACT_VERSION}。"
+        f"提示词合同 {VIDEO_PROMPT_CONTRACT_VERSION}。"
         f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 的完整可直接采用视频。"
         f"{post_text_note}"
         "全程不要任何背景音乐或 BGM；声音只保留指定人声与必要环境音。"

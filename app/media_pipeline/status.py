@@ -123,6 +123,7 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
 
         # 有 task id 时禁止显示准备参考图
         if provider_task_id and current_stage in (
+            S.STAGE_VIDEO_PROMPT,
             S.STAGE_REFERENCE_PROMPT, S.STAGE_REFERENCE_GENERATE, S.STAGE_REFERENCE_QA,
             S.STAGE_REFERENCE_CONSISTENCY, S.STAGE_REFERENCE, S.STAGE_JOB_QUEUED,
             S.STAGE_WAITING_CONTINUITY, S.STAGE_WAITING_DEPENDENCY,
@@ -163,7 +164,8 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
         _NEXT = {
             S.STAGE_PREFLIGHT_VALIDATING: S.STAGE_JOB_QUEUED,
             S.STAGE_PREFLIGHT_RETRY: S.STAGE_PREFLIGHT_VALIDATING,
-            S.STAGE_JOB_QUEUED: S.STAGE_REFERENCE_PROMPT,
+            S.STAGE_JOB_QUEUED: S.STAGE_VIDEO_PROMPT,
+            S.STAGE_VIDEO_PROMPT: S.STAGE_REFERENCE_PROMPT,
             S.STAGE_REFERENCE_PROMPT: S.STAGE_REFERENCE_GENERATE,
             S.STAGE_REFERENCE_GENERATE: S.STAGE_REFERENCE_QA,
             S.STAGE_REFERENCE_QA: S.STAGE_REFERENCE_CONSISTENCY,

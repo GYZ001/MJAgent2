@@ -2709,6 +2709,7 @@ def pack_references_by_purpose(
     max_images: int,
     continuity_required: bool = False,
     char_limit: int = 1,
+    required_identity_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """按连续性价值装箱，确保稀缺槽位优先给动作与道具真值。
 
@@ -2728,10 +2729,52 @@ def pack_references_by_purpose(
     if not usable:
         return []
 
-    character_limit = max(0, int(char_limit))
-    characters_seen = 0
-    eligible: list[dict[str, Any]] = []
+    required_names = list(dict.fromkeys(
+        str(name).strip()
+        for name in (required_identity_names or [])
+        if str(name).strip()
+    ))
+
+    def _identity_names(ref: dict[str, Any]) -> set[str]:
+        names = {
+            str(name).strip()
+            for name in (
+                ref.get("relatedCharacterIds")
+                or ref.get("related_character_ids")
+                or []
+            )
+            if str(name).strip()
+        }
+        entity_name = str(ref.get("entity_name") or "").strip()
+        if entity_name:
+            names.add(entity_name)
+        return names
+
+    required_refs: list[dict[str, Any]] = []
+    for name in required_names:
+        match = min(
+            (
+                ref
+                for ref in usable
+                if str(ref.get("type") or "") == "character"
+                and name in _identity_names(ref)
+            ),
+            key=ref_pack_priority,
+            default=None,
+        )
+        if match is not None and match not in required_refs:
+            required_refs.append(match)
+
+    character_limit = max(
+        0,
+        int(char_limit),
+        len(required_names),
+    )
+    characters_seen = len(required_refs)
+    eligible: list[dict[str, Any]] = list(required_refs)
     for ref in sorted(usable, key=ref_pack_priority):
+        if ref in required_refs:
+            continue
         if str(ref.get("type") or "") == "character":
             if characters_seen >= character_limit:
                 continue

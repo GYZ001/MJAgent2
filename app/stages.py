@@ -6924,7 +6924,12 @@ def _storyboard_shot_visual_identity_issues(
     )
     unexpected_ids = list(relation["unexpected_identity_ids"])
     unexpected_names = list(relation["unexpected_display_names"])
-    if not unexpected_ids:
+    binding_mismatches = list(relation["identity_binding_mismatches"])
+    unresolved_tokens = [
+        *relation["unresolved_visible_tokens"],
+        *relation["unresolved_visible_entity_ids"],
+    ]
+    if not unexpected_ids and not binding_mismatches and not unresolved_tokens:
         return []
 
     task_identity_ids = set(relation["allowed_identity_ids"])
@@ -6940,25 +6945,39 @@ def _storyboard_shot_visual_identity_issues(
         "offscreen_voice、lip_sync=false，且不得出现在动作或首尾帧画面中"
         if task_audio_names else ""
     )
+    if binding_mismatches or unresolved_tokens:
+        problem = (
+            f"第 {shot.shot_no} 镜的 characters_visible 与 visible_entity_ids "
+            "未按同一身份、同一顺序绑定"
+        )
+        if unresolved_tokens:
+            problem += f"，且包含未登记 token {list(dict.fromkeys(unresolved_tokens))}"
+    else:
+        problem = (
+            f"第 {shot.shot_no} 镜的持久可见身份 {unexpected_names} "
+            "不属于本镜叙事任务"
+        )
     return [Issue(
         code="SHOT_VISIBLE_IDENTITY_NOT_GROUNDED",
         severity=IssueSeverity.BLOCKER,
         category="structural",
         subject=f"storyboard_checkpoint:{episode_id}:{shot.shot_no}",
         message=(
-            f"第 {shot.shot_no} 镜的持久可见身份 {unexpected_names} "
-            f"不属于本镜叙事任务；本镜 visible_entity_ids 仅绑定 {task_names}"
+            f"{problem}；本镜 visible_entity_ids 仅绑定 {task_names}"
         ),
         evidence={
             "path": f"shots[{max(0, shot.shot_no - 1)}]",
             "rule_id": "shot_visible_identity_relation",
             "task_identity_ids": sorted(task_identity_ids),
             "unexpected_identity_ids": unexpected_ids,
+            "identity_binding_mismatches": binding_mismatches,
+            "unresolved_visible_tokens": list(dict.fromkeys(unresolved_tokens)),
         },
         repair_hint=(
-            f"将 characters、characters_visible 与角色 reference_roles 精确收敛到"
-            f"本镜 visible_entity_ids 对应的 {task_names}，并从 action_desc、"
-            f"first_frame_desc、last_frame_desc 移除 {unexpected_names} 的"
+            f"从当前 typed identity registry 原子重建 characters_visible 与"
+            f"visible_entity_ids，再将 characters 与角色 reference_roles 精确收敛到"
+            f"本镜任务对应的 {task_names}；从 action_desc、first_frame_desc、"
+            f"last_frame_desc 移除 {unexpected_names} 的"
             f"可见描写{audio_repair}；原文中的非持久背景群体可保留为不绑定身份的"
             "环境动作"
         ),

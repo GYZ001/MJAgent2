@@ -282,11 +282,30 @@ def evaluate_storyboard_for_confirmation(
                     screenplay,
                 )
                 unexpected = list(relation["unexpected_display_names"])
-                if unexpected:
+                binding_mismatches = list(
+                    relation["identity_binding_mismatches"]
+                )
+                unresolved_tokens = [
+                    *relation["unresolved_visible_tokens"],
+                    *relation["unresolved_visible_entity_ids"],
+                ]
+                if unexpected or binding_mismatches or unresolved_tokens:
+                    detail = (
+                        f"可见身份 {unexpected} 不属于本镜叙事任务"
+                        if unexpected
+                        else (
+                            "characters_visible 与 visible_entity_ids "
+                            "未按同一身份、同一顺序绑定"
+                        )
+                    )
+                    if unresolved_tokens:
+                        detail += (
+                            f"，包含未登记 token "
+                            f"{list(dict.fromkeys(unresolved_tokens))}"
+                        )
                     structural_errors.append(
                         "[SHOT_VISIBLE_IDENTITY_NOT_GROUNDED] "
-                        f"第 {shot.shot_no} 镜可见身份 {unexpected} "
-                        "不属于本镜叙事任务"
+                        f"第 {shot.shot_no} 镜{detail}"
                     )
         except IdentityContractError:
             # The existing narrative identity validator reports the complete

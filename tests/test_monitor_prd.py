@@ -292,12 +292,10 @@ def test_generic_gate_cannot_bypass_domain_publish_authority(
     conn.execute(
         """INSERT INTO episodes(
                id,project_id,episode_no,status,screenplay_status,
-               screenplay_artifact_id,published_screenplay_artifact_id,
-               storyboard_artifact_id,published_storyboard_artifact_id,created_at
+               screenplay_artifact_id,storyboard_artifact_id,created_at
            ) VALUES(
                'e1','p1',1,'confirmed','ready',
-               'screenplay-old','screenplay-old',
-               'storyboard-old','storyboard-old',1
+               'screenplay-old','storyboard-old',1
            )"""
     )
     conn.execute(
@@ -330,15 +328,12 @@ def test_generic_gate_cannot_bypass_domain_publish_authority(
     ).fetchone()[0] == 0
     episode = conn.execute(
         """SELECT status,screenplay_status,screenplay_artifact_id,
-                  published_screenplay_artifact_id,storyboard_artifact_id,
-                  published_storyboard_artifact_id
+                  storyboard_artifact_id
              FROM episodes WHERE id='e1'"""
     ).fetchone()
     assert tuple(episode) == (
         "confirmed",
         "ready",
         "screenplay-old",
-        "screenplay-old",
-        "storyboard-old",
         "storyboard-old",
     )

@@ -516,6 +516,62 @@ def storyboard_visual_identity_relation(
         if identity.identity_id not in allowed_ids:
             unexpected[identity.identity_id] = identity.display_name
 
+    visible_name_identity_ids: list[str | None] = []
+    unresolved_visible_tokens: list[str] = []
+    for token in shot.characters_visible or []:
+        value = _clean(token)
+        if not value:
+            visible_name_identity_ids.append(None)
+            continue
+        try:
+            identity = resolver.resolve(value, usage="visual")
+        except IdentityContractError:
+            unresolved_visible_tokens.append(value)
+            visible_name_identity_ids.append(None)
+            continue
+        visible_name_identity_ids.append(identity.identity_id)
+
+    stored_visible_identity_ids: list[str | None] = []
+    unresolved_visible_entity_ids: list[str] = []
+    for token in shot.visible_entity_ids or []:
+        value = _clean(token)
+        if not value:
+            stored_visible_identity_ids.append(None)
+            continue
+        try:
+            identity = resolver.resolve(value, usage="visual")
+        except IdentityContractError:
+            unresolved_visible_entity_ids.append(value)
+            stored_visible_identity_ids.append(None)
+            continue
+        stored_visible_identity_ids.append(identity.identity_id)
+        if identity.identity_id not in allowed_ids:
+            unexpected[identity.identity_id] = identity.display_name
+
+    identity_binding_mismatches: list[dict[str, object]] = []
+    pair_count = max(
+        len(visible_name_identity_ids),
+        len(stored_visible_identity_ids),
+    )
+    for index in range(pair_count):
+        name_identity_id = (
+            visible_name_identity_ids[index]
+            if index < len(visible_name_identity_ids)
+            else None
+        )
+        stored_identity_id = (
+            stored_visible_identity_ids[index]
+            if index < len(stored_visible_identity_ids)
+            else None
+        )
+        if name_identity_id == stored_identity_id:
+            continue
+        identity_binding_mismatches.append({
+            "index": index,
+            "character_identity_id": name_identity_id,
+            "visible_entity_id": stored_identity_id,
+        })
+
     # A chained shot's first frame is the previous adopted video's real tail.
     # Identities visible only at that 0-second boundary belong to the previous
     # shot contract; the current task owns the cast that persists through its
@@ -609,6 +665,11 @@ def storyboard_visual_identity_relation(
         )),
         "unexpected_identity_ids": sorted(unexpected),
         "unexpected_display_names": list(dict.fromkeys(unexpected.values())),
+        "visible_name_identity_ids": visible_name_identity_ids,
+        "stored_visible_identity_ids": stored_visible_identity_ids,
+        "identity_binding_mismatches": identity_binding_mismatches,
+        "unresolved_visible_tokens": unresolved_visible_tokens,
+        "unresolved_visible_entity_ids": unresolved_visible_entity_ids,
     }
 
 
@@ -685,12 +746,15 @@ def canonicalize_storyboard_operational_identities(
         raw_visible = [_clean(value) for value in shot.characters_visible]
         if len(raw_characters) == len(raw_visible):
             for internal, display in zip(raw_visible, raw_characters):
-                if internal and display and display in token_map:
-                    token_map.setdefault(internal, token_map[display])
-        elif len(raw_characters) == 1 and len(raw_visible) == 1:
-            token_map.setdefault(raw_visible[0], token_map.get(
-                raw_characters[0], raw_characters[0],
-            ))
+                if not internal or not display:
+                    continue
+                try:
+                    internal_identity = resolver.resolve(internal, usage="visual")
+                    display_identity = resolver.resolve(display, usage="visual")
+                except IdentityContractError:
+                    continue
+                if internal_identity.identity_id == display_identity.identity_id:
+                    token_map.setdefault(internal, display_identity.display_name)
 
     changes: list[dict[str, object]] = []
 
@@ -725,6 +789,24 @@ def canonicalize_storyboard_operational_identities(
             "characters_visible",
             list(shot.characters_visible),
         )
+        resolved_visible_ids: list[str] = []
+        for token in shot.characters_visible:
+            try:
+                identity = resolver.resolve(token, usage="visual")
+            except IdentityContractError:
+                resolved_visible_ids = []
+                break
+            resolved_visible_ids.append(identity.identity_id)
+        if resolved_visible_ids or not shot.characters_visible:
+            resolved_visible_ids = list(dict.fromkeys(resolved_visible_ids))
+            if resolved_visible_ids != list(shot.visible_entity_ids):
+                changes.append({
+                    "shot_no": shot_no,
+                    "field": "visible_entity_ids",
+                    "from": list(shot.visible_entity_ids),
+                    "to": resolved_visible_ids,
+                })
+                shot.visible_entity_ids = resolved_visible_ids
         shot.audio_cast = replace_list(
             shot_no, "audio_cast", list(shot.audio_cast),
         )

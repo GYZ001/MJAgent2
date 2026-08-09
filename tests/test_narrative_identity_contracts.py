@@ -28,6 +28,7 @@ from app.schemas import (
     SourceSpan,
     VoiceCanonical,
     World,
+    StoryboardOutlineShot,
 )
 
 
@@ -415,6 +416,95 @@ def test_allowed_longer_display_name_masks_shorter_identity_prefix() -> None:
     )
 
     assert relation["unexpected_identity_ids"] == []
+
+
+def test_operational_identity_projection_synchronizes_visible_ids() -> None:
+    shot = _shot(
+        characters=["阿烬"],
+        characters_visible=["newcomer-7"],
+        visible_entity_ids=["transient-node"],
+        action_desc="阿烬独自推开木门。",
+        first_frame_desc="阿烬站在关闭的木门前。",
+        last_frame_desc="阿烬站在打开的木门旁。",
+    )
+    board = Storyboard(episode_no=1, shots=[shot])
+
+    changes = canonicalize_storyboard_operational_identities(
+        board,
+        _bible(),
+        _screenplay(),
+    )
+
+    assert board.shots[0].characters_visible == ["阿烬"]
+    assert board.shots[0].visible_entity_ids == ["newcomer-7"]
+    assert any(change["field"] == "visible_entity_ids" for change in changes)
+
+
+def test_unknown_visible_token_is_not_guessed_and_is_blocked() -> None:
+    shot = _shot(
+        characters=["阿烬"],
+        characters_visible=["opaque-model-token"],
+        visible_entity_ids=["transient-node"],
+        action_desc="阿烬独自推开木门。",
+        first_frame_desc="阿烬站在关闭的木门前。",
+        last_frame_desc="阿烬站在打开的木门旁。",
+    )
+    board = Storyboard(episode_no=1, shots=[shot])
+    screenplay = _screenplay()
+
+    canonicalize_storyboard_operational_identities(
+        board,
+        _bible(),
+        screenplay,
+    )
+    relation = storyboard_visual_identity_relation(
+        board.shots[0],
+        ["newcomer-7", "transient-node"],
+        _bible(),
+        screenplay,
+    )
+
+    assert board.shots[0].characters_visible == ["opaque-model-token"]
+    assert board.shots[0].visible_entity_ids == ["transient-node"]
+    assert relation["unresolved_visible_tokens"] == ["opaque-model-token"]
+    assert relation["identity_binding_mismatches"]
+
+
+def test_visual_relation_rejects_swapped_name_id_bindings() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        characters=["阿烬", "云吞七号"],
+        characters_visible=["阿烬", "云吞七号"],
+        visible_entity_ids=["transient-node", "newcomer-7"],
+        action_desc="阿烬与云吞七号并肩推开木门。",
+        first_frame_desc="阿烬与云吞七号站在关闭的木门前。",
+        last_frame_desc="阿烬与云吞七号站在打开的木门旁。",
+    )
+    allowed_ids = ["newcomer-7", "transient-node"]
+
+    relation = storyboard_visual_identity_relation(
+        shot,
+        allowed_ids,
+        _bible(),
+        screenplay,
+    )
+    issues = stages._storyboard_shot_visual_identity_issues(
+        shot,
+        StoryboardOutlineShot(
+            shot_no=1,
+            visible_entity_ids=allowed_ids,
+        ),
+        _bible(),
+        screenplay,
+        episode_id="episode-1",
+    )
+
+    assert relation["unexpected_identity_ids"] == []
+    assert len(relation["identity_binding_mismatches"]) == 2
+    assert [issue.code for issue in issues] == [
+        "SHOT_VISIBLE_IDENTITY_NOT_GROUNDED",
+    ]
+    assert issues[0].evidence["identity_binding_mismatches"]
 
 
 def test_bible_identity_overrides_redundant_model_identity_contract() -> None:

@@ -1,6 +1,7 @@
 """SQLite 存储。9 张表（PRD §5.2），媒体文件只存路径不存内容。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import os
@@ -11,10 +12,15 @@ import traceback
 import urllib.request
 import uuid
 from typing import Any
+import weakref
 
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
 
 _local = threading.local()
+_task_connections: weakref.WeakKeyDictionary[
+    asyncio.Task[Any], sqlite3.Connection
+] = weakref.WeakKeyDictionary()
+_task_connections_lock = threading.Lock()
 
 # #region debug-point A-D:sqlite-transaction-trace
 _DEBUG_SQL_URL = "http://127.0.0.1:7777/event"
@@ -1188,17 +1194,47 @@ CREATE INDEX IF NOT EXISTS idx_video_mode_qa_plan
 """
 
 
+def _open_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    # #region debug-point A-D:attach-sqlite-transaction-trace
+    if _DEBUG_SQL_ENABLED:
+        _attach_debug_sql_trace(conn)
+    # #endregion
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _release_task_connection(task: asyncio.Task[Any]) -> None:
+    with _task_connections_lock:
+        conn = _task_connections.pop(task, None)
+    if conn is None:
+        return
+    try:
+        if conn.in_transaction:
+            conn.rollback()
+    finally:
+        conn.close()
+
+
 def get_conn() -> sqlite3.Connection:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    if task is not None:
+        with _task_connections_lock:
+            conn = _task_connections.get(task)
+            if conn is None:
+                conn = _open_connection()
+                _task_connections[task] = conn
+                task.add_done_callback(_release_task_connection)
+        return conn
+
     conn = getattr(_local, "conn", None)
     if conn is None:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        # #region debug-point A-D:attach-sqlite-transaction-trace
-        if _DEBUG_SQL_ENABLED:
-            _attach_debug_sql_trace(conn)
-        # #endregion
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        conn = _open_connection()
         _local.conn = conn
     return conn
 
