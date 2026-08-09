@@ -25,6 +25,7 @@ from app.schemas import (
     NarrativeIdentityContract,
     SceneDramaticContract,
     ScriptScene,
+    StoryEvent,
     StoryboardOutline,
     StoryboardOutlineShot,
     TargetDelta,
@@ -414,6 +415,72 @@ def test_legacy_action_projection_does_not_promote_quoted_identity_to_actor() ->
         "[SHOT_ACTION_ACTOR_UNDELIVERED]" in error
         for error in validation_errors
     )
+
+
+def test_legacy_pronoun_event_retains_exact_typed_roster_candidates() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["context-id"]
+    action.target_ids = []
+    action.semantic_intent = "两人走到靠窗位置落座。"
+    action.completion_condition = "两人完成落座。"
+    screenplay.narrative_plan.identity_contracts = [
+        NarrativeIdentityContract(
+            identity_id="person-a",
+            display_name="人物甲",
+            kind="person",
+            visual_policy="canonical",
+            visual_canonical="人物甲稳定外观",
+            asset_requirement="required",
+        ),
+        NarrativeIdentityContract(
+            identity_id="person-b",
+            display_name="人物乙",
+            kind="person",
+            visual_policy="canonical",
+            visual_canonical="人物乙稳定外观",
+            asset_requirement="required",
+        ),
+        NarrativeIdentityContract(
+            identity_id="context-id",
+            display_name="当场服务者",
+            kind="single scene context",
+            visual_policy="contextual",
+            visual_canonical="当场服务者稳定外观",
+            asset_requirement="forbidden",
+        ),
+    ]
+    screenplay.events = [StoryEvent(
+        event_id="E-1",
+        trigger="两人走到靠窗位置落座。",
+        visible_change="两人接过菜单后相视而笑。",
+        state_out="两人开始交谈。",
+    )]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[StoryboardOutlineShot(
+            shot_no=1,
+            scene_id="SC-generic",
+            story_event_id="E-1",
+            event_ids=["E-1"],
+            characters_visible=["人物甲", "人物乙", "当场服务者"],
+            beat="两人落座。",
+            covers="两人开始交谈。",
+        )],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert outline.shots[0].visible_entity_ids == [
+        "context-id",
+        "person-a",
+        "person-b",
+    ]
+    assert outline.shots[0].characters_visible == [
+        "人物甲",
+        "人物乙",
+        "当场服务者",
+    ]
 
 
 def test_outline_dialogue_ownership_repairs_split_fragments_and_duplicates() -> None:

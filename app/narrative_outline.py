@@ -475,16 +475,38 @@ def normalize_narrative_storyboard_outline(
             if _visual_capable(identity_id)
         }
 
+    legacy_event_text_identity_ids: dict[str, set[str]] = {}
     legacy_event_relation_ids: dict[str, set[str]] = {}
     legacy_action_relation_changes: list[dict[str, Any]] = []
     for event_id, event in events.items():
         if event.onscreen_entity_ids:
             continue
-        relation_ids = _legacy_visual_identity_ids(event_id)
+        text_identity_ids = _legacy_visual_identity_ids(event_id)
+        relation_ids = set(text_identity_ids)
         for action_id in event.action_ids:
             action = actions.get(action_id)
             if action is None:
                 continue
+            text_identity_ids.update(
+                identity_ids_in_authority_text(
+                    screenplay,
+                    "\n".join((
+                        str(action.semantic_intent or ""),
+                        str(action.completion_condition or ""),
+                        *(
+                            str(phase.start_condition or "")
+                            for phase in action.temporal_phases
+                        ),
+                        *(
+                            str(phase.end_condition or "")
+                            for phase in action.temporal_phases
+                        ),
+                    )),
+                    bible=bible,
+                    strip_dialogue=True,
+                )
+            )
+            relation_ids.update(text_identity_ids)
             projected_actor_ids, projected_target_ids = (
                 storyboard_action_relation_ids(
                     screenplay,
@@ -509,6 +531,7 @@ def normalize_narrative_storyboard_outline(
                     "to": projected_target_ids,
                     "reason": "legacy_action_typed_relation_projection",
                 })
+        legacy_event_text_identity_ids[event_id] = set(text_identity_ids)
         legacy_event_relation_ids[event_id] = relation_ids
 
     def _display_names(identity_ids: set[str]) -> list[str]:
@@ -1330,6 +1353,27 @@ def normalize_narrative_storyboard_outline(
                         )
                         if _visual_capable(identity_id)
                     )
+            if not legacy_event_text_identity_ids.get(event_id):
+                # Some pre-v1.5 events describe participants only through
+                # pronouns or counts ("两人"). When no exact identity surface
+                # exists, retain only old roster entries that still resolve
+                # exactly through the current typed registry. They form a
+                # permitted candidate relation; the directing model still
+                # chooses the actual visible subset.
+                current_names = {
+                    str(name or "").strip()
+                    for name in (shot.characters_visible or [])
+                    if str(name or "").strip()
+                }
+                visible_ids.update(
+                    identity_id
+                    for identity_id, contract in identity_contracts.items()
+                    if (
+                        _visual_capable(identity_id)
+                        and str(contract.display_name or "").strip()
+                        in current_names
+                    )
+                )
         redundant_context_ids = redundant_context_ids_by_event[event_id]
         visible_ids.difference_update(redundant_context_ids)
         allowed_names = _display_names(visible_ids)
