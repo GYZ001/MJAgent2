@@ -4501,6 +4501,9 @@ def append_reference_prompt_notes_from_dicts(
     definitions and stable reuse of those subject labels. Asset IDs alone are
     not understood by the model.
     """
+    from app.compiler import _split_video_args
+
+    prompt_body, prompt_args = _split_video_args(prompt_text)
     lines = []
     subject_images: dict[str, list[int]] = {}
     definitions: list[str] = []
@@ -4588,15 +4591,15 @@ def append_reference_prompt_notes_from_dicts(
         + sequence_note
         + REFERENCE_SINGLE_INSTANCE_NOTE
     )
-    if "[FORMAT]\n" in prompt_text:
-        prompt_text = prompt_text.replace(
+    if "[FORMAT]\n" in prompt_body:
+        prompt_body = prompt_body.replace(
             "[FORMAT]\n",
             f"[FORMAT]\n{binding}\n\n",
             1,
         )
     else:
-        prompt_text = f"{binding}\n\n{prompt_text}"
-    return prompt_text + note
+        prompt_body = f"{binding}\n\n{prompt_body}"
+    return prompt_body + note + prompt_args
 
 
 def append_reference_prompt_notes(

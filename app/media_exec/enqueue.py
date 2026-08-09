@@ -1167,26 +1167,39 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         ).fetchone()
         if boundary_prev_row is None:
             raise ValueError("视频计划的首帧来源镜头不存在或不属于本集")
-    prompt_prev_row = boundary_prev_row or prev_row
-    prev_shot = _load_shot_model(prompt_prev_row) if prompt_prev_row else None
+    continuity_prev_row = boundary_prev_row or prev_row
+    prev_shot = (
+        _load_shot_model(continuity_prev_row)
+        if continuity_prev_row is not None
+        else None
+    )
+    sequence_prev_row = None
+    if int(shot_row["shot_no"]) > 1:
+        sequence_prev_row = conn.execute(
+            """SELECT * FROM shots
+               WHERE episode_id=? AND shot_no<?
+               ORDER BY shot_no DESC LIMIT 1""",
+            (shot_row["episode_id"], int(shot_row["shot_no"])),
+        ).fetchone()
+    prompt_context_row = continuity_prev_row or sequence_prev_row
     previous_prompt_version = None
-    if prompt_prev_row is not None:
+    if prompt_context_row is not None:
         adopted_version_id = _row_value(
-            prompt_prev_row,
+            prompt_context_row,
             "adopted_version_id",
         )
         if adopted_version_id:
             previous_prompt_version = conn.execute(
                 """SELECT id,prompt_text FROM shot_versions
                    WHERE id=? AND shot_id=?""",
-                (adopted_version_id, prompt_prev_row["id"]),
+                (adopted_version_id, prompt_context_row["id"]),
             ).fetchone()
         if previous_prompt_version is None:
             previous_prompt_version = conn.execute(
                 """SELECT id,prompt_text FROM shot_versions
                    WHERE shot_id=? AND prompt_text IS NOT NULL
                    ORDER BY version_no DESC LIMIT 1""",
-                (prompt_prev_row["id"],),
+                (prompt_context_row["id"],),
             ).fetchone()
     previous_prompt_text = (
         str(previous_prompt_version["prompt_text"] or "")

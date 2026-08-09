@@ -139,6 +139,117 @@ def test_silent_prompt_explicitly_forbids_speech_and_lip_motion() -> None:
     assert "不得自行补充问候、应答、语气词" in prompt
 
 
+def test_video_prompt_contains_cinematic_generation_contract() -> None:
+    shot = _shot(
+        emotion_beat="由警惕逐渐转为坚定",
+        camera_angle="平视",
+        continuity_state_out={
+            "scene": {
+                "time_of_day": "夜晚",
+                "lighting_state": "右侧冷色月光",
+            },
+            "characters": {
+                "林风": {
+                    "pose": "右手按住铜环，身体重心前移",
+                    "gaze_target": "门缝微光",
+                },
+            },
+        },
+    )
+
+    prompt = compile_prompt(shot, _bible())
+
+    for section in (
+        "[GENERATION GOAL]",
+        "[VISUAL ANCHOR]",
+        "[ACTION TIMELINE]",
+        "[PERFORMANCE]",
+        "[ENVIRONMENT DYNAMICS]",
+        "[VISUAL QUALITY]",
+    ):
+        assert section in prompt
+    assert "[0–2秒]" in prompt
+    assert "[2–4秒]" in prompt
+    assert "[4–5秒]" in prompt
+    assert "人物情绪：由警惕逐渐转为坚定" in prompt
+    assert "林风看向门缝微光" in prompt
+    assert "光照保持右侧冷色月光" in prompt
+    assert "全镜只执行一个主要镜头运动" in prompt
+    assert "本镜主要构图以当前 CAMERA 合同为准" in prompt
+    assert "不要出现额外肢体、手指异常、脸部变形" in prompt
+    assert "不要液化、融化或形变式转场" in prompt
+
+
+def test_next_shot_inherits_only_stable_previous_prompt_sections() -> None:
+    previous_prompt = """
+[FORMAT]
+上一镜格式。
+
+[ONE CURRENT ACTION]
+PREVIOUS_ACTION_SENTINEL：拔剑、跃起并完成挥砍。
+
+[AUDIO TIMELINE]
+PREVIOUS_DIALOGUE_SENTINEL：不要复制这句对白。
+
+[END STATE | 5.0s]
+林风按住山门铜环，身体朝向门缝。
+
+[PERSISTENT SCENE GEOMETRY]
+GEOMETRY_SENTINEL：黑色山门在北侧，铜环固定在门板中央。
+
+[DO NOT]
+不要增加人物。 --ratio 9:16 --dur 5
+""".strip()
+    shot = _shot(
+        shot_no=2,
+        state_in="林风按住山门铜环，身体朝向门缝。",
+        first_frame_desc="林风按住山门铜环，身体朝向门缝。",
+        primary_action="林风缓慢推开山门。",
+        action_desc="林风缓慢推开山门。",
+        state_out="山门半开，林风停在门侧观察门内。",
+        last_frame_desc="山门半开，林风停在门侧观察门内。",
+        continuity_mode="same_scene_cut",
+    )
+
+    prompt = compile_prompt(
+        shot,
+        _bible(),
+        continuity_mode="same_scene_cut",
+        prev_state_out=shot.state_in,
+        previous_prompt_text=previous_prompt,
+    )
+
+    assert "[PREVIOUS SHOT HANDOFF]" in prompt
+    assert "上一镜结束状态即本镜承接起点" in prompt
+    assert "GEOMETRY_SENTINEL" in prompt
+    assert "PREVIOUS_ACTION_SENTINEL" not in prompt
+    assert "PREVIOUS_DIALOGUE_SENTINEL" not in prompt
+    assert "上一镜已经完成的动作不得再次表演" in prompt
+
+
+def test_scene_change_reads_previous_prompt_without_inheriting_old_geometry() -> None:
+    previous_prompt = (
+        "[PERSISTENT SCENE GEOMETRY]\nOLD_SCENE_GEOMETRY_SENTINEL\n\n"
+        "[END STATE | 5.0s]\n上一场结束。 --ratio 9:16 --dur 5"
+    )
+    shot = _shot(
+        shot_no=2,
+        scene_setting="清晨，河岸",
+        continuity_mode="scene_change",
+    )
+
+    prompt = compile_prompt(
+        shot,
+        _bible(),
+        continuity_mode="scene_change",
+        previous_prompt_text=previous_prompt,
+    )
+
+    assert "[PREVIOUS SHOT HANDOFF]" in prompt
+    assert "当前是场景切换" in prompt
+    assert "OLD_SCENE_GEOMETRY_SENTINEL" not in prompt
+
+
 def test_silent_nonverbal_response_may_reference_an_existing_request() -> None:
     shot = _shot(
         action_desc="林风听完苏婉的请求后点头，起身走向山门。",
@@ -185,6 +296,7 @@ def test_first_last_prompt_uses_real_boundary_contract_and_moving_camera() -> No
     assert "连续跟随主体的轨道移动、横摇、推拉与弧形重构运镜" in prompt
     assert "端点构图差距越大" in prompt
     assert "运镜不能掩盖换人、换装、换景或身份漂移" in prompt
+    assert "输入首帧的主要构图是 0.0 秒不可重画的视觉起点" in prompt
     assert "不要沿用上一镜完整构图或主体尾帧姿势" not in prompt
 
 

@@ -1474,10 +1474,17 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         "基于输入图像生成一段连续、自然、具有电影镜头感的单镜头视频；"
         "输入图像是本镜视觉基准，本镜唯一画面任务是完成当前主动作并到达指定结束状态。"
     )
+    composition_anchor = (
+        "输入首帧的主要构图是 0.0 秒不可重画的视觉起点，后续只按本镜动作与摄影机合同连续发展。"
+        if first_frame_boundary else
+        "人物和场景参考图只锁定身份、服装、固定场景与画风，不复制其姿势或画面布局；"
+        "本镜主要构图以当前 CAMERA 合同为准。"
+    )
     visual_anchor_block = (
         "严格保持输入图中的人物身份、脸型、五官、发型、年龄感、身体比例、服装款式颜色与配饰；"
-        "保持场景空间结构、固定物体位置、光线方向、色调、主要构图和整体美术风格。"
-        "不得重新设计人物、改变服装，或无故增加、删除、移动固定物体。"
+        "保持场景空间结构、固定物体位置、光线方向、色调和整体美术风格。"
+        + composition_anchor
+        + "不得重新设计人物、改变服装，或无故增加、删除、移动固定物体。"
     )
     reference_block = _compile_reference_roles(
         shot, continuity_mode=mode, with_refs=with_refs,
@@ -1661,6 +1668,27 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                 active[idx] = (title, compact_timeline, pri)
                 break
         text = render(active)
+
+    # 极低预算兼容：只移除已被权威段重复表达的说明段，不碰剧情、台词、边界或素材绑定。
+    if not fits(text):
+        removable_sections = (
+            "VISUAL QUALITY",
+            "ENVIRONMENT DYNAMICS",
+            "GENERATION GOAL",
+            "PERFORMANCE",
+            "VISUAL ANCHOR",
+            "CONSISTENCY",
+            "PREVIOUS SHOT HANDOFF",
+            "FORMAT",
+        )
+        for removable in removable_sections:
+            for idx, (title, _content, pri) in enumerate(active):
+                if title == removable:
+                    active[idx] = (title, "", pri)
+                    break
+            text = render(active)
+            if fits(text):
+                break
 
     # 仍超长：压缩音频时间线描述（保留台词原文）
     if not fits(text):

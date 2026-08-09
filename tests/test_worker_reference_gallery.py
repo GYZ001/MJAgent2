@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -145,6 +146,75 @@ def test_enqueue_budget_reserves_full_timeline_keyframe_estimate(monkeypatch) ->
     assert "paused_budget" not in result
     assert captured["estimate"] == (
         compiler.shot_cost_cny(10) + worker.config.IMAGE_PRICE_PER_UNIT * 9
+    )
+
+
+def test_enqueue_next_shot_reads_adopted_previous_prompt_and_records_lineage(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    _seed_project(conn)
+    conn.execute(
+        """INSERT INTO shots(
+               id, episode_id, shot_no, duration_s, shot_size, camera_move,
+               scene_setting, characters, action_desc, source_excerpt, narration,
+               dialogues, transition, continuity_from_prev, first_frame_desc,
+               last_frame_desc, scene_status
+           )
+           SELECT 's2', episode_id, 2, duration_s, shot_size, camera_move,
+                  scene_setting, characters,
+                  'A把整理好的文件推到桌面右侧。',
+                  source_excerpt, narration, dialogues, transition, 1,
+                  last_frame_desc,
+                  '同一机位，文件已经平码在桌面右侧。',
+                  scene_status
+           FROM shots WHERE id='s1'"""
+    )
+    previous_prompt = (
+        "[ONE CURRENT ACTION]\n上一镜整理文件。\n\n"
+        "[END STATE | 10.0s]\nA已经把纸张整齐平码在桌面。\n\n"
+        "[PERSISTENT SCENE GEOMETRY]\n桌子固定在房间中央。 "
+        "--ratio 9:16 --dur 10"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('prev-ver','s1',1,?,'prev-key','succeeded',1)""",
+        (previous_prompt,),
+    )
+    conn.execute(
+        "UPDATE shots SET adopted_version_id='prev-ver' WHERE id='s1'"
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "ensure_media_trace", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(
+        worker.media_scheduler,
+        "reserve_budget",
+        lambda *_args, **_kwargs: True,
+    )
+    captured: dict = {}
+
+    def compile_with_previous(*_args, **kwargs):
+        captured.update(kwargs)
+        return "CURRENT PROMPT --ratio 9:16 --dur 10"
+
+    monkeypatch.setattr(compiler, "compile_prompt", compile_with_previous)
+
+    result = worker.enqueue_shot("s2")
+
+    assert captured["previous_prompt_text"] == previous_prompt
+    meta = json.loads(conn.execute(
+        "SELECT image_inputs FROM shot_versions WHERE id=?",
+        (result["version_id"],),
+    ).fetchone()["image_inputs"])
+    assert meta["previous_prompt_version_id"] == "prev-ver"
+    assert meta["previous_prompt_fingerprint"] == hashlib.sha256(
+        previous_prompt.encode("utf-8")
+    ).hexdigest()
+    assert meta["previous_prompt_inherited"] is True
+    assert meta["video_prompt_contract_version"] == (
+        compiler.VIDEO_PROMPT_CONTRACT_VERSION
     )
 
 
