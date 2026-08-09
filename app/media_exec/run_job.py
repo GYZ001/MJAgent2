@@ -1262,6 +1262,12 @@ def _video_model_rejection_guidance(
     exc: ProviderError,
 ) -> tuple[str, str] | None:
     """Build guidance from a typed provider outcome, never from error prose."""
+    if exc.failure_kind == "prompt_provider_rejected":
+        return (
+            "VIDEO_PROMPT_PROVIDER_REJECTED",
+            "AI 视频提示词服务明确拒绝了当前内容；系统未改写内容、未切换生成方式，"
+            "也未向视频服务提交本镜。请更换获准的提示词模型或人工调整内容后再继续。",
+        )
     if exc.failure_kind != "provider_rejected":
         return None
     mode = str(meta.get("mode") or meta.get("planned_mode") or "")
@@ -3899,6 +3905,17 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         reconcile_episode_generation_status(job["episode_id"])
         return
     except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
+        from app.harness.model_gateway import StructuredProviderRejection
+
+        if isinstance(exc, StructuredProviderRejection):
+            exc = ProviderError(
+                "AI 视频提示词服务拒绝当前内容",
+                raw=str(exc),
+                retryable=False,
+                failure_kind="prompt_provider_rejected",
+                delivery_state="not_sent",
+                replay_safe=True,
+            )
         if not media_scheduler.renew_lease(job_id, owner, lease_seconds=180.0):
             return
         record = errors.log_error(
@@ -3934,12 +3951,17 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 (now(), str(meta["shot_plan_id"])),
             )
         if reason_code:
+            create_state = (
+                "model_rejected"
+                if exc.failure_kind == "provider_rejected"
+                else "not_started"
+            )
             conn.execute(
                 """UPDATE jobs
                       SET reason_code=?,reason_text=?,
-                          provider_create_state='model_rejected'
+                          provider_create_state=?
                     WHERE id=?""",
-                (reason_code, public, job_id),
+                (reason_code, public, create_state, job_id),
             )
         conn.commit()
         _set_version(version["id"], status="failed", error=public)

@@ -179,6 +179,27 @@ def issues_from_job_failure(
     reason_code = str(_get(job, "reason_code") or "")
     provider_state = str(_get(job, "provider_create_state") or "")
 
+    if reason_code == "VIDEO_PROMPT_PROVIDER_REJECTED":
+        return [_mk(
+            "VIDEO_PROMPT_PROVIDER_REJECTED",
+            IssueSeverity.BLOCKER,
+            shot_id=sid,
+            message=message or "AI 视频提示词服务明确拒绝当前内容",
+            shot_no=shot_no,
+            version_id=vid,
+            job_id=jid,
+            rule_id=reason_code,
+            repairable=False,
+            category="operational",
+            extra={
+                "provider_create_state": provider_state,
+                "provider_reason_code": reason_code,
+                "pause_state": "PAUSED_EXTERNAL",
+                "recommended_level": "L6",
+                "runtime_blocking": True,
+            },
+        )]
+
     if provider_state == "model_rejected":
         return [_mk(
             "VIDEO_PROVIDER_MODEL_REJECTED",

@@ -229,3 +229,29 @@ New lifecycle-heartbeat evidence:
 | ID | Hypothesis | Status | Evidence |
 |----|------------|--------|----------|
 | Q | Heartbeat coverage is local to dispatch and misses long ledger/adoption/checkpoint phases | Confirmed | 97-second incremental-adoption interval before watchdog takeover |
+
+New structured-prompt retry issue:
+- Shot 82 failed before any `video_create` call with
+  `ERR-20260810-1cf3fd`.
+- The prompt provider's first successful HTTP response was an explicit
+  top-level `{"error": "content policy rejection"}` envelope.
+- The structured gateway incorrectly treated that rejection as malformed model
+  output and asked the same provider to repair it twice. The final schema error
+  only reflected a later malformed repair payload, not the primary failure.
+- `_run_job` then exposed the result as generic `SYS`, even though no paid
+  video-provider operation had started.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| R | Prompt transport returned no usable response | Rejected | The provider returned a parseable, explicit content-policy error envelope |
+| S | An explicit prompt-provider rejection is incorrectly sent through schema repair and exposed as generic SYS | Confirmed | Provider calls 28393/28395/28396 and `ERR-20260810-1cf3fd` |
+| T | Video plan or release authority drifted before submission | Rejected | Job remained bound to valid plan revision 5 and failed inside `chat_structured` |
+| U | SQLite contention caused the terminal failure | Rejected | Traceback contains only schema validation / `StructuredFormatError`; `db_in_transaction=false` around the prompt await |
+
+Planned fix for S:
+- Detect an exact top-level provider `error` envelope before schema recovery.
+- Classify it as `VIDEO_PROMPT_PROVIDER_REJECTED`, preserve
+  `provider_create_state=not_started`, and do not retry or fall back to another
+  prompt path.
+- Keep the original provider evidence and pause for an explicit content/model
+  decision instead of bypassing the provider's safety policy.

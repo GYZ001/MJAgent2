@@ -149,6 +149,30 @@ def test_structured_model_rejection_is_non_repairable_and_never_retried() -> Non
     assert plan.pause_state == "PAUSED_EXTERNAL"
 
 
+def test_prompt_provider_rejection_is_non_repairable_before_video_submission() -> None:
+    issues = issues_from_job_failure(
+        {
+            "id": "job-prompt-rejected",
+            "shot_id": "shot-prompt-rejected",
+            "status": "failed",
+            "reason_code": "VIDEO_PROMPT_PROVIDER_REJECTED",
+            "provider_create_state": "not_started",
+            "error": "prompt provider rejected this content",
+        },
+        None,
+        shot_no=82,
+    )
+
+    assert len(issues) == 1
+    assert issues[0].code == "VIDEO_PROMPT_PROVIDER_REJECTED"
+    assert issues[0].evidence["provider_create_state"] == "not_started"
+    assert issues[0].repairable is False
+    plan = route(issues)
+    assert plan.is_paid is False
+    assert plan.strategy == "handoff_human"
+    assert plan.pause_state == "PAUSED_EXTERNAL"
+
+
 def test_repair_router_levels_and_upgrade():
     plan = route([
         Issue(

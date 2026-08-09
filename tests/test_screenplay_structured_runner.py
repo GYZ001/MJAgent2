@@ -104,3 +104,34 @@ def test_structured_runner_does_not_accept_malformed_http_200(monkeypatch) -> No
             max_tokens=128,
             format_retry_limit=0,
         ))
+
+
+def test_structured_runner_does_not_schema_repair_provider_error_envelope(
+    monkeypatch,
+) -> None:
+    calls = 0
+    attempts: list[dict] = []
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return '{"error":"content policy rejected"}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(
+        model_gateway.StructuredProviderRejection,
+        match="content policy rejected",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "original"}],
+            model_type=_Payload,
+            validate=None,
+            operation_id="test.provider-rejected:v1:abc",
+            max_tokens=128,
+            format_retry_limit=2,
+            on_attempt=attempts.append,
+        ))
+
+    assert calls == 1
+    assert attempts[0]["outcome"] == "provider_rejected"

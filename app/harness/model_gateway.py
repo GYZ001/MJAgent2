@@ -28,6 +28,10 @@ class StructuredSemanticError(StructuredOutputError):
     pass
 
 
+class StructuredProviderRejection(StructuredOutputError):
+    """The provider returned an explicit error envelope instead of model output."""
+
+
 def _json_candidates(value: str) -> list[dict[str, Any]]:
     """Return complete JSON objects, preferring a valid trailing response.
 
@@ -316,6 +320,27 @@ async def chat_structured(
             max_tokens=max_tokens,
             call_meta=meta,
         )
+        try:
+            direct_error = json.loads(last_raw.strip())
+        except (TypeError, ValueError, json.JSONDecodeError):
+            direct_error = None
+        if (
+            isinstance(direct_error, dict)
+            and set(direct_error) == {"error"}
+            and "error" not in model_type.model_fields
+            and str(direct_error["error"] or "").strip()
+        ):
+            message = str(direct_error["error"]).strip()
+            if on_attempt is not None:
+                on_attempt({
+                    **meta,
+                    "outcome": "provider_rejected",
+                    "raw_response": last_raw,
+                    "output_chars": len(last_raw),
+                    "local_recovery": False,
+                    "validation_errors": [message],
+                })
+            raise StructuredProviderRejection(message)
         candidates = _json_candidates(last_raw)
         # Reuse the repository's conservative JSON repair for provider output
         # that is structurally complete but contains an unescaped quote/newline
