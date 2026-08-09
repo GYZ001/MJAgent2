@@ -416,6 +416,21 @@ function HumanCalibrationControls({
     }
   }
 
+  async function runAiOneWatchSimulation() {
+    setBusy(true)
+    try {
+      const result = await api.post(
+        `/episodes/${episode.id}/narrative-calibration/ai-simulate`,
+      ) as Record<string, any>
+      await onChanged()
+      notify(String(result.message || 'AI 一次观看模拟权威已激活'))
+    } catch (caught) {
+      notify((caught as Error).message, true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const freezeBlockedReason = !protocolConfirmed
     ? '请先确认一次观看协议'
     : !participant.trim()
@@ -513,6 +528,13 @@ function HumanCalibrationControls({
 
   return <details className="narrative-calibration-controls">
     <summary>真人一次观看校准</summary>
+    <div className="narrative-calibration-rebuild">
+      <button type="button" className="btn primary" disabled={busy}
+        onClick={() => void runAiOneWatchSimulation()}>
+        {busy ? '模拟运行中…' : '运行 AI 一次观看模拟'}
+      </button>
+      <small>由你显式启动独立 AI 多先验模拟；不会伪造真人参与者或观察记录。</small>
+    </div>
     {!protocol ? <button type="button" className="btn" disabled={busy} onClick={() => void loadProtocol()}>
       {busy ? '正在读取…' : '开始记录真人样本'}
     </button> : <>
