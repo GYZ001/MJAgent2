@@ -1679,6 +1679,60 @@ def normalize_storyboard_shot_candidate(
                     })
                     shot[field] = deepcopy(planned_names)
 
+        # Continuity state keeps look/outfit facts for identities that have
+        # left the frame.  Those facts must remain available, but a stale
+        # ``visibility=visible`` makes the prompt compiler reintroduce the
+        # identity as a character reference after the shot roster has already
+        # been projected to its task-owned subset.
+        selected_visual_tokens = {
+            *_tokens(shot.get("visible_entity_ids")),
+            *_tokens(shot.get("characters")),
+            *_tokens(shot.get("characters_visible")),
+        }
+        for item in visual_identity_rows:
+            identity_id = str(item.get("identity_id") or "").strip()
+            display_name = str(item.get("display_name") or "").strip()
+            if (
+                identity_id in selected_visual_tokens
+                or display_name in selected_visual_tokens
+            ):
+                selected_visual_tokens.update({
+                    token
+                    for token in (identity_id, display_name)
+                    if token
+                })
+        hidden_visibilities = {
+            "hidden", "offscreen", "not_visible", "画外", "不可见",
+        }
+        for field in ("continuity_state_in", "continuity_state_out"):
+            state = shot.get(field)
+            if not isinstance(state, dict):
+                continue
+            character_states = state.get("characters")
+            if not isinstance(character_states, dict):
+                continue
+            normalized_state = deepcopy(state)
+            normalized_characters = normalized_state["characters"]
+            hidden_identities: list[str] = []
+            for token, character_state in normalized_characters.items():
+                if (
+                    str(token or "").strip() in selected_visual_tokens
+                    or not isinstance(character_state, dict)
+                    or str(character_state.get("visibility") or "")
+                    .strip().lower() in hidden_visibilities
+                ):
+                    continue
+                character_state["visibility"] = "hidden"
+                hidden_identities.append(str(token))
+            if not hidden_identities:
+                continue
+            shot[field] = normalized_state
+            changes.append({
+                "field": f"shot.{field}.characters",
+                "hidden_identities": hidden_identities,
+                "reason": "structured_visual_state_partition",
+            })
+
         for field in ("scene_name", "scene_time"):
             planned = str(outline_narrative_task.get(field) or "")
             if planned and shot.get(field) != planned:

@@ -282,6 +282,61 @@ def test_visual_identity_ids_are_derived_from_selected_display_names() -> None:
     assert shot["visible_entity_ids"] == ["actor", "target-a", "target-b"]
 
 
+def test_unselected_continuity_identities_are_retained_but_hidden() -> None:
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 10,
+            "characters": ["主体"],
+            "characters_visible": ["主体"],
+            "visible_entity_ids": ["actor"],
+            "continuity_state_in": {
+                "characters": {
+                    "主体": {"visibility": "visible", "outfit_revision_id": "O1"},
+                    "同场者": {"visibility": "visible", "outfit_revision_id": "O2"},
+                },
+            },
+            "continuity_state_out": {
+                "characters": {
+                    "actor": {"visibility": "visible", "outfit_revision_id": "O1"},
+                    "context": {"visibility": "visible", "outfit_revision_id": "O2"},
+                },
+            },
+        },
+    }
+    task = {
+        "visible_entity_ids": ["actor", "context"],
+        "characters_visible": ["主体", "同场者"],
+        "_bound_action_actor_ids": ["actor"],
+        "_bound_action_target_ids": [],
+        "_visual_identities": [
+            {"identity_id": "actor", "display_name": "主体"},
+            {"identity_id": "context", "display_name": "同场者"},
+        ],
+    }
+
+    normalized, changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=10,
+        outline_narrative_task=task,
+    )
+
+    shot = normalized["shot"]
+    assert shot["continuity_state_in"]["characters"]["主体"]["visibility"] == "visible"
+    assert shot["continuity_state_in"]["characters"]["同场者"]["visibility"] == "hidden"
+    assert shot["continuity_state_out"]["characters"]["actor"]["visibility"] == "visible"
+    assert shot["continuity_state_out"]["characters"]["context"]["visibility"] == "hidden"
+    assert {
+        change["field"]
+        for change in changes
+        if change["reason"] == "structured_visual_state_partition"
+    } == {
+        "shot.continuity_state_in.characters",
+        "shot.continuity_state_out.characters",
+    }
+
+
 def test_storyboard_source_evidence_can_use_source_backed_audio() -> None:
     source = "门外忽然传来一阵急促的敲门声，屋内两人同时停下动作。"
     draft = StoryboardShotDraft.model_validate({
