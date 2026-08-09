@@ -522,6 +522,37 @@ def test_blueprint_patch_replaces_node_without_changing_source_ownership() -> No
     assert blueprint.nodes[2].transition_cue == "咖啡杯匹配剪辑到台灯"
 
 
+def test_blueprint_patch_restores_authoritative_source_order() -> None:
+    blueprint = _blueprint()
+    memory_node = blueprint.nodes[1].model_copy(deep=True)
+    return_node = blueprint.nodes[2].model_copy(deep=True)
+    memory_node.key = "n3"
+    return_node.key = "n2"
+    patch = NarrativeBlueprintPatch.model_validate({
+        "replacements": [
+            {
+                "node_key": "n2",
+                "node": return_node.model_dump(mode="json"),
+            },
+            {
+                "node_key": "n3",
+                "node": memory_node.model_dump(mode="json"),
+            },
+        ],
+    })
+
+    assert apply_narrative_blueprint_patch(
+        blueprint,
+        patch,
+        allow_source_expansion=True,
+        source_text=SOURCE,
+    ) == 2
+    assert [node.key for node in blueprint.nodes] == [
+        "n1", "n3", "n2", "n4",
+    ]
+    assert validate_narrative_blueprint(blueprint, SOURCE) == []
+
+
 def test_blueprint_patch_repairs_malformed_provider_json(
     monkeypatch,
 ) -> None:

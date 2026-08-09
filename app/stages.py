@@ -3855,6 +3855,7 @@ async def _repair_narrative_blueprint(
             blueprint,
             patch,
             allow_source_expansion=True,
+            source_text=source_text,
         )
         if not changed:
             raise ValueError("蓝图局部修复没有替换任何节点")
@@ -3902,7 +3903,7 @@ async def _repair_narrative_blueprint(
     normalize_blueprint_agency_continuity(blueprint)
     errors = validate_narrative_blueprint(blueprint, source_text)
     if errors:
-        raise ValueError(
+        raise ContentGenerationError(
             "蓝图局部语义修复六轮后仍未通过："
             + "；".join(errors[:10])
         )

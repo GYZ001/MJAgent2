@@ -685,11 +685,45 @@ def blueprint_semantic_issue_is_resolved(
     )
 
 
+def normalize_blueprint_source_order(
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> int:
+    """Restore authoritative source order after independent node replacements."""
+    source_order = {
+        segment.segment_id: index
+        for index, segment in enumerate(index_source_segments(source_text))
+    }
+    ranked_nodes: list[tuple[int, int, NarrativeNode]] = []
+    for original_index, node in enumerate(blueprint.nodes):
+        positions = [
+            source_order[source_id]
+            for source_id in node.source_segment_ids
+            if source_id in source_order
+        ]
+        if not positions or len(positions) != len(node.source_segment_ids):
+            return 0
+        ranked_nodes.append((min(positions), original_index, node))
+    ordered_nodes = [
+        node
+        for _source_position, _original_index, node
+        in sorted(ranked_nodes)
+    ]
+    moved = sum(
+        node is not blueprint.nodes[index]
+        for index, node in enumerate(ordered_nodes)
+    )
+    if moved:
+        blueprint.nodes = ordered_nodes
+    return moved
+
+
 def apply_narrative_blueprint_patch(
     blueprint: NarrativeBlueprint,
     patch: NarrativeBlueprintPatch,
     *,
     allow_source_expansion: bool = False,
+    source_text: str | None = None,
 ) -> int:
     original_keys = {node.key for node in blueprint.nodes}
     normalized_replacements: list[NarrativeNodeReplacement] = []
@@ -900,6 +934,8 @@ def apply_narrative_blueprint_patch(
                 for node_key
                 in rebuilt_node.decision.constraint_release_node_keys
             ]
+    if source_text is not None:
+        normalize_blueprint_source_order(blueprint, source_text)
     normalize_blueprint_fact_versions(blueprint)
     derive_blueprint_scene_plans(blueprint)
     return changed
