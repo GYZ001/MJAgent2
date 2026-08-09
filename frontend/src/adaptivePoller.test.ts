@@ -82,6 +82,40 @@ describe('AdaptivePoller', () => {
     expect(timers).toEqual([])
   })
 
+  it('resumes with one catch-up request after a hidden-tab stop', async () => {
+    let calls = 0
+    const timers: Array<() => void> = []
+    const poller = new AdaptivePoller(
+      async () => ({ calls: ++calls }),
+      1000,
+      {
+        onData: () => undefined,
+        onError: error => { throw error },
+      },
+      {
+        setTimeout: callback => {
+          timers.push(callback)
+          return callback
+        },
+        clearTimeout: handle => {
+          const index = timers.indexOf(handle as () => void)
+          if (index >= 0) timers.splice(index, 1)
+        },
+      },
+    )
+
+    await poller.start()
+    expect(calls).toBe(1)
+    expect(timers).toHaveLength(1)
+
+    poller.stop()
+    expect(timers).toHaveLength(0)
+
+    await poller.start()
+    expect(calls).toBe(2)
+    expect(timers).toHaveLength(1)
+  })
+
   it('stops automatic polling when the error callback marks a resource terminal', async () => {
     const timers: Array<() => void> = []
     let calls = 0

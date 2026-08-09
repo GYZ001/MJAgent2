@@ -424,7 +424,7 @@ def _enqueue_for_current_status(job_id: str) -> None:
     if not row:
         return
     if row["status"] == "waiting_provider" or row["provider_task_id"]:
-        _poll_queue.put_nowait(job_id)
+        _queue_job(_poll_queue, job_id)
         return
     from app.media_pipeline.scheduler import continuity_anchor_ready, is_true_video_ready, scheduler_policy
     from app.media_pipeline import stages as media_stages
@@ -446,9 +446,24 @@ def _enqueue_for_current_status(job_id: str) -> None:
         or is_true_video_ready(meta, continuity_ok=continuity_ok)
     )
     if scheduler_policy() == "stage_aware" and ready:
-        _video_ready_queue.put_nowait(job_id)
+        _queue_job(_video_ready_queue, job_id)
     else:
-        _queue.put_nowait(job_id)
+        _queue_job(_queue, job_id)
+
+
+def _queue_job(queue: asyncio.Queue[str], job_id: str) -> None:
+    """Route durable work to an asyncio queue from loop or worker threads."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        dispatcher = _dispatcher_task
+        if dispatcher is not None and not dispatcher.done():
+            dispatcher.get_loop().call_soon_threadsafe(
+                queue.put_nowait,
+                job_id,
+            )
+        return
+    queue.put_nowait(job_id)
 
 
 def _reference_gallery_ready(raw_meta: str | None) -> bool:
@@ -626,7 +641,7 @@ def _dispatch_due_jobs_legacy() -> dict[str, int]:
 
     poll_enqueued = 0
     for row in poll_candidates[:poll_slots]:
-        _poll_queue.put_nowait(row["id"])
+        _queue_job(_poll_queue, row["id"])
         poll_enqueued += 1
 
     chosen = [row for _, row in main_candidates[:main_slots]]
@@ -636,7 +651,7 @@ def _dispatch_due_jobs_legacy() -> dict[str, int]:
         speculative_limit = min(remaining, prepared_reference_backlog())
         chosen.extend(row for _, row in blocked_reference_candidates[:speculative_limit])
     for row in chosen:
-        _queue.put_nowait(row["id"])
+        _queue_job(_queue, row["id"])
 
     return {"poll": poll_enqueued, "main": len(chosen), "due": len(rows), "video_ready": 0, "reference": len(chosen)}
 
@@ -789,12 +804,12 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
 
     poll_enqueued = 0
     for row in poll_candidates[:poll_slots]:
-        _poll_queue.put_nowait(row["id"])
+        _queue_job(_poll_queue, row["id"])
         poll_enqueued += 1
 
     vr_enqueued = 0
     for _, row in video_ready[:vr_slots]:
-        _video_ready_queue.put_nowait(row["id"])
+        _queue_job(_video_ready_queue, row["id"])
         vr_enqueued += 1
 
     # 参考图：cohort + 高低水位；关键路径优先
@@ -804,7 +819,7 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
         budget = min(demand, ref_slots)
         ordered = reference_critical + reference_normal + retake_jobs
         for _, row in ordered[:budget]:
-            _queue.put_nowait(row["id"])
+            _queue_job(_queue, row["id"])
             ref_enqueued += 1
     elif ref_slots > 0 and reference_critical:
         # 水位满时仍允许完成已接近完成的关键路径（只取 critical，且仅当已有 slot 进度）
@@ -812,7 +827,7 @@ def _dispatch_due_jobs_stage_aware() -> dict[str, int]:
             if ref_enqueued >= ref_slots:
                 break
             if _completed_reference_slots(row.get("image_inputs")) > 0:
-                _queue.put_nowait(row["id"])
+                _queue_job(_queue, row["id"])
                 ref_enqueued += 1
 
     return {
@@ -837,7 +852,7 @@ async def _durable_dispatcher() -> None:
     try:
         while True:
             try:
-                _dispatch_due_jobs()
+                await asyncio.to_thread(_dispatch_due_jobs)
                 # Recreate an unexpectedly dead worker without changing the
                 # configured target. Worker loops catch job errors themselves,
                 # so this is primarily protection against lifecycle regressions.

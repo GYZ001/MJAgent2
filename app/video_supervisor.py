@@ -1352,6 +1352,28 @@ def attempts_for(entry: ShotCoverageEntry, ledger: CoverageLedger, *, budget_cap
     return max(MIN_ATTEMPTS_PER_SHOT, min(MAX_ATTEMPTS_PER_SHOT, min(base + affordable, MAX_ATTEMPTS_PER_SHOT)))
 
 
+def _rebuild_budgeted_coverage_ledger(
+    episode_id: str,
+    *,
+    cp: VideoSupervisorCheckpoint,
+    fallback_quota: int,
+    budget_cap_cny: float,
+) -> CoverageLedger:
+    """Build the read-heavy ledger outside the uvicorn event-loop thread."""
+    ledger = rebuild_coverage_ledger(
+        episode_id,
+        cp=cp,
+        fallback_quota=fallback_quota,
+    )
+    for entry in ledger.entries:
+        entry.attempts_budgeted = attempts_for(
+            entry,
+            ledger,
+            budget_cap_cny=budget_cap_cny,
+        )
+    return ledger
+
+
 def _has_dispatch_budget_capacity(
     episode_id: str,
     entry: ShotCoverageEntry,
@@ -2942,22 +2964,27 @@ async def run_video_completion_supervisor(
         cp.tick_no += 1
         cp.phase = "PLANNING_COVERAGE"
         _reconcile_terminal_continuity_blocks(episode_id, run_id=run_id)
-        ledger = rebuild_coverage_ledger(
-            episode_id, cp=cp,
-            fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
-        )
-        # 动态分配 attempt budget
         cap = float(cp.budget.get("cap_cny") or DEFAULT_VIDEO_BUDGET_CAP_CNY)
-        for e in ledger.entries:
-            e.attempts_budgeted = attempts_for(e, ledger, budget_cap_cny=cap)
-        if _adopt_ready_candidates(ledger, run_id=run_id):
-            ledger = rebuild_coverage_ledger(
+        fallback_quota = int(cp.coverage.get("fallback_quota") or 0)
+        ledger = await asyncio.to_thread(
+            _rebuild_budgeted_coverage_ledger,
+            episode_id,
+            cp=cp,
+            fallback_quota=fallback_quota,
+            budget_cap_cny=cap,
+        )
+        if await asyncio.to_thread(
+            _adopt_ready_candidates,
+            ledger,
+            run_id=run_id,
+        ):
+            ledger = await asyncio.to_thread(
+                _rebuild_budgeted_coverage_ledger,
                 episode_id,
                 cp=cp,
-                fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
+                fallback_quota=fallback_quota,
+                budget_cap_cny=cap,
             )
-            for e in ledger.entries:
-                e.attempts_budgeted = attempts_for(e, ledger, budget_cap_cny=cap)
         _merge_shot_state(cp, ledger)
         save_checkpoint(cp, run_id=run_id)
 
@@ -3021,7 +3048,6 @@ async def run_video_completion_supervisor(
                     return cp
                 if dispatched:
                     progressed = True
-                    spent = float(rebuild_coverage_ledger(episode_id, cp=cp).cost_spent)
                 # Narrative-authority request compilation is intentionally
                 # thorough and synchronous. Yield after each dispatch so a
                 # large first pass cannot starve HTTP and media workers.
@@ -3202,7 +3228,8 @@ async def run_video_completion_supervisor(
             await asyncio.sleep(0)
 
         if budget_capacity_reached:
-            observed = rebuild_coverage_ledger(
+            observed = await asyncio.to_thread(
+                rebuild_coverage_ledger,
                 episode_id,
                 cp=cp,
                 fallback_quota=int(cp.coverage.get("fallback_quota") or 0),
@@ -3224,7 +3251,11 @@ async def run_video_completion_supervisor(
         if allow_fallback_adopt:
             # 刷新 ledger 状态到 cp
             _merge_shot_state(cp, ledger)
-            ledger2 = rebuild_coverage_ledger(episode_id, cp=cp)
+            ledger2 = await asyncio.to_thread(
+                rebuild_coverage_ledger,
+                episode_id,
+                cp=cp,
+            )
             for entry in ledger2.exhausted_but_technically_ok():
                 if _adopt_fallback(entry, episode_id=episode_id, run_id=run_id):
                     progressed = True

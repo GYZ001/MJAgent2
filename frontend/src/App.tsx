@@ -1161,17 +1161,24 @@ export function usePoll<T>(
   useEffect(() => {
     if (deps.some((d) => d == null)) return;
     const poller = pollerRef.current!;
-    void poller.start();
+    const syncVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        poller.stop();
+      } else {
+        void poller.start();
+      }
+    };
     const catchUp = () => {
       if (document.visibilityState === "visible") void poller.refresh();
     };
+    syncVisibility();
+    document.addEventListener("visibilitychange", syncVisibility);
     if (options.refreshOnFocus !== false) {
       window.addEventListener("focus", catchUp);
-      document.addEventListener("visibilitychange", catchUp);
     }
     return () => {
       window.removeEventListener("focus", catchUp);
-      document.removeEventListener("visibilitychange", catchUp);
+      document.removeEventListener("visibilitychange", syncVisibility);
       poller.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

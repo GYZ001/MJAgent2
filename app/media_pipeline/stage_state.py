@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 from app.db import get_conn, now
 from app.media_pipeline import stages as S
-
-
-def _row_has_column(conn, table: str, column: str) -> bool:
-    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    return column in cols
-
 
 def set_pipeline_stage(
     job_id: str,
@@ -28,16 +23,36 @@ def set_pipeline_stage(
 ) -> None:
     """在同一事务语义下更新 jobs 的阶段字段；缺列时静默跳过（旧库迁移前）。"""
     db = conn or get_conn()
-    if not _row_has_column(db, "jobs", "pipeline_stage"):
-        return
-    stamp = now()
     progress_json = json.dumps(stage_progress, ensure_ascii=False) if stage_progress is not None else None
-    # state_revision 单调递增
-    row = db.execute(
-        "SELECT state_revision, pipeline_stage FROM jobs WHERE id=?", (job_id,)
-    ).fetchone()
+    try:
+        row = db.execute(
+            """SELECT state_revision,pipeline_stage,reason_code,reason_text,
+                      scheduler_lane,priority_class,stage_progress_json,ready_at
+                 FROM jobs WHERE id=?""",
+            (job_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return
     if not row:
         return
+
+    changed = row["pipeline_stage"] != stage
+    for value, column in (
+        (reason_code, "reason_code"),
+        (reason_text, "reason_text"),
+        (scheduler_lane, "scheduler_lane"),
+        (priority_class, "priority_class"),
+        (progress_json, "stage_progress_json"),
+        (ready_at, "ready_at"),
+    ):
+        if value is not None and row[column] != value:
+            changed = True
+    if stage == S.STAGE_VIDEO_READY and row["ready_at"] is None:
+        changed = True
+    if not changed:
+        return
+
+    stamp = now()
     revision = int(row["state_revision"] or 0) + 1
     same_stage = row["pipeline_stage"] == stage
     sets = [
@@ -52,9 +67,6 @@ def set_pipeline_stage(
         args.append(stamp)
         sets.append("stage_status=?")
         args.append("active")
-    if pipeline_status is not None and _row_has_column(db, "jobs", "pipeline_status"):
-        # pipeline_status 列可选；宏观状态仍以 jobs.status 为主
-        pass
     if reason_code is not None:
         sets.append("reason_code=?")
         args.append(reason_code)

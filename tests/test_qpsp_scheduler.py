@@ -103,6 +103,22 @@ def test_set_pipeline_stage_and_status_projection(monkeypatch) -> None:
     assert st["reason_code"] == "EPISODE_VIDEO_INFLIGHT_FULL"
     assert "槽" in (st["stage_label"] or "")
     assert summary["video_ready"] >= 1
+    revision = conn.execute(
+        "SELECT state_revision FROM jobs WHERE id='j1'"
+    ).fetchone()["state_revision"]
+
+    set_pipeline_stage(
+        "j1", S.STAGE_WAITING_VIDEO_SLOT,
+        reason_code="EPISODE_VIDEO_INFLIGHT_FULL",
+        reason_text="本集 8 个上游视频槽已满",
+        scheduler_lane=S.LANE_VIDEO_READY,
+        stage_progress={"current": 4, "total": 4, "unit": "reference_slots"},
+        conn=conn,
+    )
+
+    assert conn.execute(
+        "SELECT state_revision FROM jobs WHERE id='j1'"
+    ).fetchone()["state_revision"] == revision
 
 
 def test_stage_label_unknown() -> None:
