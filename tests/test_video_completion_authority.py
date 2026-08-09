@@ -242,6 +242,15 @@ def test_grant_recomputes_bound_plan_and_capability_snapshot(monkeypatch) -> Non
     assert grant.video_plan_release_hash
     assert grant.capability_snapshot_id == "cap-1"
 
+    conn.execute("UPDATE shots SET adopted_version_id='v1' WHERE id='s1'")
+    conn.commit()
+    video_plan.reconcile_adopted_revision("s1", "v1", conn=conn)
+    assert validate_video_grant(
+        grant.grant_id,
+        episode_id="e",
+        storyboard_artifact_id="storyboard_rev_1",
+    ).grant_id == grant.grant_id
+
     conn.execute(
         "UPDATE provider_video_capability_snapshots SET probe_result='drifted' WHERE id='cap-1'"
     )

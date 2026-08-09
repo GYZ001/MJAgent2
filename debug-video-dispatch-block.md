@@ -193,3 +193,18 @@ New dependency-progress issue:
 | ID | Hypothesis | Status | Evidence |
 |----|------------|--------|----------|
 | N | Candidate adoption occurs only between full Supervisor ticks, delaying dependency release during a long dispatch batch | Confirmed | Shot 1 succeeded with `adopted_version_id=NULL` while dispatch continued |
+
+Post-fix evidence for N:
+- The next run adopted shots 1 and 5 immediately and populated their direct
+  `video_plan_dependencies.upstream_adopted_version_id` values.
+
+New grant issue:
+- `reconcile_adopted_revision` wrote the runtime upstream version into the
+  published shot plan's `input_fingerprints_json`.
+- The next grant validation recomputed a different shot execution contract and
+  stopped with `RELEASE_QUALIFICATION_CHANGED`, although authored authority and
+  provider capability were unchanged.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| O | Runtime adoption mutates the immutable published plan fingerprint and self-invalidates the completion grant | Confirmed | Grant changed only after dependency reconciliation |

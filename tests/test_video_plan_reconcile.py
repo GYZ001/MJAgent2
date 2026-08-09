@@ -405,6 +405,9 @@ def test_same_location_with_different_time_is_a_new_scene_entry() -> None:
 
 def test_first_adoption_binds_dependency_and_changed_adoption_stales_descendant() -> None:
     conn = _conn()
+    published_fingerprints = conn.execute(
+        "SELECT input_fingerprints_json FROM shot_video_generation_plans WHERE id='svp-2'"
+    ).fetchone()["input_fingerprints_json"]
     conn.execute(
         """INSERT INTO shot_versions(
                id,shot_id,version_no,prompt_text,idem_key,status,created_at,image_inputs
@@ -426,6 +429,9 @@ def test_first_adoption_binds_dependency_and_changed_adoption_stales_descendant(
         "SELECT upstream_adopted_version_id FROM video_plan_dependencies"
     ).fetchone()
     assert dependency["upstream_adopted_version_id"] == "v1"
+    assert conn.execute(
+        "SELECT input_fingerprints_json FROM shot_video_generation_plans WHERE id='svp-2'"
+    ).fetchone()["input_fingerprints_json"] == published_fingerprints
     prepared = conn.execute(
         "SELECT idem_key,image_inputs FROM shot_versions WHERE id='downstream'"
     ).fetchone()
