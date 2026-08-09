@@ -401,7 +401,11 @@ def evaluate_storyboard_for_confirmation(
     if has_real_bible and not structural_errors:
         try:
             for s in board.shots:
-                compile_prompt(s, bible, screenplay=screenplay)
+                compile_prompt(
+                    s.model_copy(deep=True),
+                    bible,
+                    screenplay=screenplay,
+                )
         except Exception as exc:  # noqa: BLE001
             structural_errors.append(f"Prompt 编译失败：{exc}")
     try:

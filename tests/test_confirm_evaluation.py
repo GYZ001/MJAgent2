@@ -156,6 +156,25 @@ def test_evaluate_is_readonly_and_returns_structured_result():
     assert not any("主线台词" in e for e in key_errs)
 
 
+def test_prompt_compile_probe_does_not_mutate_evaluation_board() -> None:
+    shot = _shot(
+        reference_roles=[],
+        prompt_contract_version="renderability_v1",
+    )
+
+    result = evaluate_storyboard_for_confirmation(
+        {"id": "ep1", "target_duration_s": 50},
+        Storyboard(episode_no=1, shots=[shot]),
+        screenplay=None,
+        bible=_minimal_bible(),
+        has_real_bible=True,
+        record_metrics=False,
+    )
+
+    assert result.board.shots[0].reference_roles == []
+    assert result.board.shots[0].prompt_contract_version == "renderability_v1"
+
+
 def test_dialogue_composition_is_score_warning_not_confirmation_blocker() -> None:
     ep = {"id": "ep1", "target_duration_s": 50}
     shot = _shot(
