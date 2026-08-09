@@ -255,6 +255,54 @@ def prepare_published_storyboard_repair(
         except (TypeError, ValueError):
             outline = None
 
+    repair_screenplay = None
+    repair_bible = None
+    narrative_repair_active = None
+    if outline is not None:
+        from app.domain.common import _project_bible_or_placeholder
+        from app.domain.video_ops import (
+            evaluate_storyboard_for_confirmation,
+        )
+        from app.production.screenplay_authority import (
+            resolve_downstream_screenplay,
+        )
+
+        repair_context = resolve_downstream_screenplay(
+            episode_id,
+            conn=conn,
+        )
+        repair_screenplay = repair_context.screenplay
+        narrative_repair_active = (
+            repair_context.narrative_authority_required
+        )
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?",
+            (episode["project_id"],),
+        ).fetchone()
+        repair_bible = _project_bible_or_placeholder(project)
+        current_evaluation = evaluate_storyboard_for_confirmation(
+            dict(episode),
+            board,
+            repair_screenplay,
+            repair_bible,
+            has_real_bible=bool(
+                project and str(project["bible_json"] or "").strip()
+            ),
+            record_metrics=False,
+            allow_evidence_refinalize=True,
+        )
+        # Preview payloads intentionally cap display detail. They prove the
+        # user's intent and snapshot, but the server-side current evaluation
+        # owns the complete repair target set.
+        issue_messages = list(dict.fromkeys([
+            *current_evaluation.errors,
+            *(
+                str(message)
+                for message in issue_messages
+                if str(message).strip()
+            ),
+        ]))
+
     explicit_targets = {
         int(match.group(1))
         for message in issue_messages
@@ -279,29 +327,6 @@ def prepare_published_storyboard_repair(
             "execution_verified": True,
         },
     )
-    repair_screenplay = None
-    repair_bible = None
-    narrative_repair_active = None
-    if outline is not None:
-        from app.domain.common import _project_bible_or_placeholder
-        from app.production.screenplay_authority import (
-            resolve_downstream_screenplay,
-        )
-
-        repair_context = resolve_downstream_screenplay(
-            episode_id,
-            conn=conn,
-        )
-        repair_screenplay = repair_context.screenplay
-        narrative_repair_active = (
-            repair_context.narrative_authority_required
-        )
-        project = conn.execute(
-            "SELECT * FROM projects WHERE id=?",
-            (episode["project_id"],),
-        ).fetchone()
-        repair_bible = _project_bible_or_placeholder(project)
-
     checkpoint = _apply_repair(
         checkpoint,
         plan,

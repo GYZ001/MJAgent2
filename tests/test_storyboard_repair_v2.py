@@ -758,12 +758,26 @@ def test_full_repair_scene_pack_checkpoints_without_mutating_official_rows(
         (outline.model_dump_json(),),
     )
     conn.commit()
+    import app.domain.video_ops as video_ops
+    import app.storyboard_supervisor as supervisor_module
+
+    monkeypatch.setattr(
+        video_ops,
+        "evaluate_storyboard_for_confirmation",
+        lambda _episode, board, *_args, **_kwargs: SimpleNamespace(
+            passed=False,
+            errors=[
+                "第 1 镜的可见身份不属于本镜叙事任务",
+                "第 3 镜的可见身份不属于本镜叙事任务",
+            ],
+            warnings=[],
+            issues=[],
+            board=board,
+        ),
+    )
     checkpoint = prepare_published_storyboard_repair(
         "e1",
-        [
-            "第 1 镜的可见身份不属于本镜叙事任务",
-            "第 3 镜的可见身份不属于本镜叙事任务",
-        ],
+        ["第 1 镜的可见身份不属于本镜叙事任务"],
     )
     assert checkpoint.last_repair["window_start"] == 1
     assert checkpoint.last_repair["window_end"] == 3
@@ -799,27 +813,10 @@ def test_full_repair_scene_pack_checkpoints_without_mutating_official_rows(
             ],
         )
 
-    import app.storyboard_supervisor as supervisor_module
-    import app.domain.video_ops as video_ops
-
     monkeypatch.setattr(
         supervisor_module,
         "generate_storyboard_scene_pack",
         fake_scene_pack,
-    )
-    monkeypatch.setattr(
-        video_ops,
-        "evaluate_storyboard_for_confirmation",
-        lambda _episode, board, *_args, **_kwargs: SimpleNamespace(
-            passed=False,
-            errors=[
-                "第 1 镜的可见身份不属于本镜叙事任务",
-                "第 3 镜的可见身份不属于本镜叙事任务",
-            ],
-            warnings=[],
-            issues=[],
-            board=board,
-        ),
     )
 
     paused = asyncio.run(run_storyboard_supervisor(
