@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import threading
 
 import pytest
@@ -697,6 +698,67 @@ def test_recorded_storyboard_task_releases_terminal_write_pointer(storyboard_db,
         "SELECT active_storyboard_run_id FROM episodes WHERE id='e1'",
     ).fetchone()
     assert row["active_storyboard_run_id"] is None
+
+
+def test_recorded_storyboard_task_retries_transient_sqlite_lock(
+    storyboard_db,
+    monkeypatch,
+):
+    recorder = WorkflowRecorder.create(
+        workflow_type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="sqlite-lock-retry",
+    )
+    storyboard_db.execute(
+        "UPDATE episodes SET active_storyboard_run_id=?,status='scripting' "
+        "WHERE id='e1'",
+        (recorder.run_id,),
+    )
+    storyboard_db.commit()
+    calls = []
+
+    async def locked_once(*_args, **kwargs):
+        calls.append({
+            "resume": kwargs["resume"],
+            "new_activation": kwargs["new_activation"],
+        })
+        if len(calls) == 1:
+            exc = sqlite3.OperationalError("database is locked")
+            exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise exc
+        return type("Result", (), {
+            "phase": "SUCCEEDED",
+            "outcome": "SUCCEEDED_READY_FOR_CONFIRM",
+        })()
+
+    monkeypatch.setattr(
+        "app.domain.storyboard_ops._storyboard_task",
+        locked_once,
+    )
+    monkeypatch.setattr(
+        "app.domain.storyboard_ops._STORYBOARD_SQLITE_LOCK_RETRY_DELAYS_S",
+        (0,),
+    )
+
+    asyncio.run(_recorded_storyboard_task(
+        "e1",
+        recorder,
+        resume=False,
+        new_activation=True,
+    ))
+
+    assert calls == [
+        {"resume": False, "new_activation": True},
+        {"resume": True, "new_activation": False},
+    ]
+    assert repository.get_run(recorder.run_id)["status"] == "SUCCEEDED"
+    retry_event = storyboard_db.execute(
+        "SELECT payload_json FROM run_events "
+        "WHERE run_id=? AND event_type='STORYBOARD_SQLITE_LOCK_RETRY'",
+        (recorder.run_id,),
+    ).fetchone()
+    assert json.loads(retry_event["payload_json"])["attempt"] == 1
 
 
 def test_storyboard_task_does_not_mask_current_failure_with_stale_fallback(

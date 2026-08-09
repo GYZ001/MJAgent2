@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import sqlite3
 
 from app.harness.types import Issue, IssueSeverity
 
@@ -2106,7 +2108,7 @@ async def _recorded_storyboard_task(
             )
         _step_id, supervisor_result = await recorder.step(
             "storyboard",
-            lambda: _storyboard_task(
+            lambda: _storyboard_task_with_sqlite_lock_retry(
                 episode_id,
                 resume=resume,
                 run_id=getattr(recorder, "run_id", None),
@@ -2207,6 +2209,62 @@ async def _recorded_storyboard_task(
             cleanup_conn.commit()
         except Exception:  # noqa: BLE001
             pass
+
+
+_STORYBOARD_SQLITE_LOCK_RETRY_DELAYS_S = (0.25, 1.0, 2.0)
+
+
+def _is_transient_sqlite_lock(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if error_code is None:
+        return False
+    return (int(error_code) & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }
+
+
+async def _storyboard_task_with_sqlite_lock_retry(
+    episode_id: str,
+    *,
+    resume: bool,
+    run_id: str | None,
+    new_activation: bool,
+):
+    """Resume from the durable checkpoint after a transient SQLite writer lock."""
+    for attempt in range(len(_STORYBOARD_SQLITE_LOCK_RETRY_DELAYS_S) + 1):
+        try:
+            return await _storyboard_task(
+                episode_id,
+                resume=bool(resume or attempt),
+                run_id=run_id,
+                new_activation=bool(new_activation and attempt == 0),
+            )
+        except sqlite3.OperationalError as exc:
+            if (
+                not _is_transient_sqlite_lock(exc)
+                or attempt >= len(_STORYBOARD_SQLITE_LOCK_RETRY_DELAYS_S)
+            ):
+                raise
+            get_conn().rollback()
+            delay_s = _STORYBOARD_SQLITE_LOCK_RETRY_DELAYS_S[attempt]
+            if run_id:
+                evidence_repository.append_event(
+                    run_id,
+                    "STORYBOARD_SQLITE_LOCK_RETRY",
+                    "warning",
+                    "SQLite 写锁冲突，已回滚未完成事务并从安全检查点重试",
+                    payload={
+                        "attempt": attempt + 1,
+                        "delay_s": delay_s,
+                        "episode_id": episode_id,
+                    },
+                )
+            await asyncio.sleep(delay_s)
+
+    raise RuntimeError("unreachable")
 
 
 def _storyboard_generation_is_live(ep: dict) -> bool:
