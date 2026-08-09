@@ -2836,12 +2836,18 @@ def reconcile_adopted_revision(
                 "SELECT input_fingerprints_json FROM shot_video_generation_plans WHERE id=?",
                 (dep["shot_plan_id"],),
             ).fetchone()
-            fingerprints = json.loads(row["input_fingerprints_json"] or "{}") if row else {}
-            fingerprints["upstream_adopted_video_revision"] = adopted_version_id
+            published_fingerprints = (
+                json.loads(row["input_fingerprints_json"] or "{}")
+                if row else {}
+            )
+            execution_fingerprints = {
+                **published_fingerprints,
+                "upstream_adopted_video_revision": adopted_version_id,
+            }
             db.execute(
                 """UPDATE shot_video_generation_plans
-                      SET input_fingerprints_json=?,status='ready',updated_at=? WHERE id=?""",
-                (_json(fingerprints), now(), dep["shot_plan_id"]),
+                      SET status='ready',updated_at=? WHERE id=?""",
+                (now(), dep["shot_plan_id"]),
             )
             waiting_jobs = db.execute(
                 """SELECT j.id,j.version_id,v.idem_key,v.image_inputs
@@ -2862,7 +2868,7 @@ def reconcile_adopted_revision(
                     meta = {}
                 meta["upstream_adopted_video_revision"] = adopted_version_id
                 meta["after_version_id"] = adopted_version_id
-                meta["input_revision_fingerprints"] = fingerprints
+                meta["input_revision_fingerprints"] = execution_fingerprints
                 meta["plan_status"] = "ready"
                 idem = hashlib.sha256(
                     (
