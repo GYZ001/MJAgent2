@@ -56,3 +56,7 @@ New hypotheses:
 | E | Media worker calls synchronous job/prompt work on the event loop | High | Low | Pending |
 | F | Worker thread or SQLite contention starves all HTTP work | Medium | Medium | Pending |
 | G | Debug reporting or checkpoint persistence causes the second stall | Low | Low | Pending |
+
+Iteration instrumentation:
+- E: prompt preparation and payload construction before provider await
+- F: worker synchronous setup before its first await
