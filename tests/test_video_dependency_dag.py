@@ -274,12 +274,20 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
                 },
                 {
                     "shot_id": "SH-2",
-                    "mode": "FIRST_LAST_FRAME_MODE",
+                    "mode": "FIRST_FRAME_MODE",
+                    "depends_on_shot_id": "SH-1",
                     "required_assets": [
-                        {"role": "first_frame", "source": "STATIC_BOUNDARY_ASSET"},
-                        {"role": "last_frame", "source": "STATIC_BOUNDARY_ASSET"},
+                        {
+                            "role": "first_frame",
+                            "source": "PREVIOUS_ADOPTED_TAIL",
+                            "source_shot_id": "SH-1",
+                        },
+                        {
+                            "role": "reference_image",
+                            "source": "ASSET_REVISION",
+                        },
                     ],
-                    "reason_codes": ["EXACT_START_END_STATE_REQUIRED"],
+                    "reason_codes": ["MODEL_RETURNED_EXECUTION_FIELDS"],
                     "confidence": 0.9,
                     "estimated_latency_ms": 100,
                     "estimated_cost": 1,
@@ -317,6 +325,14 @@ async def test_ai_episode_plan_is_single_call_versioned_and_first_shot_is_fixed(
     assert plan.shots[0].mode == VideoGenerationMode.REFERENCE_IMAGE_MODE
     assert plan.shots[0].depends_on_shot_id is None
     assert "FIRST_SHOT_NO_PREDECESSOR" in plan.shots[0].reason_codes
+    assert plan.shots[1].mode == VideoGenerationMode.FIRST_FRAME_MODE
+    assert plan.shots[1].depends_on_shot_id == "s1"
+    assert [asset.role for asset in plan.shots[1].required_assets] == [
+        "first_frame",
+    ]
+    assert plan.shots[1].required_assets[0].source == (
+        AssetSource.PREVIOUS_ADOPTED_TAIL
+    )
     assert conn.execute(
         "SELECT COUNT(*) FROM shot_video_generation_plans"
     ).fetchone()[0] == 3

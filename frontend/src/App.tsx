@@ -1213,24 +1213,12 @@ export const useProject = (
     [projectId, view],
   );
 
-const VIDEO_SUPERVISOR_TERMINAL = new Set([
-  "SUCCEEDED_COVERED",
-  "COMPLETED_DEADLINE_FALLBACK",
-  "PARTIAL_NO_USABLE_CANDIDATE",
-  "FAILED_CLOSED",
-  "CANCELLED",
-]);
-
 /** 全片补齐 Supervisor 仍在协调时视为忙碌（即使镜头队列暂时为空）。 */
 function videoSupervisorBusy(ep: Episode): boolean {
-  const phase =
-    ep.video_supervisor && typeof ep.video_supervisor.phase === "string"
-      ? ep.video_supervisor.phase
-      : "";
-  if (phase && VIDEO_SUPERVISOR_TERMINAL.has(phase)) return false;
   if (
     ep.video_supervisor?.task_running === true ||
-    ep.video_supervisor?.running === true
+    ep.video_supervisor?.running === true ||
+    Number(ep.video_supervisor?.active_media_jobs || 0) > 0
   )
     return true;
   return false;

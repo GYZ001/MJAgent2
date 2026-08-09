@@ -377,7 +377,7 @@ async def _ensure_supervisor_video_plan(
                         session_id = line.strip().split("=", 1)[1]
             payload = {
                 "sessionId": session_id,
-                "runId": "pre-fix",
+                "runId": "post-fix",
                 "hypothesisId": hypothesis_id,
                 "location": "app/video_supervisor.py:_ensure_supervisor_video_plan",
                 "msg": f"[DEBUG] {message}",

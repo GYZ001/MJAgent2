@@ -3,6 +3,7 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { useEpisode, useNav } from '../App'
 import {
   api,
+  type Episode,
   type EpisodeVideoGenerationPlan,
   type ReferenceImage,
   type ReviewWallContext,
@@ -425,6 +426,21 @@ function stateMeta(status: string) {
   return EPISODE_STATUS[status] || { label: '未知状态', next: '请刷新或查看技术详情' }
 }
 
+export function incompleteVideoSupervisorState(
+  supervisor: Episode['video_supervisor'],
+): { outcome: string; runId: string | null } | null {
+  if (
+    !supervisor
+    || supervisor.task_running === true
+    || Number(supervisor.active_media_jobs || 0) > 0
+    || supervisor.run_status !== 'PARTIAL'
+  ) return null
+  return {
+    outcome: String(supervisor.outcome || 'PARTIAL_RESULT'),
+    runId: supervisor.run_id || null,
+  }
+}
+
 function matchesFilter(shot: Shot, filter: ShotFilter) {
   const state = shotVideoState(shot)
   if (filter === 'problem') return Boolean(state.grade === 'B' || state.continuityDegraded || state.phase === 'generation_failed')
@@ -695,7 +711,7 @@ export default function WallPage() {
 
   const startEpisodeGeneration = async () => {
     // #region debug-point A-E:episode-generation-submit
-    void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'pre-fix', hypothesisId: 'A', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration', msg: '[DEBUG] Episode generation confirmation entered', data: { episodeId: ep?.id, eligible: context?.upstream.eligible_for_production, activeVideoRunId: ep?.active_video_run_id, supervisorPhase: ep?.video_supervisor?.phase, supervisorTaskRunning, generatingCount, generationAction }, ts: Date.now() }) }).catch(() => {})
+    void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'A', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration', msg: '[DEBUG] Episode generation confirmation entered', data: { episodeId: ep?.id, eligible: context?.upstream.eligible_for_production, activeVideoRunId: ep?.active_video_run_id, supervisorPhase: ep?.video_supervisor?.phase, supervisorTaskRunning, generatingCount, generationAction }, ts: Date.now() }) }).catch(() => {})
     // #endregion
     if (!context?.upstream.eligible_for_production) { showToast(context?.upstream.blockers.join('；') || '分镜尚未确认', undefined, true); return }
     setGenerationSubmitting(true)
@@ -709,7 +725,7 @@ export default function WallPage() {
         message?: string
       }
       // #region debug-point B-E:episode-generation-response
-      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'pre-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration.response', msg: '[DEBUG] Episode generation API returned', data: { episodeId: ep?.id, response }, ts: Date.now() }) }).catch(() => {})
+      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration.response', msg: '[DEBUG] Episode generation API returned', data: { episodeId: ep?.id, response }, ts: Date.now() }) }).catch(() => {})
       // #endregion
       showToast(
         response.message
@@ -719,7 +735,7 @@ export default function WallPage() {
       await refreshAll()
     } catch (reason) {
       // #region debug-point B-E:episode-generation-error
-      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'pre-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration.error', msg: '[DEBUG] Episode generation API failed', data: { episodeId: ep?.id, errorName: reason instanceof Error ? reason.name : typeof reason, errorMessage: reason instanceof Error ? reason.message : String(reason) }, ts: Date.now() }) }).catch(() => {})
+      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration.error', msg: '[DEBUG] Episode generation API failed', data: { episodeId: ep?.id, errorName: reason instanceof Error ? reason.name : typeof reason, errorMessage: reason instanceof Error ? reason.message : String(reason) }, ts: Date.now() }) }).catch(() => {})
       // #endregion
       showToast(reason instanceof Error ? reason.message : String(reason), undefined, true)
     } finally {
@@ -826,7 +842,13 @@ export default function WallPage() {
 
   if (error && !ep) return <QueryState loading={false} error={error} hasData={false}>{null}</QueryState>
   if (!ep) return <QueryState loading={loading !== false} error={null} hasData={false}>{null}</QueryState>
-  const episodeState = stateMeta(ep.status)
+  const incompleteSupervisor = incompleteVideoSupervisorState(ep.video_supervisor)
+  const episodeState = incompleteSupervisor
+    ? {
+      label: '视频任务未完成',
+      next: `上次全片任务已停止：${incompleteSupervisor.outcome}`,
+    }
+    : stateMeta(ep.status)
   const staleCount = stalePreview?.stale_count ?? shots.filter(shot => shot.video_stale).length
 
   return (
@@ -875,6 +897,7 @@ export default function WallPage() {
       </header>
 
       {contextError && <section className="review-persistent-error" role="alert"><b>生成资格加载失败</b><span>当前保持只读，不会用空资格继续生成或采用。</span><details><summary>查看错误详情</summary><pre>{contextError}</pre></details><button className="btn small" onClick={() => { void loadContext() }}>重试加载</button></section>}
+      {incompleteSupervisor && <section className="review-persistent-error" role="alert"><b>全片视频任务未完成</b><span>任务已停止，{shots.length} 镜仍保持当前状态；错误：{incompleteSupervisor.outcome}。</span><p>已有结果均已保留。请先查看错误详情，修复后再点击「生成视频」。</p>{incompleteSupervisor.runId && <details><summary>任务信息</summary><code>{incompleteSupervisor.runId}</code></details>}</section>}
       {context && !context.upstream.eligible_for_production && <section className="review-blocked-banner" role="status"><b>当前不可生成</b><span>{context.upstream.blockers.join('；')}。查看、停止旧任务和废弃/隔离仍可用，生成、恢复、采用和修复已保护。</span><button className="btn small" onClick={() => go(ep.status === 'scripting' || ep.status === 'planned' ? 'script' : 'board', projectId, ep.id)}>去{ep.status === 'scripting' || ep.status === 'planned' ? '剧本台' : '分镜台'}处理</button><details><summary>技术详情</summary><code>{context.upstream.qualification_version}</code></details></section>}
       {videoPlan && <VideoPlanSummary plan={videoPlan} />}
 
@@ -1285,7 +1308,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
       await onRefresh()
     } catch (error) {
       // #region debug-point B-C:shot-generation-error
-      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'pre-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:runGeneration.error', msg: '[DEBUG] Shot generation API failed', data: { shotId: shot.id, shotNo: shot.shot_no, errorName: error instanceof Error ? error.name : typeof error, errorMessage: error instanceof Error ? error.message : String(error) }, ts: Date.now() }) }).catch(() => {})
+      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:runGeneration.error', msg: '[DEBUG] Shot generation API failed', data: { shotId: shot.id, shotNo: shot.shot_no, errorName: error instanceof Error ? error.name : typeof error, errorMessage: error instanceof Error ? error.message : String(error) }, ts: Date.now() }) }).catch(() => {})
       // #endregion
       onToast(error instanceof Error ? error.message : String(error), undefined, true)
     } finally {

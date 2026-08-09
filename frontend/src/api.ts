@@ -1811,7 +1811,17 @@ export interface Episode {
   active_storyboard_run_id?: string | null;
   active_video_run_id?: string | null;
   video_completion_mode?: string | null;
-  video_supervisor?: Record<string, unknown> | null;
+  video_supervisor?: {
+    phase?: string | null;
+    run_id?: string | null;
+    run_status?: string | null;
+    outcome?: string | null;
+    task_running?: boolean;
+    running?: boolean;
+    active_media_jobs?: number;
+    finished_at?: number | null;
+    last_plan?: Record<string, unknown> | null;
+  } | null;
   supervisor?: {
     phase: string;
     repair_epoch: number;

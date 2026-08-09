@@ -16,6 +16,7 @@ import {
   describeShotUpdate,
   episodeCompletionRequest,
   episodeGenerationAction,
+  incompleteVideoSupervisorState,
   isVideoModelInputRejection,
   refSourceLabel,
   referenceLibraryLabel,
@@ -488,5 +489,25 @@ describe('整集生成按钮状态', () => {
     expect(shotHasPausedGeneration(paused)).toBe(true)
     expect(shotHasActiveGeneration(running)).toBe(true)
     expect(shotHasPausedGeneration(running)).toBe(false)
+  })
+
+  it('异步任务部分完成后暴露持久错误，不再冒充视频生成中', () => {
+    expect(incompleteVideoSupervisorState({
+      run_id: 'run-partial',
+      run_status: 'PARTIAL',
+      outcome: 'VIDEO_PLAN_INVALID',
+      task_running: false,
+      active_media_jobs: 0,
+    })).toEqual({
+      outcome: 'VIDEO_PLAN_INVALID',
+      runId: 'run-partial',
+    })
+    expect(incompleteVideoSupervisorState({
+      run_id: 'run-live',
+      run_status: 'RUNNING',
+      outcome: null,
+      task_running: true,
+      active_media_jobs: 0,
+    })).toBeNull()
   })
 })

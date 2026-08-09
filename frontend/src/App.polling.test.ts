@@ -39,4 +39,20 @@ describe('分集轮询终态同步', () => {
     expect(episodeBusy(episode('failed'))).toBe(false)
     expect(episodeBusy(episode('running'))).toBe(true)
   })
+
+  it('全片任务已 PARTIAL 时不因残留 generating 状态持续轮询', () => {
+    const partial = {
+      ...episode('failed'),
+      status: 'generating',
+      video_supervisor: {
+        run_id: 'run-partial',
+        run_status: 'PARTIAL',
+        outcome: 'VIDEO_PLAN_INVALID',
+        task_running: false,
+        active_media_jobs: 0,
+      },
+    } as Episode
+
+    expect(episodeBusy(partial)).toBe(false)
+  })
 })

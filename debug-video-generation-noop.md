@@ -31,4 +31,13 @@
   shots still pending and no persistent error explanation.
 
 ## Verification Conclusion
-Root cause confirmed. Pending minimal fix and post-fix comparison.
+Root cause confirmed. Minimal fix applied:
+- Added a typed PlannerShotAnalysis boundary. AI output owns relational facts only;
+  executable mode, dependencies, and required assets are compiler-owned.
+- Changed the planner contract to v2 so invalid v1 provider responses are not reused.
+- Removed dead AI-authored asset revision validation from the execution compiler.
+- Replaced phase-enumeration polling with task/active-job truth.
+- Added a persistent PARTIAL outcome banner in the generation studio.
+
+Focused verification: 75 backend tests and 31 frontend tests pass; TypeScript
+typecheck passes. Pending post-fix browser and runtime-log comparison.

@@ -112,6 +112,24 @@ class ShotRelations(BaseModel):
     ] = "unknown"
 
 
+class PlannerShotAnalysis(BaseModel):
+    """AI-owned relational facts; executable mode and assets are compiler-owned."""
+
+    shot_id: str
+    relations: ShotRelations = Field(default_factory=ShotRelations)
+    state_dependency: Literal[
+        "none", "start_only", "start_and_end", "full_trajectory",
+    ] = "none"
+    motion_dependency: Literal[
+        "none", "pose", "trajectory", "camera", "rhythm", "audio",
+    ] = "none"
+    reason_codes: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    unknown_dimensions: list[str] = Field(default_factory=list)
+    estimated_latency_ms: int = Field(default=0, ge=0)
+    estimated_cost: float = Field(default=0.0, ge=0.0)
+
+
 SHOT_RELATION_ENUM_CONTRACT: dict[str, list[str]] = {
     "temporal": ["same_moment", "elapsed", "jump", "new_domain", "unknown"],
     "spatial": ["same_space", "adjacent_space", "new_space", "unknown"],
@@ -1549,23 +1567,6 @@ def _shot_model_from_row(row: Any):
     return shot
 
 
-def _collect_revision_ids(value: Any) -> set[str]:
-    found: set[str] = set()
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if (
-                isinstance(item, (str, int))
-                and (key == "id" or key.endswith("_id"))
-                and str(item).strip()
-            ):
-                found.add(str(item))
-            found.update(_collect_revision_ids(item))
-    elif isinstance(value, list):
-        for item in value:
-            found.update(_collect_revision_ids(item))
-    return found
-
-
 async def generate_episode_plan(
     episode_id: str,
     *,
@@ -1638,7 +1639,6 @@ async def generate_episode_plan(
     plan_id = new_id("evp")
     shot_payload = []
     asset_fingerprints: dict[str, str] = {}
-    allowed_asset_revision_ids: dict[str, set[str]] = {}
     asset_resolution_issues: list[dict[str, Any]] = []
     from app.multiview import resolve_shot_asset_dependencies
 
@@ -1694,9 +1694,6 @@ async def generate_episode_plan(
         fingerprint = str(manifest.get("input_fingerprint") or _hash(manifest))
         asset_fingerprints[str(row["id"])] = fingerprint
         asset_fingerprints[str(payload["shot_id"])] = fingerprint
-        revision_ids = _collect_revision_ids(manifest)
-        allowed_asset_revision_ids[str(row["id"])] = revision_ids
-        allowed_asset_revision_ids[str(payload["shot_id"])] = revision_ids
         shot_payload.append(payload)
     if asset_resolution_issues:
         raise VideoPlanValidationError(asset_resolution_issues)
@@ -1888,32 +1885,24 @@ async def generate_episode_plan(
     system = (
         "你是视频生产工具层规划器，只能引用输入中的 shot/database_shot ID，不得改写剧情、"
         "新增/删除/调换镜头。输入可能是整集的一个按请求体大小切分的窗口，只输出输入 shots。"
-        "为每镜选择 REFERENCE_IMAGE_MODE、FIRST_FRAME_MODE 或 "
-        "VIDEO_INPUT_MODE。每个连续场景的首镜固定 REFERENCE_IMAGE_MODE，场景内其余镜头固定 "
-        "FIRST_FRAME_MODE。关系判断只基于时空、剪辑、动作阶段、"
+        "你只负责分析每镜的时空、剪辑、动作阶段、状态依赖、运动依赖与置信度；"
+        "不得输出执行模式、镜头依赖、视频输入意图或 required_assets。"
+        "执行模式和素材合同由程序根据真实场景顺序统一编译。关系判断只基于时空、剪辑、动作阶段、"
         "状态依赖和运动依赖，禁止按人物名、地点名、题材、打斗词或动作词表决定模式。"
-        "new_domain、new_space 或 scene_cut 表示新场景首镜。VIDEO_INPUT_MODE 必须给 intent；"
-        "CONTINUE_PREVIOUS_TAKE 只有 capability 明确准入才可选。"
-        "FIRST_FRAME_MODE 只能给一个 first_frame requirement；其 source 必须是紧邻上一镜采用视频的"
-        "真实尾帧 PREVIOUS_ADOPTED_TAIL，并填写 source_shot_id 与 depends_on_shot_id。"
-        "不得生成或声明 last_frame 静态图片。VIDEO_INPUT_MODE 唯一 required asset 是"
-        "previous_adopted_video/source=PREVIOUS_ADOPTED_VIDEO。参考图模式不得依赖上一镜视频。"
-        "fallback_order 必须为空数组；任一模式失败时保持原模式失败，不得改用其他模式。"
+        "new_domain、new_space 或 scene_cut 表示新场景首镜。"
         "relations 四个字段必须逐字使用 relation_enum_contract 对应数组中的枚举值，禁止自造同义词。"
         "只输出 JSON，不要 Markdown。"
     )
     output_contract = (
-        "\n输出：{\"shots\":[{\"shot_id\":数据库或发布shot ID,\"mode\":三种模式之一,"
-        "\"video_input_intent\":null或合法枚举,\"depends_on_shot_id\":null或上游ID,"
+        "\n输出：{\"shots\":[{\"shot_id\":数据库或发布shot ID,"
         "\"relations\":{\"temporal\":\"same_moment|elapsed|jump|new_domain|unknown\","
         "\"spatial\":\"same_space|adjacent_space|new_space|unknown\","
         "\"edit\":\"continuous_take|match_cut|angle_cut|reaction_cut|reverse_angle|insert_cut|montage|scene_cut|unknown\","
         "\"action\":\"continues_same_action|starts_new_action|shows_result|observes_result|no_action|unknown\"},"
         "\"state_dependency\":\"none|start_only|start_and_end|full_trajectory\","
         "\"motion_dependency\":\"none|pose|trajectory|camera|rhythm|audio\","
-        "\"required_assets\":[{\"role\":\"...\",\"source\":\"...\",\"source_shot_id\":null或ID}],"
         "\"reason_codes\":[通用关系码],\"confidence\":0到1,\"unknown_dimensions\":[],"
-        "\"fallback_order\":[],\"estimated_latency_ms\":整数,\"estimated_cost\":数字}]}"
+        "\"estimated_latency_ms\":整数,\"estimated_cost\":数字}]}"
     )
     planner_payload_base = {
         key: value for key, value in prompt_payload.items() if key != "shots"
@@ -1994,7 +1983,7 @@ async def generate_episode_plan(
                     "plan_revision": next_revision,
                     "window_index": window_index + 1,
                     "window_count": len(planner_windows),
-                    "contract_version": "episode-video-plan.v1",
+                    "contract_version": "episode-video-plan.v2",
                     "planner_prompt_fingerprint": _hash(window_payload),
                     "planner_episode_fingerprint": _hash(prompt_payload),
                     "operation_id": (
@@ -2031,7 +2020,6 @@ async def generate_episode_plan(
             }])
         raw_shots.extend(window_raw_shots)
     shot_plans: list[ShotVideoGenerationPlan] = []
-    ai_reference_issues: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_shots):
         if not isinstance(raw, dict):
             raise VideoPlanValidationError([{"code": "AI_PLAN_SCHEMA_INVALID", "index": index}])
@@ -2052,19 +2040,32 @@ async def generate_episode_plan(
             )
         shot_id = str(raw.get("shot_id") or "")
         try:
-            shot_plan = ShotVideoGenerationPlan.model_validate({
-                **raw,
-                "shot_plan_id": new_id("svp"),
-                "episode_video_plan_id": plan_id,
-                "plan_revision": next_revision,
-                "source_storyboard_revision_id": revision_id,
-                "shot_id": shot_id,
-                "published_shot_id": shot_id,
-                "shot_no": int(raw.get("shot_no") or index + 1),
-                "capability_snapshot_id": snapshot.id,
-                "max_cost": float(raw.get("max_cost") or max(float(raw.get("estimated_cost") or 0) * 2, 1.0)),
-                "timeout_s": float(raw.get("timeout_s") or 7200),
-            })
+            analysis = PlannerShotAnalysis.model_validate(raw)
+            shot_plan = ShotVideoGenerationPlan(
+                shot_plan_id=new_id("svp"),
+                episode_video_plan_id=plan_id,
+                plan_revision=next_revision,
+                source_storyboard_revision_id=revision_id,
+                shot_id=analysis.shot_id,
+                published_shot_id=analysis.shot_id,
+                shot_no=index + 1,
+                mode=VideoGenerationMode.REFERENCE_IMAGE_MODE,
+                video_input_intent=None,
+                depends_on_shot_id=None,
+                relations=analysis.relations,
+                state_dependency=analysis.state_dependency,
+                motion_dependency=analysis.motion_dependency,
+                required_assets=[],
+                reason_codes=analysis.reason_codes,
+                confidence=analysis.confidence,
+                unknown_dimensions=analysis.unknown_dimensions,
+                fallback_order=[],
+                max_cost=max(analysis.estimated_cost * 2, 1.0),
+                timeout_s=7200,
+                estimated_latency_ms=analysis.estimated_latency_ms,
+                estimated_cost=analysis.estimated_cost,
+                capability_snapshot_id=snapshot.id,
+            )
         except (TypeError, ValueError, ValidationError) as exc:
             raise VideoPlanValidationError([{
                 "code": "AI_PLAN_SCHEMA_INVALID",
@@ -2076,19 +2077,6 @@ async def generate_episode_plan(
         shot_plans[-1].input_revision_fingerprints["asset_revisions"] = (
             asset_fingerprints.get(shot_id, "")
         )
-        allowed_revisions = allowed_asset_revision_ids.get(shot_id, set())
-        for asset in shot_plans[-1].required_assets:
-            if (
-                asset.source == AssetSource.ASSET_REVISION
-                and asset.asset_revision_id not in allowed_revisions
-            ):
-                ai_reference_issues.append({
-                    "code": "UNKNOWN_ASSET_REVISION_ID",
-                    "shot_id": shot_id,
-                    "asset_revision_id": asset.asset_revision_id,
-                })
-    if ai_reference_issues:
-        raise VideoPlanValidationError(ai_reference_issues)
     planner_shot_numbers = {
         str(identifier): int(payload["shot_no"])
         for payload in shot_payload
