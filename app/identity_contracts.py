@@ -516,9 +516,17 @@ def storyboard_visual_identity_relation(
         if identity.identity_id not in allowed_ids:
             unexpected[identity.identity_id] = identity.display_name
 
+    # A chained shot's first frame is the previous adopted video's real tail.
+    # Identities visible only at that 0-second boundary belong to the previous
+    # shot contract; the current task owns the cast that persists through its
+    # action and resulting frame.
     visual_text = "\n".join((
         str(shot.action_desc or ""),
-        str(shot.first_frame_desc or ""),
+        (
+            ""
+            if bool(shot.continuity_from_prev)
+            else str(shot.first_frame_desc or "")
+        ),
         str(shot.last_frame_desc or ""),
     ))
     unmatched_visual_text = visual_text

@@ -301,6 +301,37 @@ def test_visual_relation_does_not_infer_collective_from_action_prose() -> None:
     assert relation["unexpected_identity_ids"] == []
 
 
+def test_visual_relation_allows_previous_tail_identity_only_at_boundary() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        visible_entity_ids=["transient-node"],
+        continuity_mode="same_scene_cut",
+        continuity_from_prev=True,
+        action_desc="云吞七号独自关上木门。",
+        first_frame_desc="阿烬站在门外，云吞七号正准备关门。",
+        last_frame_desc="云吞七号独自站在关闭的木门前。",
+    )
+
+    boundary_only = storyboard_visual_identity_relation(
+        shot,
+        ["transient-node"],
+        _bible(),
+        screenplay,
+    )
+    assert boundary_only["unexpected_identity_ids"] == []
+
+    shot.last_frame_desc = "木门关闭后，阿烬仍与云吞七号同处画面。"
+    persisted = storyboard_visual_identity_relation(
+        shot,
+        ["transient-node"],
+        _bible(),
+        screenplay,
+    )
+    assert persisted["unexpected_identity_ids"] == ["newcomer-7"]
+
+
 def test_authority_text_relation_includes_bible_only_identity() -> None:
     screenplay = _screenplay()
 
