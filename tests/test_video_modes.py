@@ -124,7 +124,7 @@ def test_selector_always_uses_reference_mode(monkeypatch) -> None:
 
     assert decision.mode == REFERENCE_IMAGE_MODE
     assert decision.defaulted is True and decision.llmUsed is False
-    assert decision.referenceImagePlan.totalCount > 0
+    assert decision.referenceImagePlan.totalCount == 0
 
 
 def test_selector_does_not_call_llm_for_strong_action(monkeypatch) -> None:
@@ -175,8 +175,8 @@ def test_selector_returns_default_reference_plan_without_llm(monkeypatch) -> Non
     assert decision.mode == REFERENCE_IMAGE_MODE
     assert decision.llmUsed is False
     plan = decision.referenceImagePlan
-    assert plan.totalCount == 2 and plan.generateNewCount == 2
-    assert plan.types == ["plot_key_frame"] * 2
+    assert plan.totalCount == 0 and plan.generateNewCount == 0
+    assert plan.types == []
     assert plan.prompts == []
     # 决策可往返序列化（入队持久化 → 生成期复用）
     assert dict_to_decision(decision_to_dict(decision)).referenceImagePlan.prompts == plan.prompts
@@ -185,9 +185,10 @@ def test_selector_returns_default_reference_plan_without_llm(monkeypatch) -> Non
 def test_reference_mode_builds_reference_image_roles() -> None:
     inputs = build_seedance_image_inputs({
         "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_images": [
-            {"url": "data:image/jpeg;base64,abc", "selectedForSeedance": True, "type": "character"},
-            {"url": "data:image/jpeg;base64,def", "selectedForSeedance": False, "type": "scene"},
+            {"url": "data:image/jpeg;base64,abc", "selectedForSeedance": True, "type": "character", "source": "asset_library"},
+            {"url": "data:image/jpeg;base64,def", "selectedForSeedance": False, "type": "scene", "source": "asset_library"},
         ],
     })
 
@@ -198,71 +199,79 @@ def test_reference_mode_excludes_deleted_reference_images() -> None:
     """用户在素材画廊里废弃（deleted）的参考图即便仍标 selectedForSeedance，也不喂给模型。"""
     inputs = build_seedance_image_inputs({
         "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_images": [
-            {"url": "data:image/jpeg;base64,keep", "selectedForSeedance": True, "type": "character"},
-            {"url": "data:image/jpeg;base64,gone", "selectedForSeedance": True, "deleted": True, "type": "scene"},
+            {"url": "data:image/jpeg;base64,keep", "selectedForSeedance": True, "type": "character", "source": "asset_library"},
+            {"url": "data:image/jpeg;base64,gone", "selectedForSeedance": True, "deleted": True, "type": "scene", "source": "asset_library"},
         ],
     })
 
     assert inputs == [("data:image/jpeg;base64,keep", "reference_image")]
 
 
-def test_reference_mode_excludes_rejected_candidate_with_stale_video_purpose() -> None:
-    """QA 淘汰图会保留用途元数据，但 selected=false 必须阻止它进入供应商请求。"""
-    inputs = build_seedance_image_inputs({
+def test_reference_mode_rejects_generated_keyframe_even_with_video_purpose() -> None:
+    """历史生成关键帧即使仍带视频用途，也不得进入新的供应商请求。"""
+    with pytest.raises(hiagent.ProviderError, match="人物谱与场景库"):
+        build_seedance_image_inputs({
         "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_images": [
             {
                 "url": "data:image/jpeg;base64,keep",
                 "selectedForSeedance": True,
                 "type": "plot_key_frame",
+                "source": "seedream_generated",
                 "purposes": ["video_input", "qa_anchor"],
             },
             {
                 "url": "data:image/jpeg;base64,rejected",
                 "selectedForSeedance": False,
                 "type": "plot_key_frame",
+                "source": "seedream_generated",
                 "purposes": ["video_input", "qa_anchor"],
                 "rejectReason": "quality_below_threshold",
             },
         ],
-    })
-
-    assert inputs == [("data:image/jpeg;base64,keep", "reference_image")]
+        })
 
 
-def test_reference_mode_defensively_packs_only_highest_selected_keyframe() -> None:
-    """即使被旧数据污染成三张 selected，视频请求也只能收到最高分关键帧。"""
-    inputs = build_seedance_image_inputs({
+def test_reference_mode_rejects_gallery_contaminated_by_generated_keyframes() -> None:
+    """旧画廊只要选中了生成关键帧，就必须整体失效并重新解析图库。"""
+    with pytest.raises(hiagent.ProviderError, match="人物谱与场景库"):
+        build_seedance_image_inputs({
         "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_images": [
             {
                 "url": "data:image/jpeg;base64,low",
                 "type": "plot_key_frame",
+                "source": "seedream_generated",
                 "selectedForSeedance": True,
                 "qualityScore": 0.41,
             },
             {
                 "url": "data:image/jpeg;base64,best",
                 "type": "plot_key_frame",
+                "source": "seedream_generated",
                 "selectedForSeedance": True,
                 "qualityScore": 0.93,
             },
             {
                 "url": "data:image/jpeg;base64,mid",
                 "type": "plot_key_frame",
+                "source": "seedream_generated",
                 "selectedForSeedance": True,
                 "qualityScore": 0.67,
             },
         ],
-    })
-
-    assert inputs == [("data:image/jpeg;base64,best", "reference_image")]
+        })
 
 
-def test_short_shot_provider_boundary_never_passes_a_second_keyframe() -> None:
-    inputs = build_seedance_image_inputs({
+def test_reference_mode_rejects_historical_timeline_keyframes() -> None:
+    with pytest.raises(hiagent.ProviderError, match="人物谱与场景库"):
+        build_seedance_image_inputs({
         "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "keyframe_sequence": {
             "keyframe_plan": {"duration_s": 7, "count": 1},
             "beats": [{"slot_key": "narrative_keyframe"}],
@@ -271,6 +280,7 @@ def test_short_shot_provider_boundary_never_passes_a_second_keyframe() -> None:
             {
                 "url": "data:image/jpeg;base64,auxiliary",
                 "type": "plot_key_frame",
+                "source": "seedream_generated",
                 "slot_key": "narrative_keyframe_01",
                 "keyframe_index": 1,
                 "keyframe_time_ratio": 0.0,
@@ -280,6 +290,7 @@ def test_short_shot_provider_boundary_never_passes_a_second_keyframe() -> None:
             {
                 "url": "data:image/jpeg;base64,master",
                 "type": "plot_key_frame",
+                "source": "seedream_generated",
                 "slot_key": "narrative_keyframe",
                 "keyframe_index": 2,
                 "keyframe_time_ratio": 0.64,
@@ -287,9 +298,7 @@ def test_short_shot_provider_boundary_never_passes_a_second_keyframe() -> None:
                 "qualityScore": 0.8,
             },
         ],
-    })
-
-    assert inputs == [("data:image/jpeg;base64,master", "reference_image")]
+        })
 
 
 def test_narrative_keyframe_beats_are_chronological_and_have_distinct_targets(monkeypatch) -> None:
@@ -975,11 +984,12 @@ def test_keyframe_best_of_three_selects_highest_and_deletes_losers(monkeypatch, 
     assert str(generated_paths[2]) not in serialized_slot
     assert progress_snapshots[-1] == ([str(generated_paths[1])], [])
 
-    video_inputs = build_seedance_image_inputs({
-        "mode": REFERENCE_IMAGE_MODE,
-        "reference_images": [asset.public_dict() for asset in assets],
-    })
-    assert video_inputs == [(hiagent.data_url_from_file(str(generated_paths[1])), "reference_image")]
+    with pytest.raises(hiagent.ProviderError, match="人物谱与场景库"):
+        build_seedance_image_inputs({
+            "mode": REFERENCE_IMAGE_MODE,
+            "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
+            "reference_images": [asset.public_dict() for asset in assets],
+        })
 
 
 def test_all_three_structurally_invalid_keyframes_fail_closed_after_retry_exhaustion(monkeypatch, tmp_path) -> None:
@@ -1048,6 +1058,7 @@ def test_all_three_structurally_invalid_keyframes_fail_closed_after_retry_exhaus
     packed = build_seedance_image_inputs({
         **meta,
         "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_images": [asset.public_dict() for asset in assets],
     })
     assert len(packed) == 2
@@ -1389,11 +1400,12 @@ def test_keyframe_three_qa_pending_candidates_resume_without_paid_regeneration(m
     serialized_slot = json.dumps(slot, ensure_ascii=False)
     assert str(candidate_paths[0]) not in serialized_slot
     assert str(candidate_paths[1]) not in serialized_slot
-    video_inputs = build_seedance_image_inputs({
-        "mode": REFERENCE_IMAGE_MODE,
-        "reference_images": [asset.public_dict() for asset in assets],
-    })
-    assert video_inputs == [(hiagent.data_url_from_file(str(candidate_paths[2])), "reference_image")]
+    with pytest.raises(hiagent.ProviderError, match="人物谱与场景库"):
+        build_seedance_image_inputs({
+            "mode": REFERENCE_IMAGE_MODE,
+            "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
+            "reference_images": [asset.public_dict() for asset in assets],
+        })
 
 
 def test_narrative_slot_forces_plot_keyframe_and_drops_wrong_type_brief(monkeypatch, tmp_path) -> None:
@@ -1610,6 +1622,24 @@ def _shot_row(**kwargs) -> dict:
     return row
 
 
+def _runtime_library_asset(asset_id: str = "character-a") -> ReferenceImageAsset:
+    return ReferenceImageAsset(
+        id=asset_id,
+        url="data:image/jpeg;base64,bGlicmFyeQ==",
+        type="character",
+        source="asset_library",
+        entity_type="character",
+        entity_name="A",
+        selectedForSeedance=True,
+        purposes=["video_input", "qa_anchor"],
+        required=True,
+    )
+
+
+def _mark_runtime_library_policy(meta: dict) -> None:
+    meta["reference_input_policy_version"] = video_modes.REFERENCE_INPUT_POLICY_VERSION
+
+
 def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
     """生成期复用入队时定好的参考图决策，不再跑一次运行期 LLM 选择（省调用、避免模式翻转）。
     既然存的是参考图决策且能拿到合格参考图，就直接以参考图模式生成，无需任何回退。"""
@@ -1618,18 +1648,11 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
         raise AssertionError("生成期不应再调用 LLM 模式选择")
 
     async def fake_build_reference_assets(**kwargs):
-        assets = [ReferenceImageAsset(
-            id="r1", url="data:image/jpeg;base64,abc", type="plot_key_frame",
-            source="seedream_generated", selectedForSeedance=True,
-            purposes=["video_input", "qa_anchor"], slot_key="narrative_keyframe", required=True,
-            qa={"overall": 0.9, "status": "scored", "absolute_quality": 0.9},
-            qualityScore=0.9,
-        )]
+        assets = [_runtime_library_asset("r1")]
         kwargs["on_progress"](assets, [])
         meta = kwargs.get("existing_meta")
         if isinstance(meta, dict):
-            meta["narrative_keyframe_missing"] = False
-            meta["reference_group_gate_passed"] = True
+            _mark_runtime_library_policy(meta)
         return assets
 
     # 运行期一旦调用 LLM 选择即视为回归（应已被移除）
@@ -1667,8 +1690,8 @@ def test_runtime_reference_mode_uses_stored_decision(monkeypatch) -> None:
     assert not out_meta.get("fallback_reason")
 
 
-def test_runtime_auto_repairs_missing_selected_keyframe_file(monkeypatch) -> None:
-    """Anchors must not hide a poisoned keyframe checkpoint left by a stale worker."""
+def test_runtime_auto_repairs_historical_generated_gallery(monkeypatch) -> None:
+    """历史生成图污染画廊时，执行器必须重建为图库资产。"""
     build_calls: list[dict] = []
 
     async def fake_build_reference_assets(**kwargs):
@@ -1676,34 +1699,18 @@ def test_runtime_auto_repairs_missing_selected_keyframe_file(monkeypatch) -> Non
         build_calls.append(json.loads(json.dumps(meta)))
         if len(build_calls) == 1:
             meta.update({
-                "narrative_keyframe_missing": True,
-                "reference_slots": {
-                    "narrative_keyframe": {
-                        "status": "passed",
-                        "path": "/missing/stale-keyframe.jpg",
-                    },
-                },
+                "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
             })
             return [
                 ReferenceImageAsset(
-                    id="character-anchor", url="data:image/jpeg;base64,character",
-                    type="character", source="asset_library",
-                    selectedForSeedance=True, purposes=["video_input", "qa_anchor"],
-                ),
-                ReferenceImageAsset(
-                    id="stale-keyframe", url=None, path="/missing/stale-keyframe.jpg",
+                    id="stale-keyframe", url="data:image/jpeg;base64,c3RhbGU=",
                     type="plot_key_frame", source="seedream_generated",
                     selectedForSeedance=True, purposes=["video_input", "qa_anchor"],
                     slot_key="narrative_keyframe", required=True,
                 ),
             ]
-        meta["narrative_keyframe_missing"] = False
-        return [ReferenceImageAsset(
-            id="repaired-keyframe", url="data:image/jpeg;base64,repaired",
-            type="plot_key_frame", source="seedream_generated",
-            selectedForSeedance=True, purposes=["video_input", "qa_anchor"],
-            slot_key="narrative_keyframe", required=True,
-        )]
+        _mark_runtime_library_policy(meta)
+        return [_runtime_library_asset("repaired-library-anchor")]
 
     writes: list[dict] = []
     monkeypatch.setattr(worker, "_set_version", lambda *a, **k: writes.append(k))
@@ -1731,28 +1738,17 @@ def test_runtime_auto_repairs_missing_selected_keyframe_file(monkeypatch) -> Non
     assert build_calls[1]["reference_slots"] == {}
     assert build_calls[1]["stale_reference_reason"] == "final_keyframe_file_missing"
     assert out_meta["reference_group_gate_passed"] is True
-    assert out_meta["reference_images"][0]["id"] == "repaired-keyframe"
+    assert out_meta["reference_images"][0]["id"] == "repaired-library-anchor"
     assert out_meta["keyframe_file_repair_count"] == 1
     assert writes
 
 
-def test_runtime_requires_repair_when_required_keyframe_gate_is_exhausted(monkeypatch) -> None:
-    """关键帧修复耗尽后保持参考图模式，不得用弱输入继续提交。"""
+def test_runtime_requires_repair_when_library_has_no_usable_images(monkeypatch) -> None:
+    """人物谱和场景库都没有可用图片时，不得纯文本提交视频。"""
 
     async def fake_build_reference_assets(**kwargs):
-        kwargs["existing_meta"].update({
-            "narrative_keyframe_missing": True,
-            "reference_group_gate_passed": False,
-        })
-        return [ReferenceImageAsset(
-            id="character-anchor",
-            url="data:image/jpeg;base64,character",
-            type="character",
-            source="asset_library",
-            selectedForSeedance=True,
-            required=True,
-            purposes=["video_input", "qa_anchor"],
-        )]
+        _mark_runtime_library_policy(kwargs["existing_meta"])
+        return []
 
     monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
     monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
@@ -1767,7 +1763,7 @@ def test_runtime_requires_repair_when_required_keyframe_gate_is_exhausted(monkey
 
     with pytest.raises(
         worker.VideoInputRepairRequired,
-        match="参考图关键帧",
+        match="参考图模式 2 次",
     ):
         asyncio.run(worker._prepare_reference_mode_inputs(
             conn,
@@ -1784,8 +1780,8 @@ def test_runtime_requires_repair_when_required_keyframe_gate_is_exhausted(monkey
     assert "reference_fallback_mode" not in meta
 
 
-def test_runtime_submits_anchor_only_fallback_after_all_keyframe_candidates_fail(monkeypatch) -> None:
-    """3 张候选都有结构硬伤时，执行器不得再用“缺必需关键帧”阻断提交。"""
+def test_runtime_submits_existing_character_and_scene_library_assets(monkeypatch) -> None:
+    """图库资产齐全时直接进入视频就绪，不再生成剧情关键帧。"""
 
     async def fake_build_reference_assets(**kwargs):
         assets = [
@@ -1801,17 +1797,10 @@ def test_runtime_submits_anchor_only_fallback_after_all_keyframe_candidates_fail
             ),
         ]
         meta = kwargs["existing_meta"]
-        fingerprint = video_modes.keyframe_contract_fingerprint(kwargs["shot"], kwargs["bible"])
         meta.update({
-            "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
-            "keyframe_contract_fingerprint": fingerprint,
-            "keyframe_fallback_mode": video_modes.KEYFRAME_STRUCTURAL_FALLBACK_MODE,
-            "keyframe_structural_fallback_slots": ["narrative_keyframe"],
+            "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
             "narrative_keyframe_missing": False,
-            "keyframe_sequence": {
-                "beats": [{"slot_key": "narrative_keyframe"}],
-                "keyframe_plan": {"count": 1, "duration_s": 5},
-            },
+            "keyframe_sequence": {"beats": [], "beat_count": 0},
         })
         kwargs["on_progress"](assets, [])
         return assets
@@ -1850,11 +1839,8 @@ def test_edited_gallery_with_changed_dependencies_is_invalidated_before_rebuild(
 
     async def fake_build_reference_assets(**kwargs):
         captured["meta_at_rebuild"] = json.loads(json.dumps(kwargs["existing_meta"]))
-        return [ReferenceImageAsset(
-            id="fresh", url="data:image/jpeg;base64,fresh", type="plot_key_frame",
-            source="seedream_generated", selectedForSeedance=True,
-            purposes=["video_input", "qa_anchor"], slot_key="narrative_keyframe", required=True,
-        )]
+        _mark_runtime_library_policy(kwargs["existing_meta"])
+        return [_runtime_library_asset("fresh")]
 
     monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
     monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
@@ -1874,13 +1860,14 @@ def test_edited_gallery_with_changed_dependencies_is_invalidated_before_rebuild(
         "keyframe_contract_fingerprint": contract_fingerprint,
         "reference_manifest": {"revision": "old"},
         "reference_manifest_frozen": True,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_generation_complete": True,
         "reference_gallery_edited": True,
         "reference_gallery_contract_override": True,
         "reference_images": [{
-            "id": "old", "url": "data:image/jpeg;base64,old", "type": "plot_key_frame",
+            "id": "old", "url": "data:image/jpeg;base64,old", "type": "character",
+            "entity_type": "character", "source": "asset_library",
             "selectedForSeedance": True, "dependency_manifest": {"revision": "old"},
-            "keyframe_contract_fingerprint": contract_fingerprint,
         }],
         "reference_slots": {
             "narrative_keyframe": {"status": "passed", "path": "/stale/keyframe.jpg", "qa": {"overall": 1}},
@@ -1900,16 +1887,13 @@ def test_edited_gallery_with_changed_dependencies_is_invalidated_before_rebuild(
     assert out_meta["reference_images"][0]["id"] == "fresh"
 
 
-def test_complete_gallery_is_invalidated_when_shot_keyframe_contract_changes(monkeypatch) -> None:
+def test_complete_historical_generated_gallery_is_invalidated_by_library_policy(monkeypatch) -> None:
     captured: dict = {}
 
     async def fake_build_reference_assets(**kwargs):
         captured["meta_at_rebuild"] = json.loads(json.dumps(kwargs["existing_meta"]))
-        return [ReferenceImageAsset(
-            id="fresh", url="data:image/jpeg;base64,fresh", type="plot_key_frame",
-            source="seedream_generated", selectedForSeedance=True,
-            purposes=["video_input", "qa_anchor"], slot_key="narrative_keyframe", required=True,
-        )]
+        _mark_runtime_library_policy(kwargs["existing_meta"])
+        return [_runtime_library_asset("fresh")]
 
     monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
     monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
@@ -1944,19 +1928,16 @@ def test_complete_gallery_is_invalidated_when_shot_keyframe_contract_changes(mon
 
     rebuild_meta = captured["meta_at_rebuild"]
     assert rebuild_meta["reference_images"] == []
-    assert rebuild_meta["stale_reference_reason"] == "shot_keyframe_contract_changed"
+    assert rebuild_meta["stale_reference_reason"] == "reference_input_policy_or_file_invalid"
 
 
-def test_static_ready_checkpoint_missing_keyframe_cannot_skip_rebuild(monkeypatch) -> None:
+def test_static_ready_checkpoint_missing_library_file_cannot_skip_rebuild(monkeypatch) -> None:
     captured: dict = {}
 
     async def fake_build_reference_assets(**kwargs):
         captured["meta_at_rebuild"] = json.loads(json.dumps(kwargs["existing_meta"]))
-        return [ReferenceImageAsset(
-            id="fresh", url="data:image/jpeg;base64,fresh", type="plot_key_frame",
-            source="seedream_generated", selectedForSeedance=True,
-            purposes=["video_input", "qa_anchor"], slot_key="narrative_keyframe", required=True,
-        )]
+        _mark_runtime_library_policy(kwargs["existing_meta"])
+        return [_runtime_library_asset("fresh")]
 
     monkeypatch.setattr(worker, "_set_version", lambda *a, **k: None)
     monkeypatch.setattr(video_modes, "build_reference_assets", fake_build_reference_assets)
@@ -1968,11 +1949,13 @@ def test_static_ready_checkpoint_missing_keyframe_cannot_skip_rebuild(monkeypatc
         "mode": REFERENCE_IMAGE_MODE,
         "mode_decision": decision_to_dict(video_modes.default_reference_decision()),
         "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "reference_static_ready": True,
         "reference_generation_complete": False,
         "reference_images": [{
-            "id": "evidence-only", "url": "data:image/jpeg;base64,evidence",
-            "type": "character", "selectedForSeedance": False,
+            "id": "missing-library", "path": "/missing/library.jpg",
+            "type": "character", "entity_type": "character", "source": "asset_library",
+            "selectedForSeedance": True,
         }],
     }
 
@@ -1985,7 +1968,7 @@ def test_static_ready_checkpoint_missing_keyframe_cannot_skip_rebuild(monkeypatc
     rebuild_meta = captured["meta_at_rebuild"]
     assert rebuild_meta["reference_static_ready"] is False
     assert rebuild_meta["reference_images"] == []
-    assert rebuild_meta["stale_reference_reason"] == "static_keyframe_contract_or_file_invalid"
+    assert rebuild_meta["stale_reference_reason"] == "library_reference_checkpoint_invalid"
 
 
 def test_previous_tail_path_and_dependency_are_version_specific(monkeypatch, tmp_path) -> None:
@@ -2531,7 +2514,7 @@ def test_multiple_high_score_character_refs_keep_one_truth_anchor_with_keyframe(
     assert all(r["selectedForSeedance"] for r in refs)
 
 
-def test_seedance_provider_inputs_keep_character_truth_anchor_with_keyframe() -> None:
+def test_seedance_provider_rejects_character_truth_anchor_mixed_with_keyframe() -> None:
     refs = [
         {
             "id": "character-a", "url": "data:image/jpeg;base64,YQ==", "type": "character",
@@ -2549,19 +2532,17 @@ def test_seedance_provider_inputs_keep_character_truth_anchor_with_keyframe() ->
             "slot_key": "narrative_keyframe", "purposes": ["qa_anchor", "video_input"],
         },
     ]
-    meta = {"mode": REFERENCE_IMAGE_MODE, "reference_images": refs}
+    for ref in refs[:2]:
+        ref["source"] = "asset_library"
+    refs[2]["source"] = "seedream_generated"
+    meta = {
+        "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
+        "reference_images": refs,
+    }
 
-    inputs = video_modes.build_seedance_image_inputs(meta)
-
-    assert inputs == [
-        ("data:image/jpeg;base64,aw==", "reference_image"),
-        ("data:image/jpeg;base64,cw==", "reference_image"),
-        ("data:image/jpeg;base64,YQ==", "reference_image"),
-    ]
-    assert refs[0]["selectedForSeedance"] is True
-    assert "video_input" in refs[0]["purposes"]
-    assert refs[1]["selectedForSeedance"] is True
-    assert refs[2]["selectedForSeedance"] is True
+    with pytest.raises(hiagent.ProviderError, match="人物谱与场景库"):
+        video_modes.build_seedance_image_inputs(meta)
 
 
 def test_seedance_provider_pack_dedupes_repeated_progress_records() -> None:
@@ -2635,16 +2616,20 @@ def test_pack_seedance_prefers_score_and_keeps_gallery_selection(monkeypatch) ->
     monkeypatch.setattr(video_modes, "max_reference_images", lambda: 2)
     refs = [
         {"id": "a", "url": "data:image/jpeg;base64,aaa", "selectedForSeedance": True,
-         "type": "character", "qualityScore": 0.99},
-        {"id": "b", "url": "data:image/jpeg;base64,bbb", "selectedForSeedance": True,
-         "type": "plot_key_frame", "qualityScore": 0.95},
+         "type": "character", "source": "asset_library", "qualityScore": 0.99},
+        {"id": "b", "url": "data:image/jpeg;base64,bbb", "selectedForSeedance": False,
+         "type": "plot_key_frame", "source": "seedream_generated", "qualityScore": 0.95},
         {"id": "s", "url": "data:image/jpeg;base64,sss", "selectedForSeedance": True,
-         "type": "scene", "qualityScore": 0.9},
+         "type": "scene", "source": "asset_library", "qualityScore": 0.9},
     ]
-    inputs = build_seedance_image_inputs({"mode": REFERENCE_IMAGE_MODE, "reference_images": refs})
+    inputs = build_seedance_image_inputs({
+        "mode": REFERENCE_IMAGE_MODE,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
+        "reference_images": refs,
+    })
     # 人物上限 1 + 场景 → 最多 2 张；分数最高人物 + 场景
     assert len(inputs) == 2
-    assert all(r["selectedForSeedance"] for r in refs)
+    assert [r["selectedForSeedance"] for r in refs] == [True, False, True]
 
 
 def test_build_reference_assets_warns_and_continues_with_incomplete_pack(monkeypatch) -> None:

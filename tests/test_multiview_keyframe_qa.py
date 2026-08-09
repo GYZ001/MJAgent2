@@ -129,11 +129,11 @@ def test_init_db_backfills_legacy_portrait_and_scene_views(tmp_path, monkeypatch
     migrated.close()
 
 
-def test_default_reference_decision_reserves_at_most_two_timeline_keyframes() -> None:
+def test_default_reference_decision_does_not_reserve_generated_keyframes() -> None:
     decision = default_reference_decision()
-    assert decision.referenceImagePlan.totalCount == 2
-    assert decision.referenceImagePlan.generateNewCount == 2
-    assert decision.referenceImagePlan.types == ["plot_key_frame"] * 2
+    assert decision.referenceImagePlan.totalCount == 0
+    assert decision.referenceImagePlan.generateNewCount == 0
+    assert decision.referenceImagePlan.types == []
 
 
 def test_pack_keeps_required_keyframe_over_high_score_character() -> None:
