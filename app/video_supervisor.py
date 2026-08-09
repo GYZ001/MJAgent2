@@ -1703,13 +1703,13 @@ def _dispatch(
             )
         _debug_enqueue_started = time.monotonic()
         # #region debug-point B:enqueue-duration
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
         # #endregion
         result = worker.enqueue_shot(entry.shot_id, **{
             k: v for k, v in kwargs.items() if k != "supervisor_meta"
         })
         # #region debug-point B:enqueue-duration
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_enqueue_started)*1000,1),"db_in_transaction":get_conn().in_transaction,"reused":bool(result.get("reused"))},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_enqueue_started)*1000,1),"db_in_transaction":get_conn().in_transaction,"reused":bool(result.get("reused"))},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
         # #endregion
         # 把 supervisor meta 写入新建 version
         if result.get("version_id") and kwargs.get("supervisor_meta"):
@@ -3121,7 +3121,7 @@ async def run_video_completion_supervisor(
         per_shot_cap = (cap / max(1, ledger.shots_total)) * SHOT_BUDGET_MULTIPLIER
 
         # #region debug-point C:dispatch-batch
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"pre-fix","hypothesisId":"C","location":"app/video_supervisor.py:run_video_supervisor","msg":"[DEBUG] actionable batch","data":{"tick_no":cp.tick_no,"actionable_count":len(ledger.actionable()),"active_jobs":ledger.has_active_jobs(),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
+        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"C","location":"app/video_supervisor.py:run_video_supervisor","msg":"[DEBUG] actionable batch","data":{"tick_no":cp.tick_no,"actionable_count":len(ledger.actionable()),"active_jobs":ledger.has_active_jobs(),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
         # #endregion
         for entry in ledger.actionable():
             # 单镜上限

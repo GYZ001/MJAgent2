@@ -37,3 +37,22 @@ The Supervisor executes the complete synchronous per-shot authority checks and
 enqueue path on the asyncio event-loop thread. Each shot blocks the loop for
 about 12 seconds, and the 137-shot first pass repeats that path without moving
 the work to a worker thread. SQLite lock ownership is not the cause.
+
+## Post-Fix Verification
+Instrumentation retained with run ID `post-fix`; logs cleared before restart.
+Expected comparison: dispatch duration may remain similar, but `/docs` must stay
+responsive while dispatch runs because the work now executes via
+`asyncio.to_thread`.
+
+Observed iteration result:
+- Supervisor dispatch no longer emitted on the event loop after restart.
+- `/docs` initially returned in 2-65 ms.
+- Once 14 media jobs entered `video_prompt_generate` / `job_queued`, five
+  consecutive `/docs` requests timed out at 2 seconds.
+
+New hypotheses:
+| ID | Hypothesis | Likelihood | Effort | Evidence |
+|----|------------|------------|--------|----------|
+| E | Media worker calls synchronous job/prompt work on the event loop | High | Low | Pending |
+| F | Worker thread or SQLite contention starves all HTTP work | Medium | Medium | Pending |
+| G | Debug reporting or checkpoint persistence causes the second stall | Low | Low | Pending |
