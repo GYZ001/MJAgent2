@@ -315,6 +315,21 @@ def _verify_supervisor_paid_authority(
     return grant
 
 
+async def _verify_supervisor_paid_authority_async(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    stage: str,
+) -> VideoCompletionGrant | None:
+    """Keep modern grant verification off-loop; legacy plan-null stays local."""
+    if not cp.grant_id:
+        return _verify_supervisor_paid_authority(cp, stage=stage)
+    return await asyncio.to_thread(
+        _verify_supervisor_paid_authority,
+        cp,
+        stage=stage,
+    )
+
+
 async def _ensure_supervisor_video_plan(
     cp: VideoSupervisorCheckpoint,
 ) -> VideoCompletionGrant | None:
@@ -328,13 +343,17 @@ async def _ensure_supervisor_video_plan(
     if cp.grant_id and not any(value is not None for value in checkpoint_binding):
         # New and pre-migration checkpoints acquire their binding exactly once
         # from the content-addressed grant before paid work begins.
-        grant = validate_video_grant(
+        grant = await asyncio.to_thread(
+            validate_video_grant,
             cp.grant_id,
             episode_id=cp.episode_id,
             storyboard_artifact_id=cp.storyboard_artifact_id,
         )
     else:
-        grant = _verify_supervisor_paid_authority(cp, stage="video_plan_preflight")
+        grant = await _verify_supervisor_paid_authority_async(
+            cp,
+            stage="video_plan_preflight",
+        )
     if grant is None:
         return None
     from app.video_plan import (
@@ -349,12 +368,19 @@ async def _ensure_supervisor_video_plan(
     if (
         plan is None
         or plan.status != "valid"
-        or not verify_episode_plan_is_current(plan, conn=conn, mark_stale=False)
+        or not await asyncio.to_thread(
+            verify_episode_plan_is_current,
+            plan,
+            mark_stale=False,
+        )
     ):
         # Planning may itself call an external model, so recheck the release
         # immediately before it.  A pending plan slot is the only permitted
         # mutation of the grant after this point.
-        _verify_supervisor_paid_authority(cp, stage="video_plan_generation")
+        await _verify_supervisor_paid_authority_async(
+            cp,
+            stage="video_plan_generation",
+        )
         try:
             plan = await generate_episode_plan(
                 cp.episode_id,
@@ -365,7 +391,11 @@ async def _ensure_supervisor_video_plan(
             raise GrantValidationError("VIDEO_PLAN_INVALID", str(exc)) from exc
     if (
         plan.status != "valid"
-        or not verify_episode_plan_is_current(plan, conn=conn, mark_stale=False)
+        or not await asyncio.to_thread(
+            verify_episode_plan_is_current,
+            plan,
+            mark_stale=False,
+        )
     ):
         raise GrantValidationError(
             "VIDEO_PLAN_INVALID",
@@ -407,7 +437,10 @@ async def _ensure_supervisor_video_plan(
     cp.episode_video_plan_revision = grant.episode_video_plan_revision
     cp.video_plan_release_hash = grant.video_plan_release_hash
     cp.capability_snapshot_id = grant.capability_snapshot_id
-    return _verify_supervisor_paid_authority(cp, stage="video_plan_bound")
+    return await _verify_supervisor_paid_authority_async(
+        cp,
+        stage="video_plan_bound",
+    )
 
 
 def load_latest_checkpoint(episode_id: str) -> VideoSupervisorCheckpoint | None:
@@ -2551,7 +2584,8 @@ async def run_video_completion_supervisor(
     grant: VideoCompletionGrant | None = None
     if cp.grant_id:
         try:
-            grant = validate_video_grant(
+            grant = await asyncio.to_thread(
+                validate_video_grant,
                 cp.grant_id,
                 episode_id=episode_id,
                 storyboard_artifact_id=ep["storyboard_artifact_id"],
@@ -2643,7 +2677,10 @@ async def run_video_completion_supervisor(
         # Budget top-ups remain visible, while every authored or plan drift is
         # re-evaluated instead of trusting a cached grant row.
         try:
-            g = _verify_supervisor_paid_authority(cp, stage="supervisor_tick")
+            g = await _verify_supervisor_paid_authority_async(
+                cp,
+                stage="supervisor_tick",
+            )
         except GrantValidationError as exc:
             cp.phase = (
                 "CANCELLED" if exc.code == "GRANT_REVOKED"
@@ -3383,6 +3420,10 @@ def recover_video_completion_runs() -> int:
         )
 
         async def _task(eid=episode_id, rid=recorder.run_id, gid=cp.grant_id, rec=recorder):
+            # Recovery tasks are spawned inside the FastAPI lifespan. Let the
+            # lifespan publish startup completion before reconstructing large
+            # immutable screenplay/storyboard authority models.
+            await asyncio.sleep(1.0)
             rec.start()
             try:
                 result = await run_video_completion_resilient(

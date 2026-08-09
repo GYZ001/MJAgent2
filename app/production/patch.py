@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from collections import OrderedDict
+from threading import RLock
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -29,6 +30,7 @@ _SCREENPLAY_ARTIFACT_MODEL_CACHE: OrderedDict[
     tuple[str, str], EpisodeScreenplay
 ] = OrderedDict()
 _SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE = 16
+_SCREENPLAY_ARTIFACT_MODEL_CACHE_LOCK = RLock()
 
 
 class PatchOperation(BaseModel):
@@ -313,9 +315,11 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
     content = art.get("content") or {}
     content_fingerprint = evidence_repository.content_hash(content)
     cache_key = (artifact_id, content_fingerprint)
-    cached = _SCREENPLAY_ARTIFACT_MODEL_CACHE.get(cache_key)
+    with _SCREENPLAY_ARTIFACT_MODEL_CACHE_LOCK:
+        cached = _SCREENPLAY_ARTIFACT_MODEL_CACHE.get(cache_key)
+        if cached is not None:
+            _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
     if cached is not None:
-        _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
         return cached
     if "_projection" in content:
         screenplay = EpisodeScreenplay.model_validate(content["_projection"])
@@ -323,10 +327,11 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
         screenplay = document_to_screenplay(ScreenplayDocument.model_validate(content))
     else:
         screenplay = EpisodeScreenplay.model_validate(content)
-    _SCREENPLAY_ARTIFACT_MODEL_CACHE[cache_key] = screenplay
-    _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
-    while len(_SCREENPLAY_ARTIFACT_MODEL_CACHE) > _SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE:
-        _SCREENPLAY_ARTIFACT_MODEL_CACHE.popitem(last=False)
+    with _SCREENPLAY_ARTIFACT_MODEL_CACHE_LOCK:
+        _SCREENPLAY_ARTIFACT_MODEL_CACHE[cache_key] = screenplay
+        _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
+        while len(_SCREENPLAY_ARTIFACT_MODEL_CACHE) > _SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE:
+            _SCREENPLAY_ARTIFACT_MODEL_CACHE.popitem(last=False)
     return screenplay
 
 
