@@ -208,3 +208,14 @@ New grant issue:
 | ID | Hypothesis | Status | Evidence |
 |----|------------|--------|----------|
 | O | Runtime adoption mutates the immutable published plan fingerprint and self-invalidates the completion grant | Confirmed | Grant changed only after dependency reconciliation |
+
+New score-only inconsistency:
+- Shot 2 completed with a valid MP4 and `technical_validation_json.passed=true`.
+- Its QA explicitly recorded `evaluation_role=score_only` and
+  `runtime_blocking=false`, but `whole_clip_usable=false`.
+- Candidate selection still discarded it solely on `whole_clip_usable`, so the
+  Supervisor could not adopt it and release shot 3.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| P | Legacy `whole_clip_usable` hard gate overrides the current score-only QA contract | Confirmed | Technically valid shot 2 remained unadopted |

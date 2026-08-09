@@ -210,7 +210,16 @@ def test_select_best_immediately_adopts_first_technical_candidate(monkeypatch) -
     technical = json.dumps({"passed": True})
     conn.execute(
         "INSERT INTO shot_versions VALUES('low','s',1,'succeeded',?,?,NULL,?)",
-        (technical, json.dumps({"overall": 0.2, "contract_facts": ["no_story_repeat_failed"]}), "{}"),
+        (
+            technical,
+            json.dumps({
+                "overall": 0.2,
+                "contract_facts": ["no_story_repeat_failed"],
+                "whole_clip_usable": False,
+                "runtime_blocking": False,
+            }),
+            "{}",
+        ),
     )
     conn.execute(
         "INSERT INTO shot_versions VALUES('high','s',2,'succeeded',?,?,NULL,?)",
@@ -256,6 +265,7 @@ def test_select_best_skips_identity_corrupted_candidate_even_when_forced(
                 "overall": 0.95,
                 "contract_facts": ["character_match_below_contract"],
                 "whole_clip_usable": False,
+                "runtime_blocking": True,
             }),
             "{}",
         ),

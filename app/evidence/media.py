@@ -450,7 +450,9 @@ def select_best_video_candidate(
         qa = json.loads(row["qa_json"] or "{}")
         score = _qa_overall(qa)
         hard_failures = classify_video_hard_failures(qa, technical=technical)
-        if qa.get("whole_clip_usable") is False or qa.get("runtime_blocking") is True:
+        # Semantic/VLM QA is score-only. Only an explicitly typed runtime
+        # blocker may override an otherwise valid technical media contract.
+        if qa.get("runtime_blocking") is True:
             continue
         entry = {
             "id": row["id"],
