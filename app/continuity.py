@@ -1307,6 +1307,7 @@ def reference_role_plan(
     shot: Shot,
     *,
     continuity_mode: str | None = None,
+    has_previous: bool = False,
     individual_names: set[str] | None = None,
     collective_names: set[str] | None = None,
 ) -> list[str]:
@@ -1314,7 +1315,7 @@ def reference_role_plan(
 
     mode = continuity_mode or derive_continuity_mode(shot)
     roles: list[str] = []
-    if uses_previous_tail_frame(mode):
+    if has_previous and uses_previous_tail_frame(mode):
         roles.append("start_state_reference")
     if mode != "scene_change":
         roles.append("scene_reference")
@@ -1393,12 +1394,24 @@ def preflight_seedance_gates(
                     )
 
     mode = shot.continuity_mode
-    roles = reference_role_plan(shot, continuity_mode=mode)
-    if uses_previous_tail_frame(mode) and "start_state_reference" not in roles:
-        errors.append(f"shot_no={shot.shot_no} continuity_mode=action_continuation 但缺少 start_state_reference")
-    if not uses_previous_tail_frame(mode) and "start_state_reference" in (shot.reference_roles or []):
+    roles = reference_role_plan(
+        shot,
+        continuity_mode=mode,
+        has_previous=prev is not None,
+    )
+    if (
+        prev is not None
+        and uses_previous_tail_frame(mode)
+        and "start_state_reference" not in roles
+    ):
         errors.append(
-            f"shot_no={shot.shot_no} continuity_mode={mode} 不得使用上一镜尾帧参考"
+            f"shot_no={shot.shot_no} continuity_mode={mode} 但缺少 start_state_reference")
+    if (
+        (prev is None or not uses_previous_tail_frame(mode))
+        and "start_state_reference" in (shot.reference_roles or [])
+    ):
+        errors.append(
+            f"shot_no={shot.shot_no} 当前没有可用的同场景上一镜尾帧参考"
         )
 
     if prompt_text:

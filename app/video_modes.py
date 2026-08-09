@@ -2836,11 +2836,13 @@ async def _build_generated_reference_assets_legacy(*, conn: Any, project_id: str
         existing_meta["asset_manifest_gate_retry_exhausted"] = True
         existing_meta["asset_manifest_warnings"] = list(manifest_warnings)
 
-    # 只有 action_continuation 才把上一镜尾帧作为强制参考图和剪辑点连贯锚点。
+    # 旧执行入口同样服从同场景真实尾帧策略；孤立测试/兼容调用没有
+    # prev_shot 且没有数据库连接时，不得凭 shot_no 猜测或伪造上游尾帧。
     forced: list[ReferenceImageAsset] = []
     from app.continuity import derive_continuity_mode, uses_previous_tail_frame
     needs_tail = (
         not decision.shotPlanId
+        and (prev_shot is not None or conn is not None)
         and uses_previous_tail_frame(derive_continuity_mode(shot, prev=prev_shot))
     )
     if needs_tail:

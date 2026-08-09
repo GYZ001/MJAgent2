@@ -447,7 +447,11 @@ def test_reference_role_plan_sequence_for_continuity_modes() -> None:
 
     for mode, needs_tail in sequence:
         shot = _shot(continuity_mode=mode)
-        roles = reference_role_plan(shot, continuity_mode=mode)
+        roles = reference_role_plan(
+            shot,
+            continuity_mode=mode,
+            has_previous=True,
+        )
         assert ("start_state_reference" in roles) is needs_tail
         assert "scene_reference" in roles
         assert "character_identity:林风" in roles

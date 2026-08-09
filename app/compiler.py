@@ -847,6 +847,7 @@ def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: boo
     roles = reference_role_plan(
         shot,
         continuity_mode=continuity_mode,
+        has_previous=chained,
         individual_names=individual_names,
         collective_names=collective_names,
     )
@@ -1138,6 +1139,7 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     shot.reference_roles = reference_role_plan(
         shot,
         continuity_mode=mode,
+        has_previous=chained,
         individual_names=individual_names,
         collective_names=collective_names,
     )

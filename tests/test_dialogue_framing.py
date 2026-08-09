@@ -623,7 +623,7 @@ def test_video_and_keyframe_prompts_enforce_speaker_only_closeup() -> None:
     assert "'甲' is the ONLY visible person" in keyframe_prompt
 
 
-def test_explicit_action_continuation_cannot_bypass_dialogue_cut() -> None:
+def test_dialogue_cut_keeps_same_scene_previous_video_tail_input() -> None:
     shot = _shot(
         continuity_mode="action_continuation",
         characters=["甲", "乙"],
@@ -640,5 +640,5 @@ def test_explicit_action_continuation_cannot_bypass_dialogue_cut() -> None:
     )
 
     assert shot.continuity_mode == "same_scene_cut"
-    assert "强制起始状态" not in prompt
+    assert "强制起始状态" in prompt
     assert "画面可见角色仅限：甲" in prompt
