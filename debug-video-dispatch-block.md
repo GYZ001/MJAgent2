@@ -219,3 +219,13 @@ New score-only inconsistency:
 | ID | Hypothesis | Status | Evidence |
 |----|------------|--------|----------|
 | P | Legacy `whole_clip_usable` hard gate overrides the current score-only QA contract | Confirmed | Technically valid shot 2 remained unadopted |
+
+New lifecycle-heartbeat evidence:
+- Dispatch 13 ended at 04:29:50.
+- Incremental adoption of shots 3 and 7 ran until about 04:31:23.
+- The watchdog cancelled the original run at 04:31:27, about 97 seconds after
+  the dispatch heartbeat ended.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| Q | Heartbeat coverage is local to dispatch and misses long ledger/adoption/checkpoint phases | Confirmed | 97-second incremental-adoption interval before watchdog takeover |

@@ -9,6 +9,7 @@ import asyncio
 import json
 import math
 from pathlib import Path
+import threading
 import time
 from typing import Any, Literal
 
@@ -91,6 +92,7 @@ CONTROL_PLANE_MAX_RECOVERIES = 3
 SUPERVISOR_HEARTBEAT_STALE_S = 60.0
 ASSET_PREP_HEARTBEAT_INTERVAL_S = 20.0
 DISPATCH_HEARTBEAT_INTERVAL_S = 20.0
+LIFECYCLE_HEARTBEAT_INTERVAL_S = 20.0
 TERMINAL_SUPERVISOR_PHASES = {
     "SUCCEEDED_COVERED",
     "COMPLETED_DEADLINE_FALLBACK",
@@ -3578,7 +3580,7 @@ def _mark_failed_closed(
     return cp
 
 
-async def run_video_completion_resilient(
+async def _run_video_completion_resilient_loop(
     episode_id: str,
     **kwargs: Any,
 ) -> VideoSupervisorCheckpoint:
@@ -3644,6 +3646,77 @@ async def run_video_completion_resilient(
                     run_id=run_id,
                     reason=f"CONTROL_PLANE_CLOSEOUT_FAILED: {type(close_exc).__name__}: {close_exc}",
                 )
+
+
+def _supervisor_lifecycle_heartbeat_worker(
+    episode_id: str,
+    run_id: str,
+    stop: threading.Event,
+    *,
+    interval_s: float = LIFECYCLE_HEARTBEAT_INTERVAL_S,
+) -> None:
+    wait_s = max(
+        0.01,
+        min(float(interval_s), SUPERVISOR_HEARTBEAT_STALE_S / 3.0),
+    )
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id=episode_id,
+        run_id=run_id,
+    )
+    while not stop.wait(wait_s):
+        try:
+            if not _refresh_supervisor_heartbeat(
+                checkpoint,
+                run_id=run_id,
+            ):
+                return
+        except Exception as exc:  # noqa: BLE001 - transient DB contention is retryable
+            try:
+                from app.errors import log_error
+
+                log_error(
+                    exc,
+                    action="video_supervisor.lifecycle_heartbeat",
+                    context={"episode_id": episode_id, "run_id": run_id},
+                )
+            except Exception:  # noqa: BLE001 - heartbeat retry must stay alive
+                pass
+
+
+async def run_video_completion_resilient(
+    episode_id: str,
+    **kwargs: Any,
+) -> VideoSupervisorCheckpoint:
+    """Run one completion epoch under an ownership-CAS lifecycle heartbeat."""
+    heartbeat_interval_s = float(
+        kwargs.pop(
+            "_lifecycle_heartbeat_interval_s",
+            LIFECYCLE_HEARTBEAT_INTERVAL_S,
+        )
+    )
+    run_id = str(kwargs.get("run_id") or "").strip()
+    if not run_id:
+        return await _run_video_completion_resilient_loop(
+            episode_id,
+            **kwargs,
+        )
+    stop = threading.Event()
+    heartbeat = threading.Thread(
+        target=_supervisor_lifecycle_heartbeat_worker,
+        args=(episode_id, run_id, stop),
+        kwargs={"interval_s": heartbeat_interval_s},
+        name=f"video-supervisor-heartbeat:{episode_id}",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        return await _run_video_completion_resilient_loop(
+            episode_id,
+            **kwargs,
+        )
+    finally:
+        stop.set()
+        await asyncio.to_thread(heartbeat.join, 5.0)
 
 
 async def reconcile_stale_video_supervisors() -> int:

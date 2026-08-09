@@ -451,6 +451,49 @@ async def test_async_dispatch_cancellation_waits_for_worker_thread(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_heartbeat_runs_during_blocking_supervisor_work(monkeypatch):
+    import threading
+    import time
+
+    import app.video_supervisor as video_supervisor
+
+    refresh_threads: list[int] = []
+
+    def refresh(*_args, **_kwargs):
+        refresh_threads.append(threading.get_ident())
+        return True
+
+    async def blocking_loop(episode_id: str, **_kwargs):
+        time.sleep(0.06)
+        return VideoSupervisorCheckpoint(episode_id=episode_id, run_id="run-1")
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_refresh_supervisor_heartbeat",
+        refresh,
+    )
+    monkeypatch.setattr(
+        video_supervisor,
+        "_run_video_completion_resilient_loop",
+        blocking_loop,
+    )
+
+    result = await video_supervisor.run_video_completion_resilient(
+        "episode-1",
+        run_id="run-1",
+        _lifecycle_heartbeat_interval_s=0.01,
+    )
+
+    assert result.run_id == "run-1"
+    assert len(refresh_threads) >= 2
+    assert all(thread_id != threading.get_ident() for thread_id in refresh_threads)
+    assert not any(
+        thread.name == "video-supervisor-heartbeat:episode-1"
+        for thread in threading.enumerate()
+    )
+
+
+@pytest.mark.asyncio
 async def test_incremental_adoption_publishes_ready_candidate(memdb, monkeypatch):
     import app.video_plan as video_plan
     import app.video_supervisor as video_supervisor
