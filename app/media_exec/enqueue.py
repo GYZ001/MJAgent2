@@ -600,9 +600,8 @@ def _load_reference_gallery(conn, shot_row) -> dict | None:
         refs = meta.get("reference_images") or []
         if not refs:
             continue
-        if not video_modes.reference_gallery_matches_keyframe_contract(meta):
-            # 关键帧 prompt 合同升级后，未编辑的旧图不再默认污染新视频。
-            # 文件仍保留供审计，新版本只是重新生成唯一叙事关键帧。
+        if not video_modes.reference_gallery_matches_library_policy(meta):
+            # 旧画廊可能含生成关键帧；新版本只复用人物谱/场景库资产。
             continue
         frozen_manifest = meta.get("reference_manifest")
         if not isinstance(frozen_manifest, dict):
@@ -1108,7 +1107,10 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     first_frame_requirement = None
     first_frame_source = None
     boundary_source_shot_id = None
-    if shot_plan is not None and shot_plan.mode.value == video_modes.FIRST_LAST_FRAME_MODE:
+    if shot_plan is not None and shot_plan.mode.value in {
+        video_modes.FIRST_FRAME_MODE,
+        video_modes.FIRST_LAST_FRAME_MODE,
+    }:
         first_frame_requirement = next(
             (
                 item
@@ -1314,6 +1316,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         + f"|after:{chain_after_shot_id or ''}"
         + f"|after_version:{chain_after_version_id or ''}"
         + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
+        + f"|reference_input_policy:{video_modes.REFERENCE_INPUT_POLICY_VERSION}"
         + f"|reference_dependencies:{current_reference_manifest.get('input_fingerprint') or ''}"
     )
     # 只有人工编辑会改变视频输入并打破原幂等键；未编辑画廊沿用历史幂等行为，
@@ -1363,6 +1366,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
         "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
+        "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "boundary_prompt_contract": {
             "video_generation_mode": (
                 shot_plan.mode.value if shot_plan is not None else decision.mode

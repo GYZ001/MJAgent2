@@ -3044,3 +3044,71 @@ async def test_recorded_narrative_gate_preserves_repair_state_and_fails_run(
     assert step["error_code"] == "SCREENPLAYNARRATIVEGATEERROR"
     assert error_log["code"] == "QA"
     assert error_log["category"] == "quality_gate"
+
+
+@pytest.mark.asyncio
+async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
+    monkeypatch,
+) -> None:
+    from app.domain import screenplay_ops
+    from app.evidence import repository as evidence_repository
+    from app.production.revision import save_checkpoint
+
+    blueprint = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content={"blueprint": True},
+    ))
+    revision = ensure_production_revision(
+        episode_id="ep_p",
+        kind="screenplay",
+        resume=False,
+    )
+    save_checkpoint(revision.id, {
+        "phase": "IDENTITY_FREEZE",
+        "blueprint_artifact_id": blueprint["id"],
+    })
+    recorder = screenplay_ops._new_screenplay_recorder(
+        "ep_p",
+        requested_by="recovery",
+        trigger_type="resume",
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='queued',active_screenplay_run_id=? "
+        "WHERE id='ep_p'",
+        (recorder.run_id,),
+    )
+    conn.commit()
+
+    async def forbidden_discovery(*_args, **_kwargs):
+        raise AssertionError("resumable Baseline must reuse persisted identity")
+
+    async def fake_task(_episode_id, *, preflight_result=None):
+        assert preflight_result["skipped"] == "prebaseline_identity_checkpoint_reused"
+        script = _minimal_script()
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='ready',screenplay_json=? "
+            "WHERE id='ep_p'",
+            (script.model_dump_json(),),
+        )
+        conn.commit()
+        return script
+
+    monkeypatch.setattr(
+        screenplay_ops,
+        "_screenplay_character_discovery",
+        forbidden_discovery,
+    )
+    monkeypatch.setattr(screenplay_ops, "_screenplay_task", fake_task)
+
+    result = await screenplay_ops._recorded_screenplay_task("ep_p", recorder)
+
+    assert isinstance(result, EpisodeScreenplay)
+    assert conn.execute(
+        "SELECT status FROM workflow_runs WHERE id=?",
+        (recorder.run_id,),
+    ).fetchone()["status"] == "SUCCEEDED"

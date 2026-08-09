@@ -1336,7 +1336,7 @@ async def _recorded_screenplay_task(
         production_state = _screenplay_production_state(episode_id)
         if (
             production_state["operation"] == "finalize"
-            or production_state.get("can_resume_baseline")
+            or production_state.get("has_resumable_baseline")
         ):
             # 完整 Document 续跑复用已冻结决议；未知身份由 typed structural
             # QA gate 暴露，禁止回到全章人物发现。

@@ -21,6 +21,7 @@ from app.db import get_conn, get_setting, log_provider_call, new_id, now
 
 class VideoGenerationMode(str, Enum):
     REFERENCE_IMAGE_MODE = "REFERENCE_IMAGE_MODE"
+    FIRST_FRAME_MODE = "FIRST_FRAME_MODE"
     FIRST_LAST_FRAME_MODE = "FIRST_LAST_FRAME_MODE"
     VIDEO_INPUT_MODE = "VIDEO_INPUT_MODE"
 
@@ -306,7 +307,10 @@ def normalize_ai_shot_plan_candidate(
                     "field": "required_assets",
                     "reason": "generic_reference_resolved_at_execution",
                 })
-    if normalized.get("mode") == VideoGenerationMode.FIRST_LAST_FRAME_MODE.value:
+    if normalized.get("mode") in {
+        VideoGenerationMode.FIRST_FRAME_MODE.value,
+        VideoGenerationMode.FIRST_LAST_FRAME_MODE.value,
+    }:
         assets = normalized.get("required_assets")
         first_frame = next((
             item for item in assets
@@ -319,6 +323,13 @@ def normalize_ai_shot_plan_candidate(
             and first_frame.get("source_shot_id")
         ):
             desired_dependency = str(first_frame["source_shot_id"])
+        elif first_frame and normalized.get("mode") == VideoGenerationMode.FIRST_FRAME_MODE.value:
+            desired_dependency = (
+                str(first_frame["source_shot_id"])
+                if first_frame.get("source") == AssetSource.PREVIOUS_ADOPTED_TAIL.value
+                and first_frame.get("source_shot_id")
+                else None
+            )
         elif (
             first_frame
             and first_frame.get("source") in {
@@ -386,7 +397,6 @@ def apply_scene_boundary_strategy(
     """Turn scene relations into a deterministic shared-boundary execution plan."""
     changes: list[dict[str, Any]] = []
     ordered = sorted(shots, key=lambda item: item.shot_no)
-    scene_offset = -1
     previous: ShotVideoGenerationPlan | None = None
     scene_identities = scene_identity_by_shot_id or {}
     for index, item in enumerate(ordered):
@@ -397,7 +407,6 @@ def apply_scene_boundary_strategy(
             scene_identity_by_shot_id=scene_identities,
         )
         if scene_entry:
-            scene_offset = 0
             previous_mode = item.mode
             item.mode = VideoGenerationMode.REFERENCE_IMAGE_MODE
             item.planned_mode = item.mode
@@ -433,42 +442,23 @@ def apply_scene_boundary_strategy(
 
         if previous is None:
             continue
-        scene_offset += 1
         previous_mode = item.mode
-        item.mode = VideoGenerationMode.FIRST_LAST_FRAME_MODE
+        item.mode = VideoGenerationMode.FIRST_FRAME_MODE
         item.planned_mode = item.mode
         item.video_input_intent = None
-        first_source = (
-            AssetSource.PREVIOUS_ADOPTED_TAIL
-            if scene_offset == 1
-            else AssetSource.PREVIOUS_STATIC_TAIL
-        )
-        item.depends_on_shot_id = (
-            previous.shot_id
-            if first_source == AssetSource.PREVIOUS_ADOPTED_TAIL
-            else None
-        )
+        first_source = AssetSource.PREVIOUS_ADOPTED_TAIL
+        item.depends_on_shot_id = previous.shot_id
         item.required_assets = [
             PlanAssetRequirement(
                 role="first_frame",
                 source=first_source,
                 source_shot_id=previous.shot_id,
             ),
-            PlanAssetRequirement(
-                role="last_frame",
-                source=AssetSource.STATIC_BOUNDARY_ASSET,
-            ),
         ]
-        reason_code = (
-            "SCENE_SECOND_SHOT_ACTUAL_TAIL"
-            if scene_offset == 1 else "PREVIOUS_STATIC_TAIL_REUSED"
-        )
+        reason_code = "IN_SCENE_PREVIOUS_VIDEO_TAIL"
         if reason_code not in item.reason_codes:
             item.reason_codes.append(reason_code)
-        if (
-            previous_mode != item.mode
-            or first_source == AssetSource.PREVIOUS_STATIC_TAIL
-        ):
+        if previous_mode != item.mode:
             changes.append({
                 "shot_id": item.shot_id,
                 "field": "mode_and_boundary_source",
@@ -915,6 +905,8 @@ def capability_allows(
 ) -> bool:
     if mode == VideoGenerationMode.REFERENCE_IMAGE_MODE:
         return snapshot.supports_reference_image
+    if mode == VideoGenerationMode.FIRST_FRAME_MODE:
+        return snapshot.supports_first_frame
     if mode == VideoGenerationMode.FIRST_LAST_FRAME_MODE:
         return bool(
             snapshot.supports_first_frame
@@ -1041,7 +1033,6 @@ def validate_episode_plan(
     if normalized and normalized[0].depends_on_shot_id:
         issues.append({"code": "FIRST_SHOT_HAS_DEPENDENCY", "shot_id": normalized[0].shot_id})
 
-    scene_offset = -1
     previous_item: ShotVideoGenerationPlan | None = None
     scene_identity_by_shot_id = {
         shot_id: _scene_identity(row)
@@ -1055,7 +1046,6 @@ def validate_episode_plan(
             scene_identity_by_shot_id=scene_identity_by_shot_id,
         )
         if scene_entry:
-            scene_offset = 0
             if item.mode != VideoGenerationMode.REFERENCE_IMAGE_MODE:
                 issues.append({
                     "code": "SCENE_ENTRY_MODE_MISMATCH",
@@ -1064,12 +1054,11 @@ def validate_episode_plan(
                 })
             previous_item = item
             continue
-        scene_offset += 1
-        if item.mode != VideoGenerationMode.FIRST_LAST_FRAME_MODE:
+        if item.mode != VideoGenerationMode.FIRST_FRAME_MODE:
             issues.append({
                 "code": "IN_SCENE_MODE_MISMATCH",
                 "shot_id": item.shot_id,
-                "expected_mode": VideoGenerationMode.FIRST_LAST_FRAME_MODE.value,
+                "expected_mode": VideoGenerationMode.FIRST_FRAME_MODE.value,
             })
             previous_item = item
             continue
@@ -1077,10 +1066,7 @@ def validate_episode_plan(
             (asset for asset in item.required_assets if asset.role == "first_frame"),
             None,
         )
-        expected_source = (
-            AssetSource.PREVIOUS_ADOPTED_TAIL
-            if scene_offset == 1 else AssetSource.PREVIOUS_STATIC_TAIL
-        )
+        expected_source = AssetSource.PREVIOUS_ADOPTED_TAIL
         if first is None or first.source != expected_source:
             issues.append({
                 "code": "SCENE_BOUNDARY_SOURCE_MISMATCH",
@@ -1097,10 +1083,7 @@ def validate_episode_plan(
                 "shot_id": item.shot_id,
                 "expected_source_shot_id": previous_item.shot_id,
             })
-        expected_dependency = (
-            previous_item.shot_id
-            if scene_offset == 1 and previous_item is not None else None
-        )
+        expected_dependency = previous_item.shot_id if previous_item is not None else None
         if item.depends_on_shot_id != expected_dependency:
             issues.append({
                 "code": "SCENE_VIDEO_DEPENDENCY_MISMATCH",
@@ -1166,6 +1149,21 @@ def validate_episode_plan(
                 for asset in item.required_assets
             ):
                 issues.append({"code": "REFERENCE_ASSET_REVISION_MISSING", "shot_id": item.shot_id})
+        elif item.mode == VideoGenerationMode.FIRST_FRAME_MODE:
+            if item.video_input_intent is not None:
+                issues.append({"code": "FIRST_FRAME_HAS_VIDEO_INTENT", "shot_id": item.shot_id})
+            if roles != ["first_frame"]:
+                issues.append({"code": "FIRST_FRAME_ROLE_CONFLICT", "shot_id": item.shot_id})
+            first = item.required_assets[0] if len(item.required_assets) == 1 else None
+            if first and first.source != AssetSource.PREVIOUS_ADOPTED_TAIL:
+                issues.append({"code": "FIRST_FRAME_SOURCE_INVALID", "shot_id": item.shot_id})
+            if not item.depends_on_shot_id:
+                issues.append({"code": "FIRST_FRAME_DEPENDENCY_MISSING", "shot_id": item.shot_id})
+            if (
+                first and first.source_shot_id
+                and first.source_shot_id != item.depends_on_shot_id
+            ):
+                issues.append({"code": "FIRST_FRAME_SOURCE_SHOT_MISMATCH", "shot_id": item.shot_id})
         elif item.mode == VideoGenerationMode.FIRST_LAST_FRAME_MODE:
             if item.video_input_intent is not None:
                 issues.append({"code": "FIRST_LAST_HAS_VIDEO_INTENT", "shot_id": item.shot_id})
@@ -1705,17 +1703,15 @@ async def generate_episode_plan(
     system = (
         "你是视频生产工具层规划器，只能引用输入中的 shot/database_shot ID，不得改写剧情、"
         "新增/删除/调换镜头。输入可能是整集的一个按请求体大小切分的窗口，只输出输入 shots。"
-        "为每镜选择 REFERENCE_IMAGE_MODE、FIRST_LAST_FRAME_MODE 或 "
+        "为每镜选择 REFERENCE_IMAGE_MODE、FIRST_FRAME_MODE 或 "
         "VIDEO_INPUT_MODE。每个连续场景的首镜固定 REFERENCE_IMAGE_MODE，场景内其余镜头固定 "
-        "FIRST_LAST_FRAME_MODE。关系判断只基于时空、剪辑、动作阶段、"
+        "FIRST_FRAME_MODE。关系判断只基于时空、剪辑、动作阶段、"
         "状态依赖和运动依赖，禁止按人物名、地点名、题材、打斗词或动作词表决定模式。"
         "new_domain、new_space 或 scene_cut 表示新场景首镜。VIDEO_INPUT_MODE 必须给 intent；"
         "CONTINUE_PREVIOUS_TAKE 只有 capability 明确准入才可选。"
-        "FIRST_LAST_FRAME_MODE 必须各给一个 first_frame/last_frame requirement；"
-        "场景内第二镜的 first_frame 来自场景首镜实际尾帧，source=PREVIOUS_ADOPTED_TAIL 并填写 "
-        "depends_on_shot_id；场景内第三镜起复用上一镜预生成静态尾帧，"
-        "source=PREVIOUS_STATIC_TAIL、填写 source_shot_id 且 depends_on_shot_id=null。"
-        "每个首尾帧镜头的 last_frame 都是 STATIC_BOUNDARY_ASSET。VIDEO_INPUT_MODE 唯一 required asset 是"
+        "FIRST_FRAME_MODE 只能给一个 first_frame requirement；其 source 必须是紧邻上一镜采用视频的"
+        "真实尾帧 PREVIOUS_ADOPTED_TAIL，并填写 source_shot_id 与 depends_on_shot_id。"
+        "不得生成或声明 last_frame 静态图片。VIDEO_INPUT_MODE 唯一 required asset 是"
         "previous_adopted_video/source=PREVIOUS_ADOPTED_VIDEO。参考图模式不得依赖上一镜视频。"
         "fallback_order 必须为空数组；任一模式失败时保持原模式失败，不得改用其他模式。"
         "relations 四个字段必须逐字使用 relation_enum_contract 对应数组中的枚举值，禁止自造同义词。"

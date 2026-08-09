@@ -1459,6 +1459,7 @@ def _video_image_inputs_from_meta(meta: dict) -> list[tuple[str, str]]:
     except ProviderError as exc:
         if meta.get("mode") in {
             video_modes.REFERENCE_IMAGE_MODE,
+            video_modes.FIRST_FRAME_MODE,
             video_modes.FIRST_LAST_FRAME_MODE,
         }:
             raise VideoInputRepairRequired(str(exc)) from exc
@@ -1480,6 +1481,7 @@ async def _prepare_reference_mode_inputs(
         meta["stale_reference_reason"] = reason
         meta["stale_keyframe_prompt_contract_version"] = meta.get("keyframe_prompt_contract_version")
         meta["keyframe_prompt_contract_version"] = video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION
+        meta["reference_input_policy_version"] = video_modes.REFERENCE_INPUT_POLICY_VERSION
         meta.pop("keyframe_contract_fingerprint", None)
         meta["reference_images"] = []
         meta["reference_slots"] = {}
@@ -1507,31 +1509,23 @@ async def _prepare_reference_mode_inputs(
     if meta.get("reference_images"):
         incomplete_checkpoint = meta.get("reference_generation_complete") is False
         if incomplete_checkpoint:
-            # prompt_ready 时画廊通常只有人物/场景 evidence，尚未产出关键帧。
-            # 这里只校验 checkpoint 合同版本，不能套用「最终画廊必须有关键帧」的门禁。
-            checkpoint_matches = (
-                str(meta.get("keyframe_prompt_contract_version") or "")
-                == video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION
-            )
+            checkpoint_matches = video_modes.reference_gallery_matches_library_policy(meta)
             if not checkpoint_matches:
-                _invalidate_reference_checkpoint("keyframe_prompt_checkpoint_contract_invalid")
+                _invalidate_reference_checkpoint("library_reference_checkpoint_invalid")
             elif (
                 meta.get("reference_static_ready")
-                and not video_modes.reference_gallery_matches_keyframe_contract(meta)
+                and not video_modes.reference_gallery_matches_library_policy(meta)
             ):
-                # static_ready 意味着必需关键帧已经落盘；若只剩 evidence
-                # 或 path 已丢失，必须回到生成阶段，不能被连续性快路伪装完成。
-                _invalidate_reference_checkpoint("static_keyframe_contract_or_file_invalid")
+                _invalidate_reference_checkpoint("library_reference_file_invalid")
         else:
-            gallery_matches = video_modes.reference_gallery_matches_keyframe_contract(meta)
+            gallery_matches = video_modes.reference_gallery_matches_library_policy(meta)
             if gallery_matches:
                 complete_gallery_candidate = True
             else:
-                _invalidate_reference_checkpoint("keyframe_prompt_contract_or_file_invalid")
+                _invalidate_reference_checkpoint("reference_input_policy_or_file_invalid")
     from app.schemas import Bible
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.stage_state import set_pipeline_stage
-    from app.continuity import derive_continuity_mode, uses_previous_tail_frame
 
     project = conn.execute("SELECT * FROM projects WHERE id=?", (job["project_id"],)).fetchone()
     bible = Bible.model_validate(json.loads(project["bible_json"]))
@@ -1553,13 +1547,7 @@ async def _prepare_reference_mode_inputs(
     from app.continuity import apply_shot_contract
     apply_shot_contract(shot_model, meta.get("shot_contract_json"))
     prev_shot = conn.execute("SELECT * FROM shots WHERE id=?", (meta.get("after_shot_id"),)).fetchone() if meta.get("after_shot_id") else None
-    needs_tail = (
-        not meta.get("shot_plan_id")
-        and uses_previous_tail_frame(derive_continuity_mode(shot_model, prev=prev_shot))
-    )
-    current_keyframe_fingerprint = video_modes.keyframe_contract_fingerprint(
-        shot_model, bible, screenplay=screenplay,
-    )
+    needs_tail = False
     if complete_gallery_candidate:
         # 提示词合同相同仍不代表人物/场景锚点未变。入队复用会把
         # manifest 一起带过来；兼容从关键帧 asset 内的冻结副本回退读取。
@@ -1572,10 +1560,8 @@ async def _prepare_reference_mode_inputs(
                 ),
                 None,
             )
-        if not video_modes.reference_gallery_matches_keyframe_contract(
-            meta, expected_fingerprint=current_keyframe_fingerprint,
-        ):
-            _invalidate_reference_checkpoint("shot_keyframe_contract_changed")
+        if not video_modes.reference_gallery_matches_library_policy(meta):
+            _invalidate_reference_checkpoint("reference_input_policy_changed")
             complete_gallery_candidate = False
         if complete_gallery_candidate and needs_tail:
             frozen_tail_contract = next(
@@ -1620,44 +1606,19 @@ async def _prepare_reference_mode_inputs(
         )
         if not isinstance(frozen_manifest, dict) or not manifest_revisions_match(frozen_manifest, current_manifest):
             _invalidate_reference_checkpoint("reference_dependency_manifest_changed")
-        elif not video_modes.reference_gallery_matches_keyframe_contract(meta):
+        elif not video_modes.reference_gallery_matches_library_policy(meta):
             # 静态预取点可能在 worker 崩溃后只剩 evidence，或关键帧文件已丢失。
             # 连续性快路不能只装配尾帧就把这组资产标成完成。
             _invalidate_reference_checkpoint("static_keyframe_contract_or_file_invalid")
     rejection_details: list[dict[str, Any]] = []
     rejected_assets: list = []
 
-    from app.multiview import narrative_keyframe_required, PURPOSE_VIDEO_INPUT, purpose_list
-
     def _reference_keyframe_gate_passed(current_assets: list) -> bool:
-        """Validate the files returned by the builder, not only its DB checkpoint."""
-        refs = [a.public_dict() for a in current_assets]
-
-        def _has_usable_keyframe(ref: dict) -> bool:
-            path = str(ref.get("path") or ref.get("image_path") or "").strip()
-            url = str(ref.get("url") or "").strip()
-            return (
-                (
-                    str(ref.get("type") or "") == "plot_key_frame"
-                    or video_modes.is_narrative_keyframe_slot(str(ref.get("slot_key") or ""))
-                )
-                and not ref.get("deleted")
-                and ref.get("selectedForSeedance")
-                and PURPOSE_VIDEO_INPUT in purpose_list(ref)
-                and ((bool(path) and Path(path).is_file()) or url.startswith("data:image"))
-            )
-
-        keyframe_ok = any(_has_usable_keyframe(ref) for ref in refs if isinstance(ref, dict))
-        if isinstance(meta.get("keyframe_sequence"), dict):
-            # The sequence contract also understands the explicit structural
-            # fallback where all candidates failed hard-shape QA.
-            keyframe_ok = video_modes.reference_gallery_matches_keyframe_contract(
-                {**meta, "reference_images": refs},
-                expected_fingerprint=current_keyframe_fingerprint,
-            )
-        return not meta.get("narrative_keyframe_missing") and (
-            not narrative_keyframe_required() or keyframe_ok
-        )
+        """Validate the exact existing-library files returned by the builder."""
+        return video_modes.reference_gallery_matches_library_policy({
+            **meta,
+            "reference_images": [a.public_dict() for a in current_assets],
+        })
 
     def _delete_rejected_assets(items: list) -> None:
         # Never let a recovered/stale worker remove files owned by the new
@@ -1683,7 +1644,7 @@ async def _prepare_reference_mode_inputs(
             stage_progress={
                 "current": candidate_done,
                 "total": candidate_total,
-                "unit": "keyframe_candidates",
+                "unit": "library_assets",
             },
             scheduler_lane=media_stages.LANE_REFERENCE_CRITICAL if needs_tail else media_stages.LANE_REFERENCE_NORMAL,
             conn=conn,
@@ -1722,10 +1683,8 @@ async def _prepare_reference_mode_inputs(
                 [a.public_dict() for a in assets]
             )
             assembled_meta = {**meta, "reference_images": assembled_refs}
-            if not video_modes.reference_gallery_matches_keyframe_contract(
-                assembled_meta, expected_fingerprint=current_keyframe_fingerprint,
-            ):
-                _invalidate_reference_checkpoint("continuity_assembly_keyframe_missing_or_stale")
+            if not video_modes.reference_gallery_matches_library_policy(assembled_meta):
+                _invalidate_reference_checkpoint("continuity_assembly_library_asset_invalid")
                 assets = []
         if assets:
             meta["reference_images"] = assembled_refs
@@ -1909,7 +1868,7 @@ async def _prepare_reference_mode_inputs(
                 image_inputs=json.dumps(meta, ensure_ascii=False),
             )
             raise VideoInputRepairRequired(
-                "参考图关键帧文件或生成前质量门禁未通过"
+                "人物谱或场景库参考图文件不可用"
             )
         meta["reference_group_gate_passed"] = True
         meta["video_input_manifest_frozen"] = True
@@ -1962,7 +1921,7 @@ async def _prepare_reference_mode_inputs(
     meta["continuity_anchor_ready"] = False
     meta["reference_group_gate_passed"] = False
     meta["video_input_manifest_frozen"] = False
-    meta["narrative_keyframe_missing"] = True
+    meta["narrative_keyframe_missing"] = False
     meta["reference_gate_retry_exhausted"] = True
     meta["reference_images"] = []
     _set_version(
