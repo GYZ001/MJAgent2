@@ -256,12 +256,28 @@ def evaluate_storyboard_for_confirmation(
             IdentityContractError,
             storyboard_visual_identity_relation,
         )
+        task_visible_ids: dict[int, list[str]] = {}
+        try:
+            from app.schemas import StoryboardOutline
+
+            outline = StoryboardOutline.model_validate_json(
+                episode["storyboard_outline_json"] or "{}"
+            )
+            task_visible_ids = {
+                int(brief.shot_no): list(brief.visible_entity_ids)
+                for brief in outline.shots
+            }
+        except (KeyError, IndexError, TypeError, ValueError):
+            task_visible_ids = {}
 
         try:
             for shot in board.shots:
                 relation = storyboard_visual_identity_relation(
                     shot,
-                    list(shot.visible_entity_ids or []),
+                    task_visible_ids.get(
+                        int(shot.shot_no),
+                        list(shot.visible_entity_ids or []),
+                    ),
                     bible,
                     screenplay,
                 )

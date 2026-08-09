@@ -1147,6 +1147,38 @@ def test_published_gate_repair_starts_in_isolated_candidate_window(
     assert _storyboard_hash(_current_board(conn)) == before
 
 
+def test_published_multi_shot_gate_repair_covers_all_explicit_targets(
+    repair_db,
+) -> None:
+    conn, _screenplay = repair_db
+    before = _storyboard_hash(_current_board(conn))
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="SUCCEEDED",
+        outcome="SUCCEEDED_READY_FOR_CONFIRM",
+        planner_version=STORYBOARD_REPAIR_PLANNER_VERSION,
+        validated_prefix_end=3,
+        next_shot_no=4,
+        expected_total=3,
+        input_versions={"screenplay_artifact_id": "sp1"},
+    ))
+
+    checkpoint = prepare_published_storyboard_repair(
+        "e1",
+        [
+            "第 1 镜的可见身份不属于本镜叙事任务",
+            "第 3 镜的可见身份不属于本镜叙事任务",
+        ],
+    )
+
+    assert _repair_is_pending(checkpoint)
+    assert checkpoint.last_repair["mode"] == "replace"
+    assert checkpoint.last_repair["window_start"] == 1
+    assert checkpoint.last_repair["window_end"] == 3
+    assert checkpoint.repair_candidate_shots == []
+    assert _storyboard_hash(_current_board(conn)) == before
+
+
 def test_new_activation_withdraws_legacy_failed_gate_publication(repair_db) -> None:
     conn, _screenplay = repair_db
     artifact = evidence_repository.create_artifact(EvidenceArtifact(

@@ -279,6 +279,29 @@ def prepare_published_storyboard_repair(
             "execution_verified": True,
         },
     )
+    repair_screenplay = None
+    repair_bible = None
+    narrative_repair_active = None
+    if outline is not None:
+        from app.domain.common import _project_bible_or_placeholder
+        from app.production.screenplay_authority import (
+            resolve_downstream_screenplay,
+        )
+
+        repair_context = resolve_downstream_screenplay(
+            episode_id,
+            conn=conn,
+        )
+        repair_screenplay = repair_context.screenplay
+        narrative_repair_active = (
+            repair_context.narrative_authority_required
+        )
+        project = conn.execute(
+            "SELECT * FROM projects WHERE id=?",
+            (episode["project_id"],),
+        ).fetchone()
+        repair_bible = _project_bible_or_placeholder(project)
+
     checkpoint = _apply_repair(
         checkpoint,
         plan,
@@ -286,12 +309,39 @@ def prepare_published_storyboard_repair(
         episode_id,
         list(board.shots),
         outline,
+        repair_screenplay=repair_screenplay,
+        narrative_repair_active=narrative_repair_active,
     )
     if not _repair_is_pending(checkpoint):
         raise StageError(
             "分镜修复",
             ["未能为发布后门禁问题建立隔离修订候选"],
         )
+    candidate_outline = _repair_outline_for_checkpoint(
+        checkpoint,
+        outline,
+    )
+    if (
+        candidate_outline is not None
+        and repair_screenplay is not None
+        and repair_bible is not None
+        and repair_screenplay.narrative_plan is not None
+    ):
+        from app.narrative_outline import (
+            normalize_narrative_storyboard_outline,
+        )
+
+        relation_repairs = normalize_narrative_storyboard_outline(
+            candidate_outline,
+            repair_screenplay,
+            bible=repair_bible,
+            preserve_shot_ids=True,
+        )
+        checkpoint.last_repair = {
+            **(checkpoint.last_repair or {}),
+            "candidate_outline": candidate_outline.model_dump(mode="json"),
+            "relation_migration_count": len(relation_repairs),
+        }
     save_checkpoint(checkpoint)
     return checkpoint
 
@@ -1389,24 +1439,6 @@ def _write_shot_fields(
     )
 
 
-def _repair_shot_visual_prose_from_authority(
-    shot: Shot,
-    brief: StoryboardOutlineShot,
-    bible: Bible,
-    screenplay: EpisodeScreenplay,
-) -> list[dict[str, Any]]:
-    from app.identity_contracts import (
-        repair_shot_visual_prose_from_authority,
-    )
-
-    return repair_shot_visual_prose_from_authority(
-        shot,
-        brief,
-        bible,
-        screenplay,
-    )
-
-
 def _ensure_storyboard_revision(
     episode_id: str,
     board: Storyboard,
@@ -2036,6 +2068,7 @@ async def run_storyboard_supervisor(
         authority_repairs = normalize_narrative_storyboard_outline(
             outline,
             screenplay,
+            bible=bible,
             preserve_shot_ids=True,
         )
         dialogue_repairs = normalize_outline_dialogue_ownership(
@@ -2046,6 +2079,7 @@ async def run_storyboard_supervisor(
             normalize_narrative_storyboard_outline(
                 outline,
                 screenplay,
+                bible=bible,
                 preserve_shot_ids=True,
             )
         )
@@ -2058,6 +2092,7 @@ async def run_storyboard_supervisor(
                     normalize_narrative_storyboard_outline(
                         pending_outline,
                         screenplay,
+                        bible=bible,
                         preserve_shot_ids=True,
                     )
                 )
@@ -2137,21 +2172,12 @@ async def run_storyboard_supervisor(
                 ),
             )
             normalized_shot = Shot.model_validate(normalized["shot"])
-            prose_repairs = _repair_shot_visual_prose_from_authority(
-                normalized_shot,
-                brief,
-                bible,
-                screenplay,
-            )
-            if not changes and not prose_repairs:
+            if not changes:
                 continue
             board.shots[index] = normalized_shot
             repairs.append({
                 "shot_no": int(shot.shot_no),
-                "fields": [
-                    *[change["field"] for change in changes],
-                    *[change["field"] for change in prose_repairs],
-                ],
+                "fields": [change["field"] for change in changes],
             })
         return repairs
 
@@ -2550,26 +2576,43 @@ async def run_storyboard_supervisor(
             save_checkpoint(cp, run_id=run_id)
 
         # ---- 按场景批量生成（新合同）----
+        active_repair = cp.last_repair or {}
+        repair_pending = _repair_is_pending(cp)
+        pack_outline = (
+            _repair_outline_for_checkpoint(cp, outline)
+            if repair_pending
+            else outline
+        )
         scene_pack_failure: BaseException | None = None
         failed_scene_ids: set[str] = set()
         failed_batch_ends: list[int] = []
         scene_pack_fallback_end: int | None = None
         if (
-            outline is not None
-            and not outline.scene_contexts
+            pack_outline is not None
+            and not pack_outline.scene_contexts
             and not completed
         ):
             derived_contexts = ensure_storyboard_scene_contexts(
-                outline,
+                pack_outline,
                 screenplay,
                 bible,
             )
             if derived_contexts:
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                    (outline.model_dump_json(), episode_id),
-                )
-                conn.commit()
+                if not repair_pending:
+                    conn.execute(
+                        "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+                        (pack_outline.model_dump_json(), episode_id),
+                    )
+                    conn.commit()
+                else:
+                    cp.last_repair = {
+                        **active_repair,
+                        "candidate_outline": pack_outline.model_dump(
+                            mode="json"
+                        ),
+                    }
+                    active_repair = cp.last_repair
+                    save_checkpoint(cp, run_id=run_id)
                 if run_id:
                     evidence_repository.append_event(
                         run_id,
@@ -2580,13 +2623,21 @@ async def run_storyboard_supervisor(
                     )
 
         scene_pack_batches = (
-            _storyboard_scene_pack_batches(outline)
-            if outline is not None else []
+            _storyboard_scene_pack_batches(pack_outline)
+            if pack_outline is not None else []
+        )
+        full_repair_scene_pack = bool(
+            repair_pending
+            and pack_outline is not None
+            and str(active_repair.get("mode") or "") == "replace"
+            and int(active_repair.get("window_start") or 0) == 1
+            and int(active_repair.get("window_end") or 0)
+            == len(pack_outline.shots)
         )
         scene_pack_mode = bool(
-            outline is not None
-            and outline.scene_contexts
-            and not _repair_is_pending(cp)
+            pack_outline is not None
+            and pack_outline.scene_contexts
+            and (not repair_pending or full_repair_scene_pack)
         )
         if scene_pack_mode:
             scene_ends = {
@@ -2635,7 +2686,7 @@ async def run_storyboard_supervisor(
                         source_text,
                         bible,
                         screenplay,
-                        outline,
+                        pack_outline,
                         batch["context"],
                         shot_nos=set(batch["shot_nos"]),
                     )
@@ -2677,7 +2728,8 @@ async def run_storyboard_supervisor(
                 )
                 normalize_continuity(candidate_board)
                 if narrative_authority:
-                    _normalize_completed_authority_board(candidate_board)
+                    if not full_repair_scene_pack:
+                        _normalize_completed_authority_board(candidate_board)
                     from app.identity_contracts import (
                         canonicalize_storyboard_operational_identities,
                     )
@@ -2722,7 +2774,7 @@ async def run_storyboard_supervisor(
                 candidate_errors = (
                     validate_storyboard(
                         candidate_board,
-                        storyboard_planning_bible(bible, outline),
+                        storyboard_planning_bible(bible, pack_outline),
                         int(ep_data.get("target_duration_s") or 0),
                         narrative_authority=True,
                         narrative_plan=screenplay.narrative_plan,
@@ -2735,8 +2787,11 @@ async def run_storyboard_supervisor(
                     candidate_errors.extend(
                         validate_storyboard_visual_identity_contract(
                             candidate_board,
-                            outline,
-                            storyboard_planning_bible(bible, outline),
+                            pack_outline,
+                            storyboard_planning_bible(
+                                bible,
+                                pack_outline,
+                            ),
                             screenplay,
                             episode_id=episode_id,
                         )
@@ -2754,6 +2809,45 @@ async def run_storyboard_supervisor(
                 )
                 if not _run_has_write_ownership():
                     return cp
+                if full_repair_scene_pack:
+                    new_shots = candidate_board.shots[len(completed):]
+                    cp.repair_candidate_shots.extend(
+                        _shot_checkpoint_payload(shot)
+                        for shot in new_shots
+                    )
+                    completed = list(candidate_board.shots)
+                    cp.scene_pack_candidates.pop(batch_key, None)
+                    cp.phase = "GENERATING_SHOTS"
+                    cp.expected_total = len(pack_outline.shots)
+                    cp.next_shot_no = len(completed) + 1
+                    cp.last_repair = {
+                        **(cp.last_repair or {}),
+                        "status": "candidate_generating",
+                        "candidate_count": len(
+                            cp.repair_candidate_shots
+                        ),
+                    }
+                    save_checkpoint(cp, run_id=run_id)
+                    if run_id:
+                        evidence_repository.append_event(
+                            run_id,
+                            "SCENE_PACK_REPAIR_CANDIDATE_CHECKPOINTED",
+                            "info",
+                            (
+                                f"{context.scene_id} 已保存第 "
+                                f"{scene_start}~{scene_end} 镜隔离候选"
+                            ),
+                            payload={
+                                "batch_key": batch_key,
+                                "scene_id": context.scene_id,
+                                "shot_start": scene_start,
+                                "shot_end": scene_end,
+                                "candidate_count": len(
+                                    cp.repair_candidate_shots
+                                ),
+                            },
+                        )
+                    continue
                 conn.execute("SAVEPOINT scene_pack_commit")
                 try:
                     _sync_storyboard_shot_timing(
@@ -3217,8 +3311,17 @@ async def run_storyboard_supervisor(
                 return cp
             candidate_board = _merge_repair_candidate(official_board, cp)
             mode = str(repair.get("mode") or "replace")
+            committed_outline = _repair_outline_for_checkpoint(cp, outline)
+            candidate_episode = dict(ep_data)
+            if committed_outline is not None:
+                candidate_episode["storyboard_outline_json"] = (
+                    committed_outline.model_dump_json()
+                )
             candidate_evaluation = evaluate_storyboard_for_confirmation(
-                ep_data, candidate_board, screenplay, bible,
+                candidate_episode,
+                candidate_board,
+                screenplay,
+                bible,
                 has_real_bible=has_real_bible,
             )
             candidate_board = _validated_candidate_projection(
@@ -3285,7 +3388,6 @@ async def run_storyboard_supervisor(
                 completed = _repair_context_shots(conn, cp, ep_data["episode_no"])
                 continue
 
-            committed_outline = _repair_outline_for_checkpoint(cp, outline)
             _commit_repair_candidate(
                 conn, cp,
                 episode_id=episode_id,
@@ -4255,8 +4357,21 @@ def _apply_repair(
         window_start = frontier
         window_end = frontier
     elif strategy in {"repair_window", "move_shot"}:
-        window_start = frontier
-        window_end = min(max_no, frontier + 1) if max_no >= frontier else frontier
+        touched = sorted({
+            int(shot_no)
+            for shot_no in plan.touched_shot_nos
+            if 0 < int(shot_no) <= max_no
+        })
+        if len(touched) > 1:
+            window_start = touched[0]
+            window_end = touched[-1]
+        else:
+            window_start = frontier
+            window_end = (
+                min(max_no, frontier + 1)
+                if max_no >= frontier
+                else frontier
+            )
     else:
         cp.phase = "WAITING_HUMAN"
         cp.outcome = "SEMANTIC_REPAIR_NOT_EXECUTABLE"

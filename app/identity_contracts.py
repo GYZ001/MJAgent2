@@ -16,7 +16,6 @@ from app.schemas import (
     NarrativeIdentityContract,
     Shot,
     Storyboard,
-    StoryboardOutlineShot,
 )
 
 
@@ -587,57 +586,6 @@ def storyboard_visual_identity_relation(
         "unexpected_identity_ids": sorted(unexpected),
         "unexpected_display_names": list(dict.fromkeys(unexpected.values())),
     }
-
-
-def repair_shot_visual_prose_from_authority(
-    shot: Shot,
-    brief: StoryboardOutlineShot,
-    bible: Bible,
-    screenplay: EpisodeScreenplay,
-) -> list[dict[str, object]]:
-    """Project visual prose onto the exact typed shot identity relation.
-
-    Structured identity authority wins when an upstream task summary mentions
-    a participant that was not allocated to this shot's composition.  Once any
-    part of the visual envelope is proven contaminated, rebuild all three prose
-    fields from the approved visible subjects; a second generic description of
-    the same excluded person must not survive merely because it omits the
-    display name.  This uses no name, title, occupation, or story-vocabulary
-    classification.
-    """
-    allowed_ids = list(shot.visible_entity_ids or [])
-    allowed_relation = storyboard_visual_identity_relation(
-        shot,
-        allowed_ids,
-        bible,
-        screenplay,
-    )
-    if not allowed_relation["unexpected_identity_ids"]:
-        return []
-
-    allowed_names = list(allowed_relation["allowed_display_names"])
-    subject = "、".join(allowed_names) or "本镜既有可见主体"
-    neutral = {
-        "action_desc": (
-            f"{subject}保持在画面主体位置，连续完成本镜批准任务中的可见主动作"
-        ),
-        "first_frame_desc": f"{subject}处于本镜动作开始前的连续状态",
-        "last_frame_desc": f"{subject}完成本镜动作并保持结果状态",
-    }
-    repairs: list[dict[str, object]] = []
-    for field in ("action_desc", "first_frame_desc", "last_frame_desc"):
-        current = str(getattr(shot, field) or "").strip()
-        replacement = neutral[field]
-        if current == replacement:
-            continue
-        setattr(shot, field, replacement)
-        repairs.append({
-            "field": field,
-            "from": current,
-            "to": replacement,
-            "reason": "shot_visual_identity_authority",
-        })
-    return repairs
 
 
 def canonicalize_storyboard_operational_identities(

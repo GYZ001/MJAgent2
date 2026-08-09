@@ -8,8 +8,8 @@ from app.compiler import CompileError, compile_prompt, keyframe_visual_contract
 from app.identity_contracts import (
     IdentityContractError,
     canonicalize_storyboard_operational_identities,
+    identity_ids_in_authority_text,
     narrative_identity_resolver,
-    repair_shot_visual_prose_from_authority,
     storyboard_visual_identity_relation,
 )
 from app.schemas import (
@@ -24,7 +24,6 @@ from app.schemas import (
     ScriptScene,
     Shot,
     Storyboard,
-    StoryboardOutlineShot,
     SourceEvidence,
     SourceSpan,
     VoiceCanonical,
@@ -229,7 +228,7 @@ def test_keyframe_contract_uses_text_verification_for_contextual_identity() -> N
     )
 
 
-def test_authority_rebound_repairs_legacy_visual_prose_without_identity_lists() -> None:
+def test_visual_relation_reports_prose_violation_without_mutating_candidate() -> None:
     screenplay = _screenplay()
     shot = _shot(
         characters=["云吞七号"],
@@ -239,64 +238,27 @@ def test_authority_rebound_repairs_legacy_visual_prose_without_identity_lists() 
         first_frame_desc="阿烬与云吞七号并肩站立。",
         last_frame_desc="阿烬仍留在画面里。",
     )
-    brief = StoryboardOutlineShot(
-        shot_no=1,
-        primary_action="云吞七号独自推开木门。",
-        beat="云吞七号完成开门动作。",
-        state_in="云吞七号站在关闭的木门前。",
-        state_out="云吞七号已推开木门。",
-    )
-
-    repairs = repair_shot_visual_prose_from_authority(
-        shot,
-        brief,
-        _bible(),
-        screenplay,
-    )
-
-    assert {repair["field"] for repair in repairs} == {
-        "action_desc",
-        "first_frame_desc",
-        "last_frame_desc",
-    }
-    assert "阿烬" not in "\n".join((
+    before = (
         shot.action_desc,
         shot.first_frame_desc,
         shot.last_frame_desc,
-    ))
-
-
-def test_visual_prose_repair_keeps_action_desc_complete_after_identity_projection() -> None:
-    screenplay = _screenplay()
-    shot = _shot(
-        characters=["云吞七号"],
-        characters_visible=["云吞七号"],
-        visible_entity_ids=["transient-node"],
-        action_desc="阿烬站在云吞七号身旁回头。",
-        first_frame_desc="云吞七号独自站在门前。",
-        last_frame_desc="云吞七号独自完成动作。",
     )
-    brief = StoryboardOutlineShot(
-        shot_no=1,
-        primary_action="云吞七号完成动作",
-        beat="云吞七号独自行动",
-        state_in="云吞七号站在关闭的木门前。",
-        state_out="云吞七号已推开木门。",
-    )
-
-    repairs = repair_shot_visual_prose_from_authority(
+    relation = storyboard_visual_identity_relation(
         shot,
-        brief,
+        ["transient-node"],
         _bible(),
         screenplay,
     )
 
-    assert any(repair["field"] == "action_desc" for repair in repairs)
-    assert len(shot.action_desc) >= 18
-    assert "阿烬" not in shot.action_desc
+    assert relation["unexpected_identity_ids"] == ["newcomer-7"]
+    assert (
+        shot.action_desc,
+        shot.first_frame_desc,
+        shot.last_frame_desc,
+    ) == before
 
 
-def test_visual_prose_repair_uses_unique_typed_appearance_evidence() -> None:
+def test_visual_relation_uses_unique_typed_appearance_without_mutation() -> None:
     screenplay = _screenplay()
     shot = _shot(
         characters=["云吞七号"],
@@ -306,24 +268,29 @@ def test_visual_prose_repair_uses_unique_typed_appearance_evidence() -> None:
         first_frame_desc="云吞七号独自站在门前。",
         last_frame_desc="云吞七号独自完成动作。",
     )
-    brief = StoryboardOutlineShot(
-        shot_no=1,
-        primary_action="云吞七号独自推开木门并站稳。",
-        beat="云吞七号完成开门动作。",
-        state_in="云吞七号站在关闭的木门前。",
-        state_out="云吞七号已推开木门。",
-    )
-
-    repairs = repair_shot_visual_prose_from_authority(
+    before = shot.action_desc
+    relation = storyboard_visual_identity_relation(
         shot,
-        brief,
+        ["transient-node"],
         _bible(),
         screenplay,
     )
 
-    assert any(repair["field"] == "action_desc" for repair in repairs)
-    assert "银灰短发" not in shot.action_desc
-    assert "暗红披肩" not in shot.action_desc
+    assert relation["unexpected_identity_ids"] == ["newcomer-7"]
+    assert shot.action_desc == before
+
+
+def test_authority_text_relation_includes_bible_only_identity() -> None:
+    screenplay = _screenplay()
+
+    identity_ids = identity_ids_in_authority_text(
+        screenplay,
+        "主角走到门边看向阿烬，并说「静默议会已经离开」。",
+        bible=_bible(),
+        strip_dialogue=True,
+    )
+
+    assert identity_ids == {"主角", "newcomer-7"}
 
 
 def test_allowed_longer_display_name_masks_shorter_identity_prefix() -> None:
