@@ -472,6 +472,12 @@ class NarrativeBlueprintPatch(BaseModel):
     )
     delete_node_keys: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _require_change(self) -> NarrativeBlueprintPatch:
+        if not self.replacements and not self.delete_node_keys:
+            raise ValueError("蓝图补丁必须替换或删除至少一个节点")
+        return self
+
 
 class BlueprintSemanticIssue(BaseModel):
     code: Literal[

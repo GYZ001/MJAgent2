@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 import uuid
 
@@ -518,6 +519,68 @@ def test_blueprint_patch_replaces_node_without_changing_source_ownership() -> No
 
     assert apply_narrative_blueprint_patch(blueprint, patch) == 1
     assert blueprint.nodes[2].transition_cue == "咖啡杯匹配剪辑到台灯"
+
+
+def test_blueprint_patch_repairs_malformed_provider_json(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    replacement = blueprint.nodes[3].model_copy(deep=True)
+    replacement.transition_cue = "次日字幕后切到学校门口"
+    valid_patch = json.dumps(
+        {
+            "replacements": [{
+                "node_key": "n4",
+                "node": replacement.model_dump(mode="json"),
+            }],
+        },
+        ensure_ascii=False,
+    )
+    responses = iter([
+        '{"replacements":[{"node_key":"n4" "node":{}}]}',
+        valid_patch,
+    ])
+    calls: list[list[dict[str, str]]] = []
+    artifacts = []
+
+    async def fake_chat(messages, **_kwargs):
+        calls.append(messages)
+        return next(responses)
+
+    def fake_create_artifact(artifact, **_kwargs):
+        artifacts.append(artifact)
+        return {"id": f"art-{len(artifacts)}"}
+
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        fake_create_artifact,
+    )
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: 1 if key == "screenplay_format_retry_limit" else None,
+    )
+
+    repaired = asyncio.run(stages._repair_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-format-repair"},
+        source_text=SOURCE,
+        additional_errors=["[BLUEPRINT_TEST] n4 需要局部修复"],
+    ))
+
+    assert len(calls) == 2
+    assert "只修复下面响应的 JSON 格式和 Schema" in calls[1][0]["content"]
+    assert repaired.nodes[3].transition_cue == "次日字幕后切到学校门口"
+    raw_attempts = [
+        artifact
+        for artifact in artifacts
+        if artifact.type == "screenplay_narrative_blueprint_patch_raw"
+    ]
+    assert [artifact.content["outcome"] for artifact in raw_attempts] == [
+        "format_error",
+        "validated",
+    ]
 
 
 def test_blueprint_patch_can_split_one_node_without_losing_sources() -> None:

@@ -106,6 +106,40 @@ def test_downstream_prompt_compile_failure_is_a_structural_loop_issue(
     assert issue.severity == IssueSeverity.BLOCKER
 
 
+def test_prompt_compile_probe_cannot_mutate_candidate_continuity(
+    monkeypatch,
+) -> None:
+    screenplay = _screenplay()
+    screenplay.narrative_plan = NarrativeContinuityPlan(scope_id="e2")
+    previous = _shot(1)
+    current = _shot(2)
+    current.continuity_mode = "same_scene_cut"
+    current.continuity_from_prev = True
+
+    def mutate_probe(shot, *_args, **_kwargs):
+        shot.continuity_from_prev = False
+        return "compiled"
+
+    monkeypatch.setattr("app.compiler.compile_prompt", mutate_probe)
+    errors = _validate_storyboard_shot_draft(
+        _draft(current, is_final=False),
+        episode={"id": "e2", **_episode()},
+        bible=_bible(),
+        screenplay=screenplay,
+        completed_shots=[previous],
+        shot_no=2,
+        allow_finish=False,
+        must_finish=False,
+        narrative_authority=True,
+    )
+
+    assert current.continuity_from_prev is True
+    assert not any(
+        "continuity_from_prev=false" in str(error)
+        for error in errors
+    )
+
+
 def test_shot_visual_identity_must_belong_to_current_narrative_task() -> None:
     bible = _bible()
     bible.characters.append(Character(

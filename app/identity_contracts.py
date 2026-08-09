@@ -549,7 +549,11 @@ def storyboard_visual_identity_relation(
     # name, title, role, costume, or story-vocabulary list is maintained here.
     visible_identities = [
         identity for identity in resolver.identities
-        if identity.can_be_visible and identity.visual_canonical.strip()
+        if (
+            identity.can_be_visible
+            and not identity.is_collective
+            and identity.visual_canonical.strip()
+        )
     ]
     authority_anchors = {
         identity.identity_id: _semantic_alias_key(identity.visual_canonical)

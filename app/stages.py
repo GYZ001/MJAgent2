@@ -3779,13 +3779,64 @@ async def _repair_narrative_blueprint(
                 ensure_ascii=False,
             )
         )
-        raw = await model_gateway.chat(
+        trace = current_trace()
+        raw_artifact_ids: list[str] = []
+
+        def record_patch_attempt(attempt: dict[str, Any]) -> None:
+            raw_artifact = evidence_repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_narrative_blueprint_patch_raw",
+                    scope_type="episode",
+                    scope_id=str(episode.get("id") or ""),
+                    status="candidate",
+                    trust_level="T0",
+                    content={
+                        "raw_output": str(attempt.get("raw_response") or ""),
+                        "round": round_no,
+                        "outcome": str(attempt.get("outcome") or ""),
+                        "format_attempt": int(attempt.get("format_attempt") or 0),
+                        "semantic_attempt": int(
+                            attempt.get("semantic_attempt") or 0
+                        ),
+                    },
+                    contract_version=BLUEPRINT_VERSION,
+                    prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                ),
+                step_run_id=trace.step_run_id,
+            )
+            raw_artifact_ids.append(str(raw_artifact["id"]))
+
+        repair_input_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "blueprint_hash": _narrative_blueprint_content_hash(blueprint),
+                    "errors": errors,
+                    "selected_node_keys": [
+                        node.get("key") for node in selected_nodes
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        patch = await model_gateway.chat_structured(
             [
                 {"role": "system", "content": SYSTEM_PREFIX},
                 {"role": "user", "content": repair_prompt},
             ],
+            model_type=NarrativeBlueprintPatch,
+            validate=None,
+            operation_id=(
+                f"screenplay.blueprint.patch:{BLUEPRINT_VERSION}:"
+                f"{repair_input_hash}:{round_no}"
+            ),
             temperature=0.1,
             max_tokens=16384,
+            format_retry_limit=int(
+                get_setting("screenplay_format_retry_limit") or 1
+            ),
+            semantic_retry_limit=0,
             call_meta={
                 "stage": "剧本蓝图局部语义修复",
                 "stage_key": "screenplay_blueprint_patch",
@@ -3797,26 +3848,7 @@ async def _repair_narrative_blueprint(
                 "expected_json": True,
                 "reuse_successful_operation": True,
             },
-        )
-        trace = current_trace()
-        raw_artifact = evidence_repository.create_artifact(
-            EvidenceArtifact(
-                type="screenplay_narrative_blueprint_patch_raw",
-                scope_type="episode",
-                scope_id=str(episode.get("id") or ""),
-                status="candidate",
-                trust_level="T0",
-                content={"raw_output": raw, "round": round_no},
-                contract_version=BLUEPRINT_VERSION,
-                prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
-            ),
-            step_run_id=trace.step_run_id,
-        )
-        patch = NarrativeBlueprintPatch.model_validate(
-            extract_json(
-                normalize_blueprint_raw_json(raw),
-                repair_unescaped_inner_quotes=True,
-            ),
+            on_attempt=record_patch_attempt,
         )
         changed = apply_narrative_blueprint_patch(
             blueprint,
@@ -3834,7 +3866,7 @@ async def _repair_narrative_blueprint(
                 status="validated",
                 trust_level="T1",
                 content=patch.model_dump(mode="json"),
-                parent_artifact_ids=[raw_artifact["id"]],
+                parent_artifact_ids=raw_artifact_ids[-1:],
                 contract_version=BLUEPRINT_VERSION,
                 prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                 model_snapshot={"replaced_nodes": changed},
@@ -6736,7 +6768,11 @@ def _validate_storyboard_shot_draft(draft: StoryboardShotDraft, *, episode: dict
     try:
         from app.compiler import CompileError, compile_prompt
 
-        compile_prompt(current, bible, screenplay=screenplay)
+        compile_prompt(
+            current.model_copy(deep=True),
+            bible,
+            screenplay=screenplay,
+        )
     except CompileError as exc:
         structural_issues.append(Issue(
             code="SHOT_PROMPT_COMPILE_FAILED",

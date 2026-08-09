@@ -280,6 +280,27 @@ def test_visual_relation_uses_unique_typed_appearance_without_mutation() -> None
     assert shot.action_desc == before
 
 
+def test_visual_relation_does_not_infer_collective_from_action_prose() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        visible_entity_ids=["transient-node"],
+        action_desc="云吞七号独自关门，门外的灰袍队列已经离开。",
+        first_frame_desc="多个外观各异的灰袍成员离开后，厅内只剩云吞七号。",
+        last_frame_desc="云吞七号独自站在关闭的木门前。",
+    )
+
+    relation = storyboard_visual_identity_relation(
+        shot,
+        ["transient-node"],
+        _bible(),
+        screenplay,
+    )
+
+    assert relation["unexpected_identity_ids"] == []
+
+
 def test_authority_text_relation_includes_bible_only_identity() -> None:
     screenplay = _screenplay()
 
