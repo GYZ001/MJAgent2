@@ -3536,8 +3536,17 @@ async def run_storyboard_supervisor(
             if outline is not None
             else bible
         )
+        evaluation_episode = dict(ep_data)
+        if outline is not None:
+            # ``ep_data`` is the run-start snapshot.  The approved outline may
+            # have been compiled or deterministically rebound during this run,
+            # so confirmation must read the current in-memory authority rather
+            # than falling back to each shot's narrower selected cast.
+            evaluation_episode["storyboard_outline_json"] = (
+                outline.model_dump_json()
+            )
         evaluation = evaluate_storyboard_for_confirmation(
-            ep_data,
+            evaluation_episode,
             full_board,
             screenplay,
             evaluation_bible,
