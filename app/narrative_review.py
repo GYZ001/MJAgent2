@@ -7,6 +7,7 @@ before a separate comparator is allowed to see the intended audience paths.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -102,16 +103,39 @@ def _canonicalize_visible_evidence_handles(
         for shot in ordered_storyboard
         if str(shot.get("shot_id") or "")
     }
+    handles_by_shot_no = {
+        int(shot["shot_no"]): [
+            str(handle)
+            for handle in shot.get("observable_evidence_handles") or []
+            if str(handle)
+        ]
+        for shot in ordered_storyboard
+        if isinstance(shot.get("shot_no"), int)
+    }
     canonical: list[str] = []
     for raw_id in evidence_ids:
         evidence_id = str(raw_id or "").strip()
         if not evidence_id:
             continue
-        replacements = (
-            [evidence_id]
-            if evidence_id in visible_handles
-            else handles_by_shot.get(evidence_id, [evidence_id])
-        )
+        replacements = [evidence_id]
+        if evidence_id not in visible_handles:
+            replacements = handles_by_shot.get(evidence_id, [])
+            if not replacements:
+                # A reader can confuse the ordinal displayed on a shot with the
+                # graph-owned evidence ordinal (for example EV-135 for shot
+                # 135, while that shot actually exposes EV-129).  Reconcile the
+                # typed ordinal alias only when the proposed handle does not
+                # already exist and the referenced shot is present.  Unknown
+                # references remain unchanged so the visibility gate still
+                # rejects them.
+                ordinal_alias = re.fullmatch(r"EV-0*(\d+)", evidence_id)
+                if ordinal_alias:
+                    replacements = handles_by_shot_no.get(
+                        int(ordinal_alias.group(1)),
+                        [],
+                    )
+            if not replacements:
+                replacements = [evidence_id]
         for replacement in replacements:
             if replacement not in canonical:
                 canonical.append(replacement)

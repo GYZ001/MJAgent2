@@ -67,18 +67,45 @@ def test_blind_review_maps_visible_shot_ids_to_evidence_handles() -> None:
     ordered_storyboard = [
         {
             "shot_id": "SH001",
+            "shot_no": 1,
             "observable_evidence_handles": ["EV-1"],
         },
         {
             "shot_id": "SH002",
+            "shot_no": 2,
             "observable_evidence_handles": ["EV-1", "EV-2"],
+        },
+        {
+            "shot_id": "SH135",
+            "shot_no": 135,
+            "observable_evidence_handles": ["EV-129"],
         },
     ]
 
     assert _canonicalize_visible_evidence_handles(
-        ["SH001", "SH002", "EV-2", "unknown"],
+        ["SH001", "SH002", "EV-2", "EV-135", "unknown"],
         ordered_storyboard,
-    ) == ["EV-1", "EV-2", "unknown"]
+    ) == ["EV-1", "EV-2", "EV-129", "unknown"]
+
+
+def test_blind_review_does_not_remap_existing_or_unknown_evidence_handles() -> None:
+    ordered_storyboard = [
+        {
+            "shot_id": "SH007",
+            "shot_no": 7,
+            "observable_evidence_handles": ["EV-7"],
+        },
+        {
+            "shot_id": "SH135",
+            "shot_no": 135,
+            "observable_evidence_handles": ["EV-129"],
+        },
+    ]
+
+    assert _canonicalize_visible_evidence_handles(
+        ["EV-7", "EV-999", "unsupported-135"],
+        ordered_storyboard,
+    ) == ["EV-7", "EV-999", "unsupported-135"]
 
 
 async def _passing_chat(messages, **kwargs):
