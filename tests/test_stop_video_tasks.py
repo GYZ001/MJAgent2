@@ -372,3 +372,78 @@ def test_fresh_supervisor_refuses_paused_job_with_changed_release(monkeypatch) -
     assert conn.execute(
         "SELECT status,owner_run_id FROM jobs WHERE id='j1'"
     ).fetchone()[:] == ("paused", None)
+
+
+def test_fresh_supervisor_recovers_abandoned_provider_handle(monkeypatch) -> None:
+    conn = _conn()
+    authority_snapshot = {
+        "qualification_version": "authority-q1:asset-old",
+        "published_screenplay_artifact_id": "screenplay-artifact",
+        "confirmed_storyboard_artifact_id": "storyboard-artifact",
+        "screenplay_revision": "screenplay-revision",
+        "storyboard_revision": "storyboard-revision",
+    }
+    conn.execute(
+        """UPDATE episodes
+              SET video_completion_mode='complete', active_video_run_id='run-new'
+            WHERE id='e'"""
+    )
+    conn.execute(
+        """UPDATE shot_versions
+              SET status='abandoned',provider_task_id='provider-existing-2',
+                  image_inputs=?
+            WHERE id='v2'""",
+        (json.dumps({"review_dependency_snapshot": authority_snapshot}),),
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET status='abandoned',cancellation_requested=1,abandoned=1,
+                  provider_operation_id='video-create-v2',
+                  provider_create_state='accepted',provider_non_cancellable=1,
+                  provider_submitted_at=10
+            WHERE id='j2'"""
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('budget-j2','j2','episode','e',4,'released',0)"""
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,status,operation_id,response_json
+           ) VALUES(10,'video_create','OK','video-create-v2',?)""",
+        (json.dumps({"id": "provider-existing-2"}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+    queued: list[str] = []
+    monkeypatch.setattr(
+        worker, "_enqueue_for_current_status", lambda job_id: queued.append(job_id),
+    )
+    current_snapshot = {
+        **authority_snapshot,
+        "qualification_version": "authority-q1:asset-new",
+        "narrative_authority_required": True,
+        "narrative_authority_verified": True,
+        "narrative_authority_version": "authority-q1",
+    }
+
+    result = worker._resume_reused_paused_job(
+        "v2",
+        supervisor_run_id="run-new",
+        dependency_snapshot=current_snapshot,
+    )
+
+    assert result and result["provider_already_accepted"] is True
+    assert conn.execute(
+        """SELECT status,owner_run_id,cancellation_requested,abandoned
+             FROM jobs WHERE id='j2'"""
+    ).fetchone()[:] == ("waiting_provider", "run-new", 0, 0)
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='j2'"
+    ).fetchone()["status"] == "reserved"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_calls WHERE kind='video_create'"
+    ).fetchone()[0] == 1
+    assert queued == ["j2"]

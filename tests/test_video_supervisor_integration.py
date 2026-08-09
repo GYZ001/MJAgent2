@@ -229,6 +229,67 @@ async def test_dispatch_refreshes_heartbeat_before_watchdog_can_take_over(
 
 
 @pytest.mark.asyncio
+async def test_watchdog_rechecks_heartbeat_before_takeover(memdb, monkeypatch):
+    import app.task_registry as task_registry
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+    run_id = evidence_repository.create_run(
+        workflow_type="episode_video_completion",
+        scope_type="episode",
+        scope_id=eid,
+        input_fingerprint="watchdog-heartbeat-race",
+        deadline_at=500,
+    )
+    memdb.execute(
+        "UPDATE workflow_runs SET status='RUNNING',started_at=100,updated_at=100 WHERE id=?",
+        (run_id,),
+    )
+    memdb.execute(
+        """UPDATE episodes
+              SET status='generating',video_completion_mode='complete',
+                  active_video_run_id=?
+            WHERE id=?""",
+        (run_id, eid),
+    )
+    memdb.commit()
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        run_id=run_id,
+        phase="DISPATCHING",
+        started_at=100,
+        deadline_at=500,
+        last_heartbeat_at=100,
+        budget={"cap_cny": 150},
+        coverage={"total": 1, "adopted": 0},
+    )
+    save_checkpoint(checkpoint, run_id=run_id)
+    monkeypatch.setattr(video_supervisor, "now", lambda: 200.0)
+    monkeypatch.setattr(task_registry, "active", lambda *_args: True)
+
+    def refresh_during_authority_check(*_args, **_kwargs):
+        memdb.execute(
+            "UPDATE workflow_runs SET updated_at=195 WHERE id=?",
+            (run_id,),
+        )
+        memdb.commit()
+        return None
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_verify_supervisor_paid_authority",
+        refresh_during_authority_check,
+    )
+
+    assert await reconcile_stale_video_supervisors() == 0
+    row = memdb.execute(
+        "SELECT active_video_run_id FROM episodes WHERE id=?",
+        (eid,),
+    ).fetchone()
+    assert row["active_video_run_id"] == run_id
+
+
+@pytest.mark.asyncio
 async def test_async_dispatch_keeps_event_loop_responsive(monkeypatch):
     import threading
     import time
@@ -325,6 +386,68 @@ async def test_async_dispatch_refreshes_heartbeat_while_worker_is_busy(monkeypat
         heartbeat_interval_s=0.01,
     )
     assert state["heartbeats_during_dispatch"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_async_dispatch_cancellation_waits_for_worker_thread(monkeypatch):
+    import threading
+
+    import app.video_supervisor as video_supervisor
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def slow_dispatch(*_args, **_kwargs):
+        started.set()
+        release.wait(timeout=1)
+        finished.set()
+        return True
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_supervisor_checks_can_use_worker_thread",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        video_supervisor,
+        "_dispatch_with_heartbeat",
+        slow_dispatch,
+    )
+    monkeypatch.setattr(
+        video_supervisor,
+        "_refresh_supervisor_heartbeat",
+        lambda *_args, **_kwargs: True,
+    )
+    entry = ShotCoverageEntry(shot_no=1, shot_id="shot-1")
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id="episode-1",
+        run_id="run-1",
+    )
+    task = asyncio.create_task(
+        video_supervisor._dispatch_with_heartbeat_async(
+            entry,
+            episode_id="episode-1",
+            run_id="run-1",
+            cp=checkpoint,
+            first=True,
+            heartbeat_interval_s=0.01,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 0.5)
+
+    task.cancel()
+    await asyncio.sleep(0.02)
+    assert task.done() is False
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+    assert not any(
+        pending.get_name().startswith("video-dispatch-heartbeat:episode-1")
+        for pending in asyncio.all_tasks()
+        if pending is not asyncio.current_task()
+    )
 
 
 def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:

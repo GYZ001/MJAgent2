@@ -170,3 +170,10 @@ New watchdog issue:
 | ID | Hypothesis | Status | Evidence |
 |----|------------|--------|----------|
 | M | Long offloaded dispatch lacks an in-flight heartbeat and is falsely taken over by the watchdog | Confirmed | 68.2-second dispatch versus 60-second stale threshold |
+
+Watchdog fix verification plan:
+- Refresh the active run every 20 seconds while a dispatch worker thread runs.
+- Re-read owner and heartbeat immediately before watchdog takeover.
+- On cancellation, keep the heartbeat alive until the worker thread exits.
+- Recover an exact abandoned provider handle on the next explicit fresh run
+  instead of creating a duplicate provider operation.

@@ -899,18 +899,23 @@ def _resume_reused_paused_job(
     supervisor_run_id: str | None,
     dependency_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Transfer an exact paused attempt to the current completion Supervisor."""
+    """Transfer an exact interrupted attempt to the current completion Supervisor."""
     if not supervisor_run_id:
         return None
     conn = get_conn()
     row = conn.execute(
         """SELECT j.*, v.status AS version_status, v.provider_task_id,
-                  v.image_inputs, e.active_video_run_id, e.video_completion_mode
+                  v.image_inputs, e.active_video_run_id, e.video_completion_mode,
+                  s.duration_s
              FROM jobs j
              JOIN shot_versions v ON v.id=j.version_id
              JOIN episodes e ON e.id=j.episode_id
-            WHERE j.version_id=? AND j.kind='video' AND j.status='paused'
-              AND j.cancellation_requested=0 AND j.abandoned=0
+             JOIN shots s ON s.id=j.shot_id
+            WHERE j.version_id=? AND j.kind='video'
+              AND (
+                  (j.status='paused' AND j.cancellation_requested=0 AND j.abandoned=0)
+                  OR (j.status='abandoned' AND j.provider_non_cancellable=1)
+              )
             ORDER BY j.created_at DESC LIMIT 1""",
         (version_id,),
     ).fetchone()
@@ -990,18 +995,6 @@ def _resume_reused_paused_job(
             "[REVIEW_DEPENDENCY_STALE] 暂停任务绑定的发布依赖已变化，禁止直接恢复"
         )
 
-    reservation = conn.execute(
-        "SELECT status FROM budget_reservations WHERE job_id=?",
-        (row["id"],),
-    ).fetchone()
-    if (
-        reservation is None
-        or reservation["status"] not in {"reserved", "running"}
-    ):
-        raise ValueError(
-            "[VIDEO_BUDGET_RESERVATION_REQUIRED] 暂停任务缺少有效预算预留，禁止恢复"
-        )
-
     provider_task_id = str(row["provider_task_id"] or "").strip()
     submitted_at = row["provider_submitted_at"]
     provider_may_have_accepted = bool(
@@ -1026,15 +1019,42 @@ def _resume_reused_paused_job(
         provider_task_id = recovered_task_id
         submitted_at = recovered_at
 
+    if row["status"] == "abandoned" and not provider_task_id:
+        raise ValueError(
+            "[VIDEO_PROVIDER_HANDLE_REQUIRED] 已放弃任务没有供应商接单证据，禁止复活"
+        )
+    reservation = conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id=?",
+        (row["id"],),
+    ).fetchone()
+    reservation_active = bool(
+        reservation is not None
+        and reservation["status"] in {"reserved", "running"}
+    )
+    if not reservation_active and row["status"] == "abandoned" and provider_task_id:
+        from app.video_cost_model import initial_shot_generation_cost
+
+        reservation_active = media_scheduler.reserve_budget(
+            row["id"],
+            row["episode_id"],
+            initial_shot_generation_cost(float(row["duration_s"] or 0)),
+            episode_video_budget_limit(str(row["episode_id"])),
+            conn=conn,
+        )
+    if not reservation_active:
+        raise ValueError(
+            "[VIDEO_BUDGET_RESERVATION_REQUIRED] 中断任务缺少有效预算预留，禁止恢复"
+        )
+
     next_status = "waiting_provider" if provider_task_id else "queued"
     updated = conn.execute(
         """UPDATE jobs
               SET status=?, error=NULL, owner_run_id=?,
                   provider_create_state=?, provider_non_cancellable=?,
                   provider_submitted_at=?, lease_owner=NULL,
-                  lease_expires_at=NULL, next_retry_at=NULL, updated_at=?
-            WHERE id=? AND status='paused'
-              AND cancellation_requested=0 AND abandoned=0""",
+                  lease_expires_at=NULL, next_retry_at=NULL,
+                  cancellation_requested=0, abandoned=0, updated_at=?
+            WHERE id=? AND status=?""",
         (
             next_status,
             supervisor_run_id,
@@ -1043,6 +1063,7 @@ def _resume_reused_paused_job(
             submitted_at,
             now(),
             row["id"],
+            row["status"],
         ),
     )
     if updated.rowcount != 1:
@@ -1054,7 +1075,8 @@ def _resume_reused_paused_job(
             (provider_task_id, version_id),
         )
     conn.execute(
-        "UPDATE shot_versions SET status='queued', error=NULL WHERE id=? AND status='paused'",
+        """UPDATE shot_versions SET status='queued', error=NULL
+            WHERE id=? AND status IN ('paused','abandoned')""",
         (version_id,),
     )
     conn.execute(
@@ -1593,16 +1615,22 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     else:
         key = make_idem_key(key_material)
         # 复用成功版；同时挡住仍在排队/运行中的同键任务，避免双击重复付费。
+        reusable_statuses = [
+            "succeeded", "queued", "running", "waiting_provider",
+            "waiting_retry", "waiting_human", "paused_budget", "paused",
+        ]
+        if supervisor_run_id:
+            reusable_statuses.append("abandoned")
+        status_marks = ",".join("?" for _ in reusable_statuses)
         existing = conn.execute(
             "SELECT * FROM shot_versions WHERE shot_id=? AND idem_key=? "
-            "AND status IN ('succeeded','queued','running','waiting_provider',"
-            "'waiting_retry','waiting_human','paused_budget','paused') "
+            f"AND status IN ({status_marks}) "
             "ORDER BY CASE status WHEN 'succeeded' THEN 0 ELSE 1 END, version_no DESC "
             "LIMIT 1",
-            (shot_id, key)).fetchone()
+            (shot_id, key, *reusable_statuses)).fetchone()
         if existing:
             result = {"reused": True, "version_id": existing["id"]}
-            if existing["status"] == "paused":
+            if existing["status"] in {"paused", "abandoned"}:
                 resumed = _resume_reused_paused_job(
                     existing["id"],
                     supervisor_run_id=supervisor_run_id,
