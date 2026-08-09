@@ -163,6 +163,104 @@ def test_recovered_provider_poll_persists_stage_progress(monkeypatch) -> None:
     }
 
 
+def test_hot_scale_down_drains_claimed_job_without_cancelling(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO jobs(id,kind,status,created_at,updated_at) "
+        "VALUES('j-drain','video','queued',1,1)"
+    )
+    conn.commit()
+
+    async def run() -> None:
+        claimed = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = False
+        reference_queue: asyncio.Queue[str] = asyncio.Queue()
+        workers: list[asyncio.Task] = []
+
+        async def blocked_run_job(job_id: str, *, lease_owner: str | None = None) -> None:
+            nonlocal cancelled
+            row = conn.execute(
+                "SELECT status,lease_owner FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            assert dict(row) == {"status": "running", "lease_owner": lease_owner}
+            claimed.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            conn.execute(
+                """UPDATE jobs
+                      SET status='succeeded',lease_owner=NULL,lease_expires_at=NULL
+                    WHERE id=? AND lease_owner=?""",
+                (job_id, lease_owner),
+            )
+            conn.commit()
+
+        monkeypatch.setattr(worker, "get_conn", lambda: conn)
+        monkeypatch.setattr(worker.media_scheduler, "get_conn", lambda: conn)
+        monkeypatch.setattr(worker, "_run_job", blocked_run_job)
+        monkeypatch.setattr(worker, "_queue", reference_queue)
+        monkeypatch.setattr(worker, "_video_ready_queue", asyncio.Queue())
+        monkeypatch.setattr(worker, "_poll_queue", asyncio.Queue())
+        monkeypatch.setattr(worker, "_workers", workers)
+        monkeypatch.setattr(worker, "_video_ready_workers", [])
+        monkeypatch.setattr(worker, "_poll_workers", [])
+        monkeypatch.setattr(worker, "_worker_retire_events", {})
+        monkeypatch.setattr(
+            "app.media_pipeline.concurrency.channel_limit",
+            lambda _resource: 0,
+        )
+
+        worker.ensure_workers(2)
+        spawned = list(workers)
+        reference_queue.put_nowait("j-drain")
+        try:
+            await asyncio.wait_for(claimed.wait(), timeout=1)
+            claimed_row = conn.execute(
+                "SELECT status,lease_owner FROM jobs WHERE id='j-drain'"
+            ).fetchone()
+            active = next(
+                task for task in spawned
+                if task.get_name() == claimed_row["lease_owner"]
+            )
+
+            worker.ensure_workers(0)
+            for _ in range(20):
+                if all(task.done() for task in spawned if task is not active):
+                    break
+                await asyncio.sleep(0)
+
+            assert not active.done()
+            assert not active.cancelled()
+            assert cancelled is False
+            assert all(task.done() for task in spawned if task is not active)
+
+            release.set()
+            await asyncio.wait_for(active, timeout=1)
+            await asyncio.sleep(0)
+
+            terminal = conn.execute(
+                "SELECT status,lease_owner,lease_expires_at FROM jobs WHERE id='j-drain'"
+            ).fetchone()
+            assert dict(terminal) == {
+                "status": "succeeded",
+                "lease_owner": None,
+                "lease_expires_at": None,
+            }
+            assert cancelled is False
+            assert workers == []
+        finally:
+            release.set()
+            for task in spawned:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*spawned, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_channel_defaults_balanced() -> None:
     assert CHANNEL_DEFAULTS[S.RESOURCE_VIDEO_INFLIGHT] == 15
     assert CHANNEL_DEFAULTS[S.RESOURCE_IMAGE] == 4

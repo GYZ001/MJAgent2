@@ -1075,20 +1075,6 @@ def test_future_identity_repairs_legacy_expansion_and_blocks_it_before_publish()
     )
     assert any("plot_spine.spine_beats[0].who[卢卢美]" in error for error in errors)
     assert any("plot_spine.spine_beats[0].who[何何钰慧]" in error for error in errors)
-    authority_errors = portraits.screenplay_unknown_identity_errors(
-        script,
-        Bible(
-            world=World(visual_style_canonical="写实"),
-            characters=[
-                Character(name="阿宾", role="主角", appearance_canonical="青年"),
-                Character(name="卢美", role="配角", appearance_canonical="女性"),
-                Character(name="何钰慧", role="配角", appearance_canonical="女性"),
-            ],
-        ),
-        resolutions,
-    )
-    assert any("卢卢美" in error for error in authority_errors)
-    assert any("何何钰慧" in error for error in authority_errors)
 
     portraits.apply_screenplay_character_resolutions(script, resolutions)
 

@@ -54,9 +54,6 @@ def _narrative_key_line_catalog(
                 spoken.strip(),
                 text,
             )
-    # #region debug-point A:short-key-line-relations
-    import json as _debug_json, urllib.request as _debug_request; _debug_payload = {"sessionId": "content-gen-validation", "runId": "post-fix", "hypothesisId": "A", "location": "app/narrative_outline.py:_narrative_key_line_catalog", "msg": "[DEBUG] Key-line relation catalog built", "data": {"catalog_size": len(catalog), "short_relations": [{"key_id": key_id, "speaker": speaker, "spoken_relation": _relation_text(spoken), "relation_length": len(_relation_text(spoken))} for key_id, (speaker, spoken, _canonical) in catalog.items() if len(_relation_text(spoken)) <= 4]}}; exec("try:\n _debug_env = open('.dbg/content-gen-validation.env', encoding='utf-8').read(); _debug_url = next((line.split('=', 1)[1] for line in _debug_env.splitlines() if line.startswith('DEBUG_SERVER_URL=')), 'http://127.0.0.1:7777/event'); _debug_request.urlopen(_debug_request.Request(_debug_url, data=_debug_json.dumps(_debug_payload, ensure_ascii=False).encode(), headers={'Content-Type': 'application/json'}), timeout=1).read()\nexcept Exception:\n pass")
-    # #endregion
     return catalog
 
 
@@ -122,9 +119,6 @@ def _action_key_line_ids(
                         for fragment_id in fragment_ids:
                             matched_modes.setdefault(fragment_id, "contiguous_fragments")
                     break
-    # #region debug-point B:action-dialogue-match-mode
-    import json as _debug_json, urllib.request as _debug_request; _debug_payload = {"sessionId": "content-gen-validation", "runId": "post-fix", "hypothesisId": "B", "location": "app/narrative_outline.py:_action_key_line_ids", "msg": "[DEBUG] Action-to-dialogue relation candidates matched", "data": {"action_ids": list(action_ids), "quoted_relations": sorted(quoted_lines), "matches": [{"key_id": key_id, "match_mode": matched_modes[key_id]} for key_id, _speaker, _spoken in catalog_entries if key_id in matched_modes]}}; exec("try:\n _debug_env = open('.dbg/content-gen-validation.env', encoding='utf-8').read(); _debug_url = next((line.split('=', 1)[1] for line in _debug_env.splitlines() if line.startswith('DEBUG_SERVER_URL=')), 'http://127.0.0.1:7777/event'); _debug_request.urlopen(_debug_request.Request(_debug_url, data=_debug_json.dumps(_debug_payload, ensure_ascii=False).encode(), headers={'Content-Type': 'application/json'}), timeout=1).read()\nexcept Exception:\n pass")
-    # #endregion
     return [
         key_id
         for key_id, _speaker, _spoken in catalog_entries
@@ -327,9 +321,6 @@ def narrative_outline_action_delivery_errors(
                 f"当前镜头交付为 {actual}，缺失 {missing}，错属 {misplaced}；"
                 "请按 action_id 的说话人和原句关系重投影"
             )
-    # #region debug-point C:event-delivery-mismatches
-    import json as _debug_json, urllib.request as _debug_request; _debug_payload = {"sessionId": "content-gen-validation", "runId": "post-fix", "hypothesisId": "C", "location": "app/narrative_outline.py:narrative_outline_action_delivery_errors", "msg": "[DEBUG] Event dialogue delivery validation finished", "data": {"error_count": len(errors), "errors": errors}}; exec("try:\n _debug_env = open('.dbg/content-gen-validation.env', encoding='utf-8').read(); _debug_url = next((line.split('=', 1)[1] for line in _debug_env.splitlines() if line.startswith('DEBUG_SERVER_URL=')), 'http://127.0.0.1:7777/event'); _debug_request.urlopen(_debug_request.Request(_debug_url, data=_debug_json.dumps(_debug_payload, ensure_ascii=False).encode(), headers={'Content-Type': 'application/json'}), timeout=1).read()\nexcept Exception:\n pass")
-    # #endregion
     return errors
 
 

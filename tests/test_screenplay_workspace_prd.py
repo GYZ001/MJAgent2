@@ -376,7 +376,7 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
     _seed_episode(with_artifact=True)
     first = _valid_script()
     first.logline += "（首个正式发布版）"
-    first.full_script_text += "\n谷言把钥匙收进掌心。"
+    first.full_script_text += "\n门外再次响起更重的敲门声。\n谷言把钥匙收进掌心。"
     with enter_handler():
         initial = asyncio.run(api.edit_screenplay("e1", {
             "screenplay": first.model_dump(mode="json"),
@@ -422,7 +422,7 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
     )
     second = _valid_script()
     second.logline += "（不应发布的新版本）"
-    second.full_script_text += "\n谷言没有收下钥匙。"
+    second.full_script_text += "\n门外再次响起更重的敲门声。\n谷言没有收下钥匙。"
     with enter_handler(), pytest.raises(
         RuntimeError,
         match="injected certificate consumption failure",
@@ -466,11 +466,9 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
             ORDER BY created_at DESC LIMIT 1""",
         (before["screenplay_production_revision_id"],),
     ).fetchone()
-    assert tuple(failed_candidate) == (
-        "active",
-        failed_candidate["working_artifact_id"],
-        None,
-    )
+    assert failed_candidate["status"] == "active"
+    assert failed_candidate["working_artifact_id"]
+    assert failed_candidate["published_artifact_id"] is None
     assert conn.execute(
         "SELECT status FROM artifacts WHERE id=?",
         (failed_candidate["working_artifact_id"],),
