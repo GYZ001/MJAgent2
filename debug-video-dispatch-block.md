@@ -177,3 +177,19 @@ Watchdog fix verification plan:
 - On cancellation, keep the heartbeat alive until the worker thread exits.
 - Recover an exact abandoned provider handle on the next explicit fresh run
   instead of creating a duplicate provider operation.
+
+Post-fix watchdog evidence:
+- Run `run_75e0079ba772` survived shot-5 and shot-6 dispatches lasting 83.4
+  seconds and 139.9 seconds respectively.
+- The active owner remained unchanged and the durable heartbeat stayed below
+  20 seconds old.
+
+New dependency-progress issue:
+- Shot 1 completed technical validation and its media job succeeded while the
+  Supervisor was still inside the first-pass dispatch loop.
+- Adoption remained empty, so FIRST_FRAME jobs continued waiting for an
+  adopted upstream tail until the entire 137-shot loop could finish.
+
+| ID | Hypothesis | Status | Evidence |
+|----|------------|--------|----------|
+| N | Candidate adoption occurs only between full Supervisor ticks, delaying dependency release during a long dispatch batch | Confirmed | Shot 1 succeeded with `adopted_version_id=NULL` while dispatch continued |

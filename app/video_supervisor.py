@@ -2473,13 +2473,27 @@ def _adopt_ready_candidates(
 ) -> int:
     """正常运行期采用首个技术有效候选；QA 只影响风险展示。"""
     adopted = 0
+    from app.video_plan import reconcile_adopted_revision
+
     for entry in ledger.entries:
-        if entry.adopted_version_id or not entry.best_version_id:
+        if entry.adopted_version_id:
+            reconcile_adopted_revision(
+                entry.shot_id,
+                entry.adopted_version_id,
+            )
+            continue
+        if not entry.best_version_id:
             continue
         result = select_best_video_candidate(entry.shot_id, force_best=False)
         if not result:
             continue
         entry.adopted_version_id = result.get("version_id")
+        if not entry.adopted_version_id:
+            continue
+        reconcile_adopted_revision(
+            entry.shot_id,
+            entry.adopted_version_id,
+        )
         entry.fallback_reason = result.get("fallback_reason")
         adopted += 1
         if run_id:
@@ -2490,6 +2504,63 @@ def _adopt_ready_candidates(
                 f"第 {entry.shot_no} 镜由 Supervisor 采用候选",
                 payload={"shot_no": entry.shot_no, "version_id": entry.adopted_version_id},
             )
+    return adopted
+
+
+def _has_unadopted_ready_candidate(episode_id: str) -> bool:
+    row = get_conn().execute(
+        """SELECT 1
+             FROM shots s
+             JOIN shot_versions v ON v.shot_id=s.id
+            WHERE s.episode_id=? AND s.adopted_version_id IS NULL
+              AND v.status='succeeded'
+              AND v.video_path IS NOT NULL AND v.video_path!=''
+              AND json_valid(v.technical_validation_json)
+              AND json_extract(v.technical_validation_json,'$.passed')=1
+            LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    return row is not None
+
+
+async def _adopt_ready_candidates_incrementally(
+    episode_id: str,
+    *,
+    cp: VideoSupervisorCheckpoint,
+    fallback_quota: int,
+    run_id: str | None,
+) -> int:
+    threaded = _supervisor_checks_can_use_worker_thread()
+    has_ready = (
+        await asyncio.to_thread(_has_unadopted_ready_candidate, episode_id)
+        if threaded
+        else _has_unadopted_ready_candidate(episode_id)
+    )
+    if not has_ready:
+        return 0
+    observed = await _rebuild_coverage_ledger_async(
+        episode_id,
+        cp=cp,
+        fallback_quota=fallback_quota,
+    )
+    adopted = (
+        await asyncio.to_thread(
+            _adopt_ready_candidates,
+            observed,
+            run_id=run_id,
+        )
+        if threaded
+        else _adopt_ready_candidates(observed, run_id=run_id)
+    )
+    if not adopted:
+        return 0
+    refreshed = await _rebuild_coverage_ledger_async(
+        episode_id,
+        cp=cp,
+        fallback_quota=fallback_quota,
+    )
+    _merge_shot_state(cp, refreshed)
+    save_checkpoint(cp, run_id=run_id)
     return adopted
 
 
@@ -3233,6 +3304,12 @@ async def run_video_completion_supervisor(
                 # thorough and synchronous. Yield after each dispatch so a
                 # large first pass cannot starve HTTP and media workers.
                 await asyncio.sleep(0)
+                await _adopt_ready_candidates_incrementally(
+                    episode_id,
+                    cp=cp,
+                    fallback_quota=fallback_quota,
+                    run_id=run_id,
+                )
                 continue
 
             issues = _collect_issues(entry, run_id=run_id)
@@ -3407,6 +3484,12 @@ async def run_video_completion_supervisor(
                         payload={"shot_no": entry.shot_no},
                     )
             await asyncio.sleep(0)
+            await _adopt_ready_candidates_incrementally(
+                episode_id,
+                cp=cp,
+                fallback_quota=fallback_quota,
+                run_id=run_id,
+            )
 
         if budget_capacity_reached:
             observed = await _rebuild_coverage_ledger_async(

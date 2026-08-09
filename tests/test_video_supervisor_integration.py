@@ -450,6 +450,70 @@ async def test_async_dispatch_cancellation_waits_for_worker_thread(monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_incremental_adoption_publishes_ready_candidate(memdb, monkeypatch):
+    import app.video_plan as video_plan
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 2)
+    shot_id = f"{eid}_shot_1"
+    version_id = _add_succeeded_version(
+        memdb,
+        shot_id,
+        qa={"overall": 0.9, "contract_facts": []},
+    )
+    memdb.execute(
+        "UPDATE shots SET adopted_version_id=NULL WHERE id=?",
+        (shot_id,),
+    )
+    memdb.commit()
+    monkeypatch.setattr(video_plan, "get_conn", lambda: memdb)
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id=eid,
+        run_id="run-1",
+        coverage={"fallback_quota": 1},
+    )
+
+    adopted = await video_supervisor._adopt_ready_candidates_incrementally(
+        eid,
+        cp=checkpoint,
+        fallback_quota=1,
+        run_id=None,
+    )
+
+    assert adopted == 1
+    assert memdb.execute(
+        "SELECT adopted_version_id FROM shots WHERE id=?",
+        (shot_id,),
+    ).fetchone()["adopted_version_id"] == version_id
+
+
+@pytest.mark.asyncio
+async def test_incremental_adoption_skips_ledger_rebuild_without_candidate(
+    memdb,
+    monkeypatch,
+):
+    import app.video_supervisor as video_supervisor
+
+    eid, _ = _seed_episode(memdb, 1)
+
+    async def unexpected_rebuild(*_args, **_kwargs):
+        raise AssertionError("no ready candidate must not rebuild the ledger")
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_rebuild_coverage_ledger_async",
+        unexpected_rebuild,
+    )
+
+    assert await video_supervisor._adopt_ready_candidates_incrementally(
+        eid,
+        cp=VideoSupervisorCheckpoint(episode_id=eid),
+        fallback_quota=1,
+        run_id=None,
+    ) == 0
+
+
 def test_cleared_versions_do_not_count_as_current_epoch_attempts(memdb) -> None:
     eid, _ = _seed_episode(memdb, 1)
     shot_id = f"{eid}_shot_1"
