@@ -507,7 +507,7 @@ def video_complete_episode(args) -> PreflightResult:
         allowed=True,
         risk=risk,
         summary=summary,
-        estimated_cost_cny=min(estimated, float(cap)),
+        estimated_cost_cny=estimated,
         affected=AffectedScope(episodes=[args.episode_id], shot_count=int(uncovered or 0)),
         preconditions=[
             PreconditionCheck(

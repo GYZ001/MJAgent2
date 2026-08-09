@@ -219,10 +219,23 @@ export type EpisodeGenerationAction = 'generate' | 'stop' | 'resume'
 export const EPISODE_COMPLETION_BUDGET_CAP_CNY = 150
 export const EPISODE_COMPLETION_WALL_CLOCK_CAP_S = 4 * 60 * 60
 
-export function episodeCompletionRequest(qualificationVersion?: string) {
+export function episodeCompletionBudgetCap(estimatedCostCny: number): number {
+  const estimate = Number.isFinite(estimatedCostCny)
+    ? Math.max(0, estimatedCostCny)
+    : 0
+  return Math.max(
+    EPISODE_COMPLETION_BUDGET_CAP_CNY,
+    Math.ceil(estimate * 100) / 100,
+  )
+}
+
+export function episodeCompletionRequest(
+  qualificationVersion?: string,
+  estimatedCostCny = 0,
+) {
   return {
     mode: 'fresh',
-    budget_cap_cny: EPISODE_COMPLETION_BUDGET_CAP_CNY,
+    budget_cap_cny: episodeCompletionBudgetCap(estimatedCostCny),
     wall_clock_cap_s: EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
     allow_fallback_adopt: true,
     allow_storyboard_edit: false,
@@ -238,6 +251,14 @@ export function episodeGenerationAction(
   if (active) return 'stop'
   if (pausedCount > 0 || failedCount > 0) return 'resume'
   return 'generate'
+}
+
+export function episodeGenerationIsActive(
+  supervisorTaskRunning: boolean,
+  activeVideoRunId: string | null | undefined,
+  generatingCount: number,
+): boolean {
+  return supervisorTaskRunning || Boolean(activeVideoRunId) || generatingCount > 0
 }
 
 export function shotHasActiveGeneration(shot: Shot): boolean {
@@ -668,13 +689,18 @@ export default function WallPage() {
   const supervisorTaskRunning = ep?.video_supervisor?.task_running === true
   const generatingCount = shots.filter(shotHasActiveGeneration).length
   const pausedGenerationCount = shots.filter(shotHasPausedGeneration).length
-  const hasCurrentGeneration = supervisorTaskRunning || generatingCount > 0
+  const hasCurrentGeneration = episodeGenerationIsActive(
+    supervisorTaskRunning,
+    ep?.active_video_run_id,
+    generatingCount,
+  )
   const generationAction = episodeGenerationAction(
     hasCurrentGeneration,
     Math.max(ep?.pipeline_summary?.paused ?? 0, pausedGenerationCount),
     ep?.pipeline_summary?.failed ?? 0,
   )
   const quickGenerationEstimate = shots.reduce((sum, shot) => sum + (shot.est_cost_cny || 0), 0)
+  const episodeBudgetCap = episodeCompletionBudgetCap(quickGenerationEstimate)
   const adoptedCount = shots.filter(shot => shotVideoState(shot).phase === 'adopted').length
   const episodeVideoCandidateCount = shots.reduce(
     (sum, shot) => sum + visibleVideoVersions(shot.versions).length,
@@ -731,7 +757,10 @@ export default function WallPage() {
     try {
       const response = await api.episodeVideoCompletion(
         ep!.id,
-        episodeCompletionRequest(context.upstream.qualification_version),
+        episodeCompletionRequest(
+          context.upstream.qualification_version,
+          quickGenerationEstimate,
+        ),
       ) as {
         run_id?: string
         message?: string
@@ -963,7 +992,7 @@ export default function WallPage() {
                 ? '继续本集未完成任务？'
                 : '清空本集全部资源？'}
           summary={generationDecision === 'generate'
-            ? `${shots.length} 镜 · 首轮预计 ¥${quickGenerationEstimate.toFixed(2)} · 累计授权上限 ¥${EPISODE_COMPLETION_BUDGET_CAP_CNY.toFixed(2)}`
+            ? `${shots.length} 镜 · 首轮预计 ¥${quickGenerationEstimate.toFixed(2)} · 累计授权上限 ¥${episodeBudgetCap.toFixed(2)}`
             : generationDecision === 'stop'
               ? `${generatingCount} 镜仍在处理`
               : generationDecision === 'resume'
