@@ -1,9 +1,24 @@
 from app.schemas import Bible, Character, Dialogue, EpisodeScreenplay, Shot, Storyboard, World
+from app.textmatch import longest_run_ratio
 from app.validators import (_contiguous_scene_move, adjacent_spoken_repeat_errors,
                             key_line_catalog, normalize_action_desc, validate_storyboard,
                             storyboard_shot_count_range,
                             validate_storyboard_preserves_key_content,
                             validate_storyboard_shot_covers_outline)
+
+
+def test_longest_run_ratio_is_exact_for_repetitive_long_text() -> None:
+    needle = "甲" * 200 + "关键动作" + "乙" * 200
+    haystack = "丙" * 20_000 + "甲" * 120 + "关键动作" + "丁" * 20_000
+
+    assert longest_run_ratio(needle, haystack) == (120 + len("关键动作")) / len(needle)
+
+
+def test_longest_run_ratio_keeps_contiguous_match_semantics() -> None:
+    assert longest_run_ratio("甲乙丙丁", "前缀甲乙后缀丙丁") == 0.5
+    assert longest_run_ratio("甲，乙！丙", "前缀甲乙丙后缀") == 1.0
+    assert longest_run_ratio("", "任意文本") == 1.0
+    assert longest_run_ratio("存在", "") == 0.0
 
 
 def _bible() -> Bible:

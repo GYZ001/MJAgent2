@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from collections import OrderedDict
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -22,6 +23,12 @@ from app.production.screenplay_document import (
     split_dialogue_turn_by_capacity,
 )
 from app.schemas import EpisodeScreenplay
+
+
+_SCREENPLAY_ARTIFACT_MODEL_CACHE: OrderedDict[
+    tuple[str, str], EpisodeScreenplay
+] = OrderedDict()
+_SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE = 16
 
 
 class PatchOperation(BaseModel):
@@ -300,16 +307,34 @@ def apply_screenplay_patch(
     )
 
 
+def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
+    """Validate a content-addressed immutable screenplay Artifact once."""
+    artifact_id = str(art.get("id") or "")
+    content = art.get("content") or {}
+    content_fingerprint = evidence_repository.content_hash(content)
+    cache_key = (artifact_id, content_fingerprint)
+    cached = _SCREENPLAY_ARTIFACT_MODEL_CACHE.get(cache_key)
+    if cached is not None:
+        _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
+        return cached
+    if "_projection" in content:
+        screenplay = EpisodeScreenplay.model_validate(content["_projection"])
+    elif "screenplay_metadata" in content:
+        screenplay = document_to_screenplay(ScreenplayDocument.model_validate(content))
+    else:
+        screenplay = EpisodeScreenplay.model_validate(content)
+    _SCREENPLAY_ARTIFACT_MODEL_CACHE[cache_key] = screenplay
+    _SCREENPLAY_ARTIFACT_MODEL_CACHE.move_to_end(cache_key)
+    while len(_SCREENPLAY_ARTIFACT_MODEL_CACHE) > _SCREENPLAY_ARTIFACT_MODEL_CACHE_SIZE:
+        _SCREENPLAY_ARTIFACT_MODEL_CACHE.popitem(last=False)
+    return screenplay
+
+
 def load_screenplay_from_artifact(artifact_id: str) -> EpisodeScreenplay:
     art = evidence_repository.get_artifact(artifact_id)
     if not art:
         raise ValueError(f"artifact 不存在: {artifact_id}")
-    content = art.get("content") or {}
-    if "_projection" in content:
-        return EpisodeScreenplay.model_validate(content["_projection"])
-    if "screenplay_metadata" in content:
-        return document_to_screenplay(ScreenplayDocument.model_validate(content))
-    return EpisodeScreenplay.model_validate(content)
+    return screenplay_from_artifact_record(art)
 
 
 def screenplay_artifact_payload(script: EpisodeScreenplay) -> dict[str, Any]:

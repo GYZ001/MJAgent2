@@ -8,7 +8,6 @@ PRD VAL-422 §4.4.4 之后，这些函数的定位被下调：它们只用于
 """
 from __future__ import annotations
 
-import difflib
 import re
 
 _SPEAKER_PREFIX_RE = re.compile(r"^([^\n：（(:]{1,16})(?:（[^）]{0,12}）)?[：:]")
@@ -74,8 +73,70 @@ def longest_run_ratio(needle: str, haystack: str) -> float:
         return 1.0
     if n in h:
         return 1.0
-    block = difflib.SequenceMatcher(None, n, h).find_longest_match(0, len(n), 0, len(h))
-    return block.size / len(n)
+    if not h:
+        return 0.0
+    return _longest_common_substring_len(n, h) / len(n)
+
+
+def _longest_common_substring_len(left: str, right: str) -> int:
+    """Return the exact longest contiguous common substring length in O(n+m).
+
+    ``difflib.SequenceMatcher.find_longest_match`` computes the same kind of
+    contiguous block but can become quadratic on long, repetitive screenplay
+    text. A suffix automaton over ``left`` preserves the matching contract
+    while keeping certificate and recovery validation linear.
+    """
+    transitions: list[dict[str, int]] = [{}]
+    links = [-1]
+    lengths = [0]
+    last = 0
+
+    for char in left:
+        current = len(transitions)
+        transitions.append({})
+        links.append(0)
+        lengths.append(lengths[last] + 1)
+        cursor = last
+        while cursor >= 0 and char not in transitions[cursor]:
+            transitions[cursor][char] = current
+            cursor = links[cursor]
+        if cursor < 0:
+            links[current] = 0
+        else:
+            target = transitions[cursor][char]
+            if lengths[cursor] + 1 == lengths[target]:
+                links[current] = target
+            else:
+                clone = len(transitions)
+                transitions.append(dict(transitions[target]))
+                links.append(links[target])
+                lengths.append(lengths[cursor] + 1)
+                while cursor >= 0 and transitions[cursor].get(char) == target:
+                    transitions[cursor][char] = clone
+                    cursor = links[cursor]
+                links[target] = clone
+                links[current] = clone
+        last = current
+
+    state = 0
+    run = 0
+    best = 0
+    for char in right:
+        while state and char not in transitions[state]:
+            state = links[state]
+            run = min(run, lengths[state])
+        target = transitions[state].get(char)
+        if target is None:
+            state = 0
+            run = 0
+            continue
+        state = target
+        run += 1
+        if run > best:
+            best = run
+            if best == len(left):
+                return best
+    return best
 
 
 def bigram_set(text: str) -> set[str]:

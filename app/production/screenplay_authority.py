@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 from typing import Any
@@ -14,6 +15,12 @@ from app.schemas import Bible, EpisodeScreenplay
 
 
 SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-2"
+
+
+@lru_cache(maxsize=16)
+def _validated_screenplay_projection(raw_projection: str) -> EpisodeScreenplay:
+    """Parse a projection by its complete persisted JSON value."""
+    return EpisodeScreenplay.model_validate_json(raw_projection)
 
 # ``screenplay-source-authority.v1`` is an append-only serialization contract,
 # not a live dump of whichever fields the current Pydantic models expose.
@@ -1008,7 +1015,7 @@ def episode_requires_immutable_screenplay_authority(
     if raw_projection:
         try:
             return (
-                EpisodeScreenplay.model_validate_json(raw_projection).narrative_plan
+                _validated_screenplay_projection(raw_projection).narrative_plan
                 is not None
             )
         except Exception:
@@ -1039,7 +1046,7 @@ def resolve_downstream_screenplay(
     if not raw_projection:
         raise ValueError("当前剧集缺少剧本投影")
     try:
-        projection = EpisodeScreenplay.model_validate_json(raw_projection)
+        projection = _validated_screenplay_projection(raw_projection)
     except Exception as exc:
         if not episode_requires_immutable_screenplay_authority(
             episode,
@@ -1144,7 +1151,7 @@ def resolve_current_screenplay_authority(
     raw_projection = _episode_value(episode, "screenplay_json", "")
     if not raw_projection:
         raise ValueError("已发布剧本缺少页面投影")
-    projection = EpisodeScreenplay.model_validate_json(raw_projection)
+    projection = _validated_screenplay_projection(raw_projection)
     if projection.model_dump(mode="json") != screenplay.model_dump(mode="json"):
         raise ValueError("页面 screenplay_json 与已发布 Artifact 内容漂移")
     if require_narrative and screenplay.narrative_plan is None:

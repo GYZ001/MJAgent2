@@ -205,16 +205,9 @@ def _narrative_screenplay_for_artifact(
         if narrative_payload is None:
             return None
         try:
-            if "screenplay_metadata" in content:
-                from app.production.screenplay_document import (
-                    ScreenplayDocument,
-                    document_to_screenplay,
-                )
+            from app.production.patch import screenplay_from_artifact_record
 
-                return document_to_screenplay(ScreenplayDocument.model_validate(content))
-            if isinstance(projection, dict):
-                return EpisodeScreenplay.model_validate(projection)
-            return EpisodeScreenplay.model_validate(content)
+            return screenplay_from_artifact_record(artifact)
         except Exception as exc:  # noqa: BLE001 - immutable authority boundary
             raise ValueError(f"剧本 Artifact 的叙事权威契约无法验证：{exc}") from exc
 
