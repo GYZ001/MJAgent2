@@ -122,8 +122,8 @@ PIPELINE_STAGE_LABELS = {
     STAGE_CONTINUITY_ASSEMBLING: "装配连续性参考",
     STAGE_VIDEO_READY: "视频输入已就绪",
     STAGE_WAITING_VIDEO_SLOT: "等待视频槽位",
-    STAGE_VIDEO_SUBMITTING: "正在提交 Seedance",
-    STAGE_VIDEO_GENERATING: "Seedance 生成中",
+    STAGE_VIDEO_SUBMITTING: "正在提交视频模型",
+    STAGE_VIDEO_GENERATING: "视频模型生成中",
     STAGE_VIDEO_DOWNLOADING: "下载视频",
     STAGE_VIDEO_TECHNICAL: "视频技术校验",
     STAGE_VIDEO_QA: "视频内容质检",
@@ -137,7 +137,7 @@ PIPELINE_STAGE_LABELS = {
     # 旧标签
     STAGE_REFERENCE: "准备参考图",
     STAGE_VIDEO_SUBMIT: "提交视频",
-    STAGE_VIDEO_POLL: "Seedance 生成中",
+    STAGE_VIDEO_POLL: "视频模型生成中",
     STAGE_DOWNLOAD: "下载中",
     STAGE_ADOPT: "待采用",
 }

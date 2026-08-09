@@ -646,6 +646,7 @@ async def test_saved_model(model_id: str, body: dict | None = None):
     override = body or {}
     if item.get("provider") == "minimax_h3":
         from app import hiagent, minimax_h3
+        from app.video_plan import record_minimax_h3_probe_snapshot
 
         try:
             result = await minimax_h3.probe_connection(
@@ -653,7 +654,16 @@ async def test_saved_model(model_id: str, body: dict | None = None):
             )
         except hiagent.ProviderError as exc:
             raise HTTPException(422, f"模型测试失败：{exc}") from exc
-        return {**result, **normalize_token_limits({})}
+        snapshot = record_minimax_h3_probe_snapshot(
+            result,
+            provider="minimax_h3",
+            model=str(item.get("model") or config.DEFAULT_MINIMAX_H3_MODEL_VIDEO),
+        )
+        return {
+            **result,
+            "capability_snapshot_id": snapshot.id,
+            **normalize_token_limits({}),
+        }
     try:
         credentials = json.loads(get_setting("model_credentials") or "{}")
     except (TypeError, json.JSONDecodeError):

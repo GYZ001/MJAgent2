@@ -208,8 +208,26 @@ def _status_from_rows(shot, *, candidate_count: int, retake_count: int,
 
     label = stage_label(current_stage, progress=stage_progress, reason_text=blocked_reason or reason_text)
     if current_stage == S.STAGE_VIDEO_GENERATING and provider_elapsed_s is not None:
-        m, s = divmod(int(provider_elapsed_s), 60)
-        label = f"Seedance 已接单，生成 {m:02d}:{s:02d}"
+        display_elapsed_s = provider_elapsed_s
+        if (stage_progress or {}).get("provider_phase") == "generating":
+            try:
+                generation_started_at = float(
+                    stage_progress.get("provider_generation_started_at") or 0
+                )
+            except (TypeError, ValueError):
+                generation_started_at = 0
+            if generation_started_at > 0:
+                display_elapsed_s = max(0.0, now() - generation_started_at)
+        m, s = divmod(int(display_elapsed_s), 60)
+        elapsed_kind = (
+            "生成"
+            if (stage_progress or {}).get("provider_phase") == "generating"
+            else "已接单"
+        )
+        if stage_progress:
+            label = f"{label} · {elapsed_kind} {m:02d}:{s:02d}"
+        else:
+            label = f"视频模型已接单 · {elapsed_kind} {m:02d}:{s:02d}"
     elif pipeline_status == "queued" and queue_position and current_stage == S.STAGE_WAITING_VIDEO_SLOT:
         label = f"视频输入已就绪，等待上游槽位（第 {queue_position} 位）"
     elif pipeline_status == "queued" and queue_position and not reason_text:

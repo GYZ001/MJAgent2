@@ -544,6 +544,12 @@ async def create_video_task(
         meta=ledger_meta,
         request_json=request_checkpoint,
     )
+    if recovered_payload is not None:
+        update_provider_call_request(
+            call_id,
+            request_checkpoint,
+            preserve_exact=True,
+        )
     started = time.time()
     status_code: int | None = None
     try:
@@ -614,7 +620,11 @@ async def create_video_task(
                     payload["ref_image_size"] = "match"
 
                 request_checkpoint["provider_request"] = payload
-                update_provider_call_request(call_id, request_checkpoint)
+                update_provider_call_request(
+                    call_id,
+                    request_checkpoint,
+                    preserve_exact=True,
+                )
 
             response = await client.post(
                 f"{base_url()}/v1/videos/generations",

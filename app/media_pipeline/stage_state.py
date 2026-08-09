@@ -143,6 +143,15 @@ def stage_label(stage: str | None, *, progress: dict | None = None, reason_text:
         limit = progress.get("attempt_limit")
         if attempt is not None and limit is not None:
             return f"首轮 QA 未通过，自动重抽 {attempt}/{limit}"
+    if stage == S.STAGE_VIDEO_GENERATING and progress:
+        provider = str(progress.get("provider_label") or "视频模型")
+        provider_stage = str(
+            progress.get("provider_stage_label") or "处理中"
+        )
+        queue_position = progress.get("provider_queue_position")
+        if progress.get("provider_phase") == "queued" and queue_position:
+            return f"{provider} · {provider_stage}（远端第 {queue_position} 位）"
+        return f"{provider} · {provider_stage}"
     if stage and stage not in S.PIPELINE_STAGE_LABELS and stage not in S.PIPELINE_STAGES:
         return f"未知阶段（{stage}）"
     return label or "未知阶段"

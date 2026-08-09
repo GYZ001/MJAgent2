@@ -2149,16 +2149,32 @@ def latest_provider_request_json(
     return None
 
 
-def update_provider_call_request(call_id: int, request_json: Any) -> None:
+def update_provider_call_request(
+    call_id: int,
+    request_json: Any,
+    *,
+    preserve_exact: bool = False,
+) -> None:
     """Persist the exact outbound request before the non-idempotent write."""
     if not call_id:
         return
+    if preserve_exact:
+        try:
+            encoded = json.dumps(
+                request_json,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except TypeError:
+            encoded = json.dumps(str(request_json), ensure_ascii=False)
+    else:
+        encoded = _dump_call_json(request_json)
     conn = get_conn()
     try:
         conn.execute(
             """UPDATE provider_calls SET request_json=?
                WHERE id=? AND status='RUNNING'""",
-            (_dump_call_json(request_json), call_id),
+            (encoded, call_id),
         )
         conn.commit()
     except sqlite3.OperationalError:

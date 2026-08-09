@@ -1398,6 +1398,9 @@ def _provider_wait_policy(
         ),
         "scope": "MiniMaxH3 生成阶段",
     })
+    policy["stage_progress"]["provider_generation_started_at"] = (
+        generation_started_at
+    )
     return policy
 
 

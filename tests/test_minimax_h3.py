@@ -25,11 +25,45 @@ def _image_data_url() -> str:
     return "data:image/jpeg;base64," + base64.b64encode(b"jpeg").decode("ascii")
 
 
+def _probe_root_payload() -> dict:
+    return {
+        "name": "MiniMax H3 ComfyUI API",
+        "version": "1.3.0",
+        "modes": ["keyframes", "reference_images", "reference_video"],
+        "accelerations": ["standard", "turbo"],
+        "turbo_profiles": {"preview": 4, "balanced": 6, "quality": 8},
+        "default_turbo_profile": "quality",
+        "video_vae_profiles": ["fp16", "int8_convrot"],
+    }
+
+
+def _probe_health_payload() -> dict:
+    return {
+        "status": "ok",
+        "modes": {
+            name: {"ready": True, "missing": []}
+            for name in ("keyframes", "reference_images", "reference_video")
+        },
+        "accelerations": {
+            "standard": {"ready": True, "missing": []},
+            "turbo": {"ready": True, "missing": []},
+        },
+        "video_vae_profiles": {
+            "fp16": {"ready": True, "missing": []},
+            "int8_convrot": {"ready": True, "missing": []},
+        },
+        "te_speed_available": True,
+    }
+
+
 def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
     requests: list[dict] = []
+    request_headers: list[dict] = []
     upload_index = 0
     monkeypatch.setattr(config, "MINIMAX_H3_ACCELERATION", "turbo")
     monkeypatch.setattr(config, "MINIMAX_H3_STEPS", 8)
+    monkeypatch.setattr(config, "MINIMAX_H3_TURBO_PROFILE", "quality")
+    monkeypatch.setattr(config, "MINIMAX_H3_VIDEO_VAE", "fp16")
     monkeypatch.setattr(config, "MINIMAX_H3_USE_TE_SPEED", False)
     monkeypatch.setattr(config, "MINIMAX_H3_TURBO_STRENGTH", 1.0)
     monkeypatch.setattr(config, "MINIMAX_H3_TURBO_LOW_VRAM", False)
@@ -47,6 +81,7 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
                 upload_index += 1
                 return _Response(201, {"filename": f"uploaded_{upload_index}"})
             requests.append(kwargs["json"])
+            request_headers.append(kwargs["headers"])
             return _Response(202, {"id": f"task-{len(requests)}", "status": "queued"})
 
     async def materialize(value, *, media_kind, index):
@@ -56,7 +91,13 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
 
     monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
     monkeypatch.setattr(minimax_h3, "_materialize_input", materialize)
+    monkeypatch.setattr(minimax_h3, "latest_provider_request_json", lambda *_args: None)
     monkeypatch.setattr(minimax_h3, "start_provider_call", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(
+        minimax_h3,
+        "update_provider_call_request",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(minimax_h3, "finish_provider_call", lambda *_args, **_kwargs: None)
 
     keyframes = asyncio.run(minimax_h3.create_video_task(
@@ -94,7 +135,9 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
     assert requests[0]["width"] == 576
     assert requests[0]["height"] == 1024
     assert requests[0]["acceleration"] == "turbo"
-    assert requests[0]["steps"] == 8
+    assert "steps" not in requests[0]
+    assert requests[0]["turbo_profile"] == "quality"
+    assert requests[0]["video_vae"] == "fp16"
     assert requests[0]["scheduler"] == "simple"
     assert requests[0]["use_te_speed"] is False
     assert requests[0]["turbo_strength"] == 1.0
@@ -110,6 +153,69 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
     assert requests[2]["use_source_audio"] is True
     assert "<Video 1>" in requests[2]["prompt"]
     assert "<Audio 1>" in requests[2]["prompt"]
+    assert [headers["Idempotency-Key"] for headers in request_headers] == [
+        "keyframes", "references", "video",
+    ]
+
+
+def test_minimax_h3_retry_reuses_exact_checkpoint_without_reupload(monkeypatch) -> None:
+    checkpoint: dict = {}
+    uploads = 0
+    generation_requests: list[dict] = []
+    generation_headers: list[dict] = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **kwargs):
+            nonlocal uploads
+            if url.endswith("/v1/files"):
+                uploads += 1
+                return _Response(201, {"filename": "durable_input.jpg"})
+            generation_requests.append(kwargs["json"])
+            generation_headers.append(kwargs["headers"])
+            return _Response(202, {
+                "id": "same-task",
+                "status": "queued",
+                "replayed": len(generation_requests) > 1,
+            })
+
+    async def materialize(_value, *, media_kind, index):
+        return f"{media_kind}_{index}.jpg", b"jpeg", "image/jpeg"
+
+    def latest(*_args):
+        return checkpoint.get("value")
+
+    def persist(_call_id, value, **_kwargs):
+        checkpoint["value"] = value
+
+    monkeypatch.setattr(config, "MINIMAX_H3_ACCELERATION", "turbo")
+    monkeypatch.setattr(config, "MINIMAX_H3_TURBO_PROFILE", "quality")
+    monkeypatch.setattr(config, "MINIMAX_H3_VIDEO_VAE", "fp16")
+    monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(minimax_h3, "_materialize_input", materialize)
+    monkeypatch.setattr(minimax_h3, "latest_provider_request_json", latest)
+    monkeypatch.setattr(minimax_h3, "start_provider_call", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(minimax_h3, "update_provider_call_request", persist)
+    monkeypatch.setattr(minimax_h3, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    kwargs = {
+        "image_urls": [(_image_data_url(), "first_frame")],
+        "call_meta": {"operation_id": "video-create-ver_1", "duration_s": 5},
+    }
+    first = asyncio.run(minimax_h3.create_video_task("人物转身", **kwargs))
+    second = asyncio.run(minimax_h3.create_video_task("人物转身", **kwargs))
+
+    assert first == second == "minimax_h3:same-task"
+    assert uploads == 1
+    assert generation_requests[0] == generation_requests[1]
+    assert {
+        headers["Idempotency-Key"] for headers in generation_headers
+    } == {"video-create-ver_1"}
 
 
 def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
@@ -138,7 +244,14 @@ def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
     assert result == {
         "status": "succeeded",
         "stage": "",
+        "stage_label": "H3 处理中",
+        "provider": "minimax_h3",
+        "provider_label": "MiniMax H3",
+        "sequence": None,
         "queue_position": None,
+        "estimated_seconds": None,
+        "timings": {},
+        "metadata": {},
         "video_url": "http://192.168.31.232:8181/v1/outputs?filename=result.mp4",
         "last_frame_url": "",
         "error": "",
@@ -182,31 +295,72 @@ def test_minimax_h3_wait_policy_starts_mode_timeout_only_when_generating(
     )
     assert queued["elapsed_s"] == 900
     assert queued["timeout_s"] == 6 * 60 * 60
-    assert queued["meta_changed"] is False
+    assert queued["meta_changed"] is True
+    assert queued["stage_progress"]["provider_phase"] == "queued"
+    assert queued["stage_progress"]["provider_queue_position"] == 3
 
     generating = worker._provider_wait_policy(
         "minimax_h3:task-1",
-        {"status": "running", "stage": "generating", "queue_position": 0},
+        {
+            "status": "running",
+            "stage": "sampling",
+            "queue_position": 0,
+            "estimated_seconds": 616,
+            "timings": {"text_encode_ms": 2500, "sampling_ms": None},
+        },
         meta,
         duration_s=15,
         provider_submitted_at=100,
         stamp=1000,
     )
     assert generating["elapsed_s"] == 0
-    assert generating["timeout_s"] > 2 * 60 * 60
+    assert generating["timeout_s"] == 1678
     assert generating["poll_delay_s"] == 5.0
     assert generating["meta_changed"] is True
+    assert generating["stage_progress"]["provider_stage"] == "sampling"
+    assert meta["minimax_h3_estimated_generation_s"] == 616
 
     resumed = worker._provider_wait_policy(
         "minimax_h3:task-1",
-        {"status": "running", "stage": "generating", "queue_position": 0},
+        {
+            "status": "running",
+            "stage": "video_vae",
+            "queue_position": 0,
+            "estimated_seconds": 616,
+            "timings": {"sampling_ms": 540000, "video_vae_ms": None},
+        },
         meta,
         duration_s=15,
         provider_submitted_at=100,
         stamp=1060,
     )
     assert resumed["elapsed_s"] == 60
-    assert resumed["meta_changed"] is False
+    assert resumed["meta_changed"] is True
+    assert resumed["stage_progress"]["provider_stage"] == "video_vae"
+
+
+@pytest.mark.parametrize(
+    ("stage", "phase"),
+    [
+        ("queued", "queued"),
+        ("checking_comfyui", "waiting"),
+        ("waiting_for_comfyui", "waiting"),
+        ("submitting", "waiting"),
+        ("queued_in_comfyui", "waiting"),
+        ("conditioning", "generating"),
+        ("sampling", "generating"),
+        ("video_vae", "generating"),
+        ("audio_vae", "generating"),
+        ("video_encoding", "generating"),
+        ("locating_comfyui_job", "generating"),
+    ],
+)
+def test_minimax_h3_classifies_v13_provider_stages(stage, phase) -> None:
+    assert minimax_h3.provider_task_phase({
+        "status": "queued" if stage == "queued" else "running",
+        "stage": stage,
+        "queue_position": 1 if stage == "queued" else 0,
+    }) == phase
 
 
 def test_minimax_h3_probe_requires_selected_acceleration(monkeypatch) -> None:
@@ -217,27 +371,26 @@ def test_minimax_h3_probe_requires_selected_acceleration(monkeypatch) -> None:
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, _url, **_kwargs):
-            return _Response(200, {
-                "status": "ok",
-                "modes": {
-                    name: {"ready": True, "missing": []}
-                    for name in ("keyframes", "reference_images", "reference_video")
-                },
-                "accelerations": {
-                    "standard": {"ready": True, "missing": []},
-                    "turbo": {"ready": True, "missing": []},
-                },
-                "te_speed_available": True,
-            })
+        async def get(self, url, **_kwargs):
+            return _Response(
+                200,
+                _probe_health_payload()
+                if url.endswith("/health")
+                else _probe_root_payload(),
+            )
 
     monkeypatch.setattr(config, "MINIMAX_H3_ACCELERATION", "turbo")
     monkeypatch.setattr(config, "MINIMAX_H3_STEPS", 8)
+    monkeypatch.setattr(config, "MINIMAX_H3_TURBO_PROFILE", "quality")
+    monkeypatch.setattr(config, "MINIMAX_H3_VIDEO_VAE", "fp16")
     monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
 
     result = asyncio.run(minimax_h3.probe_connection())
 
+    assert result["api_version"] == "1.3.0"
     assert result["acceleration"] == "turbo"
+    assert result["turbo_profile"] == "quality"
+    assert result["video_vae"] == "fp16"
     assert result["steps"] == 8
     assert "turbo" in result["preview"]
 
@@ -307,6 +460,28 @@ def test_minimax_h3_capabilities_are_verified_before_model_selection(monkeypatch
             "minimax-h3" if provider == "minimax_h3" else "seedance"
         ),
     )
+    monkeypatch.setattr(
+        minimax_h3,
+        "probe_connection_sync",
+        lambda: {
+            "ok": True,
+            "base_url": "http://192.168.31.232:8181",
+            "api_version": "1.3.0",
+            "modes": {
+                "keyframes": True,
+                "reference_images": True,
+                "reference_video": True,
+            },
+            "accelerations": {"standard": True, "turbo": True},
+            "acceleration": "turbo",
+            "turbo_profiles": {"preview": 4, "balanced": 6, "quality": 8},
+            "turbo_profile": "quality",
+            "steps": 8,
+            "video_vae_profiles": {"fp16": True, "int8_convrot": True},
+            "video_vae": "fp16",
+            "te_speed_available": True,
+        },
+    )
 
     snapshot = video_plan.current_capability_snapshot(
         provider="minimax_h3",
@@ -318,6 +493,77 @@ def test_minimax_h3_capabilities_are_verified_before_model_selection(monkeypatch
     assert snapshot.supports_reference_image is True
     assert snapshot.supports_first_last_pair is True
     assert snapshot.supports_reference_video is True
-    assert snapshot.api_version == "1.2.0"
+    assert snapshot.api_version == "1.3.0"
+    assert snapshot.format_limits["capability_source"] == "live_health"
     assert snapshot.format_limits["default_acceleration"] == "turbo"
-    assert snapshot.probe_result == "verified_v1.2.0_three_modes_turbo_2026_08_08"
+    assert snapshot.format_limits["default_turbo_profile"] == "quality"
+    assert snapshot.format_limits["default_video_vae"] == "fp16"
+    assert snapshot.probe_result == "live_health:1.3.0:turbo:quality:fp16"
+
+
+def test_minimax_h3_failed_discovery_never_registers_static_success(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    monkeypatch.setattr(
+        minimax_h3,
+        "probe_connection_sync",
+        lambda: (_ for _ in ()).throw(hiagent.ProviderError("offline")),
+    )
+
+    snapshot = video_plan.current_capability_snapshot(
+        provider="minimax_h3",
+        model="minimax-h3",
+        conn=conn,
+    )
+
+    assert snapshot.technical_success is False
+    assert snapshot.supports_reference_image is False
+    assert snapshot.supports_first_last_pair is False
+    assert snapshot.supports_reference_video is False
+    assert snapshot.format_limits["capability_source"] == "live_health_error"
+    assert snapshot.probe_result.startswith("live_health_failed:ProviderError:")
+
+
+def test_minimax_h3_unchanged_live_contract_reuses_snapshot_id() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    probe = {
+        "ok": True,
+        "base_url": "http://192.168.31.232:8181",
+        "api_version": "1.3.0",
+        "modes": {
+            "keyframes": True,
+            "reference_images": True,
+            "reference_video": True,
+        },
+        "accelerations": {"standard": True, "turbo": True},
+        "acceleration": "turbo",
+        "turbo_profiles": {"preview": 4, "balanced": 6, "quality": 8},
+        "turbo_profile": "quality",
+        "steps": 8,
+        "video_vae_profiles": {"fp16": True, "int8_convrot": True},
+        "video_vae": "fp16",
+        "te_speed_available": True,
+    }
+
+    first = video_plan.record_minimax_h3_probe_snapshot(
+        probe,
+        provider="minimax_h3",
+        model="minimax-h3",
+        conn=conn,
+    )
+    second = video_plan.record_minimax_h3_probe_snapshot(
+        probe,
+        provider="minimax_h3",
+        model="minimax-h3",
+        conn=conn,
+    )
+
+    assert second.id == first.id
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_capability_snapshots"
+    ).fetchone()[0] == 1
