@@ -374,8 +374,7 @@ def identity_ids_in_authority_text(
             )
             if str(token or "").strip()
         },
-        key=lambda item: len(item[0]),
-        reverse=True,
+        key=lambda item: (-len(item[0]), item[0], item[1]),
     )
     matched: set[str] = set()
     unmatched = text
