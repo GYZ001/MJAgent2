@@ -1038,7 +1038,11 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     """为镜头创建参考图模式视频版本并入队。
     critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
     幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。"""
-    from app.compiler import CompileError, compile_prompt
+    from app.compiler import (
+        CompileError,
+        VIDEO_PROMPT_CONTRACT_VERSION,
+        compile_prompt,
+    )
     from app.continuity import (
         derive_continuity_mode,
         effective_state_out,
@@ -1165,6 +1169,35 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             raise ValueError("视频计划的首帧来源镜头不存在或不属于本集")
     prompt_prev_row = boundary_prev_row or prev_row
     prev_shot = _load_shot_model(prompt_prev_row) if prompt_prev_row else None
+    previous_prompt_version = None
+    if prompt_prev_row is not None:
+        adopted_version_id = _row_value(
+            prompt_prev_row,
+            "adopted_version_id",
+        )
+        if adopted_version_id:
+            previous_prompt_version = conn.execute(
+                """SELECT id,prompt_text FROM shot_versions
+                   WHERE id=? AND shot_id=?""",
+                (adopted_version_id, prompt_prev_row["id"]),
+            ).fetchone()
+        if previous_prompt_version is None:
+            previous_prompt_version = conn.execute(
+                """SELECT id,prompt_text FROM shot_versions
+                   WHERE shot_id=? AND prompt_text IS NOT NULL
+                   ORDER BY version_no DESC LIMIT 1""",
+                (prompt_prev_row["id"],),
+            ).fetchone()
+    previous_prompt_text = (
+        str(previous_prompt_version["prompt_text"] or "")
+        if previous_prompt_version is not None
+        else ""
+    )
+    previous_prompt_fingerprint = (
+        hashlib.sha256(previous_prompt_text.encode("utf-8")).hexdigest()
+        if previous_prompt_text
+        else ""
+    )
     continuity_mode = derive_continuity_mode(shot, prev_shot)
     shot.continuity_mode = continuity_mode
     shot.continuity_from_prev = uses_previous_tail_frame(continuity_mode)
@@ -1258,7 +1291,8 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                                   first_frame_source=first_frame_source,
                                   boundary_relation_edit=boundary_relation_edit,
                                   boundary_relation_action=boundary_relation_action,
-                                  boundary_start_state=boundary_start_state))
+                                  boundary_start_state=boundary_start_state,
+                                  previous_prompt_text=previous_prompt_text))
     raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
     prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
     if raw_source_errors:
@@ -1321,6 +1355,8 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         + f"|after:{chain_after_shot_id or ''}"
         + f"|after_version:{chain_after_version_id or ''}"
         + f"|keyframe_prompt_contract:{video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION}"
+        + f"|video_prompt_contract:{VIDEO_PROMPT_CONTRACT_VERSION}"
+        + f"|previous_prompt:{previous_prompt_fingerprint}"
         + f"|reference_input_policy:{video_modes.REFERENCE_INPUT_POLICY_VERSION}"
         + f"|reference_dependencies:{current_reference_manifest.get('input_fingerprint') or ''}"
     )
@@ -1370,6 +1406,16 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         "auto_retake_count": max(0, int(auto_retake_count)),
         "supervisor_run_id": supervisor_run_id,
         "shot_contract_json": json.dumps(shot_contract_dict(shot), ensure_ascii=False),
+        "video_prompt_contract_version": VIDEO_PROMPT_CONTRACT_VERSION,
+        "previous_prompt_version_id": (
+            previous_prompt_version["id"]
+            if previous_prompt_version is not None
+            else None
+        ),
+        "previous_prompt_fingerprint": previous_prompt_fingerprint or None,
+        "previous_prompt_inherited": bool(
+            previous_prompt_text and not prompt_override
+        ),
         "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
         "reference_input_policy_version": video_modes.REFERENCE_INPUT_POLICY_VERSION,
         "boundary_prompt_contract": {

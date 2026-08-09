@@ -154,9 +154,48 @@ def test_minimax_h3_maps_all_three_generation_modes(monkeypatch) -> None:
     assert requests[2]["use_source_audio"] is True
     assert "<Video 1>" in requests[2]["prompt"]
     assert "<Audio 1>" in requests[2]["prompt"]
+    assert "only the carrier of <Audio 1>" in requests[2]["prompt"]
+    assert "supplies body motion" not in requests[2]["prompt"]
+    assert "supplies camera movement" not in requests[2]["prompt"]
     assert [headers["Idempotency-Key"] for headers in request_headers] == [
         "keyframes", "references", "video",
     ]
+
+
+@pytest.mark.parametrize(
+    ("intent", "expected"),
+    [
+        ("MOTION_REFERENCE", "supplies body motion and physical trajectory only"),
+        ("CAMERA_REFERENCE", "supplies camera movement, framing change, and lens rhythm only"),
+        ("RHYTHM_REFERENCE", "supplies temporal pacing and beat timing only"),
+        ("AUDIO_REFERENCE", "is only the carrier of <Audio 1>"),
+        ("CONTINUE_PREVIOUS_TAKE", "preceding take for visual and audio continuity"),
+    ],
+)
+def test_minimax_h3_video_reference_mapping_respects_declared_intent(
+    intent,
+    expected,
+) -> None:
+    prompt = minimax_h3._tagged_prompt(
+        "当前镜正文 --ratio 9:16 --dur 5",
+        video_count=1,
+        use_source_audio=intent in {"AUDIO_REFERENCE", "CONTINUE_PREVIOUS_TAKE"},
+        video_input_intent=intent,
+    )
+
+    assert expected in prompt
+    assert "当前镜正文" in prompt
+
+
+def test_minimax_h3_only_consumes_trailing_technical_args() -> None:
+    prompt = minimax_h3._tagged_prompt(
+        "角色对白中逐字说出“--dur 5”作为口令。\n"
+        "本镜继续动作 --ratio 9:16 --dur 5",
+    )
+
+    assert "逐字说出“--dur 5”作为口令" in prompt
+    assert prompt.endswith("本镜继续动作")
+    assert "--ratio 9:16 --dur 5" not in prompt
 
 
 def test_minimax_h3_retry_reuses_exact_checkpoint_without_reupload(monkeypatch) -> None:

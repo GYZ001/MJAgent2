@@ -259,10 +259,21 @@ async def _upload_file(
     return uploaded
 
 
+def _split_trailing_video_args(prompt_text: str) -> tuple[str, str]:
+    match = re.search(
+        r"(?P<suffix>(?:\s+--(?:ratio\s+\d+:\d+|dur\s+\d+(?:\.\d+)?))+)\s*$",
+        str(prompt_text or ""),
+    )
+    if not match:
+        return str(prompt_text or "").strip(), ""
+    return str(prompt_text or "")[:match.start()].strip(), match.group("suffix")
+
+
 def _duration(prompt_text: str, call_meta: dict[str, Any] | None) -> float:
     value = (call_meta or {}).get("duration_s")
     if value is None:
-        match = re.search(r"(?:^|\s)--dur\s+(\d+(?:\.\d+)?)", prompt_text)
+        _body, suffix = _split_trailing_video_args(prompt_text)
+        match = re.search(r"--dur\s+(\d+(?:\.\d+)?)", suffix)
         value = match.group(1) if match else config.DEFAULT_VIDEO_DURATION_S
     try:
         duration = float(value)
@@ -274,10 +285,41 @@ def _duration(prompt_text: str, call_meta: dict[str, Any] | None) -> float:
 def _output_dimensions(prompt_text: str) -> tuple[int, int]:
     width = config.MINIMAX_H3_VIDEO_WIDTH
     height = config.MINIMAX_H3_VIDEO_HEIGHT
-    ratio = re.search(r"(?:^|\s)--ratio\s+(\d+):(\d+)", prompt_text)
+    _body, suffix = _split_trailing_video_args(prompt_text)
+    ratio = re.search(r"--ratio\s+(\d+):(\d+)", suffix)
     if ratio and int(ratio.group(1)) > int(ratio.group(2)) and width < height:
         return height, width
     return width, height
+
+
+def _video_reference_instruction(intent: str, index: int) -> str:
+    label = f"<Video {index}>"
+    instructions = {
+        "MOTION_REFERENCE": (
+            f"{label} supplies body motion and physical trajectory only; "
+            "do not copy its identity, clothing, scene, camera path, or audio."
+        ),
+        "CAMERA_REFERENCE": (
+            f"{label} supplies camera movement, framing change, and lens rhythm only; "
+            "do not copy its people, clothing, scene, actions, or audio."
+        ),
+        "RHYTHM_REFERENCE": (
+            f"{label} supplies temporal pacing and beat timing only; "
+            "do not copy its identity, scene, exact motion, camera path, or audio."
+        ),
+        "AUDIO_REFERENCE": (
+            f"{label} is only the carrier of <Audio {index}>; "
+            "ignore its visual identity, scene, motion, framing, and camera behavior."
+        ),
+        "CONTINUE_PREVIOUS_TAKE": (
+            f"{label} is the preceding take for visual and audio continuity; "
+            "continue from its final state without replaying completed action."
+        ),
+    }
+    return instructions.get(
+        intent,
+        f"{label} is a declared video reference; use only the purpose stated in the shot contract.",
+    )
 
 
 def _tagged_prompt(
@@ -286,23 +328,23 @@ def _tagged_prompt(
     image_count: int = 0,
     video_count: int = 0,
     use_source_audio: bool = False,
+    video_input_intent: str = "",
 ) -> str:
-    prompt_text = re.sub(
-        r"(?:^|\s)--(?:ratio\s+\S+|dur\s+\d+(?:\.\d+)?)",
-        "",
-        prompt_text,
-    ).strip()
+    prompt_text, _suffix = _split_trailing_video_args(prompt_text)
     mappings = [
         f"<Picture {index}> corresponds to Reference image {index}."
         for index in range(1, image_count + 1)
     ]
     mappings.extend(
-        f"<Video {index}> is reference video {index} for motion and camera behavior."
+        _video_reference_instruction(video_input_intent, index)
         for index in range(1, video_count + 1)
     )
     if use_source_audio:
         mappings.extend(
-            f"<Audio {index}> is source audio reference {index}."
+            (
+                f"<Audio {index}> is source audio reference {index}; "
+                "use its voice/timing as declared, without importing visual content."
+            )
             for index in range(1, video_count + 1)
         )
     return (
@@ -490,6 +532,7 @@ async def create_video_task(
         image_count=len(images) if mode == "reference_images" else 0,
         video_count=len(videos) if mode == "reference_video" else 0,
         use_source_audio=use_source_audio,
+        video_input_intent=intent,
     )
     logical_request: dict[str, Any] = {
         "mode": mode,

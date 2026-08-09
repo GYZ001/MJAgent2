@@ -1,4 +1,4 @@
-"""Prompt 编译器：分镜脚本 → Seedance prompt。确定性代码，非 LLM（PRD §4.4）。
+"""Prompt 编译器：分镜脚本 → 视频模型 prompt。确定性代码，非 LLM（PRD §4.4）。
 一致性核心：画风串/场景串/角色锚点串逐字拼接，LLM 永不改写。
 M0 实测网关无同步参数校验，因此本编译器是参数合法性的唯一防线。
 """
@@ -20,13 +20,14 @@ from app.spoken_contract import SPOKEN_DELIVERIES
 
 # 正向质量/稳定锚点（Seedance 最佳实践：显式给出稳定与质量约束，比单纯负面词更有效）
 QUALITY_SUFFIX = (
-    "人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定，动作符合现实物理与人体运动规律、自然连贯，"
-    "单一动作一镜到底，首帧到尾帧同机位同场景、背景构图保持一致只有动作自然推进不跳变，"
-    "镜头运动平稳不抖动，光影与色调统一，竖屏电影质感")
+    "人物五官清晰稳定、表情自然，手部与所持道具关系正常稳定；材质稳定、边缘清晰、空间纵深明确，"
+    "自然光影与合理景深，运动模糊符合真实摄影规律；动作符合人体结构、重心和惯性并自然连贯，"
+    "镜头运动平滑稳定，光线方向、色调和整体美术风格统一，保持竖屏电影质感")
 # 成片不要任何配乐：只保留人物台词/旁白人声与必要环境音
 NO_BGM_SUFFIX = "全程不要任何背景音乐、不要配乐、不要 BGM；声音只保留人物台词、旁白人声与必要的环境音"
 SOURCE_EXCERPT_PROMPT_MAX = 260
 SOURCE_EXCERPT_MARKER = "小说原文兜底参考："
+VIDEO_PROMPT_CONTRACT_VERSION = "cinematic_continuity_v1"
 
 def _clean_transition(transition: str | None) -> str:
     transition = (transition or "").strip()
@@ -838,6 +839,162 @@ def _compile_audio_timeline(shot: Shot, voice_bible: list | None = None) -> str:
     return "\n".join(lines)
 
 
+def _format_prompt_time(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _compile_action_timeline(
+    *,
+    duration_s: int,
+    state_in: str,
+    primary_action: str,
+    state_out: str,
+    first_last_boundary: bool,
+) -> str:
+    duration = max(1.0, float(duration_s))
+    if first_last_boundary:
+        establish_end = duration * 0.22
+        settle_start = duration * 0.78
+    else:
+        establish_end = min(2.0, max(1.0, duration * 0.4))
+        settle_start = max(establish_end + 0.5, duration - 1.0)
+    return "\n".join([
+        (
+            f"[0–{_format_prompt_time(establish_end)}秒] 从起始状态自然建立镜头：{state_in}；"
+            "人物先保持真实重心，再开始当前动作，不跳位、不突然加速。"
+        ),
+        (
+            f"[{_format_prompt_time(establish_end)}–{_format_prompt_time(settle_start)}秒] "
+            f"连续发展并完整执行唯一主动作：{primary_action}；"
+            "动作符合人体结构和惯性，不停顿、不跳切、不突然改变方向。"
+        ),
+        (
+            f"[{_format_prompt_time(settle_start)}–{_format_prompt_time(duration)}秒] "
+            f"动作自然收束到结束状态：{state_out}；末尾稳定约 0.3 秒，"
+            "为下一镜保留可承接的人物位置、朝向、视线和道具状态。"
+        ),
+        "三个时段属于同一连续镜头，不得把它们表现为蒙太奇、分屏、幻灯片或多次跳切。",
+    ])
+
+
+def _compile_performance_contract(shot: Shot) -> str:
+    emotions = list(dict.fromkeys(
+        text
+        for text in [
+            (shot.emotion_beat or "").strip(),
+            *((dialogue.emotion or "").strip() for dialogue in shot.dialogues),
+            *(
+                (item.emotion or "").strip()
+                for item in shot.audio_timeline
+                if item.type in SPOKEN_DELIVERIES
+            ),
+        ]
+        if text
+    ))
+    character_states = shot.continuity_state_out.characters or {}
+    gaze = [
+        f"{name}看向{state.gaze_target}"
+        for name, state in character_states.items()
+        if (state.gaze_target or "").strip()
+    ]
+    pose = [
+        f"{name}保持{state.pose}"
+        for name, state in character_states.items()
+        if (state.pose or "").strip()
+    ]
+    lines = [
+        "情绪与表情必须随当前动作同步变化，保持自然微表情和真实身体重心；"
+        "不要用夸张表情、僵硬站姿或无关手势替代剧情动作。"
+    ]
+    if emotions:
+        lines.insert(0, "人物情绪：" + "、".join(emotions) + "。")
+    if gaze:
+        lines.append("视线合同：" + "；".join(gaze) + "。")
+    if pose:
+        lines.append("身体姿态：" + "；".join(pose) + "。")
+    return "\n".join(lines)
+
+
+def _compile_environment_dynamics(shot: Shot) -> str:
+    scene_state = shot.continuity_state_out.scene
+    fixed_state = "；".join(
+        item
+        for item in [
+            f"时间状态保持{scene_state.time_of_day}"
+            if (scene_state.time_of_day or "").strip() else "",
+            f"光照保持{scene_state.lighting_state}"
+            if (scene_state.lighting_state or "").strip() else "",
+        ]
+        if item
+    )
+    return (
+        (fixed_state + "；" if fixed_state else "")
+        + "只让输入画面中实际存在且受环境驱动的头发、衣物、树叶、雨水、烟雾或灯光产生克制的连续运动；"
+        "环境动态服务于主体动作，不抢夺视觉注意力，不凭空新增环境元素，不改变固定场景结构。"
+    )
+
+
+def _structured_prompt_sections(prompt_text: str) -> dict[str, str]:
+    body, _args = _split_video_args(prompt_text)
+    matches = list(re.finditer(r"(?m)^\[([^\]]+)\]\s*$", body))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        sections[match.group(1).strip()] = body[start:end].strip()
+    return sections
+
+
+def _bounded_handoff_text(value: str, max_chars: int) -> str:
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars].rstrip("，；。 ") + "……"
+
+
+def compile_previous_prompt_handoff(
+    previous_prompt_text: str | None,
+    *,
+    continuity_mode: str,
+    prev_state_out: str | None,
+) -> str:
+    """Project only stable previous-prompt facts into the next shot."""
+    if not (previous_prompt_text or "").strip():
+        return ""
+    sections = _structured_prompt_sections(previous_prompt_text or "")
+    previous_end = next(
+        (
+            content
+            for title, content in sections.items()
+            if title.startswith("END STATE")
+        ),
+        "",
+    )
+    authoritative_end = (prev_state_out or "").strip()
+    end_state = authoritative_end or previous_end
+    if continuity_mode == "scene_change":
+        return (
+            "已读取上一镜已编译提示词合同。当前是场景切换：只继承同一角色的身份、服装和全片画风；"
+            "不得继承上一镜场景布局、光线状态、完整动作、对白或摄影构图，本镜以当前场景合同为准。"
+        )
+    geometry = sections.get("PERSISTENT SCENE GEOMETRY", "")
+    lines = [
+        "已读取上一镜已编译提示词合同；这里只继承稳定连续性事实，不复制上一镜完整动作、对白或构图。",
+    ]
+    if end_state:
+        lines.append(
+            "上一镜结束状态即本镜承接起点："
+            + _bounded_handoff_text(end_state, 500)
+        )
+    if geometry:
+        lines.append(
+            "同场景固定几何继续有效："
+            + _bounded_handoff_text(geometry, 700)
+        )
+    lines.append("当前镜只执行本镜主动作；上一镜已经完成的动作不得再次表演。")
+    return "\n".join(lines)
+
+
 def _compile_reference_roles(shot: Shot, *, continuity_mode: str, with_refs: bool,
                              chained: bool, individual_names: set[str] | None = None,
                              collective_names: set[str] | None = None,
@@ -929,6 +1086,11 @@ def _compile_negative_constraints(shot: Shot, extra_negative: list[str] | None,
         ),
         "不要出现镜头内未指定的人物",
         "不要复制人物或生成分身",
+        "不要出现额外肢体、手指异常、脸部变形或身体比例突变",
+        "不要人物漂移、瞬移、穿模或无物理原因改变运动方向",
+        "不要背景结构随机变化，不要物体凭空出现、消失或换位",
+        "不要镜头突然跳切，不要无意义快速推拉、旋转、环绕或剧烈晃动",
+        "不要过度慢动作，不要液化、融化或形变式转场",
     ]
     for item in shot.do_not_repeat or []:
         text = (item or "").strip()
@@ -1057,8 +1219,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                    first_frame_source: str | None = None,
                    boundary_relation_edit: str | None = None,
                    boundary_relation_action: str | None = None,
-                   boundary_start_state: str | None = None) -> str:
-    """编译 Seedance 最终提示词（PRD §11）：最小完备、固定段落、禁止原文/前镜完整动作/未来剧情。"""
+                   boundary_start_state: str | None = None,
+                   previous_prompt_text: str | None = None) -> str:
+    """编译视频模型提示词：固定电影化段落、禁止原文/前镜动作/未来剧情。"""
     from app.continuity import (
         dialogue_action_staging_kind,
         dialogue_focus_subject,
@@ -1219,6 +1382,10 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     )
     if (shot.camera_motivation or "").strip():
         camera_line += f"。摄影意图：{shot.camera_motivation.strip()}"
+    camera_line += (
+        "。全镜只执行一个主要镜头运动，运动平滑稳定；"
+        "不得突然改变方向、无理由环绕主体或剧烈晃动"
+    )
     if dialogue_focus:
         boundary_camera_prefix = "完成首帧边界的连续运镜后，" if first_frame_boundary else ""
         camera_line += (
@@ -1298,9 +1465,19 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
         post_text_note += "与精确文字插入"
     post_text_note += "；不得依赖后期补齐剧情动作、配音或关键音效。"
     format_block = (
+        f"提示词合同 {VIDEO_PROMPT_CONTRACT_VERSION}。"
         f"生成 {shot_dur} 秒、{aspect_ratio}、{style} 的完整可直接采用视频。"
         f"{post_text_note}"
         "全程不要任何背景音乐或 BGM；声音只保留指定人声与必要环境音。"
+    )
+    generation_goal_block = (
+        "基于输入图像生成一段连续、自然、具有电影镜头感的单镜头视频；"
+        "输入图像是本镜视觉基准，本镜唯一画面任务是完成当前主动作并到达指定结束状态。"
+    )
+    visual_anchor_block = (
+        "严格保持输入图中的人物身份、脸型、五官、发型、年龄感、身体比例、服装款式颜色与配饰；"
+        "保持场景空间结构、固定物体位置、光线方向、色调、主要构图和整体美术风格。"
+        "不得重新设计人物、改变服装，或无故增加、删除、移动固定物体。"
     )
     reference_block = _compile_reference_roles(
         shot, continuity_mode=mode, with_refs=with_refs,
@@ -1349,6 +1526,20 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     audio_block = _compile_audio_timeline(shot, voice_bible)
     text_block = _compile_text_policy(shot)
     structured_state_block = structured_state_prompt(shot)
+    timeline_block = _compile_action_timeline(
+        duration_s=shot_dur,
+        state_in=state_in,
+        primary_action=primary,
+        state_out=state_out,
+        first_last_boundary=first_last_boundary,
+    )
+    performance_block = _compile_performance_contract(shot)
+    environment_block = _compile_environment_dynamics(shot)
+    previous_handoff_block = compile_previous_prompt_handoff(
+        previous_prompt_text,
+        continuity_mode=mode,
+        prev_state_out=prev_state_out,
+    )
     consistency_parts = [
         character_anchor, scene_anchor, prop_anchor, height_hint,
         "人物头身比沿用角色参考的自然比例；参考图裁切大小不代表实体头部大小，禁止跨镜突然大头或幼态化",
@@ -1371,18 +1562,25 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     # 固定段落顺序（PRD §11.1）；超长时按优先级压缩，不得截断台词/文字/首尾状态
     sections: list[tuple[str, str, int]] = [
         ("FORMAT", format_block, 5),
+        ("GENERATION GOAL", generation_goal_block, 5),
+        ("VISUAL ANCHOR", visual_anchor_block, 4),
         ("REFERENCE ROLES", reference_block, 3),
+        ("PREVIOUS SHOT HANDOFF", previous_handoff_block, 3),
         ("VISIBLE CAST", visible_cast_block, 1),
         ("START STATE | 0.0s", state_in, 1),
         ("FIRST-LAST CONTINUOUS PATH", boundary_path, 1),
         ("ONE CURRENT ACTION", action_block, 1),
+        ("ACTION TIMELINE", timeline_block, 2),
         (f"END STATE | {shot_dur}.0s", state_out + "。结尾稳定，可供下镜承接。", 1),
         ("STRUCTURED CONTINUITY", structured_state_block, 1),
         ("PERSISTENT SCENE GEOMETRY", scene_geometry, 1),
         ("CAMERA", camera_line, 4),
+        ("PERFORMANCE", performance_block, 4),
+        ("ENVIRONMENT DYNAMICS", environment_block, 5),
         ("AUDIO TIMELINE", audio_block, 2),
         ("ON-SCREEN TEXT", text_block, 2),
         ("CONSISTENCY", consistency_block, 4),
+        ("VISUAL QUALITY", QUALITY_SUFFIX, 5),
         ("DO NOT", negative_block, 5),
     ]
 
@@ -1402,6 +1600,11 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
     compact_negative_parts = negative_block.split("；")[:6]
     compact_map = {
         "CONSISTENCY": "保持人物身份服装与场景材质光线一致。",
+        "GENERATION GOAL": "生成连续自然、具有电影感的单镜头，完成本镜唯一主动作。",
+        "VISUAL ANCHOR": "输入图锁定人物身份服装、场景结构、光线色调与画风，不得重设计。",
+        "PREVIOUS SHOT HANDOFF": (
+            "继承上一镜结束状态与同场景固定几何；不复制上一镜动作、对白或构图。"
+        ),
         "REFERENCE ROLES": (
             "仅按角色映射使用参考图；连续动作才把尾帧当 0 秒起点，其余模式重新构图。"
             if uses_previous_tail_frame(mode) else
@@ -1417,6 +1620,9 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             + (f"；单人对白近景，仅「{dialogue_focus}」入画" if dialogue_focus else "")
             + ("；接触动作侧面机位" if has_contact_action(shot) else "")
         ),
+        "PERFORMANCE": "表情、视线与动作同步，保持自然微表情和真实身体重心。",
+        "ENVIRONMENT DYNAMICS": "仅让已有环境元素克制连续运动，不新增元素或改变场景结构。",
+        "VISUAL QUALITY": "五官、手部、材质与边缘稳定，光影景深自然，运动模糊符合真实摄影。",
     }
     for priority in (5, 4, 3):
         if fits(text):
@@ -1431,6 +1637,30 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
                     active[idx] = (title, compact, pri)
                     break
             text = render(active)
+
+    # 时间轴内容与 START/ACTION/END 重复时，压缩为时段索引但保留连续执行纪律。
+    if not fits(text):
+        duration = float(shot_dur)
+        establish_end = (
+            duration * 0.22
+            if first_last_boundary else min(2.0, max(1.0, duration * 0.4))
+        )
+        settle_start = (
+            duration * 0.78
+            if first_last_boundary else max(establish_end + 0.5, duration - 1.0)
+        )
+        compact_timeline = (
+            f"0–{_format_prompt_time(establish_end)}s 建立 START STATE；"
+            f"{_format_prompt_time(establish_end)}–{_format_prompt_time(settle_start)}s "
+            "连续执行 ONE CURRENT ACTION；"
+            f"{_format_prompt_time(settle_start)}–{_format_prompt_time(duration)}s "
+            "收束到 END STATE 并稳定 0.3s；全程不跳切。"
+        )
+        for idx, (title, _content, pri) in enumerate(active):
+            if title == "ACTION TIMELINE":
+                active[idx] = (title, compact_timeline, pri)
+                break
+        text = render(active)
 
     # 仍超长：压缩音频时间线描述（保留台词原文）
     if not fits(text):
