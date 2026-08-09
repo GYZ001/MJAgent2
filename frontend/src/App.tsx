@@ -1171,7 +1171,9 @@ export function usePoll<T>(
     const catchUp = () => {
       if (document.visibilityState === "visible") void poller.refresh();
     };
-    syncVisibility();
+    void poller.start().finally(() => {
+      if (document.visibilityState === "hidden") poller.stop();
+    });
     document.addEventListener("visibilitychange", syncVisibility);
     if (options.refreshOnFocus !== false) {
       window.addEventListener("focus", catchUp);

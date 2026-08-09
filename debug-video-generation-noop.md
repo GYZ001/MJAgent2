@@ -41,3 +41,33 @@ Root cause confirmed. Minimal fix applied:
 
 Focused verification: 75 backend tests and 31 frontend tests pass; TypeScript
 typecheck passes. Pending post-fix browser and runtime-log comparison.
+
+## Load Regression Evidence
+- With 33 media jobs, the backend reached about 87% CPU and 12 consecutive
+  health probes exceeded 5 seconds.
+- The native sample placed about 77% of main-thread samples in synchronous
+  SQLite execute/fetch paths.
+- A prior SQL debug probe was attached to every connection and captured a
+  Python stack for every write; the process reached roughly 106 threads and
+  82 database handles.
+- Chrome had 23 application tabs. Hidden tabs continued polling complete
+  board/wall payloads; the target wall contains 44 shots and 83 versions.
+- Project call observability scanned all 20k provider_calls rows. The table is
+  about 528 MiB and the query took 6.9-11 seconds.
+
+## Load Fixes
+- SQL tracing now requires explicit `MJ_DEBUG_SQL_TRACE=1`.
+- No-op pipeline stage writes no longer increment revisions or write WAL.
+- Durable dispatch and full coverage-ledger rebuilds run off the uvicorn loop.
+- Per-shot first-pass dispatch no longer rebuilds the whole episode ledger.
+- Hidden tabs stop periodic polling after one initial load; wall detail polling
+  while active is reduced from 2 seconds to 8 seconds.
+- Provider calls persist project ownership and use a project/id index before
+  Python aggregation.
+
+Post-fix measurements:
+- 50/50 health probes succeeded; most completed in 1-3 ms.
+- Threads fell to 13 and database handles to 18.
+- Project call query warm latency fell to about 30 ms.
+- Planner revision 3 published valid with 44 shots; SH019 has exactly one
+  compiler-produced `first_frame` input.
