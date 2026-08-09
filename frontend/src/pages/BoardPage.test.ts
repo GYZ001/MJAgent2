@@ -9,6 +9,7 @@ import {
   storyboardCharacterFilterOptions,
   storyboardProgressCopy,
   storyboardInputStrategy,
+  storyboardPrimaryAction,
   storyboardSaveDisabledReason,
   storyboardShotCheckpointLabel,
   storyboardSpokenChars,
@@ -216,6 +217,74 @@ describe('分镜台结构化 diff 与问题筛选', () => {
     expect(preview.title).toBe('完成分镜发布证据')
     expect(preview.confirmLabel).toBe('继续审读发布')
     expect(preview.detail).toContain('仅继续冷观众审读')
+  })
+
+  it('把一次观看权威提升为发布证据阶段的主操作', () => {
+    const status = storyboardStatus({
+      planned_shots: 14,
+      produced_shots: 14,
+      validated_shots: 14,
+      resume_mode: 'finalize_evidence',
+      final_shot_valid: true,
+      hard_gates_passed: true,
+    })
+
+    expect(storyboardPrimaryAction(
+      status,
+      { ready: false, status: 'needs_review', blockers: [] },
+      {
+        artifact_id: 'review-1',
+        version: 1,
+        status: 'validated',
+        decision: 'pass',
+        low_percentile: {},
+        inference_variance: 0,
+        reason: '',
+      },
+    )).toEqual({
+      intent: 'activate_ai_one_watch',
+      label: '运行 AI 一次观看模拟',
+    })
+
+    expect(storyboardPrimaryAction(
+      status,
+      {
+        ready: false,
+        status: 'awaiting_republish',
+        authority_mode: 'ai_simulation',
+        blockers: [],
+      },
+      null,
+    )).toEqual({
+      intent: 'resume_storyboard',
+      label: '完成发布证据',
+    })
+  })
+
+  it('真实门禁失败时仍要求继续修复，不能进入一次观看或确认', () => {
+    const action = storyboardPrimaryAction(
+      storyboardStatus({
+        state: 'failed',
+        resume_mode: 'repair_existing',
+        hard_gates_passed: false,
+        hard_gate_issue_count: 1,
+      }),
+      { ready: false, status: 'needs_review', blockers: [] },
+      {
+        artifact_id: 'review-1',
+        version: 1,
+        status: 'validated',
+        decision: 'pass',
+        low_percentile: {},
+        inference_variance: 0,
+        reason: '',
+      },
+    )
+
+    expect(action).toEqual({
+      intent: 'resume_storyboard',
+      label: '继续分镜任务',
+    })
   })
 
   it('在镜头轨道区分已校验和待校验工作副本', () => {

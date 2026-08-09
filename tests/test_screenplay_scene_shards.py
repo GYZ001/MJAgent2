@@ -175,6 +175,29 @@ def test_frozen_functional_identity_has_a_visible_contextual_anchor() -> None:
     assert "邮差" in functional.visual_canonical
 
 
+def test_frozen_identity_registry_rejects_conflicting_canonical_names() -> None:
+    resolutions = [
+        {
+            "source_label": "门口的人",
+            "canonical_name": "甲",
+            "resolution": "functional_identity",
+            "authority_id": "functional:same",
+        },
+        {
+            "source_label": "屋内的人",
+            "canonical_name": "乙",
+            "resolution": "functional_identity",
+            "authority_id": "functional:same",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="functional:same.*多个 canonical_name"):
+        build_frozen_identity_registry(
+            Bible(characters=[], world=World(visual_style_canonical="测试")),
+            resolutions,
+        )
+
+
 def test_validated_shards_merge_in_blueprint_order_with_global_namespaces() -> None:
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(

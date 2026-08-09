@@ -27,6 +27,7 @@ export class AdaptivePoller<T> {
   private callbacks: PollCallbacks<T>
   private readonly clock: PollClock
   private data: T | null = null
+  private started = false
   private active = false
   private generation = 0
   private timer: unknown
@@ -55,11 +56,13 @@ export class AdaptivePoller<T> {
   }
 
   start(): Promise<T | null> {
+    this.started = true
     this.active = true
     return this.refresh()
   }
 
   stop() {
+    this.started = false
     this.active = false
     this.generation += 1
     this.clearTimer()
@@ -67,7 +70,8 @@ export class AdaptivePoller<T> {
   }
 
   refresh(): Promise<T | null> {
-    if (!this.active) return Promise.resolve(this.data)
+    if (!this.started) return Promise.resolve(this.data)
+    this.active = true
     if (this.inFlight) return this.inFlight
 
     const generation = this.generation

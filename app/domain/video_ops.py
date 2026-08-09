@@ -3252,6 +3252,20 @@ def _persist_project_video_queue(run_id: str, state: dict) -> None:
 
 
 _project_video_queue_pause_requests: set[str] = set()
+_PROJECT_VIDEO_CHILD_WAIT_STATUSES = {
+    "CREATED",
+    "RUNNING",
+    "WAITING_RETRY",
+    "WAITING_HUMAN",
+    "WAITING_AUTHORIZATION",
+    "PAUSED_BUDGET",
+    "PAUSED_EXTERNAL",
+}
+_PROJECT_VIDEO_ITEM_SUCCESS_STATUSES = {
+    "success",
+    "finished",  # Compatibility with queue snapshots persisted before status propagation.
+    "already_covered",
+}
 
 
 def request_project_video_queue_pause(project_id: str) -> None:
@@ -3260,6 +3274,129 @@ def request_project_video_queue_pause(project_id: str) -> None:
 
 def clear_project_video_queue_pause(project_id: str) -> None:
     _project_video_queue_pause_requests.discard(project_id)
+
+
+def _authoritative_project_video_child_run(run_id: str | None) -> dict | None:
+    """Follow recovery links and return the latest persisted child attempt."""
+    if not run_id:
+        return None
+    conn = get_conn()
+    current_id = run_id
+    visited: set[str] = set()
+    while current_id and current_id not in visited:
+        visited.add(current_id)
+        row = conn.execute(
+            """SELECT id,status,failure_code,failure_message,recovered_by_run_id
+               FROM workflow_runs WHERE id=?""",
+            (current_id,),
+        ).fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        recovered_by = current.get("recovered_by_run_id")
+        if not recovered_by:
+            return current
+        current_id = recovered_by
+    return None
+
+
+def _propagate_project_video_child_status(item: dict) -> None:
+    child = _authoritative_project_video_child_run(item.get("run_id"))
+    if child is None:
+        item["status"] = "failed"
+        item["error"] = "单集补齐运行记录缺失，无法确认完成状态"
+        return
+
+    child_status = str(child["status"] or "").upper()
+    item["run_id"] = child["id"]
+    item["child_run_status"] = child_status
+    if child.get("failure_code"):
+        item["child_failure_code"] = child["failure_code"]
+    if child.get("failure_message"):
+        item["child_message"] = child["failure_message"]
+
+    if child_status == "SUCCEEDED":
+        item["status"] = "success"
+    elif child_status == "PARTIAL":
+        item["status"] = "partial"
+    elif child_status == "FAILED":
+        item["status"] = "failed"
+    elif child_status == "CANCELLED":
+        item["status"] = "cancelled"
+    elif child_status in _PROJECT_VIDEO_CHILD_WAIT_STATUSES:
+        item["status"] = "waiting"
+    else:
+        item["status"] = "failed"
+        item["error"] = f"单集补齐返回未知运行状态：{child_status or 'EMPTY'}"
+
+    if item["status"] == "failed" and child.get("failure_message"):
+        item["error"] = str(child["failure_message"])[:500]
+
+
+def _finish_project_video_completion_queue(plan: list[dict], recorder) -> None:
+    from app.evidence import repository as evidence_repository
+    from app.orchestration.state_machine import transition_run
+
+    statuses = [str(item.get("status") or "") for item in plan]
+    waiting_items = [item for item in plan if item.get("status") == "waiting"]
+    if waiting_items:
+        waiting_statuses = [
+            str(item.get("child_run_status") or "")
+            for item in waiting_items
+        ]
+        target = next(
+            (
+                status for status in waiting_statuses
+                if status in _PROJECT_VIDEO_CHILD_WAIT_STATUSES
+                and status not in {"CREATED", "RUNNING"}
+            ),
+            "WAITING_HUMAN",
+        )
+        source = next(
+            (
+                item for item in waiting_items
+                if item.get("child_run_status") == target
+            ),
+            waiting_items[0],
+        )
+        message = f"项目补齐队列有 {len(waiting_items)} 集等待继续处理"
+        transition_run(
+            recorder.run_id,
+            "RUNNING",
+            target,
+            message,
+            failure_code=source.get("child_failure_code"),
+        )
+        evidence_repository.append_event(
+            recorder.run_id,
+            "PROJECT_VIDEO_QUEUE_WAITING",
+            "warning",
+            message,
+            payload={"waiting": len(waiting_items), "status": target},
+        )
+        return
+
+    unsuccessful = [
+        status for status in statuses
+        if status not in _PROJECT_VIDEO_ITEM_SUCCESS_STATUSES
+    ]
+    if not unsuccessful:
+        recorder.succeed("项目补齐队列已全部处理")
+        return
+    if all(status == "cancelled" for status in unsuccessful) and all(
+        status == "cancelled" for status in statuses
+    ):
+        recorder.cancel("项目补齐队列中的单集任务均已取消")
+        return
+    if statuses and all(status == "failed" for status in statuses):
+        recorder.fail_result(
+            f"项目补齐队列失败，{len(statuses)} 集均未完成",
+            failure_code="PROJECT_VIDEO_CHILD_FAILED",
+        )
+        return
+    recorder.partial(
+        f"项目补齐队列已结束，{len(unsuccessful)} 集未成功完成"
+    )
 
 
 async def _run_project_video_completion_queue(
@@ -3274,9 +3411,20 @@ async def _run_project_video_completion_queue(
     _persist_project_video_queue(recorder.run_id, state)
     try:
         for item in plan:
-            if item.get("status") not in {"queued", "started", "failed_to_schedule"}:
+            item_status = item.get("status")
+            if item_status not in {
+                "queued", "started", "waiting", "already_running",
+                "failed_to_schedule",
+            }:
                 continue
             episode_id = item["episode_id"]
+            if item_status == "already_running" and not item.get("run_id"):
+                active_run = get_conn().execute(
+                    "SELECT active_video_run_id FROM episodes WHERE id=?",
+                    (episode_id,),
+                ).fetchone()
+                if active_run:
+                    item["run_id"] = active_run["active_video_run_id"]
             # A recovered per-episode Supervisor always owns the episode first.
             while any(
                 task_registry.active("video_completion", candidate["episode_id"])
@@ -3284,12 +3432,16 @@ async def _run_project_video_completion_queue(
                 if candidate.get("episode_id")
             ):
                 await asyncio.sleep(5)
+            if item_status in {"started", "waiting", "already_running"}:
+                _propagate_project_video_child_status(item)
+                _persist_project_video_queue(recorder.run_id, state)
+                continue
             try:
                 from app.video_supervisor import rebuild_coverage_ledger
 
                 ledger = rebuild_coverage_ledger(episode_id)
                 if ledger.covered_within_quota():
-                    item["status"] = "finished"
+                    item["status"] = "success"
                     _persist_project_video_queue(recorder.run_id, state)
                     continue
             except Exception:  # noqa: BLE001
@@ -3318,21 +3470,12 @@ async def _run_project_video_completion_queue(
                 _persist_project_video_queue(recorder.run_id, state)
                 while task_registry.active("video_completion", episode_id):
                     await asyncio.sleep(8)
-                item["status"] = "finished"
+                _propagate_project_video_child_status(item)
             except Exception as exc:  # noqa: BLE001
                 item["status"] = "failed"
                 item["error"] = str(exc)[:500]
             _persist_project_video_queue(recorder.run_id, state)
-        failures = [
-            item for item in plan
-            if item.get("status") in {"failed", "failed_to_schedule", "skipped_budget"}
-        ]
-        if failures:
-            recorder.partial(
-                f"项目补齐队列已结束，{len(failures)} 集需补充预算或重新发起"
-            )
-        else:
-            recorder.succeed("项目补齐队列已全部处理")
+        _finish_project_video_completion_queue(plan, recorder)
     except asyncio.CancelledError:
         _persist_project_video_queue(recorder.run_id, state)
         pause_requested = project_id in _project_video_queue_pause_requests

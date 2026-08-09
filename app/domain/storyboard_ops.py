@@ -4203,6 +4203,21 @@ def _public_shot_versions(conn, shot_id: str, *, include_inputs: bool) -> list[d
             "video_input_source_revision_id": upstream_video_revision or None,
             "mode": meta.get("mode"),
             "mode_decision": meta.get("mode_decision"),
+            "planned_mode": meta.get("planned_mode"),
+            "actual_mode": meta.get("actual_mode"),
+            "video_input_intent": meta.get("video_input_intent"),
+            "ai_video_prompt_contract_version": meta.get(
+                "ai_video_prompt_contract_version"
+            ),
+            "ai_video_prompt_generated_at": meta.get(
+                "ai_video_prompt_generated_at"
+            ),
+            "required_reference_characters": list(
+                meta.get("required_reference_characters") or []
+            ),
+            "required_interaction_reference_characters": list(
+                meta.get("required_interaction_reference_characters") or []
+            ),
             "reference_image_used": bool(meta.get("reference_image_used")),
             "reference_images": refs,
             "reference_failure_logs": [

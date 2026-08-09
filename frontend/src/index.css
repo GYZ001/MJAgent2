@@ -1596,6 +1596,18 @@ label.f {
   white-space: pre-wrap;
   font-size: 10.5px;
 }
+.h3-prompt-output {
+  max-height: 420px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  background: var(--paper);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.6 monospace;
+}
 .material-review {
   margin-top: 0;
 }

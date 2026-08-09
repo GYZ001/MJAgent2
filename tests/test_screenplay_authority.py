@@ -55,6 +55,127 @@ def test_cached_screenplay_artifact_model_is_isolated_from_mutable_readers() -> 
     )
 
 
+def test_revalidation_candidate_switches_revision_pointer_only_when_published() -> None:
+    screenplay, artifact, authority = _published_case()
+    from app.production.certificate import get_completion_certificate
+
+    conn = db.get_conn()
+    before = conn.execute(
+        "SELECT screenplay_production_revision_id,"
+        "screenplay_completion_certificate_id FROM episodes "
+        "WHERE id='episode-generic'"
+    ).fetchone()
+    old_certificate = get_completion_certificate(authority.certificate_id)
+    assert old_certificate is not None
+
+    candidate = ensure_production_revision(
+        episode_id="episode-generic",
+        kind="screenplay",
+        input_fingerprint=authority.input_fingerprint,
+        contract_version=str(artifact["contract_version"]),
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        resume=False,
+    )
+    mark_baseline_generated(
+        candidate.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+
+    during = conn.execute(
+        "SELECT screenplay_production_revision_id,"
+        "screenplay_completion_certificate_id FROM episodes "
+        "WHERE id='episode-generic'"
+    ).fetchone()
+    assert tuple(during) == tuple(before)
+
+    published = publish_screenplay(
+        episode_id="episode-generic",
+        revision_id=candidate.id,
+        artifact_id=artifact["id"],
+        artifact_hash=artifact["content_hash"],
+        evaluation_ids=old_certificate.evaluation_ids,
+        input_fingerprint=authority.input_fingerprint,
+        contract_version=str(artifact["contract_version"]),
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        clear_downstream=False,
+    )
+
+    after = conn.execute(
+        "SELECT screenplay_production_revision_id,"
+        "screenplay_completion_certificate_id FROM episodes "
+        "WHERE id='episode-generic'"
+    ).fetchone()
+    assert after["screenplay_production_revision_id"] == candidate.id
+    assert after["screenplay_completion_certificate_id"] == published["certificate_id"]
+    resolved = resolve_current_screenplay_authority("episode-generic")
+    assert resolved.certificate_id == published["certificate_id"]
+    assert resolved.screenplay.model_dump(mode="json") == screenplay.model_dump(mode="json")
+
+
+def test_identity_normalization_failure_preserves_published_resolver(
+    monkeypatch,
+) -> None:
+    screenplay, artifact, authority = _published_case()
+    from app import portraits
+    from app.domain.common import _project_bible_or_placeholder
+    from app.domain.screenplay_ops import _prepare_published_screenplay_revalidation
+    from app.production.screenplay_repair import (
+        _complete_screenplay_from_working_artifact,
+    )
+
+    conn = db.get_conn()
+    before = conn.execute(
+        "SELECT screenplay_artifact_id,published_screenplay_artifact_id,"
+        "screenplay_production_revision_id,screenplay_completion_certificate_id "
+        "FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    episode = dict(conn.execute(
+        "SELECT * FROM episodes WHERE id='episode-generic'"
+    ).fetchone())
+    candidate = _prepare_published_screenplay_revalidation(episode)
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id='project-generic'"
+    ).fetchone()
+
+    def fail_identity_normalization(*_args, **_kwargs):
+        raise RuntimeError("injected identity normalization failure")
+
+    monkeypatch.setattr(
+        portraits,
+        "apply_screenplay_character_resolutions",
+        fail_identity_normalization,
+    )
+    with pytest.raises(RuntimeError, match="injected identity normalization failure"):
+        _complete_screenplay_from_working_artifact(
+            episode_id="episode-generic",
+            episode=dict(conn.execute(
+                "SELECT * FROM episodes WHERE id='episode-generic'"
+            ).fetchone()),
+            source_text=authority.source_text,
+            bible=_project_bible_or_placeholder(project),
+            revision_id=candidate.id,
+            run_id=None,
+            checkpoint=dict(candidate.checkpoint_json),
+            activation_no=1,
+        )
+
+    after = conn.execute(
+        "SELECT screenplay_artifact_id,published_screenplay_artifact_id,"
+        "screenplay_production_revision_id,screenplay_completion_certificate_id "
+        "FROM episodes WHERE id='episode-generic'"
+    ).fetchone()
+    assert tuple(after) == tuple(before)
+    assert conn.execute(
+        "SELECT status FROM production_revisions WHERE id=?",
+        (candidate.id,),
+    ).fetchone()["status"] == "active"
+    resolved = resolve_current_screenplay_authority("episode-generic")
+    assert resolved.artifact_id == artifact["id"]
+    assert resolved.certificate_id == authority.certificate_id
+    assert resolved.screenplay.model_dump(mode="json") == screenplay.model_dump(mode="json")
+
+
 def _seed_test_bible_authority() -> tuple[dict, dict]:
     bible = {
         "world": {

@@ -3123,6 +3123,17 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             _set_version(version["id"], prompt_text=prompt_text)
         try:
             if not task_id:
+                await _assert_video_provider_submission_authority_async(
+                    conn=conn,
+                    job=job,
+                    meta=meta,
+                    actual_mode=str(
+                        meta.get("planned_mode")
+                        or meta.get("mode")
+                        or video_modes.REFERENCE_IMAGE_MODE
+                    ),
+                    write_point="video_prompt_generate",
+                )
                 meta, prompt_text = await _await_with_job_lease_heartbeat(
                     _ensure_ai_video_prompt(
                         conn, job, version, shot, ep, meta, prompt_text,

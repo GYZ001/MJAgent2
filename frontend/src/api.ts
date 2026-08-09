@@ -1480,6 +1480,10 @@ export interface ShotVersion {
     degraded_reason?: string | null;
     stale?: boolean;
     stale_reason?: string | null;
+    ai_video_prompt_contract_version?: string | null;
+    ai_video_prompt_generated_at?: number | null;
+    required_reference_characters?: string[];
+    required_interaction_reference_characters?: string[];
     reference_image_used?: boolean;
     reference_images?: ReferenceImage[];
     reference_failure_logs?: {

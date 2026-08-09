@@ -464,6 +464,18 @@ async function participantHash(value: string) {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
+type AiOneWatchSimulationResult = {
+  message?: string
+}
+
+async function activateAiOneWatchSimulation(
+  episodeId: string,
+): Promise<AiOneWatchSimulationResult> {
+  return api.post(
+    `/episodes/${episodeId}/narrative-calibration/ai-simulate`,
+  ) as Promise<AiOneWatchSimulationResult>
+}
+
 function HumanCalibrationControls({
   episode,
   notify,
@@ -608,7 +620,7 @@ function HumanCalibrationControls({
   }
 
   return <details className="narrative-calibration-controls">
-    <summary>一次观看权威与真人校准</summary>
+    <summary>一次观看权威与真人一次观看校准</summary>
     <div className="narrative-calibration-rebuild">
       <button type="button" className="btn primary" disabled={busy}
         onClick={() => void runAiOneWatchSimulation()}>

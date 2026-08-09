@@ -172,8 +172,12 @@ def identity_authority_registry(
         if source_label and source_label not in entry["source_labels"]:
             entry["source_labels"].append(source_label)
         if entry["canonical_name"] != item["canonical_name"]:
-            entry["conflicting_canonical_names"] = sorted({
+            names = sorted({
                 entry["canonical_name"],
                 item["canonical_name"],
             })
+            raise ValueError(
+                f"authority_id={authority_id} 同时声明了多个 canonical_name："
+                f"{names}"
+            )
     return list(entries.values())

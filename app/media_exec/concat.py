@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 try:
     _queue
 except NameError:  # pragma: no cover - used when importing this module directly
@@ -7,6 +9,104 @@ except NameError:  # pragma: no cover - used when importing this module directly
 
 
 _ACTIVE_VIDEO_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_retry")
+_CONCAT_PROBE_TIMEOUT_S = 30.0
+_CONCAT_DURATION_TOLERANCE_RATIO = 0.10
+_CONCAT_DURATION_TOLERANCE_MIN_S = 0.75
+
+
+def _probe_concat_media(path: str | Path) -> dict[str, Any]:
+    media_path = Path(path)
+    if not media_path.is_file() or media_path.stat().st_size <= 0:
+        raise ValueError("文件不存在或为空")
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=format_name,duration:stream=codec_type",
+                "-of", "json", str(media_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_CONCAT_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            f"ffprobe 超过 {int(_CONCAT_PROBE_TIMEOUT_S)} 秒"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()[-500:]
+        raise ValueError("ffprobe 无法读取容器" + (f"：{detail}" if detail else "")) from exc
+    except OSError as exc:
+        raise ValueError(f"ffprobe 无法执行：{exc}") from exc
+    try:
+        payload = json.loads(completed.stdout or "{}")
+        fmt = payload.get("format") or {}
+        format_name = str(fmt.get("format_name") or "").strip().lower()
+        duration_s = float(fmt.get("duration"))
+        streams = payload.get("streams") or []
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("ffprobe 返回了无效的容器元数据") from exc
+    if "mp4" not in format_name.split(","):
+        raise ValueError(f"容器不是 MP4（format_name={format_name or 'unknown'}）")
+    if not any(
+        isinstance(stream, dict) and stream.get("codec_type") == "video"
+        for stream in streams
+    ):
+        raise ValueError("容器中没有视频流")
+    if not math.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError(f"容器时长无效（duration={duration_s!r}）")
+    return {"duration_s": duration_s, "format_name": format_name}
+
+
+def _validate_concat_output(
+    path: str | Path,
+    *,
+    expected_duration_s: float,
+    decode_timeout_s: float,
+) -> float:
+    try:
+        probe = _probe_concat_media(path)
+    except ValueError as exc:
+        raise ValueError(
+            f"合片产物容器/时长校验失败，上一版成片仍保留：{exc}"
+        ) from exc
+    if not math.isfinite(expected_duration_s) or expected_duration_s <= 0:
+        raise ValueError("无法确定合片预期时长，上一版成片仍保留")
+    actual_duration_s = float(probe["duration_s"])
+    tolerance_s = max(
+        _CONCAT_DURATION_TOLERANCE_MIN_S,
+        expected_duration_s * _CONCAT_DURATION_TOLERANCE_RATIO,
+    )
+    if abs(actual_duration_s - expected_duration_s) > tolerance_s:
+        raise ValueError(
+            "合片产物时长异常，上一版成片仍保留："
+            f"实测 {actual_duration_s:.3f}s，预期 {expected_duration_s:.3f}s，"
+            f"允许误差 {tolerance_s:.3f}s"
+        )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-nostdin", "-v", "error", "-xerror",
+                "-i", str(path), "-map", "0:v:0", "-f", "null", "-",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=decode_timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            f"合片产物完整解码超过 {int(decode_timeout_s)} 秒，上一版成片仍保留"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace").strip()[-500:]
+        raise ValueError(
+            "合片产物完整解码失败，上一版成片仍保留"
+            + (f"：{detail}" if detail else "")
+        ) from exc
+    except OSError as exc:
+        raise ValueError(f"合片产物无法执行完整解码，上一版成片仍保留：{exc}") from exc
+    return actual_duration_s
 
 
 def _active_generation_shot_nos(conn, episode_id: str) -> list[int]:
@@ -232,6 +332,11 @@ def concatenate_episode(episode_id: str) -> dict:
             "服务端未找到视频合成组件 ffmpeg；请安装 ffmpeg 或修正服务启动 PATH 后重试，"
             "本次未生成成片"
         )
+    if not shutil.which("ffprobe"):
+        raise ValueError(
+            "服务端未找到视频校验组件 ffprobe；无法在替换前校验成片，"
+            "本次未生成成片"
+        )
 
     # 恢复/人工合成时，低分但可播放的真实模型候选可以强制择优；确定性图片
     # 兜底已从候选池排除，绝不能借此获得 adopted_version_id。
@@ -354,6 +459,11 @@ def concatenate_episode(episode_id: str) -> dict:
                 edit_report["mode"] = "final_edit"
                 edit_report["decision_reason"] = final_edit_reason
                 edit_report["elapsed_s"] = round(time.perf_counter() - final_edit_started_at, 3)
+                validated_duration_s = _validate_concat_output(
+                    edited_video,
+                    expected_duration_s=float(edit_report["total_duration_s"]),
+                    decode_timeout_s=concat_timeout_s,
+                )
                 atomic_copy(edited_video, final_path)
             final_path.with_suffix(".stale").unlink(missing_ok=True)
             report_path = _edit_report_path(final_path)
@@ -363,7 +473,7 @@ def concatenate_episode(episode_id: str) -> dict:
             )
             return {
                 "video_url": _versioned_final_url(final_path),
-                "total_duration_s": round(float(edit_report["total_duration_s"]), 1),
+                "total_duration_s": round(validated_duration_s, 1),
                 **common_result,
                 "elapsed_s": round(time.perf_counter() - started_at, 3),
                 "final_edit": edit_report,
@@ -371,6 +481,16 @@ def concatenate_episode(episode_id: str) -> dict:
         except Exception as exc:  # noqa: BLE001 - 质量增强失败必须继续完整交付
             final_edit_elapsed_s = time.perf_counter() - final_edit_started_at
             final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
+
+    measured_total_dur = 0.0
+    for shot_no, vpath, rate in piece_specs:
+        try:
+            source_probe = _probe_concat_media(vpath)
+        except ValueError as exc:
+            raise ValueError(
+                f"镜 {shot_no} 的源片段无法完成容器/时长校验，上一版成片仍保留：{exc}"
+            ) from exc
+        measured_total_dur += float(source_probe["duration_s"]) / rate
 
     # 用 concat demuxer 优先无重编码直粘（画质无损）；但 -c copy 要求各片段编码参数
     # （像素格式/timebase/SAR/profile）完全一致，否则会失败或花屏。一旦失败，回退重编码兜底。
@@ -441,22 +561,15 @@ def concatenate_episode(episode_id: str) -> dict:
                 ) from exc
         if not silent_video.is_file() or silent_video.stat().st_size <= 0:
             raise ValueError("ffmpeg 未产出有效成片，上一版成片仍保留，可检查片段后重试")
+        total_dur = _validate_concat_output(
+            silent_video,
+            expected_duration_s=measured_total_dur,
+            decode_timeout_s=concat_timeout_s,
+        )
         atomic_copy(silent_video, final_path)
         # 新成片已经原子替换成功，此时才清除“待更新”标记。合成失败时旧成片和
         # 标记都会保留，状态轮询不会把正在观看的成品入口移除。
         final_path.with_suffix(".stale").unlink(missing_ok=True)
-
-    total_dur = 0
-    try:
-        for shot_no, vpath, rate in piece_specs:
-            raw = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", vpath], capture_output=True, text=True, check=True,
-                timeout=30,
-            ).stdout.strip()
-            total_dur += (float(raw) / rate) if raw else 0
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
-        total_dur = est_total_dur or config.DEFAULT_VIDEO_DURATION_S * len(pieces)
 
     fallback_edit_report = {
         "ok": False,

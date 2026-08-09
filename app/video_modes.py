@@ -4509,11 +4509,6 @@ def append_reference_prompt_notes_from_dicts(
         return prompt_text
     prompt_body, prompt_args = _split_video_args(prompt_text)
     lines: list[str] = []
-    subject_images: dict[str, list[int]] = {}
-    definitions: list[str] = []
-    timeline_count = sum(
-        1 for ref in packed_refs if ref.get("type") == "plot_key_frame"
-    )
     for idx, ref in enumerate(packed_refs, 1):
         label = {
             "character": "character",
@@ -4535,18 +4530,6 @@ def append_reference_prompt_notes_from_dicts(
         entity_name = str(ref.get("entity_name") or "").strip()
         if ref.get("type") == "character" and entity_name and entity_name not in related:
             related.append(entity_name)
-        for name in related:
-            subject_images.setdefault(name, []).append(idx)
-        if ref.get("type") == "character" and related:
-            definitions.append(
-                f"将 Reference image {idx} 中的唯一人物定义为「{related[0]}」；"
-                "该图是其脸、性别、年龄感、发型、体型和服装的身份真值。"
-            )
-        elif ref.get("type") == "plot_key_frame" and related:
-            definitions.append(
-                f"Reference image {idx} 的画面人物必须且仅能解释为："
-                f"{'、'.join(related)}；不得改成其他身份或额外人物。"
-            )
         subject = f"「{'、'.join(related)}」" if related else ""
         timeline = ""
         if ref.get("type") == "plot_key_frame":
@@ -4556,58 +4539,23 @@ def append_reference_prompt_notes_from_dicts(
             time_ratio = ref.get("keyframe_time_ratio")
             timing = ""
             try:
-                timing = f", at {round(float(time_ratio) * 100)}% of the shot"
+                timing = f"@{round(float(time_ratio) * 100)}%"
             except (TypeError, ValueError):
                 pass
-            timeline = (
-                f"; chronological timeline beat {beat_index} of {beat_total}"
-                f"{timing}"
-            )
+            timeline = f"; beat {beat_index}/{beat_total}{timing}"
             if target:
-                timeline += f"; freeze only: {target}"
+                timeline += f"; target: {target}"
         lines.append(
             f"Reference image {idx}: use as {label}{subject}; "
             f"identity/appearance only{timeline}."
         )
     if not lines:
         return prompt_text
-    for name, indexes in subject_images.items():
-        if len(indexes) > 1:
-            definitions.append(
-                f"Reference images {', '.join(str(index) for index in indexes)} "
-                f"中的「{name}」是同一个且仅一个人物，不是多个相似人物；"
-                "全程保持该身份不变。"
-            )
-    binding = (
-        "[SUBJECT DEFINITIONS | HIGHEST PRIORITY]\n"
-        + "".join(definitions)
-        + "后续动作每次提及角色都严格沿用上述唯一角色名与参考图绑定；"
-        "角色的性别、年龄感、脸、发型、体型和服装是不可变化的不变量，"
-        "禁止中途变性、换脸、换人、身份合并或由无关人物替代。"
-    )
-    sequence_note = ""
-    if timeline_count > 1:
-        sequence_note = (
-            " Treat the plot key frames as chronological waypoints of ONE "
-            "continuous shot and interpolate through them in the numbered order. "
-            "Do not show them simultaneously; no montage, split screen, collage, "
-            "hard cuts, duplicated actors, or frozen slideshow. "
-            + _MULTI_KEYFRAME_INVARIANCE_NOTE
-        )
     note = (
         REFERENCE_PROMPT_NOTE_MARKER
         + " ".join(lines)
-        + sequence_note
         + REFERENCE_SINGLE_INSTANCE_NOTE
     )
-    if "[FORMAT]\n" in prompt_body:
-        prompt_body = prompt_body.replace(
-            "[FORMAT]\n",
-            f"[FORMAT]\n{binding}\n\n",
-            1,
-        )
-    else:
-        prompt_body = f"{binding}\n\n{prompt_body}"
     return prompt_body + note + prompt_args
 
 

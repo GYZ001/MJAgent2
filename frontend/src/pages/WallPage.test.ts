@@ -297,6 +297,7 @@ describe('生成台对象稳定性', () => {
 
     expect(html).toContain('由整集关系计划生成')
     expect(html).toContain('参考图')
+    expect(html).toContain('等待 AI 完成 Physical Performance 编译')
   })
 
   it('上游确认或运行指针收口时会重新加载生成资格', () => {
@@ -447,7 +448,7 @@ describe('视频预览工作区', () => {
 
   it('付费提交按钮直接说明动作与预计费用，不暗示还有下一步确认', () => {
     expect(videoGenerationConfirmLabel('reroll', 4)).toBe('确认新建候选 · 预计 ￥4.00')
-    expect(videoGenerationConfirmLabel('rewrite', 4)).toBe('确认使用新词生成 · 预计 ￥4.00')
+    expect(videoGenerationConfirmLabel('rewrite', 4)).toBe('确认让 AI 按要求重写 · 预计 ￥4.00')
     expect(videoGenerationConfirmLabel('critique', 4)).toBe('确认按质检问题修复 · 预计 ￥4.00')
   })
 })

@@ -2912,7 +2912,6 @@ async def edit_screenplay(episode_id: str, body: dict):
             contract_version=contract_version,
             qa_profile_version="screenplay-qa-gate-2",
             resume=False,
-            sync_episode_pointer=False,
         )
         candidate = evidence_repository.create_artifact(
             EvidenceArtifact(

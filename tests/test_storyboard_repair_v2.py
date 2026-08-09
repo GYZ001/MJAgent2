@@ -852,6 +852,7 @@ def test_scene_pack_failure_preserves_successful_later_batch(
         "UPDATE projects SET bible_json=? WHERE id='p1'",
         (bible.model_dump_json(),),
     )
+    conn.commit()
     contexts = [
         StoryboardSceneContext(
             scene_id=f"SC00{number}",

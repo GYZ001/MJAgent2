@@ -116,17 +116,19 @@ describe('AdaptivePoller', () => {
     expect(timers).toHaveLength(1)
   })
 
-  it('stops automatic polling when the error callback marks a resource terminal', async () => {
+  it('lets manual refresh restart polling after the error callback marks it inactive', async () => {
     const timers: Array<() => void> = []
     let calls = 0
+    const received: Array<{ status: string }> = []
     const poller = new AdaptivePoller(
       async () => {
         calls += 1
-        throw Object.assign(new Error('资源不存在'), { status: 404 })
+        if (calls === 1) throw Object.assign(new Error('资源不存在'), { status: 404 })
+        return { status: 'running' }
       },
       1000,
       {
-        onData: () => undefined,
+        onData: value => received.push(value),
         onError: () => false,
       },
       {
@@ -142,5 +144,29 @@ describe('AdaptivePoller', () => {
 
     expect(calls).toBe(1)
     expect(timers).toEqual([])
+
+    await poller.refresh()
+
+    expect(calls).toBe(2)
+    expect(received).toEqual([{ status: 'running' }])
+    expect(timers).toHaveLength(1)
+  })
+
+  it('does not let refresh reactivate a poller after an explicit stop', async () => {
+    let calls = 0
+    const poller = new AdaptivePoller(
+      async () => ({ calls: ++calls }),
+      1000,
+      {
+        onData: () => undefined,
+        onError: error => { throw error },
+      },
+    )
+
+    await poller.start()
+    poller.stop()
+    await poller.refresh()
+
+    expect(calls).toBe(1)
   })
 })

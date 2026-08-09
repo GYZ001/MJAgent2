@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import EpisodeCrumb from '../components/EpisodeCrumb'
-import { episodeBusy, useEpisode, useNav } from '../App'
+import { episodeBusy, useEpisode, useNav, usePoll } from '../App'
 import {
   api,
   type Episode,
@@ -25,6 +25,9 @@ type DetailState =
   | { status: 'loading'; shotId: string }
   | { status: 'ready'; shotId: string; shot: Shot; loadedAt: number }
   | { status: 'error'; shotId: string; message: string; errorId?: string }
+type ReviewContextPollResult =
+  | { ok: true; context: ReviewWallContext }
+  | { ok: false; error: string }
 type ShotFilter = 'problem' | 'unproduced' | 'generating' | 'pending_adoption' | 'adopted' | 'failed' | 'grade_b' | 'continuity'
 
 export const REVIEW_TABS: Array<{ id: ReviewTab; label: string }> = [
@@ -263,7 +266,7 @@ export function videoGenerationConfirmLabel(mode: VideoGenerationMode, estimated
   const action = mode === 'reroll'
     ? '确认新建候选'
     : mode === 'rewrite'
-      ? '确认使用新词生成'
+      ? '确认让 AI 按要求重写'
       : '确认按质检问题修复'
   return `${action} · 预计 ￥${estimatedCost.toFixed(2)}`
 }
@@ -460,6 +463,20 @@ export default function WallPage() {
     'wall',
     current => episodeBusy(current) ? 8000 : 0,
   )
+  const {
+    data: contextPollResult,
+    refresh: refreshContext,
+  } = usePoll<ReviewContextPollResult>(
+    async () => {
+      try {
+        return { ok: true, context: await api.getReviewContext(episodeId!) }
+      } catch (reason) {
+        return { ok: false, error: reason instanceof Error ? reason.message : String(reason) }
+      }
+    },
+    result => result?.ok === false ? 3000 : 0,
+    [episodeId],
+  )
   // Keep the pre-detail dependency stable. A fresh [] on every render makes
   // the detail effect re-enter and repeatedly write a new idle state.
   const shots = ep?.shots ?? EMPTY_SHOTS
@@ -489,7 +506,6 @@ export default function WallPage() {
   const clearEpisodeResourcesRef = useRef<HTMLButtonElement>(null)
   const detailRequest = useRef(0)
   const lastReadyDetail = useRef<Shot | null>(null)
-  const contextRequest = useRef(0)
   const positionKey = reviewWallPositionKey(
     projectId,
     episodeId,
@@ -509,19 +525,9 @@ export default function WallPage() {
   }, [generationDecision])
 
   const loadContext = useCallback(async () => {
-    if (!episodeId) return null
-    const request = ++contextRequest.current
-    try {
-      const next = await api.getReviewContext(episodeId)
-      if (request !== contextRequest.current) return null
-      setContext(next)
-      setContextError(null)
-      return next
-    } catch (reason) {
-      if (request === contextRequest.current) setContextError(reason instanceof Error ? reason.message : String(reason))
-      return null
-    }
-  }, [episodeId])
+    const result = await refreshContext()
+    return result?.ok ? result.context : null
+  }, [refreshContext])
 
   const loadVideoPlan = useCallback(async () => {
     if (!episodeId) return null
@@ -563,17 +569,19 @@ export default function WallPage() {
     }
   }, [selectedShotId])
 
+  useEffect(() => {
+    if (!contextPollResult) return
+    if (contextPollResult.ok) {
+      setContext(contextPollResult.context)
+      setContextError(null)
+    } else {
+      setContextError(contextPollResult.error)
+    }
+  }, [contextPollResult])
+
   const contextRefreshKey = reviewContextRefreshKey(ep)
   useEffect(() => { void loadContext() }, [contextRefreshKey, loadContext])
   useEffect(() => { void loadVideoPlan() }, [contextRefreshKey, loadVideoPlan])
-
-  // 后端重启时的瞬时网络失败不应把生成台永久留在只读状态。
-  // 保留 fail-closed，但在错误存在期间有界地重读真实资格，成功后自动恢复。
-  useEffect(() => {
-    if (!contextError) return
-    const retry = window.setInterval(() => { void loadContext() }, 3000)
-    return () => window.clearInterval(retry)
-  }, [contextError, loadContext])
 
   useEffect(() => {
     if (
@@ -1080,13 +1088,47 @@ function ShotWorkbench({ shot, episodeNo, episodeStatus, tab, onTab, context, wr
 export function InfoSection({ shot, current }: { shot: Shot; current?: ShotVersion }) {
   const dialogue = (shot.dialogues ?? []).map(line => `${line.speaker}：${line.line}${line.emotion && line.emotion !== '平静' ? `（${line.emotion}）` : ''}`).join('\n')
   const prompt = current?.prompt_text || shot.prompt_preview || ''
+  const aiPromptReady = Boolean(current?.image_inputs?.ai_video_prompt_contract_version)
   const modePlan = shot.mode_plan
   const actualMode = current?.image_inputs?.actual_mode
   const reusesStaticTail = modePlan?.required_assets?.some(
     asset => asset.source === 'PREVIOUS_STATIC_TAIL',
   )
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text) } catch { /* clipboard permission */ } }
-  return <div className="info-section">{modePlan && <section className="script-card video-mode-audit"><div className="script-card-head">视频生成方式</div><div className="video-mode-route"><b>{videoModeLabel(modePlan.mode)}</b><span>→</span><b>{actualMode ? videoModeLabel(actualMode) : modePlan.depends_on_shot_id ? '等待上游素材' : '待执行'}</b></div><p>{modePlan.degraded_reason || (modePlan.depends_on_shot_id ? '场景第二镜会先生成自己的静态尾帧，再等待场景首镜真实尾帧。' : reusesStaticTail ? '本镜首帧直接复用上一镜静态尾帧，不等待上一镜视频；本镜尾帧可供下一镜复用。' : '本镜无动态上游素材依赖，可安全并行。')}</p><details><summary>计划依据</summary><p>{videoModeReasonText(modePlan.reason_codes)}</p><p>置信度 {Math.round(modePlan.confidence * 100)}% · {modePlan.video_input_intent ? `参考意图 ${modePlan.video_input_intent}` : '无视频参考意图'}</p></details></section>}<section className="script-card"><div className="script-card-head">原文摘录 <button className="text-action" onClick={() => { void copy(shot.source_excerpt || '') }}>复制</button></div><div className={`script-source${shot.source_excerpt ? '' : ' empty'}`}>{shot.source_excerpt || '暂无原文摘录'}</div></section><section className="script-card"><div className="script-card-head">镜头信息</div><dl className="script-meta-grid"><Meta label="场景图" value={shot.scene_name || shot.scene_setting} /><Meta label="时间" value={shot.scene_time || "未设置"} /><Meta label="角色" value={commaList(shot.characters)} /><Meta label="时长" value={`${shot.duration_s}s`} /><Meta label="镜头" value={`${shot.shot_size} / ${shot.camera_move}`} /><Meta label="转场" value={shot.transition} /><Meta label="衔接" value={shot.continuity_mode || (shot.continuity_from_prev ? '接上镜' : '新场景')} /></dl></section><section className="script-card continuity-card"><div className="script-card-head">视频连续性</div><div className="continuity-flow"><div><b>输入状态</b><p>{shot.state_in || shot.first_frame_desc || '未设置'}</p></div><span>→</span><div><b>主要动作</b><p>{shot.primary_action || shot.action_desc || '未设置'}</p></div><span>→</span><div><b>输出状态</b><p>{shot.state_out || shot.last_frame_desc || '未设置'}</p></div></div>{current?.qa?.failure_types?.length ? <div className="continuity-risk" role="status"><b>连续性风险</b>{current.qa.failure_types.join('、')}<p>观测输出：{current.qa.observed_state_out || '未返回'}</p></div> : <div className="continuity-ok">暂无已知高风险差异</div>}<details><summary>技术字段</summary>{prompt && <pre>{truncateText(prompt)}</pre>}</details></section><section className="script-card"><div className="script-card-head">镜头脚本 <button className="text-action" onClick={() => { void copy([shot.action_desc, shot.narration, dialogue].filter(Boolean).join('\n')) }}>复制业务文本</button></div><div className="script-block"><div className="script-paragraph"><span className="script-label">画面</span><p>{shot.action_desc}</p></div>{shot.narration && <div className="script-paragraph"><span className="script-label">旁白</span><p>{shot.narration}</p></div>}{dialogue && <div className="script-paragraph"><span className="script-label">台词</span><pre className="script-dialogues">{dialogue}</pre></div>}</div></section></div>
+  return <div className="info-section">
+    {modePlan && <section className="script-card video-mode-audit">
+      <div className="script-card-head">视频生成方式</div>
+      <div className="video-mode-route"><b>{videoModeLabel(modePlan.mode)}</b><span>→</span><b>{actualMode ? videoModeLabel(actualMode) : modePlan.depends_on_shot_id ? '等待上游素材' : '待执行'}</b></div>
+      <p>{modePlan.degraded_reason || (modePlan.depends_on_shot_id ? '场景第二镜会先生成自己的静态尾帧，再等待场景首镜真实尾帧。' : reusesStaticTail ? '本镜首帧直接复用上一镜静态尾帧，不等待上一镜视频；本镜尾帧可供下一镜复用。' : '本镜无动态上游素材依赖，可安全并行。')}</p>
+      <details><summary>计划依据</summary><p>{videoModeReasonText(modePlan.reason_codes)}</p><p>置信度 {Math.round(modePlan.confidence * 100)}% · {modePlan.video_input_intent ? `参考意图 ${modePlan.video_input_intent}` : '无视频参考意图'}</p></details>
+    </section>}
+    <section className="script-card">
+      <div className="script-card-head">原文摘录 <button className="text-action" onClick={() => { void copy(shot.source_excerpt || '') }}>复制</button></div>
+      <div className={`script-source${shot.source_excerpt ? '' : ' empty'}`}>{shot.source_excerpt || '暂无原文摘录'}</div>
+    </section>
+    <section className="script-card">
+      <div className="script-card-head">镜头信息</div>
+      <dl className="script-meta-grid"><Meta label="场景图" value={shot.scene_name || shot.scene_setting} /><Meta label="时间" value={shot.scene_time || '未设置'} /><Meta label="角色" value={commaList(shot.characters)} /><Meta label="时长" value={`${shot.duration_s}s`} /><Meta label="镜头" value={`${shot.shot_size} / ${shot.camera_move}`} /><Meta label="转场" value={shot.transition} /><Meta label="衔接" value={shot.continuity_mode || (shot.continuity_from_prev ? '接上镜' : '新场景')} /></dl>
+    </section>
+    <section className="script-card continuity-card">
+      <div className="script-card-head">视频连续性</div>
+      <div className="continuity-flow"><div><b>输入状态</b><p>{shot.state_in || shot.first_frame_desc || '未设置'}</p></div><span>→</span><div><b>主要动作</b><p>{shot.primary_action || shot.action_desc || '未设置'}</p></div><span>→</span><div><b>输出状态</b><p>{shot.state_out || shot.last_frame_desc || '未设置'}</p></div></div>
+      {current?.qa?.failure_types?.length ? <div className="continuity-risk" role="status"><b>连续性风险</b>{current.qa.failure_types.join('、')}<p>观测输出：{current.qa.observed_state_out || '未返回'}</p></div> : <div className="continuity-ok">暂无已知高风险差异</div>}
+    </section>
+    <section className="script-card h3-prompt-card">
+      <div className="script-card-head">
+        {aiPromptReady ? 'AI 最终 H3 Prompt' : 'AI H3 Prompt'}
+        {prompt && <button className="text-action" onClick={() => { void copy(prompt) }}>复制</button>}
+      </div>
+      {aiPromptReady && prompt
+        ? <pre className="h3-prompt-output">{prompt}</pre>
+        : <div className="script-source empty">等待 AI 完成 Physical Performance 编译；当前未生成可提交 H3 的提示词。</div>}
+    </section>
+    <section className="script-card">
+      <div className="script-card-head">镜头脚本 <button className="text-action" onClick={() => { void copy([shot.action_desc, shot.narration, dialogue].filter(Boolean).join('\n')) }}>复制业务文本</button></div>
+      <div className="script-block"><div className="script-paragraph"><span className="script-label">画面</span><p>{shot.action_desc}</p></div>{shot.narration && <div className="script-paragraph"><span className="script-label">旁白</span><p>{shot.narration}</p></div>}{dialogue && <div className="script-paragraph"><span className="script-label">台词</span><pre className="script-dialogues">{dialogue}</pre></div>}</div>
+    </section>
+  </div>
 }
 
 function Meta({ label, value }: { label: string; value: string }) { return <div className="script-meta-item"><dt className="script-meta-label">{label}</dt><dd className="script-meta-value">{value}</dd></div> }
@@ -1297,10 +1339,9 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
 
   const runGeneration = async () => {
     if (!wizard || !context) return
-    const initial = adoptedVersion?.prompt_text || shot.prompt_preview || ''
     const next = prompt.trim()
-    if (wizard === 'rewrite' && (!next || next === initial)) {
-      onToast('修改模式需要与原词不同的有效生成词')
+    if (wizard === 'rewrite' && !next) {
+      onToast('请填写给 AI 的导演要求')
       return
     }
     setGenerating(true)
@@ -1408,7 +1449,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
   return <div className="video-preview-workspace">
     <section className="asset-workspace-toolbar video-toolbar">
       <div><b>本镜视频</b><span>单次估算 ￥{shot.est_cost_cny.toFixed(2)} · 候选 {versions.length} 个</span></div>
-      <div className="asset-workspace-actions"><button className="btn primary small" disabled={Boolean(createVideoDisabledReason)} aria-label={createVideoDisabledReason ? `新建视频版本，暂不可用：${createVideoDisabledReason}` : `为镜 ${shot.shot_no} 新建视频版本`} title={createVideoDisabledReason || '提交前会先展示输入方式、范围和估算费用'} onClick={() => { setWizard('reroll'); setPrompt(shot.prompt_preview || '') }}>新建视频版本</button><button type="button" className="btn ghost small danger" disabled={Boolean(clearResourcesDisabledReason)} aria-label={clearResourcesDisabledReason ? `清空资源，暂不可用：${clearResourcesDisabledReason}` : `清空镜 ${shot.shot_no} 的视频和图像资源`} title={clearResourcesDisabledReason || '删除本镜视频、关键帧和参考图'} onClick={() => setClearResourcesConfirm(true)}>{clearingResources ? '清空中…' : '清空资源'}</button></div>
+      <div className="asset-workspace-actions"><button className="btn primary small" disabled={Boolean(createVideoDisabledReason)} aria-label={createVideoDisabledReason ? `新建视频版本，暂不可用：${createVideoDisabledReason}` : `为镜 ${shot.shot_no} 新建视频版本`} title={createVideoDisabledReason || '提交前会先展示输入方式、范围和估算费用'} onClick={() => { setWizard('reroll'); setPrompt('') }}>新建视频版本</button><button type="button" className="btn ghost small danger" disabled={Boolean(clearResourcesDisabledReason)} aria-label={clearResourcesDisabledReason ? `清空资源，暂不可用：${clearResourcesDisabledReason}` : `清空镜 ${shot.shot_no} 的视频和图像资源`} title={clearResourcesDisabledReason || '删除本镜视频、关键帧和参考图'} onClick={() => setClearResourcesConfirm(true)}>{clearingResources ? '清空中…' : '清空资源'}</button></div>
     </section>
     {pipelineBlocked && <section className="review-persistent-error compact" role="alert"><b>视频任务尚未进入生成</b><span>{shot.pipeline?.reason_text || shot.pipeline?.blocked_reason || '视频输入需要处理后才能继续。'}</span><p>请先按提示修正分镜内容；修正后点击「新建视频版本」会复用当前任务并重新校验，不会重复提交供应商。</p>{shot.pipeline?.task_id && <details><summary>任务信息</summary><code>{shot.pipeline.task_id}</code></details>}</section>}
     {preflightRetrying && <section className="material-fallback-note" role="status"><b>{shot.pipeline?.pipeline_stage === 'preflight_validating' ? '正在校验视频输入' : '校验遇到瞬时故障，等待自动重试'}</b><span>{shot.pipeline?.reason_text || '此阶段尚未提交供应商，不会产生视频费用。'}{shot.pipeline?.next_retry_at ? ` 下次检查：${new Date(shot.pipeline.next_retry_at * 1000).toLocaleTimeString()}` : ''}</span></section>}
@@ -1440,7 +1481,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
         }) : <div className="review-state-empty"><b>暂无视频候选</b><p>{writeFrozen ? '请先确认分镜，并完成人物或场景资产校验。' : '可点击「新建视频版本」创建候选。'}</p></div>}</div>
       </section>
     </div>
-    {wizard && <Dialog title="新建视频版本" onClose={() => setWizard(null)} closeDisabled={generating} wide><div className="generation-mode-tabs"><button disabled={generating} className={wizard === 'reroll' ? 'active' : ''} onClick={() => setWizard('reroll')}>按原词新建候选</button><button disabled={generating} className={wizard === 'rewrite' ? 'active' : ''} onClick={() => setWizard('rewrite')}>修改提示词</button><button disabled={generating} className={wizard === 'critique' ? 'active' : ''} onClick={() => setWizard('critique')}>按质检问题修复</button></div><div className="review-impact"><b>{wizard === 'reroll' ? '输入不变，强制创建新候选' : wizard === 'rewrite' ? '将以新生成词创建独立版本' : '将读取当前采用版或最新成功版的视频质检问题'}</b><p>确认后会立即创建任务并可能产生模型费用，当前预计 ￥{shot.est_cost_cny.toFixed(2)}，实际费用以供应商返回为准。旧采用版保留，失败不会覆盖。</p></div>{wizard === 'rewrite' && <><div className="prompt-diff"><div><b>原词</b><pre>{truncateText(adoptedVersion?.prompt_text || shot.prompt_preview || '无')}</pre></div><div><b>新词</b><textarea rows={8} maxLength={8000} disabled={generating} value={prompt} onChange={event => setPrompt(event.target.value)} /></div></div><small>{prompt.length}/8000 字符；草稿按当前镜头保存在本机，未确认提交不会产生费用。</small></>}{wizard === 'critique' && <div className="review-impact"><p>系统会把已有视频质检问题作为本次必须改正项；若暂无成功候选，则按原词创建新候选。</p></div>}<div className="dialog-actions"><button className="btn ghost" disabled={generating} onClick={() => setWizard(null)}>取消（零任务/零扣费）</button><button className="btn primary" disabled={generating || (wizard === 'rewrite' && !prompt.trim())} onClick={() => { void runGeneration() }}>{generating ? '正在提交…' : videoGenerationConfirmLabel(wizard, shot.est_cost_cny)}</button></div></Dialog>}
+    {wizard && <Dialog title="新建视频版本" onClose={() => setWizard(null)} closeDisabled={generating} wide><div className="generation-mode-tabs"><button disabled={generating} className={wizard === 'reroll' ? 'active' : ''} onClick={() => setWizard('reroll')}>AI 重新生成</button><button disabled={generating} className={wizard === 'rewrite' ? 'active' : ''} onClick={() => setWizard('rewrite')}>给 AI 导演要求</button><button disabled={generating} className={wizard === 'critique' ? 'active' : ''} onClick={() => setWizard('critique')}>按质检问题修复</button></div><div className="review-impact"><b>{wizard === 'reroll' ? '沿用同一连续性合同，由 AI 重新编写 H3 Prompt' : wizard === 'rewrite' ? '你的文字只作为导演要求，最终 H3 Prompt 仍由 AI 完整生成并通过结构化校验' : 'AI 将读取当前采用版或最新成功版的质检问题，重新编写 Physical Performance 与 H3 Prompt'}</b><p>确认后会立即创建任务并可能产生模型费用，当前预计 ￥{shot.est_cost_cny.toFixed(2)}，实际费用以供应商返回为准。旧采用版保留，失败不会覆盖。</p></div>{wizard === 'rewrite' && <><div className="prompt-diff"><div><b>当前 AI 最终 H3 Prompt（只读）</b><pre>{adoptedVersion?.prompt_text || '暂无已采用 Prompt'}</pre></div><div><b>给 AI 的导演要求</b><textarea rows={8} maxLength={2000} disabled={generating} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="例如：双人接触必须同时入画，侧面中景看清接触点；动作贯穿对白，不要退化成静态口型。" /></div></div><small>{prompt.length}/2000 字符；AI 会结合连续性合同重新生成完整提示词，不会把这里的文字直接提交给 H3。</small></>}{wizard === 'critique' && <div className="review-impact"><p>AI 会把已有视频质检问题作为本次必须改正项；若暂无成功候选，则基于当前连续性合同重新编写。</p></div>}<div className="dialog-actions"><button className="btn ghost" disabled={generating} onClick={() => setWizard(null)}>取消（零任务/零扣费）</button><button className="btn primary" disabled={generating || (wizard === 'rewrite' && !prompt.trim())} onClick={() => { void runGeneration() }}>{generating ? '正在提交…' : videoGenerationConfirmLabel(wizard, shot.est_cost_cny)}</button></div></Dialog>}
     {adopt && <Dialog title={`${adopt.id === shot.adopted_version_id ? '更新倍速定稿' : '采纳'}镜 ${shot.shot_no} 的 v${adopt.version_no}`} onClose={() => setAdopt(null)} closeDisabled={adopting}><div className="review-impact"><p>当前采用：{adoptedVersion ? `v${adoptedVersion.version_no} · ${videoPlaybackRate(adoptedVersion)}×` : '无'}；目标候选：v{adopt.version_no} · {playbackRates[adopt.id] ?? videoPlaybackRate(adopt)}×。</p><p>目标质检分 {adopt.qa?.overall?.toFixed(2) ?? '未评估'}，费用 ￥{adopt.cost_cny.toFixed(2)}。提交会固定镜头、版本和倍速，并写入审计；成片将使用倍速处理后的片段。</p></div><label className="review-field">必填定稿理由<textarea rows={4} disabled={adopting} value={adoptReason} onChange={event => setAdoptReason(event.target.value)} placeholder="说明画面质量、节奏、连续性或成本判断" /></label><div className="dialog-actions"><button className="btn ghost" disabled={adopting} onClick={() => setAdopt(null)}>取消</button><button className="btn primary" disabled={adopting || adoptReason.trim().length < 4} onClick={() => { void doAdopt() }}>{adopting ? '定稿中…' : `确认按 ${playbackRates[adopt.id] ?? videoPlaybackRate(adopt)}× 定稿采纳`}</button></div></Dialog>}
     {deleteTarget && <Dialog title={`永久删除镜 ${shot.shot_no} 的 v${deleteTarget.version_no}？`} onClose={() => setDeleteTarget(null)} closeDisabled={deleting}><div className="review-impact"><b>此操作无法撤销</b><p>将永久移除此候选记录和关联视频入口；当前采用版与其他候选不受影响。</p><p>已记录费用 ￥{deleteTarget.cost_cny.toFixed(2)} 不会退回。若只想暂时从候选列表隐藏，请取消后使用「归档」。</p></div><div className="dialog-actions"><button type="button" className="btn ghost" disabled={deleting} onClick={() => setDeleteTarget(null)}>保留候选</button><button type="button" className="btn danger" disabled={deleting} onClick={() => { void remove(deleteTarget) }}>{deleting ? '删除中…' : '确认永久删除'}</button></div></Dialog>}
     {clearResourcesConfirm && <DecisionDialog title={`清空镜 ${shot.shot_no} 的全部资源？`} summary={`${versions.length} 个视频候选、${shotReferenceImageCount} 张图像和当前采用关系将被删除`} message="本镜已引入或生成的视频、关键帧和参考图都会清空；剧本和分镜文本保留。" details={['此操作不可撤销，已发生费用不会退回', '后续需重新准备图像并生成视频']} confirmLabel="确认清空本镜资源" cancelLabel="保留资源" danger onClose={() => setClearResourcesConfirm(false)} onConfirm={() => { setClearResourcesConfirm(false); void clearResources() }} />}

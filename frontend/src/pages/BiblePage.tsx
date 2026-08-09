@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   api, ApiError, Bible, BibleImpactPreview, Character, Portrait, PortraitView, RefsCostPrecheck,
 } from '../api'
-import { useNav, useProject } from '../App'
+import { useNav, usePoll, useProject } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import EvidenceDrawer from '../components/harness/EvidenceDrawer'
@@ -408,7 +408,6 @@ export default function BiblePage() {
   const [qaDetail, setQaDetail] = useState<{ characterName: string; portrait: Portrait | null } | null>(null)
   const [compareDetail, setCompareDetail] = useState<{ title: string; images: { src: string; label: string }[] } | null>(null)
   const [timelineCharacter, setTimelineCharacter] = useState('')
-  const [refsProgress, setRefsProgress] = useState<RefsProgress | null>(null)
   const [skipConfirm, setSkipConfirm] = useState<{ count: number; names: string[] } | null>(null)
   const [stopConfirm, setStopConfirm] = useState(false)
   const [impactOpen, setImpactOpen] = useState(false)
@@ -454,6 +453,36 @@ export default function BiblePage() {
   const dirtyCount = countBibleChanges(editing, p?.bible)
   const dirty = dirtyCount > 0
   const currentEditVersion = editBaseVersion ?? p?.bible_version ?? 0
+  const {
+    data: draftSavedAt,
+    error: draftSaveError,
+  } = usePoll<number>(
+    async () => {
+      const latest = editingRef.current
+      if (!latest) return Date.now()
+      setDraftState('saving')
+      await api.saveBibleDraft(projectId!, { bible: latest, expected_version: currentEditVersion })
+      return Date.now()
+    },
+    8000,
+    [projectId && dirty ? projectId : null, currentEditVersion],
+    { refreshOnFocus: false },
+  )
+  const {
+    data: polledRefsProgress,
+    refresh: refreshRefsProgress,
+  } = usePoll<RefsProgress>(
+    () => api.refsProgress(projectId!),
+    progress => (
+      p?.bible_status === 'running'
+      || p?.refs_status === 'running'
+      || progress?.refs_status === 'running'
+        ? 3500
+        : 0
+    ),
+    [p?.id ?? null],
+  )
+  const refsProgress = p?.bible ? polledRefsProgress : null
 
   const resetCharacterList = () => {
     setCharSearch('')
@@ -548,6 +577,21 @@ export default function BiblePage() {
   }, [editing])
 
   useEffect(() => {
+    if (!dirty) return
+    if (draftSaveError) {
+      setDraftState('error')
+    } else if (draftSavedAt !== null) {
+      setDraftState('saved')
+    }
+  }, [dirty, draftSaveError, draftSavedAt])
+
+  useEffect(() => {
+    if (p?.bible_status === 'running' || p?.refs_status === 'running') {
+      void refreshRefsProgress()
+    }
+  }, [p?.bible_status, p?.refs_status, refreshRefsProgress])
+
+  useEffect(() => {
     if (!projectId || !editing || !dirty) return
     const key = bibleDraftKey(projectId, currentEditVersion)
     try {
@@ -558,39 +602,6 @@ export default function BiblePage() {
       }))
     } catch { /* local backup is best-effort */ }
   }, [projectId, editing, dirty, currentEditVersion])
-
-  useEffect(() => {
-    if (!projectId || !dirty) return
-    const id = window.setInterval(() => {
-      const latest = editingRef.current
-      if (!latest) return
-      setDraftState('saving')
-      api.saveBibleDraft(projectId, { bible: latest, expected_version: currentEditVersion })
-        .then(() => setDraftState('saved'))
-        .catch(() => setDraftState('error'))
-    }, 8000)
-    return () => window.clearInterval(id)
-  }, [projectId, dirty, currentEditVersion])
-
-  useEffect(() => {
-    if (!p?.id || !p.bible) return
-    let cancelled = false
-    const load = async () => {
-      try {
-        const progress = await api.refsProgress(p.id)
-        if (!cancelled) setRefsProgress(progress)
-      } catch {
-        if (!cancelled) setRefsProgress(null)
-      }
-    }
-    void load()
-    const running = p.bible_status === 'running' || p.refs_status === 'running' || refsProgress?.refs_status === 'running'
-    const id = running ? window.setInterval(load, 3500) : null
-    return () => {
-      cancelled = true
-      if (id != null) window.clearInterval(id)
-    }
-  }, [p?.id, p?.bible, p?.bible_status, p?.refs_status, refsProgress?.refs_status])
 
   if (error && !p) return <QueryState loading={false} error={error} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
   if (!p) return <QueryState loading={loading !== false} error={null} hasData={false} objectName="人物谱" onRetry={refresh}>{null}</QueryState>
@@ -762,9 +773,8 @@ export default function BiblePage() {
       }
       let summary = ''
       try {
-        const progress = await api.refsProgress(p.id)
-        setRefsProgress(progress)
-        summary = summarizeProgress(progress)
+        const progress = await refreshRefsProgress()
+        if (progress) summary = summarizeProgress(progress)
       } catch { /* keep original stop toast */ }
       toast(summary ? `${stopped}；${summary}` : stopped)
       refresh()
@@ -839,9 +849,15 @@ export default function BiblePage() {
     try {
       let names: string[] = []
       try {
-        const progress = await api.refsProgress(p.id)
-        setRefsProgress(progress)
-        names = progressProblemNames(progress)
+        const progress = await refreshRefsProgress()
+        if (progress) {
+          names = progressProblemNames(progress)
+        } else {
+          const gaps = await api.refsGaps(p.id)
+          names = (gaps.items ?? [])
+            .map(item => String(item.character || ''))
+            .filter(Boolean)
+        }
       } catch {
         const gaps = await api.refsGaps(p.id)
         names = (gaps.items ?? [])

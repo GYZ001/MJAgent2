@@ -554,9 +554,8 @@ def ensure_production_revision(
     qa_profile_version: str = "",
     grant_id: str | None = None,
     resume: bool = True,
-    sync_episode_pointer: bool = True,
 ) -> ProductionRevision:
-    """获取或创建 active revision。resume=True 时复用已有 active；False 时归档旧的并新建。"""
+    """获取或创建候选 revision，不改变 episode 的正式发布指针。"""
     ensure_production_revisions_table()
     conn = get_conn()
     _assert_screenplay_write_owner(
@@ -605,13 +604,6 @@ def ensure_production_revision(
             contract_version, qa_profile_version, grant_id, stamp, stamp,
         ),
     )
-    if sync_episode_pointer:
-        col = (
-            "screenplay_production_revision_id"
-            if kind == "screenplay"
-            else "storyboard_production_revision_id"
-        )
-        conn.execute(f"UPDATE episodes SET {col}=? WHERE id=?", (revision_id, episode_id))
     conn.commit()
     return get_production_revision(revision_id)  # type: ignore[return-value]
 

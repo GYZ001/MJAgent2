@@ -126,6 +126,137 @@ def test_harness_chat_read_timeout_is_not_immediately_replayed(monkeypatch) -> N
     assert attempts == 1
 
 
+@pytest.mark.parametrize("heartbeat", [b"\n", b": keepalive\n\n"], ids=["blank-line", "keepalive"])
+def test_stream_total_timeout_covers_keepalive_and_blank_lines(
+    heartbeat, monkeypatch,
+) -> None:
+    fault = {"timeout_scope_active": False}
+    events: list[tuple] = []
+
+    class InjectedTotalTimeout:
+        async def __aenter__(self):
+            fault["timeout_scope_active"] = True
+
+        async def __aexit__(self, *_args):
+            fault["timeout_scope_active"] = False
+
+    class HeartbeatThenTimeout(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield heartbeat
+            if fault["timeout_scope_active"]:
+                raise asyncio.TimeoutError("injected stream total timeout")
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            return None
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=HeartbeatThenTimeout(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(hiagent.asyncio, "timeout", lambda _seconds: InjectedTotalTimeout())
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+    monkeypatch.setattr(hiagent, "start_provider_call", lambda *_args, **_kwargs: 17)
+    monkeypatch.setattr(
+        hiagent,
+        "finish_provider_call",
+        lambda call_id, status, http_status, latency_ms, *, error=None, response_json=None:
+        events.append((call_id, status, http_status, error, response_json)),
+    )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await hiagent._stream_chat_completion(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+            )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.timeout_phase == "总时长"
+    assert caught.value.retryable is True
+    assert len(events) == 1
+    assert events[0][0:3] == (17, "TIMEOUT", None)
+    assert events[0][4] is None
+
+
+def test_stream_eof_without_done_fails_lifecycle_and_discards_partial_tool_call(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-eof.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    partial_text = "部分回复"
+    frame = {
+        "choices": [{
+            "delta": {
+                "content": partial_text,
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_partial",
+                    "function": {
+                        "name": "resource.read",
+                        "arguments": '{"uri":"manju://pro',
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    }
+    body = f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
+    emitted: list[tuple[str, str]] = []
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    def forbidden_reconstruction(*_args, **_kwargs):
+        raise AssertionError("incomplete stream must not reconstruct truncated tool arguments")
+
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+    monkeypatch.setattr(hiagent, "_reconstruct_stream_data", forbidden_reconstruction)
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await hiagent._stream_chat_completion(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat_tools",
+                model="m",
+                headers={},
+                on_token=lambda kind, text: emitted.append((kind, text)),
+            )
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.failure_kind == "stream_interrupted"
+    assert caught.value.retryable is True
+    assert emitted == [("content", partial_text)]
+    row = db.get_conn().execute(
+        "SELECT status,http_status,error,response_json,received_chars "
+        "FROM provider_calls WHERE kind='chat_tools' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "FAILED"
+    assert row["http_status"] == 200
+    assert row["error"].startswith("stream interrupted before [DONE] (latency_ms=")
+    assert row["error"].endswith(f", received_chars={len(partial_text)})")
+    assert row["response_json"] is None
+    assert row["received_chars"] == len(partial_text)
+
+
 def test_harness_chat_network_error_has_single_adapter_attempt(monkeypatch) -> None:
     attempts = 0
 

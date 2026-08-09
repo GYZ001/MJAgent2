@@ -1253,6 +1253,7 @@ async def _stream_chat_completion(
     received_chars = 0
     last_progress_chars = 0
     last_progress_at = start
+    saw_done = False
     try:
         total_timeout_s = max(
             60.0,
@@ -1261,65 +1262,75 @@ async def _stream_chat_completion(
     except (TypeError, ValueError):
         total_timeout_s = 1200.0
     try:
-        async with client.stream("POST", url, json=stream_payload, headers=req_headers) as resp:
-            if resp.status_code != 200:
-                body = await resp.aread()
-                text = body.decode("utf-8", "replace")
-                err = _classify_http_error(resp.status_code, text, key_name)
-                finish_provider_call(
-                    call_id, "FAILED", resp.status_code, int((time.time() - start) * 1000),
-                    error=str(err), response_json={"status_code": resp.status_code, "body": text})
-                raise err
-            async for line in resp.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                chunk_str = line[len("data:"):].strip()
-                if not chunk_str or chunk_str == "[DONE]":
-                    if chunk_str == "[DONE]":
-                        break
-                    continue
-                try:
-                    chunk = json.loads(chunk_str)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                content_count = len(content_parts)
-                reasoning_count = len(reasoning_parts)
-                _accumulate_stream_chunk(
-                    chunk, content_parts=content_parts, reasoning_parts=reasoning_parts,
-                    tool_slots=tool_slots, state=state, on_token=on_token)
-                received_chars += sum(
-                    len(value)
-                    for value in content_parts[content_count:]
-                ) + sum(
-                    len(value)
-                    for value in reasoning_parts[reasoning_count:]
-                )
-                stamp = time.time()
-                if (
-                    received_chars > 0
-                    and (
-                        last_progress_chars == 0
-                        or received_chars - last_progress_chars >= 8192
-                        or stamp - last_progress_at >= 2.0
+        async with asyncio.timeout(total_timeout_s):
+            async with client.stream("POST", url, json=stream_payload, headers=req_headers) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    text = body.decode("utf-8", "replace")
+                    err = _classify_http_error(resp.status_code, text, key_name)
+                    finish_provider_call(
+                        call_id, "FAILED", resp.status_code, int((time.time() - start) * 1000),
+                        error=str(err), response_json={"status_code": resp.status_code, "body": text})
+                    raise err
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    chunk_str = line[len("data:"):].strip()
+                    if not chunk_str or chunk_str == "[DONE]":
+                        if chunk_str == "[DONE]":
+                            saw_done = True
+                            break
+                        continue
+                    try:
+                        chunk = json.loads(chunk_str)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    content_count = len(content_parts)
+                    reasoning_count = len(reasoning_parts)
+                    _accumulate_stream_chunk(
+                        chunk, content_parts=content_parts, reasoning_parts=reasoning_parts,
+                        tool_slots=tool_slots, state=state, on_token=on_token)
+                    received_chars += sum(
+                        len(value)
+                        for value in content_parts[content_count:]
+                    ) + sum(
+                        len(value)
+                        for value in reasoning_parts[reasoning_count:]
                     )
-                ):
-                    update_provider_call_progress(
-                        call_id,
-                        received_chars=received_chars,
-                        chunk_at=stamp,
-                    )
-                    last_progress_chars = received_chars
-                    last_progress_at = stamp
-                if stamp - start > total_timeout_s:
-                    raise asyncio.TimeoutError(
-                        f"stream total timeout after {total_timeout_s:.0f}s"
-                    )
+                    stamp = time.time()
+                    if (
+                        received_chars > 0
+                        and (
+                            last_progress_chars == 0
+                            or received_chars - last_progress_chars >= 8192
+                            or stamp - last_progress_at >= 2.0
+                        )
+                    ):
+                        update_provider_call_progress(
+                            call_id,
+                            received_chars=received_chars,
+                            chunk_at=stamp,
+                        )
+                        last_progress_chars = received_chars
+                        last_progress_at = stamp
         latency = int((time.time() - start) * 1000)
         if received_chars > last_progress_chars:
             update_provider_call_progress(
                 call_id,
                 received_chars=received_chars,
                 chunk_at=time.time(),
+            )
+        if not saw_done:
+            detail = (
+                "stream interrupted before [DONE] "
+                f"(latency_ms={latency}, received_chars={received_chars})"
+            )
+            finish_provider_call(call_id, "FAILED", 200, latency, error=detail)
+            raise ProviderError(
+                "流式响应在 [DONE] 前中断，已丢弃不完整结果",
+                retryable=True,
+                raw=detail,
+                failure_kind="stream_interrupted",
             )
         data = _reconstruct_stream_data(content_parts, reasoning_parts, tool_slots, state)
         finish_provider_call(call_id, "OK", 200, latency, response_json=data)

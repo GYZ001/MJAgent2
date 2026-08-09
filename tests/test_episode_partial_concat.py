@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import subprocess
 from types import SimpleNamespace
@@ -5,6 +6,19 @@ from pathlib import Path
 
 from app import api, artifacts, db, worker
 from app.video_playback import normalize_playback_rate
+
+
+def _probe_result(duration_s: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        stdout=json.dumps({
+            "format": {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "duration": str(duration_s),
+            },
+            "streams": [{"codec_type": "video"}],
+        }),
+        stderr="",
+    )
 
 
 def _database(shot_nos: tuple[int, ...] = (1, 2, 3)) -> sqlite3.Connection:
@@ -123,7 +137,9 @@ def test_concat_uses_completed_real_videos_while_other_shots_are_still_generatin
 
     def successful_run(command, **_kwargs):
         if command[0] == "ffprobe":
-            return SimpleNamespace(stdout="5.0")
+            return _probe_result(5.0)
+        if command[-1] == "-":
+            return SimpleNamespace(stdout=b"", stderr=b"")
         Path(command[-1]).write_bytes(b"partial-final")
         return SimpleNamespace(stdout="", stderr=b"")
 
@@ -181,6 +197,15 @@ def test_full_episode_with_real_transition_still_uses_final_edit(tmp_path, monke
     monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(final_edit, "render_episode_final_edit", fake_render_episode_final_edit)
 
+    def successful_validation(command, **_kwargs):
+        if command[0] == "ffprobe":
+            return _probe_result(10.0)
+        if command[-1] == "-":
+            return SimpleNamespace(stdout=b"", stderr=b"")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(worker.subprocess, "run", successful_validation)
+
     result = worker.concatenate_episode("e")
 
     assert calls == [[(1, str(project_root / "p" / "episodes" / "1" / "shots" / "shot-1.mp4"), 1.0),
@@ -214,7 +239,10 @@ def test_episode_without_adoption_selects_existing_model_videos_before_mix(tmp_p
 
     def successful_run(command, **_kwargs):
         if command[0] == "ffprobe":
-            return SimpleNamespace(stdout="5.0")
+            duration_s = 15.0 if Path(command[-1]).name == "concat.mp4" else 5.0
+            return _probe_result(duration_s)
+        if command[-1] == "-":
+            return SimpleNamespace(stdout=b"", stderr=b"")
         Path(command[-1]).write_bytes(b"generated-video")
         return SimpleNamespace(stdout="", stderr=b"")
 
@@ -391,6 +419,100 @@ def test_concat_timeout_preserves_previous_final_video(tmp_path, monkeypatch) ->
     assert final_path.read_bytes() == b"previous-final"
 
 
+def test_concat_nonempty_undecodable_output_preserves_previous_final_video(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _database((1,))
+    project_root = tmp_path / "projects"
+    piece = project_root / "p" / "episodes" / "1" / "shots" / "shot-1.mp4"
+    piece.parent.mkdir(parents=True)
+    piece.write_bytes(b"source-video")
+    _version(conn, shot_no=1, path=piece, adopted=True)
+    conn.commit()
+    final_path = project_root / "p" / "episodes" / "1" / "final" / "episode.mp4"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"previous-final")
+    stale_path = final_path.with_suffix(".stale")
+    stale_path.write_text("outdated\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict]] = []
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    def corrupt_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == "ffprobe":
+            return _probe_result(6.0)
+        if command[-1] == "-":
+            raise subprocess.CalledProcessError(
+                1, command, stderr=b"Invalid data found when processing input",
+            )
+        Path(command[-1]).write_bytes(b"broken-but-nonempty")
+        return SimpleNamespace(stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(worker.subprocess, "run", corrupt_run)
+
+    try:
+        worker.concatenate_episode("e")
+    except ValueError as exc:
+        assert "完整解码失败" in str(exc)
+        assert "上一版成片仍保留" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("坏的非空合片产物不得覆盖旧成片")
+
+    assert final_path.read_bytes() == b"previous-final"
+    assert stale_path.is_file()
+    assert calls and all(call_kwargs.get("timeout") for _command, call_kwargs in calls)
+
+
+def test_concat_abnormal_output_duration_preserves_previous_final_video(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _database((1,))
+    project_root = tmp_path / "projects"
+    piece = project_root / "p" / "episodes" / "1" / "shots" / "shot-1.mp4"
+    piece.parent.mkdir(parents=True)
+    piece.write_bytes(b"source-video")
+    _version(conn, shot_no=1, path=piece, adopted=True)
+    conn.commit()
+    final_path = project_root / "p" / "episodes" / "1" / "final" / "episode.mp4"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"previous-final")
+    probed_source = False
+    calls: list[tuple[list[str], dict]] = []
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.config, "PROJECTS_DIR", project_root)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    def wrong_duration_run(command, **kwargs):
+        nonlocal probed_source
+        calls.append((command, kwargs))
+        if command[0] == "ffprobe":
+            if not probed_source:
+                probed_source = True
+                return _probe_result(6.0)
+            return _probe_result(0.25)
+        Path(command[-1]).write_bytes(b"nonempty-short-output")
+        return SimpleNamespace(stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(worker.subprocess, "run", wrong_duration_run)
+
+    try:
+        worker.concatenate_episode("e")
+    except ValueError as exc:
+        assert "时长异常" in str(exc)
+        assert "上一版成片仍保留" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("时长异常的非空合片产物不得覆盖旧成片")
+
+    assert final_path.read_bytes() == b"previous-final"
+    assert calls and all(call_kwargs.get("timeout") for _command, call_kwargs in calls)
+
+
 def test_cancel_video_adoption_keeps_candidate_and_marks_shot_pending(tmp_path, monkeypatch) -> None:
     conn = _database()
     video_path = tmp_path / "candidate.mp4"
@@ -477,7 +599,10 @@ def test_mix_applies_each_adopted_versions_finalized_playback_rate(
     def successful_run(command, **_kwargs):
         commands.append(command)
         if command[0] == "ffprobe":
-            return SimpleNamespace(stdout="8.0")
+            duration_s = 8.0 if Path(command[-1]) == piece else 4.0
+            return _probe_result(duration_s)
+        if command[-1] == "-":
+            return SimpleNamespace(stdout=b"", stderr=b"")
         Path(command[-1]).write_bytes(b"generated-video")
         return SimpleNamespace(stdout="", stderr=b"")
 
