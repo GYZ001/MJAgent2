@@ -2122,10 +2122,6 @@ async def _prepare_first_frame_mode_inputs(
     if not source_shot_id or source_shot_id != shot_plan.depends_on_shot_id:
         raise VideoInputRepairRequired("首帧来源镜头与视频计划依赖不一致")
 
-    current = str(meta.get("first_frame_path") or "")
-    if current and Path(current).is_file() and not meta.get("last_frame_path"):
-        return meta, prompt_text
-
     previous = conn.execute(
         "SELECT * FROM shots WHERE id=? AND episode_id=?",
         (source_shot_id, job["episode_id"]),
@@ -2178,6 +2174,7 @@ async def _prepare_first_frame_mode_inputs(
     meta["first_frame_path"] = first_path
     meta["first_frame_source"] = AssetSource.PREVIOUS_ADOPTED_TAIL.value
     meta["first_frame_source_shot_id"] = source_shot_id
+    meta["first_frame_fingerprint"] = fingerprint
     meta["upstream_adopted_video_revision"] = source_contract["adopted_version_id"]
     meta["reference_images"] = []
     meta.pop("last_frame_path", None)

@@ -383,7 +383,9 @@ def test_first_frame_mode_extracts_previous_video_tail_without_generating_image(
         )],
     )
     tail = tmp_path / "previous-video-tail.jpg"
+    stale = tmp_path / "stale-previous-video-tail.jpg"
     Image.new("RGB", (720, 1280), "black").save(tail)
+    Image.new("RGB", (720, 1280), "white").save(stale)
     persisted: list[str] = []
     monkeypatch.setattr(worker, "_resolve_current_execution_plan", lambda *_args, **_kwargs: plan)
     monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
@@ -430,7 +432,10 @@ def test_first_frame_mode_extracts_previous_video_tail_without_generating_image(
         {"id": "v2"},
         {"shot_no": 2},
         {"episode_no": 1},
-        {},
+        {
+            "first_frame_path": str(stale),
+            "upstream_adopted_video_revision": "old-version",
+        },
         "prompt",
         lease_owner="lease",
     ))
@@ -438,6 +443,8 @@ def test_first_frame_mode_extracts_previous_video_tail_without_generating_image(
     assert persisted == ["first_frame"]
     assert meta["first_frame_path"] == str(tail)
     assert meta["first_frame_source"] == AssetSource.PREVIOUS_ADOPTED_TAIL.value
+    assert meta["upstream_adopted_video_revision"] == "v1"
+    assert meta["first_frame_fingerprint"]
     assert "last_frame_path" not in meta
     assert meta["reference_images"] == []
 
