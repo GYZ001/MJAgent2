@@ -27,6 +27,7 @@ export interface TraceNode {
   name: string;
   subtitle: string;
   status: string;
+  sequence?: number | null;
   started_at?: number | null;
   finished_at?: number | null;
   latency_ms: number;
@@ -249,6 +250,13 @@ export function traceInitialExpandedIds(nodes: TraceNode[], selectedId: string) 
 }
 
 export function traceNodeOrder(left: TraceNode, right: TraceNode) {
+  const leftSequence = Number(left.sequence);
+  const rightSequence = Number(right.sequence);
+  const leftHasSequence = Number.isFinite(leftSequence) && leftSequence > 0;
+  const rightHasSequence = Number.isFinite(rightSequence) && rightSequence > 0;
+  if (leftHasSequence !== rightHasSequence) return leftHasSequence ? -1 : 1;
+  if (leftHasSequence && leftSequence !== rightSequence)
+    return leftSequence - rightSequence;
   const leftStarted = Number(left.started_at);
   const rightStarted = Number(right.started_at);
   const leftHasTime = Number.isFinite(leftStarted) && leftStarted > 0;

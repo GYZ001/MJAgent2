@@ -1200,7 +1200,11 @@ def _trace_tree(
             "sequence": job.get("shot_no"),
             "name": job_name,
             "subtitle": job_subtitle,
-            "status": job.get("stage_status") or job.get("status") or "unknown",
+            "status": (
+                job.get("status")
+                if is_video_completion_job
+                else job.get("stage_status") or job.get("status")
+            ) or "unknown",
             "started_at": job.get("stage_started_at") or job.get("created_at"),
             "finished_at": job.get("stage_updated_at") or job.get("updated_at"),
             "latency_ms": max(
@@ -1831,21 +1835,79 @@ def _trace_node_detail(
                 "error": item.get("screenplay_error"),
             }
         else:
+            video_plan = None
+            shot_no = None
+            if item.get("kind") == "video" and item.get("shot_id"):
+                video_plan_row = get_conn().execute(
+                    """SELECT sp.*,ep.plan_revision
+                       FROM shot_video_generation_plans sp
+                       JOIN episode_video_generation_plans ep
+                         ON ep.id=sp.episode_video_plan_id
+                       WHERE sp.shot_id=?
+                       ORDER BY ep.plan_revision DESC LIMIT 1""",
+                    (item.get("shot_id"),),
+                ).fetchone()
+                video_plan = dict(video_plan_row) if video_plan_row else None
+                shot_row = get_conn().execute(
+                    "SELECT shot_no FROM shots WHERE id=?",
+                    (item.get("shot_id"),),
+                ).fetchone()
+                shot_no = shot_row["shot_no"] if shot_row else None
             input_value = {
                 "kind": item.get("kind"),
                 "project_id": item.get("project_id"),
                 "episode_id": item.get("episode_id"),
                 "shot_id": item.get("shot_id"),
+                "shot_no": shot_no,
                 "version_id": item.get("version_id"),
                 "after_shot_id": item.get("after_shot_id"),
                 "after_version_id": item.get("after_version_id"),
                 "scene_kinds": _trace_json_value(item.get("scene_kinds")),
+                "generation_plan": (
+                    {
+                        "plan_revision": video_plan.get("plan_revision"),
+                        "generation_mode": _video_mode_label(
+                            video_plan.get("planned_mode")
+                        ),
+                        "video_input_intent": video_plan.get(
+                            "video_input_intent"
+                        ),
+                        "depends_on_shot_id": video_plan.get(
+                            "depends_on_shot_id"
+                        ),
+                        "required_assets": _trace_json_value(
+                            video_plan.get("required_assets_json")
+                        ) or [],
+                        "reason_codes": _trace_json_value(
+                            video_plan.get("reason_codes_json")
+                        ) or [],
+                    }
+                    if video_plan else None
+                ),
             }
+            stage_progress = _trace_json_value(
+                item.get("stage_progress_json")
+            )
+            if item.get("kind") == "video":
+                from app.media_pipeline.stage_state import stage_label
+
+                current_action = stage_label(
+                    item.get("pipeline_stage"),
+                    progress=(
+                        stage_progress
+                        if isinstance(stage_progress, dict)
+                        else None
+                    ),
+                    reason_text=item.get("reason_text"),
+                )
+            else:
+                current_action = None
             output_value = {
                 "status": item.get("status"),
                 "pipeline_stage": item.get("pipeline_stage"),
+                "current_action": current_action,
                 "stage_status": item.get("stage_status"),
-                "stage_progress": _trace_json_value(item.get("stage_progress_json")),
+                "stage_progress": stage_progress,
                 "reason_code": item.get("reason_code"),
                 "reason_text": item.get("reason_text"),
                 "error": item.get("error"),

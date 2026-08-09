@@ -360,6 +360,131 @@ def test_trace_labels_hide_technical_keys_but_keep_them_in_metadata() -> None:
     )
 
 
+def test_video_completion_trace_explains_business_stages_and_shot_work(
+    scoped_db,
+) -> None:
+    scoped_db.execute(
+        """UPDATE workflow_runs
+           SET workflow_type='episode_video_completion',status='RUNNING',
+               requested_by='user',trigger_type='manual',
+               policy_snapshot_json='{"budget_cap_cny":150}',
+               budget_limit_cny=150,started_at=10,updated_at=20
+           WHERE id='run-1'"""
+    )
+    scoped_db.execute(
+        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
+           VALUES('shot-1','e1',1,5)"""
+    )
+    scoped_db.execute(
+        """INSERT INTO provider_video_capability_snapshots(
+               id,provider,model,capabilities_json,probe_time,probe_result,
+               technical_success,created_at
+           ) VALUES('cap-1','provider','model','{}',10,'succeeded',1,10)"""
+    )
+    scoped_db.execute(
+        """INSERT INTO episode_video_generation_plans(
+               id,episode_id,plan_revision,source_storyboard_revision_id,
+               capability_snapshot_id,status,estimated_cost,
+               estimated_latency_ms,created_at
+           ) VALUES(
+               'plan-1','e1',3,'board-1','cap-1','valid',3.5,9000,12
+           )"""
+    )
+    scoped_db.execute(
+        """INSERT INTO shot_video_generation_plans(
+               id,episode_video_plan_id,shot_id,shot_no,planned_mode,
+               capability_snapshot_id,status,created_at,updated_at
+           ) VALUES(
+               'shot-plan-1','plan-1','shot-1',1,'FIRST_LAST_FRAME_MODE',
+               'cap-1','planned',12,12
+           )"""
+    )
+    scoped_db.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+               started_at,updated_at
+           ) VALUES(
+               'run-video-1','video_generation','shot','shot-1','RUNNING',
+               'video-fp',13,13
+           )"""
+    )
+    scoped_db.execute(
+        """INSERT INTO jobs(
+               id,kind,project_id,episode_id,shot_id,status,pipeline_stage,
+               stage_status,run_id,owner_run_id,created_at,updated_at
+           ) VALUES(
+               'job-video-1','video','p1','e1','shot-1','running',
+               'video_generating','active','run-video-1','run-1',13,14
+           )"""
+    )
+    scoped_db.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_json,content_hash,parent_artifact_ids_json,
+               model_snapshot_json,created_at
+           ) VALUES(
+               'checkpoint-1','video_supervisor_checkpoint','episode','e1',1,
+               'validated','T2',?,'checkpoint-hash','[]','{}',14
+           )""",
+        (json.dumps({
+            "run_id": "run-1",
+            "phase": "PLANNING_COVERAGE",
+            "tick_no": 1,
+            "repair_epoch": 0,
+            "episode_video_plan_id": "plan-1",
+            "grant_id": "grant-1",
+            "budget": {"cap_cny": 150, "spent_cny": 0},
+            "coverage": {
+                "total": 1, "adopted": 0, "A": 0, "B": 0, "C": 1,
+            },
+        }, ensure_ascii=False),),
+    )
+    scoped_db.commit()
+
+    tree = observability_api._trace_tree("p1", "runs", "run-1")
+    by_id = {item["id"]: item for item in tree["nodes"]}
+    stage_nodes = [
+        item for item in tree["nodes"]
+        if item["parent_id"] == "run:run-1"
+    ]
+    assert [item["name"] for item in sorted(
+        stage_nodes, key=lambda item: item["sequence"],
+    )] == [
+        "确认补齐范围与生成授权",
+        "制定全片视频生成方案",
+        "核对人物、场景与连续性素材",
+        "盘点全片缺口与生成顺序",
+        "逐镜生成视频",
+        "检查质量并自动修复",
+        "验收全片覆盖并收口",
+    ]
+    assert "run:run-video-1" not in by_id
+    video_job = by_id["job:job-video-1"]
+    assert video_job["parent_id"] == "stage:run-1:video-shots"
+    assert video_job["name"] == "第 1 镜 · 视频模型生成中"
+    assert video_job["subtitle"] == "首尾帧控制 · 第 1 次执行"
+    assert by_id["stage:run-1:video-shots"]["subtitle"] == (
+        "已派发 1/1 镜 · 当前处理中 1 镜"
+    )
+
+    plan_detail = observability_api._trace_node_detail(
+        "p1", "runs", "run-1", "stage:run-1:video-plan", "auto",
+    )
+    assert plan_detail["output"]["plan_revision"] == 3
+    assert plan_detail["output"]["mode_distribution"] == {"首尾帧控制": 1}
+    coverage_detail = observability_api._trace_node_detail(
+        "p1", "runs", "run-1", "stage:run-1:video-coverage", "auto",
+    )
+    assert coverage_detail["output"]["phase_name"] == "盘点待补镜头"
+    assert coverage_detail["output"]["coverage"]["total"] == 1
+    job_detail = observability_api._trace_node_detail(
+        "p1", "runs", "run-1", "job:job-video-1", "auto",
+    )
+    assert job_detail["input"]["shot_no"] == 1
+    assert job_detail["input"]["generation_plan"]["generation_mode"] == "首尾帧控制"
+    assert job_detail["output"]["current_action"] == "视频模型生成中"
+
+
 def test_trace_routes_reject_foreign_project_before_returning_tree(scoped_db) -> None:
     app = FastAPI()
     app.include_router(observability_api.router)

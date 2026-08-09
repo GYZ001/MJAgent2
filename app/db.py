@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import sqlite3
 import threading
 import time
@@ -18,15 +19,19 @@ _local = threading.local()
 # #region debug-point A-D:sqlite-transaction-trace
 _DEBUG_SQL_URL = "http://127.0.0.1:7777/event"
 _DEBUG_SQL_SESSION = "backend-sqlite-lock"
-try:
-    with open(".dbg/backend-sqlite-lock.env", encoding="utf-8") as _debug_env:
-        for _debug_line in _debug_env:
-            if _debug_line.startswith("DEBUG_SERVER_URL="):
-                _DEBUG_SQL_URL = _debug_line.strip().split("=", 1)[1]
-            elif _debug_line.startswith("DEBUG_SESSION_ID="):
-                _DEBUG_SQL_SESSION = _debug_line.strip().split("=", 1)[1]
-except OSError:
-    pass
+_DEBUG_SQL_ENABLED = os.environ.get("MJ_DEBUG_SQL_TRACE", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+if _DEBUG_SQL_ENABLED:
+    try:
+        with open(".dbg/backend-sqlite-lock.env", encoding="utf-8") as _debug_env:
+            for _debug_line in _debug_env:
+                if _debug_line.startswith("DEBUG_SERVER_URL="):
+                    _DEBUG_SQL_URL = _debug_line.strip().split("=", 1)[1]
+                elif _debug_line.startswith("DEBUG_SESSION_ID="):
+                    _DEBUG_SQL_SESSION = _debug_line.strip().split("=", 1)[1]
+    except OSError:
+        pass
 
 
 def _attach_debug_sql_trace(conn: sqlite3.Connection) -> None:
@@ -1188,7 +1193,8 @@ def get_conn() -> sqlite3.Connection:
         conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         # #region debug-point A-D:attach-sqlite-transaction-trace
-        _attach_debug_sql_trace(conn)
+        if _DEBUG_SQL_ENABLED:
+            _attach_debug_sql_trace(conn)
         # #endregion
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")

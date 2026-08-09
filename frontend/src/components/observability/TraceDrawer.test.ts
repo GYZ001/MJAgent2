@@ -77,6 +77,20 @@ describe("调用树根节点识别", () => {
     ]);
   });
 
+  it("业务流程和逐镜任务优先按后端业务序号排序", () => {
+    const nodes = [
+      { ...node("stage:quality", "run:main", "business_stage"), sequence: 6, started_at: 10 },
+      { ...node("stage:plan", "run:main", "business_stage"), sequence: 2, started_at: 30 },
+      { ...node("stage:authorization", "run:main", "business_stage"), sequence: 1, started_at: 40 },
+    ];
+
+    expect(nodes.sort(traceNodeOrder).map((item) => item.id)).toEqual([
+      "stage:authorization",
+      "stage:plan",
+      "stage:quality",
+    ]);
+  });
+
   it("业务环节摘要合并统计全部后代中的模型与程序处理", () => {
     const nodes = [
       node("run:main", null, "task"),
