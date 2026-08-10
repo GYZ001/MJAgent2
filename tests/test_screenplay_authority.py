@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app import api, db, errors as app_errors, storyboard_workspace
+from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.narrative_review import NarrativeReviewError, run_blind_audience_review
@@ -53,6 +54,181 @@ def _published_case():
     artifact, _shot_artifacts = _persist_review_projection(screenplay, _board())
     authority = resolve_current_screenplay_authority("episode-generic")
     return screenplay, artifact, authority
+
+
+def _published_episode() -> dict:
+    return dict(db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id='episode-generic'"
+    ).fetchone())
+
+
+def test_invalid_certificate_recommends_resume_only_when_published_revalidation_is_eligible(
+    monkeypatch,
+) -> None:
+    _screenplay_value, artifact, _authority = _published_case()
+    episode = _published_episode()
+    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+
+    state = api._screenplay_authority_state(
+        episode,
+        shot_count=0,
+        production={},
+    )
+
+    assert state["code"] == "qa_certificate_invalid"
+    assert state["can_resume"] is True
+    assert state["recommended_action"] == "resume_screenplay"
+    assert db.get_conn().execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()["status"] == "approved"
+
+    revision = api._prepare_published_screenplay_revalidation(episode)
+    assert revision.baseline_done is True
+    assert revision.working_artifact_id == artifact["id"]
+
+
+@pytest.mark.asyncio
+async def test_eligible_published_revalidation_is_executable_by_resume_endpoint(
+    monkeypatch,
+) -> None:
+    _screenplay_value, artifact, _authority = _published_case()
+    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+    monkeypatch.setattr(api, "_require_harness_engine", lambda _project_id: None)
+
+    class Recorder:
+        run_id = "run-revalidation"
+
+    spawned: dict[str, object] = {}
+    monkeypatch.setattr(
+        api,
+        "_new_screenplay_recorder",
+        lambda *_args, **_kwargs: Recorder(),
+    )
+
+    def capture_spawn(episode_id, recorder, **kwargs):
+        spawned.update({
+            "episode_id": episode_id,
+            "run_id": recorder.run_id,
+            "status": kwargs["status"],
+            "message": kwargs["message"],
+        })
+
+    monkeypatch.setattr(api, "_spawn_screenplay_activation", capture_spawn)
+
+    with enter_handler():
+        result = await api.resume_screenplay("episode-generic", body={})
+
+    assert result["status"] == "queued"
+    assert result["run_id"] == "run-revalidation"
+    assert result["mode"] == "finalize"
+    assert result["revision_id"]
+    assert spawned["episode_id"] == "episode-generic"
+    assert spawned["status"] == "queued"
+    revision = db.get_conn().execute(
+        "SELECT baseline_artifact_id,working_artifact_id "
+        "FROM production_revisions "
+        "WHERE episode_id='episode-generic' AND status='active'"
+    ).fetchone()
+    assert tuple(revision) == (artifact["id"], artifact["id"])
+
+
+@pytest.mark.parametrize(
+    ("published_pointer", "artifact_status", "expected_code"),
+    [
+        pytest.param("", None, "published_screenplay_missing", id="missing"),
+        pytest.param(None, "candidate", "published_screenplay_not_approved", id="nonapproved"),
+        pytest.param(None, "stale", "published_screenplay_not_approved", id="stale"),
+    ],
+)
+def test_invalid_certificate_does_not_recommend_unexecutable_action(
+    monkeypatch,
+    published_pointer,
+    artifact_status,
+    expected_code,
+) -> None:
+    _screenplay_value, artifact, _authority = _published_case()
+    conn = db.get_conn()
+    if published_pointer is not None:
+        conn.execute(
+            "UPDATE episodes SET published_screenplay_artifact_id=? "
+            "WHERE id='episode-generic'",
+            (published_pointer,),
+        )
+    if artifact_status is not None:
+        conn.execute(
+            "UPDATE artifacts SET status=? WHERE id=?",
+            (artifact_status, artifact["id"]),
+        )
+    conn.commit()
+    episode = _published_episode()
+    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+
+    state = api._screenplay_authority_state(
+        episode,
+        shot_count=0,
+        production={},
+    )
+
+    assert state["code"] == expected_code
+    assert state["can_resume"] is False
+    assert state["recommended_action"] == "refresh"
+    with pytest.raises(HTTPException) as caught:
+        api._prepare_published_screenplay_revalidation(episode)
+    assert caught.value.status_code == 409
+    assert caught.value.detail["code"] == expected_code
+
+
+def test_unknown_revalidation_check_fails_closed_without_executable_action(
+    monkeypatch,
+) -> None:
+    _published_case()
+    episode = _published_episode()
+    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+
+    def fail_unknown(**_kwargs):
+        raise RuntimeError("unknown validation failure")
+
+    monkeypatch.setattr(
+        "app.production.screenplay_authority.assert_screenplay_matches_validated_v6_source",
+        fail_unknown,
+    )
+
+    state = api._screenplay_authority_state(
+        episode,
+        shot_count=0,
+        production={},
+    )
+
+    assert state["code"] == "published_screenplay_revalidation_check_failed"
+    assert state["can_resume"] is False
+    assert state["recommended_action"] == "refresh"
+    with pytest.raises(HTTPException) as caught:
+        api._prepare_published_screenplay_revalidation(episode)
+    assert caught.value.status_code == 409
+    assert caught.value.detail["code"] == state["code"]
+
+
+def test_first_episode_baseline_resume_keeps_production_checkpoint_action(
+    monkeypatch,
+) -> None:
+    _published_case()
+    episode = _published_episode()
+    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+
+    state = api._screenplay_authority_state(
+        episode,
+        shot_count=0,
+        production={
+            "can_resume_baseline": True,
+            "stage_stop_reason": "failed",
+        },
+    )
+
+    assert episode["episode_no"] == 1
+    assert state["code"] == "workflow_failed_recoverable"
+    assert state["can_resume"] is True
+    assert state["recommended_action"] == "resume_screenplay"
 
 
 def _source_projection_case() -> dict:

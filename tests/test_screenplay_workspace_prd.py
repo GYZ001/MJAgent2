@@ -728,7 +728,7 @@ def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:
     assert failed["checkpoint_shot"] == 5
 
 
-def test_invalid_published_certificate_without_resume_capability_regenerates(
+def test_invalid_published_certificate_without_resolved_capability_refreshes(
     monkeypatch,
 ) -> None:
     _seed_episode(with_artifact=True)
@@ -741,7 +741,7 @@ def test_invalid_published_certificate_without_resume_capability_regenerates(
 
     assert state["code"] == "qa_certificate_invalid"
     assert state["can_resume"] is False
-    assert state["recommended_action"] == "generate_screenplay"
+    assert state["recommended_action"] == "refresh"
     assert "重新校验" in state["message"]
 
 
@@ -907,9 +907,9 @@ def test_script_detail_keeps_valid_screenplay_projection() -> None:
     detail = api.episode_detail("e1", view="script")
 
     assert detail["screenplay"]["title"] == _valid_script().title
-    assert detail["screenplay_state"]["code"] == "qa_certificate_invalid"
+    assert detail["screenplay_state"]["code"] == "published_screenplay_missing"
     assert detail["screenplay_state"]["can_resume"] is False
-    assert detail["screenplay_state"]["recommended_action"] == "generate_screenplay"
+    assert detail["screenplay_state"]["recommended_action"] == "refresh"
 
 
 @pytest.mark.parametrize(

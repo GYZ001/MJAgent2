@@ -276,7 +276,7 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
         code, message, action = (
             "qa_certificate_invalid",
             "上游版本已变化，需重新校验剧本并签发完成凭证",
-            "generate_screenplay",
+            "refresh",
         )
     elif screenplay_status == "ready" and storyboard_active:
         code, message, action = "ready_storyboard_running", "剧本已交付｜分镜生成中", "view_storyboard"
@@ -314,6 +314,116 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
 _SCREENPLAY_REBUILD_ERROR_UNSET = object()
 
 
+def _published_screenplay_revalidation_eligibility(
+    ep: dict,
+    *,
+    conn=None,
+) -> dict:
+    """Resolve whether immutable published content can enter revalidation."""
+    from app.errors import ArtifactNeedsRebuildError
+    from app.production.patch import screenplay_from_artifact_record
+    from app.production.screenplay_authority import (
+        assert_screenplay_matches_validated_v6_source,
+        published_stale_screenplay_rebuild_error,
+    )
+
+    db = conn or get_conn()
+    episode_id = str(ep["id"])
+    artifact_id = str(ep.get("published_screenplay_artifact_id") or "")
+
+    def blocked(code: str, message: str, *, error=None) -> dict:
+        return {
+            "eligible": False,
+            "code": code,
+            "message": message,
+            "artifact_id": artifact_id or None,
+            "artifact": None,
+            "screenplay": None,
+            "error": error,
+        }
+
+    if not artifact_id:
+        return blocked(
+            "published_screenplay_missing",
+            "当前剧本没有可复验的 published Artifact",
+        )
+    try:
+        rebuild_error = published_stale_screenplay_rebuild_error(ep, conn=db)
+    except Exception as exc:  # noqa: BLE001 - eligibility must fail closed
+        return blocked(
+            "published_screenplay_revalidation_check_failed",
+            "published 剧本复验资格检查失败，请刷新后重试",
+            error=exc,
+        )
+    if rebuild_error is not None:
+        return blocked(
+            rebuild_error.code,
+            str(rebuild_error),
+            error=rebuild_error,
+        )
+
+    try:
+        artifact = evidence_repository.get_artifact(artifact_id, conn=db)
+    except Exception as exc:  # noqa: BLE001 - eligibility must fail closed
+        return blocked(
+            "published_screenplay_revalidation_check_failed",
+            "published 剧本复验资格检查失败，请刷新后重试",
+            error=exc,
+        )
+    if artifact is None:
+        return blocked(
+            "published_screenplay_artifact_missing",
+            "published 剧本指向的 Artifact 不存在",
+        )
+    if (
+        artifact.get("type") != "screenplay_document"
+        or artifact.get("scope_type") != "episode"
+        or artifact.get("scope_id") != episode_id
+    ):
+        return blocked(
+            "published_screenplay_authority_invalid",
+            "published 剧本 Artifact 的类型或作用域不匹配",
+        )
+    if artifact.get("status") != "approved":
+        return blocked(
+            "published_screenplay_not_approved",
+            "published 剧本 Artifact 未处于 approved 状态",
+        )
+    try:
+        screenplay = screenplay_from_artifact_record(artifact)
+    except Exception as exc:  # noqa: BLE001 - parse failures are ineligible
+        return blocked(
+            "published_screenplay_unreadable",
+            "published 剧本 Artifact 无法按当前合同解析",
+            error=exc,
+        )
+    try:
+        assert_screenplay_matches_validated_v6_source(
+            episode_id=episode_id,
+            artifact=artifact,
+            screenplay=screenplay,
+            conn=db,
+            mark_stale=False,
+        )
+    except ArtifactNeedsRebuildError as exc:
+        return blocked(exc.code, str(exc), error=exc)
+    except Exception as exc:  # noqa: BLE001 - unknown checks are ineligible
+        return blocked(
+            "published_screenplay_revalidation_check_failed",
+            "published 剧本复验资格检查失败，请刷新后重试",
+            error=exc,
+        )
+    return {
+        "eligible": True,
+        "code": "published_screenplay_revalidation_eligible",
+        "message": "published 剧本可从原文档进入重新校验",
+        "artifact_id": artifact_id,
+        "artifact": artifact,
+        "screenplay": screenplay,
+        "error": None,
+    }
+
+
 def _screenplay_authority_state(
     ep,
     *,
@@ -330,6 +440,38 @@ def _screenplay_authority_state(
         shot_count=shot_count,
         production=production,
     )
+    if (
+        rebuild_error is not _SCREENPLAY_REBUILD_ERROR_UNSET
+        and rebuild_error is not None
+    ):
+        return _screenplay_rebuild_state(snapshot, rebuild_error)
+    if (
+        snapshot["code"] == "qa_certificate_invalid"
+        and not snapshot["can_resume"]
+    ):
+        eligibility = _published_screenplay_revalidation_eligibility(dict(ep))
+        eligibility_error = eligibility.get("error")
+        if getattr(eligibility_error, "code", None) == "ARTIFACT_NEEDS_REBUILD":
+            return _screenplay_rebuild_state(snapshot, eligibility_error)
+        if eligibility["eligible"]:
+            return {
+                **snapshot,
+                "recommended_action": "resume_screenplay",
+                "can_resume": True,
+                "resume_capability": "published_screenplay_revalidation",
+            }
+        return {
+            **snapshot,
+            "code": eligibility["code"],
+            "message": eligibility["message"],
+            "recommended_action": "refresh",
+            "can_resume": False,
+            "blocker": {
+                "code": eligibility["code"],
+                "message": eligibility["message"],
+                "artifact_id": eligibility["artifact_id"],
+            },
+        }
     if rebuild_error is _SCREENPLAY_REBUILD_ERROR_UNSET:
         rebuild_error = published_stale_screenplay_rebuild_error(ep)
     if rebuild_error is None:
@@ -1822,7 +1964,6 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
 def _prepare_published_screenplay_revalidation(ep: dict):
     """Create a new revision that revalidates immutable published content."""
     from app.harness.contracts import get_contract
-    from app.production.patch import load_screenplay_from_artifact
     from app.production.revision import (
         ensure_production_revision,
         mark_baseline_generated,
@@ -1830,47 +1971,21 @@ def _prepare_published_screenplay_revalidation(ep: dict):
     )
     from app.production.screenplay_authority import (
         SCREENPLAY_QA_PROFILE_VERSION,
-        assert_screenplay_matches_validated_v6_source,
-        published_stale_screenplay_rebuild_error,
         screenplay_authority_fingerprint,
     )
-    from app.errors import ArtifactNeedsRebuildError
 
     episode_id = str(ep["id"])
-    artifact_id = str(ep.get("published_screenplay_artifact_id") or "")
-    rebuild_error = published_stale_screenplay_rebuild_error(ep, conn=get_conn())
-    if rebuild_error is not None:
-        raise HTTPException(409, {
-            "code": rebuild_error.code,
-            "message": str(rebuild_error),
-            "action": "请重新生成并发布剧本，旧 published 不得继续复验",
-        }) from rebuild_error
-    artifact = evidence_repository.get_artifact(artifact_id)
-    if (
-        not artifact
-        or artifact.get("type") != "screenplay_document"
-        or artifact.get("scope_id") != episode_id
-        or artifact.get("status") != "approved"
-    ):
-        raise HTTPException(409, "当前发布剧本缺少可复验的权威 Artifact")
-    try:
-        published_screenplay = load_screenplay_from_artifact(artifact_id)
-        assert_screenplay_matches_validated_v6_source(
-            episode_id=episode_id,
-            artifact=artifact,
-            screenplay=published_screenplay,
-            conn=get_conn(),
-        )
-    except ArtifactNeedsRebuildError as exc:
-        raise HTTPException(409, {
-            "code": "ARTIFACT_NEEDS_REBUILD",
-            "message": str(exc),
-            "action": "请重新生成并发布剧本，旧 published 不得继续复验",
-        }) from exc
-    except Exception as exc:
-        raise HTTPException(409, "当前发布剧本 Artifact 无法读取") from exc
-
     conn = get_conn()
+    eligibility = _published_screenplay_revalidation_eligibility(ep, conn=conn)
+    if not eligibility["eligible"]:
+        error = eligibility.get("error")
+        raise HTTPException(409, {
+            "code": eligibility["code"],
+            "message": eligibility["message"],
+            "artifact_id": eligibility["artifact_id"],
+            "action": "refresh",
+        }) from error
+    artifact_id = str(eligibility["artifact_id"])
     project = conn.execute(
         "SELECT * FROM projects WHERE id=?", (ep["project_id"],)
     ).fetchone()
