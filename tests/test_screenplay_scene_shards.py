@@ -27,7 +27,6 @@ from app.screenplay_ir import (
     IRActionParticipantDelivery,
     IRIdentity,
     IRScene,
-    IRSceneUnit,
 )
 from app.screenplay_scene_shards import (
     SCREENPLAY_SCENE_INPUT_VERSION,
@@ -237,7 +236,23 @@ def _participant_case(
         first_participants.append("见证人")
         second_participants.append("见证人")
     blueprint.nodes[0].participants = first_participants
+    blueprint.nodes[0].participant_evidence = [
+        NarrativeParticipantEvidence(
+            identity_key=identity_key,
+            source_segment_ids=["SRC0001"],
+            usage="visible",
+        )
+        for identity_key in first_participants
+    ]
     blueprint.nodes[1].participants = second_participants
+    blueprint.nodes[1].participant_evidence = [
+        NarrativeParticipantEvidence(
+            identity_key=identity_key,
+            source_segment_ids=["SRC0002"],
+            usage="visible",
+        )
+        for identity_key in second_participants
+    ]
     derive_blueprint_scene_plans(blueprint)
     registry = [
         {
@@ -280,8 +295,6 @@ def _participant_case(
     )
     assert len(plans) == 1
     shard = _shard(plans[0], blueprint, registry)
-    for index, scene in enumerate(shard.scenes, start=1):
-        scene.units[0].event_key = f"local-event-{index}"
     return blueprint, plans, registry, identities, shard
 
 
@@ -441,7 +454,7 @@ def test_frozen_identity_registry_rejects_conflicting_canonical_names() -> None:
         )
 
 
-def test_validated_shards_merge_in_blueprint_order_with_global_namespaces() -> None:
+def test_validated_shards_merge_in_blueprint_order_with_locked_event_keys() -> None:
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
         blueprint,
@@ -462,8 +475,8 @@ def test_validated_shards_merge_in_blueprint_order_with_global_namespaces() -> N
     assert [scene.key for scene in merged.scenes] == ["bp-sc001", "bp-sc002"]
     event_keys = [scene.units[0].event_key for scene in merged.scenes]
     assert event_keys == [
-        "ss001_bp_sc001_local-event-1",
-        "ss002_bp_sc002_local-event-1",
+        plans[0].unit_slots[0].event_key,
+        plans[1].unit_slots[0].event_key,
     ]
     assert {source for scene in merged.scenes for unit in scene.units for source in unit.source_segment_ids} == {
         segment.segment_id for segment in index_source_segments(SOURCE)
@@ -526,7 +539,7 @@ def test_merge_rejects_source_consumed_by_multiple_scenes() -> None:
         )
 
 
-def test_merge_does_not_require_front_matter_in_scene_units(
+def test_merge_requires_front_matter_source_coverage(
     monkeypatch,
 ) -> None:
     blueprint = _blueprint(split_domain=True)
@@ -545,18 +558,19 @@ def test_merge_does_not_require_front_matter_in_scene_units(
         lambda _segments: {front_matter_id},
     )
 
-    merged = merge_screenplay_scene_shards(
-        envelope=_envelope(blueprint),
-        identities=_identities(),
-        plans=plans,
-        shards=shards,
-        scene_input_contracts=scene_input_contracts,
-        blueprint=blueprint,
-        source_text=SOURCE,
-    )
-
-    assert merged.scenes[0].units == []
-    assert merged.scenes[1].units
+    with pytest.raises(
+        ScreenplaySceneMergeError,
+        match="未覆盖.*SRC0001",
+    ):
+        merge_screenplay_scene_shards(
+            envelope=_envelope(blueprint),
+            identities=_identities(),
+            plans=plans,
+            shards=shards,
+            scene_input_contracts=scene_input_contracts,
+            blueprint=blueprint,
+            source_text=SOURCE,
+        )
 
 
 def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
@@ -574,24 +588,19 @@ def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
         scene_key="bp-sc001",
     )]
     scene_input_contracts = _contracts(plans, blueprint)[plans[0].shard_id]
-    normalize_screenplay_scene_shard(
-        shard,
-        episode_no=1,
-        plan=plans[0],
-        scene_plans={item.key: item for item in blueprint.scene_plans},
-        scene_input_contracts=scene_input_contracts,
-    )
+    with pytest.raises(ScreenplaySceneShardError) as caught:
+        normalize_screenplay_scene_shard(
+            shard,
+            episode_no=1,
+            plan=plans[0],
+            scene_plans={item.key: item for item in blueprint.scene_plans},
+            scene_input_contracts=scene_input_contracts,
+        )
     assert shard.scenes[0].units[0].source_segment_ids == ["SRC0002"]
-    errors = validate_screenplay_scene_shard(
-        shard,
-        plan=plans[0],
-        scene_plans={item.key: item for item in blueprint.scene_plans},
-        scene_input_contracts=scene_input_contracts,
-        identity_keys={"narrator"},
-    )
+    errors = caught.value.errors
     assert any("来源唯一归属冲突" in error for error in errors)
     assert any(
-        "owner=bp-sc002" in error and "consumer=bp-sc001" in error
+        "owner=bp-sc002" in error
         for error in errors
     )
     assert any("未冻结参与者" in error for error in errors)
@@ -619,13 +628,10 @@ def test_scene_shard_rejects_unit_without_source_when_scene_coverage_is_complete
         identity_keys={"narrator"},
     )
 
-    assert any(
-        "units[1] 必须声明 source_segment_ids" in error
-        for error in errors
-    )
+    assert any("unit_key 重复" in error for error in errors)
 
 
-def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
+def test_scene_shard_rejects_program_and_identity_field_drift() -> None:
     blueprint = _blueprint(split_domain=True)
     blueprint.nodes[0].participants = ["旁白"]
     derive_blueprint_scene_plans(blueprint)
@@ -660,36 +666,23 @@ def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
         registry,
     )[plan.shard_id]
 
-    normalized = normalize_screenplay_scene_shard(
-        shard,
-        episode_no=1,
-        plan=plan,
-        scene_plans={item.key: item for item in blueprint.scene_plans},
-        scene_input_contracts=scene_input_contracts,
-    )
-
-    assert normalized.episode_no == 1
-    assert normalized.shard_id == plan.shard_id
-    assert normalized.scene_plan_keys == plan.scene_plan_keys
-    assert normalized.source_hash == plan.source_hash
-    assert normalized.scenes[0].character_keys == ["旁白"]
-    assert normalized.scenes[0].units[0].actor_keys == ["旁白"]
-    assert normalized.scenes[0].units[0].target_keys == []
-    assert normalized.scenes[0].units[0].onscreen_entity_keys == ["旁白"]
-    assert normalized.scenes[0].units[0].text == "原文实际口播"
-    assert "SRC_TITLE" not in normalized.consumed_source_ids
-    errors = validate_screenplay_scene_shard(
-        normalized,
-        plan=plan,
-        scene_plans={item.key: item for item in blueprint.scene_plans},
-        scene_input_contracts=scene_input_contracts,
-        identity_keys={"narrator"},
-    )
-    assert any("character_keys 违反逐场参与者合同" in error for error in errors)
-    assert any("speaker_key 违反逐场参与者合同" in error for error in errors)
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="episode_no.*generation scaffold",
+    ):
+        normalize_screenplay_scene_shard(
+            shard,
+            episode_no=1,
+            plan=plan,
+            scene_plans={item.key: item for item in blueprint.scene_plans},
+            scene_input_contracts=scene_input_contracts,
+        )
+    assert shard.episode_no == 99
+    assert shard.shard_id == "invented"
+    assert shard.scenes[0].units[0].text == "说明性对白摘要"
 
 
-def test_scene_shard_payload_derives_generic_story_function_from_blueprint() -> None:
+def test_scene_shard_payload_normalizer_does_not_rewrite_contract_fields() -> None:
     blueprint = _blueprint(split_domain=True)
     plan = build_screenplay_scene_shard_plans(
         blueprint,
@@ -709,14 +702,12 @@ def test_scene_shard_payload_derives_generic_story_function_from_blueprint() -> 
         blueprint=blueprint,
     )
 
-    shard = ScreenplaySceneShardIR.model_validate(normalized)
-    assert shard.episode_no == 1
-    assert shard.shard_id == plan.shard_id
-    assert shard.scenes[0].story_function.startswith("推进本场事件：")
-    assert blueprint.nodes[0].summary in shard.scenes[0].story_function
+    assert normalized == payload
+    with pytest.raises(ValidationError, match="story_function"):
+        ScreenplaySceneShardIR.model_validate(normalized)
 
 
-def test_scene_shard_does_not_require_front_matter_in_units() -> None:
+def test_scene_shard_requires_front_matter_in_declared_slots() -> None:
     blueprint = _blueprint(split_domain=True)
     plan = build_screenplay_scene_shard_plans(
         blueprint,
@@ -749,7 +740,7 @@ def test_scene_shard_does_not_require_front_matter_in_units() -> None:
     )
 
     assert any(front_matter_id in error for error in without_exclusion)
-    assert with_exclusion == []
+    assert with_exclusion == without_exclusion
 
 
 def test_scene_shard_rejects_short_story_function() -> None:
@@ -826,7 +817,7 @@ def test_merge_rejects_source_less_unit_when_other_units_cover_all_sources() -> 
 
     with pytest.raises(
         ScreenplaySceneMergeError,
-        match=r"bp-sc001\.units\[1\] 必须声明 source_segment_ids",
+        match="unit_key 重复",
     ):
         merge_screenplay_scene_shards(
             envelope=_envelope(blueprint),
@@ -850,7 +841,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v5"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v6"
 
 
 def test_scene_shard_schema_requires_explicit_participant_deliveries() -> None:
@@ -1030,6 +1021,19 @@ def _ss004_replay_validation_context() -> tuple[
         for item in replay_input["scene_plans"]
     }
     hashes = replay_input["hashes"]
+    source_by_id = {
+        segment["source_segment_id"]: segment["text"]
+        for item in replay_input["scene_inputs"]
+        for segment in item["source_segments"]
+    }
+    unit_slots = scene_shards_module._build_group_unit_slots(
+        list(scene_plans.values()),
+        source_by_id=source_by_id,
+        scene_order_by_key={
+            key: index
+            for index, key in enumerate(scene_plans, start=13)
+        },
+    )
     plan = ScreenplaySceneShardPlan(
         shard_id="SS004",
         scene_plan_keys=list(scene_plans),
@@ -1039,6 +1043,7 @@ def _ss004_replay_validation_context() -> tuple[
             for source_id in scene_plan.source_segment_ids
         ],
         source_scene_owners=replay_input["source_scene_owners"],
+        unit_slots=unit_slots,
         source_ownership_hash=hashes["source_ownership_hash"],
         estimated_units=replay_input["recorded_request"]["estimated_units"],
         estimated_output_chars=replay_input["recorded_request"][
@@ -1049,8 +1054,9 @@ def _ss004_replay_validation_context() -> tuple[
         blueprint_hash=hashes["blueprint_hash"],
         identity_registry_hash=hashes["identity_registry_hash"],
     )
-    contracts = [
-        ScreenplaySceneInputContract(
+    contracts = []
+    for item in replay_input["scene_inputs"]:
+        contract = ScreenplaySceneInputContract(
             scene_plan_key=item["scene_plan_key"],
             node_keys=item["node_keys"],
             source_segment_ids=[
@@ -1069,10 +1075,21 @@ def _ss004_replay_validation_context() -> tuple[
                 for blueprint_key, identity_key in item["participant_bindings"]
             ],
             source_scene_owners=replay_input["source_scene_owners"],
+            unit_slots=[
+                scene_shards_module.ScreenplaySceneCompiledUnitSlot(
+                    **slot.model_dump(mode="python")
+                )
+                for slot in unit_slots
+                if slot.scene_key == item["scene_plan_key"]
+            ],
             source_ownership_hash=hashes["source_ownership_hash"],
         )
-        for item in replay_input["scene_inputs"]
-    ]
+        contract.identity_scaffold_hash = (
+            scene_shards_module._contract_identity_scaffold_hash(
+                contract
+            )
+        )
+        contracts.append(contract)
     identity_keys = {
         item["identity_key"] for item in replay_input["identity_registry"]
     }
@@ -1145,7 +1162,7 @@ def _err_48009f_candidate(
 
 def test_err_20260810_48009f_replay_uses_contract_canonical_keys_without_mutation() -> None:
     replay = json.loads(ERR_20260810_48009F_REPLAY.read_text(encoding="utf-8"))
-    _plan, _scene_plans, contracts, _identity_keys = (
+    plan, _scene_plans, contracts, _identity_keys = (
         _ss004_replay_validation_context()
     )
 
@@ -1169,6 +1186,7 @@ def test_err_20260810_48009f_replay_uses_contract_canonical_keys_without_mutatio
     ]
 
     schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
         scene_input_contracts=contracts,
     )
     unit_properties = schema["$defs"][
@@ -1192,46 +1210,41 @@ def test_err_20260810_48009f_replay_uses_contract_canonical_keys_without_mutatio
 
 
 def test_scene_contract_schema_is_shared_by_initial_and_semantic_attempts() -> None:
-    replay = json.loads(ERR_20260810_48009F_REPLAY.read_text(encoding="utf-8"))
-    _plan, _scene_plans, contracts, _identity_keys = (
+    _replay = json.loads(ERR_20260810_48009F_REPLAY.read_text(encoding="utf-8"))
+    plan, _scene_plans, contracts, _identity_keys = (
         _ss004_replay_validation_context()
     )
     initial_schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
         scene_input_contracts=contracts,
     )
-    candidate = _err_48009f_candidate(replay["provider_responses"][0])
     repair_schema = build_screenplay_scene_shard_repair_schema(
-        candidate,
+        plan=plan,
         scene_input_contracts=contracts,
     )
 
     assert initial_schema == repair_schema
     assert initial_schema["x-schema-purpose"] == (
-        "creative-content-with-deterministic-identity-scaffold"
+        "creative-content-for-deterministic-generation-slots"
     )
 
 
 def test_scene_contract_schema_preserves_relation_cardinality_boundaries() -> None:
-    _replay, _plan, _scene_plans, contracts = (
+    _replay, plan, _scene_plans, contracts = (
         _ss004_533ac9_compile_context()
     )
     schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
         scene_input_contracts=contracts,
     )
-    scene_14 = schema["properties"]["scenes"]["prefixItems"][0][
-        "allOf"
-    ][1]
-    source_schema = scene_14["properties"]["units"]["items"]["allOf"][1][
-        "properties"
-    ]["source_segment_ids"]
-    assert source_schema["minItems"] == 1
-    assert source_schema["uniqueItems"] is True
-    assert source_schema["items"]["enum"] == [
-        "SRC0054",
-        "SRC0055",
-        "SRC0056",
-        "SRC0057",
+    slots_schema = schema["properties"]["slots"]
+    assert slots_schema["additionalProperties"] is False
+    assert slots_schema["required"] == [
+        slot.unit_key for slot in plan.unit_slots
     ]
+    assert set(slots_schema["properties"]) == set(
+        slots_schema["required"]
+    )
 
 
 def test_scene_contract_schema_does_not_interchange_similar_bound_identities() -> None:
@@ -1244,17 +1257,20 @@ def test_scene_contract_schema_does_not_interchange_similar_bound_identities() -
 
 
 def test_repair_schema_derives_relations_visibility_and_evidence_per_unit() -> None:
-    replay, _plan, _scene_plans, contracts = (
+    replay, plan, _scene_plans, contracts = (
         _ss004_533ac9_compile_context()
     )
-    draft = ScreenplaySceneShardCreativeIR.model_validate(
-        replay["creative_response"]
+    draft = _recorded_response_slot_draft(
+        replay["creative_response"],
+        plan,
     )
     initial = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
         scene_input_contracts=contracts,
     )
     repair = build_screenplay_scene_shard_repair_schema(
         draft,
+        plan=plan,
         scene_input_contracts=contracts,
     )
     assert initial == repair
@@ -1262,10 +1278,11 @@ def test_repair_schema_derives_relations_visibility_and_evidence_per_unit() -> N
 
 
 def test_repair_schema_allows_only_a_genuine_empty_delivery_set() -> None:
-    _replay, _plan, _scene_plans, contracts = (
+    _replay, plan, _scene_plans, contracts = (
         _ss004_533ac9_compile_context()
     )
     schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
         scene_input_contracts=contracts,
     )
     unit_properties = schema["$defs"][
@@ -1279,8 +1296,9 @@ def test_repair_schema_accepts_audible_offscreen_speaker_evidence() -> None:
         _ss004_533ac9_compile_context()
     )
     shard = scene_shards_module.compile_screenplay_scene_shard_draft(
-        ScreenplaySceneShardCreativeIR.model_validate(
-            replay["creative_response"]
+        _recorded_response_slot_draft(
+            replay["creative_response"],
+            plan,
         ),
         episode_no=1,
         plan=plan,
@@ -1319,7 +1337,7 @@ def test_err_20260810_b66dda_semantic_retry_uses_60895_bound_schema(
     ]
     prompts: list[str] = []
     attempts: list[dict] = []
-    _plan, _scene_plans, contracts, _identity_keys = (
+    plan, _scene_plans, contracts, _identity_keys = (
         _ss004_replay_validation_context()
     )
 
@@ -1345,6 +1363,7 @@ def test_err_20260810_b66dda_semantic_retry_uses_60895_bound_schema(
             format_retry_limit=1,
             semantic_retry_limit=1,
             output_schema=build_screenplay_scene_shard_repair_schema(
+                plan=plan,
                 scene_input_contracts=contracts,
             ),
             on_attempt=attempts.append,
@@ -1367,18 +1386,46 @@ def test_err_20260810_b66dda_semantic_retry_uses_60895_bound_schema(
 def test_validator_and_merge_accept_source_authored_offscreen_evidence(
     channel: str,
 ) -> None:
-    blueprint, plans, registry, identities, shard = _participant_case()
-    unit = shard.scenes[0].units[0]
-    unit.actor_keys = ["person_a"]
-    unit.onscreen_entity_keys = []
-    unit.participant_deliveries = [
-        IRActionParticipantDelivery(
-            participant_key="person_a",
-            observable_claim="画外动作通过本场可感知证据抵达观众",
-            **{channel: True},
+    blueprint, plans, registry, identities, _shard_value = _participant_case()
+    scene_input_contracts = _contracts(plans, blueprint, registry)
+    contract = scene_input_contracts[plans[0].shard_id][0]
+    contract.action_evidence = [
+        scene_shards_module.ScreenplaySceneActionEvidence(
+            node_key=contract.node_keys[0],
+            source_segment_ids=["SRC0001"],
+            participants=[
+                scene_shards_module.ScreenplaySceneActionParticipantEvidence(
+                    identity_key="person_a",
+                    source_segment_ids=["SRC0001"],
+                    usage="voice",
+                    perception_channels=[channel],
+                )
+            ],
+            decision_actor_key="person_a",
         )
     ]
-    scene_input_contracts = _contracts(plans, blueprint, registry)
+    compiled_slot, slot_errors = (
+        scene_shards_module._compile_unit_identity_scaffold(
+            plans[0].unit_slots[0],
+            contract=contract,
+        )
+    )
+    assert slot_errors == []
+    contract.unit_slots = [compiled_slot]
+    contract.identity_scaffold_hash = (
+        scene_shards_module._contract_identity_scaffold_hash(
+            contract
+        )
+    )
+    shard = scene_shards_module.compile_screenplay_scene_shard_draft(
+        _creative_shard(plans[0], blueprint),
+        episode_no=1,
+        plan=plans[0],
+        scene_plans={
+            scene.key: scene for scene in blueprint.scene_plans
+        },
+        scene_input_contracts=scene_input_contracts[plans[0].shard_id],
+    )
 
     errors = validate_screenplay_scene_shard(
         shard,
@@ -1406,7 +1453,6 @@ def test_validator_and_merge_accept_source_authored_offscreen_evidence(
 def test_validator_and_merge_reject_offscreen_claim_without_perceivable_channel() -> None:
     blueprint, plans, registry, identities, shard = _participant_case()
     unit = shard.scenes[0].units[0]
-    unit.actor_keys = ["person_a"]
     unit.onscreen_entity_keys = []
     unit.participant_deliveries = [
         IRActionParticipantDelivery(
@@ -1423,13 +1469,10 @@ def test_validator_and_merge_reject_offscreen_claim_without_perceivable_channel(
         scene_input_contracts=scene_input_contracts[plans[0].shard_id],
         identity_keys={item.key for item in identities},
     )
-    assert any(
-        "person_a 缺少结构化可感知证据" in error
-        for error in errors
-    )
+    assert any("identity scaffold drift" in error for error in errors)
     with pytest.raises(
         ScreenplaySceneMergeError,
-        match="person_a 缺少结构化可感知证据",
+        match="identity scaffold drift",
     ):
         merge_screenplay_scene_shards(
             envelope=_envelope(blueprint),
@@ -1653,9 +1696,9 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert "乙接过钥匙并回答。" not in envelope_prompt
     first_prompt = prompts["screenplay_scene_shards:SS001"]
     second_prompt = prompts["screenplay_scene_shards:SS002"]
-    assert "根对象必须是完整 ScreenplaySceneShardCreativeIR" in first_prompt
-    assert "模型无权输出或修改这些身份字段" in first_prompt
-    assert "dialogue.source_text 必须逐字一致" in first_prompt
+    assert "根对象只能包含 contract_version 与 slots" in first_prompt
+    assert "模型无权输出或修改" in first_prompt
+    assert "dialogue slot 的 text 已由 Schema 固定" in first_prompt
     assert "participant_deliveries" in first_prompt
     assert "逐场输入合同（来源正文不得跨 scene_plan_key 使用）" in first_prompt
     assert (
@@ -1698,13 +1741,13 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         "screenplay_scene_shards:SS001"
     ]
     assert repair_schema["x-schema-purpose"] == (
-        "creative-content-with-deterministic-identity-scaffold"
+        "creative-content-for-deterministic-generation-slots"
     )
     assert operation_ids["screenplay_scene_shards:SS001"].startswith(
-        "screenplay.scene-shard:screenplay-scene-shard.v5:"
+        f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
     )
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v5"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v6"
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
@@ -1859,6 +1902,20 @@ def _ss004_533ac9_compile_context():
         for source_id, owner in plan.source_scene_owners.items()
         if owner in selected_keys
     }
+    source_by_id = {
+        segment["source_segment_id"]: segment["text"]
+        for item in replay_input["scene_inputs"]
+        if item["scene_plan_key"] in selected_keys
+        for segment in item["source_segments"]
+    }
+    selected_slots = scene_shards_module._build_group_unit_slots(
+        list(scene_plans.values()),
+        source_by_id=source_by_id,
+        scene_order_by_key={
+            "bp-sc014": 14,
+            "bp-sc015": 15,
+        },
+    )
     selected_plan = plan.model_copy(update={
         "scene_plan_keys": selected_keys,
         "source_segment_ids": [
@@ -1867,13 +1924,9 @@ def _ss004_533ac9_compile_context():
             for source_id in scene_plans[key].source_segment_ids
         ],
         "source_scene_owners": source_owners,
+        "unit_slots": selected_slots,
+        "estimated_units": len(selected_slots),
     })
-    source_by_id = {
-        segment["source_segment_id"]: segment["text"]
-        for item in replay_input["scene_inputs"]
-        if item["scene_plan_key"] in selected_keys
-        for segment in item["source_segments"]
-    }
     nodes = []
     for index, evidence in enumerate(replay["action_evidence"]):
         participants = list(dict.fromkeys(
@@ -1909,8 +1962,57 @@ def _ss004_533ac9_compile_context():
     return replay, selected_plan, scene_plans, contracts
 
 
+def _recorded_response_slot_draft(
+    response: dict,
+    plan: ScreenplaySceneShardPlan,
+) -> ScreenplaySceneShardCreativeIR:
+    replay_input = json.loads(
+        SS004_REPLAY_INPUT.read_text(encoding="utf-8")
+    )
+    source_text_by_id = {
+        segment["source_segment_id"]: segment["text"]
+        for scene_input in replay_input["scene_inputs"]
+        for segment in scene_input["source_segments"]
+    }
+    content_by_signature: dict[tuple[str, str, str], dict] = {}
+    for scene in response["scenes"]:
+        for unit in scene["units"]:
+            assert len(unit["source_segment_ids"]) == 1
+            signature = (
+                scene["scene_plan_key"],
+                unit["source_segment_ids"][0],
+                unit["kind"],
+            )
+            assert signature not in content_by_signature
+            content_by_signature[signature] = unit
+    slots: dict[str, dict] = {}
+    for slot in plan.unit_slots:
+        signature = (
+            slot.scene_key,
+            slot.source_segment_ids[0],
+            slot.kind,
+        )
+        recorded = content_by_signature.get(signature, {})
+        slots[slot.unit_key] = {
+            "text": (
+                slot.source_text
+                if slot.kind == "dialogue"
+                else str(
+                    recorded.get("text")
+                    or source_text_by_id[slot.source_segment_ids[0]]
+                )
+            ),
+            "performance": "",
+            "resulting_state": recorded.get("resulting_state", ""),
+            "function": recorded.get("function", "statement"),
+        }
+    return ScreenplaySceneShardCreativeIR.model_validate({
+        "slots": slots,
+    })
+
+
 def test_scene_shard_creative_schema_is_closed_and_rejects_identity_authority() -> None:
-    replay, _plan, _scene_plans, contracts = (
+    replay, plan, _scene_plans, contracts = (
         _ss004_533ac9_compile_context()
     )
     draft_type = getattr(
@@ -1921,6 +2023,7 @@ def test_scene_shard_creative_schema_is_closed_and_rejects_identity_authority() 
     assert draft_type is not None
 
     schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
         scene_input_contracts=contracts,
     )
     assert schema["additionalProperties"] is False
@@ -1990,7 +2093,10 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
     )
     assert draft_type is not None
     assert callable(compile_draft)
-    draft = draft_type.model_validate(replay["creative_response"])
+    draft = _recorded_response_slot_draft(
+        replay["creative_response"],
+        plan,
+    )
     shard = compile_draft(
         draft,
         episode_no=1,
@@ -2044,8 +2150,8 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 
 
 def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v5"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v5"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v6"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v6"
 
 
 def test_scene_shard_error_has_generation_contract_classification() -> None:
@@ -2190,6 +2296,12 @@ def test_creative_provider_response_recovers_with_scaffold_fingerprint(
     contracts_by_shard = _contracts([plan], blueprint)
     contracts = contracts_by_shard[plan.shard_id]
     scaffold_hash = screenplay_scene_identity_scaffold_hash(contracts)
+    generation_hash = (
+        scene_shards_module.screenplay_scene_generation_scaffold_hash(
+            plan,
+            contracts,
+        )
+    )
     episode_id = "ep-creative-provider-recovery"
     operation_id = (
         f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
@@ -2197,7 +2309,7 @@ def test_creative_provider_response_recovers_with_scaffold_fingerprint(
         f"{episode_id}:{plan.shard_id}:{plan.source_hash}:"
         f"{plan.boundary_hash}:{plan.blueprint_hash}:"
         f"{plan.identity_registry_hash}:{plan.source_ownership_hash}:"
-        f"{scaffold_hash}"
+        f"{generation_hash}"
     )
     db.log_provider_call(
         "chat",
@@ -2238,6 +2350,7 @@ def test_creative_provider_response_recovers_with_scaffold_fingerprint(
     )
 
     assert shards[0].identity_scaffold_hash == scaffold_hash
+    assert shards[0].generation_scaffold_hash == generation_hash
     assert rows[0]["status"] == "validated"
     raw = evidence_repository.latest_artifact(
         "screenplay_scene_shard_raw",
