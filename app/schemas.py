@@ -6,7 +6,14 @@ import re
 
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 SHOT_SIZES = {"远景", "全景", "中景", "近景", "特写"}
 CAMERA_MOVES = {"固定", "推近", "拉远", "横摇", "跟随"}
@@ -369,10 +376,24 @@ class ActionParticipantDelivery(BaseModel):
         return self.audible or self.visible_effect or self.visible_reaction
 
 
+class ActionAgency(BaseModel):
+    """Open semantic agency plus machine-checkable identity/source provenance."""
+
+    kind: str = "character"
+    identity_bearing: bool = True
+    source_segment_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _normalize_kind(cls, value: object) -> str:
+        return str(value or "").strip() or "unattributed"
+
+
 class AtomicAction(BaseModel):
     action_id: str
     actor_ids: list[str] = Field(default_factory=list)
     target_ids: list[str] = Field(default_factory=list)
+    action_agency: ActionAgency = Field(default_factory=ActionAgency)
     participant_deliveries: list[ActionParticipantDelivery] = Field(
         default_factory=list
     )
@@ -1076,6 +1097,7 @@ class CharacterContinuityState(BaseModel):
     look_revision_id: str = ""
     outfit_revision_id: str = ""
     visibility: str = "visible"
+    visible_in_frame: bool | None = None
     screen_side: str = ""
     pose: str = ""
     facing: str = ""

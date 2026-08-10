@@ -423,6 +423,19 @@ def action_participant_delivery_errors(
             for participant_id in [*action.actor_ids, *action.target_ids]
             if _norm(participant_id)
         }
+        if action.action_agency.identity_bearing != bool(participants):
+            errors.append(
+                f"[ACTION_AGENCY_PARTICIPANT_MISMATCH] {action_id} 的 "
+                "identity_bearing 与 actor/target 分区不等价"
+            )
+        if (
+            not action.action_agency.identity_bearing
+            and not action.action_agency.source_segment_ids
+        ):
+            errors.append(
+                f"[ACTION_AGENCY_PROVENANCE_MISSING] {action_id} 的非人物动作"
+                "缺少 source_segment_ids"
+            )
         owner_event = event_by_action.get(action_id)
         if owner_event is None:
             offscreen_participants = participants & offscreen_only_ids
@@ -1043,7 +1056,11 @@ def validate_screenplay_narrative(
             errors.append(f"[ACTION_SEMANTICS_MISSING] {action_id} 缺少语义意图或可观察完成条件")
         if set(action.effects_add).intersection(action.effects_remove):
             errors.append(f"[ACTION_EFFECT_CONFLICT] {action_id} 同时增加和删除同一状态事实")
-        if not action.actor_ids and not action.target_ids:
+        if (
+            not action.actor_ids
+            and not action.target_ids
+            and action.action_agency.identity_bearing
+        ):
             errors.append(f"[ACTION_PARTICIPANT_MISSING] {action_id} 没有主体或作用目标")
         undeclared_participants = (
             set(action.actor_ids) | set(action.target_ids)

@@ -26,6 +26,7 @@ from app.identity_authority import (
     model_identity_authority_prompt_rule,
 )
 from app.schemas import (
+    ActionAgency,
     Bible,
     EpisodeScreenplay,
     InformationItem,
@@ -381,6 +382,7 @@ class IRSceneUnit(BaseModel):
     participant_deliveries: list[IRActionParticipantDelivery] = Field(
         default_factory=list
     )
+    action_agency: ActionAgency
     resulting_state: str = ""
     speaker_key: str | None = None
     function: str = "statement"
@@ -400,6 +402,29 @@ class IRSceneUnit(BaseModel):
         elif kind not in {"action", "dialogue"}:
             kind = "action"
         normalized["kind"] = kind
+        if "action_agency" not in normalized:
+            relation_keys = [
+                *_as_list(normalized.get("actor_keys")),
+                *_as_list(normalized.get("target_keys")),
+                *(
+                    [normalized.get("speaker_key")]
+                    if normalized.get("speaker_key")
+                    else []
+                ),
+            ]
+            normalized["action_agency"] = {
+                "kind": (
+                    "character"
+                    if any(str(key or "").strip() for key in relation_keys)
+                    else "unattributed"
+                ),
+                "identity_bearing": bool(
+                    any(str(key or "").strip() for key in relation_keys)
+                ),
+                "source_segment_ids": _as_list(
+                    normalized.get("source_segment_ids")
+                ),
+            }
         return normalized
 
     @field_validator(
@@ -409,6 +434,22 @@ class IRSceneUnit(BaseModel):
     @classmethod
     def _normalize_source_ids(cls, value: Any) -> list[Any]:
         return _as_list(value)
+
+    @model_validator(mode="after")
+    def _validate_action_agency(self) -> "IRSceneUnit":
+        identity_bearing = bool(
+            self.actor_keys or self.target_keys or self.speaker_key
+        )
+        if self.action_agency.identity_bearing != identity_bearing:
+            raise ValueError(
+                "action_agency.identity_bearing 必须与 "
+                "actor_keys/target_keys/speaker_key 等价"
+            )
+        if self.action_agency.source_segment_ids != self.source_segment_ids:
+            raise ValueError(
+                "action_agency.source_segment_ids 必须与 unit 来源等价"
+            )
+        return self
 
 
 class IRScene(BaseModel):
@@ -474,6 +515,7 @@ class IREvent(BaseModel):
     participant_deliveries: list[IRActionParticipantDelivery] = Field(
         default_factory=list
     )
+    action_agency: ActionAgency
     causal_parent_keys: list[str] = Field(default_factory=list)
     precondition_state: str = ""
     resulting_state: str = ""
@@ -509,6 +551,24 @@ class IREvent(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
+        if "action_agency" not in normalized:
+            relation_keys = [
+                *_as_list(normalized.get("actor_keys")),
+                *_as_list(normalized.get("target_keys")),
+            ]
+            normalized["action_agency"] = {
+                "kind": (
+                    "character"
+                    if any(str(key or "").strip() for key in relation_keys)
+                    else "unattributed"
+                ),
+                "identity_bearing": bool(
+                    any(str(key or "").strip() for key in relation_keys)
+                ),
+                "source_segment_ids": _as_list(
+                    normalized.get("source_segment_ids")
+                ),
+            }
         for field, default in (
             ("salience", 0.7),
             ("irreversibility", 0.5),
@@ -526,6 +586,20 @@ class IREvent(BaseModel):
         except (TypeError, ValueError):
             normalized["readability_s"] = 1.0
         return normalized
+
+    @model_validator(mode="after")
+    def _validate_action_agency(self) -> "IREvent":
+        identity_bearing = bool(self.actor_keys or self.target_keys)
+        if self.action_agency.identity_bearing != identity_bearing:
+            raise ValueError(
+                "event.action_agency.identity_bearing 必须与 "
+                "actor_keys/target_keys 等价"
+            )
+        if self.action_agency.source_segment_ids != self.source_segment_ids:
+            raise ValueError(
+                "event.action_agency.source_segment_ids 必须与事件来源等价"
+            )
+        return self
 
 
 class IRAudiencePrior(BaseModel):
@@ -2720,7 +2794,11 @@ def compile_screenplay_ir(
                 onscreen_keys_by_event[(scene.key, event_key)]
             )
             contextual_actor = False
-            if not actor_keys and unit.kind == "action":
+            if (
+                not actor_keys
+                and unit.kind == "action"
+                and not typed_visual_unit_contract
+            ):
                 contextual_key = f"context_actor_{scene.key}"
                 contextual_actor = True
                 actor_keys = [contextual_key]
@@ -2809,6 +2887,21 @@ def compile_screenplay_ir(
                     existing.participant_deliveries,
                     unit.participant_deliveries,
                 )
+                agency_kinds = list(dict.fromkeys([
+                    existing.action_agency.kind,
+                    unit.action_agency.kind,
+                ]))
+                existing.action_agency = ActionAgency(
+                    kind=(
+                        agency_kinds[0]
+                        if len(agency_kinds) == 1
+                        else "mixed"
+                    ),
+                    identity_bearing=bool(
+                        existing.actor_keys or existing.target_keys
+                    ),
+                    source_segment_ids=list(existing.source_segment_ids),
+                )
                 if not screenplay_beat_fields_repeat(
                     existing.adapted_statement,
                     adapted_statement,
@@ -2835,11 +2928,16 @@ def compile_screenplay_ir(
                     delivery.model_copy(deep=True)
                     for delivery in unit.participant_deliveries
                 ],
+                action_agency=ActionAgency(
+                    kind=unit.action_agency.kind,
+                    identity_bearing=bool(actor_keys or target_keys),
+                    source_segment_ids=source_ids,
+                ),
                 character_emotion="",
-                decision_required=not contextual_actor,
+                decision_required=bool(actor_keys) and not contextual_actor,
                 decision_reason=(
-                    "来源只定义了场次环境或未具名群体动作，不建立人物自主决策链"
-                    if contextual_actor else ""
+                    "来源动作没有人物 actor，不建立人物自主决策链"
+                    if not actor_keys else ""
                 ),
                 must_keep=True,
             )
@@ -3776,7 +3874,7 @@ def compile_screenplay_ir(
                 for token in scene_by_key[event.scene_key].character_keys
             ],
         ]))
-        if not participants:
+        if not participants and not typed_visual_unit_contract:
             participants = [final_identity_ids[ordered_used_keys[0]]]
 
         source_statement = event.source_statement.strip() or exact_excerpt
@@ -3984,6 +4082,11 @@ def compile_screenplay_ir(
             "action_id": action_id,
             "actor_ids": actor_ids,
             "target_ids": target_ids,
+            "action_agency": {
+                "kind": event.action_agency.kind,
+                "identity_bearing": bool(actor_ids or target_ids),
+                "source_segment_ids": list(event.source_segment_ids),
+            },
             "participant_deliveries": participant_delivery_rows,
             "semantic_intent": event.action_intent,
             "precondition_fact_ids": [fact_in_id],

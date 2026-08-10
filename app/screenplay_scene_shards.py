@@ -33,7 +33,7 @@ from app.narrative_blueprint import (
 )
 from app.observability.tracing import current_trace
 from app.renderability import SCENE_STORY_FUNCTION_MIN_CHARS
-from app.schemas import Bible
+from app.schemas import ActionAgency, Bible
 from app.screenplay_ir import (
     IRActionParticipantDelivery,
     IRExperience,
@@ -150,6 +150,7 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
         default_factory=list,
     )
     speaker_key: str | None = None
+    action_agency: ActionAgency = Field(exclude=True)
 
 
 class ScreenplaySceneShardPlan(BaseModel):
@@ -259,6 +260,7 @@ class ScreenplaySceneShardCreativeUnit(BaseModel):
     performance: str = ""
     resulting_state: str = ""
     function: str = "statement"
+    agency_kind: str = ""
 
 
 class ScreenplaySceneShardCreativeIR(BaseModel):
@@ -585,6 +587,11 @@ def _compile_unit_identity_scaffold(
         onscreen_entity_keys=visible_keys,
         participant_deliveries=participant_deliveries,
         speaker_key=speaker_key,
+        action_agency=ActionAgency(
+            kind="character" if relation_keys else "unattributed",
+            identity_bearing=bool(relation_keys),
+            source_segment_ids=source_ids,
+        ),
     ), errors
 
 
@@ -721,6 +728,12 @@ def compile_screenplay_scene_shard_draft(
                     delivery.model_copy(deep=True)
                     for delivery in compiled_slot.participant_deliveries
                 ],
+                action_agency=compiled_slot.action_agency.model_copy(update={
+                    "kind": (
+                        creative_unit.agency_kind.strip()
+                        or compiled_slot.action_agency.kind
+                    ),
+                }),
                 resulting_state=creative_unit.resulting_state,
                 speaker_key=compiled_slot.speaker_key,
                 function=creative_unit.function,
@@ -2439,7 +2452,9 @@ def _scene_shard_prompt(
         "均已由 Blueprint、shard plan 和 compiler 锁定，模型无权输出或修改。"
         "根对象只能包含 contract_version 与 slots；slots 必须是对象，属性名必须"
         "与 Shard plan 的 unit_key 集合完全相等。每个 slot 只能填写 text、"
-        "performance、resulting_state、function。不得用数组位置匹配，不得增加、"
+        "performance、resulting_state、function、agency_kind。agency_kind 是"
+        "开放语义字段，用于区分 environment、prop、on_screen_text、character "
+        "等动作归属；不得据此改写任何身份关系。不得用数组位置匹配，不得增加、"
         "删除、重命名或重排结构主键。dialogue slot 的 text 已由 Schema 固定为"
         "来源原文。任何缺失 slot、多余 slot 或越权字段都会明确作为 "
         "generation_contract 失败，不会静默改写。\nShard plan：\n"
