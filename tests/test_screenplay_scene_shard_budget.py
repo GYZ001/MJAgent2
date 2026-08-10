@@ -8,14 +8,14 @@ import pytest
 
 from app import db
 from app.narrative_blueprint import BlueprintScenePlan, NarrativeBlueprint
+from app.screenplay_ir import IRIdentity
 from app.screenplay_scene_shards import (
-    ScreenplayActionParticipantDeliveryContract,
     ScreenplaySceneInputContract,
-    ScreenplaySceneParticipantBinding,
     ScreenplaySceneShardCreativeIR,
-    ScreenplaySceneShardCreativeScene,
     ScreenplaySceneShardCreativeUnit,
     ScreenplaySceneShardPlan,
+    ScreenplaySceneUnitSlotPlan,
+    build_screenplay_scene_input_contracts,
     generate_screenplay_scene_shards,
 )
 
@@ -40,6 +40,31 @@ def _fixture() -> dict:
 
 def _plan(case: dict) -> ScreenplaySceneShardPlan:
     hashes = case["hashes"]
+    unit_slots: list[ScreenplaySceneUnitSlotPlan] = []
+    unit_order = 0
+    for scene_order, scene_input in enumerate(
+        case["scene_inputs"],
+        start=1,
+    ):
+        for scene_unit_order, segment in enumerate(
+            scene_input["source_segments"],
+            start=1,
+        ):
+            unit_order += 1
+            source_id = segment["source_segment_id"]
+            key_base = (
+                f"{scene_input['scene_plan_key']}:{source_id}:001"
+            )
+            unit_slots.append(ScreenplaySceneUnitSlotPlan(
+                unit_key=f"{key_base}:unit",
+                event_key=f"{key_base}:event",
+                scene_key=scene_input["scene_plan_key"],
+                scene_order=scene_order,
+                unit_order=unit_order,
+                scene_unit_order=scene_unit_order,
+                kind="action",
+                source_segment_ids=[source_id],
+            ))
     return ScreenplaySceneShardPlan(
         shard_id="SS004",
         scene_plan_keys=[
@@ -51,6 +76,7 @@ def _plan(case: dict) -> ScreenplaySceneShardPlan:
             if "SRC0049" <= source_id <= "SRC0059"
         ],
         source_scene_owners=case["source_scene_owners"],
+        unit_slots=unit_slots,
         source_ownership_hash=hashes["source_ownership_hash"],
         estimated_units=case["recorded_request"]["estimated_units"],
         estimated_output_chars=case["recorded_request"][
@@ -76,62 +102,57 @@ def _plan(case: dict) -> ScreenplaySceneShardPlan:
 def _contracts(
     case: dict,
     plan: ScreenplaySceneShardPlan,
+    blueprint: NarrativeBlueprint,
 ) -> list[ScreenplaySceneInputContract]:
-    return [
-        ScreenplaySceneInputContract(
-            scene_plan_key=value["scene_plan_key"],
-            node_keys=value["node_keys"],
-            source_segment_ids=[
-                segment["source_segment_id"]
-                for segment in value["source_segments"]
-            ],
-            source_segments=value["source_segments"],
-            participant_bindings=[
-                ScreenplaySceneParticipantBinding(
-                    blueprint_key=blueprint_key,
-                    identity_key=identity_key,
-                )
-                for blueprint_key, identity_key
-                in value["participant_bindings"]
-            ],
-            source_scene_owners=plan.source_scene_owners,
-            action_participant_delivery_contract=(
-                ScreenplayActionParticipantDeliveryContract()
-            ),
-            source_ownership_hash=plan.source_ownership_hash,
-        )
+    source_by_id = {
+        segment["source_segment_id"]: segment["text"]
         for value in case["scene_inputs"]
-    ]
+        for segment in value["source_segments"]
+    }
+    return build_screenplay_scene_input_contracts(
+        plan=plan,
+        scene_plans=list(blueprint.scene_plans),
+        source_by_id=source_by_id,
+        identity_registry=case["identity_registry"],
+    )
 
 
 def _complete_shard(
     case: dict,
     plan: ScreenplaySceneShardPlan,
 ) -> ScreenplaySceneShardCreativeIR:
-    scenes: list[ScreenplaySceneShardCreativeScene] = []
-    for value in case["scene_inputs"]:
-        units: list[ScreenplaySceneShardCreativeUnit] = []
-        for segment in value["source_segments"]:
-            source_id = segment["source_segment_id"]
-            units.append(ScreenplaySceneShardCreativeUnit(
-                kind="action",
-                text=segment["text"],
-                source_segment_ids=[source_id],
-                resulting_state=f"完成 {source_id}",
-            ))
-        scene_plan = next(
-            item for item in case["scene_plans"]
-            if item["key"] == value["scene_plan_key"]
-        )
-        scenes.append(ScreenplaySceneShardCreativeScene(
-            scene_plan_key=scene_plan["key"],
-            story_function="完整交付本场全部来源事件",
-            summary=scene_plan["exit_state"],
-            units=units,
-        ))
+    source_by_id = {
+        segment["source_segment_id"]: segment["text"]
+        for value in case["scene_inputs"]
+        for segment in value["source_segments"]
+    }
     return ScreenplaySceneShardCreativeIR(
-        scenes=scenes,
+        slots={
+            slot.unit_key: ScreenplaySceneShardCreativeUnit(
+                text=source_by_id[slot.source_segment_ids[0]],
+                resulting_state=(
+                    f"完成 {slot.source_segment_ids[0]}"
+                ),
+            )
+            for slot in plan.unit_slots
+        },
     )
+
+
+def _identities(case: dict) -> list[IRIdentity]:
+    return [
+        IRIdentity(
+            key=value["identity_key"],
+            display_name=value["canonical_name"],
+            authority_id=f"fixture:{value['identity_key']}",
+            source_names=list(value["source_labels"]),
+            kind="named_character",
+            visual_policy="canonical",
+            asset_requirement="required",
+            role_type="named_character",
+        )
+        for value in case["identity_registry"]
+    ]
 
 
 def test_ss004_budget_replay_preserves_all_sources_and_events(
@@ -139,7 +160,6 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
 ) -> None:
     case = _fixture()
     plan = _plan(case)
-    contracts = _contracts(case, plan)
     blueprint = NarrativeBlueprint(
         episode_no=1,
         nodes=[],
@@ -149,6 +169,7 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
         ],
         source_scene_owners=case["source_scene_owners"],
     )
+    contracts = _contracts(case, plan, blueprint)
     complete_shard = _complete_shard(case, plan)
     captured: dict = {}
 
@@ -181,7 +202,7 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
             source_text=source_text,
             blueprint=blueprint,
             identity_registry=case["identity_registry"],
-            identities=[],
+            identities=_identities(case),
             plans=[plan],
             scene_input_contracts={plan.shard_id: contracts},
         )
@@ -217,9 +238,7 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
     assert actual_sources == expected_sources
     assert shards[0].consumed_source_ids == expected_sources
     assert actual_events == {
-        f"unit-{index + 1:03d}"
-        for scene in shards[0].scenes
-        for index, _unit in enumerate(scene.units)
+        slot.event_key for slot in plan.unit_slots
     }
 
     for source_input in case["scene_inputs"]:

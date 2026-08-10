@@ -1520,7 +1520,7 @@ def test_validator_and_merge_reject_participant_delivery_contract_drift() -> Non
         )
 
 
-def test_normalization_does_not_invent_offscreen_participant_evidence() -> None:
+def test_normalization_rejects_offscreen_identity_scaffold_drift() -> None:
     blueprint, plans, registry, identities, shard = _participant_case()
     unit = shard.scenes[0].units[0]
     unit.target_keys = ["person_a"]
@@ -1528,13 +1528,17 @@ def test_normalization_does_not_invent_offscreen_participant_evidence() -> None:
     unit.participant_deliveries = []
     scene_input_contracts = _contracts(plans, blueprint, registry)
 
-    normalize_screenplay_scene_shard(
-        shard,
-        episode_no=1,
-        plan=plans[0],
-        scene_plans={item.key: item for item in blueprint.scene_plans},
-        scene_input_contracts=scene_input_contracts[plans[0].shard_id],
-    )
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="identity scaffold drift",
+    ):
+        normalize_screenplay_scene_shard(
+            shard,
+            episode_no=1,
+            plan=plans[0],
+            scene_plans={item.key: item for item in blueprint.scene_plans},
+            scene_input_contracts=scene_input_contracts[plans[0].shard_id],
+        )
 
     assert unit.participant_deliveries == []
     errors = validate_screenplay_scene_shard(
@@ -1544,11 +1548,7 @@ def test_normalization_does_not_invent_offscreen_participant_evidence() -> None:
         scene_input_contracts=scene_input_contracts[plans[0].shard_id],
         identity_keys={item.key for item in identities},
     )
-    assert any(
-        "缺少 participant_deliveries" in error
-        and "person_a" in error
-        for error in errors
-    )
+    assert any("identity scaffold drift" in error for error in errors)
 
 
 def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> None:
@@ -1808,7 +1808,10 @@ def test_merge_rejects_frozen_identity_owned_only_by_another_scene() -> None:
     shard.scenes[0].units[0].onscreen_entity_keys = ["person_b"]
     scene_input_contracts = _contracts(plans, blueprint, registry)
 
-    with pytest.raises(ScreenplaySceneMergeError, match="逐场参与者合同"):
+    with pytest.raises(
+        ScreenplaySceneMergeError,
+        match="identity scaffold drift",
+    ):
         merge_screenplay_scene_shards(
             envelope=_envelope(blueprint),
             identities=identities,
@@ -1824,11 +1827,6 @@ def test_scene_contract_allows_identity_explicitly_shared_by_both_scenes() -> No
     blueprint, plans, registry, identities, shard = _participant_case(
         shared_identity=True,
     )
-    for scene in shard.scenes:
-        scene.character_keys = ["person_shared"]
-        scene.units[0].actor_keys = ["person_shared"]
-        scene.units[0].target_keys = ["person_shared"]
-        scene.units[0].onscreen_entity_keys = ["person_shared"]
     scene_input_contracts = _contracts(plans, blueprint, registry)
 
     merged = merge_screenplay_scene_shards(
@@ -1842,15 +1840,18 @@ def test_scene_contract_allows_identity_explicitly_shared_by_both_scenes() -> No
     )
 
     assert [scene.character_keys for scene in merged.scenes] == [
-        ["person_shared"],
-        ["person_shared"],
+        ["person_a", "person_shared"],
+        ["person_b", "person_shared"],
     ]
     assert [
         scene.units[0].actor_keys for scene in merged.scenes
-    ] == [["person_shared"], ["person_shared"]]
+    ] == [
+        ["person_a", "person_shared"],
+        ["person_b", "person_shared"],
+    ]
 
 
-def test_normalization_preserves_unbound_target_for_hard_gate() -> None:
+def test_normalization_rejects_unbound_target_scaffold_drift() -> None:
     blueprint = _blueprint(split_domain=True)
     plan = build_screenplay_scene_shard_plans(
         blueprint,
@@ -1861,27 +1862,27 @@ def test_normalization_preserves_unbound_target_for_hard_gate() -> None:
     shard.scenes[0].units[0].target_keys = ["unbound-person"]
     scene_input_contracts = _contracts([plan], blueprint)[plan.shard_id]
 
-    normalized = normalize_screenplay_scene_shard(
-        shard,
-        episode_no=1,
-        plan=plan,
-        scene_plans={item.key: item for item in blueprint.scene_plans},
-        scene_input_contracts=scene_input_contracts,
-    )
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="identity scaffold drift",
+    ):
+        normalize_screenplay_scene_shard(
+            shard,
+            episode_no=1,
+            plan=plan,
+            scene_plans={item.key: item for item in blueprint.scene_plans},
+            scene_input_contracts=scene_input_contracts,
+        )
 
-    assert normalized.scenes[0].units[0].target_keys == ["unbound-person"]
+    assert shard.scenes[0].units[0].target_keys == ["unbound-person"]
     errors = validate_screenplay_scene_shard(
-        normalized,
+        shard,
         plan=plan,
         scene_plans={item.key: item for item in blueprint.scene_plans},
         scene_input_contracts=scene_input_contracts,
         identity_keys={"narrator"},
     )
-    assert any(
-        "actor/target 违反逐场参与者合同" in error
-        and "unbound-person" in error
-        for error in errors
-    )
+    assert any("identity scaffold drift" in error for error in errors)
 
 
 def _ss004_533ac9_compile_context():
