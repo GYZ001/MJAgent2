@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app import api, db, portraits
 from app.capabilities.direct import enter_handler
+from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.main import app
 from tests.conftest import SessionTestClient
@@ -757,6 +759,90 @@ def test_resumable_screenplay_status_exposes_actual_stop_reason() -> None:
     assert blocked["code"] == "workflow_gate_blocked"
     assert "门禁未通过" in blocked["message"]
     assert failed["recommended_action"] == blocked["recommended_action"] == "resume_screenplay"
+
+
+def _bind_stale_screenplay_artifact(
+    projection: dict,
+    artifact_content: dict,
+    *,
+    stale_reason: str,
+) -> None:
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,content_json,
+               content_hash,stale_reason,created_at
+           ) VALUES(
+               'art-stale-screenplay','screenplay_document','episode','e1',1,
+               'stale','T2',?,?,?,?,1
+           )""",
+        (
+            json.dumps(artifact_content, ensure_ascii=False),
+            evidence_repository.content_hash(artifact_content),
+            stale_reason,
+        ),
+    )
+    conn.execute(
+        """UPDATE episodes
+              SET screenplay_json=?,
+                  screenplay_artifact_id='art-stale-screenplay',
+                  published_screenplay_artifact_id='art-stale-screenplay',
+                  screenplay_status='failed'
+            WHERE id='e1'""",
+        (json.dumps(projection, ensure_ascii=False),),
+    )
+    conn.commit()
+
+
+def _legacy_screenplay_payload() -> dict:
+    payload = _valid_script().model_dump(mode="json")
+    for action in payload["narrative_plan"]["atomic_actions"]:
+        action.pop("participant_deliveries")
+    return payload
+
+
+def test_script_detail_projects_authoritative_stale_screenplay_as_rebuild_state(
+    client,
+) -> None:
+    _seed_episode(with_artifact=False)
+    legacy = _legacy_screenplay_payload()
+    _bind_stale_screenplay_artifact(
+        legacy,
+        legacy,
+        stale_reason="legacy contract invalid",
+    )
+
+    response = client.get("/api/episodes/e1?view=script")
+
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["screenplay"] is None
+    assert detail["screenplay_evidence"]["status"] == "stale"
+    assert detail["screenplay_evidence"]["stale_code"] == "ARTIFACT_NEEDS_REBUILD"
+    assert detail["screenplay_state"]["code"] == "ARTIFACT_NEEDS_REBUILD"
+    assert detail["screenplay_state"]["artifact_id"] == "art-stale-screenplay"
+    assert detail["screenplay_state"]["recommended_action"] == "resume_screenplay"
+
+
+def test_script_detail_keeps_valid_screenplay_projection() -> None:
+    _seed_episode(with_artifact=False)
+
+    detail = api.episode_detail("e1", view="script")
+
+    assert detail["screenplay"]["title"] == _valid_script().title
+    assert detail["screenplay_state"]["code"] == "ready_storyboard_empty"
+
+
+def test_script_detail_does_not_classify_unknown_validation_from_stale_reason() -> None:
+    _seed_episode(with_artifact=False)
+    _bind_stale_screenplay_artifact(
+        _legacy_screenplay_payload(),
+        _valid_script().model_dump(mode="json"),
+        stale_reason="[ARTIFACT_NEEDS_REBUILD] untrusted free text",
+    )
+
+    with pytest.raises(ValidationError):
+        api.episode_detail("e1", view="script")
 
 
 def test_1646_episode_picker_and_light_status_reduce_minute_payload_over_80_percent() -> None:
