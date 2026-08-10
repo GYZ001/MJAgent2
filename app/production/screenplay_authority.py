@@ -1012,7 +1012,7 @@ class ScreenplaySourceProjection:
 def screenplay_action_agency_projection(
     screenplay: EpisodeScreenplay,
 ) -> dict[str, Any]:
-    """Project only source-owned action identity/provenance semantics."""
+    """Project compiler-owned action and text attribution semantics."""
     plan = screenplay.narrative_plan
     if plan is None:
         return {
@@ -1027,6 +1027,13 @@ def screenplay_action_agency_projection(
                 "actor_ids": list(action.actor_ids),
                 "target_ids": list(action.target_ids),
                 "action_agency": action.action_agency.model_dump(mode="json"),
+                "text_provenance": action.text_provenance.model_dump(
+                    mode="json"
+                ),
+                "dialogue_text": action.dialogue_text,
+                "required_text": action.required_text,
+                "prop_text": action.prop_text,
+                "on_screen_text": action.on_screen_text,
             }
             for action in plan.atomic_actions
         ],
@@ -1049,6 +1056,51 @@ def screenplay_action_agency_errors(
         if action.action_agency.is_character_agency and not has_relation:
             errors.append(
                 f"{action.action_id} character agency 缺少 actor/target 关系"
+            )
+        explicit_text_kinds = [
+            kind
+            for kind, content in (
+                ("dialogue", action.dialogue_text),
+                ("required_text", action.required_text),
+                ("prop_text", action.prop_text),
+                ("on_screen_text", action.on_screen_text),
+            )
+            if content.strip()
+        ]
+        expected_kind = (
+            explicit_text_kinds[0]
+            if explicit_text_kinds
+            else "creative_action"
+        )
+        expected_identity_keys = (
+            []
+            if expected_kind in (
+                "required_text", "prop_text", "on_screen_text",
+            )
+            else list(dict.fromkeys([
+                *action.actor_ids,
+                *action.target_ids,
+            ]))
+        )
+        if len(explicit_text_kinds) > 1:
+            errors.append(
+                f"{action.action_id} 含多个冲突的文字结构字段"
+            )
+        if action.text_provenance.kind != expected_kind:
+            errors.append(
+                f"{action.action_id} text provenance kind 未由文字结构确定"
+            )
+        if action.text_provenance.identity_keys != expected_identity_keys:
+            errors.append(
+                f"{action.action_id} text provenance identity "
+                "未由 actor/target 关系确定"
+            )
+        if (
+            action.text_provenance.source_segment_ids
+            != action.action_agency.source_segment_ids
+        ):
+            errors.append(
+                f"{action.action_id} text provenance 与 agency 来源不等价"
             )
     return errors
 
@@ -1131,7 +1183,7 @@ def _validated_v6_source_artifacts(
                 artifact_type=str(artifact.get("type") or ""),
                 reason=(
                     "source projection 依赖的 scene shards/merged IR "
-                    "不是完整 validated v6 权威"
+                    "不是完整的当前 validated 权威"
                 ),
             )
         return candidate, shard_parents
@@ -1172,7 +1224,7 @@ def _compile_validated_v6_source_projection(
         raise ArtifactNeedsRebuildError(
             artifact_id=str(artifact.get("id") or ""),
             artifact_type=str(artifact.get("type") or ""),
-            reason=f"validated v6 source projection 无法解析：{exc}",
+            reason=f"validated scene source projection 无法解析：{exc}",
         ) from exc
     if any(
         shard.contract_version != SCREENPLAY_SCENE_SHARD_VERSION
@@ -1181,7 +1233,7 @@ def _compile_validated_v6_source_projection(
         raise ArtifactNeedsRebuildError(
             artifact_id=str(artifact.get("id") or ""),
             artifact_type=str(artifact.get("type") or ""),
-            reason="validated v6 source projection 内容合同漂移",
+            reason="validated scene source projection 内容合同漂移",
         )
 
     source_scenes: dict[str, IRScene] = {}
@@ -1192,7 +1244,7 @@ def _compile_validated_v6_source_projection(
                     artifact_id=str(artifact.get("id") or ""),
                     artifact_type=str(artifact.get("type") or ""),
                     reason=(
-                        "validated v6 source projection 含重复 scene："
+                        "validated scene source projection 含重复 scene："
                         f"{scene.key}"
                     ),
                 )
@@ -1204,7 +1256,7 @@ def _compile_validated_v6_source_projection(
         raise ArtifactNeedsRebuildError(
             artifact_id=str(artifact.get("id") or ""),
             artifact_type=str(artifact.get("type") or ""),
-            reason="validated v6 source shards 与 merged IR 场次集合漂移",
+            reason="validated scene source shards 与 merged IR 场次集合漂移",
         )
     ordered_source_scenes = [
         source_scenes[scene_key] for scene_key in merged_scene_keys
@@ -1217,7 +1269,7 @@ def _compile_validated_v6_source_projection(
         raise ArtifactNeedsRebuildError(
             artifact_id=str(artifact.get("id") or ""),
             artifact_type=str(artifact.get("type") or ""),
-            reason="validated v6 source shards 与 merged IR 内容漂移",
+            reason="validated scene source shards 与 merged IR 内容漂移",
         )
     merged_ir.scenes = ordered_source_scenes
 
@@ -1252,7 +1304,7 @@ def _compile_validated_v6_source_projection(
         raise ArtifactNeedsRebuildError(
             artifact_id=str(artifact.get("id") or ""),
             artifact_type=str(artifact.get("type") or ""),
-            reason=f"validated v6 source projection 无法重新编译：{exc}",
+            reason=f"validated scene source projection 无法重新编译：{exc}",
         ) from exc
     return (
         source_screenplay,
@@ -1272,7 +1324,7 @@ def assert_screenplay_matches_validated_v6_source(
     conn: Any | None = None,
     mark_stale: bool = True,
 ) -> ScreenplaySourceProjection | None:
-    """Fail closed when a v6 shard-derived action projection drifted."""
+    """Fail closed when the current shard-derived attribution drifts."""
     db = conn or get_conn()
     try:
         source = _compile_validated_v6_source_projection(
@@ -1284,7 +1336,7 @@ def assert_screenplay_matches_validated_v6_source(
             return None
         source_screenplay, merged_artifact_id, shard_artifact_ids = source
         for projection_name, candidate in (
-            ("validated v6 source", source_screenplay),
+            ("validated scene source", source_screenplay),
             ("published screenplay", screenplay),
         ):
             agency_errors = screenplay_action_agency_errors(candidate)

@@ -506,6 +506,10 @@ def _compile_unit_identity_scaffold(
     participant_usages: dict[str, set[str]] = {}
     participant_channels: dict[str, list[str]] = {}
     decision_actor_keys: list[str] = []
+    source_text_by_id = {
+        segment.source_segment_id: segment.text
+        for segment in contract.source_segments
+    }
 
     for action in contract.action_evidence:
         if not source_set.intersection(action.source_segment_ids):
@@ -599,6 +603,21 @@ def _compile_unit_identity_scaffold(
             ]
         else:
             actor_keys = list(visible_keys)
+        source_has_dialogue_slot = any(
+            part_kind == "dialogue"
+            for source_id in source_ids
+            for part_kind, _part_text in _source_creative_parts(
+                source_text_by_id.get(source_id, "")
+            )
+        )
+        if voice_keys and not source_has_dialogue_slot:
+            if len(voice_keys) == 1:
+                speaker_key = voice_keys[0]
+            else:
+                errors.append(
+                    f"{slot.unit_key} 无对白结构的来源含多个 voice identity，"
+                    "必须在 Blueprint 中拆分来源"
+                )
 
     relation_keys = _ordered_unique([
         *actor_keys,
@@ -606,10 +625,6 @@ def _compile_unit_identity_scaffold(
         *([speaker_key] if speaker_key else []),
     ])
     participant_deliveries: list[IRActionParticipantDelivery] = []
-    source_text_by_id = {
-        segment.source_segment_id: segment.text
-        for segment in contract.source_segments
-    }
     observable_basis = slot.source_text.strip() or " ".join(
         source_text_by_id.get(source_id, "")
         for source_id in source_ids
@@ -661,89 +676,51 @@ def _structural_slot(
     )
 
 
-def _creative_text_provenance_errors(
+def _compile_text_provenance(
     *,
     creative_unit: ScreenplaySceneShardCreativeUnit,
     compiled_slot: ScreenplaySceneCompiledUnitSlot,
-    contract: ScreenplaySceneInputContract,
-) -> list[str]:
-    errors: list[str] = []
-    provenance = creative_unit.text_provenance
-    declared_identity_keys = set(provenance.identity_keys)
-    bound_identity_keys = {
-        binding.identity_key
-        for binding in contract.participant_bindings
-        if binding.identity_key
-    }
-    relation_identity_keys = {
-        identity_key
-        for identity_key in [
-            *compiled_slot.actor_keys,
-            *compiled_slot.target_keys,
-            *compiled_slot.onscreen_entity_keys,
-            *([compiled_slot.speaker_key] if compiled_slot.speaker_key else []),
-            *[
-                delivery.participant_key
-                for delivery in compiled_slot.participant_deliveries
-            ],
-        ]
-        if identity_key
-    }
-    unknown_identity_keys = sorted(
-        declared_identity_keys - bound_identity_keys
+) -> tuple[TextProvenance, str]:
+    if creative_unit.required_text.strip():
+        provenance_kind = "required_text"
+    elif creative_unit.prop_text.strip():
+        provenance_kind = "prop_text"
+    elif creative_unit.on_screen_text.strip():
+        provenance_kind = "on_screen_text"
+    elif compiled_slot.kind == "dialogue":
+        provenance_kind = "dialogue"
+    else:
+        provenance_kind = "creative_action"
+    relation_identity_keys = _ordered_unique([
+        *compiled_slot.actor_keys,
+        *compiled_slot.target_keys,
+        *(
+            [compiled_slot.speaker_key]
+            if compiled_slot.speaker_key
+            else []
+        ),
+    ])
+    provenance = TextProvenance(
+        kind=provenance_kind,
+        identity_keys=(
+            []
+            if provenance_kind in (
+                "required_text", "prop_text", "on_screen_text",
+            )
+            else relation_identity_keys
+        ),
+        source_segment_ids=list(compiled_slot.source_segment_ids),
     )
-    if unknown_identity_keys:
-        errors.append(
-            "[GENERATION_CONTRACT] "
-            f"{compiled_slot.unit_key} text provenance 引用了未冻结 identity_key："
-            + ",".join(unknown_identity_keys)
-        )
-
     agency_kind = (
-        creative_unit.agency_kind.strip()
-        or compiled_slot.action_agency.kind
-    )
-    character_agency = (
-        agency_kind == "character"
-        or agency_kind.startswith("character_")
-    )
-    if provenance.kind != "creative_action":
-        if declared_identity_keys:
-            errors.append(
-                "[GENERATION_CONTRACT] "
-                f"{compiled_slot.unit_key} {provenance.kind} 不得声明人物关系"
-            )
-        if character_agency:
-            errors.append(
-                "[GENERATION_CONTRACT] "
-                f"{compiled_slot.unit_key} {provenance.kind} 不得声明 "
-                "character agency"
-            )
-        return errors
-
-    unbound_identity_keys = sorted(
-        declared_identity_keys - relation_identity_keys
-    )
-    if unbound_identity_keys:
-        errors.append(
-            "[GENERATION_CONTRACT] "
-            f"{compiled_slot.unit_key} creative action identity 未由 scaffold "
-            "绑定："
-            + ",".join(unbound_identity_keys)
+        compiled_slot.action_agency.kind
+        if relation_identity_keys
+        else provenance_kind
+        if provenance_kind in (
+            "required_text", "prop_text", "on_screen_text",
         )
-    if character_agency and not relation_identity_keys:
-        errors.append(
-            "[GENERATION_CONTRACT] "
-            f"{compiled_slot.unit_key} character agency 缺少 scaffold "
-            "actor/target/speaker/onscreen relation"
-        )
-    if character_agency and not declared_identity_keys:
-        errors.append(
-            "[GENERATION_CONTRACT] "
-            f"{compiled_slot.unit_key} character agency 缺少 text provenance "
-            "identity_keys"
-        )
-    return errors
+        else "unattributed"
+    )
+    return provenance, agency_kind
 
 
 def compile_screenplay_scene_shard_draft(
@@ -848,17 +825,9 @@ def compile_screenplay_scene_shard_draft(
                     "scaffold source_text"
                 )
                 continue
-            provenance_errors = _creative_text_provenance_errors(
+            text_provenance, agency_kind = _compile_text_provenance(
                 creative_unit=creative_unit,
                 compiled_slot=compiled_slot,
-                contract=contract,
-            )
-            if provenance_errors:
-                errors.extend(provenance_errors)
-                continue
-            agency_kind = (
-                creative_unit.agency_kind.strip()
-                or compiled_slot.action_agency.kind
             )
             unit = ScreenplaySceneShardUnit(
                 unit_key=planned_slot.unit_key,
@@ -889,6 +858,10 @@ def compile_screenplay_scene_shard_draft(
                         compiled_slot.action_agency.source_segment_ids
                     ),
                 ),
+                text_provenance=text_provenance,
+                required_text=creative_unit.required_text,
+                prop_text=creative_unit.prop_text,
+                on_screen_text=creative_unit.on_screen_text,
                 resulting_state=creative_unit.resulting_state,
                 speaker_key=compiled_slot.speaker_key,
                 function=creative_unit.function,
@@ -2610,18 +2583,14 @@ def _scene_shard_prompt(
         "均已由 Blueprint、shard plan 和 compiler 锁定，模型无权输出或修改。"
         "根对象只能包含 contract_version 与 slots；slots 必须是对象，属性名必须"
         "与 Shard plan 的 unit_key 集合完全相等。每个 slot 只能填写 text、"
-        "text_provenance、performance、resulting_state、function、agency_kind。"
-        "text_provenance.kind 必须是 creative_action、on_screen_text、"
-        "required_text、prop_text 之一；creative_action 中每个已冻结身份都必须"
-        "在 text_provenance.identity_keys 逐字引用 frozen identity_key，且该 key "
-        "必须已经存在于本 slot 的 scaffold relation。标题、画面指定文字和道具字"
-        "分别使用 on_screen_text、required_text、prop_text，identity_keys 必须"
-        "为空，不得据文字中的姓名建立人物关系。匿名群体动作使用 creative_action "
-        "且 identity_keys 为空。agency_kind 是"
-        "开放语义字段，用于区分 environment、prop、on_screen_text、character "
-        "等动作归属；character agency 必须同时具有非空 text provenance identity "
-        "和已有 scaffold relation，不得据此改写任何身份关系。不得用数组位置匹配，"
-        "不得增加、"
+        "performance、resulting_state、function、required_text、prop_text、"
+        "on_screen_text。required_text、prop_text、on_screen_text 只填写需要"
+        "准确出现在画面中的文字内容，每个 slot 最多使用一种；对白必须只写入"
+        "dialogue slot 的 text，不得把口播放入 required_text。action_agency、"
+        "agency_kind、text_provenance、identity_keys 均由 compiler 根据 generation "
+        "scaffold 关系、文字结构字段与 source IDs 生成，模型输出这些字段属于"
+        "additionalProperties 越权并直接失败。文字中出现人物姓名不会创建人物关系。"
+        "不得用数组位置匹配，不得增加、"
         "删除、重命名或重排结构主键。dialogue slot 的 text 已由 Schema 固定为"
         "来源原文。任何缺失 slot、多余 slot 或越权字段都会明确作为 "
         "generation_contract 失败，不会静默改写。\nShard plan：\n"
@@ -2919,9 +2888,9 @@ async def generate_screenplay_scene_shards(
                             "missing or extra slots are generation_contract failures",
                             "structural and identity fields are forbidden in slot content",
                             "dialogue text must equal scaffold source_text",
-                            "text_provenance is required for every slot",
-                            "creative identity keys must already exist in the slot scaffold",
-                            "on_screen_text, required_text and prop_text never create identity relations",
+                            "action_agency, agency_kind, text_provenance and identity_keys are compiler-owned additional properties",
+                            "required_text, prop_text and on_screen_text are content fields and never create identity relations",
+                            "compiler derives agency and provenance from scaffold relations and source IDs",
                         ],
                     }, ensure_ascii=False, separators=(",", ":")),
                     output_schema=output_schema,
