@@ -10,7 +10,6 @@ import json
 import math
 from pathlib import Path
 import threading
-import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -459,38 +458,6 @@ async def _ensure_supervisor_video_plan(
     cp: VideoSupervisorCheckpoint,
 ) -> VideoCompletionGrant | None:
     """Generate/validate and bind the plan before any paid asset or video call."""
-    # #region debug-point C-D:supervisor-plan-probe
-    def _debug_video_plan(hypothesis_id: str, message: str, data: dict[str, Any]) -> None:
-        import urllib.request
-
-        url = "http://127.0.0.1:7778/event"
-        session_id = "video-generation-noop"
-        try:
-            with open(".dbg/video-generation-noop.env", encoding="utf-8") as env_file:
-                for line in env_file:
-                    if line.startswith("DEBUG_SERVER_URL="):
-                        url = line.strip().split("=", 1)[1]
-                    elif line.startswith("DEBUG_SESSION_ID="):
-                        session_id = line.strip().split("=", 1)[1]
-            payload = {
-                "sessionId": session_id,
-                "runId": "post-fix",
-                "hypothesisId": hypothesis_id,
-                "location": "app/video_supervisor.py:_ensure_supervisor_video_plan",
-                "msg": f"[DEBUG] {message}",
-                "data": data,
-                "ts": int(time.time() * 1000),
-            }
-            request = urllib.request.Request(
-                url,
-                data=json.dumps(payload, ensure_ascii=False).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(request, timeout=0.5).read()
-        except Exception:
-            pass
-    # #endregion
-
     checkpoint_binding = (
         cp.episode_video_plan_id,
         cp.episode_video_plan_revision,
@@ -529,22 +496,6 @@ async def _ensure_supervisor_video_plan(
 
     conn = get_conn()
     plan = load_latest_plan(cp.episode_id, conn=conn)
-    # #region debug-point C-D:supervisor-plan-loaded
-    _debug_video_plan("C", "Supervisor loaded video plan", {
-        "episodeId": cp.episode_id,
-        "runId": cp.run_id,
-        "checkpointPhase": cp.phase,
-        "checkpointBinding": checkpoint_binding,
-        "grantId": grant.grant_id,
-        "grantPlanId": grant.episode_video_plan_id,
-        "grantPlanRevision": grant.episode_video_plan_revision,
-        "planId": plan.episode_video_plan_id if plan else None,
-        "planRevision": plan.plan_revision if plan else None,
-        "planStatus": plan.status if plan else None,
-        "planBlockers": plan.blockers if plan else None,
-        "capabilitySnapshotId": plan.capability_snapshot_id if plan else None,
-    })
-    # #endregion
     if (
         plan is None
         or plan.status != "valid"
@@ -565,32 +516,12 @@ async def _ensure_supervisor_video_plan(
                 conn=conn,
             )
         except (ValueError, VideoPlanValidationError) as exc:
-            # #region debug-point C:supervisor-plan-generation-error
-            _debug_video_plan("C", "Video plan generation failed", {
-                "episodeId": cp.episode_id,
-                "runId": cp.run_id,
-                "errorType": type(exc).__name__,
-                "errorMessage": str(exc),
-                "issues": getattr(exc, "issues", None),
-            })
-            # #endregion
             raise GrantValidationError("VIDEO_PLAN_INVALID", str(exc)) from exc
     if (
         plan.status != "valid"
         or not await _verify_episode_plan_current_async(plan)
         or not video_plan_provider_selection_is_current(plan, conn=conn)
     ):
-        # #region debug-point C-D:supervisor-plan-postcheck-invalid
-        _debug_video_plan("C", "Generated video plan failed current-plan checks", {
-            "episodeId": cp.episode_id,
-            "runId": cp.run_id,
-            "planId": plan.episode_video_plan_id,
-            "planRevision": plan.plan_revision,
-            "planStatus": plan.status,
-            "planBlockers": plan.blockers,
-            "capabilitySnapshotId": plan.capability_snapshot_id,
-        })
-        # #endregion
         raise GrantValidationError(
             "VIDEO_PLAN_INVALID",
             "Supervisor 启动前未取得当前有效的整集视频计划",
@@ -1742,16 +1673,9 @@ def _dispatch(
                 authority_checkpoint,
                 stage="video_provider_enqueue_commit",
             )
-        _debug_enqueue_started = time.monotonic()
-        # #region debug-point B:enqueue-duration
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-        # #endregion
         result = worker.enqueue_shot(entry.shot_id, **{
             k: v for k, v in kwargs.items() if k != "supervisor_meta"
         })
-        # #region debug-point B:enqueue-duration
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"B","location":"app/video_supervisor.py:_dispatch","msg":"[DEBUG] worker enqueue end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_enqueue_started)*1000,1),"db_in_transaction":get_conn().in_transaction,"reused":bool(result.get("reused"))},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-        # #endregion
         # 把 supervisor meta 写入新建 version
         if result.get("version_id") and kwargs.get("supervisor_meta"):
             _patch_version_supervisor_meta(result["version_id"], kwargs["supervisor_meta"])
@@ -1807,10 +1731,6 @@ def _dispatch_with_heartbeat(
     first: bool = False,
 ) -> bool:
     """Keep the run live across synchronous request compilation and enqueue."""
-    _debug_dispatch_started = time.monotonic()
-    # #region debug-point A:dispatch-duration
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch start","data":{"shot_no":entry.shot_no,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     _refresh_supervisor_heartbeat(cp, run_id=run_id)
     try:
         return _dispatch(
@@ -1823,9 +1743,6 @@ def _dispatch_with_heartbeat(
         )
     finally:
         _refresh_supervisor_heartbeat(cp, run_id=run_id)
-        # #region debug-point A:dispatch-duration
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"A","location":"app/video_supervisor.py:_dispatch_with_heartbeat","msg":"[DEBUG] dispatch end","data":{"shot_no":entry.shot_no,"elapsed_ms":round((time.monotonic()-_debug_dispatch_started)*1000,1),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-        # #endregion
 
 
 async def _dispatch_with_heartbeat_async(
@@ -3347,9 +3264,6 @@ async def run_video_completion_supervisor(
         soft_cap = cap * FIRST_PASS_BUDGET_FRACTION
         per_shot_cap = (cap / max(1, ledger.shots_total)) * SHOT_BUDGET_MULTIPLIER
 
-        # #region debug-point C:dispatch-batch
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"C","location":"app/video_supervisor.py:run_video_supervisor","msg":"[DEBUG] actionable batch","data":{"tick_no":cp.tick_no,"actionable_count":len(ledger.actionable()),"active_jobs":ledger.has_active_jobs(),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-        # #endregion
         for entry in ledger.actionable():
             budget_paused_job_id = _budget_paused_job_id(
                 conn,

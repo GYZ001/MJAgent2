@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { api, DeliveryPackageRecord, DeliveryReadiness, MixStatus, MixResult } from '../api'
-import { useEpisode, useNav } from '../App'
+import { useEpisode, useNav, usePoll } from '../App'
 import EpisodeCrumb from '../components/EpisodeCrumb'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import QueryState from '../components/QueryState'
@@ -166,64 +166,48 @@ export default function CinemaPage() {
     records: null,
   })
   const dialogTriggerRef = useRef<HTMLElement | null>(null)
-  const mixRefreshVersionRef = useRef(0)
   const mixTimer = useTaskTimer(`episode.${episodeId}.mix`, mixBusy)
+  const cinemaPollInterval = mixBusy || ep?.status === 'generating' ? 4000 : 0
+  const {
+    data: polledMix,
+    error: mixError,
+    refresh: refreshMix,
+  } = usePoll<MixStatus>(
+    () => api.get(`/episodes/${episodeId}/mix-status`),
+    cinemaPollInterval,
+    [episodeId],
+  )
+  const {
+    data: polledDelivery,
+    error: deliveryError,
+    refresh: refreshDelivery,
+  } = usePoll<{ readiness: DeliveryReadiness; packages: DeliveryPackageRecord[] }>(
+    async () => {
+      const [nextReadiness, nextPackages] = await Promise.all([
+        api.get(`/episodes/${episodeId}/delivery/readiness`),
+        api.get(`/episodes/${episodeId}/delivery/packages`),
+      ])
+      return { readiness: nextReadiness, packages: nextPackages }
+    },
+    cinemaPollInterval,
+    [episodeId],
+  )
 
-  const refreshMix = () => {
-    if (!episodeId) return Promise.resolve()
-    const requestVersion = ++mixRefreshVersionRef.current
-    setMixError(null)
-    return api.get(`/episodes/${episodeId}/mix-status`)
-      .then((d: unknown) => {
-        if (requestVersion !== mixRefreshVersionRef.current) return
-        setMix(previous => reconcileMixStatus(previous, d as MixStatus))
-      })
-      .catch(e => {
-        if (requestVersion !== mixRefreshVersionRef.current) return
-        const message = String(e.message || e)
-        setMixError(message)
-        toast('成片状态刷新失败，当前保留上次成功结果', true)
-      })
-  }
+  useEffect(() => {
+    if (polledMix) setMix(previous => reconcileMixStatus(previous, polledMix))
+  }, [polledMix])
 
-  const refreshDelivery = () => {
-    if (!episodeId) return Promise.resolve()
-    setDeliveryError(null)
-    return Promise.all([
-      api.get(`/episodes/${episodeId}/delivery/readiness`),
-      api.get(`/episodes/${episodeId}/delivery/packages`),
-    ]).then(([nextReadiness, nextPackages]: [DeliveryReadiness, DeliveryPackageRecord[]]) => {
-      setReadiness(nextReadiness)
-      setPackages(nextPackages)
-      setSelectedPackageId(current => {
-        if (current && nextPackages.some(item => item.id === current)) return current
-        return nextPackages.find(item => item.status === 'waiting_human')?.id
-          ?? nextPackages[0]?.id
-          ?? null
-      })
-    }).catch(e => {
-      const message = String(e.message || e)
-      setDeliveryError(message)
-      toast('交付检查刷新失败，当前保留上次成功结果', true)
+  useEffect(() => {
+    if (!polledDelivery) return
+    setReadiness(polledDelivery.readiness)
+    setPackages(polledDelivery.packages)
+    setSelectedPackageId(current => {
+      if (current && polledDelivery.packages.some(item => item.id === current)) return current
+      return polledDelivery.packages.find(item => item.status === 'waiting_human')?.id
+        ?? polledDelivery.packages[0]?.id
+        ?? null
     })
-  }
-
-  useEffect(() => {
-    refreshMix()
-    refreshDelivery()
-  }, [episodeId])
-
-  // 仅在确有运行任务时自动刷新，避免未完成分集在成片台永久轮询。
-  useEffect(() => {
-    if (!episodeId) return
-    const needPoll = mixBusy || ep?.status === 'generating'
-    if (!needPoll) return
-    const timer = window.setInterval(() => {
-      void refreshMix()
-      void refreshDelivery()
-    }, 4000)
-    return () => window.clearInterval(timer)
-  }, [episodeId, ep?.status, mixBusy])
+  }, [polledDelivery])
 
   if (!ep) {
     return (
@@ -349,8 +333,6 @@ export default function CinemaPage() {
         toast(result.note || '服务端缺少视频合成组件，当前仅返回首个片段，不能视为最终成片', true)
       } else {
         if (result.video_url) {
-          // 让合成开始前发出的旧状态请求失效，避免它稍后以空 URL 覆盖新成品。
-          mixRefreshVersionRef.current += 1
           setMix(previous => previous ? {
             ...previous,
             final_video_url: result.video_url,

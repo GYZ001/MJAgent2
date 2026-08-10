@@ -818,7 +818,17 @@ async def media_cleanup_outbox_loop(
     while True:
         await asyncio.sleep(interval)
         try:
-            report = sweep_pending_media_cleanup(batch_limit)
+            sweep_task = asyncio.create_task(
+                asyncio.to_thread(
+                    sweep_pending_media_cleanup,
+                    batch_limit,
+                )
+            )
+            try:
+                report = await asyncio.shield(sweep_task)
+            except asyncio.CancelledError:
+                await sweep_task
+                raise
             if report["attempted"]:
                 from app.observability.metrics import inc
 
@@ -925,14 +935,14 @@ def _invalidate_final_video(
     final_path = config.PROJECTS_DIR / project_id / "episodes" / str(episode_no) / "final" / "episode.mp4"
     stale_path = final_path.with_suffix(".stale")
     try:
+        final_stat = final_path.stat()
         if (
-            final_path.exists()
-            and (
-                not_newer_than is None
-                or final_path.stat().st_mtime <= not_newer_than
-            )
+            not_newer_than is None
+            or max(final_stat.st_mtime, final_stat.st_ctime) <= not_newer_than
         ):
             atomic_write_text(stale_path, "outdated\n")
+    except FileNotFoundError:
+        return
     except OSError:
         if not suppress_errors:
             raise

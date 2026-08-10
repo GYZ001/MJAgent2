@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useId, useRef, useState } from 'react'
 import { api, numToCn, type Project } from '../api'
-import { shouldRetryPollError, useNav, usePoll } from '../App'
+import { useNav, usePoll } from '../App'
 import { TaskTimer, useTaskTimer } from '../components/TaskTimer'
 import SearchField from '../components/SearchField'
 import PrepSubnav from '../components/PrepSubnav'
@@ -14,6 +14,15 @@ import { storyboardTaskNotice } from '../lib/productionNotices'
 
 const PAGE_SIZE = 15
 type BatchAction = 'replan' | 'screenplay' | 'storyboard'
+type StoryboardMetrics = {
+  active_storyboard_runs: number
+  scripting_episodes: number
+  waiting_human: number
+  paused: number
+  repairing: number
+  waiting_authorization?: number
+  phase_counts: Record<string, number>
+}
 
 export function canScanPortraitGaps(
   project: Pick<Project, 'bible_status' | 'bible'> | null | undefined,
@@ -78,32 +87,11 @@ export default function EpisodesPage() {
   const planTimer = useTaskTimer(`project.${projectId}.plan`, p?.plan_status === 'running')
   const screenplayAllTimer = useTaskTimer(`project.${projectId}.screenplay-all`, screenplayActiveCount > 0)
   const storyboardAllTimer = useTaskTimer(`project.${projectId}.storyboard-all`, scriptingCount > 0)
-  const [sbMetrics, setSbMetrics] = useState<{
-    active_storyboard_runs: number
-    scripting_episodes: number
-    waiting_human: number
-    paused: number
-    repairing: number
-    waiting_authorization?: number
-    phase_counts: Record<string, number>
-  } | null>(null)
-
-  useEffect(() => {
-    if (!projectId) return
-    let cancelled = false
-    let terminal = false
-    const load = () => {
-      if (terminal) return
-      api.get(`/projects/${projectId}/storyboard-metrics`).then((m: any) => {
-        if (!cancelled) setSbMetrics(m)
-      }).catch((error: unknown) => {
-        if (!shouldRetryPollError(error)) terminal = true
-      })
-    }
-    load()
-    const id = window.setInterval(load, scriptingCount > 0 ? 4000 : 15000)
-    return () => { cancelled = true; window.clearInterval(id) }
-  }, [projectId, scriptingCount])
+  const { data: sbMetrics } = usePoll<StoryboardMetrics>(
+    () => api.get(`/projects/${projectId}/storyboard-metrics`),
+    scriptingCount > 0 ? 4000 : 15000,
+    [projectId, scriptingCount],
+  )
   const filteredEps = eps
   const filteredTotal = p?.episodes_total ?? eps.length
   const pageCount = p?.episodes_page_count ?? 1

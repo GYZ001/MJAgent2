@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -304,10 +303,6 @@ async def generate_ai_video_prompt(
     user_instruction: str = "",
     critique: list[str] | None = None,
 ) -> tuple[str, AIVideoPromptDraft]:
-    _debug_payload_started = time.monotonic()
-    # #region debug-point E:prompt-payload
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"E","location":"app/video_prompt_ai.py:generate_ai_video_prompt","msg":"[DEBUG] prompt payload start","data":{"shot_no":shot.shot_no},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     payload = {
         "task": (
             "将内部 Cinematic Continuity Contract 编译成一条可直接提交 MiniMax H3 的"
@@ -366,9 +361,6 @@ async def generate_ai_video_prompt(
     fingerprint = hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:24]
-    # #region debug-point E:prompt-payload
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"E","location":"app/video_prompt_ai.py:generate_ai_video_prompt","msg":"[DEBUG] prompt payload before chat","data":{"shot_no":shot.shot_no,"elapsed_ms":round((time.monotonic()-_debug_payload_started)*1000,1),"continuity_chars":len(continuity_contract)},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     draft = await model_gateway.chat_structured(
         [
             {

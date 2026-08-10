@@ -66,7 +66,6 @@ export class AdaptivePoller<T> {
     this.active = false
     this.generation += 1
     this.clearTimer()
-    this.inFlight = null
   }
 
   refresh(): Promise<T | null> {
@@ -96,7 +95,7 @@ export class AdaptivePoller<T> {
       .finally(() => {
         if (this.inFlight !== request) return
         this.inFlight = null
-        if (this.active && generation === this.generation) this.scheduleNext()
+        if (this.active) this.scheduleNext()
       })
 
     this.inFlight = request

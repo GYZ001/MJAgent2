@@ -117,6 +117,46 @@ describe('AdaptivePoller', () => {
     expect(timers).toHaveLength(1)
   })
 
+  it('does not execute an in-flight write again across stop and start', async () => {
+    let calls = 0
+    let resolveRequest!: (value: number) => void
+    const timers: Array<() => void> = []
+    const poller = new AdaptivePoller(
+      () => {
+        calls += 1
+        return new Promise<number>(resolve => { resolveRequest = resolve })
+      },
+      1000,
+      {
+        onData: () => undefined,
+        onError: error => { throw error },
+      },
+      {
+        setTimeout: callback => {
+          timers.push(callback)
+          return callback
+        },
+        clearTimeout: handle => {
+          const index = timers.indexOf(handle as () => void)
+          if (index >= 0) timers.splice(index, 1)
+        },
+      },
+    )
+
+    const initial = poller.start()
+    await flush()
+    poller.stop()
+    const restarted = poller.start()
+
+    expect(calls).toBe(1)
+
+    resolveRequest(1)
+    await Promise.all([initial, restarted])
+
+    expect(calls).toBe(1)
+    expect(timers).toHaveLength(1)
+  })
+
   it('resumes with one catch-up request after a hidden-tab stop', async () => {
     let calls = 0
     const timers: Array<() => void> = []

@@ -4,12 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
-import os
 import sqlite3
 import threading
 import time
-import traceback
-import urllib.request
 import uuid
 from typing import Any, Callable, TypeVar
 import weakref
@@ -24,111 +21,6 @@ _task_connections_lock = threading.Lock()
 _T = TypeVar("_T")
 
 ASYNC_WRITE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4)
-
-# #region debug-point A-D:sqlite-transaction-trace
-_DEBUG_SQL_URL = "http://127.0.0.1:7777/event"
-_DEBUG_SQL_SESSION = "backend-sqlite-lock"
-_DEBUG_SQL_ENABLED = os.environ.get("MJ_DEBUG_SQL_TRACE", "").strip().lower() in {
-    "1", "true", "yes", "on",
-}
-if _DEBUG_SQL_ENABLED:
-    try:
-        with open(".dbg/backend-sqlite-lock.env", encoding="utf-8") as _debug_env:
-            for _debug_line in _debug_env:
-                if _debug_line.startswith("DEBUG_SERVER_URL="):
-                    _DEBUG_SQL_URL = _debug_line.strip().split("=", 1)[1]
-                elif _debug_line.startswith("DEBUG_SESSION_ID="):
-                    _DEBUG_SQL_SESSION = _debug_line.strip().split("=", 1)[1]
-    except OSError:
-        pass
-
-
-def _attach_debug_sql_trace(conn: sqlite3.Connection) -> None:
-    connection_id = hex(id(conn))
-    state: dict[str, Any] = {
-        "started_at": None,
-        "operation": None,
-        "statement_shape": None,
-        "stack": None,
-        "thread_id": None,
-        "thread_name": None,
-        "reported": False,
-    }
-
-    def trace(statement: str) -> None:
-        tokens = statement.strip().split()
-        operation = tokens[0].upper() if tokens else ""
-        statement_shape = " ".join(tokens[:3])
-        if operation == "BEGIN":
-            state.update({
-                "started_at": time.monotonic(),
-                "operation": operation,
-                "statement_shape": statement_shape,
-                "stack": traceback.format_stack(limit=12)[:-2],
-                "thread_id": threading.get_ident(),
-                "thread_name": threading.current_thread().name,
-                "reported": False,
-            })
-        elif operation in {"INSERT", "UPDATE", "DELETE", "REPLACE"}:
-            if state["started_at"] is None:
-                state.update({
-                    "started_at": time.monotonic(),
-                    "operation": operation,
-                    "thread_id": threading.get_ident(),
-                    "thread_name": threading.current_thread().name,
-                    "reported": False,
-                })
-            state["statement_shape"] = statement_shape
-            state["stack"] = traceback.format_stack(limit=12)[:-2]
-        elif operation in {"COMMIT", "ROLLBACK"}:
-            state["started_at"] = None
-            state["reported"] = False
-
-    def watch() -> None:
-        while True:
-            time.sleep(0.1)
-            started_at = state["started_at"]
-            if started_at is None or state["reported"]:
-                continue
-            elapsed = time.monotonic() - float(started_at)
-            if elapsed < 0.5:
-                continue
-            state["reported"] = True
-            try:
-                in_transaction = conn.in_transaction
-            except sqlite3.ProgrammingError:
-                return
-            payload = {
-                "sessionId": _DEBUG_SQL_SESSION,
-                "runId": "post-fix",
-                "hypothesisId": "A" if in_transaction else "D",
-                "location": "app/db.py:get_conn.long-transaction-watch",
-                "msg": "[DEBUG] SQLite transaction or lock wait exceeded 500ms",
-                "data": {
-                    "connectionId": connection_id,
-                    "threadId": state["thread_id"],
-                    "threadName": state["thread_name"],
-                    "operation": state["operation"],
-                    "statementShape": state["statement_shape"],
-                    "inTransaction": in_transaction,
-                    "elapsedMs": round(elapsed * 1000),
-                    "stack": state["stack"],
-                },
-                "ts": int(time.time() * 1000),
-            }
-            try:
-                request = urllib.request.Request(
-                    _DEBUG_SQL_URL,
-                    data=json.dumps(payload, ensure_ascii=False).encode(),
-                    headers={"Content-Type": "application/json"},
-                )
-                urllib.request.urlopen(request, timeout=0.5).read()
-            except Exception:
-                pass
-
-    conn.set_trace_callback(trace)
-    threading.Thread(target=watch, daemon=True).start()
-# #endregion
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -1200,10 +1092,6 @@ CREATE INDEX IF NOT EXISTS idx_video_mode_qa_plan
 def _open_connection(*, timeout: float = 30.0) -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=timeout, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    # #region debug-point A-D:attach-sqlite-transaction-trace
-    if _DEBUG_SQL_ENABLED:
-        _attach_debug_sql_trace(conn)
-    # #endregion
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn

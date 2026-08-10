@@ -142,6 +142,49 @@ def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
     ).fetchone()["status"] == "reserved"
 
 
+def test_current_worker_can_recover_legacy_provider_handle_without_budget_ledger(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v1','s1',1,'p','idem','running',100)"""
+    )
+    conn.commit()
+    assert media_scheduler.claim_job("j1", "worker-a", lease_seconds=30)
+
+    worker._commit_provider_acceptance(
+        conn,
+        job_id="j1",
+        version_id="v1",
+        owner="worker-a",
+        operation_id="legacy-op",
+        task_id="legacy-task",
+        submitted_at=90,
+    )
+
+    job = conn.execute(
+        """SELECT provider_create_state,provider_submitted_at
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    assert dict(job) == {
+        "provider_create_state": "accepted",
+        "provider_submitted_at": 90.0,
+    }
+    assert conn.execute(
+        "SELECT provider_task_id FROM shot_versions WHERE id='v1'"
+    ).fetchone()["provider_task_id"] == "legacy-task"
+    assert conn.execute(
+        """SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='provider_video_budget_claims'"""
+    ).fetchone()
+
+
 def test_recovery_keeps_future_retry_and_cancel_marks_provider_work_abandoned(monkeypatch) -> None:
     conn = _conn()
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)

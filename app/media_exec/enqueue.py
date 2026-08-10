@@ -1185,10 +1185,6 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  dependency_snapshot: dict[str, Any] | None = None,
                  critique_sources: list[dict[str, Any]] | None = None) -> dict:
     """持久化校验状态；不从错误文案推断或改写分镜数据。"""
-    _debug_enqueue_started = time.monotonic()
-    # #region debug-point H:enqueue-boundaries
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"H","location":"app/media_exec/enqueue.py:enqueue_shot","msg":"[DEBUG] enqueue entry","data":{"shot_id":shot_id,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     authority_context = _assert_enqueue_storyboard_authority(shot_id)
     if (
         authority_context.narrative_authority_required
@@ -1201,9 +1197,6 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
     preflight_job_id = _begin_video_preflight_job(
         shot_id, supervisor_run_id=supervisor_run_id,
     )
-    # #region debug-point H:enqueue-boundaries
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"H","location":"app/media_exec/enqueue.py:enqueue_shot","msg":"[DEBUG] preflight persisted","data":{"shot_id":shot_id,"elapsed_ms":round((time.monotonic()-_debug_enqueue_started)*1000,1),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     try:
         result = _enqueue_shot_impl(
             shot_id,
@@ -1245,7 +1238,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     """为镜头创建参考图模式视频版本并入队。
     critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
     幂等：相同 idem_key 的成功版本直接复用（reroll 时跳过复用）。"""
-    _debug_impl_started = time.monotonic()
     from app.compiler import (
         CompileError,
         VIDEO_PROMPT_CONTRACT_VERSION,
@@ -1492,9 +1484,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     if preflight_errors:
         raise CompileError("；".join(preflight_errors))
 
-    # #region debug-point I:prompt-compile
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"I","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] compile prompt start","data":{"shot_id":shot_id,"elapsed_ms":round((time.monotonic()-_debug_impl_started)*1000,1),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     raw_prompt_text = compile_prompt(
         shot,
         bible,
@@ -1531,9 +1520,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
         boundary_start_state=boundary_start_state,
         previous_prompt_text=previous_prompt_text,
     )
-    # #region debug-point I:prompt-compile
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"I","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] compile prompt end","data":{"shot_id":shot_id,"elapsed_ms":round((time.monotonic()-_debug_impl_started)*1000,1),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     raw_source_errors = prompt_source_provenance_errors(raw_prompt_text, shot)
     prompt_text = ensure_source_excerpt_in_prompt(raw_prompt_text, shot)
     if raw_source_errors:
@@ -1746,9 +1732,6 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             image_meta["reference_gallery_edited"] = True
         if reference_gallery.get("contract_override"):
             image_meta["reference_gallery_contract_override"] = True
-    # #region debug-point H:persistence
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"H","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] version persistence start","data":{"shot_id":shot_id,"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     conn.execute(
         "INSERT INTO shot_versions(id, shot_id, version_no, prompt_text, idem_key, status, created_at, image_inputs) "
         "VALUES(?,?,?,?,?, 'queued', ?, ?)",
@@ -1756,16 +1739,10 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
          json.dumps(image_meta, ensure_ascii=False)))
     job_id = preflight_job_id or new_id("job")
     budget_limit = episode_video_budget_limit(str(ep["id"]))
-    # #region debug-point H:persistence
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"H","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] media trace start","data":{"shot_id":shot_id,"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     run_id, step_run_id = ensure_media_trace(
         workflow_type="video_generation", scope_id=shot_id,
         input_value={"prompt": prompt_text, "version": version_no}, budget_limit_cny=budget_limit,
     )
-    # #region debug-point H:persistence
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"H","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] media trace end","data":{"shot_id":shot_id,"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     if preflight_job_id:
         updated = conn.execute(
             """UPDATE jobs
@@ -1802,26 +1779,14 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
     except Exception:  # noqa: BLE001
         pass
     conn.execute("UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'", (ep["id"],))
-    # #region debug-point H:persistence
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"H","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] version persistence commit start","data":{"shot_id":shot_id,"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     conn.commit()
-    # #region debug-point H:persistence
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"H","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] version persistence commit end","data":{"shot_id":shot_id,"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     from app.video_cost_model import initial_shot_generation_cost
 
     estimate = initial_shot_generation_cost(float(shot.duration_s))
     try:
-        # #region debug-point J:budget-reserve
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"J","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] budget reserve start","data":{"shot_id":shot_id,"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-        # #endregion
         reserved = media_scheduler.reserve_budget(
             job_id, ep["id"], estimate, budget_limit, conn=conn
         )
-        # #region debug-point J:budget-reserve
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"J","location":"app/media_exec/enqueue.py:_enqueue_shot_impl","msg":"[DEBUG] budget reserve end","data":{"shot_id":shot_id,"db_in_transaction":conn.in_transaction,"reserved":bool(reserved)},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-        # #endregion
     except Exception as exc:
         public = errors.record_and_format(
             exc,

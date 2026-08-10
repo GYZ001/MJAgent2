@@ -388,6 +388,9 @@ def _commit_provider_acceptance(
     submitted_at: float | None = None,
 ) -> None:
     """Commit paid provider acceptance only while this worker owns the lease."""
+    from app.completion_grant import ensure_video_budget_authority_tables
+
+    ensure_video_budget_authority_tables(conn)
     stamp = now()
     accepted_at = float(submitted_at or stamp)
     try:
@@ -3061,10 +3064,6 @@ async def _ensure_ai_video_prompt(
     conn = conn or get_conn()
     if not meta.get("ai_video_prompt_required"):
         return meta, prompt_text
-    _debug_prompt_prep_started = time.monotonic()
-    # #region debug-point E:prompt-prep
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"E","location":"app/media_exec/run_job.py:_ensure_ai_video_prompt","msg":"[DEBUG] prompt prep start","data":{"job_id":job["id"],"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
 
     from app.video_prompt_ai import (
         AI_VIDEO_PROMPT_CONTRACT_VERSION,
@@ -3105,9 +3104,6 @@ async def _ensure_ai_video_prompt(
     continuity_contract = str(
         meta.get("continuity_contract_prompt") or prompt_text
     ).strip()
-    # #region debug-point E:prompt-prep
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"E","location":"app/media_exec/run_job.py:_ensure_ai_video_prompt","msg":"[DEBUG] prompt prep before provider","data":{"job_id":job["id"],"elapsed_ms":round((time.monotonic()-_debug_prompt_prep_started)*1000,1),"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     prompt, draft = await generate_ai_video_prompt(
         shot=shot_model,
         bible=bible,
@@ -3125,9 +3121,6 @@ async def _ensure_ai_video_prompt(
             if str(item).strip()
         ],
     )
-    # #region debug-point E:prompt-prep
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"E","location":"app/media_exec/run_job.py:_ensure_ai_video_prompt","msg":"[DEBUG] prompt provider returned","data":{"job_id":job["id"],"elapsed_ms":round((time.monotonic()-_debug_prompt_prep_started)*1000,1),"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     meta["continuity_contract_prompt"] = continuity_contract
     meta["ai_video_prompt_contract_version"] = (
         AI_VIDEO_PROMPT_CONTRACT_VERSION
@@ -3243,10 +3236,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     # verification, or reference preparation below; otherwise a recovered
     # cohort can monopolize the event loop before the socket starts listening.
     await asyncio.sleep(1.0)
-    _debug_worker_setup_started = time.monotonic()
-    # #region debug-point F:worker-setup
-    with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"F","location":"app/media_exec/run_job.py:_run_job","msg":"[DEBUG] worker setup start","data":{"job_id":job_id,"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-    # #endregion
     conn = get_conn()
     owner = lease_owner or f"direct-{id(asyncio.current_task())}"
     if lease_owner is None:
@@ -3283,9 +3272,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
 
     started = time.time()
     try:
-        # #region debug-point F:worker-setup
-        with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"F","location":"app/media_exec/run_job.py:_run_job","msg":"[DEBUG] worker setup before first await","data":{"job_id":job_id,"elapsed_ms":round((time.monotonic()-_debug_worker_setup_started)*1000,1),"db_in_transaction":conn.in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
-        # #endregion
         await _assert_review_dependency_fence_async(
             job, version["id"], "worker_start",
         )
