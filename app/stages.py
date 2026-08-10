@@ -4318,7 +4318,6 @@ async def _semantic_review_narrative_blueprint(
                 repair_context=json.dumps(
                     {
                         "node_reference_contract": node_reference_contract,
-                        "output_schema": review_schema,
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),
@@ -4978,6 +4977,7 @@ async def _generate_screenplay_narrative_blueprint(
                  JOIN workflow_runs wr ON wr.id=sr.run_id
                 WHERE a.scope_type='episode' AND a.scope_id=?
                   AND a.type='screenplay_narrative_blueprint'
+                  AND a.status='validated'
                   AND a.prompt_version=?
                   AND wr.input_fingerprint=?
                 ORDER BY a.created_at DESC LIMIT 10""",

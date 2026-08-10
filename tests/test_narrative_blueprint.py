@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import uuid
 
@@ -7,6 +8,7 @@ import pytest
 
 from app import stages
 from app.errors import ContentGenerationError
+from app.harness import model_gateway
 from app.narrative_blueprint import (
     BlueprintDecision,
     BlueprintSemanticReview,
@@ -18,8 +20,10 @@ from app.narrative_blueprint import (
     NarrativeBlueprintShard,
     apply_narrative_blueprint_patch,
     blueprint_semantic_issue_is_resolved,
+    blueprint_semantic_review_schema,
     derive_blueprint_scene_plans,
     normalize_blueprint_agency_continuity,
+    normalize_blueprint_semantic_review_payload,
     recover_complete_blueprint_prefix,
     validate_and_apply_blueprint_scene_contract,
     validate_blueprint_semantic_review,
@@ -34,6 +38,15 @@ SOURCE = "\n\n".join([
     "咖啡杯倒影转为卧室台灯，白洁回到现实。",
     "次日小张驾驶王局长的车来到学校。",
 ])
+
+
+def _reviewer_drift_fixture() -> dict:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "blueprint_reviewer_node_key_drift.json"
+    )
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
 def _blueprint() -> NarrativeBlueprint:
@@ -786,6 +799,186 @@ def test_semantic_review_must_reference_existing_nodes_and_sources() -> None:
     assert any("SOURCE_UNKNOWN" in error for error in errors)
 
 
+def test_semantic_review_schema_binds_canonical_node_references() -> None:
+    schema = blueprint_semantic_review_schema(["n1", "n2", "n3"])
+    references = schema["$defs"]["BlueprintSemanticIssue"][
+        "properties"
+    ]["node_keys"]
+    alternatives = references["items"]["oneOf"]
+
+    assert references["minItems"] == 1
+    assert alternatives[0]["enum"] == ["n1", "n2", "n3"]
+    assert alternatives[1]["properties"]["ordinal"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3,
+    }
+    assert alternatives[2]["properties"]["identity"]["enum"] == [
+        "n1",
+        "n2",
+        "n3",
+    ]
+    assert "bp-sc001" not in json.dumps(schema)
+
+
+def test_semantic_review_normalizer_maps_only_exact_structured_references() -> None:
+    payload = {
+        "issues": [{
+            "code": "spatial_action_gap",
+            "node_keys": [
+                "n1",
+                {"ordinal": 2},
+                {"identity": "n3"},
+                {"ordinal": 0},
+                {"identity": "missing"},
+                {"ordinal": 2, "identity": "n2"},
+                "人物名称",
+            ],
+            "message": "保留同一个问题及全部引用",
+            "required_resolution": "仅修正引用合同",
+        }],
+    }
+
+    normalized = normalize_blueprint_semantic_review_payload(
+        payload,
+        ["n1", "n2", "n3", "n4"],
+    )
+    references = normalized["issues"][0]["node_keys"]
+
+    assert references[:3] == ["n1", "n2", "n3"]
+    assert len(references) == 7
+    assert all(
+        value.startswith("[INVALID_BLUEPRINT_NODE_REFERENCE]")
+        for value in references[3:6]
+    )
+    assert references[6] == "人物名称"
+    review = BlueprintSemanticReview.model_validate(normalized)
+    errors = validate_blueprint_semantic_review(
+        review,
+        _blueprint(),
+        SOURCE,
+    )
+    assert any("NODE_UNKNOWN" in error for error in errors)
+    assert len(review.issues) == 1
+    assert len(review.issues[0].node_keys) == 7
+
+
+def test_replays_original_reviewer_node_key_drift_without_dropping_issue(
+    monkeypatch,
+) -> None:
+    fixture = _reviewer_drift_fixture()
+    canonical = fixture["canonical_node_keys"]
+    raw_responses = [
+        json.dumps(item["response"], ensure_ascii=False)
+        for item in fixture["responses"]
+    ]
+    prompts: list[str] = []
+    observed_issue_counts: list[int] = []
+    attempts: list[dict] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return raw_responses[len(prompts) - 1]
+
+    def validate(review: BlueprintSemanticReview) -> list[str]:
+        observed_issue_counts.append(len(review.issues))
+        unknown = [
+            node_key
+            for issue in review.issues
+            for node_key in issue.node_keys
+            if node_key not in set(canonical)
+        ]
+        return [f"unknown canonical node identity: {value}" for value in unknown]
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    schema = blueprint_semantic_review_schema(canonical)
+
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="S002-S001-N007",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "review current blueprint"}],
+            model_type=BlueprintSemanticReview,
+            validate=validate,
+            operation_id="replay.run_b864b0c8915d.review.2.1",
+            max_tokens=8192,
+            format_retry_limit=0,
+            semantic_retry_limit=1,
+            repair_context=json.dumps({
+                "canonical_nodes": [
+                    {"ordinal": index, "identity": node_key}
+                    for index, node_key in enumerate(canonical, start=1)
+                ],
+            }, ensure_ascii=False),
+            output_schema=schema,
+            normalize_payload=lambda payload: (
+                normalize_blueprint_semantic_review_payload(
+                    payload,
+                    canonical,
+                )
+            ),
+            on_attempt=attempts.append,
+        ))
+
+    assert observed_issue_counts == [3, 3]
+    assert [attempt["outcome"] for attempt in attempts] == [
+        "semantic_error",
+        "semantic_error",
+    ]
+    assert "bp-sc007" in prompts[1]
+    assert "S001-N007" in prompts[1]
+    assert "Canonical Node References" in prompts[1]
+
+
+def test_structured_ordinal_and_identity_recover_reviewer_issue(
+    monkeypatch,
+) -> None:
+    fixture = _reviewer_drift_fixture()
+    canonical = fixture["canonical_node_keys"]
+    response = json.loads(json.dumps(fixture["responses"][0]["response"]))
+    response["issues"][0]["node_keys"] = [
+        {"ordinal": 8},
+        {"identity": "S001-N007"},
+    ]
+    calls = 0
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(response, ensure_ascii=False)
+
+    def validate(review: BlueprintSemanticReview) -> list[str]:
+        return [
+            node_key
+            for issue in review.issues
+            for node_key in issue.node_keys
+            if node_key not in set(canonical)
+        ]
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "review current blueprint"}],
+        model_type=BlueprintSemanticReview,
+        validate=validate,
+        operation_id="replay.run_b864b0c8915d.structured-reference",
+        max_tokens=8192,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+        output_schema=blueprint_semantic_review_schema(canonical),
+        normalize_payload=lambda payload: (
+            normalize_blueprint_semantic_review_payload(payload, canonical)
+        ),
+    ))
+
+    assert calls == 1
+    assert len(result.issues) == 3
+    assert result.issues[0].node_keys == [
+        "S002-S001-N008",
+        "S001-N007",
+    ]
+
+
 def test_recovers_only_complete_blueprint_nodes_from_truncated_json() -> None:
     raw = _blueprint().model_dump_json()
     truncated = raw[:raw.index('"key":"n2"') + len('"key":"n2"')]
@@ -855,6 +1048,160 @@ def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
     ))
     assert result is blueprint
     assert modes == ["risk_nodes", "risk_nodes", "full", "full"]
+
+
+def test_reviewer_input_and_retry_share_canonical_contract(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    calls: list[tuple[list[dict], dict]] = []
+
+    class EmptyRows:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class EmptyConnection:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return EmptyRows()
+
+    async def fake_structured(messages, **kwargs):
+        calls.append((messages, kwargs))
+        normalized = kwargs["normalize_payload"]({
+            "issues": [{
+                "code": "timeline_conflict",
+                "node_keys": [{"ordinal": 2}],
+                "message": "验证本轮 ordinal 合同",
+                "required_resolution": "保持引用精确",
+            }],
+        })
+        assert normalized["issues"][0]["node_keys"] == ["n2"]
+        return BlueprintSemanticReview(issues=[])
+
+    monkeypatch.setattr(stages, "get_conn", lambda: EmptyConnection())
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "true"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else "1",
+    )
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-canonical-review-contract"},
+        source_text=SOURCE,
+    ))
+
+    assert result is blueprint
+    assert len(calls) == 2
+    messages, kwargs = calls[0]
+    prompt = messages[1]["content"]
+    expected_keys = [node.key for node in blueprint.nodes]
+    alternatives = kwargs["output_schema"]["$defs"][
+        "BlueprintSemanticIssue"
+    ]["properties"]["node_keys"]["items"]["oneOf"]
+    retry_contract = json.loads(kwargs["repair_context"])
+    assert alternatives[0]["enum"] == expected_keys
+    assert [item["identity"] for item in retry_contract[
+        "node_reference_contract"
+    ]["canonical_nodes"]] == expected_keys
+    assert "本轮节点引用合同" in prompt
+    assert "禁止根据文本相似度推断、拼接或改写 identity" in prompt
+
+
+def test_blueprint_generation_reuses_validated_cached_artifact(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    sql_seen: list[str] = []
+    logged_kinds: list[str] = []
+    reviewed: list[NarrativeBlueprint] = []
+
+    class QueryResult:
+        def __init__(self, *, one=None, many=None):
+            self.one = one
+            self.many = many or []
+
+        def fetchone(self):
+            return self.one
+
+        def fetchall(self):
+            return self.many
+
+    class CacheConnection:
+        @staticmethod
+        def execute(sql, _params):
+            sql_seen.append(sql)
+            if "SELECT input_fingerprint" in sql:
+                return QueryResult(one={"input_fingerprint": "same-input"})
+            if "FROM artifacts a" in sql:
+                assert "a.status='validated'" in sql
+                return QueryResult(many=[{
+                    "content_json": blueprint.model_dump_json(),
+                }])
+            raise AssertionError(sql)
+
+    async def fake_review(value, **_kwargs):
+        reviewed.append(value)
+        return value
+
+    async def fail_generate(*_args, **_kwargs):
+        raise AssertionError("validated Blueprint cache was not reused")
+
+    monkeypatch.setattr(stages, "get_conn", lambda: CacheConnection())
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(run_id="run-cache-replay"),
+    )
+    monkeypatch.setattr(
+        stages,
+        "log_provider_call",
+        lambda kind, *_args, **_kwargs: logged_kinds.append(kind),
+    )
+    monkeypatch.setattr(
+        stages,
+        "validate_narrative_blueprint",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        stages,
+        "_semantic_review_narrative_blueprint",
+        fake_review,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_generate_sharded_narrative_blueprint",
+        fail_generate,
+    )
+
+    result = asyncio.run(stages._generate_screenplay_narrative_blueprint(
+        {
+            "id": "episode-cache-replay",
+            "episode_no": 8,
+        },
+        SOURCE,
+        SimpleNamespace(),
+    ))
+
+    assert result.model_dump(mode="json") == blueprint.model_dump(mode="json")
+    assert reviewed and [node.key for node in reviewed[0].nodes] == [
+        node.key for node in blueprint.nodes
+    ]
+    assert logged_kinds == ["screenplay_blueprint_local_recompile"]
+    assert any("a.status='validated'" in sql for sql in sql_seen)
 
 
 def test_blueprint_review_fails_closed_when_one_reviewer_is_unavailable(
