@@ -2792,15 +2792,18 @@ async def run_storyboard_supervisor(
                 (episode_id,),
             )
             conn.commit()
-            ep_data["target_duration_s"] = (
-                outline_authority.authoritative_duration_s
-            )
-            ep_data["storyboard_outline_json"] = (
-                outline_authority.canonical_json
-            )
-            cp.outline_artifact_id = str(
-                outline_authority.artifact_id
-            )
+            if outline_authority is not None:
+                ep_data["target_duration_s"] = (
+                    outline_authority.authoritative_duration_s
+                )
+                ep_data["storyboard_outline_json"] = (
+                    outline_authority.canonical_json
+                )
+                cp.outline_artifact_id = str(
+                    outline_authority.artifact_id
+                )
+            else:
+                ep_data["storyboard_outline_json"] = outline.model_dump_json()
             cp.phase = "VALIDATING_OUTLINE"
             cp.expected_total = len(outline.shots)
             planned_persisted = len(outline.shots)
@@ -2841,9 +2844,10 @@ async def run_storyboard_supervisor(
                         pack_outline,
                         conn=conn,
                     )
-                    ep_data["target_duration_s"] = (
-                        outline_authority.authoritative_duration_s
-                    )
+                    if outline_authority is not None:
+                        ep_data["target_duration_s"] = (
+                            outline_authority.authoritative_duration_s
+                        )
                 else:
                     cp.last_repair = {
                         **active_repair,
@@ -3725,9 +3729,10 @@ async def run_storyboard_supervisor(
                 conn=conn,
             )
             conn.commit()
-            ep_data["target_duration_s"] = (
-                outline_authority.authoritative_duration_s
-            )
+            if outline_authority is not None:
+                ep_data["target_duration_s"] = (
+                    outline_authority.authoritative_duration_s
+                )
             completed = list(full_board.shots)
             if run_id:
                 evidence_repository.append_event(
