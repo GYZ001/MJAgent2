@@ -337,6 +337,38 @@ def _assert_screenplay_artifact_contract(
             artifact_type=str(art.get("type") or "screenplay_document"),
             reason="缺少显式参与者交付字段 " + "、".join(missing[:10]),
         )
+    invalid_agencies: list[str] = []
+    for index, action in enumerate(plan.get("atomic_actions") or []):
+        if not isinstance(action, dict):
+            continue
+        agency = action.get("action_agency")
+        if not isinstance(agency, dict):
+            continue
+        has_relation = bool(
+            action.get("actor_ids") or action.get("target_ids")
+        )
+        identity_bearing = bool(agency.get("identity_bearing"))
+        agency_kind = str(agency.get("kind") or "").strip()
+        character_agency = (
+            agency_kind == "character"
+            or agency_kind.startswith("character_")
+        )
+        if (
+            identity_bearing != has_relation
+            or character_agency and not has_relation
+        ):
+            invalid_agencies.append(
+                str(action.get("action_id") or f"atomic_actions[{index}]")
+            )
+    if invalid_agencies:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(art.get("id") or ""),
+            artifact_type=str(art.get("type") or "screenplay_document"),
+            reason=(
+                "action agency 与 actor/target 结构关系不一致："
+                + "、".join(invalid_agencies[:20])
+            ),
+        )
     contract_version = str(plan.get("contract_version") or "")
     if contract_version != NARRATIVE_CONTRACT_VERSION:
         raise ArtifactNeedsRebuildError(

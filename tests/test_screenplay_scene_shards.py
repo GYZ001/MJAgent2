@@ -194,6 +194,17 @@ def _creative_shard(
         for contract in (contracts or [])
         for slot in contract.unit_slots
     }
+
+    def identity_keys(slot) -> list[str]:
+        compiled = compiled_by_key.get(slot.unit_key)
+        if compiled is None:
+            return []
+        return list(dict.fromkeys([
+            *compiled.actor_keys,
+            *compiled.target_keys,
+            *compiled.onscreen_entity_keys,
+        ]))
+
     return ScreenplaySceneShardCreativeIR.model_validate({
         "slots": {
             slot.unit_key: {
@@ -207,26 +218,7 @@ def _creative_shard(
                 ),
                 "text_provenance": {
                     "kind": "creative_action",
-                    "identity_keys": list(dict.fromkeys([
-                        *compiled_by_key.get(
-                            slot.unit_key,
-                            ScreenplaySceneCompiledUnitSlot(
-                                **slot.model_dump(mode="python")
-                            ),
-                        ).actor_keys,
-                        *compiled_by_key.get(
-                            slot.unit_key,
-                            ScreenplaySceneCompiledUnitSlot(
-                                **slot.model_dump(mode="python")
-                            ),
-                        ).target_keys,
-                        *compiled_by_key.get(
-                            slot.unit_key,
-                            ScreenplaySceneCompiledUnitSlot(
-                                **slot.model_dump(mode="python")
-                            ),
-                        ).onscreen_entity_keys,
-                    ])),
+                    "identity_keys": identity_keys(slot),
                 },
             }
             for slot in plan.unit_slots
@@ -1337,6 +1329,7 @@ def test_repair_schema_derives_relations_visibility_and_evidence_per_unit() -> N
     draft = _recorded_response_slot_draft(
         replay["creative_response"],
         plan,
+        contracts,
     )
     initial = build_screenplay_scene_shard_repair_schema(
         plan=plan,
@@ -1373,6 +1366,7 @@ def test_repair_schema_accepts_audible_offscreen_speaker_evidence() -> None:
         _recorded_response_slot_draft(
             replay["creative_response"],
             plan,
+            contracts,
         ),
         episode_no=1,
         plan=plan,
@@ -2040,6 +2034,7 @@ def _ss004_533ac9_compile_context():
 def _recorded_response_slot_draft(
     response: dict,
     plan: ScreenplaySceneShardPlan,
+    contracts: list[ScreenplaySceneInputContract],
 ) -> ScreenplaySceneShardCreativeIR:
     replay_input = json.loads(
         SS004_REPLAY_INPUT.read_text(encoding="utf-8")
@@ -2050,6 +2045,11 @@ def _recorded_response_slot_draft(
         for segment in scene_input["source_segments"]
     }
     content_by_signature: dict[tuple[str, str, str], dict] = {}
+    compiled_by_key = {
+        slot.unit_key: slot
+        for contract in contracts
+        for slot in contract.unit_slots
+    }
     for scene in response["scenes"]:
         for unit in scene["units"]:
             assert len(unit["source_segment_ids"]) == 1
@@ -2068,6 +2068,12 @@ def _recorded_response_slot_draft(
             slot.kind,
         )
         recorded = content_by_signature.get(signature, {})
+        compiled = compiled_by_key[slot.unit_key]
+        identity_keys = list(dict.fromkeys([
+            *compiled.actor_keys,
+            *compiled.target_keys,
+            *compiled.onscreen_entity_keys,
+        ]))
         slots[slot.unit_key] = {
             "text": (
                 slot.source_text
@@ -2080,6 +2086,10 @@ def _recorded_response_slot_draft(
             "performance": "",
             "resulting_state": recorded.get("resulting_state", ""),
             "function": recorded.get("function", "statement"),
+            "text_provenance": {
+                "kind": "creative_action",
+                "identity_keys": identity_keys,
+            },
         }
     return ScreenplaySceneShardCreativeIR.model_validate({
         "slots": slots,
@@ -2171,6 +2181,7 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
     draft = _recorded_response_slot_draft(
         replay["creative_response"],
         plan,
+        contracts,
     )
     shard = compile_draft(
         draft,
@@ -2733,6 +2744,10 @@ def test_slot_content_compiles_by_key_and_rejects_contract_drift() -> None:
         slot.unit_key: {
             "text": f"交付 {slot.source_segment_ids[0]}",
             "resulting_state": f"完成 {slot.source_segment_ids[0]}",
+            "text_provenance": {
+                "kind": "creative_action",
+                "identity_keys": [],
+            },
         }
         for slot in reversed(plan.unit_slots)
     }
@@ -2775,7 +2790,13 @@ def test_slot_content_compiles_by_key_and_rejects_contract_drift() -> None:
         )
 
     extra_content = deepcopy(slot_content)
-    extra_content["unexpected-unit"] = {"text": "越权单元"}
+    extra_content["unexpected-unit"] = {
+        "text": "越权单元",
+        "text_provenance": {
+            "kind": "creative_action",
+            "identity_keys": [],
+        },
+    }
     extra = ScreenplaySceneShardCreativeIR.model_validate({
         "slots": extra_content,
     })

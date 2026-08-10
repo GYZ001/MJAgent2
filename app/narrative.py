@@ -428,6 +428,11 @@ def action_participant_delivery_errors(
                 f"[ACTION_AGENCY_PARTICIPANT_MISMATCH] {action_id} 的 "
                 "identity_bearing 与 actor/target 分区不等价"
             )
+        if action.action_agency.is_character_agency and not participants:
+            errors.append(
+                f"[ACTION_AGENCY_CHARACTER_RELATION_MISSING] {action_id} 的 "
+                "character agency 缺少 actor/target 结构关系"
+            )
         if (
             not action.action_agency.identity_bearing
             and not action.action_agency.source_segment_ids

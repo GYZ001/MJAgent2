@@ -1033,6 +1033,26 @@ def screenplay_action_agency_projection(
     }
 
 
+def screenplay_action_agency_errors(
+    screenplay: EpisodeScreenplay,
+) -> list[str]:
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return []
+    errors: list[str] = []
+    for action in plan.atomic_actions:
+        has_relation = bool(action.actor_ids or action.target_ids)
+        if action.action_agency.identity_bearing != has_relation:
+            errors.append(
+                f"{action.action_id} identity_bearing 与 actor/target 不等价"
+            )
+        if action.action_agency.is_character_agency and not has_relation:
+            errors.append(
+                f"{action.action_id} character agency 缺少 actor/target 关系"
+            )
+    return errors
+
+
 def _artifact_ancestors_by_depth(
     artifact: dict[str, Any],
     *,
@@ -1263,6 +1283,22 @@ def assert_screenplay_matches_validated_v6_source(
         if source is None:
             return None
         source_screenplay, merged_artifact_id, shard_artifact_ids = source
+        for projection_name, candidate in (
+            ("validated v6 source", source_screenplay),
+            ("published screenplay", screenplay),
+        ):
+            agency_errors = screenplay_action_agency_errors(candidate)
+            if agency_errors:
+                from app.errors import ArtifactNeedsRebuildError
+
+                raise ArtifactNeedsRebuildError(
+                    artifact_id=str(artifact.get("id") or ""),
+                    artifact_type=str(artifact.get("type") or ""),
+                    reason=(
+                        f"{projection_name} action agency 合同失效："
+                        + "；".join(agency_errors[:20])
+                    ),
+                )
         source_projection_hash = evidence_repository.content_hash(
             screenplay_action_agency_projection(source_screenplay)
         )

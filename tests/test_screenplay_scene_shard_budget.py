@@ -130,6 +130,10 @@ def _complete_shard(
         slots={
             slot.unit_key: ScreenplaySceneShardCreativeUnit(
                 text=source_by_id[slot.source_segment_ids[0]],
+                text_provenance={
+                    "kind": "creative_action",
+                    "identity_keys": [],
+                },
                 resulting_state=(
                     f"完成 {slot.source_segment_ids[0]}"
                 ),
