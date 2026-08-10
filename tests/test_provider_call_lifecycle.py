@@ -1000,6 +1000,111 @@ def test_video_poll_network_error_is_retryable(monkeypatch) -> None:
     assert calls[0][0][:3] == ("video_poll", "video-model", "FAILED")
 
 
+def _install_video_poll_response(monkeypatch, response) -> None:
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, *, headers):
+            return response
+
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *_args: ("https://provider.invalid", {"x": "y"}),
+    )
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model")
+    monkeypatch.setattr(hiagent, "log_provider_call", lambda *_args, **_kwargs: None)
+
+
+def test_video_poll_non_200_preserves_structured_model_rejection(monkeypatch) -> None:
+    payload = {
+        "error": {
+            "message": "request rejected",
+            "failure": {
+                "category": "model_rejection",
+                "kind": "provider_rejected",
+                "retryable": True,
+            },
+        },
+    }
+
+    class Response:
+        status_code = 422
+        text = json.dumps(payload)
+
+        def json(self):
+            return payload
+
+    _install_video_poll_response(monkeypatch, Response())
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent.poll_video_task("task-1"))
+
+    assert caught.value.failure.to_payload() == {
+        "category": "model_rejection",
+        "kind": "provider_rejected",
+        "disposition": "external_terminal",
+        "retryable": False,
+    }
+
+
+def test_video_poll_non_200_preserves_structured_technical_failure(monkeypatch) -> None:
+    payload = {
+        "error": {
+            "message": "provider execution unavailable",
+            "failure": {
+                "category": "technical",
+                "kind": "provider_execution_failed",
+                "retryable": True,
+            },
+        },
+    }
+
+    class Response:
+        status_code = 409
+        text = json.dumps(payload)
+
+        def json(self):
+            return payload
+
+    _install_video_poll_response(monkeypatch, Response())
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent.poll_video_task("task-1"))
+
+    assert caught.value.failure.to_payload() == {
+        "category": "technical",
+        "kind": "provider_execution_failed",
+        "disposition": "automatic_retry",
+        "retryable": True,
+    }
+
+
+def test_video_poll_malformed_response_is_typed_technical_failure(monkeypatch) -> None:
+    class Response:
+        status_code = 200
+        text = "<html>temporary gateway response</html>"
+
+        def json(self):
+            raise ValueError("invalid JSON")
+
+    _install_video_poll_response(monkeypatch, Response())
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent.poll_video_task("task-1"))
+
+    assert caught.value.failure.to_payload() == {
+        "category": "technical",
+        "kind": "malformed_response",
+        "disposition": "automatic_retry",
+        "retryable": True,
+    }
+
+
 @pytest.mark.parametrize(
     ("error_payload", "expected_failure"),
     [

@@ -1710,6 +1710,7 @@ def retry_job(job_id: str, body: dict | None = None):
                     "message": "任务缺少视频版本上下文，不能安全重新提交",
                 })
             from app.completion_grant import (
+                close_provider_video_budget_claim_liability,
                 ensure_video_budget_authority_tables,
                 reserve_provider_video_budget,
             )
@@ -1733,6 +1734,20 @@ def retry_job(job_id: str, body: dict | None = None):
                     (time.time(), job_id),
                 )
                 if (
+                    (manual_provider_failure or provider_recovery_unconfirmed)
+                    and item.get("provider_operation_id")
+                ):
+                    close_provider_video_budget_claim_liability(
+                        str(item["provider_operation_id"]),
+                        job_id=job_id,
+                        reason=(
+                            "technical_failure_resubmission_confirmed"
+                            if manual_provider_failure
+                            else "unresolved_create_resubmission_confirmed"
+                        ),
+                        conn=conn,
+                    )
+                elif (
                     not provider_recovery_unconfirmed
                     and item.get("provider_create_state") == "not_started"
                     and item.get("provider_operation_id")

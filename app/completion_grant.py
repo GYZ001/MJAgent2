@@ -39,6 +39,8 @@ _PROVIDER_CLAIM_LEDGER_COLUMNS = {
     "accepted_at",
     "settled_at",
     "released_at",
+    "liability_closed_at",
+    "closure_reason",
 }
 
 
@@ -112,6 +114,8 @@ def _create_provider_claim_ledger_table(db, table_name: str) -> None:
                accepted_at REAL,
                settled_at REAL,
                released_at REAL,
+               liability_closed_at REAL,
+               closure_reason TEXT,
                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
                FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE SET NULL,
                FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE SET NULL,
@@ -146,19 +150,31 @@ def _provider_claim_ledger_is_current(db) -> bool:
 
 
 def _legacy_claim_owner(db, row) -> dict[str, str | None]:
+    keys = set(row.keys())
+    origin_job_id = str(
+        row["origin_job_id"]
+        if "origin_job_id" in keys
+        else row["job_id"]
+    )
+    origin_version_id = str(
+        row["origin_version_id"]
+        if "origin_version_id" in keys
+        else row["version_id"]
+    )
     job = db.execute(
         "SELECT id,project_id,episode_id,shot_id,version_id FROM jobs WHERE id=?",
-        (row["job_id"],),
+        (row["job_id"] if row["job_id"] else origin_job_id,),
     ).fetchone()
     version = db.execute(
         "SELECT id,shot_id FROM shot_versions WHERE id=?",
-        (row["version_id"],),
+        (row["version_id"] if row["version_id"] else origin_version_id,),
     ).fetchone()
     shot_ids = {
         str(value)
         for value in (
             job["shot_id"] if job else None,
             version["shot_id"] if version else None,
+            row["origin_shot_id"] if "origin_shot_id" in keys else None,
         )
         if value
     }
@@ -181,6 +197,7 @@ def _legacy_claim_owner(db, row) -> dict[str, str | None]:
             row["episode_id"],
             job["episode_id"] if job else None,
             shot["episode_id"] if shot else None,
+            row["origin_episode_id"] if "origin_episode_id" in keys else None,
         )
         if value
     }
@@ -198,6 +215,7 @@ def _legacy_claim_owner(db, row) -> dict[str, str | None]:
         for value in (
             episode["project_id"] if episode else None,
             job["project_id"] if job else None,
+            row["project_id"] if "project_id" in keys else None,
         )
         if value
     }
@@ -213,7 +231,11 @@ def _legacy_claim_owner(db, row) -> dict[str, str | None]:
         raise RuntimeError(
             f"provider claim {row['operation_id']} project owner is missing"
         )
-    if job and job["version_id"] and str(job["version_id"]) != str(row["version_id"]):
+    if (
+        job
+        and job["version_id"]
+        and str(job["version_id"]) != origin_version_id
+    ):
         raise RuntimeError(
             f"provider claim {row['operation_id']} has inconsistent version ownership"
         )
@@ -221,12 +243,12 @@ def _legacy_claim_owner(db, row) -> dict[str, str | None]:
         "project_id": project_id,
         "episode_id": origin_episode_id if episode else None,
         "shot_id": origin_shot_id if shot else None,
-        "job_id": str(row["job_id"]) if job else None,
-        "version_id": str(row["version_id"]) if version else None,
+        "job_id": str(job["id"]) if job else None,
+        "version_id": str(version["id"]) if version else None,
         "origin_episode_id": origin_episode_id,
         "origin_shot_id": origin_shot_id,
-        "origin_job_id": str(row["job_id"]),
-        "origin_version_id": str(row["version_id"]),
+        "origin_job_id": origin_job_id,
+        "origin_version_id": origin_version_id,
     }
 
 
@@ -249,13 +271,28 @@ def _migrate_provider_claim_ledger(db) -> None:
         )
         settled_at = float(row["updated_at"]) if status == "settled" else None
         released_at = float(row["updated_at"]) if status == "released" else None
+        liability_closed_at = (
+            row["liability_closed_at"]
+            if "liability_closed_at" in row.keys()
+            else (
+                float(row["updated_at"])
+                if status == "closed_liability"
+                else None
+            )
+        )
+        closure_reason = (
+            row["closure_reason"]
+            if "closure_reason" in row.keys()
+            else None
+        )
         db.execute(
             """INSERT INTO provider_video_budget_claims_v2(
                    operation_id,project_id,episode_id,shot_id,job_id,version_id,
                    origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
                    amount_cny,status,created_at,updated_at,
-                   accepted_at,settled_at,released_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   accepted_at,settled_at,released_at,
+                   liability_closed_at,closure_reason
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 row["operation_id"],
                 owner["project_id"],
@@ -274,6 +311,8 @@ def _migrate_provider_claim_ledger(db) -> None:
                 accepted_at,
                 settled_at,
                 released_at,
+                liability_closed_at,
+                closure_reason,
             ),
         )
     db.execute("DROP INDEX IF EXISTS idx_provider_video_budget_episode")
@@ -345,7 +384,7 @@ def _provider_task_clearance_evaluation(
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
     conn=None,
-) -> tuple[dict[str, Any], list[str]]:
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
     db = conn or get_conn()
     normalized_shots = list(dict.fromkeys(str(value) for value in shot_ids if value))
     normalized_versions = list(
@@ -448,6 +487,8 @@ def _provider_task_clearance_evaluation(
 
     blockers: list[dict[str, Any]] = []
     releasable_operation_ids: list[str] = []
+    settle_operation_ids: list[str] = []
+    close_liability_operation_ids: list[str] = []
     for row in rows:
         create_state = str(row["provider_create_state"] or "").strip().lower()
         claim_status = (
@@ -493,10 +534,14 @@ def _provider_task_clearance_evaluation(
                 )
             )
         else:
-            provider_may_exist = claim_status not in {"released", "settled"}
+            provider_may_exist = claim_status not in {
+                "released",
+                "settled",
+                "closed_liability",
+            }
         terminal_evidence = bool(
             result_checkpointed
-            or claim_status == "settled"
+            or claim_status in {"settled", "closed_liability"}
             or (
                 claim_status == "released"
                 and (not claim_is_current or not provider_may_exist)
@@ -511,6 +556,27 @@ def _provider_task_clearance_evaluation(
                 releasable_operation_ids.append(operation_id)
             continue
         if terminal_evidence:
+            if (
+                result_checkpointed
+                and operation_id
+                and claim_status not in {
+                    "settled",
+                    "closed_liability",
+                    "released",
+                }
+            ):
+                settle_operation_ids.append(operation_id)
+            elif (
+                claim_is_current
+                and failure_disposition == "external_terminal"
+                and operation_id
+                and claim_status not in {
+                    "settled",
+                    "closed_liability",
+                    "released",
+                }
+            ):
+                close_liability_operation_ids.append(operation_id)
             continue
 
         locally_recoverable_poll = bool(
@@ -555,7 +621,13 @@ def _provider_task_clearance_evaluation(
             "resume_supported": bool(blockers),
             "blockers": blockers,
         },
-        list(dict.fromkeys(releasable_operation_ids)),
+        {
+            "release": list(dict.fromkeys(releasable_operation_ids)),
+            "settle": list(dict.fromkeys(settle_operation_ids)),
+            "close_liability": list(
+                dict.fromkeys(close_liability_operation_ids)
+            ),
+        },
     )
 
 
@@ -572,7 +644,7 @@ def provider_task_clearance_snapshot(
     from job kind. A provider-backed operation without durable terminal
     evidence blocks cleanup so its task handle and billing authority survive.
     """
-    clearance, _releasable = _provider_task_clearance_evaluation(
+    clearance, _terminal_actions = _provider_task_clearance_evaluation(
         episode_id=episode_id,
         shot_ids=shot_ids,
         version_ids=version_ids,
@@ -608,7 +680,7 @@ def prepare_provider_tasks_for_clear(
 ) -> dict[str, Any]:
     """Fence provider risk and explicitly release unsubmitted reservations."""
     db = conn or get_conn()
-    clearance, releasable = _provider_task_clearance_evaluation(
+    clearance, terminal_actions = _provider_task_clearance_evaluation(
         episode_id=episode_id,
         shot_ids=shot_ids,
         version_ids=version_ids,
@@ -616,6 +688,7 @@ def prepare_provider_tasks_for_clear(
     )
     if not clearance["safe_to_clear"]:
         raise ProviderTasksNotTerminalError(clearance)
+    releasable = terminal_actions["release"]
     if releasable:
         marks = ",".join("?" for _ in releasable)
         stamp = now()
@@ -624,6 +697,31 @@ def prepare_provider_tasks_for_clear(
                    SET status='released',updated_at=?,released_at=?
                  WHERE operation_id IN ({marks}) AND status='reserved'""",
             (stamp, stamp, *releasable),
+        )
+    settle = terminal_actions["settle"]
+    if settle:
+        marks = ",".join("?" for _ in settle)
+        stamp = now()
+        db.execute(
+            f"""UPDATE provider_video_budget_claims
+                   SET status='settled',updated_at=?,settled_at=?
+                 WHERE operation_id IN ({marks})
+                   AND status!='released' AND status!='closed_liability'""",
+            (stamp, stamp, *settle),
+        )
+    close_liability = terminal_actions["close_liability"]
+    if close_liability:
+        marks = ",".join("?" for _ in close_liability)
+        stamp = now()
+        db.execute(
+            f"""UPDATE provider_video_budget_claims
+                   SET status='closed_liability',updated_at=?,
+                       liability_closed_at=?,
+                       closure_reason='provider_external_terminal'
+                 WHERE operation_id IN ({marks})
+                   AND status!='released' AND status!='settled'
+                   AND status!='closed_liability'""",
+            (stamp, stamp, *close_liability),
         )
     return clearance
 
@@ -962,6 +1060,8 @@ def reserve_provider_video_budget(
                    accepted_at=NULL,
                    settled_at=NULL,
                    released_at=NULL,
+                   liability_closed_at=NULL,
+                   closure_reason=NULL,
                    updated_at=excluded.updated_at""",
             (
                 operation_id,
@@ -1032,6 +1132,52 @@ def mark_provider_video_budget_claim(
             job_id,
             lease_owner,
         ),
+    )
+    if conn is None:
+        db.commit()
+    return cursor.rowcount == 1
+
+
+def close_provider_video_budget_claim_liability(
+    operation_id: str,
+    *,
+    job_id: str,
+    reason: str,
+    conn=None,
+) -> bool:
+    """Close recovery for an accepted operation without releasing its budget.
+
+    This terminal is used only after an explicit decision to abandon recovery
+    and create a new provider operation. The conservative claim amount remains
+    project-used because the old provider charge cannot be disproved.
+    """
+    closure_reason = str(reason or "").strip()
+    if not closure_reason:
+        raise ValueError("provider claim liability closure requires a reason")
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    existing = db.execute(
+        """SELECT status FROM provider_video_budget_claims
+            WHERE operation_id=? AND job_id=?""",
+        (operation_id, job_id),
+    ).fetchone()
+    if existing is None:
+        return False
+    if existing["status"] == "released":
+        raise ValueError(
+            "released provider claim cannot become a chargeable liability"
+        )
+    if existing["status"] in {"settled", "closed_liability"}:
+        return True
+    stamp = now()
+    cursor = db.execute(
+        """UPDATE provider_video_budget_claims
+              SET status='closed_liability',updated_at=?,
+                  liability_closed_at=?,closure_reason=?
+            WHERE operation_id=? AND job_id=?
+              AND status!='released' AND status!='settled'
+              AND status!='closed_liability'""",
+        (stamp, stamp, closure_reason, operation_id, job_id),
     )
     if conn is None:
         db.commit()

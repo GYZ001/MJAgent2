@@ -147,12 +147,19 @@ def _seed_video_claim(
     )
     conn.execute(
         """INSERT INTO provider_video_budget_claims(
-               operation_id,episode_id,job_id,version_id,amount_cny,status,
-               created_at,updated_at
-           ) VALUES(?,?,?,?,?,?,1,1)""",
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,1)""",
         (
             f"operation-{suffix}",
+            "p",
             episode_id,
+            shot_id,
+            job_id,
+            version_id,
+            episode_id,
+            shot_id,
             job_id,
             version_id,
             amount_cny,

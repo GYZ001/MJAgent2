@@ -566,9 +566,13 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
     completion_grant.ensure_video_budget_authority_tables(conn)
     conn.execute(
         """INSERT INTO provider_video_budget_claims(
-               operation_id,episode_id,job_id,version_id,amount_cny,status,
-               created_at,updated_at
-           ) VALUES('video-create-v1','e1','j1','v1',1,'reserved',1,1)"""
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at
+           ) VALUES(
+               'video-create-v1','p1','e1','s1','j1','v1',
+               'e1','s1','j1','v1',1,'reserved',1,1
+           )"""
     )
     conn.commit()
     create_calls: list[str] = []
@@ -1034,10 +1038,12 @@ def test_new_submission_retry_recalculates_budget_and_double_click_is_idempotent
     ensure_video_budget_authority_tables(conn)
     conn.execute(
         """INSERT INTO provider_video_budget_claims(
-               operation_id,episode_id,job_id,version_id,amount_cny,status,
-               created_at,updated_at
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at
            ) VALUES(
-               'video-create-v-retry-old','e-retry','j-retry','v-retry',
+               'video-create-v-retry-old','p-retry','e-retry','s-retry',
+               'j-retry','v-retry','e-retry','s-retry','j-retry','v-retry',
                0.25,'reserved',1,1
            )"""
     )

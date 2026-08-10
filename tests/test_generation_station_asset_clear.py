@@ -330,10 +330,12 @@ def _seed_unsettled_provider_task(
     )
     conn.execute(
         """INSERT INTO provider_video_budget_claims(
-               operation_id,episode_id,job_id,version_id,amount_cny,status,
-               created_at,updated_at
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at
            ) VALUES(
-               'op-provider','e','j-provider','v-provider',4,?,1,1
+               'op-provider','p','e','s','j-provider','v-provider',
+               'e','s','j-provider','v-provider',4,?,1,1
            )""",
         (claim_status,),
     )
@@ -523,9 +525,66 @@ def test_resource_clear_allows_durable_provider_terminal_evidence(
     assert conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE id='j-provider'"
     ).fetchone()[0] == 0
+    claim = conn.execute(
+        """SELECT project_id,episode_id,shot_id,job_id,version_id,
+                  origin_job_id,origin_version_id,status,closure_reason
+             FROM provider_video_budget_claims
+            WHERE operation_id='op-provider'"""
+    ).fetchone()
+    assert dict(claim) == {
+        "project_id": "p",
+        "episode_id": "e",
+        "shot_id": "s",
+        "job_id": None,
+        "version_id": None,
+        "origin_job_id": "j-provider",
+        "origin_version_id": "v-provider",
+        "status": (
+            "closed_liability" if failure_disposition else "settled"
+        ),
+        "closure_reason": (
+            "provider_external_terminal" if failure_disposition else None
+        ),
+    }
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_settled_claim_clear_keeps_project_used_budget(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="settled",
+        provider_task_id="provider-task-1",
+    )
+    conn.execute(
+        """INSERT INTO episode_video_budget_authorities(
+               episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
+           ) VALUES('e',0,10,'test',1,1)"""
+    )
+    conn.execute("UPDATE jobs SET status='succeeded' WHERE id='j-provider'")
+    conn.execute(
+        "UPDATE shot_versions SET status='succeeded' WHERE id='v-provider'"
+    )
+    conn.commit()
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    before = completion_grant.project_video_budget_snapshot("p", conn=conn)
+    result = artifacts.clear_shot_artifacts("s")
+    after = completion_grant.project_video_budget_snapshot("p", conn=conn)
+
+    assert result["videos"] == 1
+    assert before["used_cny"] == 4
+    assert after["used_cny"] == before["used_cny"]
     assert conn.execute(
-        "SELECT COUNT(*) FROM provider_video_budget_claims WHERE operation_id='op-provider'"
-    ).fetchone()[0] == 0
+        """SELECT status,project_id,job_id,version_id
+             FROM provider_video_budget_claims
+            WHERE operation_id='op-provider'"""
+    ).fetchone()[:] == ("settled", "p", None, None)
 
 
 def test_resource_clear_allows_unsubmitted_reservation(
@@ -552,9 +611,15 @@ def test_resource_clear_allows_unsubmitted_reservation(
     result = artifacts.clear_shot_artifacts("s")
 
     assert result["videos"] == 1
-    assert conn.execute(
-        "SELECT COUNT(*) FROM provider_video_budget_claims WHERE operation_id='op-provider'"
-    ).fetchone()[0] == 0
+    claim = conn.execute(
+        """SELECT status,released_at,job_id,version_id
+             FROM provider_video_budget_claims
+            WHERE operation_id='op-provider'"""
+    ).fetchone()
+    assert claim["status"] == "released"
+    assert claim["released_at"] is not None
+    assert claim["job_id"] is None
+    assert claim["version_id"] is None
 
 
 def test_resource_clear_exposes_manual_provider_recovery_action(
@@ -602,10 +667,12 @@ def test_historical_unsettled_claim_blocks_without_reusing_current_task_handle(
     )
     conn.execute(
         """INSERT INTO provider_video_budget_claims(
-               operation_id,episode_id,job_id,version_id,amount_cny,status,
-               created_at,updated_at
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at
            ) VALUES(
-               'op-provider-old','e','j-provider','v-provider',3,'accepted',0,0
+               'op-provider-old','p','e','s','j-provider','v-provider',
+               'e','s','j-provider','v-provider',3,'accepted',0,0
            )"""
     )
     conn.commit()

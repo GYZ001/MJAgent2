@@ -12,6 +12,7 @@ import ast
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -167,10 +168,38 @@ def _command_label(command: list[str], cwd: Path) -> str:
     return prefix + " ".join(command)
 
 
-def _run(command: list[str], *, cwd: Path = ROOT, plan: bool = False) -> None:
+def _run(
+    command: list[str],
+    *,
+    cwd: Path = ROOT,
+    plan: bool = False,
+    env: dict[str, str] | None = None,
+) -> None:
     print(f"\n> {_command_label(command, cwd)}", flush=True)
     if not plan:
-        subprocess.run(command, cwd=cwd, check=True)
+        subprocess.run(command, cwd=cwd, check=True, env=env)
+
+
+def _isolated_environment(sandbox: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["MANJU_TEST_PROFILE"] = "isolated"
+    env["MANJU_TEST_SANDBOX"] = str(sandbox)
+    env["HIAGENT_API_KEY"] = ""
+    env["OPENROUTER_API_KEY"] = ""
+    env["BAILIAN_API_KEY"] = ""
+    env["DASHSCOPE_API_KEY"] = ""
+    env["DEEPSEEK_API_KEY"] = ""
+    env["ZHIPU_API_KEY"] = ""
+    env["MINIMAX_H3_API_KEY"] = ""
+    env["MINIMAX_H3_BASE_URL"] = ""
+    return env
+
+
+def _live_integration_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env["MANJU_TEST_PROFILE"] = "live-integration"
+    env.pop("MANJU_TEST_SANDBOX", None)
+    return env
 
 
 def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
@@ -208,8 +237,8 @@ def _quick_commands(paths: list[str]) -> list[tuple[list[str], Path]]:
     return commands
 
 
-def _full_commands() -> list[tuple[list[str], Path]]:
-    return [
+def _full_commands(*, live_integration: bool = False) -> list[tuple[list[str], Path]]:
+    commands = [
         ([sys.executable, "-m", "ruff", "check", "app", "tests", "scripts"], ROOT),
         ([sys.executable, "scripts/check_contract_surface.py"], ROOT),
         ([sys.executable, "scripts/check_capability_coverage.py"], ROOT),
@@ -218,17 +247,40 @@ def _full_commands() -> list[tuple[list[str], Path]]:
         ([_npm(), "run", "build"], FRONTEND),
         ([_npm(), "test"], FRONTEND),
     ]
+    if live_integration:
+        commands.append(
+            (
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "-m",
+                    "live_integration",
+                    "--live-integration",
+                ],
+                ROOT,
+            )
+        )
+    return commands
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="run the release/CI-level suite")
+    parser.add_argument(
+        "--live-integration",
+        action="store_true",
+        help="after isolated full verification, run explicitly marked live integrations",
+    )
     parser.add_argument("--plan", action="store_true", help="print commands without executing them")
     args = parser.parse_args()
+    if args.live_integration and not args.full:
+        parser.error("--live-integration requires --full")
 
     started = time.monotonic()
     if args.full:
-        commands = _full_commands()
+        commands = _full_commands(live_integration=args.live_integration)
         print("Full verification")
     else:
         paths = changed_files()
@@ -240,12 +292,20 @@ def main() -> int:
     if not commands:
         print("No code changes need verification.")
         return 0
-    try:
-        for command, cwd in commands:
-            _run(command, cwd=cwd, plan=args.plan)
-    except subprocess.CalledProcessError as exc:
-        print(f"\nFAILED (exit {exc.returncode}) in {time.monotonic() - started:.1f}s")
-        return exc.returncode
+    with tempfile.TemporaryDirectory(prefix="manju-verify-") as sandbox_dir:
+        isolated_env = _isolated_environment(Path(sandbox_dir))
+        live_env = _live_integration_environment()
+        try:
+            for command, cwd in commands:
+                command_env = (
+                    live_env
+                    if "--live-integration" in command
+                    else isolated_env
+                )
+                _run(command, cwd=cwd, plan=args.plan, env=command_env)
+        except subprocess.CalledProcessError as exc:
+            print(f"\nFAILED (exit {exc.returncode}) in {time.monotonic() - started:.1f}s")
+            return exc.returncode
     suffix = " plan" if args.plan else ""
     print(f"\nOK{suffix} in {time.monotonic() - started:.1f}s")
     return 0
