@@ -8,6 +8,7 @@ from typing import Any
 
 from app import config
 from app.schemas import (
+    ActionParticipantDelivery,
     AudienceStatePathRef,
     EpisodeScreenplay,
     NARRATIVE_CONTRACT_VERSION,
@@ -54,6 +55,49 @@ def _set_anchor_id(value: Any, event_id: str) -> None:
 
 def _source_ids(value: str) -> set[str]:
     return set(re.findall(r"SRC\d+", str(value or "")))
+
+
+def _filter_state_fragment(
+    value: Any,
+    *,
+    proposition_ids: set[str],
+    evidence_ids: set[str],
+) -> Any:
+    if isinstance(value, list):
+        return [
+            filtered
+            for item in value
+            if not (
+                isinstance(item, dict)
+                and item.get("proposition_id") in proposition_ids
+            )
+            for filtered in [
+                _filter_state_fragment(
+                    item,
+                    proposition_ids=proposition_ids,
+                    evidence_ids=evidence_ids,
+                )
+            ]
+        ]
+    if isinstance(value, dict):
+        filtered: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in proposition_ids:
+                continue
+            if key == "evidence_ids" and isinstance(item, list):
+                filtered[key] = [
+                    evidence_id
+                    for evidence_id in item
+                    if evidence_id not in evidence_ids
+                ]
+                continue
+            filtered[key] = _filter_state_fragment(
+                item,
+                proposition_ids=proposition_ids,
+                evidence_ids=evidence_ids,
+            )
+        return filtered
+    return value
 
 
 def _scene_event_groups(screenplay: EpisodeScreenplay) -> list[list[str]]:
@@ -410,19 +454,28 @@ def _drop_paratext(
                     value for value in delta.proposition_ids
                     if value not in removed_proposition_ids
                 ]
-                delta.from_state = {
-                    key: value
-                    for key, value in delta.from_state.items()
-                    if key not in removed_proposition_ids
-                }
-                delta.to_state = {
-                    key: value
-                    for key, value in delta.to_state.items()
-                    if key not in removed_proposition_ids
-                }
+                delta.from_state = _filter_state_fragment(
+                    delta.from_state,
+                    proposition_ids=removed_proposition_ids,
+                    evidence_ids=removed_evidence_ids,
+                )
+                delta.to_state = _filter_state_fragment(
+                    delta.to_state,
+                    proposition_ids=removed_proposition_ids,
+                    evidence_ids=removed_evidence_ids,
+                )
                 if delta.deadline_event_id in excluded_event_ids:
                     delta.deadline_event_id = last_event_id
                     delta.primary_delivery_window_id = f"RW-{last_event_id.lstrip('E')}"
+    for task in plan.assimilation_tasks:
+        task.downstream_dependency_event_ids = _dedupe(
+            last_event_id if value in excluded_event_ids else value
+            for value in task.downstream_dependency_event_ids
+        )
+        task.required_prior_proposition_ids = [
+            value for value in task.required_prior_proposition_ids
+            if value not in removed_proposition_ids
+        ]
     last_window = None
     windows = []
     for window in plan.readability_windows:
@@ -452,6 +505,23 @@ def _drop_paratext(
             *last_window.target_delta_ids,
             *target_delta_ids,
         ])
+        last_window.scheduled_processing_s = max(
+            float(last_window.scheduled_processing_s or 0),
+            max(
+                (
+                    float(delta.required_processing_s or 0)
+                    for intent in plan.experience_intents
+                    for path in intent.audience_paths
+                    for delta in path.target_deltas
+                    if delta.deadline_event_id == last_event_id
+                ),
+                default=0.0,
+            ),
+        )
+        last_window.planned_available_s = max(
+            float(last_window.planned_available_s or 0),
+            float(last_window.scheduled_processing_s or 0),
+        )
     plan.readability_windows = windows
     for contract in plan.setup_payoff_contracts:
         contract.setup_event_ids = [
@@ -577,6 +647,60 @@ def _drop_paratext(
     }
 
 
+def _migrate_legacy_participant_deliveries(
+    screenplay: EpisodeScreenplay,
+) -> None:
+    """Bind old typed relations to their existing event evidence."""
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return
+    identities = {
+        item.identity_id: item
+        for item in plan.identity_contracts
+    }
+    evidence_by_event = defaultdict(list)
+    for evidence in plan.evidence:
+        if evidence.anchor.type == "event":
+            evidence_by_event[evidence.anchor.id].append(evidence.evidence_id)
+    actions = {
+        item.action_id: item
+        for item in plan.atomic_actions
+    }
+    for event in plan.events:
+        evidence_ids = evidence_by_event.get(event.event_id) or []
+        if not evidence_ids:
+            continue
+        visible = set(event.onscreen_entity_ids)
+        for action_id in event.action_ids:
+            action = actions.get(action_id)
+            if action is None:
+                continue
+            existing = {
+                item.participant_id
+                for item in action.participant_deliveries
+            }
+            for participant_id in _dedupe([
+                *action.actor_ids,
+                *action.target_ids,
+            ]):
+                if participant_id in visible or participant_id in existing:
+                    continue
+                identity = identities.get(participant_id)
+                voice_only = bool(
+                    identity is not None
+                    and identity.visual_policy == "offscreen_only"
+                )
+                action.participant_deliveries.append(
+                    ActionParticipantDelivery(
+                        action_id=action_id,
+                        participant_id=participant_id,
+                        evidence_ids=[evidence_ids[0]],
+                        audible=voice_only,
+                        visible_effect=not voice_only,
+                    )
+                )
+
+
 def picture_screenplay_projection(
     screenplay: EpisodeScreenplay,
 ) -> tuple[EpisodeScreenplay, dict[str, Any]]:
@@ -624,6 +748,12 @@ def picture_screenplay_projection(
         excluded_event_ids=excluded,
         scene_groups=scene_groups,
     )
+    if not has_explicit_semantics:
+        _migrate_legacy_participant_deliveries(projected)
+        if projected.narrative_plan is not None:
+            projected.narrative_plan.contract_version = (
+                NARRATIVE_CONTRACT_VERSION
+            )
     report["legacy_semantics"] = not has_explicit_semantics
     report["story_event_count"] = len(
         projected.narrative_plan.events

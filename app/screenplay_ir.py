@@ -1844,11 +1844,7 @@ def compile_screenplay_ir(
     format_version = str(value.format_version or "")
     version_key = screenplay_ir_version_key(format_version)
     strict_unit_ownership = version_key >= (1, 3)
-    typed_visual_unit_contract = not (
-        screenplay_ir_missing_participant_delivery_paths(
-            value.model_dump(mode="json", exclude_unset=True)
-        )
-    )
+    typed_visual_unit_contract = version_key >= (1, 5)
     segments_list = (
         index_compact_source_segments(source_text)
         if format_version.startswith("screenplay-generation-ir.v1.2")

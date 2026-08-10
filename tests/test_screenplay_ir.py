@@ -692,6 +692,41 @@ def _v13_payload() -> dict:
     return payload
 
 
+def test_v13_compiler_accepts_unique_source_scene_owners() -> None:
+    payload = _v13_payload()
+    payload["source_scene_owners"] = {
+        "SRC0001": "sc1",
+        "SRC0002": "sc2",
+        "SRC0003": "sc3",
+    }
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={"id": "ep-ir-v13-owner", "episode_no": 1},
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    assert screenplay.source_text_range == "screenplay-generation-ir.v1.3"
+
+
+def test_v13_compiler_rejects_source_owned_by_another_scene() -> None:
+    payload = _v13_payload()
+    payload["source_scene_owners"] = {
+        "SRC0001": "sc1",
+        "SRC0002": "sc1",
+        "SRC0003": "sc3",
+    }
+
+    with pytest.raises(ValueError, match="IR 来源唯一归属冲突.*SRC0002"):
+        compile_screenplay_ir(
+            ScreenplayGenerationIR.model_validate(payload),
+            episode={"id": "ep-ir-v13-owner-conflict", "episode_no": 1},
+            source_text=SOURCE,
+            bible=_bible(),
+        )
+
+
 def test_v13_requires_every_fine_source_segment_in_authored_units() -> None:
     payload = _v13_payload()
     payload["scenes"][0]["scene_heading"] = "【场1-1】夜 / 咖啡厅里侧"
@@ -1024,6 +1059,61 @@ def test_fidelity_plan_selection_keeps_low_density_internal_windows() -> None:
     assert repair_source_ids == {
         "SRC0002", "SRC0003", "SRC0004", "SRC0005",
     }
+
+
+def test_fidelity_patch_routes_unit_to_its_source_owner_scene() -> None:
+    candidate = ScreenplayGenerationIR.model_validate(_v13_payload())
+    candidate.source_scene_owners = {
+        "SRC0001": "sc1",
+        "SRC0002": "sc2",
+        "SRC0003": "sc3",
+    }
+    unit = candidate.scenes[1].units[0].model_copy(deep=True)
+    original_counts = {
+        scene.key: len(scene.units) for scene in candidate.scenes
+    }
+    patch = stages._IRFidelityPatch.model_validate({
+        "insertions": [{
+            "scene_key": "sc1",
+            "units": [unit.model_dump(mode="json")],
+        }],
+    })
+
+    inserted = stages._merge_ir_fidelity_patch(
+        candidate,
+        patch,
+        SOURCE,
+        round_no=1,
+    )
+
+    assert inserted == 1
+    assert len(candidate.scenes[0].units) == original_counts["sc1"]
+    assert len(candidate.scenes[1].units) == original_counts["sc2"] + 1
+
+
+def test_fidelity_patch_rejects_unit_with_multiple_source_owners() -> None:
+    candidate = ScreenplayGenerationIR.model_validate(_v13_payload())
+    candidate.source_scene_owners = {
+        "SRC0001": "sc1",
+        "SRC0002": "sc2",
+        "SRC0003": "sc3",
+    }
+    unit = candidate.scenes[0].units[0].model_copy(deep=True)
+    unit.source_segment_ids = ["SRC0001", "SRC0002"]
+    patch = stages._IRFidelityPatch.model_validate({
+        "insertions": [{
+            "scene_key": "sc1",
+            "units": [unit.model_dump(mode="json")],
+        }],
+    })
+
+    with pytest.raises(ValueError, match="跨越多个 source owner"):
+        stages._merge_ir_fidelity_patch(
+            candidate,
+            patch,
+            SOURCE,
+            round_no=1,
+        )
 
 
 def test_truncated_ir_recovers_only_complete_top_level_members() -> None:

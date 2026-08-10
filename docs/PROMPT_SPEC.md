@@ -3,11 +3,14 @@
 > 对应 PRD §4.2~§4.4。每个 LLM 阶段 = 一个 prompt 模板 + 一个 Pydantic Schema + 一个业务规则校验器 + 修复回路。
 > 本文件中的 prompt 是可直接使用的初稿；任何修改必须先跑金样回归（PRD §7）再合入。
 
-## 当前生产合同（Blueprint 1.2.1 + IR Prompt 5.5 / IR v1.4，兼容 v3/v4 发布结构）
+## 当前生产合同（Blueprint 1.3.0 + IR Prompt 5.5 / IR v1.5，兼容 v3/v4 发布结构）
 
-- 剧本写作前先生成 `screenplay-narrative-blueprint.v2`。模型只识别时间域、单一地点、
+- 剧本写作前先生成 `screenplay-narrative-blueprint.v3`。模型只识别时间域、单一地点、
   人物位置、状态事实、重大决定依据和行为自主性；程序根据节点确定性生成
   `scene_plans`，剧本 IR 必须逐场消费。
+- Blueprint 同时生成 `source_scene_owners` 和 `scene_derivations`。每个非标题 SRC
+  必须且只能拥有一个 scene owner；跨场状态、决定前置和转场上下文只能通过显式派生
+  关系传递，不得让另一场再次消费原 SRC。owner 冲突直接失败，不做静默去重。
 - 蓝图采用可恢复分片协议。默认分片拥有 28 个连续 SRC；每片独立进行 Schema、来源覆盖、
   单一地点、时间关系、转场、状态引用和动机门禁。三次仍失败时只将当前片二分为 14，
   必要时继续二分到 7；已通过分片按来源哈希和边界状态哈希复用。
@@ -26,8 +29,8 @@
   程序以来源称谓生成唯一显示名；未命名群众使用地点与戏剧职责构成稳定实体，不使用
   按出现顺序生成的临时编号，也不使用姓名黑白名单。
 
-- 剧本 Baseline 使用 `screenplay-envelope.v1` + `screenplay-scene-shard.v1` 生成并合并为
-  `screenplay-generation-ir.v1.4`。Envelope 只接收 Blueprint 全局摘要、集元数据和冻结
+- 剧本 Baseline 使用 `screenplay-envelope.v1` + `screenplay-scene-shard.v4` 生成并合并为
+  `screenplay-generation-ir.v1.5`。Envelope 只接收 Blueprint 全局摘要、集元数据和冻结
   identity registry，不接收完整原文；Scene Shard 只接收其 Blueprint scene plans、owned
   SRC、边界状态和冻结身份。模型负责场次有序单元、对白与观众意图；后端从 units 确定性生成 events、beats、动作阶段、
   audience priors、稳定 ID、
@@ -51,7 +54,7 @@
 - 每个 Envelope/Scene Shard 只允许当前小单元的一次格式修复和一次语义修复。原始响应分别
   保存为 `screenplay_envelope_raw` / `screenplay_scene_shard_raw`，只有 Schema 与业务门禁均通过的
   normalized Artifact 才能复用。服务恢复按 contract version、Blueprint hash、identity registry
-  hash、source hash 和 boundary hash 复用已验证分片；禁止再次计费生成。
+  hash、source hash、boundary hash 和 source ownership hash 复用已验证分片；禁止再次计费生成。
 - 若供应商因长度上限在 events 等程序派生尾部截断，但顶层 `scenes` 数组已由标准 JSON
   decoder 证明完整，系统只恢复完整成员并从 units 重建尾部；不猜测或补闭未完成场次。
 - `v1.4` 不允许未被 unit 直接消费的来源段发布；未知 ID、漏段、来源首次入戏顺序错误、

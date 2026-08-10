@@ -405,6 +405,12 @@ def test_validated_shards_merge_in_blueprint_order_with_global_namespaces() -> N
     assert {source for scene in merged.scenes for unit in scene.units for source in unit.source_segment_ids} == {
         segment.segment_id for segment in index_source_segments(SOURCE)
     }
+    assert merged.source_scene_owners == blueprint.source_scene_owners
+    assert merged.scene_derivations == [
+        relation.model_dump(mode="json")
+        for relation in blueprint.scene_derivations
+    ]
+    assert merged.source_ownership_hash == plans[0].source_ownership_hash
 
 
 def test_merge_rejects_source_consumed_by_multiple_scenes() -> None:

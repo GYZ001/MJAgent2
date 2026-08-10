@@ -1091,6 +1091,13 @@ async def _complete_screenplay_ir_fidelity(
         windows = context["windows_requiring_expansion"]
         if not windows:
             raise ValueError("IR 保真补写没有可处理的缺口窗口")
+        if candidate.source_scene_owners:
+            context["source_scene_owners"] = dict(
+                candidate.source_scene_owners
+            )
+            context["scene_derivations"] = list(
+                candidate.scene_derivations
+            )
         prompt = (
             "任务：只补写现有剧本 IR 中缺失或过度压缩的剧情单元，不重写整集。\n"
             f"这是第 {round_no} 轮局部补写；只要上下文仍列出缺口，禁止返回空数组。\n"
@@ -1098,6 +1105,8 @@ async def _complete_screenplay_ir_fidelity(
             "遗漏的动作、人物反应、对白关系、因果桥梁和场景转换真正写进 text；"
             "禁止重复已有内容凑字数。\n"
             "source_segment_ids 只能引用对应窗口内 SRC，必须按原文顺序且连续；"
+            "若上下文含 source_scene_owners，每个 SRC 只能写入其 owner scene；"
+            "跨场信息只能读取 scene_derivations，不得重复消费来源场 SRC。"
             "dialogue.source_text 必须逐字来自声明的 SRC，并使用 identities 中已有"
             " speaker_key。scene_key 从现有 scenes 选择。每个 insertion 的 units 按"
             "播放顺序输出，event_key 可使用任意临时唯一值，后端会重编号。"
@@ -7410,6 +7419,11 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     if not (screenplay.full_script_text or "").strip():
         raise StageError("分镜大纲", ["请先生成完整剧本，再规划分镜大纲"])
     if screenplay.narrative_plan is not None:
+        from app.narrative_priority import (
+            authoritative_outline_duration_s,
+            merge_outline_delivery_beats,
+            picture_screenplay_projection,
+        )
         from app.evidence import repository as evidence_repository
         from app.harness.contracts import get_contract
         from app.harness.types import EvidenceArtifact
@@ -7431,6 +7445,9 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             split_outline_over_key_line_capacity,
         )
 
+        screenplay, picture_projection = picture_screenplay_projection(
+            screenplay
+        )
         outline = compile_narrative_storyboard_outline(screenplay)
         max_shots = storyboard_shot_count_range(
             int(episode.get("target_duration_s") or 0)
@@ -7475,6 +7492,13 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             )
         )
         normalize_outline_spoken_durations(outline, screenplay)
+        beat_merge_changes = merge_outline_delivery_beats(
+            outline,
+            screenplay,
+        )
+        split_changes.extend(beat_merge_changes)
+        authoritative_duration_s = authoritative_outline_duration_s(outline)
+        episode["target_duration_s"] = authoritative_duration_s
         ensure_storyboard_scene_contexts(outline, screenplay, bible)
 
         errors = [
@@ -7529,9 +7553,11 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             prompt_version="storyboard-outline-compiler-1.0.0",
             model_snapshot={
                 **dict(getattr(outline, "_compile_audit", {}) or {}),
+                "picture_projection": picture_projection,
                 "projection_change_count": len(projection_changes),
                 "split_change_count": len(split_changes),
                 "final_shot_count": len(outline.shots),
+                "authoritative_duration_s": authoritative_duration_s,
                 "scene_batch_count": len(outline.scene_contexts),
             },
         ))

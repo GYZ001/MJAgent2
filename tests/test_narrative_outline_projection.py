@@ -322,7 +322,11 @@ def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
         for shot in outline.shots
     )
     assert outline.shots[0].offscreen_action_actor_ids == []
-    assert outline.shots[-1].offscreen_action_actor_ids == ["ID-CONTEXT"]
+    assert outline.shots[-1].offscreen_action_actor_ids == []
+    assert all(
+        shot.action_participant_deliveries == []
+        for shot in outline.shots
+    )
 
 
 def test_outline_projection_uses_event_onscreen_relation_not_scene_or_perceivers() -> None:
