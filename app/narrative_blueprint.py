@@ -12,7 +12,13 @@ import re
 from collections import defaultdict
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.source_excerpt import (
     index_source_segments,
@@ -522,6 +528,8 @@ class NarrativeBlueprintPatch(BaseModel):
 
 
 class BlueprintSemanticIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     code: Literal[
         "timeline_conflict",
         "spatial_action_gap",
@@ -540,7 +548,121 @@ class BlueprintSemanticIssue(BaseModel):
 
 
 class BlueprintSemanticReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     issues: list[BlueprintSemanticIssue] = Field(default_factory=list)
+
+
+def blueprint_semantic_review_schema(
+    canonical_node_keys: list[str],
+) -> dict[str, Any]:
+    """Bind reviewer node references to one ordered Blueprint projection."""
+    identities = [str(key).strip() for key in canonical_node_keys]
+    if (
+        not identities
+        or any(not key for key in identities)
+        or len(identities) != len(set(identities))
+    ):
+        raise ValueError("canonical node identities must be non-empty and unique")
+
+    schema = BlueprintSemanticReview.model_json_schema()
+    issue_schema = schema["$defs"]["BlueprintSemanticIssue"]
+    issue_schema["properties"]["node_keys"] = {
+        "title": "Canonical Node References",
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "oneOf": [
+                {
+                    "type": "string",
+                    "enum": identities,
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "ordinal": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": len(identities),
+                        },
+                    },
+                    "required": ["ordinal"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "identity": {
+                            "type": "string",
+                            "enum": identities,
+                        },
+                    },
+                    "required": ["identity"],
+                },
+            ],
+        },
+    }
+    return schema
+
+
+def normalize_blueprint_semantic_review_payload(
+    payload: dict[str, Any],
+    canonical_node_keys: list[str],
+) -> dict[str, Any]:
+    """Resolve only exact identity or one-based ordinal node references."""
+    identities = tuple(str(key).strip() for key in canonical_node_keys)
+    identity_set = set(identities)
+    normalized = dict(payload)
+    issues = payload.get("issues")
+    if not isinstance(issues, list):
+        return normalized
+
+    normalized_issues: list[Any] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            normalized_issues.append(issue)
+            continue
+        normalized_issue = dict(issue)
+        references = issue.get("node_keys")
+        if not isinstance(references, list):
+            normalized_issues.append(normalized_issue)
+            continue
+
+        normalized_references: list[str] = []
+        for reference in references:
+            resolved: str | None = None
+            if isinstance(reference, str):
+                resolved = reference
+            elif isinstance(reference, dict):
+                if set(reference) == {"identity"}:
+                    identity = reference.get("identity")
+                    if isinstance(identity, str) and identity in identity_set:
+                        resolved = identity
+                elif set(reference) == {"ordinal"}:
+                    ordinal = reference.get("ordinal")
+                    if (
+                        isinstance(ordinal, int)
+                        and not isinstance(ordinal, bool)
+                        and 1 <= ordinal <= len(identities)
+                    ):
+                        resolved = identities[ordinal - 1]
+            if resolved is None:
+                resolved = (
+                    "[INVALID_BLUEPRINT_NODE_REFERENCE]"
+                    + json.dumps(
+                        reference,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            normalized_references.append(resolved)
+        normalized_issue["node_keys"] = normalized_references
+        normalized_issues.append(normalized_issue)
+
+    normalized["issues"] = normalized_issues
+    return normalized
 
 
 def normalize_blueprint_fact_versions(

@@ -288,6 +288,7 @@ async def chat_structured(
     temperature: float = 0.1,
     call_meta: dict[str, Any] | None = None,
     repair_context: str = "",
+    output_schema: dict[str, Any] | None = None,
     normalize_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_attempt: Callable[[dict[str, Any]], Any] | None = None,
 ) -> T:
@@ -300,6 +301,7 @@ async def chat_structured(
     """
     if not operation_id.strip():
         raise ValueError("structured operation_id is required")
+    structured_schema = output_schema or _model_schema(model_type)
     base_messages = [dict(message) for message in messages]
     current_messages = base_messages
     format_attempt = 0
@@ -427,7 +429,7 @@ async def chat_structured(
                     "content": (
                         "只修复下面响应的 JSON 格式和 Schema，不改写其语义。"
                         "只输出一个完整 JSON 对象。\nSchema:\n"
-                        + json.dumps(_model_schema(model_type), ensure_ascii=False)
+                        + json.dumps(structured_schema, ensure_ascii=False)
                         + "\nSchema 校验错误：\n"
                         + str(parse_error or "找不到完整 JSON 对象")
                         + "\n完整候选：\n"
@@ -475,6 +477,8 @@ async def chat_structured(
                     "问题：\n- "
                     + "\n- ".join(semantic_errors[:20])
                     + ("\n最小修复上下文：\n" + repair_context if repair_context else "")
+                    + "\n输出 Schema：\n"
+                    + json.dumps(structured_schema, ensure_ascii=False)
                     + "\n当前候选：\n"
                     + json.dumps(
                         parsed.model_dump(mode="json")

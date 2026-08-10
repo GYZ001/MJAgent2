@@ -41,10 +41,12 @@ from app.narrative_blueprint import (
     apply_narrative_blueprint_patch,
     blueprint_semantic_issue_is_resolved,
     blueprint_prompt_contract,
+    blueprint_semantic_review_schema,
     derive_blueprint_scene_plans,
     normalize_blueprint_agency_continuity,
     normalize_blueprint_fact_versions,
     normalize_blueprint_raw_json,
+    normalize_blueprint_semantic_review_payload,
     recover_complete_blueprint_prefix,
     validate_and_apply_blueprint_scene_contract,
     validate_blueprint_semantic_review,
@@ -4197,6 +4199,22 @@ async def _semantic_review_narrative_blueprint(
                 [node.key for node in blueprint.nodes],
             )
         )
+        node_reference_contract = {
+            "contract_version": "blueprint-semantic-node-reference.v1",
+            "canonical_nodes": [
+                {
+                    "ordinal": ordinal,
+                    "identity": node_key,
+                }
+                for ordinal, node_key in enumerate(
+                    projected_node_keys,
+                    start=1,
+                )
+            ],
+        }
+        review_schema = blueprint_semantic_review_schema(
+            projected_node_keys,
+        )
         prompt = (
             "你是漫剧叙事蓝图的独立语义审稿人。只找会导致观众理解错误、"
             "人物瞬移、状态矛盾、因果跳跃或动机突变的可证实问题；不改稿，"
@@ -4215,9 +4233,20 @@ async def _semantic_review_narrative_blueprint(
             " setup_missing。不得要求删除原文明确写出的关系来修复 setup。\n"
             "required_resolution 不得把无来源的便利设定伪装为原文事实；若只能通过"
             "改编补桥修复，必须明确要求 adaptation_kind=logic_bridge 及审计理由。"
-            "每个问题必须引用现有 node_keys；有直接原文依据时附"
-            " source_segment_ids。只输出 must_fix=true 的确定问题，禁止泛泛建议。"
-            "\n\n蓝图：\n"
+            "每个问题必须引用本轮节点引用合同中的 canonical identity；node_keys"
+            " 每项可直接使用 identity，或使用结构化 {\"ordinal\":正整数} /"
+            " {\"identity\":\"canonical identity\"}。ordinal 从 1 开始，严格对应"
+            " canonical_nodes 顺序。禁止根据文本相似度推断、拼接或改写 identity。"
+            "发现确定问题后必须保留完整 issue；修正引用时不得删除该 issue。"
+            "有直接原文依据时附 source_segment_ids。只输出 must_fix=true 的确定"
+            "问题，禁止泛泛建议。"
+            "\n\n本轮节点引用合同：\n"
+            + json.dumps(
+                node_reference_contract,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n蓝图：\n"
             + json.dumps(
                 projected_blueprint,
                 ensure_ascii=False,
@@ -4227,7 +4256,7 @@ async def _semantic_review_narrative_blueprint(
             + projected_source
             + "\n\n输出 Schema：\n"
             + json.dumps(
-                BlueprintSemanticReview.model_json_schema(),
+                review_schema,
                 ensure_ascii=False,
             )
         )
@@ -4286,7 +4315,21 @@ async def _semantic_review_narrative_blueprint(
                     "substage": "risk_nodes" if targeted_review else "full",
                     "source_count": len(projected_source.splitlines()),
                 },
-                repair_context=projected_source,
+                repair_context=json.dumps(
+                    {
+                        "node_reference_contract": node_reference_contract,
+                        "output_schema": review_schema,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                output_schema=review_schema,
+                normalize_payload=lambda payload: (
+                    normalize_blueprint_semantic_review_payload(
+                        payload,
+                        projected_node_keys,
+                    )
+                ),
             )
             review.issues = [
                 issue

@@ -1,0 +1,118 @@
+{
+  "run_id": "run_b864b0c8915d",
+  "artifact_id": "art_f2c2fc4ffce5",
+  "canonical_node_keys": [
+    "S001-N001",
+    "S001-N002",
+    "S001-N003",
+    "S001-N004",
+    "S001-N005",
+    "S001-N006",
+    "S001-N007",
+    "S002-S001-N008",
+    "S002-S001-N009",
+    "S002-S001-N010",
+    "S002-S001-N011",
+    "S002-S001-N012",
+    "S002-S001-N013",
+    "S002-S001-N014",
+    "S002-S001-N015",
+    "S003-S002-S001-N016",
+    "S003-S002-S001-N017",
+    "S003-S002-S001-N018"
+  ],
+  "responses": [
+    {
+      "provider_call_id": 60871,
+      "semantic_attempt": 0,
+      "response": {
+        "issues": [
+          {
+            "code": "spatial_action_gap",
+            "node_keys": [
+              "S002-S001-N008",
+              "bp-sc007"
+            ],
+            "source_segment_ids": [
+              "SRC0029"
+            ],
+            "message": "节点S002-S001-N008未明确孟浩收集藤条的区域位置、收集后返回崖边的移动逻辑，场景计划bp-sc007将S001-N007（山顶找藤条）和S002-S001-N008（返回崖边顺藤条）合并在同一地点「赵国大青山山顶」，未体现从山顶藤条生长区返回崖边的动作过渡，易让观众误认为孟浩全程站在崖边没有移动，存在空间行动断层。",
+            "required_resolution": "补充孟浩从崖边到藤条生长区、收集完藤条后返回崖边的移动动作视觉提示，明确两个节点的空间过渡逻辑，adaptation_kind=logic_bridge。",
+            "must_fix": true
+          },
+          {
+            "code": "spatial_action_gap",
+            "node_keys": [
+              "S002-S001-N011"
+            ],
+            "source_segment_ids": [
+              "SRC0039",
+              "SRC0040"
+            ],
+            "message": "节点S002-S001-N011提及许师姐将孟浩扔到半山腰裂缝后「跟随进入吓退王有材等人」，但未明确许师姐进入裂缝的方式、裂缝的入口空间逻辑，也未说明孟浩被扔入裂缝后落地的状态，存在空间行动跳跃，易让观众误解为人物瞬移。",
+            "required_resolution": "补充绿风裹着孟浩降落在裂缝内、许师姐跟随进入裂缝的视觉动作，以及裂缝内部的空间结构简单展示，adaptation_kind=logic_bridge。",
+            "must_fix": true
+          },
+          {
+            "code": "persistent_state_conflict",
+            "node_keys": [
+              "S003-S002-S001-N016"
+            ],
+            "source_segment_ids": [
+              "SRC0057"
+            ],
+            "message": "节点S003-S002-S001-N016仅提到分配王有材和大青山被困少年乙去南区杂役处，未提及剩下的孟浩和大青山被困少年甲的分配结果，与之前建立的「四名杂役被带到宗门」的状态冲突，存在人员去向的闭环缺失，易让观众疑惑另外两人的安排。",
+            "required_resolution": "补充绿袍执事对孟浩和大青山被困少年甲的分配安排说明，或明确暗示后续会安排两人去向，保证四名杂役的去向逻辑闭环，adaptation_kind=logic_bridge。",
+            "must_fix": true
+          }
+        ]
+      }
+    },
+    {
+      "provider_call_id": 60873,
+      "semantic_attempt": 1,
+      "response": {
+        "issues": [
+          {
+            "code": "spatial_action_gap",
+            "node_keys": [
+              "S002-S001-N008",
+              "S002-S001-N007"
+            ],
+            "source_segment_ids": [
+              "SRC0029"
+            ],
+            "message": "节点S002-S001-N008未明确孟浩收集藤条的区域位置、收集后返回崖边的移动逻辑，场景计划将S001-N007（山顶找藤条）和S002-S001-N008（返回崖边顺藤条）合并在同一地点「赵国大青山山顶」，未体现从山顶藤条生长区返回崖边的动作过渡，易让观众误认为孟浩全程站在崖边没有移动，存在空间行动断层。",
+            "required_resolution": "补充孟浩从崖边到藤条生长区、收集完藤条后返回崖边的移动动作视觉提示，明确两个节点的空间过渡逻辑，adaptation_kind=logic_bridge。",
+            "must_fix": true
+          },
+          {
+            "code": "spatial_action_gap",
+            "node_keys": [
+              "S002-S001-N011"
+            ],
+            "source_segment_ids": [
+              "SRC0039",
+              "SRC0040"
+            ],
+            "message": "节点S002-S001-N011提及许师姐将孟浩扔到半山腰裂缝后「跟随进入吓退王有材等人」，但未明确许师姐进入裂缝的方式、裂缝的入口空间逻辑，也未说明孟浩被扔入裂缝后落地的状态，存在空间行动跳跃，易让观众误解为人物瞬移。",
+            "required_resolution": "补充绿风裹着孟浩降落在裂缝内、许师姐跟随进入裂缝的视觉动作，以及裂缝内部的空间结构简单展示，adaptation_kind=logic_bridge。",
+            "must_fix": true
+          },
+          {
+            "code": "persistent_state_conflict",
+            "node_keys": [
+              "S003-S002-S001-N016"
+            ],
+            "source_segment_ids": [
+              "SRC0057"
+            ],
+            "message": "节点S003-S002-S001-N016仅提到分配王有材和大青山被困少年乙去南区杂役处，未提及剩下的孟浩和大青山被困少年甲的分配结果，与之前建立的「四名杂役被带到宗门」的状态冲突，存在人员去向的闭环缺失，易让观众疑惑另外两人的安排。",
+            "required_resolution": "补充绿袍执事对孟浩和大青山被困少年甲的分配安排说明，或明确暗示后续会安排两人去向，保证四名杂役的去向逻辑闭环，adaptation_kind=logic_bridge。",
+            "must_fix": true
+          }
+        ]
+      }
+    }
+  ]
+}
