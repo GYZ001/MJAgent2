@@ -89,6 +89,11 @@ ERR_20260810_533AC9_REPLAY = (
     / "fixtures"
     / "screenplay_scene_shard_err_20260810_533ac9.json"
 )
+RUN_D6BA3C89_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_run_d6ba3c89a60f.json"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -2286,3 +2291,266 @@ def test_creative_provider_response_recovers_with_scaffold_fingerprint(
         "local_recovery": True,
         "validation_errors": [],
     }]
+
+
+def test_run_d6ba3c89_replay_records_all_provider_outcomes() -> None:
+    replay = json.loads(RUN_D6BA3C89_REPLAY.read_text(encoding="utf-8"))
+    calls = replay["provider_responses"]
+
+    assert replay["run_id"] == "run_d6ba3c89a60f"
+    assert [call["provider_call_id"] for call in calls] == list(
+        range(60908, 60918)
+    )
+    assert [
+        call["shard_id"] for call in calls
+    ] == [
+        "SS001", "SS002", "SS002", "SS001", "SS003",
+        "SS004", "SS003", "SS004", "SS005", "SS004",
+    ]
+    assert sum(call["shard_id"] != "SS005" for call in calls) == 9
+    assert next(
+        call for call in calls if call["provider_call_id"] == 60916
+    )["validator_errors"] == []
+    format_retry = next(
+        call for call in calls if call["provider_call_id"] == 60915
+    )
+    assert format_retry["validation_phase"] == "format"
+    assert {
+        "speaker",
+        "action",
+        "evidence",
+    } <= set(format_retry["response"]["scenes"][0]["units"][3])
+    assert all(
+        "Extra inputs are not permitted" in error
+        for error in format_retry["validator_errors"]
+    )
+
+
+def test_scene_shard_plan_owns_unique_structural_unit_slots() -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+
+    slots = plan.unit_slots
+    assert slots
+    assert [slot.scene_key for slot in slots] == [
+        "bp-sc001",
+        "bp-sc002",
+    ]
+    assert len({slot.unit_key for slot in slots}) == len(slots)
+    assert len({slot.event_key for slot in slots}) == len(slots)
+    assert [slot.unit_order for slot in slots] == list(range(1, len(slots) + 1))
+    assert [slot.source_segment_ids for slot in slots] == [
+        ["SRC0001"],
+        ["SRC0002"],
+    ]
+    assert all(
+        plan.source_scene_owners[source_id] == slot.scene_key
+        for slot in slots
+        for source_id in slot.source_segment_ids
+    )
+
+
+def test_slot_content_compiles_by_key_and_rejects_contract_drift() -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    slot_content = {
+        slot.unit_key: {
+            "text": f"交付 {slot.source_segment_ids[0]}",
+            "resulting_state": f"完成 {slot.source_segment_ids[0]}",
+        }
+        for slot in reversed(plan.unit_slots)
+    }
+    draft = ScreenplaySceneShardCreativeIR.model_validate({
+        "slots": slot_content,
+    })
+
+    compiled = scene_shards_module.compile_screenplay_scene_shard_draft(
+        draft,
+        episode_no=1,
+        plan=plan,
+        scene_plans={
+            scene.key: scene for scene in blueprint.scene_plans
+        },
+        scene_input_contracts=contracts,
+    )
+    assert [
+        unit.unit_key
+        for scene in compiled.scenes
+        for unit in scene.units
+    ] == [slot.unit_key for slot in plan.unit_slots]
+    assert [
+        unit.event_key
+        for scene in compiled.scenes
+        for unit in scene.units
+    ] == [slot.event_key for slot in plan.unit_slots]
+
+    missing = ScreenplaySceneShardCreativeIR.model_validate({
+        "slots": dict(list(slot_content.items())[1:]),
+    })
+    with pytest.raises(ScreenplaySceneShardError, match="缺失 slot"):
+        scene_shards_module.compile_screenplay_scene_shard_draft(
+            missing,
+            episode_no=1,
+            plan=plan,
+            scene_plans={
+                scene.key: scene for scene in blueprint.scene_plans
+            },
+            scene_input_contracts=contracts,
+        )
+
+    extra_content = deepcopy(slot_content)
+    extra_content["unexpected-unit"] = {"text": "越权单元"}
+    extra = ScreenplaySceneShardCreativeIR.model_validate({
+        "slots": extra_content,
+    })
+    with pytest.raises(ScreenplaySceneShardError, match="多余 slot"):
+        scene_shards_module.compile_screenplay_scene_shard_draft(
+            extra,
+            episode_no=1,
+            plan=plan,
+            scene_plans={
+                scene.key: scene for scene in blueprint.scene_plans
+            },
+            scene_input_contracts=contracts,
+        )
+
+    first_key = plan.unit_slots[0].unit_key
+    overreach = deepcopy(slot_content)
+    overreach[first_key]["event_key"] = "model-owned-event"
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        ScreenplaySceneShardCreativeIR.model_validate({"slots": overreach})
+
+
+def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    fingerprint = (
+        scene_shards_module.screenplay_scene_generation_scaffold_hash(
+            plan,
+            contracts,
+        )
+    )
+    schema = build_screenplay_scene_shard_repair_schema(
+        plan=plan,
+        scene_input_contracts=contracts,
+    )
+
+    assert schema["x-generation-scaffold-hash"] == fingerprint
+    changed = plan.model_copy(deep=True)
+    changed.unit_slots[0].event_key += "-changed"
+    assert (
+        scene_shards_module.screenplay_scene_generation_scaffold_hash(
+            changed,
+            contracts,
+        )
+        != fingerprint
+    )
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v6"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v6"
+
+
+def test_dialogue_mismatch_is_not_silently_normalized() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    shard = _shard(plan, blueprint)
+    unit = shard.scenes[0].units[0]
+    unit.kind = "dialogue"
+    unit.text = "模型改写"
+    unit.source_text = "来源原文"
+
+    with pytest.raises(ScreenplaySceneShardError, match="dialogue.text"):
+        normalize_screenplay_scene_shard(
+            shard,
+            episode_no=1,
+            plan=plan,
+            scene_plans={
+                scene.key: scene for scene in blueprint.scene_plans
+            },
+            scene_input_contracts=contracts,
+        )
+    assert unit.text == "模型改写"
+
+
+def test_ambiguous_dialogue_authority_fails_before_provider_dispatch() -> None:
+    source = "“跟我走。”甲和乙同时抬头。"
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "n1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "甲和乙听到命令后抬头",
+            "temporal_domain_key": "present",
+            "time_label": "日",
+            "time_relation": "episode_start",
+            "location_key": "yard",
+            "location_label": "院中",
+            "participants": ["甲", "乙"],
+            "participant_evidence": [
+                {
+                    "identity_key": "甲",
+                    "source_segment_ids": ["SRC0001"],
+                    "usage": "visible",
+                },
+                {
+                    "identity_key": "乙",
+                    "source_segment_ids": ["SRC0001"],
+                    "usage": "visible",
+                },
+            ],
+            "action_logic": "命令发出后两人抬头",
+        }],
+    })
+    derive_blueprint_scene_plans(blueprint)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source,
+        identity_registry_hash="identity-hash",
+    )[0]
+    registry = [
+        {
+            "identity_key": "person_a",
+            "authority_id": "bible:甲",
+            "canonical_name": "甲",
+            "source_labels": ["甲"],
+        },
+        {
+            "identity_key": "person_b",
+            "authority_id": "bible:乙",
+            "canonical_name": "乙",
+            "source_labels": ["乙"],
+        },
+    ]
+
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="dialogue.*唯一 speaker",
+    ):
+        build_screenplay_scene_input_contracts(
+            plan=plan,
+            scene_plans=blueprint.scene_plans,
+            source_by_id={
+                segment.segment_id: segment.text
+                for segment in index_source_segments(source)
+            },
+            identity_registry=registry,
+            blueprint_nodes=blueprint.nodes,
+        )
