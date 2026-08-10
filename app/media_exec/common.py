@@ -28,7 +28,15 @@ from app.artifacts import (_adopted_video_paths, _invalidate_final_video,
                            purge_project_video_artifacts, purge_shot_videos)
 from app.compiler import ensure_source_excerpt_in_prompt, idem_key as make_idem_key, shot_cost_cny
 from app.completion_grant import VideoBudgetAuthorizationError
-from app.db import get_conn, get_setting, log_provider_call, new_id, now, rows_to_dicts
+from app.db import (
+    get_conn,
+    get_setting,
+    log_provider_call,
+    new_id,
+    now,
+    rows_to_dicts,
+    run_write_transaction,
+)
 from app.hiagent import ProviderError
 from app.evidence import media as media_evidence
 from app.orchestration import media_scheduler

@@ -27,9 +27,8 @@ import httpx
 from app import config
 from app.atomic_io import atomic_write_bytes
 from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
-                    latest_provider_request_json, provider_operation_id,
-                    start_provider_call, update_provider_call_progress,
-                    update_provider_call_request)
+                    provider_operation_id, start_provider_call,
+                    update_provider_call_progress, update_provider_call_request)
 from app.model_capabilities import (
     active_model_token_limits,
 )
@@ -104,6 +103,30 @@ def _cached_successful_provider_response(
         return None
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None
+
+
+def _latest_provider_operation_request(
+    kind: str,
+    operation_id: str,
+) -> dict[str, Any] | None:
+    """Load request identity across models so a restart cannot reuse a key after model drift."""
+    try:
+        rows = get_conn().execute(
+            """SELECT request_json FROM provider_calls
+               WHERE kind=? AND operation_id=? AND request_json IS NOT NULL
+               ORDER BY id DESC""",
+            (kind, operation_id),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        try:
+            request = json.loads(row["request_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(request, dict):
+            return request
+    return None
 
 
 class ProviderError(Exception):
@@ -1643,8 +1666,8 @@ async def create_video_task(
         operation_id = f"video-create-{call_meta['version_id']}"
     else:
         operation_id = provider_operation_id("video_create", model, payload)
-    saved_request = latest_provider_request_json(
-        "video_create", model, operation_id,
+    saved_request = _latest_provider_operation_request(
+        "video_create", operation_id,
     )
     if saved_request is not None and saved_request != payload:
         raise ProviderError(

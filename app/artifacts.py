@@ -745,17 +745,18 @@ def flush_media_cleanup_outbox(outbox_id: str) -> bool:
     try:
         payload = json.loads(row["payload_json"] or "{}")
         for raw_path in payload.get("files") or []:
-            try:
-                Path(str(raw_path)).unlink(missing_ok=True)
-            except OSError:
-                pass
+            Path(str(raw_path)).unlink(missing_ok=True)
         for raw_path in payload.get("directories") or []:
-            shutil.rmtree(Path(str(raw_path)), ignore_errors=True)
+            try:
+                shutil.rmtree(Path(str(raw_path)))
+            except FileNotFoundError:
+                pass
         final = payload.get("invalidate_final") or {}
         if final.get("project_id") and final.get("episode_no") is not None:
             _invalidate_final_video(
                 str(final["project_id"]),
                 int(final["episode_no"]),
+                suppress_errors=False,
             )
         conn.execute(
             """UPDATE media_cleanup_outbox
@@ -839,7 +840,12 @@ def clear_episode_artifacts(episode_id: str) -> dict:
     return {"episode_id": episode_id, "shots": len(shots), "videos": versions, "references": refs}
 
 
-def _invalidate_final_video(project_id: str, episode_no: int) -> None:
+def _invalidate_final_video(
+    project_id: str,
+    episode_no: int,
+    *,
+    suppress_errors: bool = True,
+) -> None:
     """标记某集已合成的整集成品为待更新，但不删除用户已经得到的成品。
 
     生成任务与成片台刷新是并行的。过去这里直接删除 ``episode.mp4``，会让
@@ -852,7 +858,8 @@ def _invalidate_final_video(project_id: str, episode_no: int) -> None:
         if final_path.exists():
             atomic_write_text(stale_path, "outdated\n")
     except OSError:
-        pass
+        if not suppress_errors:
+            raise
 
 
 def _adopted_video_paths(episode_id: str) -> list[tuple[int, str]]:

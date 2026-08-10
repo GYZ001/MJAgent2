@@ -39,6 +39,29 @@ def _assert_provider_create_resolved(job, task_id: str | None) -> None:
         )
 
 
+async def _claim_job_without_blocking_loop(
+    job_id: str,
+    owner: str,
+    *,
+    lease_seconds: float,
+):
+    if not _authority_checks_can_use_worker_thread():
+        return media_scheduler.claim_job(
+            job_id,
+            owner,
+            lease_seconds=lease_seconds,
+        )
+    return await run_write_transaction(
+        lambda conn: media_scheduler.claim_job(
+            job_id,
+            owner,
+            lease_seconds=lease_seconds,
+            conn=conn,
+            commit=False,
+        )
+    )
+
+
 def _authority_checks_can_use_worker_thread(conn=None) -> bool:
     """A private in-memory SQLite database cannot be reopened in a worker thread."""
     try:
@@ -3108,7 +3131,11 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     conn = get_conn()
     owner = lease_owner or f"direct-{id(asyncio.current_task())}"
     if lease_owner is None:
-        if not media_scheduler.claim_job(job_id, owner, lease_seconds=180.0):
+        if not await _claim_job_without_blocking_loop(
+            job_id,
+            owner,
+            lease_seconds=180.0,
+        ):
             return
         run_row = conn.execute(
             "SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)
@@ -4329,7 +4356,11 @@ async def _worker_loop(
             return
         claimed = False
         try:
-            claim = media_scheduler.claim_job(job_id, name, lease_seconds=180.0)
+            claim = await _claim_job_without_blocking_loop(
+                job_id,
+                name,
+                lease_seconds=180.0,
+            )
             if claim:
                 claimed = True
                 row = get_conn().execute(

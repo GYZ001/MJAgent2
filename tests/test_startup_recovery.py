@@ -66,6 +66,11 @@ def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monke
     )
     conn.commit()
     parent = _paused_run("screenplay", "episode", "e1")
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=? WHERE id='e1'",
+        (parent,),
+    )
+    conn.commit()
 
     class Recorder:
         run_id = "run_not_started"

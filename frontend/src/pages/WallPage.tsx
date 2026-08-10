@@ -3,6 +3,7 @@ import EpisodeCrumb from '../components/EpisodeCrumb'
 import { episodeBusy, useEpisode, useNav, usePoll } from '../App'
 import {
   api,
+  ApiError,
   type Episode,
   type EpisodeVideoGenerationPlan,
   type ReferenceImage,
@@ -1304,6 +1305,12 @@ export function countReferenceImages(versions: ShotVersion[]): number {
   )
 }
 
+export function isProviderCreateUnresolved(
+  pipeline?: Shot['pipeline'] | null,
+): boolean {
+  return pipeline?.reason_code === 'VIDEO_PROVIDER_CREATE_UNRESOLVED'
+}
+
 function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, generating, setGenerating, writeFrozen, onRefresh, onToast }: { shot: Shot; episodeNo: number; episodeStatus: string; context: ReviewWallContext | null; generating: boolean; setGenerating: (busy: boolean) => void; writeFrozen: boolean; onRefresh: () => Promise<void>; onToast: (message: string, action?: { label: string; run: () => void }, persistent?: boolean) => void }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [previewId, setPreviewId] = useState<string | null>(() => resolvePreviewVersionId(shot.versions, null))
@@ -1322,6 +1329,8 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
   const [candidateAction, setCandidateAction] = useState<{ kind: 'archive' | 'restore'; versionId: string } | null>(null)
   const [clearingResources, setClearingResources] = useState(false)
   const [clearResourcesConfirm, setClearResourcesConfirm] = useState(false)
+  const [providerRecoveryBusy, setProviderRecoveryBusy] = useState(false)
+  const [confirmProviderResubmission, setConfirmProviderResubmission] = useState(false)
   const playableKey = shot.versions.map(version => `${version.id}:${Boolean(version.video_url)}:${videoPlaybackRate(version)}`).join('|')
 
   useEffect(() => {
@@ -1345,6 +1354,8 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
     setAdopting(false)
     setCancellingAdoption(false)
     setCandidateAction(null)
+    setProviderRecoveryBusy(false)
+    setConfirmProviderResubmission(false)
   }, [shot.id])
   useEffect(() => {
     if (wizard !== 'rewrite') return
@@ -1370,11 +1381,14 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
   const adoptedVersion = shot.versions.find(version => version.id === shot.adopted_version_id)
   const versions = useMemo(() => visibleVideoVersions(shot.versions), [shot.versions])
   const shotReferenceImageCount = countReferenceImages(shot.versions)
+  const providerCreateUnresolved = isProviderCreateUnresolved(shot.pipeline)
   const videoTaskActive = versions.some(version =>
     ['queued', 'running', 'waiting_provider', 'paused'].includes(version.status),
   )
   const createVideoDisabledReason = generating
     ? '当前视频任务正在处理，请等待完成'
+    : providerCreateUnresolved
+      ? '供应商可能已接收当前创建请求，请先核对并恢复原任务'
     : !['confirmed', 'generating', 'done'].includes(episodeStatus)
       ? '请先在分镜台确认本集分镜'
       : writeFrozen
@@ -1390,9 +1404,11 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
   const adoptDisabledReason = writeFrozen
     ? context?.upstream.blockers.join('；') || '当前生成资格未通过'
     : ''
-  const pipelineBlocked = shot.pipeline?.pipeline_status === 'waiting_human'
+  const pipelineBlocked = !providerCreateUnresolved && (
+    shot.pipeline?.pipeline_status === 'waiting_human'
     || shot.pipeline?.pipeline_stage === 'preflight_blocked'
     || shot.pipeline?.pipeline_stage === 'waiting_human'
+  )
   const preflightRetrying = shot.pipeline?.pipeline_stage === 'preflight_retry'
     || shot.pipeline?.pipeline_stage === 'preflight_validating'
 
@@ -1417,6 +1433,40 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
       onToast(error instanceof Error ? error.message : String(error), undefined, true)
     } finally {
       setGenerating(false)
+    }
+  }
+
+  const recoverProviderCreate = async (allowNewSubmission = false) => {
+    const taskId = shot.pipeline?.task_id
+    if (!taskId) {
+      onToast('当前任务缺少可恢复的任务标识，请到监制房查看详情', undefined, true)
+      return
+    }
+    setProviderRecoveryBusy(true)
+    try {
+      const result = await api.post(`/system/jobs/${encodeURIComponent(taskId)}/retry`, {
+        expected_version: shot.pipeline?.state_revision ?? 0,
+        allow_new_submission: allowNewSubmission,
+      }) as { retryability?: { action?: string } }
+      setConfirmProviderResubmission(false)
+      onToast(
+        result.retryability?.action === 'continue_poll'
+          ? '已恢复原供应商任务，正在继续查询；未重复提交 create'
+          : '已确认重新提交，系统正在重新校验预算',
+      )
+      await onRefresh()
+    } catch (error) {
+      if (
+        error instanceof ApiError
+        && error.code === 'PROVIDER_HANDLE_UNCONFIRMED'
+        && !allowNewSubmission
+      ) {
+        setConfirmProviderResubmission(true)
+        return
+      }
+      onToast(error instanceof Error ? error.message : String(error), undefined, true)
+    } finally {
+      setProviderRecoveryBusy(false)
     }
   }
 
@@ -1510,6 +1560,7 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
       <div><b>本镜视频</b><span>单次估算 ￥{shot.est_cost_cny.toFixed(2)} · 候选 {versions.length} 个</span></div>
       <div className="asset-workspace-actions"><button className="btn primary small" disabled={Boolean(createVideoDisabledReason)} aria-label={createVideoDisabledReason ? `新建视频版本，暂不可用：${createVideoDisabledReason}` : `为镜 ${shot.shot_no} 新建视频版本`} title={createVideoDisabledReason || '提交前会先展示输入方式、范围和估算费用'} onClick={() => { setWizard('reroll'); setPrompt('') }}>新建视频版本</button><button type="button" className="btn ghost small danger" disabled={Boolean(clearResourcesDisabledReason)} aria-label={clearResourcesDisabledReason ? `清空资源，暂不可用：${clearResourcesDisabledReason}` : `清空镜 ${shot.shot_no} 的视频和图像资源`} title={clearResourcesDisabledReason || '删除本镜视频、关键帧和参考图'} onClick={() => setClearResourcesConfirm(true)}>{clearingResources ? '清空中…' : '清空资源'}</button></div>
     </section>
+    {providerCreateUnresolved && <section className="review-persistent-error compact" role="alert"><b>供应商 create 结果待核对</b><span>{shot.pipeline?.reason_text || '供应商可能已接收创建请求，但系统尚未取得可查询的任务编号。'}</span><p>先尝试恢复原供应商任务，此操作不会重新提交 create。只有确认旧任务无法核对后，页面才会提供重新提交入口。</p><button type="button" className="btn primary small" disabled={providerRecoveryBusy || !shot.pipeline?.task_id} onClick={() => { void recoverProviderCreate(false) }}>{providerRecoveryBusy ? '正在核对…' : '仅恢复原任务并继续查询'}</button>{shot.pipeline?.task_id && <details><summary>任务信息</summary><code>{shot.pipeline.task_id}</code></details>}</section>}
     {pipelineBlocked && <section className="review-persistent-error compact" role="alert"><b>视频任务尚未进入生成</b><span>{shot.pipeline?.reason_text || shot.pipeline?.blocked_reason || '视频输入需要处理后才能继续。'}</span><p>请先按提示修正分镜内容；修正后点击「新建视频版本」会复用当前任务并重新校验，不会重复提交供应商。</p>{shot.pipeline?.task_id && <details><summary>任务信息</summary><code>{shot.pipeline.task_id}</code></details>}</section>}
     {preflightRetrying && <section className="material-fallback-note" role="status"><b>{shot.pipeline?.pipeline_stage === 'preflight_validating' ? '正在校验视频输入' : '校验遇到瞬时故障，等待自动重试'}</b><span>{shot.pipeline?.reason_text || '此阶段尚未提交供应商，不会产生视频费用。'}{shot.pipeline?.next_retry_at ? ` 下次检查：${new Date(shot.pipeline.next_retry_at * 1000).toLocaleTimeString()}` : ''}</span></section>}
     <div className="video-preview-layout">
@@ -1544,5 +1595,6 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
     {adopt && <Dialog title={`${adopt.id === shot.adopted_version_id ? '更新倍速定稿' : '采纳'}镜 ${shot.shot_no} 的 v${adopt.version_no}`} onClose={() => setAdopt(null)} closeDisabled={adopting}><div className="review-impact"><p>当前采用：{adoptedVersion ? `v${adoptedVersion.version_no} · ${videoPlaybackRate(adoptedVersion)}×` : '无'}；目标候选：v{adopt.version_no} · {playbackRates[adopt.id] ?? videoPlaybackRate(adopt)}×。</p><p>目标质检分 {adopt.qa?.overall?.toFixed(2) ?? '未评估'}，费用 ￥{adopt.cost_cny.toFixed(2)}。提交会固定镜头、版本和倍速，并写入审计；成片将使用倍速处理后的片段。</p></div><label className="review-field">必填定稿理由<textarea rows={4} disabled={adopting} value={adoptReason} onChange={event => setAdoptReason(event.target.value)} placeholder="说明画面质量、节奏、连续性或成本判断" /></label><div className="dialog-actions"><button className="btn ghost" disabled={adopting} onClick={() => setAdopt(null)}>取消</button><button className="btn primary" disabled={adopting || adoptReason.trim().length < 4} onClick={() => { void doAdopt() }}>{adopting ? '定稿中…' : `确认按 ${playbackRates[adopt.id] ?? videoPlaybackRate(adopt)}× 定稿采纳`}</button></div></Dialog>}
     {deleteTarget && <Dialog title={`永久删除镜 ${shot.shot_no} 的 v${deleteTarget.version_no}？`} onClose={() => setDeleteTarget(null)} closeDisabled={deleting}><div className="review-impact"><b>此操作无法撤销</b><p>将永久移除此候选记录和关联视频入口；当前采用版与其他候选不受影响。</p><p>已记录费用 ￥{deleteTarget.cost_cny.toFixed(2)} 不会退回。若只想暂时从候选列表隐藏，请取消后使用「归档」。</p></div><div className="dialog-actions"><button type="button" className="btn ghost" disabled={deleting} onClick={() => setDeleteTarget(null)}>保留候选</button><button type="button" className="btn danger" disabled={deleting} onClick={() => { void remove(deleteTarget) }}>{deleting ? '删除中…' : '确认永久删除'}</button></div></Dialog>}
     {clearResourcesConfirm && <DecisionDialog title={`清空镜 ${shot.shot_no} 的全部资源？`} summary={`${versions.length} 个视频候选、${shotReferenceImageCount} 张图像和当前采用关系将被删除`} message="本镜已引入或生成的视频、关键帧和参考图都会清空；剧本和分镜文本保留。" details={['此操作不可撤销，已发生费用不会退回', '后续需重新准备图像并生成视频']} confirmLabel="确认清空本镜资源" cancelLabel="保留资源" danger onClose={() => setClearResourcesConfirm(false)} onConfirm={() => { setClearResourcesConfirm(false); void clearResources() }} />}
+    {confirmProviderResubmission && <DecisionDialog title={`确认重新提交镜 ${shot.shot_no} 的供应商 create？`} summary="旧请求可能已被供应商接收，重新提交仍可能产生第二笔费用" message="系统未找到可继续查询的供应商任务编号。请先核对供应商后台；确认后会复用原幂等标识、重新校验预算并再次提交。" details={['此动作不是恢复原任务', '原请求费用状态仍未知', '普通新建视频版本保持禁用']} confirmLabel={providerRecoveryBusy ? '正在提交…' : '已核对，确认重新提交'} cancelLabel="暂不重新提交" danger onClose={() => setConfirmProviderResubmission(false)} onConfirm={() => { void recoverProviderCreate(true) }} />}
   </div>
 }

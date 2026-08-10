@@ -1976,6 +1976,21 @@ def _requeue_no_charge_job(
     return str(job["id"]) if changed.rowcount == 1 else None
 
 
+def _budget_paused_job_id(
+    conn,
+    *,
+    shot_id: str,
+) -> str | None:
+    row = conn.execute(
+        """SELECT id FROM jobs WHERE shot_id=? AND kind='video'
+           AND status='paused_budget'
+           AND cancellation_requested=0 AND abandoned=0
+           ORDER BY created_at DESC LIMIT 1""",
+        (shot_id,),
+    ).fetchone()
+    return str(row["id"]) if row else None
+
+
 def _collect_issues(
     entry: ShotCoverageEntry,
     *,
@@ -3336,6 +3351,25 @@ async def run_video_completion_supervisor(
         with __import__("contextlib").suppress(Exception): __import__("urllib.request").request.urlopen(__import__("urllib.request").request.Request("http://127.0.0.1:7777/event", data=json.dumps({"sessionId":"video-dispatch-block","runId":"post-fix","hypothesisId":"C","location":"app/video_supervisor.py:run_video_supervisor","msg":"[DEBUG] actionable batch","data":{"tick_no":cp.tick_no,"actionable_count":len(ledger.actionable()),"active_jobs":ledger.has_active_jobs(),"db_in_transaction":get_conn().in_transaction},"ts":int(time.time()*1000)}).encode(), headers={"Content-Type":"application/json"}), timeout=0.2).read()
         # #endregion
         for entry in ledger.actionable():
+            budget_paused_job_id = _budget_paused_job_id(
+                conn,
+                shot_id=entry.shot_id,
+            )
+            if budget_paused_job_id:
+                cp.phase = "WAITING_AUTHORIZATION"
+                cp.outcome = "VIDEO_BUDGET_PAUSED"
+                cp.last_plan = {
+                    "shot_no": entry.shot_no,
+                    "level": "L6",
+                    "strategy": "handoff_human",
+                    "reason": "预算暂停仅允许通过页面显式继续",
+                    "issue_codes": ["VIDEO_BUDGET_PAUSED"],
+                    "job_id": budget_paused_job_id,
+                }
+                _merge_shot_state(cp, ledger)
+                save_checkpoint(cp, run_id=run_id)
+                return cp
+
             # 单镜上限
             if entry.cost_spent_cny >= per_shot_cap and entry.grade == "C":
                 if allow_fallback_adopt and entry.best_version_id:
@@ -3929,7 +3963,7 @@ async def video_supervisor_watchdog_loop(interval_s: float = 30.0) -> None:
             # 轻量级业务巡检始终运行，不要求用户显式开启全片补齐授权。
             # 它只恢复已请求任务或降级孤儿连续性，不会自行创建新的付费范围。
             from app import worker
-            worker.reconcile_stalled_video_jobs()
+            await asyncio.to_thread(worker.reconcile_stalled_video_jobs)
             await reconcile_stale_video_supervisors()
         except asyncio.CancelledError:
             raise

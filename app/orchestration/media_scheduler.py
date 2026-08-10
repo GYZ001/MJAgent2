@@ -192,9 +192,16 @@ def reconcile_cancelled_version_states(
     return changed
 
 
-def claim_job(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> Claim | None:
+def claim_job(
+    job_id: str,
+    owner: str,
+    *,
+    lease_seconds: float = 120.0,
+    conn: sqlite3.Connection | None = None,
+    commit: bool = True,
+) -> Claim | None:
     """CAS claim a due queued / waiting_provider job, or reclaim an expired lease."""
-    db = get_conn()
+    db = conn or get_conn()
     stamp = now()
     expires = stamp + max(5.0, float(lease_seconds))
     row = db.execute("SELECT status, lease_expires_at FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -211,13 +218,15 @@ def claim_job(job_id: str, owner: str, *, lease_seconds: float = 120.0) -> Claim
         (owner, expires, stamp, stamp, job_id, stamp, stamp),
     )
     if cursor.rowcount != 1:
-        db.rollback()
+        if commit:
+            db.rollback()
         return None
     db.execute(
         "UPDATE budget_reservations SET status='running' WHERE job_id=? AND status='reserved'",
         (job_id,),
     )
-    db.commit()
+    if commit:
+        db.commit()
     return Claim(recovered=recovered)
 
 

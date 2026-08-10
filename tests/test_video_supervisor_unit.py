@@ -1,8 +1,10 @@
 """视频补齐 Supervisor 单元测试：grade / issues / router / budget / cascade / grant。"""
 from __future__ import annotations
 
+import asyncio
 import math
 import sqlite3
+import threading
 
 import pytest
 
@@ -27,11 +29,58 @@ from app.video_supervisor import (
     MIN_ATTEMPTS_PER_SHOT,
     CoverageLedger,
     ShotCoverageEntry,
+    _budget_paused_job_id,
     _requeue_no_charge_job,
     attempts_for,
 )
 from app.evidence.media import grade_shot_video
 from app.compiler import CompileError
+
+
+def test_watchdog_stall_reconciliation_does_not_block_event_loop(
+    monkeypatch,
+) -> None:
+    from app import video_supervisor, worker
+
+    started = threading.Event()
+    release = threading.Event()
+    supervisor_reconciled = asyncio.Event()
+
+    def blocking_reconcile() -> None:
+        started.set()
+        release.wait(timeout=1)
+
+    async def reconcile_supervisors() -> int:
+        supervisor_reconciled.set()
+        return 0
+
+    monkeypatch.setattr(worker, "reconcile_stalled_video_jobs", blocking_reconcile)
+    monkeypatch.setattr(
+        video_supervisor,
+        "reconcile_stale_video_supervisors",
+        reconcile_supervisors,
+    )
+
+    async def scenario() -> int:
+        watchdog = asyncio.create_task(
+            video_supervisor.video_supervisor_watchdog_loop(interval_s=5)
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 0.5)
+            heartbeat_ticks = 0
+            for _ in range(5):
+                await asyncio.sleep(0.005)
+                heartbeat_ticks += 1
+            assert watchdog.done() is False
+            release.set()
+            await asyncio.wait_for(supervisor_reconciled.wait(), timeout=0.5)
+            return heartbeat_ticks
+        finally:
+            release.set()
+            watchdog.cancel()
+            await asyncio.gather(watchdog, return_exceptions=True)
+
+    assert asyncio.run(scenario()) == 5
 
 
 def test_no_charge_requeue_preserves_budget_pause_gate() -> None:
@@ -69,6 +118,10 @@ def test_no_charge_requeue_preserves_budget_pause_gate() -> None:
         "job-failed": "queued",
         "job-budget": "paused_budget",
     }
+    assert _budget_paused_job_id(
+        conn,
+        shot_id="shot-budget",
+    ) == "job-budget"
 
 
 def test_grade_shot_video_a_b_c():

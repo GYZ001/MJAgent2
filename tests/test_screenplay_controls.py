@@ -951,6 +951,47 @@ def test_recovery_does_not_restart_persisted_cancellation(monkeypatch) -> None:
     assert api.recover_screenplay_tasks() == 0
 
 
+def test_recovery_failure_does_not_overwrite_concurrent_delete(monkeypatch) -> None:
+    conn = db.get_conn()
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="interrupted",
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing',"
+        "active_screenplay_run_id=? WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    def delete_then_fail(*_args, **_kwargs):
+        conn.execute(
+            "UPDATE episodes SET screenplay_status='pending',screenplay_error=NULL,"
+            "active_screenplay_run_id=NULL WHERE id='e1'"
+        )
+        conn.commit()
+        raise RuntimeError("delete won")
+
+    monkeypatch.setattr(api, "_new_screenplay_recorder", delete_then_fail)
+
+    assert api.recover_screenplay_tasks() == 0
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_error,active_screenplay_run_id "
+        "FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(episode) == {
+        "screenplay_status": "pending",
+        "screenplay_error": None,
+        "active_screenplay_run_id": None,
+    }
+
+
 @pytest.mark.asyncio
 async def test_batch_start_reports_partial_failure_without_stranding_episode(
     monkeypatch,

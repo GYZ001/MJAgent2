@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { useNav, usePoll } from "../App";
 import type { NavigationGuardPrompt } from "../App";
 import JsonViewer from "../components/JsonViewer";
@@ -483,7 +483,12 @@ export function jobBusinessLabel(job: Job) {
     jobStatusLabel(job.status),
   ].join(" · ");
 }
+export function isProviderCreateUnresolved(job: Pick<Job, "reason_code">) {
+  return job.reason_code === "VIDEO_PROVIDER_CREATE_UNRESOLVED";
+}
 export function jobNextStep(job: Job) {
+  if (isProviderCreateUnresolved(job))
+    return "供应商可能已接收创建请求；请先恢复原任务句柄，无法确认后再决定是否重新提交";
   if (job.status === "succeeded")
     return "任务已完成，无需处理";
   if (job.status === "running")
@@ -833,7 +838,7 @@ function JobDrawer({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const [confirmAction, setConfirmAction] = useState<
-    "" | "retry" | "resume" | "cancel"
+    "" | "retry" | "resume" | "cancel" | "confirm_new_submission"
   >("");
   const [copied, setCopied] = useState("");
   const [actionMessage, setActionMessage] = useState("");
@@ -855,43 +860,60 @@ function JobDrawer({
   useEffect(() => {
     void load();
   }, [load]);
-  const runAction = async (action: "retry" | "resume" | "cancel") => {
+  const runAction = async (
+    action: "retry" | "resume" | "cancel" | "confirm_new_submission",
+  ) => {
     setBusy(action);
     setError("");
     setActionMessage("");
+    const endpointAction = action === "confirm_new_submission" ? "resume" : action;
+    const allowNewSubmission = action === "confirm_new_submission";
+    let confirmationRequired = false;
     try {
       if (projectId) {
         await api.post(
-          `/projects/${encodeURIComponent(projectId)}/observability/jobs/${encodeURIComponent(job.id)}/${action}?source=${job.source}`,
-          action === "cancel" ? undefined : {
+          `/projects/${encodeURIComponent(projectId)}/observability/jobs/${encodeURIComponent(job.id)}/${endpointAction}?source=${job.source}`,
+          endpointAction === "cancel" ? undefined : {
             expected_version: job.state_revision ?? 0,
-            allow_new_submission: true,
+            allow_new_submission: allowNewSubmission,
           },
         );
       } else if (job.source === "run") {
         await api.post(
-          `/runs/${encodeURIComponent(job.run_id || job.id)}/${action}`,
-          action === "cancel" ? undefined : { allow_new_submission: true },
+          `/runs/${encodeURIComponent(job.run_id || job.id)}/${endpointAction}`,
+          endpointAction === "cancel" ? undefined : {
+            allow_new_submission: allowNewSubmission,
+          },
         );
-      } else if (action === "cancel") {
+      } else if (endpointAction === "cancel") {
         await api.post(`/jobs/${encodeURIComponent(job.id)}/cancel`);
       } else {
         await api.post(`/system/jobs/${encodeURIComponent(job.id)}/retry`, {
           expected_version: job.state_revision ?? 0,
-          allow_new_submission: true,
+          allow_new_submission: allowNewSubmission,
         });
       }
-      track("job_action", { action, object_status: job.status }, job.id);
+      track("job_action", { action: endpointAction, object_status: job.status }, job.id);
       setActionMessage(
-        `${jobWorkLabel(job)}：${action === "cancel" ? "取消请求已接受" : action === "resume" ? "恢复请求已接受，正在从检查点继续" : "重试请求已接受，正在排队"}`,
+        `${jobWorkLabel(job)}：${endpointAction === "cancel" ? "取消请求已接受" : allowNewSubmission ? "已确认重新提交，正在重新校验预算" : endpointAction === "resume" ? "恢复请求已接受，正在从检查点继续" : "重试请求已接受，正在排队"}`,
       );
       onChanged();
       await load();
     } catch (e) {
+      if (
+        e instanceof ApiError
+        && e.code === "PROVIDER_HANDLE_UNCONFIRMED"
+        && !allowNewSubmission
+      ) {
+        confirmationRequired = true;
+        setConfirmAction("confirm_new_submission");
+        setError("");
+        return;
+      }
       setError((e as Error).message);
     } finally {
       setBusy("");
-      setConfirmAction("");
+      if (!confirmationRequired) setConfirmAction("");
     }
   };
   const sourceUrl = job.project_id
@@ -908,6 +930,7 @@ function JobDrawer({
     "waiting_retry",
     "waiting_human",
   ].includes(job.status);
+  const providerCreateUnresolved = isProviderCreateUnresolved(job);
   const canCancel =
     job.source !== "screenplay" &&
     ["running", "queued", "recovering"].includes(job.status);
@@ -1032,7 +1055,7 @@ function JobDrawer({
               disabled={!!busy}
               onClick={() => setConfirmAction("resume")}
             >
-              从检查点恢复
+              {providerCreateUnresolved ? "核对并恢复原任务" : "从检查点恢复"}
             </button>
           )}
           {canCancel && !confirmAction && (
@@ -1048,8 +1071,12 @@ function JobDrawer({
           <div className="monitor-inline-confirm">
             {confirmAction === "cancel"
               ? "取消会中止当前任务，已产生的上游费用仍会保留。"
+              : confirmAction === "confirm_new_submission"
+                ? "未找到可继续查询的供应商任务编号。请先核对供应商后台；只有确认后才会重新提交 create，原请求费用仍可能已经产生。"
               : confirmAction === "resume"
-                ? "恢复会从安全检查点继续，并可能产生新的模型费用。"
+                ? providerCreateUnresolved
+                  ? "系统会先查找原供应商任务并继续查询，不会在此步骤重新提交 create。"
+                  : "恢复会从安全检查点继续，并可能产生新的模型费用。"
                 : "重试会创建新的执行轮次，并可能产生新的模型费用。"}
             <button
               disabled={!!busy}
@@ -1059,8 +1086,10 @@ function JobDrawer({
                 ? "处理中…"
                 : confirmAction === "cancel"
                   ? "确认取消"
+                  : confirmAction === "confirm_new_submission"
+                    ? "已核对，确认重新提交"
                   : confirmAction === "resume"
-                    ? "确认恢复"
+                    ? providerCreateUnresolved ? "仅恢复原任务" : "确认恢复"
                     : "确认重试"}
             </button>
             <button

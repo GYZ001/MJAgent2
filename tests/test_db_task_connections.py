@@ -9,7 +9,7 @@ import pytest
 from app import db
 
 
-def test_async_connection_does_not_wait_synchronously_for_writer_lock(
+def test_async_write_retries_until_lock_release_without_blocking_event_loop(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -21,25 +21,55 @@ def test_async_connection_does_not_wait_synchronously_for_writer_lock(
     writer.execute("BEGIN IMMEDIATE")
     monkeypatch.setattr(db, "DB_PATH", database_path)
 
-    async def contend() -> tuple[sqlite3.OperationalError, float, int]:
-        conn = db.get_conn()
-        busy_timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    async def contend() -> tuple[int, int]:
+        heartbeat_ticks = 0
         started_at = time.monotonic()
-        try:
-            conn.execute("INSERT INTO events(id) VALUES('contender')")
-        except sqlite3.OperationalError as exc:
-            return exc, time.monotonic() - started_at, busy_timeout_ms
-        raise AssertionError("contending write unexpectedly succeeded")
+        write_task = asyncio.create_task(db.run_write_transaction(
+            lambda conn: conn.execute(
+                "INSERT INTO events(id) VALUES('contender')"
+            ).rowcount,
+            retry_delays=(0.01, 0.02, 0.04, 0.08, 0.16),
+        ))
+        while time.monotonic() - started_at < 0.06:
+            heartbeat_ticks += 1
+            await asyncio.sleep(0.005)
+        assert write_task.done() is False
+        writer.rollback()
+        rowcount = await asyncio.wait_for(write_task, timeout=1)
+        return heartbeat_ticks, rowcount
 
     try:
-        error, elapsed, busy_timeout_ms = asyncio.run(contend())
+        heartbeat_ticks, rowcount = asyncio.run(contend())
     finally:
-        writer.rollback()
+        if writer.in_transaction:
+            writer.rollback()
         writer.close()
 
-    assert (error.sqlite_errorcode & 0xFF) == sqlite3.SQLITE_BUSY
-    assert busy_timeout_ms == 0
-    assert elapsed < 0.5
+    verification = sqlite3.connect(database_path)
+    try:
+        rows = verification.execute("SELECT id FROM events").fetchall()
+    finally:
+        verification.close()
+
+    assert heartbeat_ticks >= 5
+    assert rowcount == 1
+    assert rows == [("contender",)]
+
+
+def test_async_write_does_not_retry_non_lock_operational_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "non-lock-error.db")
+
+    async def fail() -> None:
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            await db.run_write_transaction(
+                lambda conn: conn.execute("INSERT INTO missing VALUES(1)"),
+                retry_delays=(0, 0),
+            )
+
+    asyncio.run(fail())
 
 
 def test_async_tasks_have_isolated_transactions_and_release_connections(

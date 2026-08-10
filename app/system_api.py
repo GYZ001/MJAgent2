@@ -1246,6 +1246,10 @@ def jobs_overview(include_all: bool = False):
                       ORDER BY j.updated_at DESC LIMIT 1
                     )
                   END AS linked_job_status,
+                  (
+                    SELECT j.reason_code FROM jobs j WHERE j.run_id=wr.id
+                    ORDER BY j.updated_at DESC LIMIT 1
+                  ) AS linked_job_reason_code,
                   CASE wr.scope_type
                     WHEN 'project' THEN wr.scope_id
                     WHEN 'episode' THEN scope_episode.project_id
@@ -1274,6 +1278,7 @@ def jobs_overview(include_all: bool = False):
         row["kind"] = row["workflow_type"]
         row["raw_status"] = row["status"]
         row["status"] = effective_run_status(row)
+        row["reason_code"] = row.get("linked_job_reason_code")
         row["error"] = (
             "服务重启后已自动重新排队，等待 worker 领取"
             if row["status"] == "recovering"
@@ -1501,9 +1506,13 @@ def retry_job(job_id: str, body: dict | None = None):
         and shot_plan is not None
         and shot_plan["status"] == "waiting_asset"
     )
+    waiting_provider_create_resolution = bool(
+        item["status"] == "waiting_human"
+        and item.get("reason_code") == "VIDEO_PROVIDER_CREATE_UNRESOLVED"
+    )
     if item["status"] not in {
         "failed", "cancelled", "paused", "paused_external", "paused_budget", "waiting_retry",
-    } and not waiting_input_repair:
+    } and not waiting_input_repair and not waiting_provider_create_resolution:
         raise HTTPException(409, detail={
             "code": "JOB_STATE_CONFLICT", "message": f"当前状态 {item['status']} 不支持重试",
             "current_status": item["status"],

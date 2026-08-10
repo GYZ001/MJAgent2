@@ -252,6 +252,12 @@ def _restart_screenplay_run(run_id: str, trigger_type: str):
     ).fetchone()
     if not episode:
         raise HTTPException(404, "剧集不存在")
+    if episode["active_screenplay_run_id"] != run_id:
+        raise HTTPException(409, {
+            "code": "SCREENPLAY_RUN_NO_LONGER_OWNS_EPISODE",
+            "message": "该历史运行已不再绑定当前剧本，不能恢复或重试",
+            "action": "open_screenplay",
+        })
     if task_registry.active("screenplay", episode["id"]):
         raise HTTPException(409, "该剧集已有剧本任务在运行")
     try:
@@ -272,6 +278,7 @@ def _restart_screenplay_run(run_id: str, trigger_type: str):
                 "从任务中心继续局部修复：工作副本和检查点均已保留"
                 if is_repair else None
             ),
+            expected_active_run_id=run_id,
         )
     except Exception as exc:
         raise HTTPException(503, {

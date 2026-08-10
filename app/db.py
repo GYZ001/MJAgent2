@@ -11,7 +11,7 @@ import time
 import traceback
 import urllib.request
 import uuid
-from typing import Any
+from typing import Any, Callable, TypeVar
 import weakref
 
 from app.config import DATA_DIR, DB_PATH, DEFAULT_SETTINGS
@@ -21,6 +21,9 @@ _task_connections: weakref.WeakKeyDictionary[
     asyncio.Task[Any], sqlite3.Connection
 ] = weakref.WeakKeyDictionary()
 _task_connections_lock = threading.Lock()
+_T = TypeVar("_T")
+
+ASYNC_WRITE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4)
 
 # #region debug-point A-D:sqlite-transaction-trace
 _DEBUG_SQL_URL = "http://127.0.0.1:7777/event"
@@ -1206,6 +1209,52 @@ def _open_connection(*, timeout: float = 30.0) -> sqlite3.Connection:
     return conn
 
 
+def _is_transient_sqlite_lock(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if error_code is None:
+        return False
+    return (int(error_code) & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }
+
+
+def _run_write_transaction_once(
+    operation: Callable[[sqlite3.Connection], _T],
+) -> _T:
+    conn = _open_connection(timeout=0)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        result = operation(conn)
+        conn.commit()
+        return result
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+async def run_write_transaction(
+    operation: Callable[[sqlite3.Connection], _T],
+    *,
+    retry_delays: tuple[float, ...] = ASYNC_WRITE_RETRY_DELAYS_S,
+) -> _T:
+    """Run one short transaction off-loop with bounded async lock retries."""
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            return await asyncio.to_thread(_run_write_transaction_once, operation)
+        except sqlite3.OperationalError as exc:
+            if (
+                not _is_transient_sqlite_lock(exc)
+                or attempt >= len(retry_delays)
+            ):
+                raise
+            await asyncio.sleep(max(0.0, float(retry_delays[attempt])))
+    raise AssertionError("unreachable")
+
+
 def _release_task_connection(task: asyncio.Task[Any]) -> None:
     with _task_connections_lock:
         conn = _task_connections.pop(task, None)
@@ -1227,9 +1276,7 @@ def get_conn() -> sqlite3.Connection:
         with _task_connections_lock:
             conn = _task_connections.get(task)
             if conn is None:
-                # sqlite3 waits for writer locks synchronously. An asyncio task
-                # must fail fast so retry backoff can yield to the event loop.
-                conn = _open_connection(timeout=0)
+                conn = _open_connection()
                 _task_connections[task] = conn
                 task.add_done_callback(_release_task_connection)
         return conn

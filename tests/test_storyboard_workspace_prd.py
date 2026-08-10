@@ -2219,3 +2219,46 @@ def test_media_cleanup_outbox_keeps_files_until_database_commit(
         "SELECT status FROM media_cleanup_outbox WHERE id=?",
         (staged["outbox_id"],),
     ).fetchone()[0] == "completed"
+
+
+def test_media_cleanup_outbox_retries_file_delete_errors(
+    storyboard_db,
+    tmp_path,
+    monkeypatch,
+):
+    from app import artifacts
+
+    video_file = tmp_path / "locked-shot.mp4"
+    video_file.write_bytes(b"video")
+    storyboard_db.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('v-locked','s1',1,'prompt','idem-locked','done',?,1)""",
+        (str(video_file),),
+    )
+    storyboard_db.commit()
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    storyboard_db.commit()
+
+    real_unlink = artifacts.Path.unlink
+
+    def fail_target(path, *args, **kwargs):
+        if path == video_file:
+            raise PermissionError("injected file lock")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts.Path, "unlink", fail_target)
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is False
+    pending = storyboard_db.execute(
+        "SELECT status,attempts,last_error FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()
+    assert pending["status"] == "pending"
+    assert pending["attempts"] == 1
+    assert "injected file lock" in pending["last_error"]
+    assert video_file.exists()
+
+    monkeypatch.setattr(artifacts.Path, "unlink", real_unlink)
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
+    assert not video_file.exists()

@@ -5,6 +5,7 @@ import asyncio
 import json
 
 import pytest
+from fastapi import HTTPException
 
 from app import api, db
 from app.capabilities import ensure_catalog_loaded
@@ -12,6 +13,8 @@ from app.capabilities import inputs as capability_inputs
 from app.capabilities import preflight as capability_preflight
 from app.capabilities.direct import enter_handler
 from app.capabilities.registry import get_registry
+from app.evidence import repository
+from app.orchestration import api as orchestration_api
 from app.production.revision import (
     ensure_production_revision,
     get_active_production_revision,
@@ -197,3 +200,72 @@ def test_delete_route_is_registered_as_destructive_capability() -> None:
         "DELETE /api/episodes/{episode_id}/screenplay"
     ] == "screenplay.delete"
     assert registry.commands["screenplay.delete"].title == "删除当前剧本"
+
+
+def test_delete_rolls_back_shot_cleanup_when_later_step_fails(monkeypatch) -> None:
+    original = api.worker.delete_episode_shots
+
+    def fail_after_cleanup(episode_id: str, **kwargs):
+        original(episode_id, **kwargs)
+        raise RuntimeError("injected delete failure")
+
+    monkeypatch.setattr(api.worker, "delete_episode_shots", fail_after_cleanup)
+
+    with enter_handler(), pytest.raises(RuntimeError, match="injected"):
+        asyncio.run(api.delete_screenplay("e1"))
+
+    conn = db.get_conn()
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_artifact_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(episode) == {
+        "screenplay_status": "ready",
+        "screenplay_artifact_id": "art-published",
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+    ).fetchone()["c"] == 1
+    assert get_active_production_revision("e1", "screenplay") is not None
+
+
+@pytest.mark.asyncio
+async def test_deleted_screenplay_cannot_be_revived_from_historical_run(
+    monkeypatch,
+) -> None:
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="historical",
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=? WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    with enter_handler():
+        await api.delete_screenplay("e1")
+
+    monkeypatch.setattr(
+        api,
+        "_new_screenplay_recorder",
+        lambda *_args, **_kwargs: pytest.fail("历史 Run 不得创建恢复运行"),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await orchestration_api.retry_run(run_id)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "SCREENPLAY_RUN_NO_LONGER_OWNS_EPISODE"
+    episode = conn.execute(
+        "SELECT screenplay_status,active_screenplay_run_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert dict(episode) == {
+        "screenplay_status": "pending",
+        "active_screenplay_run_id": None,
+    }

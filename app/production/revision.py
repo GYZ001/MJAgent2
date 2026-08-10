@@ -558,53 +558,60 @@ def ensure_production_revision(
     """获取或创建候选 revision，不改变 episode 的正式发布指针。"""
     ensure_production_revisions_table()
     conn = get_conn()
-    _assert_screenplay_write_owner(
-        conn,
-        episode_id=episode_id,
-        kind=kind,
-    )
-    if resume:
-        existing = get_active_production_revision(episode_id, kind)
-        if existing:
-            requested = {
-                "input_fingerprint": input_fingerprint,
-                "contract_version": contract_version,
-                "qa_profile_version": qa_profile_version,
-            }
-            conflicts = [
-                field
-                for field, value in requested.items()
-                if value
-                and str(getattr(existing, field) or "")
-                and str(getattr(existing, field) or "") != str(value)
-            ]
-            if not conflicts:
-                return existing
-            # A revision freezes its production contract. Reusing it after a
-            # contract/input upgrade would resume obsolete repair logic. The
-            # immutable artifacts remain attached to the superseded revision.
-            resume = False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _assert_screenplay_write_owner(
+            conn,
+            episode_id=episode_id,
+            kind=kind,
+        )
+        if resume:
+            existing = _row_to_revision(conn.execute(
+                "SELECT * FROM production_revisions "
+                "WHERE episode_id=? AND kind=? AND status='active' "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (episode_id, kind),
+            ).fetchone())
+            if existing:
+                requested = {
+                    "input_fingerprint": input_fingerprint,
+                    "contract_version": contract_version,
+                    "qa_profile_version": qa_profile_version,
+                }
+                conflicts = [
+                    field
+                    for field, value in requested.items()
+                    if value
+                    and str(getattr(existing, field) or "")
+                    and str(getattr(existing, field) or "") != str(value)
+                ]
+                if not conflicts:
+                    conn.commit()
+                    return existing
 
-    # 归档旧 active
-    stamp = now()
-    conn.execute(
-        "UPDATE production_revisions SET status='superseded', updated_at=? "
-        "WHERE episode_id=? AND kind=? AND status='active'",
-        (stamp, episode_id, kind),
-    )
-    revision_id = new_id("rev")
-    conn.execute(
-        """INSERT INTO production_revisions(
-            id, episode_id, kind, status, baseline_generation_count,
-            input_fingerprint, contract_version, qa_profile_version, grant_id,
-            checkpoint_json, created_at, updated_at
-        ) VALUES(?,?,?,'active',0,?,?,?,?, '{}',?,?)""",
-        (
-            revision_id, episode_id, kind, input_fingerprint,
-            contract_version, qa_profile_version, grant_id, stamp, stamp,
-        ),
-    )
-    conn.commit()
+        stamp = now()
+        conn.execute(
+            "UPDATE production_revisions SET status='superseded', updated_at=? "
+            "WHERE episode_id=? AND kind=? AND status='active'",
+            (stamp, episode_id, kind),
+        )
+        revision_id = new_id("rev")
+        conn.execute(
+            """INSERT INTO production_revisions(
+                id, episode_id, kind, status, baseline_generation_count,
+                input_fingerprint, contract_version, qa_profile_version, grant_id,
+                checkpoint_json, created_at, updated_at
+            ) VALUES(?,?,?,'active',0,?,?,?,?, '{}',?,?)""",
+            (
+                revision_id, episode_id, kind, input_fingerprint,
+                contract_version, qa_profile_version, grant_id, stamp, stamp,
+            ),
+        )
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     return get_production_revision(revision_id)  # type: ignore[return-value]
 
 
@@ -677,10 +684,14 @@ def mark_first_evaluation(revision_id: str, evaluation_id: str) -> ProductionRev
     if row["first_evaluation_id"]:
         return get_production_revision(revision_id)  # type: ignore[return-value]
     stamp = now()
-    conn.execute(
-        "UPDATE production_revisions SET first_evaluation_id=?, updated_at=? WHERE id=?",
+    cursor = conn.execute(
+        "UPDATE production_revisions SET first_evaluation_id=?, updated_at=? "
+        "WHERE id=? AND status='active' AND first_evaluation_id IS NULL",
         (evaluation_id, stamp, revision_id),
     )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise ValueError("production revision 首次评估发生 CAS 冲突")
     conn.commit()
     return get_production_revision(revision_id)  # type: ignore[return-value]
 
@@ -711,10 +722,20 @@ def update_working_artifact(revision_id: str, artifact_id: str, *, expected_hash
             if art and art["content_hash"] and art["content_hash"] != expected_hash:
                 raise RuntimeError("working artifact hash conflict")
     stamp = now()
-    conn.execute(
-        "UPDATE production_revisions SET working_artifact_id=?, updated_at=? WHERE id=?",
-        (artifact_id, stamp, revision_id),
+    cursor = conn.execute(
+        "UPDATE production_revisions SET working_artifact_id=?, updated_at=? "
+        "WHERE id=? AND status='active' "
+        "AND COALESCE(working_artifact_id, '')=COALESCE(?, '')",
+        (
+            artifact_id,
+            stamp,
+            revision_id,
+            row["working_artifact_id"],
+        ),
     )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise RuntimeError("production revision working artifact 发生 CAS 冲突")
     kind = row["kind"]
     episode_id = row["episode_id"]
     col = (

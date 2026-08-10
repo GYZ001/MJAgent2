@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import api, db, portraits
 from app.capabilities.direct import enter_handler
-from app.harness.types import Evaluation, Issue, IssueSeverity
+from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.main import app
 from tests.conftest import SessionTestClient
 from tests.test_screenplay_edit_save import _seed_episode, _valid_script
@@ -406,6 +406,25 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
         "SELECT status,trust_level FROM artifacts WHERE id=?",
         (before["screenplay_artifact_id"],),
     ).fetchone()
+    from app.evidence import repository
+
+    descendant = repository.create_artifact(EvidenceArtifact(
+        type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        status="approved",
+        trust_level="T2",
+        content={"old_downstream": True},
+        parent_artifact_ids=[before["screenplay_artifact_id"]],
+    ))
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) "
+        "VALUES('rollback-shot','e1',1,5)"
+    )
+    conn.commit()
+    cleanup_outbox_count = conn.execute(
+        "SELECT COUNT(*) FROM media_cleanup_outbox"
+    ).fetchone()[0]
     certificate_count = conn.execute(
         "SELECT COUNT(*) AS c FROM completion_certificates"
     ).fetchone()["c"]
@@ -453,6 +472,16 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
         (before["screenplay_artifact_id"],),
     ).fetchone()) == tuple(old_artifact)
     assert conn.execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (descendant["id"],),
+    ).fetchone()["status"] == "approved"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM shots WHERE id='rollback-shot'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM media_cleanup_outbox"
+    ).fetchone()[0] == cleanup_outbox_count
+    assert conn.execute(
         "SELECT COUNT(*) AS c FROM completion_certificates"
     ).fetchone()["c"] == certificate_count
     assert conn.execute(
@@ -473,6 +502,80 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
         "SELECT status FROM artifacts WHERE id=?",
         (failed_candidate["working_artifact_id"],),
     ).fetchone()["status"] == "candidate"
+
+
+def test_publish_persists_cleanup_outbox_and_recovers_deferred_file_delete(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app import artifacts
+    from app.evidence import repository
+
+    _seed_episode(with_artifact=True)
+    first = _valid_script()
+    first.logline += "（第一版）"
+    first.full_script_text += "\n门外再次响起更重的敲门声。\n谷言把钥匙收进口袋。"
+    with enter_handler():
+        initial = asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": first.model_dump(mode="json"),
+            "expected_version": "art_sp_old",
+        }))
+
+    descendant = repository.create_artifact(EvidenceArtifact(
+        type="storyboard",
+        scope_type="episode",
+        scope_id="e1",
+        status="approved",
+        trust_level="T2",
+        content={"old_downstream": True},
+        parent_artifact_ids=[initial["artifact_id"]],
+    ))
+    video_file = tmp_path / "old-shot.mp4"
+    video_file.write_bytes(b"old video")
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) "
+        "VALUES('old-shot','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('old-version','old-shot',1,'prompt','old-idem','done',?,1)""",
+        (str(video_file),),
+    )
+    conn.commit()
+
+    real_flush = artifacts.flush_media_cleanup_outbox
+    monkeypatch.setattr(artifacts, "flush_media_cleanup_outbox", lambda _id: False)
+    second = _valid_script()
+    second.logline += "（第二版）"
+    second.full_script_text += "\n门外再次响起更重的敲门声。\n谷言没有收下钥匙。"
+    with enter_handler():
+        asyncio.run(api.edit_screenplay("e1", {
+            "screenplay": second.model_dump(mode="json"),
+            "expected_version": initial["artifact_id"],
+        }))
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM shots WHERE episode_id='e1'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (descendant["id"],),
+    ).fetchone()["status"] == "stale"
+    pending = conn.execute(
+        "SELECT id,status FROM media_cleanup_outbox "
+        "WHERE episode_id='e1' AND status='pending'"
+    ).fetchone()
+    assert pending["status"] == "pending"
+    assert video_file.exists()
+
+    assert real_flush(str(pending["id"])) is True
+    assert not video_file.exists()
+    assert conn.execute(
+        "SELECT status FROM media_cleanup_outbox WHERE id=?",
+        (pending["id"],),
+    ).fetchone()["status"] == "completed"
 
 
 def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(

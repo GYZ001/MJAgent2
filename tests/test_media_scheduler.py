@@ -1,6 +1,6 @@
 import sqlite3
 
-from app import db
+from app import completion_grant, db
 from app.orchestration import media_scheduler
 
 
@@ -41,6 +41,59 @@ def test_lease_claim_is_cas_and_expired_lease_can_be_reclaimed(monkeypatch) -> N
     clock["now"] = 111.0
     recovered = media_scheduler.claim_job("j1", "worker-b", lease_seconds=10)
     assert recovered and recovered.recovered
+
+
+def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    clock = {"now": 100.0}
+    monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_scheduler, "now", lambda: clock["now"])
+    monkeypatch.setattr(completion_grant, "now", lambda: clock["now"])
+    completion_grant.ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO episode_video_budget_authorities(
+               episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
+           ) VALUES('e',0,10,'test',100,100)"""
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v1','s1',1,'p','idem','running',100)"""
+    )
+    conn.commit()
+
+    assert media_scheduler.claim_job("j1", "worker-a", lease_seconds=5)
+    assert completion_grant.reserve_provider_video_budget(
+        episode_id="e",
+        job_id="j1",
+        version_id="v1",
+        operation_id="op1",
+        amount_cny=1,
+        conn=conn,
+    )
+
+    clock["now"] = 106.0
+    assert media_scheduler.claim_job("j1", "worker-b", lease_seconds=5)
+
+    accepted = completion_grant.mark_provider_video_budget_claim(
+        "op1",
+        "accepted",
+        job_id="j1",
+        lease_owner="worker-a",
+        conn=conn,
+    )
+    conn.commit()
+
+    assert accepted is False
+    assert conn.execute(
+        """SELECT status FROM provider_video_budget_claims
+           WHERE operation_id='op1'"""
+    ).fetchone()["status"] == "reserved"
 
 
 def test_recovery_keeps_future_retry_and_cancel_marks_provider_work_abandoned(monkeypatch) -> None:

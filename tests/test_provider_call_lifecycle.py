@@ -914,6 +914,18 @@ def test_video_create_persists_exact_request_and_rejects_operation_drift(
 
     assert caught.value.failure_kind == "idempotency_request_mismatch"
     assert caught.value.requires_explicit_retry is True
+
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model-new")
+    with pytest.raises(
+        hiagent.ProviderError,
+        match="同一业务操作的请求内容发生变化",
+    ):
+        asyncio.run(hiagent.create_video_task(
+            "prompt-one",
+            image_urls=[(data_url, "reference_image")],
+            call_meta={"operation_id": operation_id},
+        ))
+
     assert len(posts) == 1
 
 
