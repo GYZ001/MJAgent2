@@ -58,6 +58,13 @@ export class AdaptivePoller<T> {
   start(): Promise<T | null> {
     this.started = true
     this.active = true
+    const staleRequest = this.inFlight
+    if (staleRequest) {
+      return staleRequest.then(() => {
+        if (!this.started) return this.data
+        return this.refresh()
+      })
+    }
     return this.refresh()
   }
 

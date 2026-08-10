@@ -117,18 +117,19 @@ describe('AdaptivePoller', () => {
     expect(timers).toHaveLength(1)
   })
 
-  it('does not execute an in-flight write again across stop and start', async () => {
+  it('refetches after an invalidated in-flight request across stop and start', async () => {
     let calls = 0
-    let resolveRequest!: (value: number) => void
+    const resolvers: Array<(value: number) => void> = []
+    const received: number[] = []
     const timers: Array<() => void> = []
     const poller = new AdaptivePoller(
       () => {
         calls += 1
-        return new Promise<number>(resolve => { resolveRequest = resolve })
+        return new Promise<number>(resolve => { resolvers.push(resolve) })
       },
       1000,
       {
-        onData: () => undefined,
+        onData: value => received.push(value),
         onError: error => { throw error },
       },
       {
@@ -150,10 +151,13 @@ describe('AdaptivePoller', () => {
 
     expect(calls).toBe(1)
 
-    resolveRequest(1)
+    resolvers[0](1)
+    await flush()
+    expect(calls).toBe(2)
+    resolvers[1](2)
     await Promise.all([initial, restarted])
 
-    expect(calls).toBe(1)
+    expect(received).toEqual([2])
     expect(timers).toHaveLength(1)
   })
 
