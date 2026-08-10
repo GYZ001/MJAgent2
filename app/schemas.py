@@ -401,11 +401,41 @@ class ActionAgency(BaseModel):
         return self
 
 
+class TextProvenance(BaseModel):
+    """Compiler-owned attribution for authored text and its frozen sources."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = "creative_action"
+    identity_keys: list[str] = Field(default_factory=list)
+    source_segment_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _normalize_kind(cls, value: object) -> str:
+        return str(value or "").strip() or "creative_action"
+
+    @field_validator("identity_keys", "source_segment_ids", mode="before")
+    @classmethod
+    def _normalize_keys(cls, value: object) -> list[str]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        return list(dict.fromkeys(
+            normalized
+            for item in values
+            if (normalized := str(item or "").strip())
+        ))
+
+
 class AtomicAction(BaseModel):
     action_id: str
     actor_ids: list[str] = Field(default_factory=list)
     target_ids: list[str] = Field(default_factory=list)
     action_agency: ActionAgency
+    text_provenance: TextProvenance
+    dialogue_text: str = ""
+    required_text: str = ""
+    prop_text: str = ""
+    on_screen_text: str = ""
     participant_deliveries: list[ActionParticipantDelivery] = Field(
         default_factory=list
     )
@@ -422,19 +452,46 @@ class AtomicAction(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _derive_missing_action_agency(cls, value: object) -> object:
-        if not isinstance(value, dict) or value.get("action_agency") is not None:
+        if not isinstance(value, dict):
             return value
         normalized = dict(value)
         actor_ids = list(normalized.get("actor_ids") or [])
         target_ids = list(normalized.get("target_ids") or [])
         identity_bearing = bool(actor_ids or target_ids)
-        normalized["action_agency"] = {
-            "kind": "character" if identity_bearing else "unattributed",
-            "identity_bearing": identity_bearing,
-            "source_segment_ids": list(
-                normalized.get("source_segment_ids") or []
-            ),
-        }
+        if normalized.get("action_agency") is None:
+            normalized["action_agency"] = {
+                "kind": "character" if identity_bearing else "unattributed",
+                "identity_bearing": identity_bearing,
+                "source_segment_ids": list(
+                    normalized.get("source_segment_ids") or []
+                ),
+            }
+        if normalized.get("text_provenance") is None:
+            agency = normalized["action_agency"]
+            source_segment_ids = (
+                list(agency.source_segment_ids)
+                if isinstance(agency, ActionAgency)
+                else list(agency.get("source_segment_ids") or [])
+            )
+            if str(normalized.get("dialogue_text") or "").strip():
+                provenance_kind = "dialogue"
+            elif str(normalized.get("required_text") or "").strip():
+                provenance_kind = "required_text"
+            elif str(normalized.get("prop_text") or "").strip():
+                provenance_kind = "prop_text"
+            elif str(normalized.get("on_screen_text") or "").strip():
+                provenance_kind = "on_screen_text"
+            else:
+                provenance_kind = "creative_action"
+            normalized["text_provenance"] = {
+                "kind": provenance_kind,
+                "identity_keys": (
+                    []
+                    if provenance_kind not in ("creative_action", "dialogue")
+                    else list(dict.fromkeys([*actor_ids, *target_ids]))
+                ),
+                "source_segment_ids": source_segment_ids,
+            }
         return normalized
 
     @model_validator(mode="after")
@@ -447,6 +504,48 @@ class AtomicAction(BaseModel):
         if self.action_agency.is_character_agency and not identity_bearing:
             raise ValueError(
                 "character action_agency 必须由 actor_ids/target_ids 承载"
+            )
+        explicit_text_kinds = [
+            kind
+            for kind, content in (
+                ("dialogue", self.dialogue_text),
+                ("required_text", self.required_text),
+                ("prop_text", self.prop_text),
+                ("on_screen_text", self.on_screen_text),
+            )
+            if content.strip()
+        ]
+        if len(explicit_text_kinds) > 1:
+            raise ValueError(
+                "dialogue/required_text/prop_text/on_screen_text "
+                "每个 action 最多声明一种"
+            )
+        expected_provenance_kind = (
+            explicit_text_kinds[0]
+            if explicit_text_kinds
+            else "creative_action"
+        )
+        expected_identity_keys = (
+            []
+            if expected_provenance_kind in (
+                "required_text", "prop_text", "on_screen_text",
+            )
+            else list(dict.fromkeys([*self.actor_ids, *self.target_ids]))
+        )
+        if self.text_provenance.kind != expected_provenance_kind:
+            raise ValueError(
+                "text_provenance.kind 必须由显式文字结构字段确定"
+            )
+        if self.text_provenance.identity_keys != expected_identity_keys:
+            raise ValueError(
+                "text_provenance.identity_keys 必须由 actor_ids/target_ids 确定"
+            )
+        if (
+            self.text_provenance.source_segment_ids
+            != self.action_agency.source_segment_ids
+        ):
+            raise ValueError(
+                "text_provenance.source_segment_ids 必须与 action agency 来源等价"
             )
         return self
 

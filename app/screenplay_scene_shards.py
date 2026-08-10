@@ -40,7 +40,7 @@ from app.narrative_blueprint import (
 )
 from app.observability.tracing import current_trace
 from app.renderability import SCENE_STORY_FUNCTION_MIN_CHARS
-from app.schemas import ActionAgency, Bible
+from app.schemas import ActionAgency, Bible, TextProvenance
 from app.screenplay_ir import (
     IRActionParticipantDelivery,
     IRExperience,
@@ -55,11 +55,11 @@ from app.source_excerpt import index_source_segments, structural_front_matter_id
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v6"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v7"
 SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v3"
-SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v6"
-SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v3"
-SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v5"
+SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v7"
+SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v4"
+SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v6"
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
@@ -260,7 +260,7 @@ class ScreenplayActionParticipantDeliveryContract(BaseModel):
 class ScreenplaySceneInputContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-input.v6"] = (
+    contract_version: Literal["screenplay-scene-input.v7"] = (
         SCREENPLAY_SCENE_INPUT_VERSION
     )
     scene_plan_key: str
@@ -291,42 +291,37 @@ class UnresolvedParticipant(BaseModel):
     reason: str = ""
 
 
-class ScreenplaySceneCreativeTextProvenance(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    kind: Literal[
-        "creative_action",
-        "on_screen_text",
-        "required_text",
-        "prop_text",
-    ]
-    identity_keys: list[str] = Field(default_factory=list)
-
-    @field_validator("identity_keys", mode="before")
-    @classmethod
-    def _normalize_identity_keys(cls, value: Any) -> list[str]:
-        return _ordered_unique([
-            str(identity_key or "").strip()
-            for identity_key in (value or [])
-            if str(identity_key or "").strip()
-        ])
-
-
 class ScreenplaySceneShardCreativeUnit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1)
-    text_provenance: ScreenplaySceneCreativeTextProvenance
     performance: str = ""
     resulting_state: str = ""
     function: str = "statement"
-    agency_kind: str = ""
+    required_text: str = ""
+    prop_text: str = ""
+    on_screen_text: str = ""
+
+    @model_validator(mode="after")
+    def _validate_text_content_shape(
+        self,
+    ) -> "ScreenplaySceneShardCreativeUnit":
+        explicit_text_fields = sum(bool(value.strip()) for value in (
+            self.required_text,
+            self.prop_text,
+            self.on_screen_text,
+        ))
+        if explicit_text_fields > 1:
+            raise ValueError(
+                "required_text/prop_text/on_screen_text 每个 slot 最多填写一种"
+            )
+        return self
 
 
 class ScreenplaySceneShardCreativeIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-creative.v3"] = (
+    contract_version: Literal["screenplay-scene-creative.v4"] = (
         SCREENPLAY_SCENE_CREATIVE_VERSION
     )
     slots: dict[str, ScreenplaySceneShardCreativeUnit]
@@ -347,7 +342,7 @@ class ScreenplaySceneShardScene(IRScene):
 class ScreenplaySceneShardIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard.v6"] = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v7"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]

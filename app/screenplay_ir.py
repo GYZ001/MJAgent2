@@ -39,6 +39,7 @@ from app.schemas import (
     ScriptScene,
     SourceCoverageDecision,
     StoryEvent,
+    TextProvenance,
     VoiceCanonical,
 )
 from app.renderability import (
@@ -183,6 +184,111 @@ def derive_action_agency_payload(
         )
     normalized["action_agency"] = agency
     return normalized
+
+
+def derive_text_provenance_payload(
+    value: dict[str, Any],
+    *,
+    actor_field: str,
+    target_field: str,
+    source_field: str,
+    speaker_field: str | None = None,
+    dialogue: bool = False,
+) -> dict[str, Any]:
+    """Derive text attribution from typed content and frozen relations."""
+    normalized = dict(value)
+    if normalized.get("text_provenance") is not None:
+        return normalized
+    relation_keys = [
+        *_as_list(normalized.get(actor_field)),
+        *_as_list(normalized.get(target_field)),
+    ]
+    if speaker_field and normalized.get(speaker_field):
+        relation_keys.append(normalized[speaker_field])
+    relation_keys = list(dict.fromkeys(
+        str(key or "").strip()
+        for key in relation_keys
+        if str(key or "").strip()
+    ))
+    if str(normalized.get("required_text") or "").strip():
+        provenance_kind = "required_text"
+    elif str(normalized.get("prop_text") or "").strip():
+        provenance_kind = "prop_text"
+    elif str(normalized.get("on_screen_text") or "").strip():
+        provenance_kind = "on_screen_text"
+    elif dialogue or str(normalized.get("dialogue_text") or "").strip():
+        provenance_kind = "dialogue"
+    else:
+        provenance_kind = "creative_action"
+    normalized["text_provenance"] = {
+        "kind": provenance_kind,
+        "identity_keys": (
+            []
+            if provenance_kind in (
+                "required_text", "prop_text", "on_screen_text",
+            )
+            else relation_keys
+        ),
+        "source_segment_ids": _as_list(normalized.get(source_field)),
+    }
+    return normalized
+
+
+def _validate_text_provenance(
+    *,
+    provenance: TextProvenance,
+    relation_keys: list[str],
+    source_segment_ids: list[str],
+    dialogue: bool,
+    dialogue_text: str,
+    required_text: str,
+    prop_text: str,
+    on_screen_text: str,
+    label: str,
+) -> None:
+    explicit_kinds = [
+        kind
+        for kind, content in (
+            ("dialogue", dialogue_text),
+            ("required_text", required_text),
+            ("prop_text", prop_text),
+            ("on_screen_text", on_screen_text),
+        )
+        if str(content or "").strip()
+    ]
+    if len(explicit_kinds) > 1:
+        raise ValueError(
+            f"{label} dialogue/required_text/prop_text/on_screen_text "
+            "最多声明一种"
+        )
+    expected_kind = (
+        explicit_kinds[0]
+        if explicit_kinds
+        else "dialogue" if dialogue else "creative_action"
+    )
+    expected_identity_keys = (
+        []
+        if expected_kind in (
+            "required_text", "prop_text", "on_screen_text",
+        )
+        else list(dict.fromkeys(
+            str(key or "").strip()
+            for key in relation_keys
+            if str(key or "").strip()
+        ))
+    )
+    if provenance.kind != expected_kind:
+        raise ValueError(
+            f"{label} text_provenance.kind 必须由 slot/content 结构确定"
+        )
+    if provenance.identity_keys != expected_identity_keys:
+        raise ValueError(
+            f"{label} text_provenance.identity_keys 必须由冻结关系确定"
+        )
+    if provenance.source_segment_ids != source_segment_ids:
+        raise ValueError(
+            f"{label} text_provenance.source_segment_ids 必须与来源等价"
+        )
 
 
 def screenplay_ir_version_key(value: object) -> tuple[int, int]:
@@ -423,6 +529,10 @@ class IRSceneUnit(BaseModel):
         default_factory=list
     )
     action_agency: ActionAgency
+    text_provenance: TextProvenance
+    required_text: str = ""
+    prop_text: str = ""
+    on_screen_text: str = ""
     resulting_state: str = ""
     speaker_key: str | None = None
     function: str = "statement"
@@ -448,7 +558,14 @@ class IRSceneUnit(BaseModel):
         elif kind not in {"action", "dialogue"}:
             kind = "action"
         normalized["kind"] = kind
-        return normalized
+        return derive_text_provenance_payload(
+            normalized,
+            actor_field="actor_keys",
+            target_field="target_keys",
+            speaker_field="speaker_key",
+            source_field="source_segment_ids",
+            dialogue=kind == "dialogue",
+        )
 
     @field_validator(
         "source_segment_ids", "actor_keys", "target_keys",
@@ -477,6 +594,21 @@ class IRSceneUnit(BaseModel):
             raise ValueError(
                 "action_agency.source_segment_ids 必须与 unit 来源等价"
             )
+        _validate_text_provenance(
+            provenance=self.text_provenance,
+            relation_keys=[
+                *self.actor_keys,
+                *self.target_keys,
+                *([self.speaker_key] if self.speaker_key else []),
+            ],
+            source_segment_ids=self.source_segment_ids,
+            dialogue=self.kind == "dialogue",
+            dialogue_text=self.text if self.kind == "dialogue" else "",
+            required_text=self.required_text,
+            prop_text=self.prop_text,
+            on_screen_text=self.on_screen_text,
+            label="unit",
+        )
         return self
 
 
@@ -544,6 +676,11 @@ class IREvent(BaseModel):
         default_factory=list
     )
     action_agency: ActionAgency
+    text_provenance: TextProvenance
+    dialogue_text: str = ""
+    required_text: str = ""
+    prop_text: str = ""
+    on_screen_text: str = ""
     causal_parent_keys: list[str] = Field(default_factory=list)
     precondition_state: str = ""
     resulting_state: str = ""
@@ -584,6 +721,12 @@ class IREvent(BaseModel):
             target_field="target_keys",
             source_field="source_segment_ids",
         )
+        normalized = derive_text_provenance_payload(
+            normalized,
+            actor_field="actor_keys",
+            target_field="target_keys",
+            source_field="source_segment_ids",
+        )
         for field, default in (
             ("salience", 0.7),
             ("irreversibility", 0.5),
@@ -619,6 +762,17 @@ class IREvent(BaseModel):
             raise ValueError(
                 "event.action_agency.source_segment_ids 必须与事件来源等价"
             )
+        _validate_text_provenance(
+            provenance=self.text_provenance,
+            relation_keys=[*self.actor_keys, *self.target_keys],
+            source_segment_ids=self.source_segment_ids,
+            dialogue=False,
+            dialogue_text=self.dialogue_text,
+            required_text=self.required_text,
+            prop_text=self.prop_text,
+            on_screen_text=self.on_screen_text,
+            label="event",
+        )
         return self
 
 
@@ -2699,7 +2853,7 @@ def compile_screenplay_ir(
             explicit = list(dict.fromkeys([
                 *(
                     [unit.speaker_key]
-                    if unit.kind == "dialogue" and unit.speaker_key
+                    if unit.speaker_key
                     else []
                 ),
                 *(
@@ -2926,6 +3080,22 @@ def compile_screenplay_ir(
                     ),
                     source_segment_ids=list(existing.source_segment_ids),
                 )
+                existing.text_provenance = TextProvenance(
+                    kind=unit.text_provenance.kind,
+                    identity_keys=(
+                        []
+                        if unit.text_provenance.kind in (
+                            "required_text",
+                            "prop_text",
+                            "on_screen_text",
+                        )
+                        else list(dict.fromkeys([
+                            *existing.actor_keys,
+                            *existing.target_keys,
+                        ]))
+                    ),
+                    source_segment_ids=list(existing.source_segment_ids),
+                )
                 if not screenplay_beat_fields_repeat(
                     existing.adapted_statement,
                     adapted_statement,
@@ -2957,6 +3127,30 @@ def compile_screenplay_ir(
                     identity_bearing=bool(actor_keys or target_keys),
                     source_segment_ids=source_ids,
                 ),
+                text_provenance=TextProvenance(
+                    kind=unit.text_provenance.kind,
+                    identity_keys=(
+                        []
+                        if unit.text_provenance.kind in (
+                            "required_text",
+                            "prop_text",
+                            "on_screen_text",
+                        )
+                        else list(dict.fromkeys([
+                            *actor_keys,
+                            *target_keys,
+                        ]))
+                    ),
+                    source_segment_ids=source_ids,
+                ),
+                dialogue_text=(
+                    unit.text.strip()
+                    if unit.kind == "dialogue"
+                    else ""
+                ),
+                required_text=unit.required_text,
+                prop_text=unit.prop_text,
+                on_screen_text=unit.on_screen_text,
                 character_emotion="",
                 decision_required=bool(actor_keys) and not contextual_actor,
                 decision_reason=(
@@ -4111,6 +4305,20 @@ def compile_screenplay_ir(
                 "identity_bearing": bool(actor_ids or target_ids),
                 "source_segment_ids": list(event.source_segment_ids),
             },
+            "text_provenance": {
+                "kind": event.text_provenance.kind,
+                "identity_keys": [
+                    identity_id(token)
+                    for token in event.text_provenance.identity_keys
+                ],
+                "source_segment_ids": list(
+                    event.text_provenance.source_segment_ids
+                ),
+            },
+            "dialogue_text": event.dialogue_text,
+            "required_text": event.required_text,
+            "prop_text": event.prop_text,
+            "on_screen_text": event.on_screen_text,
             "participant_deliveries": participant_delivery_rows,
             "semantic_intent": event.action_intent,
             "precondition_fact_ids": [fact_in_id],
