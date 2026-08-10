@@ -5,12 +5,15 @@ import json
 import pytest
 from fastapi import HTTPException
 
-from app import api, db, storyboard_workspace
+from app import api, db, errors as app_errors, storyboard_workspace
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.narrative_review import NarrativeReviewError, run_blind_audience_review
 from app.production.publish import publish_screenplay
-from app.production.patch import load_screenplay_from_artifact
+from app.production.patch import (
+    load_screenplay_from_artifact,
+    screenplay_artifact_payload,
+)
 from app.production.revision import ensure_production_revision, mark_baseline_generated
 from app.production.screenplay_authority import (
     SCREENPLAY_QA_PROFILE_VERSION,
@@ -53,6 +56,66 @@ def test_cached_screenplay_artifact_model_is_isolated_from_mutable_readers() -> 
     assert resolved.screenplay.model_dump(mode="json") == screenplay.model_dump(
         mode="json",
     )
+
+
+def test_legacy_screenplay_artifact_without_participant_deliveries_needs_rebuild() -> None:
+    screenplay = _screenplay()
+    payload = screenplay_artifact_payload(screenplay)
+    payload["narrative_plan"]["contract_version"] = "narrative-continuity.v1"
+    for action in payload["narrative_plan"]["atomic_actions"]:
+        action.pop("participant_deliveries", None)
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="episode-generic",
+        status="candidate",
+        trust_level="T1",
+        content=payload,
+        contract_version="4.0.0",
+    ))
+
+    with pytest.raises(ValueError, match="ARTIFACT_NEEDS_REBUILD") as caught:
+        load_screenplay_from_artifact(artifact["id"])
+
+    assert getattr(caught.value, "code", None) == "ARTIFACT_NEEDS_REBUILD"
+    assert app_errors.classify(caught.value) == (
+        "conflict",
+        "ARTIFACT-REBUILD",
+    )
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert "participant_deliveries" in row["stale_reason"]
+
+
+def test_current_screenplay_artifact_with_participant_deliveries_loads() -> None:
+    screenplay = _screenplay()
+    payload = screenplay_artifact_payload(screenplay)
+    payload["narrative_plan"]["contract_version"] = "narrative-continuity.v2"
+    assert all(
+        "participant_deliveries" in action
+        for action in payload["narrative_plan"]["atomic_actions"]
+    )
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="episode-generic",
+        status="candidate",
+        trust_level="T1",
+        content=payload,
+        contract_version="4.0.0",
+    ))
+
+    restored = load_screenplay_from_artifact(artifact["id"])
+
+    assert restored.narrative_plan is not None
+    assert restored.narrative_plan.contract_version == "narrative-continuity.v2"
+    assert db.get_conn().execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()["status"] == "candidate"
 
 
 def test_revalidation_candidate_switches_revision_pointer_only_when_published() -> None:

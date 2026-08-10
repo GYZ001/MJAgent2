@@ -11,8 +11,10 @@ from app.capabilities import ensure_catalog_loaded
 from app.capabilities.direct import enter_handler
 from app.capabilities.registry import get_registry
 from app.evidence import repository
+from app.harness.contracts import get_contract
 from app.harness.types import EvidenceArtifact
 from app.observability.tracing import bind_trace
+from app.production.patch import screenplay_artifact_payload
 from app.production.revision import (
     ProductionRevisionOwnershipLost,
     ensure_production_revision,
@@ -25,6 +27,7 @@ from app.screenplay_scene_shards import (
     ScreenplaySceneShardOwnershipLost,
     _assert_episode_owner,
 )
+from tests.test_narrative_continuity import _screenplay
 
 
 @pytest.fixture(autouse=True)
@@ -944,6 +947,78 @@ def test_recovery_does_not_resume_obsolete_contract_revision(monkeypatch) -> Non
     assert "旧合同 2.0.0" in episode["screenplay_error"]
     assert "当前合同为 4.0.0" in episode["screenplay_error"]
     assert episode["active_screenplay_run_id"] is None
+
+
+def test_recovery_stops_at_legacy_working_artifact_rebuild_boundary(
+    monkeypatch,
+) -> None:
+    payload = screenplay_artifact_payload(_screenplay())
+    payload["narrative_plan"]["contract_version"] = "narrative-continuity.v1"
+    for action in payload["narrative_plan"]["atomic_actions"]:
+        action.pop("participant_deliveries", None)
+    artifact = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="e1",
+        status="candidate",
+        trust_level="T1",
+        content=payload,
+        contract_version=get_contract("screenplay").version,
+    ))
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint="legacy-working-artifact",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version="screenplay-qa-gate-2",
+        resume=False,
+    )
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="legacy-working-artifact",
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE workflow_runs SET status='PAUSED_EXTERNAL',failure_code='SERVICE_RESTART' "
+        "WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing',active_screenplay_run_id=? "
+        "WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        api,
+        "_new_screenplay_recorder",
+        lambda *_args, **_kwargs: pytest.fail(
+            "needs_rebuild Artifact 禁止恢复旧修复循环"
+        ),
+    )
+
+    assert api.recover_screenplay_tasks() == 0
+
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_error,active_screenplay_run_id "
+        "FROM episodes WHERE id='e1'",
+    ).fetchone()
+    assert episode["screenplay_status"] == "repairing"
+    assert "ARTIFACT_NEEDS_REBUILD" in episode["screenplay_error"]
+    assert episode["active_screenplay_run_id"] is None
+    stale = conn.execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert stale["status"] == "stale"
+    assert "participant_deliveries" in stale["stale_reason"]
 
 
 def test_recovery_does_not_restart_intentionally_paused_repair(monkeypatch) -> None:

@@ -128,6 +128,34 @@ def test_valid_blueprint_derives_scenes_without_model_scene_grouping() -> None:
         "bp-sc001", "bp-sc002", "bp-sc003", "bp-sc004",
     ]
     assert plans[2].scene_heading == "【场3】夜 / 白洁家卧室"
+    assert blueprint.source_scene_owners == {
+        "SRC0001": "bp-sc001",
+        "SRC0002": "bp-sc002",
+        "SRC0003": "bp-sc003",
+        "SRC0004": "bp-sc004",
+    }
+    assert any(
+        relation.relation_type == "state_requirement"
+        and relation.source_scene_plan_key == "bp-sc001"
+        and relation.target_scene_plan_key == "bp-sc004"
+        and relation.reference_key == "F001"
+        for relation in blueprint.scene_derivations
+    )
+
+
+def test_blueprint_rejects_source_assigned_to_multiple_scene_owners() -> None:
+    blueprint = _blueprint()
+    blueprint.nodes[1].source_segment_ids = ["SRC0001", "SRC0002"]
+
+    errors = validate_narrative_blueprint(blueprint, SOURCE)
+
+    assert any(
+        "[BLUEPRINT_SOURCE_OWNER_CONFLICT]" in error
+        and "SRC0001" in error
+        and "bp-sc001" in error
+        and "bp-sc002" in error
+        for error in errors
+    )
 
 
 def test_blueprint_normalizes_unpadded_source_ids() -> None:

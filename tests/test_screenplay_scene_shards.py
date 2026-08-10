@@ -298,6 +298,15 @@ def test_scene_input_contracts_align_source_and_frozen_participants_per_scene() 
     }
     assert contracts[1].source_segment_ids == ["SRC0002"]
     assert contracts[1].participant_bindings[0].identity_key == "person_b"
+    assert plan.source_scene_owners == blueprint.source_scene_owners
+    assert contracts[0].source_scene_owners == blueprint.source_scene_owners
+    assert contracts[1].source_scene_owners == blueprint.source_scene_owners
+    assert any(
+        relation.relation_type == "scene_transition"
+        and relation.source_scene_plan_key == "bp-sc001"
+        and relation.target_scene_plan_key == "bp-sc002"
+        for relation in contracts[1].derived_relations
+    )
 
 
 def test_scene_input_contract_rejects_unfrozen_blueprint_participant() -> None:
@@ -395,6 +404,56 @@ def test_validated_shards_merge_in_blueprint_order_with_global_namespaces() -> N
     assert {source for scene in merged.scenes for unit in scene.units for source in unit.source_segment_ids} == {
         segment.segment_id for segment in index_source_segments(SOURCE)
     }
+
+
+def test_merge_rejects_source_consumed_by_multiple_scenes() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    shards = [_shard(plan, blueprint) for plan in plans]
+    scene_input_contracts = _contracts(plans, blueprint)
+
+    duplicated_source_id = "SRC0001"
+    second_scene_plan = blueprint.scene_plans[1]
+    second_scene_plan.source_segment_ids = [
+        duplicated_source_id,
+        *second_scene_plan.source_segment_ids,
+    ]
+    plans[1].source_segment_ids = [
+        duplicated_source_id,
+        *plans[1].source_segment_ids,
+    ]
+    second_contract = scene_input_contracts[plans[1].shard_id][0]
+    second_contract.source_segment_ids = [
+        duplicated_source_id,
+        *second_contract.source_segment_ids,
+    ]
+    second_contract.source_segments = [
+        scene_input_contracts[plans[0].shard_id][0].source_segments[0],
+        *second_contract.source_segments,
+    ]
+    shards[1].scenes[0].units[0].source_segment_ids = [
+        duplicated_source_id,
+        "SRC0002",
+    ]
+    shards[1].consumed_source_ids = [duplicated_source_id, "SRC0002"]
+
+    with pytest.raises(
+        ScreenplaySceneMergeError,
+        match=r"SRC0001.*bp-sc001.*bp-sc002",
+    ):
+        merge_screenplay_scene_shards(
+            envelope=_envelope(blueprint),
+            identities=_identities(),
+            plans=plans,
+            shards=shards,
+            scene_input_contracts=scene_input_contracts,
+            blueprint=blueprint,
+            source_text=SOURCE,
+        )
 
 
 def test_merge_does_not_require_front_matter_in_scene_units(

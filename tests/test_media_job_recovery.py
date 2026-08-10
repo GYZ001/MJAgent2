@@ -1322,6 +1322,11 @@ def test_manual_retry_cas_failure_rolls_back_new_epoch_budget(monkeypatch) -> No
     import app.system_api as system_api
 
     conn = _conn()
+    _seed_retry_episode(conn)
+    conn.execute(
+        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
+           VALUES('s1','e1',1,5)"""
+    )
     conn.execute(
         """INSERT INTO shot_versions(
                id,shot_id,version_no,prompt_text,idem_key,status,created_at
@@ -1329,11 +1334,12 @@ def test_manual_retry_cas_failure_rolls_back_new_epoch_budget(monkeypatch) -> No
     )
     conn.execute(
         """INSERT INTO jobs(
-               id,kind,status,version_id,episode_id,provider_operation_id,
+               id,kind,status,shot_id,version_id,episode_id,project_id,
+               provider_operation_id,
                provider_create_state,provider_non_cancellable,reserved_cost_cny,
                reason_code,reason_text,created_at,updated_at
            ) VALUES(
-               'j-race','video','waiting_human','v-race','e1',
+               'j-race','video','waiting_human','s1','v-race','e1','p1',
                'video-create-v-race','unknown',1,1,
                'VIDEO_PROVIDER_CREATE_UNRESOLVED','旧人工阻塞',1,1
            )"""

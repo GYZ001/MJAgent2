@@ -27,7 +27,12 @@ from app.db import (
     start_provider_call,
     update_provider_call_request,
 )
-from app.hiagent import ProviderError, ProviderFailure, ProviderFailureKind
+from app.hiagent import (
+    ProviderError,
+    ProviderFailure,
+    ProviderFailureKind,
+    provider_failure_from_http_payload,
+)
 
 
 TASK_PREFIX = "minimax_h3:"
@@ -101,6 +106,7 @@ def _headers(*, json_content: bool = False) -> dict[str, str]:
 
 def _error_from_response(action: str, response: httpx.Response) -> ProviderError:
     detail = response.text[:500]
+    payload: Any = None
     try:
         payload = response.json()
         error = payload.get("error") if isinstance(payload, dict) else None
@@ -110,10 +116,18 @@ def _error_from_response(action: str, response: httpx.Response) -> ProviderError
             detail = str(error)
     except (TypeError, ValueError):
         pass
+    failure = provider_failure_from_http_payload(payload)
     return ProviderError(
         f"MiniMaxH3 {action}失败 HTTP {response.status_code}：{detail}",
-        retryable=response.status_code in {408, 425, 429} or response.status_code >= 500,
+        retryable=(
+            failure.retryable
+            if failure is not None
+            else response.status_code in {408, 425, 429}
+            or response.status_code >= 500
+        ),
         raw=response.text,
+        delivery_state="responded",
+        failure=failure,
     )
 
 
@@ -790,8 +804,16 @@ async def poll_video_task(
         raise error
     try:
         data = response.json()
-    except ValueError as exc:
-        raise ProviderError("MiniMaxH3 状态响应不是合法 JSON", retryable=True) from exc
+        if not isinstance(data, dict):
+            raise TypeError("expected a JSON object")
+    except (TypeError, ValueError) as exc:
+        raise ProviderError(
+            f"MiniMaxH3 状态响应不是合法 JSON 对象：{exc}",
+            retryable=True,
+            raw=response.text,
+            failure_kind=ProviderFailureKind.MALFORMED_RESPONSE,
+            delivery_state="responded",
+        ) from exc
     status = str(data.get("status") or "").strip().lower()
     stage = str(data.get("stage") or "").strip().lower()
     failure: ProviderFailure | None = None

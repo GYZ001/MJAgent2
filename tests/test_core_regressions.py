@@ -907,8 +907,17 @@ def test_video_derivatives_are_removed_when_visual_basis_changes(tmp_path, monke
     final = project_root / "p1" / "episodes" / "1" / "final" / "episode.mp4"
     final.parent.mkdir(parents=True)
     final.write_bytes(b"final")
-    conn.execute("INSERT INTO shot_versions VALUES('v1','s1',?)", (str(video),))
-    conn.execute("INSERT INTO jobs VALUES('s1','video')")
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,video_path,provider_task_id,status,cost_cny
+           ) VALUES('v1','s1',?,NULL,'succeeded',0)""",
+        (str(video),),
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,shot_id,version_id,kind,status,provider_create_state,created_at
+           ) VALUES('j1','s1','v1','video','succeeded','not_started',1)"""
+    )
     conn.commit()
     monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
     monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", project_root)

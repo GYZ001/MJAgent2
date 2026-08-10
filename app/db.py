@@ -1637,6 +1637,10 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                   v.provider_task_id,v.video_path,
                   br.amount_cny AS reservation_amount,
                   CASE WHEN j.cancellation_requested=0 AND j.abandoned=0
+                         AND NOT (
+                           j.provider_poll_required=1
+                           AND j.provider_result_adoptable=0
+                         )
                          AND (
                            j.status IN (
                              'queued','running','waiting_provider','waiting_retry',

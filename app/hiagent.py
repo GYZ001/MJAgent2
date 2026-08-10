@@ -227,6 +227,21 @@ class ProviderFailure:
         return f"VIDEO_{suffix or 'PROVIDER_FAILURE'}"
 
 
+def provider_failure_from_http_payload(payload: Any) -> ProviderFailure | None:
+    """Extract the typed provider failure shared by HTTP adapters."""
+    if not isinstance(payload, dict):
+        return None
+    error_payload = payload.get("error")
+    failure_payload = (
+        error_payload.get("failure")
+        if isinstance(error_payload, dict)
+        else payload.get("failure")
+    )
+    if not isinstance(failure_payload, dict):
+        return None
+    return ProviderFailure.from_provider_payload(failure_payload)
+
+
 class ProviderError(Exception):
     """对外调用失败。message 面向 UI，包含分类结论 + 原始报文摘要。"""
 
@@ -400,17 +415,7 @@ def _structured_failure_from_http_body(body: str) -> ProviderFailure | None:
         payload = json.loads(body)
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict):
-        return None
-    error_payload = payload.get("error")
-    failure_payload = (
-        error_payload.get("failure")
-        if isinstance(error_payload, dict)
-        else payload.get("failure")
-    )
-    if not isinstance(failure_payload, dict):
-        return None
-    return ProviderFailure.from_provider_payload(failure_payload)
+    return provider_failure_from_http_payload(payload)
 
 
 def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KEY") -> ProviderError:

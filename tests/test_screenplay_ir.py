@@ -7,13 +7,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import stages
+from app import db, stages
 from app import errors as app_errors
 from app import identity_adjudication
+from app.evidence import repository as evidence_repository
+from app.harness.types import EvidenceArtifact
 from app.identity_adjudication import adjudicate_screenplay_ir_identities
 from app.identity_authority import normalize_character_resolution
 from app.identity_contracts import narrative_identity_resolver
 from app.narrative import validate_screenplay_narrative
+from app.observability.tracing import bind_trace
 from app.production.screenplay_document import (
     document_to_screenplay,
     screenplay_to_document,
@@ -2138,6 +2141,147 @@ def test_baseline_recompiles_durable_ir_without_second_model_call(
     assert script.id == "ep-ir-recover"
     assert script._source_ir_artifact_id == "art-ir-recovered"
     assert script.narrative_plan is not None
+
+
+def _participant_delivery_complete_ir_payload(version: str) -> dict:
+    payload = _ir_payload()
+    payload["format_version"] = version
+    for scene in payload["scenes"]:
+        for unit in scene["units"]:
+            unit["participant_deliveries"] = []
+    for event in payload["events"]:
+        event["participant_deliveries"] = []
+    return payload
+
+
+def _persist_recoverable_ir(
+    *,
+    episode_id: str,
+    input_fingerprint: str,
+    contract_version: str,
+    payload: dict,
+) -> tuple[str, str, dict]:
+    run_id = evidence_repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id=episode_id,
+        input_fingerprint=input_fingerprint,
+    )
+    step_id = evidence_repository.create_step(run_id, "screenplay.iteration")
+    artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_generation_ir",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="candidate",
+            trust_level="T1",
+            content=payload,
+            contract_version=contract_version,
+            prompt_version=stages.SCREENPLAY_BASELINE_PROMPT_VERSION,
+        ),
+        step_run_id=step_id,
+    )
+    return run_id, step_id, artifact
+
+
+def test_current_ir_serialization_declares_participant_delivery_contract() -> None:
+    payload = _participant_delivery_complete_ir_payload(
+        "screenplay-generation-ir.v2"
+    )
+
+    serialized = ScreenplayGenerationIR.model_validate(payload).model_dump(
+        mode="json"
+    )
+
+    assert stages.IR_VERSION == "screenplay-generation-ir.v2"
+    assert serialized["format_version"] == stages.IR_VERSION
+    assert all(
+        "participant_deliveries" in unit
+        for scene in serialized["scenes"]
+        for unit in scene["units"]
+    )
+    assert all(
+        "participant_deliveries" in event
+        for event in serialized["events"]
+    )
+
+
+def test_recovery_accepts_legal_current_ir_artifact() -> None:
+    episode_id = "ep-ir-contract-v2"
+    run_id, step_id, artifact = _persist_recoverable_ir(
+        episode_id=episode_id,
+        input_fingerprint="ir-contract-v2",
+        contract_version="screenplay-generation-ir.v2",
+        payload=_participant_delivery_complete_ir_payload(
+            "screenplay-generation-ir.v2"
+        ),
+    )
+
+    with bind_trace(run_id, step_id):
+        recovered = stages._recover_screenplay_ir_candidate(episode_id)
+
+    assert recovered is not None
+    candidate, artifact_id = recovered
+    assert artifact_id == artifact["id"]
+    assert candidate.format_version == "screenplay-generation-ir.v2"
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert tuple(row) == ("candidate", None)
+
+
+def test_recovery_keeps_structurally_complete_legacy_ir_explicitly_legacy() -> None:
+    episode_id = "ep-ir-contract-v1-complete"
+    run_id, step_id, artifact = _persist_recoverable_ir(
+        episode_id=episode_id,
+        input_fingerprint="ir-contract-v1-complete",
+        contract_version="screenplay-generation-ir.v1.5",
+        payload=_participant_delivery_complete_ir_payload(
+            "screenplay-generation-ir.v1.5"
+        ),
+    )
+
+    with bind_trace(run_id, step_id):
+        recovered = stages._recover_screenplay_ir_candidate(episode_id)
+
+    assert recovered is not None
+    candidate, artifact_id = recovered
+    assert artifact_id == artifact["id"]
+    assert candidate.format_version == "screenplay-generation-ir.v1.5"
+    assert db.get_conn().execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()["status"] == "candidate"
+
+
+def test_recovery_marks_legacy_ir_without_participant_deliveries_stale() -> None:
+    episode_id = "ep-ir-contract-v1-incomplete"
+    payload = _ir_payload()
+    payload["format_version"] = "screenplay-generation-ir.v1.5"
+    for scene in payload["scenes"]:
+        for unit in scene["units"]:
+            unit.pop("participant_deliveries", None)
+    for event in payload["events"]:
+        event.pop("participant_deliveries", None)
+    run_id, step_id, artifact = _persist_recoverable_ir(
+        episode_id=episode_id,
+        input_fingerprint="ir-contract-v1-incomplete",
+        contract_version="screenplay-generation-ir.v1.5",
+        payload=payload,
+    )
+
+    with bind_trace(run_id, step_id):
+        recovered = stages._recover_screenplay_ir_candidate(episode_id)
+
+    assert recovered is None
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert "ARTIFACT_NEEDS_REBUILD" in row["stale_reason"]
+    assert "participant_deliveries" in row["stale_reason"]
 
 
 def test_durable_ir_without_blueprint_hash_uses_strict_runtime_validation() -> None:
