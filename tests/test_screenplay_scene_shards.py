@@ -188,22 +188,7 @@ def _creative_shard(
     blueprint: NarrativeBlueprint,
     contracts: list[ScreenplaySceneInputContract] | None = None,
 ) -> ScreenplaySceneShardCreativeIR:
-    del blueprint
-    compiled_by_key = {
-        slot.unit_key: slot
-        for contract in (contracts or [])
-        for slot in contract.unit_slots
-    }
-
-    def identity_keys(slot) -> list[str]:
-        compiled = compiled_by_key.get(slot.unit_key)
-        if compiled is None:
-            return []
-        return list(dict.fromkeys([
-            *compiled.actor_keys,
-            *compiled.target_keys,
-            *compiled.onscreen_entity_keys,
-        ]))
+    del blueprint, contracts
 
     return ScreenplaySceneShardCreativeIR.model_validate({
         "slots": {
@@ -216,10 +201,6 @@ def _creative_shard(
                 "resulting_state": (
                     f"完成 {slot.source_segment_ids[0]}"
                 ),
-                "text_provenance": {
-                    "kind": "creative_action",
-                    "identity_keys": identity_keys(slot),
-                },
             }
             for slot in plan.unit_slots
         },
@@ -271,16 +252,20 @@ def _a78_replay_models(
             "source_segment_ids": ["SRC0056"],
         }
     contract = ScreenplaySceneInputContract.model_validate(contract_payload)
-    creative_payload = deepcopy(replay["provider_creative_response"])
-    creative_payload["contract_version"] = SCREENPLAY_SCENE_CREATIVE_VERSION
-    creative_slot = creative_payload["slots"][plan.unit_slots[0].unit_key]
-    creative_slot["text_provenance"] = {
-        "kind": "creative_action",
-        "identity_keys": ["person_8ff1cb1a5861"],
+    recorded_slot = replay["provider_creative_response"]["slots"][
+        plan.unit_slots[0].unit_key
+    ]
+    creative_slot = {
+        "text": recorded_slot["text"],
+        "performance": recorded_slot["performance"],
+        "resulting_state": recorded_slot["resulting_state"],
+        "function": recorded_slot["function"],
     }
-    creative_slot.update(
-        creative_update or {}
-    )
+    creative_slot.update(creative_update or {})
+    creative_payload = {
+        "contract_version": SCREENPLAY_SCENE_CREATIVE_VERSION,
+        "slots": {plan.unit_slots[0].unit_key: creative_slot},
+    }
     creative = ScreenplaySceneShardCreativeIR.model_validate(creative_payload)
     return replay, plan, scene_plan, contract, creative
 
@@ -907,7 +892,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v6"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v7"
 
 
 def test_scene_shard_schema_requires_explicit_participant_deliveries() -> None:
@@ -1819,7 +1804,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
     )
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v6"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v7"
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
@@ -2049,11 +2034,7 @@ def _recorded_response_slot_draft(
         for segment in scene_input["source_segments"]
     }
     content_by_signature: dict[tuple[str, str, str], dict] = {}
-    compiled_by_key = {
-        slot.unit_key: slot
-        for contract in contracts
-        for slot in contract.unit_slots
-    }
+    del contracts
     for scene in response["scenes"]:
         for unit in scene["units"]:
             assert len(unit["source_segment_ids"]) == 1
@@ -2072,12 +2053,6 @@ def _recorded_response_slot_draft(
             slot.kind,
         )
         recorded = content_by_signature.get(signature, {})
-        compiled = compiled_by_key[slot.unit_key]
-        identity_keys = list(dict.fromkeys([
-            *compiled.actor_keys,
-            *compiled.target_keys,
-            *compiled.onscreen_entity_keys,
-        ]))
         slots[slot.unit_key] = {
             "text": (
                 slot.source_text
@@ -2090,10 +2065,6 @@ def _recorded_response_slot_draft(
             "performance": "",
             "resulting_state": recorded.get("resulting_state", ""),
             "function": recorded.get("function", "statement"),
-            "text_provenance": {
-                "kind": "creative_action",
-                "identity_keys": identity_keys,
-            },
         }
     return ScreenplaySceneShardCreativeIR.model_validate({
         "slots": slots,
@@ -2258,8 +2229,8 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 
 
 def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v6"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v6"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v7"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v7"
 
 
 def test_compiled_unit_slot_round_trip_preserves_derived_action_agency() -> None:
@@ -2286,7 +2257,7 @@ def test_compiled_unit_slot_round_trip_preserves_derived_action_agency() -> None
     assert ScreenplaySceneCompiledUnitSlot.model_validate(serialized) == slot
 
 
-def test_a78_replay_rejects_character_text_without_scaffold_relation() -> None:
+def test_a78_replay_cannot_create_character_relation_from_text() -> None:
     replay, plan, scene_plan, contract, creative = _a78_replay_models()
 
     assert replay["published_artifact"]["artifact_id"] == "art_5e0650367127"
@@ -2297,55 +2268,59 @@ def test_a78_replay_rejects_character_text_without_scaffold_relation() -> None:
         "art_d1de89b55073"
     )
     assert replay["source_lineage"]["provider_call_id"] == 61001
-    with pytest.raises(
-        ScreenplaySceneShardError,
-        match="GENERATION_CONTRACT.*scaffold",
-    ):
-        scene_shards_module.compile_screenplay_scene_shard_draft(
-            creative,
-            episode_no=1,
-            plan=plan,
-            scene_plans={scene_plan.key: scene_plan},
-            scene_input_contracts=[contract],
-        )
+    raw_response = deepcopy(replay["provider_creative_response"])
+    raw_response["contract_version"] = SCREENPLAY_SCENE_CREATIVE_VERSION
+    with pytest.raises(ValidationError) as caught:
+        ScreenplaySceneShardCreativeIR.model_validate(raw_response)
+    assert {
+        error["loc"][-1]
+        for error in caught.value.errors()
+        if error["type"] == "extra_forbidden"
+    } == {"agency_kind"}
+
+    shard = scene_shards_module.compile_screenplay_scene_shard_draft(
+        creative,
+        episode_no=1,
+        plan=plan,
+        scene_plans={scene_plan.key: scene_plan},
+        scene_input_contracts=[contract],
+    )
+    unit = shard.scenes[0].units[0]
+    assert unit.actor_keys == []
+    assert unit.target_keys == []
+    assert unit.action_agency.kind == "unattributed"
+    assert unit.text_provenance.kind == "creative_action"
+    assert unit.text_provenance.identity_keys == []
 
 
 @pytest.mark.parametrize(
-    ("text", "agency_kind", "text_provenance"),
+    ("text_field", "text"),
     [
         pytest.param(
+            "on_screen_text",
             "片头题字“孟浩”浮现在画面中央",
-            "on_screen_text",
-            "on_screen_text",
             id="on_screen_title",
         ),
         pytest.param(
+            "required_text",
             "画面必须准确显示“孟浩”",
-            "required_text",
-            "required_text",
             id="required_text",
         ),
         pytest.param(
+            "prop_text",
             "腰牌刻字“孟浩”清晰可见",
-            "prop_text",
-            "prop_text",
             id="prop_text",
         ),
     ],
 )
-def test_creative_text_provenance_does_not_create_character_relation(
+def test_compiler_owned_text_provenance_does_not_create_character_relation(
+    text_field: str,
     text: str,
-    agency_kind: str,
-    text_provenance: str,
 ) -> None:
     _replay, plan, scene_plan, contract, creative = _a78_replay_models(
         creative_update={
             "text": text,
-            "agency_kind": agency_kind,
-            "text_provenance": {
-                "kind": text_provenance,
-                "identity_keys": [],
-            },
+            text_field: text,
         },
     )
 
@@ -2361,18 +2336,16 @@ def test_creative_text_provenance_does_not_create_character_relation(
     assert unit.actor_keys == []
     assert unit.target_keys == []
     assert unit.onscreen_entity_keys == []
+    assert unit.action_agency.kind == text_field
     assert unit.action_agency.identity_bearing is False
+    assert unit.text_provenance.kind == text_field
+    assert unit.text_provenance.identity_keys == []
 
 
 def test_anonymous_group_action_does_not_require_identity_relation() -> None:
     _replay, plan, scene_plan, contract, creative = _a78_replay_models(
         creative_update={
             "text": "四个少年同时后退一步",
-            "agency_kind": "collective",
-            "text_provenance": {
-                "kind": "creative_action",
-                "identity_keys": [],
-            },
         },
     )
 
@@ -2387,18 +2360,13 @@ def test_anonymous_group_action_does_not_require_identity_relation() -> None:
     unit = shard.scenes[0].units[0]
     assert unit.actor_keys == []
     assert unit.target_keys == []
-    assert unit.action_agency.kind == "collective"
+    assert unit.action_agency.kind == "unattributed"
     assert unit.action_agency.identity_bearing is False
+    assert unit.text_provenance.identity_keys == []
 
 
 def test_character_action_with_scaffold_relation_compiles() -> None:
     _replay, plan, scene_plan, contract, creative = _a78_replay_models(
-        creative_update={
-            "text_provenance": {
-                "kind": "creative_action",
-                "identity_keys": ["person_8ff1cb1a5861"],
-            },
-        },
         bind_actor=True,
     )
 
@@ -2415,6 +2383,9 @@ def test_character_action_with_scaffold_relation_compiles() -> None:
     assert unit.onscreen_entity_keys == ["person_8ff1cb1a5861"]
     assert unit.action_agency.kind == "character"
     assert unit.action_agency.identity_bearing is True
+    assert unit.text_provenance.identity_keys == [
+        "person_8ff1cb1a5861"
+    ]
 
 
 def test_full_production_ss001_missing_agency_round_trip_preserves_fields() -> None:
@@ -2437,7 +2408,11 @@ def test_full_production_ss001_missing_agency_round_trip_preserves_fields() -> N
     assert len(raw_units) == 23
     assert all("action_agency" not in unit for unit in raw_units)
 
-    shard = ScreenplaySceneShardIR.model_validate(fixture["content"])
+    upgraded_content = deepcopy(fixture["content"])
+    upgraded_content["contract_version"] = (
+        SCREENPLAY_SCENE_SHARD_VERSION
+    )
+    shard = ScreenplaySceneShardIR.model_validate(upgraded_content)
     serialized = shard.model_dump(mode="json")
     round_trip = ScreenplaySceneShardIR.model_validate(serialized)
     units = [unit for scene in shard.scenes for unit in scene.units]
@@ -2457,6 +2432,11 @@ def test_full_production_ss001_missing_agency_round_trip_preserves_fields() -> N
     )
     assert all(
         "action_agency" in unit
+        for scene in serialized["scenes"]
+        for unit in scene["units"]
+    )
+    assert all(
+        "text_provenance" in unit
         for scene in serialized["scenes"]
         for unit in scene["units"]
     )
@@ -2752,10 +2732,6 @@ def test_slot_content_compiles_by_key_and_rejects_contract_drift() -> None:
         slot.unit_key: {
             "text": f"交付 {slot.source_segment_ids[0]}",
             "resulting_state": f"完成 {slot.source_segment_ids[0]}",
-            "text_provenance": {
-                "kind": "creative_action",
-                "identity_keys": [],
-            },
         }
         for slot in reversed(plan.unit_slots)
     }
@@ -2800,10 +2776,6 @@ def test_slot_content_compiles_by_key_and_rejects_contract_drift() -> None:
     extra_content = deepcopy(slot_content)
     extra_content["unexpected-unit"] = {
         "text": "越权单元",
-        "text_provenance": {
-            "kind": "creative_action",
-            "identity_keys": [],
-        },
     }
     extra = ScreenplaySceneShardCreativeIR.model_validate({
         "slots": extra_content,
@@ -2855,8 +2827,8 @@ def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
         )
         != fingerprint
     )
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v6"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v6"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v7"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v7"
 
 
 def test_dialogue_mismatch_is_not_silently_normalized() -> None:
