@@ -7421,82 +7421,27 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
     if screenplay.narrative_plan is not None:
         from app.narrative_priority import (
             authoritative_outline_duration_s,
-            merge_outline_delivery_beats,
-            picture_screenplay_projection,
+            compile_authoritative_delivery_outline,
         )
         from app.evidence import repository as evidence_repository
         from app.harness.contracts import get_contract
         from app.harness.types import EvidenceArtifact
         from app.narrative import validate_storyboard_narrative
         from app.narrative_outline import (
-            compile_narrative_storyboard_outline,
             narrative_outline_action_delivery_errors,
-            normalize_narrative_storyboard_outline,
         )
         from app.validators import (
-            assign_outline_delivery_ids,
-            normalize_outline_dialogue_ownership,
-            normalize_outline_spoken_durations,
             outline_key_line_capacity_errors,
             outline_key_line_speaker_errors,
             outline_scene_coverage_errors,
-            split_outline_on_speaker_changes,
-            split_outline_over_action_capacity,
-            split_outline_over_key_line_capacity,
         )
 
-        screenplay, picture_projection = picture_screenplay_projection(
-            screenplay
-        )
-        outline = compile_narrative_storyboard_outline(screenplay)
-        max_shots = storyboard_shot_count_range(
-            int(episode.get("target_duration_s") or 0)
-        )[1]
-        projection_changes = normalize_narrative_storyboard_outline(
-            outline,
+        screenplay, outline, compile_audit = (
+            compile_authoritative_delivery_outline(
             screenplay,
             bible=bible,
         )
-        assign_outline_delivery_ids(outline, screenplay)
-        split_changes = [
-            *split_outline_over_action_capacity(
-                outline,
-                max_shots=max_shots,
-            ),
-            *split_outline_on_speaker_changes(
-                outline,
-                screenplay,
-                max_shots=max_shots,
-            ),
-            *split_outline_over_key_line_capacity(
-                outline,
-                screenplay,
-                max_shots=max_shots,
-            ),
-            *normalize_outline_dialogue_ownership(
-                outline,
-                screenplay,
-            ),
-        ]
-        projection_changes.extend(
-            normalize_narrative_storyboard_outline(
-                outline,
-                screenplay,
-                bible=bible,
-            )
         )
-        projection_changes.extend(
-            normalize_outline_dialogue_ownership(
-                outline,
-                screenplay,
-            )
-        )
-        normalize_outline_spoken_durations(outline, screenplay)
-        beat_merge_changes = merge_outline_delivery_beats(
-            outline,
-            screenplay,
-        )
-        split_changes.extend(beat_merge_changes)
         authoritative_duration_s = authoritative_outline_duration_s(outline)
         episode["target_duration_s"] = authoritative_duration_s
         ensure_storyboard_scene_contexts(outline, screenplay, bible)
@@ -7553,9 +7498,7 @@ async def generate_storyboard_outline(episode: dict, source_text: str, bible: Bi
             prompt_version="storyboard-outline-compiler-1.0.0",
             model_snapshot={
                 **dict(getattr(outline, "_compile_audit", {}) or {}),
-                "picture_projection": picture_projection,
-                "projection_change_count": len(projection_changes),
-                "split_change_count": len(split_changes),
+                **compile_audit,
                 "final_shot_count": len(outline.shots),
                 "authoritative_duration_s": authoritative_duration_s,
                 "scene_batch_count": len(outline.scene_contexts),

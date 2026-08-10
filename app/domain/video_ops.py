@@ -244,7 +244,7 @@ def evaluate_storyboard_for_confirmation(
         target_duration_s if target_duration_s is not None else episode["target_duration_s"]
     )
     actual_total = sum(int(s.duration_s or 0) for s in board.shots)
-    compact_target = _compact_episode_target(actual_total or compact_target)
+    compact_target = actual_total or compact_target
 
     structural_errors = _storyboard_structural_errors(board)
     outline = None
@@ -2768,7 +2768,11 @@ async def _complete_episode_core(
             episode_id=episode_id,
             project_id=ep["project_id"],
             storyboard_artifact_id=ep["storyboard_artifact_id"] or "",
-            budget_cap_cny=float(budget_cap) if budget_cap is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY,
+            budget_cap_cny=(
+                float(budget_cap)
+                if budget_cap is not None
+                else None
+            ),
             wall_clock_cap_s=float(wall_cap) if wall_cap is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S,
             allow_fallback_adopt=bool(allow_fallback),
             max_fallback_shots=(

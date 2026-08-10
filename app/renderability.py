@@ -67,10 +67,26 @@ def episode_target_from_spine(spine_beat_count: int) -> int:
 
 
 def screenplay_required_duration_s(screenplay, *, minimum_s: int = 0) -> int:
-    """Derive an unbounded duration floor from spoken, spine, and scene capacity."""
+    """Use the executable outline as duration authority when one can be compiled."""
     from app import config
     from app.spoken_contract import content_char_count
 
+    if getattr(screenplay, "narrative_plan", None) is not None:
+        from app.narrative_priority import (
+            authoritative_outline_duration_s,
+            compile_authoritative_delivery_outline,
+        )
+
+        _projected, outline, _audit = (
+            compile_authoritative_delivery_outline(screenplay)
+        )
+        return max(
+            int(minimum_s or 0),
+            authoritative_outline_duration_s(outline),
+        )
+
+    # Legacy scripts without a narrative graph retain the old conservative
+    # floor until they can be migrated to structured ShotTasks.
     spoken_chars = sum(
         content_char_count(turn.line)
         for chain in (getattr(screenplay, "dialogue_chains", None) or [])

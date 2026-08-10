@@ -1683,6 +1683,11 @@ def _generation_plan_material(
         "planner_provider": plan.planner_provider,
         "planner_model": plan.planner_model,
         "planner_prompt_fingerprint": plan.planner_prompt_fingerprint,
+        "authoritative_shot_count": len(plan.shots),
+        "authoritative_estimated_cost_cny": round(
+            sum(float(shot.estimated_cost or 0) for shot in plan.shots),
+            6,
+        ),
         "shot_execution_contracts": [
             {
                 "shot_id": shot.shot_id,
@@ -1778,7 +1783,24 @@ def issue_video_completion_grant(
     grant_id = new_id("grant")
     token = secrets.token_urlsafe(24)
     issued_at = now()
-    cap = float(budget_cap_cny if budget_cap_cny is not None else DEFAULT_VIDEO_BUDGET_CAP_CNY)
+    budget_requirement = episode_video_completion_budget_requirement(
+        episode_id,
+        conn=conn,
+    )
+    required_cap = float(
+        budget_requirement["required_completion_cap_cny"] or 0
+    )
+    cap = float(
+        budget_cap_cny
+        if budget_cap_cny is not None
+        else max(1.0, required_cap)
+    )
+    if cap + 1e-9 < required_cap:
+        raise GrantValidationError(
+            "VIDEO_BUDGET_BELOW_AUTHORITY_PLAN",
+            "视频授权低于当前权威镜头计划的一次完整生成成本："
+            f"requested={cap:g}, required={required_cap:g}",
+        )
     wall = float(wall_clock_cap_s if wall_clock_cap_s is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S)
     if not math.isfinite(cap) or not 1 <= cap <= 100000:
         raise GrantValidationError("INVALID_BUDGET", "视频补齐预算必须是 1–100000 的有限数")

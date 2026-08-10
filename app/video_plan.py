@@ -1458,6 +1458,14 @@ def validate_episode_plan(
     if issues:
         raise VideoPlanValidationError(issues)
 
+    from app.video_cost_model import initial_shot_generation_cost
+
+    for item in normalized:
+        duration_s = float(by_id[item.shot_id]["duration_s"] or 5)
+        authoritative_cost = initial_shot_generation_cost(duration_s)
+        item.estimated_cost = authoritative_cost
+        item.max_cost = max(float(item.max_cost or 0), authoritative_cost)
+
     serial_provider = snapshot.provider == "minimax_h3"
     if serial_provider:
         from app import minimax_h3
