@@ -212,6 +212,46 @@ def test_shot_visual_identity_gate_does_not_treat_required_text_as_cast() -> Non
     assert issues == []
 
 
+def test_shot_visual_identity_gate_marks_unsatisfied_text_surface_conflict() -> None:
+    bible = _bible()
+    bible.characters.append(Character(
+        name="未来出场者",
+        role="后续事件人物",
+        appearance_canonical="成年人物，深色长袍，外观稳定清晰",
+    ))
+    screenplay = _screenplay()
+    screenplay.narrative_plan = NarrativeContinuityPlan(scope_id="e2")
+    shot = _shot(1)
+    shot.characters = ["萧炎", "未来出场者"]
+    shot.characters_visible = ["萧炎", "未来出场者"]
+    shot.visible_entity_ids = ["萧炎", "未来出场者"]
+    shot.required_text = RequiredOnScreenText(
+        surface="未来出场者",
+        exact_text="额间印记",
+        strategy="embedded_prop",
+    )
+    task = StoryboardOutlineShot(
+        shot_no=1,
+        visible_entity_ids=["萧炎"],
+    )
+
+    issues = _storyboard_shot_visual_identity_issues(
+        shot,
+        task,
+        bible,
+        screenplay,
+        episode_id="e2",
+    )
+
+    assert len(issues) == 1
+    assert issues[0].repairable is False
+    assert issues[0].evidence["authority_conflicts"] == [{
+        "preserve_path": "required_text",
+        "remove_identity_id": "未来出场者",
+        "reason": "文字承载面要求该身份可见",
+    }]
+
+
 def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bool,
              screenplay: EpisodeScreenplay, completed: list[Shot] | None = None) -> list[str]:
     return _validate_storyboard_shot_draft(

@@ -1242,12 +1242,15 @@ def _recover_truncated_outline_from_approved_artifact(
             continue
         if len(candidate.shots) <= max(current_count, shot_count):
             continue
-        persist_storyboard_outline_projection(
+        authority = persist_storyboard_outline_projection(
             str(ep["id"]),
             candidate,
             artifact_id=str(row["id"]),
             conn=conn,
+            **_outline_authority_cas(cp),
         )
+        if authority is not None:
+            _bind_checkpoint_to_outline_authority(cp, authority)
         cp.expected_total = len(candidate.shots)
         cp.phase = "VALIDATING_OUTLINE"
         cp.outcome = None
@@ -1337,16 +1340,20 @@ def _recover_outline_from_current_artifact(
                 break
         if requires_format_repair:
             continue
-        cp.outline_artifact_id = artifact_id
-        cp.expected_total = len(outline.shots)
-        cp.phase = "VALIDATING_OUTLINE"
-        cp.outcome = None
-        persist_storyboard_outline_projection(
+        authority = persist_storyboard_outline_projection(
             str(ep["id"]),
             outline,
             artifact_id=artifact_id,
             conn=conn,
+            **_outline_authority_cas(cp),
         )
+        if authority is not None:
+            _bind_checkpoint_to_outline_authority(cp, authority)
+        else:
+            cp.outline_artifact_id = artifact_id
+        cp.expected_total = len(outline.shots)
+        cp.phase = "VALIDATING_OUTLINE"
+        cp.outcome = None
         conn.execute(
             "UPDATE episodes SET storyboard_warning=NULL WHERE id=?",
             (ep["id"],),
@@ -2569,7 +2576,13 @@ async def run_storyboard_supervisor(
                 episode_id,
                 outline,
                 conn=conn,
+                **_outline_authority_cas(cp),
             )
+            if outline_authority is not None:
+                _bind_checkpoint_to_outline_authority(
+                    cp,
+                    outline_authority,
+                )
             ep_data["target_duration_s"] = (
                 outline_authority.authoritative_duration_s
             )
@@ -2806,7 +2819,13 @@ async def run_storyboard_supervisor(
                         episode_id,
                         outline,
                         conn=conn,
+                        **_outline_authority_cas(cp),
                     )
+                    if outline_authority is not None:
+                        _bind_checkpoint_to_outline_authority(
+                            cp,
+                            outline_authority,
+                        )
                     ep_data["target_duration_s"] = (
                         outline_authority.authoritative_duration_s
                     )
@@ -3036,6 +3055,7 @@ async def run_storyboard_supervisor(
                     or None
                 ),
                 conn=conn,
+                **_outline_authority_cas(cp),
             )
             conn.execute(
                 "UPDATE episodes SET storyboard_warning=NULL WHERE id=?",
@@ -3051,6 +3071,10 @@ async def run_storyboard_supervisor(
                 )
                 cp.outline_artifact_id = str(
                     outline_authority.artifact_id
+                )
+                _bind_checkpoint_to_outline_authority(
+                    cp,
+                    outline_authority,
                 )
             else:
                 ep_data["storyboard_outline_json"] = outline.model_dump_json()
@@ -3093,8 +3117,13 @@ async def run_storyboard_supervisor(
                         episode_id,
                         pack_outline,
                         conn=conn,
+                        **_outline_authority_cas(cp),
                     )
                     if outline_authority is not None:
+                        _bind_checkpoint_to_outline_authority(
+                            cp,
+                            outline_authority,
+                        )
                         ep_data["target_duration_s"] = (
                             outline_authority.authoritative_duration_s
                         )
@@ -3977,9 +4006,14 @@ async def run_storyboard_supervisor(
                 episode_id,
                 outline,
                 conn=conn,
+                **_outline_authority_cas(cp),
             )
             conn.commit()
             if outline_authority is not None:
+                _bind_checkpoint_to_outline_authority(
+                    cp,
+                    outline_authority,
+                )
                 ep_data["target_duration_s"] = (
                     outline_authority.authoritative_duration_s
                 )
@@ -4155,7 +4189,13 @@ async def run_storyboard_supervisor(
                     episode_id,
                     outline,
                     conn=conn,
+                    **_outline_authority_cas(cp),
                 )
+                if outline_authority is not None:
+                    _bind_checkpoint_to_outline_authority(
+                        cp,
+                        outline_authority,
+                    )
                 ep_data["target_duration_s"] = (
                     outline_authority.authoritative_duration_s
                 )

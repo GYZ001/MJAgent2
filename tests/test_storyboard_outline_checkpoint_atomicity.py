@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
 
@@ -162,6 +163,24 @@ def _authority_prompt_version(authority) -> str:
     return str(artifact["prompt_version"] or "")
 
 
+def _persisted_checkpoint_payload(conn) -> tuple[dict, dict]:
+    revision = conn.execute(
+        """SELECT checkpoint_json FROM production_revisions
+            WHERE id='storyboard-revision'"""
+    ).fetchone()
+    artifact = conn.execute(
+        """SELECT content_json FROM artifacts
+            WHERE type='storyboard_supervisor_checkpoint' AND scope_id='e1'
+            ORDER BY version DESC LIMIT 1"""
+    ).fetchone()
+    assert revision is not None
+    assert artifact is not None
+    return (
+        json.loads(revision["checkpoint_json"])["supervisor_checkpoint"],
+        json.loads(artifact["content_json"]),
+    )
+
+
 def test_outline_revisions_advance_episode_and_checkpoint_as_one_authority(
     outline_checkpoint_db,
 ) -> None:
@@ -186,6 +205,11 @@ def test_outline_revisions_advance_episode_and_checkpoint_as_one_authority(
         "storyboard_outline_fingerprint": r3.fingerprint,
         "storyboard_outline_prompt_version": _authority_prompt_version(r3),
     }
+    revision_checkpoint, artifact_checkpoint = _persisted_checkpoint_payload(
+        outline_checkpoint_db
+    )
+    assert revision_checkpoint == artifact_checkpoint
+    assert revision_checkpoint["outline_artifact_id"] == r3.artifact_id
     assert r1.artifact_id != r2.artifact_id != r3.artifact_id
 
 
@@ -209,6 +233,72 @@ def test_stale_outline_compare_and_swap_cannot_overwrite_newer_authority(
     assert checkpoint.outline_artifact_id == r2.artifact_id
 
 
+def test_concurrent_outline_writers_allow_only_one_old_compare_and_swap(
+    outline_checkpoint_db,
+) -> None:
+    r1 = _adopt(1)
+    save_checkpoint(_checkpoint_for(r1))
+    outline2, artifact2 = _outline_artifact(
+        2,
+        prompt_version="storyboard-outline-compiler-2.0.0",
+    )
+    outline3, artifact3 = _outline_artifact(
+        3,
+        prompt_version="storyboard-outline-compiler-3.0.0",
+    )
+    barrier = threading.Barrier(2)
+
+    def compete(outline, artifact):
+        barrier.wait()
+        try:
+            return persist_storyboard_outline_authority(
+                "e1",
+                outline,
+                artifact_id=artifact["id"],
+                expected_outline_artifact_id=r1.artifact_id,
+            )
+        except StoryboardOutlineAuthorityError as exc:
+            return exc
+        finally:
+            connection = getattr(db._local, "conn", None)
+            if connection is not None:
+                connection.close()
+                db._local.conn = None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(
+            executor.map(
+                lambda case: compete(*case),
+                [
+                    (outline2, artifact2),
+                    (outline3, artifact3),
+                ],
+            )
+        )
+
+    adopted = [
+        outcome
+        for outcome in outcomes
+        if not isinstance(outcome, Exception)
+    ]
+    rejected = [
+        outcome
+        for outcome in outcomes
+        if isinstance(outcome, StoryboardOutlineAuthorityError)
+    ]
+    assert len(adopted) == 1
+    assert len(rejected) == 1
+    assert "CAS" in str(rejected[0])
+    winner = adopted[0]
+    episode = _episode_authority_row(outline_checkpoint_db)
+    checkpoint = load_latest_checkpoint("e1")
+    assert checkpoint is not None
+    assert episode["storyboard_outline_artifact_id"] == winner.artifact_id
+    assert episode["storyboard_outline_revision"] == winner.revision
+    assert episode["storyboard_outline_fingerprint"] == winner.fingerprint
+    assert checkpoint.outline_artifact_id == winner.artifact_id
+
+
 def test_checkpoint_persistence_failure_rolls_back_outline_authority(
     outline_checkpoint_db,
     monkeypatch,
@@ -220,6 +310,9 @@ def test_checkpoint_persistence_failure_rolls_back_outline_authority(
         """SELECT COUNT(*) FROM artifacts
              WHERE type='storyboard_supervisor_checkpoint'"""
     ).fetchone()[0]
+    before_revision_checkpoint, before_artifact_checkpoint = (
+        _persisted_checkpoint_payload(outline_checkpoint_db)
+    )
     create_artifact = evidence_repository.create_artifact
 
     def fail_checkpoint_artifact(artifact, **kwargs):
@@ -256,6 +349,11 @@ def test_checkpoint_persistence_failure_rolls_back_outline_authority(
     checkpoint = load_latest_checkpoint("e1")
     assert checkpoint is not None
     assert checkpoint.outline_artifact_id == r1.artifact_id
+    revision_checkpoint, artifact_checkpoint = _persisted_checkpoint_payload(
+        outline_checkpoint_db
+    )
+    assert revision_checkpoint == before_revision_checkpoint
+    assert artifact_checkpoint == before_artifact_checkpoint
 
 
 def test_restart_reads_episode_authority_and_discards_stale_outline_candidate(

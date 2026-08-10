@@ -272,9 +272,10 @@ def test_agent_loop_does_not_dispatch_repair_for_authority_conflict() -> None:
         ),
     )
 
-    with pytest.raises(AgentLoopFailure, match="authority_conflict"):
+    with pytest.raises(AgentLoopFailure) as exc_info:
         asyncio.run(loop.run(producer, evaluate))
 
+    assert exc_info.value.exit_reason == "authority_conflict"
     assert calls == 1
 
 

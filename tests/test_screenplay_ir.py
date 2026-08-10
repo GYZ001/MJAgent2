@@ -619,6 +619,11 @@ def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
         unit["narrative_layer"] = "story"
         unit["event_priority"] = "causal"
         unit["render_policy"] = "standalone"
+    for event in payload["events"]:
+        event["participant_deliveries"] = []
+        event["narrative_layer"] = "story"
+        event["event_priority"] = "causal"
+        event["render_policy"] = "standalone"
 
     candidate = ScreenplayGenerationIR.model_validate(payload)
     screenplay = compile_screenplay_ir(
