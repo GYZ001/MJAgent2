@@ -1486,7 +1486,11 @@ def test_validator_and_merge_accept_source_authored_offscreen_evidence(
         )
     )
     shard = scene_shards_module.compile_screenplay_scene_shard_draft(
-        _creative_shard(plans[0], blueprint),
+        _creative_shard(
+            plans[0],
+            blueprint,
+            scene_input_contracts[plans[0].shard_id],
+        ),
         episode_no=1,
         plan=plans[0],
         scene_plans={
@@ -2550,7 +2554,11 @@ def test_compiled_identity_scaffold_round_trip_and_merge_rejects_drift() -> None
     }
     shards = [
         scene_shards_module.compile_screenplay_scene_shard_draft(
-            _creative_shard(plan, blueprint),
+            _creative_shard(
+                plan,
+                blueprint,
+                contracts[plan.shard_id],
+            ),
             episode_no=1,
             plan=plan,
             scene_plans=scene_plans,
