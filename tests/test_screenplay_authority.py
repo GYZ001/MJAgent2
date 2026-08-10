@@ -137,6 +137,12 @@ async def test_eligible_published_revalidation_is_executable_by_resume_endpoint(
     ("published_pointer", "artifact_status", "expected_code"),
     [
         pytest.param("", None, "published_screenplay_missing", id="missing"),
+        pytest.param(
+            "missing-artifact",
+            None,
+            "published_screenplay_artifact_missing",
+            id="artifact-missing",
+        ),
         pytest.param(None, "candidate", "published_screenplay_not_approved", id="nonapproved"),
         pytest.param(None, "stale", "published_screenplay_not_approved", id="stale"),
     ],
@@ -207,6 +213,43 @@ def test_unknown_revalidation_check_fails_closed_without_executable_action(
         api._prepare_published_screenplay_revalidation(episode)
     assert caught.value.status_code == 409
     assert caught.value.detail["code"] == state["code"]
+
+
+def test_typed_source_drift_has_priority_without_marking_artifact_stale(
+    monkeypatch,
+) -> None:
+    _screenplay_value, artifact, _authority = _published_case()
+    episode = _published_episode()
+    monkeypatch.setattr(api, "_screenplay_ready", lambda _episode: False)
+    observed: dict[str, object] = {}
+
+    def fail_typed(**kwargs):
+        observed["mark_stale"] = kwargs["mark_stale"]
+        raise app_errors.ArtifactNeedsRebuildError(
+            artifact_id=artifact["id"],
+            artifact_type="screenplay_document",
+            reason="validated-v6 source drift",
+        )
+
+    monkeypatch.setattr(
+        "app.production.screenplay_authority.assert_screenplay_matches_validated_v6_source",
+        fail_typed,
+    )
+
+    state = api._screenplay_authority_state(
+        episode,
+        shot_count=0,
+        production={},
+    )
+
+    assert state["code"] == "ARTIFACT_NEEDS_REBUILD"
+    assert state["can_resume"] is False
+    assert state["recommended_action"] == "refresh"
+    assert observed["mark_stale"] is False
+    assert db.get_conn().execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()["status"] == "approved"
 
 
 def test_first_episode_baseline_resume_keeps_production_checkpoint_action(

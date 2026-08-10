@@ -340,6 +340,11 @@ def _published_screenplay_revalidation_eligibility(
             "artifact": None,
             "screenplay": None,
             "error": error,
+            "rebuild_error": (
+                error
+                if isinstance(error, ArtifactNeedsRebuildError)
+                else None
+            ),
         }
 
     if not artifact_id:
@@ -421,6 +426,7 @@ def _published_screenplay_revalidation_eligibility(
         "artifact": artifact,
         "screenplay": screenplay,
         "error": None,
+        "rebuild_error": None,
     }
 
 
@@ -450,9 +456,11 @@ def _screenplay_authority_state(
         and not snapshot["can_resume"]
     ):
         eligibility = _published_screenplay_revalidation_eligibility(dict(ep))
-        eligibility_error = eligibility.get("error")
-        if getattr(eligibility_error, "code", None) == "ARTIFACT_NEEDS_REBUILD":
-            return _screenplay_rebuild_state(snapshot, eligibility_error)
+        if eligibility["rebuild_error"] is not None:
+            return _screenplay_rebuild_state(
+                snapshot,
+                eligibility["rebuild_error"],
+            )
         if eligibility["eligible"]:
             return {
                 **snapshot,

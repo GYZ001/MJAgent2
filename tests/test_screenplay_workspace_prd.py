@@ -924,10 +924,6 @@ def test_script_detail_keeps_valid_screenplay_projection() -> None:
             id="status",
         ),
         pytest.param(
-            api._prepare_published_screenplay_revalidation,
-            id="resume",
-        ),
-        pytest.param(
             lambda episode: api._screenplay_rebuild_block(
                 db.get_conn(),
                 episode,
@@ -953,6 +949,32 @@ def test_unknown_stale_artifact_validation_fails_closed_at_every_boundary(
 
     with pytest.raises(ValidationError):
         boundary(episode)
+
+
+def test_unknown_stale_artifact_revalidation_returns_structured_block() -> None:
+    _seed_episode(with_artifact=False)
+    invalid_artifact = _screenplay().model_dump(mode="json")
+    invalid_artifact.pop("episode_no")
+    _bind_stale_screenplay_artifact(
+        _valid_script().model_dump(mode="json"),
+        invalid_artifact,
+        stale_reason="[ARTIFACT_NEEDS_REBUILD] untrusted free text",
+    )
+    episode = dict(db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id='e1'"
+    ).fetchone())
+
+    with pytest.raises(HTTPException) as caught:
+        api._prepare_published_screenplay_revalidation(episode)
+
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {
+        "code": "published_screenplay_revalidation_check_failed",
+        "message": "published 剧本复验资格检查失败，请刷新后重试",
+        "artifact_id": "art-stale-screenplay",
+        "action": "refresh",
+    }
+    assert isinstance(caught.value.__cause__, ValidationError)
 
 
 def test_1646_episode_picker_and_light_status_reduce_minute_payload_over_80_percent() -> None:
