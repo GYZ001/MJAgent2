@@ -347,10 +347,28 @@ class AtomicActionPhase(BaseModel):
     estimated_min_s: float = 0.0
 
 
+class ActionParticipantDelivery(BaseModel):
+    """Structured proof that one offscreen action participant reaches viewers."""
+
+    action_id: str
+    participant_id: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    audible: bool = False
+    visible_effect: bool = False
+    visible_reaction: bool = False
+
+    @property
+    def is_perceivable(self) -> bool:
+        return self.audible or self.visible_effect or self.visible_reaction
+
+
 class AtomicAction(BaseModel):
     action_id: str
     actor_ids: list[str] = Field(default_factory=list)
     target_ids: list[str] = Field(default_factory=list)
+    participant_deliveries: list[ActionParticipantDelivery] = Field(
+        default_factory=list
+    )
     semantic_intent: str
     precondition_fact_ids: list[str] = Field(default_factory=list)
     effects_add: list[str] = Field(default_factory=list)
@@ -1161,6 +1179,9 @@ class Shot(BaseModel):
     visible_entity_ids: list[str] = Field(default_factory=list)
     offscreen_action_actor_ids: list[str] = Field(default_factory=list)
     offscreen_action_target_ids: list[str] = Field(default_factory=list)
+    action_participant_deliveries: list[ActionParticipantDelivery] = Field(
+        default_factory=list
+    )
     capacity_budget: ShotCapacityBudget | None = None
     shot_contribution: ShotContribution | None = None
     audience_state_paths: list[AudienceStatePathRef] = Field(default_factory=list)
@@ -1229,6 +1250,9 @@ class StoryboardOutlineShot(BaseModel):
     visible_entity_ids: list[str] = Field(default_factory=list)
     offscreen_action_actor_ids: list[str] = Field(default_factory=list)
     offscreen_action_target_ids: list[str] = Field(default_factory=list)
+    action_participant_deliveries: list[ActionParticipantDelivery] = Field(
+        default_factory=list
+    )
     capacity_budget: ShotCapacityBudget | None = None
     shot_contribution: ShotContribution | None = None
     audience_state_paths: list[AudienceStatePathRef] = Field(default_factory=list)

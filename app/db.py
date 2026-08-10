@@ -208,6 +208,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     provider_failure_disposition TEXT,
     provider_failure_retryable INTEGER,
     provider_submitted_at REAL,
+    provider_poll_required INTEGER NOT NULL DEFAULT 0,
+    provider_result_adoptable INTEGER NOT NULL DEFAULT 1,
     abandoned INTEGER NOT NULL DEFAULT 0,
     attempt_started_at REAL,
     pipeline_stage TEXT,
@@ -1347,6 +1349,8 @@ MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN provider_failure_disposition TEXT",
     "ALTER TABLE jobs ADD COLUMN provider_failure_retryable INTEGER",
     "ALTER TABLE jobs ADD COLUMN provider_submitted_at REAL",
+    "ALTER TABLE jobs ADD COLUMN provider_poll_required INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE jobs ADD COLUMN provider_result_adoptable INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE jobs ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN attempt_started_at REAL",
     "ALTER TABLE character_portraits ADD COLUMN artifact_id TEXT",
@@ -1616,33 +1620,61 @@ def _backup_before_integrity_repair(conn: sqlite3.Connection, stamp: str) -> str
 
 
 def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
-    """Project legacy video lifecycle rows into the single durable shot slot."""
+    """Separate one local generation slot from every accepted provider task."""
     if (
         "video_slot_active" not in _column_names(conn, "jobs")
         or "video_slot_active" not in _column_names(conn, "shot_versions")
+        or "provider_poll_required" not in _column_names(conn, "jobs")
+        or "provider_result_adoptable" not in _column_names(conn, "jobs")
     ):
         return 0
     rows = conn.execute(
         """SELECT j.id,j.shot_id,j.version_id,j.status,j.updated_at,
                   j.lease_owner,j.provider_non_cancellable,j.provider_create_state,
-                  v.provider_task_id
+                  j.provider_operation_id,j.provider_submitted_at,
+                  j.episode_id,j.project_id,j.cancellation_requested,j.abandoned,
+                  j.video_slot_active,j.provider_result_adoptable,
+                  v.provider_task_id,v.video_path,
+                  br.amount_cny AS reservation_amount,
+                  CASE WHEN j.cancellation_requested=0 AND j.abandoned=0
+                         AND (
+                           j.status IN (
+                             'queued','running','waiting_provider','waiting_retry',
+                             'waiting_human','waiting','paused'
+                           )
+                           OR (j.status='stale' AND j.provider_non_cancellable=1)
+                         )
+                       THEN 1 ELSE 0 END AS locally_active
              FROM jobs j
              LEFT JOIN shot_versions v ON v.id=j.version_id
+             LEFT JOIN budget_reservations br ON br.job_id=j.id
             WHERE j.kind='video' AND j.shot_id IS NOT NULL
-              AND j.cancellation_requested=0 AND j.abandoned=0
               AND (
-                  j.status IN (
-                      'queued','running','waiting_provider','waiting_retry',
-                      'waiting_human','waiting','paused'
+                  (
+                    j.cancellation_requested=0 AND j.abandoned=0
+                    AND (
+                      j.status IN (
+                        'queued','running','waiting_provider','waiting_retry',
+                        'waiting_human','waiting','paused'
+                      )
+                      OR (j.status='stale' AND j.provider_non_cancellable=1)
+                    )
                   )
-                  OR (j.status='stale' AND j.provider_non_cancellable=1)
+                  OR (
+                    j.provider_create_state='accepted'
+                    AND (
+                      (v.provider_task_id IS NOT NULL AND v.provider_task_id!='')
+                      OR j.provider_non_cancellable=1
+                    )
+                  )
               )
             ORDER BY j.shot_id,
               CASE
-                WHEN v.provider_task_id IS NOT NULL AND v.provider_task_id!='' THEN 0
-                WHEN j.provider_non_cancellable=1 THEN 1
-                WHEN j.lease_owner IS NOT NULL AND j.lease_owner!='' THEN 2
-                WHEN j.version_id IS NOT NULL THEN 3
+                WHEN j.video_slot_active=1 THEN 0
+                WHEN j.provider_result_adoptable=1
+                     AND j.cancellation_requested=0 AND j.abandoned=0 THEN 1
+                WHEN v.provider_task_id IS NOT NULL AND v.provider_task_id!='' THEN 2
+                WHEN j.lease_owner IS NOT NULL AND j.lease_owner!='' THEN 3
                 ELSE 4
               END,
               j.updated_at DESC,j.id DESC"""
@@ -1658,62 +1690,140 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
     reconciled = 0
     stamp = now()
     for shot_rows in by_shot.values():
-        owner = shot_rows[0]
-        conn.execute(
-            "UPDATE jobs SET video_slot_active=1 WHERE id=?",
-            (owner["id"],),
+        owner = next(
+            (row for row in shot_rows if bool(row["locally_active"])),
+            None,
         )
-        if owner["version_id"]:
+        if owner is not None:
             conn.execute(
-                "UPDATE shot_versions SET video_slot_active=1 WHERE id=?",
-                (owner["version_id"],),
+                """UPDATE jobs
+                      SET video_slot_active=1,provider_result_adoptable=1
+                    WHERE id=?""",
+                (owner["id"],),
             )
-        for duplicate in shot_rows[1:]:
-            provider_may_exist = bool(
-                duplicate["provider_task_id"]
-                or duplicate["provider_non_cancellable"]
-                or duplicate["provider_create_state"] in {
-                    "accepted", "submitting", "unknown",
-                }
+            if owner["version_id"]:
+                conn.execute(
+                    "UPDATE shot_versions SET video_slot_active=1 WHERE id=?",
+                    (owner["version_id"],),
+                )
+        for row in shot_rows:
+            is_owner = owner is not None and row["id"] == owner["id"]
+            provider_accepted = bool(
+                row["provider_create_state"] == "accepted"
+                and (row["provider_task_id"] or row["provider_non_cancellable"])
             )
-            terminal_status = "abandoned" if provider_may_exist else "cancelled"
+            if provider_accepted:
+                operation_id = (
+                    str(row["provider_operation_id"] or "").strip()
+                    or f"video-create-{row['version_id']}"
+                )
+                message = (
+                    "数据库同镜活动槽迁移：继续轮询原供应商任务；"
+                    + (
+                        "该任务保留生成结果采用资格"
+                        if is_owner
+                        else "该历史结果只入隔离审计，不参与采用"
+                    )
+                )
+                if not is_owner:
+                    conn.execute(
+                        """UPDATE jobs
+                              SET status='waiting_provider',video_slot_active=0,
+                                  provider_poll_required=1,
+                                  provider_result_adoptable=0,
+                                  provider_operation_id=?,
+                                  cancellation_requested=0,abandoned=0,
+                                  lease_owner=NULL,lease_expires_at=NULL,
+                                  next_retry_at=?,error=?,updated_at=?
+                            WHERE id=?""",
+                        (operation_id, stamp, message, stamp, row["id"]),
+                    )
+                    if row["version_id"]:
+                        conn.execute(
+                            """UPDATE shot_versions
+                                  SET status='waiting_provider',
+                                      video_slot_active=0,error=?
+                                WHERE id=? AND video_path IS NULL""",
+                            (message, row["version_id"]),
+                        )
+                    conn.execute(
+                        """UPDATE budget_reservations
+                              SET status='reserved',settled_at=NULL,
+                                  actual_cost_cny=NULL
+                            WHERE job_id=?""",
+                        (row["id"],),
+                    )
+                    reconciled += 1
+                else:
+                    conn.execute(
+                        """UPDATE jobs
+                              SET provider_poll_required=1,
+                                  provider_result_adoptable=1,
+                                  provider_operation_id=?
+                            WHERE id=?""",
+                        (operation_id, row["id"]),
+                    )
+                if (
+                    row["project_id"]
+                    and row["episode_id"]
+                    and row["version_id"]
+                ):
+                    accepted_at = float(
+                        row["provider_submitted_at"] or row["updated_at"] or stamp
+                    )
+                    conn.execute(
+                        """INSERT OR IGNORE INTO provider_video_budget_claims(
+                               operation_id,project_id,episode_id,shot_id,
+                               job_id,version_id,origin_episode_id,origin_shot_id,
+                               origin_job_id,origin_version_id,amount_cny,status,
+                               created_at,updated_at,accepted_at
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
+                        (
+                            operation_id,
+                            row["project_id"],
+                            row["episode_id"],
+                            row["shot_id"],
+                            row["id"],
+                            row["version_id"],
+                            row["episode_id"],
+                            row["shot_id"],
+                            row["id"],
+                            row["version_id"],
+                            float(row["reservation_amount"] or 0),
+                            accepted_at,
+                            stamp,
+                            accepted_at,
+                        ),
+                    )
+                continue
+            if is_owner:
+                continue
             message = (
-                "数据库同镜活动槽迁移：该历史重复任务已隔离，"
-                f"活动所有者为 {owner['id']}"
+                "数据库同镜活动槽迁移：未提交供应商的历史重复任务已关闭，"
+                f"活动所有者为 {owner['id'] if owner is not None else 'none'}"
             )
             conn.execute(
                 """UPDATE jobs
-                      SET status=?,video_slot_active=0,cancellation_requested=1,
-                          abandoned=?,lease_owner=NULL,lease_expires_at=NULL,
+                      SET status='cancelled',video_slot_active=0,
+                          provider_poll_required=0,provider_result_adoptable=0,
+                          cancellation_requested=1,abandoned=0,
+                          lease_owner=NULL,lease_expires_at=NULL,
                           next_retry_at=NULL,error=?,updated_at=?
                     WHERE id=?""",
-                (
-                    terminal_status,
-                    int(provider_may_exist),
-                    message,
-                    stamp,
-                    duplicate["id"],
-                ),
+                (message, stamp, row["id"]),
             )
-            if duplicate["version_id"]:
+            if row["version_id"]:
                 conn.execute(
                     """UPDATE shot_versions
-                          SET status=?,video_slot_active=0,error=?
+                          SET status='cancelled',video_slot_active=0,error=?
                         WHERE id=?""",
-                    (terminal_status, message, duplicate["version_id"]),
+                    (message, row["version_id"]),
                 )
-            reservation_status = "settled" if provider_may_exist else "released"
             conn.execute(
                 """UPDATE budget_reservations
-                      SET status=?,settled_at=?,
-                          actual_cost_cny=CASE WHEN ? THEN amount_cny ELSE 0 END
+                      SET status='released',settled_at=?,actual_cost_cny=0
                     WHERE job_id=? AND status IN ('reserved','running')""",
-                (
-                    reservation_status,
-                    stamp,
-                    int(provider_may_exist),
-                    duplicate["id"],
-                ),
+                (stamp, row["id"]),
             )
             reconciled += 1
     return reconciled

@@ -44,6 +44,7 @@ def pytest_configure(config: pytest.Config) -> None:
     else:
         _SANDBOX = Path(tempfile.mkdtemp(prefix="manju-pytest-")).resolve()
         _SANDBOX_OWNED = True
+    os.environ["MANJU_TEST_SANDBOX"] = str(_SANDBOX)
     config.option.basetemp = str(_SANDBOX / "pytest-tmp")
 
     os.environ["MANJU_TEST_PROFILE"] = "isolated"
@@ -120,15 +121,13 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     del config
     if _ISOLATION_SESSION is not None:
         _ISOLATION_SESSION.restore()
-    try:
-        from app import db
-
-        conn = getattr(db._local, "conn", None)
+    db = sys.modules.get("app.db")
+    if db is not None:
+        local = getattr(db, "_local", None)
+        conn = getattr(local, "conn", None)
         if conn is not None:
             conn.close()
-            db._local.conn = None
-    except (ImportError, AttributeError):
-        pass
+            local.conn = None
     if _SANDBOX_OWNED and _SANDBOX is not None:
         shutil.rmtree(_SANDBOX, ignore_errors=True)
 

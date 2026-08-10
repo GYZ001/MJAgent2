@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from math import ceil
 
+import pytest
+
 from app import config
 from app.continuity import state_chain_errors
 from app.narrative import (
@@ -10,6 +12,7 @@ from app.narrative import (
     validate_storyboard_narrative,
 )
 from app.narrative_outline import (
+    compile_narrative_storyboard_outline,
     narrative_outline_action_delivery_errors,
     normalize_narrative_storyboard_outline,
     normalize_split_action_owner_completions,
@@ -65,6 +68,19 @@ def _attach_generic_action(screenplay) -> AtomicAction:
     screenplay.narrative_plan.atomic_actions.append(action)
     screenplay.narrative_plan.events[0].action_ids = [action.action_id]
     return action
+
+
+def _set_action_participant_deliveries(
+    screenplay,
+    action: AtomicAction,
+    deliveries: list[dict[str, object]],
+) -> AtomicAction:
+    payload = action.model_dump(mode="json")
+    payload["participant_deliveries"] = deliveries
+    contracted = AtomicAction.model_validate(payload)
+    index = screenplay.narrative_plan.atomic_actions.index(action)
+    screenplay.narrative_plan.atomic_actions[index] = contracted
+    return contracted
 
 
 def test_outline_rebinds_shifted_dialogue_to_atomic_action_relation() -> None:
@@ -356,7 +372,7 @@ def test_outline_projection_uses_event_onscreen_relation_not_scene_or_perceivers
     assert outline.shots[0].characters_visible == ["当前人物"]
 
 
-def test_outline_projection_partitions_bound_action_participants_before_hard_gate() -> None:
+def test_outline_projection_accepts_offscreen_participants_with_structured_evidence() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)
     action.actor_ids = ["character-1", "offscreen-actor"]
@@ -369,6 +385,24 @@ def test_outline_projection_partitions_bound_action_participants_before_hard_gat
         "character-1",
         "entity-1",
     ]
+    action = _set_action_participant_deliveries(
+        screenplay,
+        action,
+        [
+            {
+                "action_id": action.action_id,
+                "participant_id": "offscreen-actor",
+                "evidence_ids": ["EV-1"],
+                "audible": True,
+            },
+            {
+                "action_id": action.action_id,
+                "participant_id": "offscreen-target",
+                "evidence_ids": ["EV-1"],
+                "visible_effect": True,
+            },
+        ],
+    )
     outline = StoryboardOutline(
         episode_no=1,
         shots=[
@@ -389,17 +423,25 @@ def test_outline_projection_partitions_bound_action_participants_before_hard_gat
     assert shot.visible_entity_ids == ["character-1", "entity-1"]
     assert shot.offscreen_action_actor_ids == ["offscreen-actor"]
     assert shot.offscreen_action_target_ids == ["offscreen-target"]
+    assert [
+        delivery.model_dump(mode="json")
+        for delivery in shot.action_participant_deliveries
+    ] == [
+        delivery.model_dump(mode="json")
+        for delivery in action.participant_deliveries
+    ]
     errors = validate_storyboard_narrative(
         None,
         screenplay,
         outline=outline,
         complete=False,
     )
+    assert not any("ACTION_PARTICIPANT_DELIVERY" in error for error in errors)
     assert not any("ACTION_ACTOR_UNDELIVERED" in error for error in errors)
     assert not any("ACTION_TARGET_UNDELIVERED" in error for error in errors)
 
 
-def test_storyboard_hard_gate_rejects_removed_offscreen_action_partition() -> None:
+def test_outline_precheck_and_compiler_reject_offscreen_participants_without_evidence() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)
     action.actor_ids = ["character-1", "offscreen-actor"]
@@ -426,8 +468,6 @@ def test_storyboard_hard_gate_rejects_removed_offscreen_action_partition() -> No
         ],
     )
     normalize_narrative_storyboard_outline(outline, screenplay)
-    outline.shots[0].offscreen_action_actor_ids = []
-    outline.shots[0].offscreen_action_target_ids = []
 
     errors = validate_storyboard_narrative(
         None,
@@ -436,8 +476,79 @@ def test_storyboard_hard_gate_rejects_removed_offscreen_action_partition() -> No
         complete=False,
     )
 
+    assert outline.shots[0].offscreen_action_actor_ids == []
+    assert outline.shots[0].offscreen_action_target_ids == []
+    assert any("ACTION_PARTICIPANT_DELIVERY_MISSING" in error for error in errors)
     assert any("ACTION_ACTOR_UNDELIVERED" in error for error in errors)
     assert any("ACTION_TARGET_UNDELIVERED" in error for error in errors)
+    with pytest.raises(ValueError, match="ACTION_PARTICIPANT_DELIVERY_MISSING"):
+        compile_narrative_storyboard_outline(screenplay)
+
+
+def test_outline_projection_keeps_structured_offscreen_speaker_out_of_frame() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["voice-id"]
+    action.target_ids = []
+    action.semantic_intent = "画外声源说出对白「别碰那扇门」"
+    action.completion_condition = "画内人物听见警告并停下动作"
+    screenplay.key_lines = ["画外声源：别碰那扇门"]
+    screenplay.narrative_plan.propositions[1].entity_ids.append("voice-id")
+    screenplay.narrative_plan.identity_contracts.append(
+        NarrativeIdentityContract(
+            identity_id="voice-id",
+            display_name="画外声源",
+            kind="diegetic offscreen speaker",
+            visual_policy="offscreen_only",
+            asset_requirement="forbidden",
+        )
+    )
+    screenplay.narrative_plan.events[0].onscreen_entity_ids = ["character-1"]
+    action = _set_action_participant_deliveries(
+        screenplay,
+        action,
+        [{
+            "action_id": action.action_id,
+            "participant_id": "voice-id",
+            "evidence_ids": ["EV-1"],
+            "audible": True,
+        }],
+    )
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="画内人物听见警告并停下动作。",
+                covers="画外声源：别碰那扇门",
+                key_line_ids=["KL01"],
+                audio_cast=["画外声源"],
+            )
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    assert all("voice-id" not in shot.visible_entity_ids for shot in outline.shots)
+    assert all("画外声源" not in shot.characters_visible for shot in outline.shots)
+    dialogue_owner = next(shot for shot in outline.shots if shot.key_line_ids)
+    action_owner = next(
+        shot for shot in outline.shots
+        if shot.primary_action_id == action.action_id
+    )
+    assert dialogue_owner.audio_cast == ["画外声源"]
+    assert action_owner.offscreen_action_actor_ids == ["voice-id"]
+    assert len(action_owner.action_participant_deliveries) == 1
+    assert action_owner.action_participant_deliveries[0].audible is True
+    assert validate_storyboard_narrative(
+        None,
+        screenplay,
+        outline=outline,
+        complete=False,
+    ) == []
 
 
 def test_legacy_action_projection_does_not_promote_quoted_identity_to_actor() -> None:

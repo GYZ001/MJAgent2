@@ -88,6 +88,11 @@ def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
                id,shot_id,version_no,prompt_text,idem_key,status,created_at
            ) VALUES('v1','s1',1,'p','idem','running',100)"""
     )
+    conn.execute(
+        """UPDATE jobs
+              SET shot_id='s1',version_id='v1',episode_id='e',project_id='p'
+            WHERE id='j1'"""
+    )
     conn.commit()
 
     assert media_scheduler.claim_job("j1", "worker-a", lease_seconds=5)

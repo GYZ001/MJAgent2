@@ -48,6 +48,16 @@ def _authorize_video_retry(
     conn.commit()
 
 
+def _seed_retry_episode(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('e1','p1',1,'confirmed',1)"""
+    )
+
+
 def _seed_retryable_video_job(
     conn: sqlite3.Connection,
     *,
@@ -983,6 +993,7 @@ def test_manual_retry_distinguishes_poll_from_new_submission(monkeypatch) -> Non
     import app.system_api as system_api
 
     conn = _conn()
+    _seed_retry_episode(conn)
     conn.execute(
         """INSERT INTO shot_versions(
                id, shot_id, version_no, prompt_text, idem_key, status,
@@ -1146,6 +1157,7 @@ def test_manual_budget_retry_only_resumes_requested_job(monkeypatch) -> None:
     import app.system_api as system_api
 
     conn = _conn()
+    _seed_retry_episode(conn)
     conn.executemany(
         "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,?,5)",
         [("s-budget-1", "e1", 1), ("s-budget-2", "e1", 2)],
@@ -1198,6 +1210,11 @@ def test_manual_retry_recovers_persisted_provider_handle_before_queueing(monkeyp
     import app.system_api as system_api
 
     conn = _conn()
+    _seed_retry_episode(conn)
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) "
+        "VALUES('s1','e1',1,5)"
+    )
     conn.execute(
         """INSERT INTO shot_versions(
                id, shot_id, version_no, prompt_text, idem_key, status, created_at
@@ -1238,6 +1255,11 @@ def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monke
     import app.system_api as system_api
 
     conn = _conn()
+    _seed_retry_episode(conn)
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) "
+        "VALUES('s1','e1',1,5)"
+    )
     conn.execute(
         """INSERT INTO shot_versions(
                id, shot_id, version_no, prompt_text, idem_key, status, created_at
@@ -1245,12 +1267,13 @@ def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monke
     )
     conn.execute(
         """INSERT INTO jobs(
-               id, kind, status, version_id, episode_id, error, provider_operation_id,
-               provider_create_state, provider_non_cancellable, reserved_cost_cny,
-               provider_submitted_at, reason_code, reason_text, created_at, updated_at
+               id,kind,status,shot_id,version_id,episode_id,project_id,error,
+               provider_operation_id,provider_create_state,
+               provider_non_cancellable,reserved_cost_cny,
+               provider_submitted_at,reason_code,reason_text,created_at,updated_at
            ) VALUES(
-               'j-unknown','video','waiting_human','v-unknown','e1','旧人工阻塞',
-               'video-create-v-unknown','unknown',1,1,5,
+               'j-unknown','video','waiting_human','s1','v-unknown','e1','p1',
+               '旧人工阻塞','video-create-v-unknown','unknown',1,1,5,
                'VIDEO_PROVIDER_CREATE_UNRESOLVED','旧人工阻塞',1,1
            )"""
     )
