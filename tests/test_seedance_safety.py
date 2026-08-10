@@ -1,5 +1,5 @@
 from app.compiler import sanitize_seedance_prompt
-from app.hiagent import ProviderError
+from app.hiagent import ProviderError, ProviderFailure
 from app.worker import _video_model_rejection_guidance
 
 
@@ -37,7 +37,10 @@ def test_video_rejection_guidance_uses_typed_provider_state_only() -> None:
     arbitrary_message = "任意未来供应商报文，不应由词语决定分类"
     guidance = _video_model_rejection_guidance(
         {"mode": "FIRST_LAST_FRAME_MODE"},
-        ProviderError(arbitrary_message, failure_kind="provider_rejected"),
+        ProviderError(
+            arbitrary_message,
+            failure=ProviderFailure.model_rejection(),
+        ),
     )
 
     assert guidance is not None

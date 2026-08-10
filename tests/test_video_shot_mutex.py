@@ -391,3 +391,51 @@ def test_init_db_reconciles_legacy_duplicate_active_jobs(
         row[1] for row in migrated.execute("PRAGMA index_list(jobs)").fetchall()
     }
     assert "uq_jobs_active_video_shot" in indexes
+
+
+def test_manual_retry_cannot_take_slot_from_another_active_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.system_api as system_api
+
+    conn = _conn()
+    _seed_shot(conn)
+    conn.executescript(db.INTEGRITY_SCHEMA)
+    conn.executemany(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               provider_task_id,video_slot_active,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
+        [
+            ("v-active", "s1", 1, "p", "i1", "running", None, 1, 1),
+            ("v-retry", "s1", 2, "p", "i2", "failed", "provider-task", 0, 2),
+        ],
+    )
+    conn.executemany(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_create_state,provider_non_cancellable,video_slot_active,
+               created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (
+                "j-active", "video", "s1", "v-active", "e1", "p1", "queued",
+                "not_started", 0, 1, 1, 1,
+            ),
+            (
+                "j-retry", "video", "s1", "v-retry", "e1", "p1", "failed",
+                "accepted", 1, 0, 2, 2,
+            ),
+        ],
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+
+    with pytest.raises(system_api.HTTPException) as conflict:
+        system_api.retry_job("j-retry")
+
+    assert conflict.value.status_code == 409
+    assert conflict.value.detail["code"] == "SHOT_VIDEO_ACTIVE_CONFLICT"
+    assert conn.execute(
+        "SELECT video_slot_active FROM jobs WHERE id='j-retry'"
+    ).fetchone()[0] == 0

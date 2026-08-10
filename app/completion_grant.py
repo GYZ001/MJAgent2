@@ -159,28 +159,25 @@ def provider_task_clearance_snapshot(
         if claims_available
         else ""
     )
+    claim_operation_column = (
+        "COALESCE(c.operation_id,j.provider_operation_id)"
+        if claims_available
+        else "j.provider_operation_id"
+    )
     rows = db.execute(
         f"""SELECT j.id AS job_id,j.version_id,j.status AS job_status,
                    j.cancellation_requested,j.abandoned,
                    j.provider_non_cancellable,j.provider_operation_id,
-                   j.provider_create_state,
+                   j.provider_create_state,j.provider_failure_disposition,
                    v.provider_task_id,v.status AS version_status,
                    v.video_path,v.cost_cny,
                    {claim_columns}
-                   COALESCE(c.operation_id,j.provider_operation_id)
-                       AS claim_operation_id
+                   {claim_operation_column} AS claim_operation_id
               FROM jobs j
               LEFT JOIN shot_versions v ON v.id=j.version_id
               {claim_join}
              WHERE {" OR ".join(f"({clause})" for clause in scope_clauses)}
-             ORDER BY j.created_at,j.id,claim_operation_id""".replace(
-            "COALESCE(c.operation_id,j.provider_operation_id)",
-            (
-                "COALESCE(c.operation_id,j.provider_operation_id)"
-                if claims_available
-                else "j.provider_operation_id"
-            ),
-        ),
+             ORDER BY j.created_at,j.id,claim_operation_id""",
         scope_params,
     ).fetchall()
 
@@ -194,32 +191,57 @@ def provider_task_clearance_snapshot(
         )
         provider_task_id = str(row["provider_task_id"] or "").strip() or None
         operation_id = str(row["claim_operation_id"] or "").strip() or None
+        current_operation_id = (
+            str(row["provider_operation_id"] or "").strip() or None
+        )
+        claim_is_current = (
+            claim_status is None or operation_id == current_operation_id
+        )
+        provider_task_for_recovery = (
+            provider_task_id if claim_is_current else None
+        )
+        failure_disposition = str(
+            row["provider_failure_disposition"] or ""
+        ).strip().lower()
         result_checkpointed = (
+            claim_is_current
+            and
             str(row["version_status"] or "").strip().lower() == "succeeded"
             and bool(
                 str(row["video_path"] or "").strip()
                 or float(row["cost_cny"] or 0) > 0
             )
         )
-        provider_may_exist = bool(
-            provider_task_id
-            or row["provider_non_cancellable"]
-            or create_state not in {"", "not_started"}
-            or (
-                claim_status is not None
-                and claim_status not in {"reserved", "released", "settled"}
+        if claim_is_current:
+            provider_may_exist = bool(
+                provider_task_id
+                or row["provider_non_cancellable"]
+                or create_state not in {"", "not_started"}
+                or (
+                    claim_status is not None
+                    and claim_status not in {"reserved", "released", "settled"}
+                )
             )
-        )
+        else:
+            provider_may_exist = claim_status not in {"released", "settled"}
         terminal_evidence = bool(
             result_checkpointed
             or claim_status == "settled"
-            or (claim_status == "released" and not provider_may_exist)
+            or (
+                claim_status == "released"
+                and (not claim_is_current or not provider_may_exist)
+            )
+            or (
+                claim_is_current
+                and failure_disposition == "external_terminal"
+            )
         )
         if terminal_evidence or not provider_may_exist:
             continue
 
         locally_recoverable_poll = bool(
-            provider_task_id
+            provider_task_for_recovery
+            and failure_disposition != "manual_review"
             and not row["cancellation_requested"]
             and not row["abandoned"]
         )
@@ -229,21 +251,27 @@ def provider_task_clearance_snapshot(
                 str(row["version_id"]) if row["version_id"] is not None else None
             ),
             "provider_operation_id": operation_id,
-            "provider_task_id": provider_task_id,
+            "provider_task_id": provider_task_for_recovery,
             "job_status": str(row["job_status"] or ""),
-            "provider_create_state": create_state or "unknown",
+            "provider_create_state": (
+                create_state if claim_is_current and create_state else "unknown"
+            ),
             "claim_status": claim_status,
             "amount_cny": float(row["claim_amount"] or 0),
             "recovery_status": (
                 "waiting_provider" if locally_recoverable_poll else "waiting_human"
             ),
             "recovery_action": (
-                "continue_provider_poll"
-                if locally_recoverable_poll
+                "review_provider_failure"
+                if failure_disposition == "manual_review"
                 else (
-                    "restore_provider_poll"
-                    if provider_task_id
-                    else "reconcile_provider_create"
+                    "continue_provider_poll"
+                    if locally_recoverable_poll
+                    else (
+                        "restore_provider_poll"
+                        if provider_task_for_recovery
+                        else "reconcile_provider_create"
+                    )
                 )
             ),
         })

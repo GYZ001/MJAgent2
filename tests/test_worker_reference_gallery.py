@@ -4,8 +4,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 from app import compiler, db, stages, video_modes, worker
 from app.schemas import Bible, Character, Dialogue, RequiredOnScreenText, Shot, World
 
@@ -218,7 +216,7 @@ def test_enqueue_next_shot_reads_adopted_previous_prompt_and_records_lineage(
     )
 
 
-def test_enqueue_budget_reservation_error_closes_durable_job(monkeypatch) -> None:
+def test_enqueue_budget_reservation_error_keeps_recoverable_preflight(monkeypatch) -> None:
     conn = _conn()
     _seed_project(conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -231,17 +229,18 @@ def test_enqueue_budget_reservation_error_closes_durable_job(monkeypatch) -> Non
 
     monkeypatch.setattr(worker.media_scheduler, "reserve_budget", fail_reserve)
 
-    with pytest.raises(ValueError, match="尚未提交供应商"):
-        worker.enqueue_shot("s1")
+    result = worker.enqueue_shot("s1")
 
-    job = conn.execute("SELECT status,error FROM jobs").fetchone()
-    version = conn.execute("SELECT status,error FROM shot_versions").fetchone()
-    assert job["status"] == "failed"
-    assert version["status"] == "failed"
-    assert "预算预留" in job["error"]
-    assert conn.execute(
-        "SELECT status FROM episodes WHERE id='e1'"
-    ).fetchone()["status"] == "confirmed"
+    assert result["retry_scheduled"] is True
+    job = conn.execute(
+        "SELECT status,version_id,video_slot_active FROM jobs"
+    ).fetchone()
+    assert dict(job) == {
+        "status": "waiting_retry",
+        "version_id": None,
+        "video_slot_active": 1,
+    }
+    assert conn.execute("SELECT COUNT(*) FROM shot_versions").fetchone()[0] == 0
 
 
 def test_enqueue_dispatch_error_keeps_job_durably_accepted(monkeypatch) -> None:
@@ -303,6 +302,7 @@ def test_generated_reference_gallery_cannot_change_enqueue_idempotency(monkeypat
         "UPDATE shot_versions SET status='succeeded', image_inputs=? WHERE id=?",
         (json.dumps(meta, ensure_ascii=False), first["version_id"]),
     )
+    assert worker._set_job(first["job_id"], "succeeded") is True
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id='s1'", (first["version_id"],))
     conn.commit()
 
@@ -370,6 +370,7 @@ def test_new_portrait_revision_prevents_old_gallery_and_video_reuse(monkeypatch)
             "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
         }), first["version_id"]),
     )
+    assert worker._set_job(first["job_id"], "succeeded") is True
     conn.execute(
         "UPDATE shots SET adopted_version_id=? WHERE id='s1'",
         (first["version_id"],),
@@ -440,6 +441,7 @@ def test_reroll_does_not_reuse_gallery_containing_generated_keyframe(monkeypatch
             "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
         }), first["version_id"]),
     )
+    assert worker._set_job(first["job_id"], "succeeded") is True
     conn.execute(
         "UPDATE shots SET adopted_version_id=? WHERE id='s1'",
         (first["version_id"],),
@@ -486,6 +488,7 @@ def test_legacy_keyframe_gallery_is_not_reused_after_prompt_contract_upgrade(mon
             "reference_images": legacy_refs,
         }), first["version_id"]),
     )
+    assert worker._set_job(first["job_id"], "succeeded") is True
     conn.execute("UPDATE shots SET adopted_version_id=? WHERE id='s1'", (first["version_id"],))
     conn.commit()
 
@@ -545,6 +548,7 @@ def test_failed_generated_reference_gallery_is_not_reused_by_next_attempt(monkey
             "keyframe_prompt_contract_version": video_modes.KEYFRAME_PROMPT_CONTRACT_VERSION,
         }), failed["version_id"]),
     )
+    assert worker._set_job(failed["job_id"], "failed") is True
     conn.commit()
 
     retried = worker.enqueue_shot("s1")

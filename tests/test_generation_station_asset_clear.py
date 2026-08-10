@@ -476,6 +476,162 @@ def test_video_only_clear_preserves_unsettled_provider_handle_and_claim(
     ).fetchone()[0] == "accepted"
 
 
+@pytest.mark.parametrize(
+    ("claim_status", "failure_disposition"),
+    [
+        pytest.param("settled", None, id="费用与结果已结算"),
+        pytest.param(
+            "accepted",
+            "external_terminal",
+            id="供应商明确终态失败",
+        ),
+    ],
+)
+def test_resource_clear_allows_durable_provider_terminal_evidence(
+    tmp_path,
+    monkeypatch,
+    claim_status: str,
+    failure_disposition: str | None,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status=claim_status,
+        provider_task_id="provider-task-1",
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET status=?,provider_failure_disposition=?
+            WHERE id='j-provider'""",
+        (
+            "failed" if failure_disposition else "succeeded",
+            failure_disposition,
+        ),
+    )
+    conn.execute(
+        "UPDATE shot_versions SET status=? WHERE id='v-provider'",
+        ("failed" if failure_disposition else "succeeded",),
+    )
+    conn.commit()
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    result = artifacts.clear_shot_artifacts("s")
+
+    assert result["videos"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE id='j-provider'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()[0] == 0
+
+
+def test_resource_clear_allows_unsubmitted_reservation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="submitting",
+        claim_status="reserved",
+        provider_task_id=None,
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET status='queued',provider_non_cancellable=0,
+                  provider_create_state='not_started'
+            WHERE id='j-provider'"""
+    )
+    conn.commit()
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    result = artifacts.clear_shot_artifacts("s")
+
+    assert result["videos"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()[0] == 0
+
+
+def test_resource_clear_exposes_manual_provider_recovery_action(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET status='waiting_human',
+                  provider_failure_disposition='manual_review'
+            WHERE id='j-provider'"""
+    )
+    conn.commit()
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    with pytest.raises(ValueError) as blocked:
+        artifacts.clear_shot_artifacts("s")
+
+    blocker = blocked.value.detail["blockers"][0]
+    assert blocker["recovery_status"] == "waiting_human"
+    assert blocker["recovery_action"] == "review_provider_failure"
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()[0] == "accepted"
+
+
+def test_historical_unsettled_claim_blocks_without_reusing_current_task_handle(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="settled",
+        provider_task_id="provider-task-current",
+    )
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,episode_id,job_id,version_id,amount_cny,status,
+               created_at,updated_at
+           ) VALUES(
+               'op-provider-old','e','j-provider','v-provider',3,'accepted',0,0
+           )"""
+    )
+    conn.commit()
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    with pytest.raises(ValueError) as blocked:
+        artifacts.clear_shot_artifacts("s")
+
+    old_claim = blocked.value.detail["blockers"][0]
+    assert old_claim["provider_operation_id"] == "op-provider-old"
+    assert old_claim["provider_task_id"] is None
+    assert old_claim["provider_create_state"] == "unknown"
+    assert old_claim["recovery_action"] == "reconcile_provider_create"
+    conn.execute(
+        """UPDATE provider_video_budget_claims
+              SET status='released'
+            WHERE operation_id='op-provider-old'"""
+    )
+    conn.commit()
+
+    result = artifacts.clear_shot_artifacts("s")
+
+    assert result["videos"] == 1
+
+
 @pytest.mark.parametrize("scope", ["shot", "episode"])
 def test_staged_cleanup_rejects_unsettled_provider_task_in_callers_transaction(
     tmp_path,

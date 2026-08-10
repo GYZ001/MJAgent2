@@ -671,8 +671,54 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
     ).fetchone()["status"] == "waiting_human"
 
 
-def test_run_job_persists_technical_provider_failure_for_manual_handling(
+@pytest.mark.parametrize(
+    ("failure_payload", "expected_job", "expected_version_status"),
+    [
+        pytest.param(
+            {
+                "category": "technical",
+                "kind": "provider_task_not_found",
+                "disposition": "manual_review",
+                "retryable": False,
+            },
+            {
+                "status": "waiting_human",
+                "provider_create_state": "accepted",
+                "provider_failure_category": "technical",
+                "provider_failure_kind": "provider_task_not_found",
+                "provider_failure_disposition": "manual_review",
+                "provider_failure_retryable": 0,
+                "reason_code": "VIDEO_PROVIDER_TASK_NOT_FOUND",
+            },
+            "waiting_human",
+            id="technical-failure-waits-for-human",
+        ),
+        pytest.param(
+            {
+                "category": "model_rejection",
+                "kind": "provider_rejected",
+                "disposition": "external_terminal",
+                "retryable": False,
+            },
+            {
+                "status": "failed",
+                "provider_create_state": "model_rejected",
+                "provider_failure_category": "model_rejection",
+                "provider_failure_kind": "provider_rejected",
+                "provider_failure_disposition": "external_terminal",
+                "provider_failure_retryable": 0,
+                "reason_code": "VIDEO_PROVIDER_MODEL_REJECTED",
+            },
+            "failed",
+            id="explicit-model-rejection-is-external-terminal",
+        ),
+    ],
+)
+def test_run_job_persists_structured_provider_failure_outcome(
     monkeypatch,
+    failure_payload: dict,
+    expected_job: dict,
+    expected_version_status: str,
 ) -> None:
     from app.media_pipeline import concurrency, stage_state
 
@@ -683,8 +729,12 @@ def test_run_job_persists_technical_provider_failure_for_manual_handling(
            VALUES('e1','p1',1,'generating',1)"""
     )
     conn.execute(
-        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
-           VALUES('s1','e1',1,5)"""
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,characters,action_desc,dialogues,transition
+           ) VALUES(
+               's1','e1',1,5,'中景','固定','室内','[]','人物站定','[]','硬切'
+           )"""
     )
     conn.execute(
         """INSERT INTO shot_versions(
@@ -720,6 +770,12 @@ def test_run_job_persists_technical_provider_failure_for_manual_handling(
         error_id = "ERR-test"
         public = "供应商技术失败（LLM · ERR-test）"
 
+    logged_errors: list[BaseException] = []
+
+    def log_error(exc: BaseException, **_kwargs) -> ErrorRecord:
+        logged_errors.append(exc)
+        return ErrorRecord()
+
     async def no_sleep(_delay: float) -> None:
         return None
 
@@ -732,12 +788,7 @@ def test_run_job_persists_technical_provider_failure_for_manual_handling(
             "video_url": "",
             "last_frame_url": "",
             "error": "MiniMaxH3 队列和历史中均找不到该任务",
-            "failure": {
-                "category": "technical",
-                "kind": "provider_task_not_found",
-                "disposition": "manual_review",
-                "retryable": False,
-            },
+            "failure": failure_payload,
         }
 
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -749,7 +800,7 @@ def test_run_job_persists_technical_provider_failure_for_manual_handling(
     monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(worker.errors, "log_error", lambda *_args, **_kwargs: ErrorRecord())
+    monkeypatch.setattr(worker.errors, "log_error", log_error)
     monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(worker.media_scheduler, "settle_budget", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
@@ -759,24 +810,19 @@ def test_run_job_persists_technical_provider_failure_for_manual_handling(
 
     asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
 
+    assert [
+        f"{type(error).__name__}: {error}" for error in logged_errors
+    ] == ["ProviderError: 视频模型 任务失败：MiniMaxH3 队列和历史中均找不到该任务"]
     job = conn.execute(
         """SELECT status,provider_create_state,provider_failure_category,
                   provider_failure_kind,provider_failure_disposition,
                   provider_failure_retryable,reason_code
              FROM jobs WHERE id='j1'"""
     ).fetchone()
-    assert dict(job) == {
-        "status": "waiting_human",
-        "provider_create_state": "accepted",
-        "provider_failure_category": "technical",
-        "provider_failure_kind": "provider_task_not_found",
-        "provider_failure_disposition": "manual_review",
-        "provider_failure_retryable": 0,
-        "reason_code": "VIDEO_PROVIDER_TASK_NOT_FOUND",
-    }
+    assert dict(job) == expected_job
     assert conn.execute(
         "SELECT status FROM shot_versions WHERE id='v1'"
-    ).fetchone()["status"] == "waiting_human"
+    ).fetchone()["status"] == expected_version_status
 
 
 def test_paid_provider_attempts_count_distinct_operations() -> None:
