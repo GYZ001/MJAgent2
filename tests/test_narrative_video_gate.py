@@ -445,7 +445,15 @@ async def test_narrative_enqueue_never_runs_legacy_in_place_repair(
     assert not hasattr(worker, "_auto_repair_embedded_source_dialogue")
     assert not hasattr(worker, "_auto_expand_source_dialogue_duration")
     assert not hasattr(worker, "_auto_normalize_functional_speaker")
-    monkeypatch.setattr(worker, "_begin_video_preflight_job", lambda *_a, **_k: "preflight")
+    monkeypatch.setattr(
+        worker,
+        "_begin_video_preflight_job",
+        lambda *_a, **_k: {
+            "acquired": True,
+            "job_id": "preflight",
+            "claim_owner": "preflight-owner",
+        },
+    )
     monkeypatch.setattr(
         api,
         "_review_upstream_snapshot",

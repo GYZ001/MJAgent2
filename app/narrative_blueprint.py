@@ -478,6 +478,19 @@ def validate_narrative_blueprint_shard(
     node_keys = [node.key for node in shard.nodes]
     if len(node_keys) != len(set(node_keys)):
         errors.append("[BLUEPRINT_SHARD_NODE_DUPLICATE] 节点 key 重复")
+    try:
+        derive_blueprint_scene_plans(NarrativeBlueprint(
+            episode_no=shard.episode_no,
+            nodes=shard.nodes,
+        ))
+    except BlueprintSourceOwnershipError as exc:
+        errors.extend(
+            error.replace(
+                "[BLUEPRINT_SOURCE_OWNER_CONFLICT]",
+                "[BLUEPRINT_SHARD_SOURCE_OWNER_CONFLICT]",
+            )
+            for error in exc.errors
+        )
     return errors
 
 

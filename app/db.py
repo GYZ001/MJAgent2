@@ -2066,7 +2066,10 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
                 raise
     # Provider claims are a project-owned accounting ledger. Migrate their
     # ownership before any integrity repair can delete disposable jobs/assets.
-    from app.completion_grant import ensure_video_budget_authority_tables
+    from app.completion_grant import (
+        ensure_video_budget_authority_tables,
+        migrate_legacy_video_liabilities,
+    )
     ensure_video_budget_authority_tables(conn)
     conn.execute(
         """UPDATE provider_calls
@@ -2142,6 +2145,7 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
     )
     _backfill_multiview_assets(conn)
     _repair_integrity(conn)
+    migrate_legacy_video_liabilities(conn)
     # 旧版把“候选已生成但缺新版 QA 证据”误归类为 ProviderError，并在项目页显示为
     # 大模型故障。保留历史 run 原貌供审计，只修正项目当前态与面向用户的恢复指引。
     conn.execute(

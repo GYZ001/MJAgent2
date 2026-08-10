@@ -27,7 +27,7 @@ from app.continuity import (adaptation_hook_errors, ensure_audio_timeline,
                             sync_shot_continuity_fields)
 from app.db import get_conn, get_setting, log_provider_call
 from app.evaluations.issues import issues_from_messages
-from app.errors import ContentGenerationError
+from app.errors import ArtifactNeedsRebuildError, ContentGenerationError
 from app.harness import model_gateway
 from app.harness.types import Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
@@ -52,7 +52,8 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_shard,
 )
 from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenplay,
-                         RequiredOnScreenText, SHOT_SIZES, Scene, Shot, Storyboard,
+                         NARRATIVE_CONTRACT_VERSION, RequiredOnScreenText,
+                         SHOT_SIZES, Scene, Shot, Storyboard,
                          StoryboardContextRequirement, StoryboardOutline,
                          StoryboardOutlineShot, StoryboardSceneContext, StoryboardScenePack,
                          TRANSITIONS,
@@ -117,7 +118,9 @@ from app.screenplay_ir import (
     recover_complete_screenplay_ir_prefix,
     scene_heading_has_multiple_locations,
     screenplay_ir_bible_context,
+    screenplay_ir_missing_participant_delivery_paths,
     screenplay_ir_prompt_contract,
+    screenplay_ir_version_key,
 )
 from app.identity_authority import model_identity_authority_prompt_rule
 
@@ -248,16 +251,16 @@ def _recover_screenplay_ir_candidate(
         return None
     lineage_marks = ",".join("?" for _ in lineage_run_ids)
     rows = conn.execute(
-        f"""SELECT a.id,a.type,a.content_json,a.prompt_version,
+        f"""SELECT a.id,a.type,a.content_json,a.contract_version,
+                  a.prompt_version,
                   a.model_snapshot_json,
                   wr.input_fingerprint AS artifact_input_fingerprint
              FROM artifacts a
              JOIN step_runs sr ON sr.id=a.created_by_step_run_id
              JOIN workflow_runs wr ON wr.id=sr.run_id
             WHERE a.scope_type='episode' AND a.scope_id=?
-              AND a.contract_version IN (
-                    ?, 'screenplay-generation-ir.v1.3'
-              )
+              AND a.contract_version LIKE 'screenplay-generation-ir.v%'
+              AND a.status!='stale'
               AND a.type IN (
                     'screenplay_generation_ir',
                     'screenplay_generation_ir_raw',
@@ -267,16 +270,18 @@ def _recover_screenplay_ir_candidate(
               AND wr.id IN ({lineage_marks})
             ORDER BY CASE
                          WHEN a.prompt_version=? AND a.contract_version=?
-                         THEN 0 ELSE 1
+                         THEN 0
+                         WHEN a.contract_version=? THEN 1
+                         ELSE 2
                      END,
                      a.created_at DESC
             LIMIT 20""",
         (
             episode_id,
-            IR_VERSION,
             input_fingerprint,
             *lineage_run_ids,
             SCREENPLAY_BASELINE_PROMPT_VERSION,
+            IR_VERSION,
             IR_VERSION,
         ),
     ).fetchall()
@@ -304,8 +309,47 @@ def _recover_screenplay_ir_candidate(
                 payload = content
             if not isinstance(payload, dict):
                 continue
+            missing_paths = screenplay_ir_missing_participant_delivery_paths(
+                payload
+            )
+            if missing_paths:
+                raise ArtifactNeedsRebuildError(
+                    artifact_id=str(row["id"]),
+                    artifact_type=str(row["type"]),
+                    reason=(
+                        "缺少显式参与者交付字段 "
+                        + "、".join(missing_paths[:10])
+                    ),
+                )
+            artifact_contract = str(row["contract_version"] or "")
+            payload_contract = str(payload.get("format_version") or "")
+            artifact_version = screenplay_ir_version_key(artifact_contract)
+            current_version = screenplay_ir_version_key(IR_VERSION)
+            if artifact_contract == IR_VERSION and payload_contract != IR_VERSION:
+                raise ArtifactNeedsRebuildError(
+                    artifact_id=str(row["id"]),
+                    artifact_type=str(row["type"]),
+                    reason=(
+                        f"Artifact 合同为 {IR_VERSION}，"
+                        f"内容合同为 {payload_contract or 'missing'}"
+                    ),
+                )
+            if artifact_version >= current_version and artifact_contract != IR_VERSION:
+                raise ArtifactNeedsRebuildError(
+                    artifact_id=str(row["id"]),
+                    artifact_type=str(row["type"]),
+                    reason=f"当前运行时不支持合同 {artifact_contract}",
+                )
             payload, _changes = normalize_screenplay_ir_payload(payload)
             candidate = ScreenplayGenerationIR.model_validate(payload)
+        except ArtifactNeedsRebuildError as exc:
+            conn.execute(
+                "UPDATE artifacts SET status='stale',stale_reason=? "
+                "WHERE id=? AND status!='rejected'",
+                (str(exc), row["id"]),
+            )
+            conn.commit()
+            continue
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         return candidate, str(row["id"])
@@ -3120,7 +3164,7 @@ def _narrative_plan_schema_example(
         source_chapter_ids[0] if source_chapter_ids else "current-source-chapter"
     )
     example = {
-        "contract_version": "narrative-continuity.v1",
+        "contract_version": NARRATIVE_CONTRACT_VERSION,
         "scope_id": scope_id,
         "source_evidence": [{
             "source_evidence_id": "SE-1",

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.db import now
 from app.evidence import repository as evidence_repository
+from app.errors import ArtifactNeedsRebuildError
 from app.harness.types import EvidenceArtifact, Issue
 from app.production.metrics import record_noop_rejected, record_patch
 from app.production.policy import assert_patch_ops_allowed, FullRegenDenied
@@ -23,7 +24,7 @@ from app.production.screenplay_document import (
     split_dialogue_chain_by_scene,
     split_dialogue_turn_by_capacity,
 )
-from app.schemas import EpisodeScreenplay
+from app.schemas import EpisodeScreenplay, NARRATIVE_CONTRACT_VERSION
 
 
 _SCREENPLAY_ARTIFACT_MODEL_CACHE: OrderedDict[
@@ -309,6 +310,45 @@ def apply_screenplay_patch(
     )
 
 
+def _raw_narrative_plan(content: object) -> dict[str, Any] | None:
+    if not isinstance(content, dict):
+        return None
+    projection = content.get("_projection")
+    screenplay_payload = projection if isinstance(projection, dict) else content
+    plan = screenplay_payload.get("narrative_plan")
+    return plan if isinstance(plan, dict) else None
+
+
+def _assert_screenplay_artifact_contract(
+    art: dict[str, Any],
+    content: object,
+) -> None:
+    plan = _raw_narrative_plan(content)
+    if plan is None:
+        return
+    missing = [
+        f"narrative_plan.atomic_actions[{index}].participant_deliveries"
+        for index, action in enumerate(plan.get("atomic_actions") or [])
+        if isinstance(action, dict) and "participant_deliveries" not in action
+    ]
+    if missing:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(art.get("id") or ""),
+            artifact_type=str(art.get("type") or "screenplay_document"),
+            reason="缺少显式参与者交付字段 " + "、".join(missing[:10]),
+        )
+    contract_version = str(plan.get("contract_version") or "")
+    if contract_version != NARRATIVE_CONTRACT_VERSION:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(art.get("id") or ""),
+            artifact_type=str(art.get("type") or "screenplay_document"),
+            reason=(
+                f"叙事合同为 {contract_version or 'missing'}，"
+                f"当前要求 {NARRATIVE_CONTRACT_VERSION}"
+            ),
+        )
+
+
 def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
     """Validate an immutable Artifact once and isolate every mutable reader.
 
@@ -319,6 +359,7 @@ def screenplay_from_artifact_record(art: dict[str, Any]) -> EpisodeScreenplay:
     """
     artifact_id = str(art.get("id") or "")
     content = art.get("content") or {}
+    _assert_screenplay_artifact_contract(art, content)
     content_fingerprint = evidence_repository.content_hash(content)
     cache_key = (artifact_id, content_fingerprint)
     with _SCREENPLAY_ARTIFACT_MODEL_CACHE_LOCK:
@@ -345,7 +386,17 @@ def load_screenplay_from_artifact(artifact_id: str) -> EpisodeScreenplay:
     art = evidence_repository.get_artifact(artifact_id)
     if not art:
         raise ValueError(f"artifact 不存在: {artifact_id}")
-    return screenplay_from_artifact_record(art)
+    try:
+        return screenplay_from_artifact_record(art)
+    except ArtifactNeedsRebuildError as exc:
+        conn = evidence_repository.get_conn()
+        conn.execute(
+            "UPDATE artifacts SET status='stale',stale_reason=? "
+            "WHERE id=? AND status!='rejected'",
+            (str(exc), artifact_id),
+        )
+        conn.commit()
+        raise
 
 
 def screenplay_artifact_payload(script: EpisodeScreenplay) -> dict[str, Any]:

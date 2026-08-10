@@ -31,6 +31,7 @@ from app.schemas import (
     InformationItem,
     KeyDialogueChain,
     KeyDialogueTurn,
+    NARRATIVE_CONTRACT_VERSION,
     NarrativeContinuityPlan,
     PlotSpine,
     PlotSpineBeat,
@@ -52,8 +53,8 @@ from app.source_excerpt import (
 from app.spoken_contract import content_char_count
 
 
-IR_VERSION = "screenplay-generation-ir.v1.5"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v1.5"
+IR_VERSION = "screenplay-generation-ir.v2"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v2"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -141,6 +142,50 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, (tuple, set)):
         return list(value)
     return [value]
+
+
+def screenplay_ir_version_key(value: object) -> tuple[int, int]:
+    """Parse this contract family without enumerating accepted versions."""
+    match = re.fullmatch(
+        r"screenplay-generation-ir\.v(?P<major>\d+)(?:\.(?P<minor>\d+))?",
+        str(value or "").strip(),
+    )
+    if match is None:
+        return (0, 0)
+    return (
+        int(match.group("major")),
+        int(match.group("minor") or 0),
+    )
+
+
+def screenplay_ir_missing_participant_delivery_paths(
+    value: object,
+) -> list[str]:
+    """Report absent evidence fields without manufacturing empty contracts."""
+    if not isinstance(value, dict):
+        return ["$"]
+    missing: list[str] = []
+    for scene_index, scene in enumerate(value.get("scenes") or []):
+        if not isinstance(scene, dict):
+            continue
+        for unit_index, unit in enumerate(scene.get("units") or []):
+            if (
+                isinstance(unit, dict)
+                and "participant_deliveries" not in unit
+            ):
+                missing.append(
+                    f"scenes[{scene_index}].units[{unit_index}]"
+                    ".participant_deliveries"
+                )
+    for event_index, event in enumerate(value.get("events") or []):
+        if (
+            isinstance(event, dict)
+            and "participant_deliveries" not in event
+        ):
+            missing.append(
+                f"events[{event_index}].participant_deliveries"
+            )
+    return missing
 
 
 class IRIdentity(BaseModel):
@@ -295,6 +340,11 @@ class IRSceneUnit(BaseModel):
     kind: Literal["action", "dialogue"]
     text: str
     event_key: str
+    narrative_layer: Literal["story", "paratext"] = "story"
+    event_priority: Literal["causal", "supporting", "connective"] = "causal"
+    render_policy: Literal[
+        "standalone", "merge_adjacent", "exclude_from_spine",
+    ] = "standalone"
     source_segment_ids: list[str] = Field(default_factory=list)
     actor_keys: list[str] = Field(default_factory=list)
     target_keys: list[str] = Field(default_factory=list)
@@ -379,6 +429,11 @@ class IRActionPhase(BaseModel):
 class IREvent(BaseModel):
     key: str
     scene_key: str
+    narrative_layer: Literal["story", "paratext"] = "story"
+    event_priority: Literal["causal", "supporting", "connective"] = "causal"
+    render_policy: Literal[
+        "standalone", "merge_adjacent", "exclude_from_spine",
+    ] = "standalone"
     source_segment_ids: list[str] = Field(default_factory=list)
     source_excerpt: str = ""
     source_statement: str = ""
@@ -568,6 +623,13 @@ class ScreenplayGenerationIR(BaseModel):
                 "episode_no": int(value.get("episode_no") or 0),
                 "legacy_screenplay": value,
             }
+        if str(value.get("format_version") or IR_VERSION) == IR_VERSION:
+            missing = screenplay_ir_missing_participant_delivery_paths(value)
+            if missing:
+                raise ValueError(
+                    "[IR_CONTRACT_FIELD_MISSING] 当前 IR 合同缺少显式字段："
+                    + "、".join(missing[:10])
+                )
         normalized = dict(value)
         coverage = normalized.get("coverage")
         if isinstance(coverage, dict):
@@ -1159,9 +1221,7 @@ def prepare_ir_identity_authorities(
         if str(character.name or "").strip()
     }
     legacy_self_authority = bool(
-        not str(value.format_version or "").startswith(
-            "screenplay-generation-ir.v1.4"
-        )
+        screenplay_ir_version_key(value.format_version) < (1, 4)
         and not (episode.get("character_resolutions") or [])
     )
     changes: list[dict[str, Any]] = []
@@ -1420,7 +1480,7 @@ def recover_complete_screenplay_ir_prefix(raw: str) -> dict[str, Any] | None:
 def screenplay_ir_prompt_contract() -> str:
     """Compact output contract included in the generation prompt."""
     return """{
-  "format_version":"screenplay-generation-ir.v1.5",
+  "format_version":"__IR_VERSION__",
   "episode_no":1,
   "metadata":{
     "title":"", "logline":"", "script_format_note":"场次化台本稿",
@@ -1470,7 +1530,7 @@ def screenplay_ir_prompt_contract() -> str:
 }""".replace(
         "__IDENTITY_AUTHORITY_CONTRACT__",
         model_identity_authority_prompt_rule(),
-    )
+    ).replace("__IR_VERSION__", IR_VERSION)
 
 
 def screenplay_ir_bible_context(
@@ -1742,17 +1802,16 @@ def compile_screenplay_ir(
     if not value.scenes:
         raise ValueError("IR scenes 不能为空")
     format_version = str(value.format_version or "")
-    strict_unit_ownership = format_version.startswith((
-        "screenplay-generation-ir.v1.3",
-        "screenplay-generation-ir.v1.4",
-        "screenplay-generation-ir.v1.5",
-    ))
-    typed_visual_unit_contract = format_version.startswith(
-        "screenplay-generation-ir.v1.5"
+    version_key = screenplay_ir_version_key(format_version)
+    strict_unit_ownership = version_key >= (1, 3)
+    typed_visual_unit_contract = not (
+        screenplay_ir_missing_participant_delivery_paths(
+            value.model_dump(mode="json", exclude_unset=True)
+        )
     )
     segments_list = (
         index_compact_source_segments(source_text)
-        if format_version.startswith("screenplay-generation-ir.v1.2")
+        if version_key >= (1, 2)
         else index_source_segments(source_text)
     )
     segments = {item.segment_id: item for item in segments_list}
@@ -2430,7 +2489,7 @@ def compile_screenplay_ir(
                 and "onscreen_entity_keys" not in unit.model_fields_set
             ):
                 raise ScreenplayIRFidelityError(
-                    f"IR v1.5 {scene.key}.{event_key} 缺少显式 "
+                    f"IR {format_version} {scene.key}.{event_key} 缺少显式 "
                     "onscreen_entity_keys，禁止从姓名词面推断在场关系"
                 )
             if (
@@ -2439,10 +2498,10 @@ def compile_screenplay_ir(
                 and "actor_keys" not in unit.model_fields_set
             ):
                 raise ScreenplayIRFidelityError(
-                    f"IR v1.5 {scene.key}.{event_key} 动作单元缺少显式 "
+                    f"IR {format_version} {scene.key}.{event_key} 动作单元缺少显式 "
                     "actor_keys，禁止从动作文本猜测执行者"
                 )
-            # Name occurrences remain a pre-v1.5 compatibility fallback only.
+            # Name occurrences remain a compatibility fallback for untyped IR.
             # Current contracts carry actor/target/on-screen relations as
             # frozen identity keys and never infer them from story words.
             visual_text = (
@@ -4637,7 +4696,7 @@ def compile_screenplay_ir(
         })
 
     narrative_plan = NarrativeContinuityPlan.model_validate({
-        "contract_version": "narrative-continuity.v1",
+        "contract_version": NARRATIVE_CONTRACT_VERSION,
         "scope_id": scope_id,
         "source_evidence": source_evidence,
         "propositions": propositions,

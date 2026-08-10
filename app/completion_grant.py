@@ -734,34 +734,132 @@ def prepare_provider_tasks_for_clear(
     return clearance
 
 
-def _historical_video_liability(episode_id: str, *, conn) -> float:
-    """Best available cost for provider tasks accepted before the claim ledger."""
-    from app.compiler import shot_cost_cny
-
-    rows = conn.execute(
-        """SELECT v.cost_cny,v.provider_task_id,v.image_inputs,s.duration_s
+def _unowned_historical_video_liabilities(episode_id: str, *, conn) -> list:
+    """Return legacy version liabilities not already owned by a durable claim."""
+    return conn.execute(
+        """SELECT e.project_id,s.id AS shot_id,s.duration_s,
+                  v.id AS version_id,v.cost_cny,v.provider_task_id,
+                  v.image_inputs,v.created_at
              FROM shot_versions v
              JOIN shots s ON s.id=v.shot_id
+             JOIN episodes e ON e.id=s.episode_id
             WHERE s.episode_id=?
               AND (
                   COALESCE(v.cost_cny,0)>0
                   OR (v.provider_task_id IS NOT NULL AND v.provider_task_id!='')
-              )""",
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                    FROM provider_video_budget_claims c
+                   WHERE c.origin_version_id=v.id OR c.version_id=v.id
+              )
+            ORDER BY v.created_at,v.id""",
         (episode_id,),
     ).fetchall()
-    total = 0.0
-    for row in rows:
-        cost = float(row["cost_cny"] or 0)
-        if cost > 0:
-            total += cost
-            continue
-        try:
-            meta = json.loads(row["image_inputs"] or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            meta = {}
-        attempts = max(1, int(meta.get("provider_paid_attempts") or 0))
-        total += shot_cost_cny(int(row["duration_s"] or 0)) * attempts
+
+
+def _legacy_video_liability_amount(row) -> float:
+    from app.compiler import shot_cost_cny
+
+    cost = float(row["cost_cny"] or 0)
+    if cost > 0:
+        return round(cost, 6)
+    try:
+        meta = json.loads(row["image_inputs"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        meta = {}
+    attempts = max(1, int(meta.get("provider_paid_attempts") or 0))
+    return round(
+        shot_cost_cny(int(row["duration_s"] or 0)) * attempts,
+        6,
+    )
+
+
+def _historical_video_liability(episode_id: str, *, conn) -> float:
+    """Estimate only legacy liability that has no authority or claim owner."""
+    rows = _unowned_historical_video_liabilities(episode_id, conn=conn)
+    total = sum(_legacy_video_liability_amount(row) for row in rows)
     return round(total, 6)
+
+
+def migrate_legacy_video_liabilities(conn=None) -> int:
+    """Move unowned legacy version costs into the project claim ledger once."""
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        episode_ids = [
+            str(row["id"])
+            for row in db.execute(
+                """SELECT e.id
+                     FROM episodes e
+                     LEFT JOIN episode_video_budget_authorities a
+                       ON a.episode_id=e.id
+                    WHERE a.episode_id IS NULL
+                    ORDER BY e.created_at,e.id"""
+            ).fetchall()
+        ]
+        stamp = now()
+        migrated = 0
+        for episode_id in episode_ids:
+            for row in _unowned_historical_video_liabilities(
+                episode_id,
+                conn=db,
+            ):
+                version_id = str(row["version_id"])
+                operation_id = f"legacy-video-liability:{version_id}"
+                collision = db.execute(
+                    """SELECT origin_version_id
+                         FROM provider_video_budget_claims
+                        WHERE operation_id=?""",
+                    (operation_id,),
+                ).fetchone()
+                if collision is not None:
+                    raise RuntimeError(
+                        "legacy video liability operation ownership collision: "
+                        f"{operation_id}"
+                    )
+                created_at = (
+                    float(row["created_at"])
+                    if row["created_at"] is not None
+                    else stamp
+                )
+                db.execute(
+                    """INSERT INTO provider_video_budget_claims(
+                           operation_id,project_id,episode_id,shot_id,
+                           job_id,version_id,origin_episode_id,origin_shot_id,
+                           origin_job_id,origin_version_id,amount_cny,status,
+                           liability_source,created_at,updated_at,
+                           accepted_at,settled_at
+                       ) VALUES(?,?,?,?,NULL,?,?,?,?,?,?,'settled',
+                                'legacy_version_migration',?,?,?,?)""",
+                    (
+                        operation_id,
+                        row["project_id"],
+                        episode_id,
+                        row["shot_id"],
+                        version_id,
+                        episode_id,
+                        row["shot_id"],
+                        f"legacy-version:{version_id}",
+                        version_id,
+                        _legacy_video_liability_amount(row),
+                        created_at,
+                        stamp,
+                        created_at,
+                        stamp,
+                    ),
+                )
+                migrated += 1
+        if owns_transaction:
+            db.commit()
+        return migrated
+    except Exception:
+        if owns_transaction:
+            db.rollback()
+        raise
 
 
 def authorize_episode_video_budget_increment(

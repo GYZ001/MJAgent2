@@ -165,3 +165,22 @@ def test_project_budget_mixed_ownership_counts_each_liability_once(
         "claimed_cny": 9.0,
         "used_cny": 12.0,
     }
+    claims = ledger_db.execute(
+        """SELECT origin_episode_id,origin_version_id,amount_cny,liability_source
+             FROM provider_video_budget_claims
+            ORDER BY origin_episode_id"""
+    ).fetchall()
+    assert [dict(row) for row in claims] == [
+        {
+            "origin_episode_id": "e-claimed",
+            "origin_version_id": "v-e-claimed",
+            "amount_cny": 4.0,
+            "liability_source": "provider_operation",
+        },
+        {
+            "origin_episode_id": "e-unmigrated",
+            "origin_version_id": "v-e-unmigrated",
+            "amount_cny": 5.0,
+            "liability_source": "legacy_version_migration",
+        },
+    ]

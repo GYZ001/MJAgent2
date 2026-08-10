@@ -52,6 +52,7 @@ AUDIO_TIMELINE_TYPES = {
 }
 
 PROMPT_CONTRACT_VERSION = "video_cinematic_continuity_v6"
+NARRATIVE_CONTRACT_VERSION = "narrative-continuity.v2"
 
 # 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
 # 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。
@@ -416,6 +417,9 @@ class NarrativeEvent(BaseModel):
     salience: float = 0.0
     irreversibility: float = 0.0
     must_keep: bool = True
+    narrative_layer: Literal["story", "paratext"] = "story"
+    event_priority: Literal["causal", "supporting", "connective"] = "causal"
+    render_policy: Literal["standalone", "merge_adjacent", "exclude_from_spine"] = "standalone"
     delivery_scope_id: str = "episode"
     delivery_policy: str = "deliver"
     primary_delivery_window_id: str | None = None
@@ -694,7 +698,7 @@ class NarrativeIdentityContract(BaseModel):
 
 
 class NarrativeContinuityPlan(BaseModel):
-    contract_version: str = "narrative-continuity.v1"
+    contract_version: str = NARRATIVE_CONTRACT_VERSION
     scope_id: str
     source_evidence: list[SourceEvidence] = Field(default_factory=list)
     propositions: list[NarrativeProposition] = Field(default_factory=list)

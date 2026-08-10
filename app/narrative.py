@@ -19,6 +19,7 @@ from app.schemas import (
     AudiencePriorContract,
     BlindAudienceObservation,
     EpisodeScreenplay,
+    NARRATIVE_CONTRACT_VERSION,
     NarrativeContinuityPlan,
     NarrativeReviewReport,
     ShotContribution,
@@ -27,7 +28,6 @@ from app.schemas import (
 )
 from app.spoken_contract import onscreen_text_for_capacity
 
-NARRATIVE_CONTRACT_VERSION = "narrative-continuity.v1"
 AUDIENCE_PERCEPTUAL_SURFACE_VERSION = "audience-perceptual-surface.v1"
 
 
