@@ -4384,8 +4384,7 @@ def episode_detail(episode_id: str, view: str | None = None):
             ]
     if full or view == "script":
         from app.domain.screenplay_ops import (
-            _screenplay_rebuild_state,
-            _screenplay_status_snapshot,
+            _screenplay_authority_state,
         )
     ep.pop("screenplay_required_dialogues", None)
     ep.pop("screenplay_required_dialogue_occurrences", None)
@@ -4489,14 +4488,12 @@ def episode_detail(episode_id: str, view: str | None = None):
     ).fetchone()["c"])
     ep["shot_count"] = shot_count
     if full or view == "script":
-        ep["screenplay_state"] = _screenplay_status_snapshot(
-            ep, shot_count=shot_count, production=ep.get("screenplay_production")
+        ep["screenplay_state"] = _screenplay_authority_state(
+            ep,
+            shot_count=shot_count,
+            production=ep.get("screenplay_production"),
+            rebuild_error=screenplay_rebuild_error,
         )
-        if screenplay_rebuild_error is not None:
-            ep["screenplay_state"] = _screenplay_rebuild_state(
-                ep["screenplay_state"],
-                screenplay_rebuild_error,
-            )
     else:
         ep["screenplay_state"] = None
     if view in ("script", "cinema"):

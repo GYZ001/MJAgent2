@@ -259,7 +259,6 @@ def _screenplay_rebuild_state(snapshot: dict, exc) -> dict:
         "code": exc.code,
         "message": str(exc),
         "artifact_id": exc.artifact_id,
-        "recommended_action": "resume_screenplay",
     }
 
 
@@ -349,6 +348,28 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
     }
 
 
+_SCREENPLAY_REBUILD_ERROR_UNSET = object()
+
+
+def _screenplay_authority_state(
+    ep,
+    *,
+    shot_count: int,
+    production: dict | None = None,
+    rebuild_error=_SCREENPLAY_REBUILD_ERROR_UNSET,
+) -> dict:
+    snapshot = _screenplay_status_snapshot(
+        ep,
+        shot_count=shot_count,
+        production=production,
+    )
+    if rebuild_error is _SCREENPLAY_REBUILD_ERROR_UNSET:
+        rebuild_error = _authoritative_stale_screenplay_error(ep)
+    if rebuild_error is None:
+        return snapshot
+    return _screenplay_rebuild_state(snapshot, rebuild_error)
+
+
 @router.get("/episodes/{episode_id}/screenplay/status")
 def screenplay_lightweight_status(episode_id: str):
     """运行期轻量状态：不返回正文、台词库、镜头或证据。"""
@@ -358,7 +379,11 @@ def screenplay_lightweight_status(episode_id: str):
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
     ).fetchone()["c"])
     production = _screenplay_production_state(episode_id)
-    snapshot = _screenplay_status_snapshot(ep, shot_count=shot_count, production=production)
+    snapshot = _screenplay_authority_state(
+        ep,
+        shot_count=shot_count,
+        production=production,
+    )
     return {
         "id": episode_id,
         "screenplay_status": ep["screenplay_status"],

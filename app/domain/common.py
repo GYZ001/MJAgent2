@@ -199,19 +199,16 @@ def _episode_source_text(conn, ep) -> str:
 
 
 def _load_screenplay(ep) -> EpisodeScreenplay | None:
+    from app.domain.screenplay_ops import (
+        _authoritative_stale_screenplay_error,
+    )
+
+    rebuild_error = _authoritative_stale_screenplay_error(ep)
+    if rebuild_error is not None:
+        raise rebuild_error
     if not ep["screenplay_json"]:
         return None
-    try:
-        return EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
-    except ValidationError:
-        from app.domain.screenplay_ops import (
-            _authoritative_stale_screenplay_error,
-        )
-
-        rebuild_error = _authoritative_stale_screenplay_error(ep)
-        if rebuild_error is None:
-            raise
-        raise rebuild_error
+    return EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
 
 
 LEGACY_SCREENPLAY_PURGED_ERROR = "旧版拍卡剧本已下线，请重新生成完整剧本。"

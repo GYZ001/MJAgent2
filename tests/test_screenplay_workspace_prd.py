@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app import api, db, portraits
+from app import api, db, errors as app_errors, portraits
 from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
@@ -812,28 +812,80 @@ def _legacy_screenplay_payload() -> dict:
     return payload
 
 
-def test_script_detail_projects_authoritative_stale_screenplay_as_rebuild_state(
+def test_script_and_status_project_authoritative_stale_screenplay_without_resume(
     client,
 ) -> None:
     _seed_episode(with_artifact=False)
     legacy = _legacy_screenplay_payload()
     _bind_stale_screenplay_artifact(
-        legacy,
+        _valid_script().model_dump(mode="json"),
         legacy,
         stale_reason="legacy contract invalid",
     )
 
     response = client.get("/api/episodes/e1?view=script")
+    status_response = client.get("/api/episodes/e1/screenplay/status")
 
     assert response.status_code == 200
+    assert status_response.status_code == 200
     detail = response.json()
+    status = status_response.json()
     assert detail["screenplay"] is None
     assert detail["screenplay_evidence"]["status"] == "stale"
     assert detail["screenplay_evidence"]["stale_code"] == "ARTIFACT_NEEDS_REBUILD"
     assert detail["screenplay_state"]["code"] == "ARTIFACT_NEEDS_REBUILD"
     assert detail["screenplay_state"]["artifact_id"] == "art-stale-screenplay"
-    assert detail["screenplay_state"]["recommended_action"] == "resume_screenplay"
+    assert detail["screenplay_state"]["recommended_action"] == "generate_screenplay"
     assert detail["screenplay_state"]["can_resume"] is False
+    assert status["screenplay_state"] == detail["screenplay_state"]
+
+
+@pytest.mark.parametrize("view", [None, "board"])
+def test_authoritative_stale_screenplay_fails_closed_for_consuming_views(
+    view,
+) -> None:
+    _seed_episode(with_artifact=False)
+    legacy = _legacy_screenplay_payload()
+    _bind_stale_screenplay_artifact(
+        _valid_script().model_dump(mode="json"),
+        legacy,
+        stale_reason="legacy contract invalid",
+    )
+
+    with pytest.raises(app_errors.ArtifactNeedsRebuildError) as caught:
+        api.episode_detail("e1", view=view)
+
+    assert caught.value.code == "ARTIFACT_NEEDS_REBUILD"
+    assert caught.value.artifact_id == "art-stale-screenplay"
+
+
+def test_stale_screenplay_state_preserves_real_resumable_action(
+    client,
+    monkeypatch,
+) -> None:
+    _seed_episode(with_artifact=False)
+    legacy = _legacy_screenplay_payload()
+    _bind_stale_screenplay_artifact(
+        _valid_script().model_dump(mode="json"),
+        legacy,
+        stale_reason="legacy contract invalid",
+    )
+    production = {
+        "can_resume_baseline": True,
+        "stage_stop_reason": "failed",
+    }
+    monkeypatch.setattr(
+        "app.production.revision.screenplay_production_state",
+        lambda _episode_id: production,
+    )
+
+    detail = client.get("/api/episodes/e1?view=script").json()
+    status = client.get("/api/episodes/e1/screenplay/status").json()
+
+    assert detail["screenplay_state"]["code"] == "ARTIFACT_NEEDS_REBUILD"
+    assert detail["screenplay_state"]["can_resume"] is True
+    assert detail["screenplay_state"]["recommended_action"] == "resume_screenplay"
+    assert status["screenplay_state"] == detail["screenplay_state"]
 
 
 def test_script_detail_keeps_valid_screenplay_projection() -> None:
