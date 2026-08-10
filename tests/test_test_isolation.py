@@ -70,19 +70,27 @@ def test_pytest_injects_provider_isolation_configuration() -> None:
         assert set(values.values()) == {UNROUTABLE_PROVIDER_BASE_URL}
 
 
-def test_pytest_restores_direct_provider_mutations_between_tests(
+def test_pytest_restores_runtime_state_between_disruptive_tests(
     tmp_path: Path,
 ) -> None:
-    child_sandbox = tmp_path / "provider-boundary"
+    child_sandbox = tmp_path / "runtime-boundary"
     child_sandbox.mkdir()
-    probe = tmp_path / "test_provider_boundary_probe.py"
+    probe = tmp_path / "test_runtime_boundary_probe.py"
     probe.write_text(
         textwrap.dedent(
             """
             import os
+            import sqlite3
+            from pathlib import Path
 
-            from app import config
+            import pytest
+
+            from app import config, db
             from tests.isolation import ProviderConfigurationIsolation
+
+
+            closed_connection = None
+            replacement_connection = None
 
 
             def provider_isolation():
@@ -92,19 +100,15 @@ def test_pytest_restores_direct_provider_mutations_between_tests(
                 )
 
 
-            def test_direct_provider_mutation_is_visible_to_its_owner():
-                isolation = provider_isolation()
-                credential = isolation.schema.credentials[0]
-                endpoint = isolation.schema.endpoints[0]
-                os.environ[credential] = "direct-fake"
-                setattr(config, credential, "direct-fake")
-                os.environ[endpoint] = "https://provider.example"
-                setattr(config, endpoint, "https://provider.example")
-                os.environ["FUTURE_PROVIDER_API_KEY"] = "future-fake"
-                assert getattr(config, credential) == "direct-fake"
+            def assert_isolated_runtime():
+                sandbox = Path(os.environ["MANJU_TEST_SANDBOX"]).resolve()
+                assert config.RUNTIME_ROOT == sandbox
+                assert config.PROJECTS_DIR == sandbox / "projects"
+                assert config.DATA_DIR == sandbox / "data"
+                assert config.DB_PATH == sandbox / "data" / "manju.db"
+                assert db.DATA_DIR == config.DATA_DIR
+                assert db.DB_PATH == config.DB_PATH
 
-
-            def test_next_test_starts_fail_closed():
                 state = provider_isolation().state()
                 for values in state["credentials"].values():
                     assert set(values.values()) == {""}
@@ -112,6 +116,99 @@ def test_pytest_restores_direct_provider_mutations_between_tests(
                     assert set(values.values()) == {
                         "http://pytest-deny-network.invalid"
                     }
+
+
+            def test_01_body_may_close_the_fixture_connection():
+                global closed_connection
+                isolation = provider_isolation()
+                credential = isolation.schema.credentials[0]
+                endpoint = isolation.schema.endpoints[0]
+                closed_connection = db.get_conn()
+                closed_connection.close()
+
+                os.environ[credential] = "direct-fake"
+                setattr(config, credential, "direct-fake")
+                os.environ[endpoint] = "https://provider.example"
+                setattr(config, endpoint, "https://provider.example")
+                os.environ["FUTURE_PROVIDER_API_KEY"] = "future-fake"
+                config.DB_PATH = Path(os.environ["MANJU_TEST_SANDBOX"]) / "closed.db"
+                db.DB_PATH = config.DB_PATH
+
+                with pytest.raises(sqlite3.ProgrammingError):
+                    closed_connection.execute("SELECT 1")
+
+
+            def test_02_next_test_creates_a_fresh_connection():
+                assert_isolated_runtime()
+                assert db._local.conn is None
+                connection = db.get_conn()
+                assert connection is not closed_connection
+                assert connection.execute(
+                    "SELECT 1 FROM settings LIMIT 1"
+                ).fetchone() is not None
+                connection.close()
+
+
+            def test_03_body_may_replace_the_connection_and_runtime():
+                global replacement_connection
+                sandbox = Path(os.environ["MANJU_TEST_SANDBOX"]).resolve()
+                replacement_connection = sqlite3.connect(":memory:")
+                db._local.conn = replacement_connection
+                config.RUNTIME_ROOT = sandbox / "replacement-runtime"
+                config.PROJECTS_DIR = sandbox / "replacement-projects"
+                config.DATA_DIR = sandbox / "replacement-data"
+                config.DB_PATH = sandbox / "replacement.db"
+                db.DATA_DIR = config.DATA_DIR
+                db.DB_PATH = config.DB_PATH
+
+                isolation = provider_isolation()
+                credential = isolation.schema.credentials[0]
+                endpoint = isolation.schema.endpoints[0]
+                os.environ[credential] = "replacement-fake"
+                setattr(config, credential, "replacement-fake")
+                os.environ[endpoint] = "https://replacement.example"
+                setattr(config, endpoint, "https://replacement.example")
+
+                assert db.get_conn() is replacement_connection
+
+
+            def test_04_replaced_connection_is_detached_not_reused():
+                assert_isolated_runtime()
+                assert replacement_connection.execute("SELECT 1").fetchone()[0] == 1
+                assert db._local.conn is None
+                connection = db.get_conn()
+                assert connection is not replacement_connection
+                database_file = connection.execute(
+                    "PRAGMA database_list"
+                ).fetchone()["file"]
+                assert Path(database_file).resolve() == config.DB_PATH.resolve()
+                connection.close()
+                replacement_connection.close()
+
+
+            @pytest.mark.xfail(raises=RuntimeError, strict=True)
+            def test_05_exception_still_runs_fixture_restoration():
+                isolation = provider_isolation()
+                credential = isolation.schema.credentials[0]
+                endpoint = isolation.schema.endpoints[0]
+                os.environ[credential] = "exception-fake"
+                setattr(config, credential, "exception-fake")
+                os.environ[endpoint] = "https://exception.example"
+                setattr(config, endpoint, "https://exception.example")
+                config.DB_PATH = (
+                    Path(os.environ["MANJU_TEST_SANDBOX"]) / "exception.db"
+                )
+                db.DB_PATH = config.DB_PATH
+                db.get_conn().close()
+                raise RuntimeError("expected body failure")
+
+
+            def test_06_exception_path_restores_all_isolation_state():
+                assert_isolated_runtime()
+                assert db._local.conn is None
+                connection = db.get_conn()
+                assert connection.execute("SELECT 1").fetchone()[0] == 1
+                connection.close()
             """
         ),
         encoding="utf-8",
