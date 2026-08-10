@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from app.production.patch import (
 from app.production.revision import ensure_production_revision, mark_baseline_generated
 from app.production.screenplay_authority import (
     SCREENPLAY_QA_PROFILE_VERSION,
+    assert_screenplay_matches_validated_v6_source,
     resolve_current_screenplay_authority,
     screenplay_authority_material,
     screenplay_bible_payload,
@@ -361,6 +363,118 @@ def test_compile_publish_action_projection_hash_is_identical() -> None:
         for action in published_projection
         for identity_id in [*action["actor_ids"], *action["target_ids"]]
     )
+
+
+def test_revalidation_marks_equal_invalid_v6_action_projection_stale() -> None:
+    from app.errors import ArtifactNeedsRebuildError
+
+    case = _source_projection_case()
+    conn = db.get_conn()
+    merged = evidence_repository.get_artifact(
+        case["merged_artifact_id"],
+        conn=conn,
+    )
+    assert merged is not None
+    shard_id = next(
+        parent_id
+        for parent_id in merged["parent_artifact_ids"]
+        if evidence_repository.get_artifact(parent_id, conn=conn)["type"]
+        == "screenplay_scene_shard"
+    )
+    shard = evidence_repository.get_artifact(shard_id, conn=conn)
+    assert shard is not None
+
+    merged_content = deepcopy(merged["content"])
+    merged_units = [
+        unit
+        for scene in merged_content["scenes"]
+        for unit in scene["units"]
+    ]
+    unit_index = next(
+        index
+        for index, unit in enumerate(merged_units)
+        if (
+            not unit.get("actor_keys")
+            and not unit.get("target_keys")
+            and not unit.get("speaker_key")
+        )
+    )
+    invalid_unit = merged_units[unit_index]
+    invalid_unit["text"] = "绿袍执事乙扫视四个少年"
+    invalid_unit["action_agency"] = {
+        "kind": "character",
+        "identity_bearing": False,
+        "source_segment_ids": list(invalid_unit["source_segment_ids"]),
+    }
+
+    shard_content = deepcopy(shard["content"])
+    shard_unit = [
+        unit
+        for scene in shard_content["scenes"]
+        for unit in scene["units"]
+    ][unit_index]
+    shard_unit.update(deepcopy(invalid_unit))
+    for artifact_id, content in (
+        (merged["id"], merged_content),
+        (shard["id"], shard_content),
+    ):
+        conn.execute(
+            "UPDATE artifacts SET content_json=?,content_hash=? WHERE id=?",
+            (
+                json.dumps(content, ensure_ascii=False),
+                evidence_repository.content_hash(content),
+                artifact_id,
+            ),
+        )
+
+    published_screenplay = case["compiled"].model_copy(deep=True)
+    published_action = published_screenplay.narrative_plan.atomic_actions[
+        unit_index
+    ]
+    assert not published_action.actor_ids
+    assert not published_action.target_ids
+    published_action.action_agency = ActionAgency.model_construct(
+        kind="character",
+        identity_bearing=False,
+        source_segment_ids=list(
+            published_action.action_agency.source_segment_ids
+        ),
+    )
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="approved",
+        trust_level="T2",
+        content=screenplay_artifact_payload(published_screenplay),
+        parent_artifact_ids=[merged["id"]],
+        contract_version="4.0.0",
+    ))
+    conn.execute(
+        "UPDATE episodes SET screenplay_artifact_id=?,"
+        "published_screenplay_artifact_id=?,screenplay_status='ready' "
+        "WHERE id=?",
+        (artifact["id"], artifact["id"], case["episode_id"]),
+    )
+    conn.commit()
+
+    with pytest.raises(
+        ArtifactNeedsRebuildError,
+        match="需要重建",
+    ):
+        assert_screenplay_matches_validated_v6_source(
+            episode_id=case["episode_id"],
+            artifact=artifact,
+            screenplay=published_screenplay,
+            conn=conn,
+        )
+
+    stale = conn.execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert stale["status"] == "stale"
+    assert "ARTIFACT_NEEDS_REBUILD" in stale["stale_reason"]
 
 
 @pytest.mark.asyncio

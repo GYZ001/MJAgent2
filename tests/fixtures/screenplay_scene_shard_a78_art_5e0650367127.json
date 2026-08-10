@@ -1,0 +1,241 @@
+{
+  "case_id": "episode-1-a78-art_5e0650367127",
+  "replay_scope": "unaltered A-78 contract fields projected from the published artifact, validated v6 shard, blueprint, and provider call",
+  "published_artifact": {
+    "artifact_id": "art_5e0650367127",
+    "status": "approved",
+    "contract_version": "4.0.0",
+    "content_hash": "d39d0cb839cb548d9908d72359547fc1f9a1d7c39c5170ad5940a4cce09bea0f",
+    "action": {
+      "action_id": "A-78",
+      "actor_ids": [],
+      "target_ids": [],
+      "action_agency": {
+        "kind": "character",
+        "identity_bearing": false,
+        "source_segment_ids": [
+          "SRC0056"
+        ]
+      },
+      "semantic_intent": "绿袍执事乙扫视过四个少年，眼神里带着审视，仿佛在打量待分配的货物。",
+      "completion_condition": "绿袍执事乙扫视过四个少年，眼神里带着审视，仿佛在打量待分配的货物。"
+    }
+  },
+  "source_lineage": {
+    "merged_ir_artifact_id": "art_f3e3b246d77e",
+    "scene_shard_artifact_id": "art_d1de89b55073",
+    "scene_shard_raw_artifact_id": "art_3aba82989376",
+    "blueprint_artifact_id": "art_4298c30db609",
+    "identity_registry_artifact_id": "art_e46ad599638f",
+    "provider_call_id": 61001,
+    "provider_response_sha256": "17294b3c222e52a57abaf215bcd7af973ccf285f44f4a0f407665299634ee282"
+  },
+  "identity_registry": [
+    {
+      "authority_id": "functional:5342f0103037da68",
+      "canonical_name": "绿袍执事乙",
+      "source_labels": [
+        "绿袍执事乙"
+      ],
+      "identity_key": "person_8ff1cb1a5861"
+    },
+    {
+      "authority_id": "bible:孟浩",
+      "canonical_name": "孟浩",
+      "source_labels": [
+        "孟浩"
+      ],
+      "identity_key": "person_b67de643afe6"
+    }
+  ],
+  "source_segment": {
+    "source_segment_id": "SRC0056",
+    "text": "“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”另一个绿袍修士，感慨的说道，随后神色带着高高在上之意，看向孟浩四人。"
+  },
+  "blueprint_node": {
+    "node_key": "S002-S001-N015",
+    "source_segment_ids": [
+      "SRC0054",
+      "SRC0055",
+      "SRC0056"
+    ],
+    "participant_evidence": [
+      {
+        "identity_key": "孟浩",
+        "source_segment_ids": [
+          "SRC0054",
+          "SRC0055"
+        ],
+        "usage": "visible"
+      },
+      {
+        "identity_key": "绿袍执事乙",
+        "source_segment_ids": [
+          "SRC0056"
+        ],
+        "usage": "voice"
+      },
+      {
+        "identity_key": "绿袍执事甲",
+        "source_segment_ids": [
+          "SRC0056"
+        ],
+        "usage": "mentioned"
+      }
+    ],
+    "decision_actor_key": null
+  },
+  "plan": {
+    "shard_id": "SS004",
+    "scene_plan_keys": [
+      "bp-sc014"
+    ],
+    "source_segment_ids": [
+      "SRC0056"
+    ],
+    "source_scene_owners": {
+      "SRC0056": "bp-sc014"
+    },
+    "unit_slots": [
+      {
+        "unit_key": "bp-sc014:SRC0056:002:unit",
+        "event_key": "bp-sc014:SRC0056:002:event",
+        "scene_key": "bp-sc014",
+        "scene_order": 14,
+        "unit_order": 1,
+        "scene_unit_order": 1,
+        "kind": "action",
+        "narrative_layer": "story",
+        "event_priority": "causal",
+        "render_policy": "standalone",
+        "source_segment_ids": [
+          "SRC0056"
+        ],
+        "source_text": ""
+      }
+    ],
+    "source_ownership_hash": "956f9e0529cfb851473d66dfaa6f146ced801204e74777e5e2ede72e05df442f",
+    "estimated_units": 1,
+    "estimated_output_chars": 512,
+    "source_hash": "16518756baf2aadae1ccf91bd1c139625f121af71dda7bf0e033190096f5b160",
+    "boundary_hash": "8343e89411a57ce55e4d44c76727d7b437bbdeffd62e177cada421be94fb574a",
+    "blueprint_hash": "eb4d085fabdd0636a2863416e27c62f144ed4cc8288c69f73092d7f310e41ce5",
+    "identity_registry_hash": "0e32ae0cf54393c5847a8787141a05413b1ad8c4d342fd612f7a3770c9d8d42e"
+  },
+  "scene_plan": {
+    "key": "bp-sc014",
+    "node_keys": [
+      "S002-S001-N015"
+    ],
+    "source_segment_ids": [
+      "SRC0056"
+    ],
+    "temporal_domain_key": "T002",
+    "time_label": "入夜",
+    "location_key": "L004",
+    "location_label": "修仙宗门外门半山腰青石空地",
+    "transition_cue": "孟浩从震惊中平复",
+    "previous_scene_exit_state": "许师姐离开，将四个少年交给两名绿袍执事",
+    "opening_image": "孟浩从震惊中平复",
+    "exit_state": "绿袍执事准备分配四人的杂役岗位",
+    "dramatic_load": 3,
+    "participant_keys": [
+      "孟浩",
+      "绿袍执事乙"
+    ],
+    "scene_heading": "【场14】入夜 / 修仙宗门外门半山腰青石空地"
+  },
+  "scene_input_contract": {
+    "scene_plan_key": "bp-sc014",
+    "node_keys": [
+      "S002-S001-N015"
+    ],
+    "source_segment_ids": [
+      "SRC0056"
+    ],
+    "source_segments": [
+      {
+        "source_segment_id": "SRC0056",
+        "text": "“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”另一个绿袍修士，感慨的说道，随后神色带着高高在上之意，看向孟浩四人。"
+      }
+    ],
+    "participant_bindings": [
+      {
+        "blueprint_key": "孟浩",
+        "identity_key": "person_b67de643afe6"
+      },
+      {
+        "blueprint_key": "绿袍执事乙",
+        "identity_key": "person_8ff1cb1a5861"
+      }
+    ],
+    "source_scene_owners": {
+      "SRC0056": "bp-sc014"
+    },
+    "action_evidence": [
+      {
+        "node_key": "S002-S001-N015",
+        "source_segment_ids": [
+          "SRC0056"
+        ],
+        "participants": [
+          {
+            "identity_key": "person_8ff1cb1a5861",
+            "source_segment_ids": [
+              "SRC0056"
+            ],
+            "usage": "voice",
+            "perception_channels": [
+              "audible"
+            ]
+          }
+        ],
+        "decision_actor_key": null
+      }
+    ],
+    "unit_slots": [
+      {
+        "unit_key": "bp-sc014:SRC0056:002:unit",
+        "event_key": "bp-sc014:SRC0056:002:event",
+        "scene_key": "bp-sc014",
+        "scene_order": 14,
+        "unit_order": 1,
+        "scene_unit_order": 1,
+        "kind": "action",
+        "narrative_layer": "story",
+        "event_priority": "causal",
+        "render_policy": "standalone",
+        "source_segment_ids": [
+          "SRC0056"
+        ],
+        "source_text": "",
+        "actor_keys": [],
+        "target_keys": [],
+        "onscreen_entity_keys": [],
+        "participant_deliveries": [],
+        "speaker_key": null,
+        "action_agency": {
+          "kind": "unattributed",
+          "identity_bearing": false,
+          "source_segment_ids": [
+            "SRC0056"
+          ]
+        }
+      }
+    ],
+    "identity_scaffold_hash": "",
+    "source_ownership_hash": "956f9e0529cfb851473d66dfaa6f146ced801204e74777e5e2ede72e05df442f"
+  },
+  "provider_creative_response": {
+    "contract_version": "screenplay-scene-creative.v2",
+    "slots": {
+      "bp-sc014:SRC0056:002:unit": {
+        "text": "绿袍执事乙扫视过四个少年，眼神里带着审视，仿佛在打量待分配的货物。",
+        "performance": "绿油油的眼珠在四人身上转了一圈，下巴微微抬起，神态倨傲，透着上位者的优越感。",
+        "resulting_state": "绿袍执事准备按规则分配四人的杂役岗位。",
+        "function": "action_setup",
+        "agency_kind": "character"
+      }
+    }
+  }
+}

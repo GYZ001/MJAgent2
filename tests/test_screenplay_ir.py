@@ -22,7 +22,15 @@ from app.production.screenplay_document import (
     document_to_screenplay,
     screenplay_to_document,
 )
-from app.schemas import AtomicAction, Bible, Character, EpisodeScreenplay, Scene, World
+from app.schemas import (
+    ActionAgency,
+    AtomicAction,
+    Bible,
+    Character,
+    EpisodeScreenplay,
+    Scene,
+    World,
+)
 from app.screenplay_ir import (
     IREvent,
     ScreenplayIRIdentityConflictError,
@@ -685,6 +693,18 @@ def test_atomic_action_missing_agency_derives_from_owned_relations() -> None:
     assert unattributed.action_agency.identity_bearing is False
     assert attributed.action_agency.kind == "character"
     assert attributed.action_agency.identity_bearing is True
+
+
+def test_character_action_agency_requires_identity_bearing_relation() -> None:
+    with pytest.raises(
+        ValueError,
+        match="character.*identity_bearing",
+    ):
+        ActionAgency(
+            kind="character",
+            identity_bearing=False,
+            source_segment_ids=["SRC0056"],
+        )
 
 
 def test_production_merged_ir_missing_agency_round_trip_is_relation_owned() -> None:

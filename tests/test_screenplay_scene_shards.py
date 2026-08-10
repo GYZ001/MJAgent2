@@ -89,6 +89,11 @@ ERR_20260810_533AC9_REPLAY = (
     / "fixtures"
     / "screenplay_scene_shard_err_20260810_533ac9.json"
 )
+A78_ARTIFACT_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_a78_art_5e0650367127.json"
+)
 RUN_D6BA3C89_REPLAY = (
     Path(__file__).parent
     / "fixtures"
@@ -223,6 +228,33 @@ def _contracts(
         source_text=SOURCE,
         identity_registry=identity_registry or [],
     )
+
+
+def _a78_replay_models(
+    *,
+    creative_update: dict | None = None,
+    bind_actor: bool = False,
+):
+    replay = json.loads(A78_ARTIFACT_REPLAY.read_text(encoding="utf-8"))
+    plan = ScreenplaySceneShardPlan.model_validate(replay["plan"])
+    scene_plan = BlueprintScenePlan.model_validate(replay["scene_plan"])
+    contract_payload = deepcopy(replay["scene_input_contract"])
+    if bind_actor:
+        slot = contract_payload["unit_slots"][0]
+        slot["actor_keys"] = ["person_8ff1cb1a5861"]
+        slot["onscreen_entity_keys"] = ["person_8ff1cb1a5861"]
+        slot["action_agency"] = {
+            "kind": "character",
+            "identity_bearing": True,
+            "source_segment_ids": ["SRC0056"],
+        }
+    contract = ScreenplaySceneInputContract.model_validate(contract_payload)
+    creative_payload = deepcopy(replay["provider_creative_response"])
+    creative_payload["slots"][plan.unit_slots[0].unit_key].update(
+        creative_update or {}
+    )
+    creative = ScreenplaySceneShardCreativeIR.model_validate(creative_payload)
+    return replay, plan, scene_plan, contract, creative
 
 
 def _participant_case(
@@ -2201,6 +2233,126 @@ def test_compiled_unit_slot_round_trip_preserves_derived_action_agency() -> None
         "source_segment_ids": ["SRC0001"],
     }
     assert ScreenplaySceneCompiledUnitSlot.model_validate(serialized) == slot
+
+
+def test_a78_replay_rejects_character_text_without_scaffold_relation() -> None:
+    replay, plan, scene_plan, contract, creative = _a78_replay_models()
+
+    assert replay["published_artifact"]["artifact_id"] == "art_5e0650367127"
+    assert replay["source_lineage"]["merged_ir_artifact_id"] == (
+        "art_f3e3b246d77e"
+    )
+    assert replay["source_lineage"]["scene_shard_artifact_id"] == (
+        "art_d1de89b55073"
+    )
+    assert replay["source_lineage"]["provider_call_id"] == 61001
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="GENERATION_CONTRACT.*scaffold",
+    ):
+        scene_shards_module.compile_screenplay_scene_shard_draft(
+            creative,
+            episode_no=1,
+            plan=plan,
+            scene_plans={scene_plan.key: scene_plan},
+            scene_input_contracts=[contract],
+        )
+
+
+@pytest.mark.parametrize(
+    ("text", "agency_kind", "text_provenance"),
+    [
+        pytest.param(
+            "片头题字“孟浩”浮现在画面中央",
+            "on_screen_text",
+            "on_screen_text",
+            id="on_screen_title",
+        ),
+        pytest.param(
+            "画面必须准确显示“孟浩”",
+            "required_text",
+            "required_text",
+            id="required_text",
+        ),
+        pytest.param(
+            "腰牌刻字“孟浩”清晰可见",
+            "prop_text",
+            "prop_text",
+            id="prop_text",
+        ),
+    ],
+)
+def test_creative_text_provenance_does_not_create_character_relation(
+    text: str,
+    agency_kind: str,
+    text_provenance: str,
+) -> None:
+    _replay, plan, scene_plan, contract, creative = _a78_replay_models(
+        creative_update={
+            "text": text,
+            "agency_kind": agency_kind,
+            "text_provenance": text_provenance,
+        },
+    )
+
+    shard = scene_shards_module.compile_screenplay_scene_shard_draft(
+        creative,
+        episode_no=1,
+        plan=plan,
+        scene_plans={scene_plan.key: scene_plan},
+        scene_input_contracts=[contract],
+    )
+
+    unit = shard.scenes[0].units[0]
+    assert unit.actor_keys == []
+    assert unit.target_keys == []
+    assert unit.onscreen_entity_keys == []
+    assert unit.action_agency.identity_bearing is False
+
+
+def test_anonymous_group_action_does_not_require_identity_relation() -> None:
+    _replay, plan, scene_plan, contract, creative = _a78_replay_models(
+        creative_update={
+            "text": "四个少年同时后退一步",
+            "agency_kind": "collective",
+            "text_provenance": "creative_action",
+        },
+    )
+
+    shard = scene_shards_module.compile_screenplay_scene_shard_draft(
+        creative,
+        episode_no=1,
+        plan=plan,
+        scene_plans={scene_plan.key: scene_plan},
+        scene_input_contracts=[contract],
+    )
+
+    unit = shard.scenes[0].units[0]
+    assert unit.actor_keys == []
+    assert unit.target_keys == []
+    assert unit.action_agency.kind == "collective"
+    assert unit.action_agency.identity_bearing is False
+
+
+def test_character_action_with_scaffold_relation_compiles() -> None:
+    _replay, plan, scene_plan, contract, creative = _a78_replay_models(
+        creative_update={"text_provenance": "creative_action"},
+        bind_actor=True,
+    )
+
+    shard = scene_shards_module.compile_screenplay_scene_shard_draft(
+        creative,
+        episode_no=1,
+        plan=plan,
+        scene_plans={scene_plan.key: scene_plan},
+        scene_input_contracts=[contract],
+    )
+
+    unit = shard.scenes[0].units[0]
+    assert unit.actor_keys == ["person_8ff1cb1a5861"]
+    assert unit.onscreen_entity_keys == ["person_8ff1cb1a5861"]
+    assert unit.action_agency.kind == "character"
+    assert unit.action_agency.identity_bearing is True
 
 
 def test_full_production_ss001_missing_agency_round_trip_preserves_fields() -> None:
