@@ -351,6 +351,7 @@ def test_outline_projection_preserves_non_identity_action_participants() -> None
     )
     screenplay.narrative_plan.events[0].onscreen_entity_ids = []
     outline = compile_narrative_storyboard_outline(screenplay)
+    normalize_narrative_storyboard_outline(outline, screenplay)
 
     assert not any(
         "[ACTION_PARTICIPANT_MISSING]" in error

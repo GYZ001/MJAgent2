@@ -16,7 +16,13 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from app.character_policy import functional_extra_anchor
 from app.db import get_conn, get_setting
@@ -150,7 +156,23 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
         default_factory=list,
     )
     speaker_key: str | None = None
-    action_agency: ActionAgency = Field(exclude=True)
+    action_agency: ActionAgency | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _derive_action_agency(self) -> "ScreenplaySceneCompiledUnitSlot":
+        if self.action_agency is None:
+            self.action_agency = ActionAgency(
+                kind=(
+                    "character"
+                    if self.actor_keys or self.target_keys or self.speaker_key
+                    else "unattributed"
+                ),
+                identity_bearing=bool(
+                    self.actor_keys or self.target_keys or self.speaker_key
+                ),
+                source_segment_ids=list(self.source_segment_ids),
+            )
+        return self
 
 
 class ScreenplaySceneShardPlan(BaseModel):
@@ -2175,7 +2197,7 @@ def merge_screenplay_scene_shards(
         shard = by_id.get(plan.shard_id)
         if shard is None:
             continue
-        errors.extend(validate_screenplay_scene_shard(
+        shard_errors = validate_screenplay_scene_shard(
             shard,
             plan=plan,
             scene_plans=scene_plan_map,
@@ -2183,9 +2205,12 @@ def merge_screenplay_scene_shards(
                 plan.shard_id, []
             ),
             identity_keys=identity_keys,
-        ))
+        )
+        errors.extend(shard_errors)
         if plan_index and plan.boundary_state_in != plans[plan_index - 1].boundary_state_out:
             errors.append(f"{plan.shard_id} boundary state 与前一 shard 不闭合")
+        if shard_errors:
+            continue
         merged_scenes.extend(_namespace_shard_scene_keys(shard))
         consumed.extend(shard.consumed_source_ids)
     if [scene.key for scene in merged_scenes] != expected_scenes:

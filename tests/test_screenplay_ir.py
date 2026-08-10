@@ -1190,6 +1190,7 @@ def test_fidelity_patch_rejects_unit_with_multiple_source_owners() -> None:
     }
     unit = candidate.scenes[0].units[0].model_copy(deep=True)
     unit.source_segment_ids = ["SRC0001", "SRC0002"]
+    unit.action_agency.source_segment_ids = ["SRC0001", "SRC0002"]
     patch = stages._IRFidelityPatch.model_validate({
         "insertions": [{
             "scene_key": "sc1",
