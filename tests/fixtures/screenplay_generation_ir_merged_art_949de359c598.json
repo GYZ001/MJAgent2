@@ -1,0 +1,3549 @@
+{
+  "artifact_id": "art_949de359c598",
+  "artifact_type": "screenplay_generation_ir_merged",
+  "artifact_status": "validated",
+  "scope_type": "episode",
+  "scope_id": "ep_711b29204aa9",
+  "contract_version": "screenplay-generation-ir-merged.v4",
+  "content_hash": "0c375efd1d89780b67a6480d6e7b3c27db6930735313592821430ff9816dc152",
+  "parent_artifact_ids": [
+    "art_f2c2fc4ffce5",
+    "art_d024cafcadfc",
+    "art_ed3f00a1fbc3",
+    "art_bcebe2075a55",
+    "art_dcc27f6982b2",
+    "art_0fc722449985",
+    "art_29aed0431912",
+    "art_2d64aecd3778"
+  ],
+  "content": {
+    "audience_priors": [],
+    "beats": [],
+    "coverage": [],
+    "episode_no": 1,
+    "events": [],
+    "experience": {
+      "director_objective": "清晰展现主角孟浩的性格底色与人生转折点，让观众共情其科举失意的情绪，同时感受到修仙世界突然出现的冲击力，奠定剧集轻松爽感、主角务实接地气的整体基调",
+      "forbidden_misconceptions": [
+        "不得将孟浩塑造为悲春伤秋的懦弱书生，其本质是务实、能快速接受现实的性格",
+        "不得将许清塑造为恶意恶人的形象，其只是按宗门要求完成杂役招募任务",
+        "不得弱化修仙者出场的震撼感，要体现出世俗凡人对仙人的认知差"
+      ],
+      "required_processing_s": 1800.0,
+      "satisfaction_criteria": "观众能清晰理解孟浩的处境与性格，对其后续进入修仙界的经历产生好奇，能够接收到从世俗到修仙世界转换的反差感"
+    },
+    "format_version": "screenplay-generation-ir.v2",
+    "identities": [
+      {
+        "asset_requirement": "required",
+        "authority_id": "bible:孟浩",
+        "display_name": "孟浩",
+        "key": "person_b67de643afe6",
+        "kind": "named_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "named_character",
+        "source_names": [
+          "孟浩"
+        ],
+        "visual_canonical": "",
+        "visual_policy": "canonical",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "required",
+        "authority_id": "bible:曹阳",
+        "display_name": "曹阳",
+        "key": "person_59b6805875cd",
+        "kind": "named_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "named_character",
+        "source_names": [
+          "曹阳"
+        ],
+        "visual_canonical": "",
+        "visual_policy": "canonical",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "required",
+        "authority_id": "bible:李富贵",
+        "display_name": "李富贵",
+        "key": "person_fd16d2af0627",
+        "kind": "named_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "named_character",
+        "source_names": [
+          "李富贵"
+        ],
+        "visual_canonical": "",
+        "visual_policy": "canonical",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "required",
+        "authority_id": "bible:王有材",
+        "display_name": "王有材",
+        "key": "person_e79ecc6793f5",
+        "kind": "named_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "named_character",
+        "source_names": [
+          "王有材"
+        ],
+        "visual_canonical": "",
+        "visual_policy": "canonical",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "required",
+        "authority_id": "bible:王腾飞",
+        "display_name": "王腾飞",
+        "key": "person_eb604bde129e",
+        "kind": "named_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "named_character",
+        "source_names": [
+          "王腾飞"
+        ],
+        "visual_canonical": "",
+        "visual_policy": "canonical",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "required",
+        "authority_id": "bible:许清",
+        "display_name": "许清",
+        "key": "person_bd2bd90fe58b",
+        "kind": "named_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "named_character",
+        "source_names": [
+          "许清"
+        ],
+        "visual_canonical": "",
+        "visual_policy": "canonical",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "required",
+        "authority_id": "bible:赵武刚",
+        "display_name": "赵武刚",
+        "key": "person_0e8b7cde667d",
+        "kind": "named_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "named_character",
+        "source_names": [
+          "赵武刚"
+        ],
+        "visual_canonical": "",
+        "visual_policy": "canonical",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:03f2ad2f69f130c5",
+        "display_name": "虎头虎脑的少年",
+        "key": "person_7079b367078a",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "虎头虎脑的少年"
+        ],
+        "visual_canonical": "功能性路人「虎头虎脑的少年」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:088b4eb3c4c8e9e5",
+        "display_name": "周员外",
+        "key": "person_f0f86949946f",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "周员外"
+        ],
+        "visual_canonical": "功能性路人「周员外」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:40886ce84a5c727b",
+        "display_name": "大青山被困少年甲",
+        "key": "person_b9cd0397a07f",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "大青山被困少年甲"
+        ],
+        "visual_canonical": "功能性路人「大青山被困少年甲」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:4ec43bacb5918da3",
+        "display_name": "会飞的女人",
+        "key": "person_224fd998b1e7",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "会飞的女人",
+          "许师姐"
+        ],
+        "visual_canonical": "功能性路人「会飞的女人」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:5342f0103037da68",
+        "display_name": "绿袍执事乙",
+        "key": "person_8ff1cb1a5861",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "绿袍执事乙"
+        ],
+        "visual_canonical": "功能性路人「绿袍执事乙」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:554a1b5246ca061a",
+        "display_name": "大青山被困少年乙",
+        "key": "person_32ce878a56e2",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "大青山被困少年乙"
+        ],
+        "visual_canonical": "功能性路人「大青山被困少年乙」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:91c67265951c2a2f",
+        "display_name": "旁白",
+        "key": "person_128a372b4ecc",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "旁白"
+        ],
+        "visual_canonical": "功能性路人「旁白」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:9d81518d4729786e",
+        "display_name": "王伯",
+        "key": "person_5c69fb89ae1c",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "王伯"
+        ],
+        "visual_canonical": "功能性路人「王伯」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:a3fcbceb1f5b1f97",
+        "display_name": "绿袍执事甲",
+        "key": "person_46e7e8b742ed",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "绿袍执事甲"
+        ],
+        "visual_canonical": "功能性路人「绿袍执事甲」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "optional",
+        "authority_id": "functional:accacf4a96da93d0",
+        "display_name": "白白净净身子较胖",
+        "key": "person_e030d5451ad2",
+        "kind": "functional_character",
+        "rationale": "来自冻结的人物谱/本集身份决议",
+        "role_type": "functional_character",
+        "source_names": [
+          "白白净净身子较胖"
+        ],
+        "visual_canonical": "功能性路人「白白净净身子较胖」，穿着符合当前时代与职业身份的普通服饰，外貌自然克制、不使用任何主角标志性特征；同一镜头内脸型、发型和服装保持一致，不抢主角视觉中心",
+        "visual_policy": "contextual",
+        "voice_canonical": ""
+      },
+      {
+        "asset_requirement": "forbidden",
+        "authority_id": "narrator:narrator",
+        "display_name": "旁白",
+        "key": "narrator",
+        "kind": "narrator",
+        "rationale": "后端拥有的纯旁白身份",
+        "role_type": "narrator",
+        "source_names": [],
+        "visual_canonical": "",
+        "visual_policy": "offscreen_only",
+        "voice_canonical": ""
+      }
+    ],
+    "metadata": {
+      "adaptation_direction": "忠实还原原著开篇孟浩的书生人设与务实性格，还原从世俗书生踏入修仙界的转折点，情绪节奏贴合原著叙事逻辑",
+      "approved_adaptations": [
+        "补充孟浩扔葫芦寄托理想的细节强化人物失意情绪",
+        "调整救援王有材的过程节奏，突出孟浩务实机敏的性格",
+        "增加孟浩得知要做杂役后产生期待的细节，夯实人物接地气的人设"
+      ],
+      "climax": "许清带着四人飞离大青山，孟浩意识到对方是仙人，承受不住冲击昏厥",
+      "conflict": "孟浩准备拉王有材上来时，许清突然出现，将孟浩掳到山崖裂缝中凑够杂役人数",
+      "development": "孟浩自述三次落榜的窘境，将写有理想的纸条塞进葫芦扔下山，收拾情绪准备下山时听到崖下呼救声，认出被困者是王有材，寻找藤条准备救人",
+      "dramatic_question": "科举失意的穷书生孟浩意外被修仙者抓走后，将迎来怎样的命运？",
+      "drop_list": [],
+      "emotional_curve": "开篇失意迷茫→扔出葫芦宣泄后重拾生活信心→发现有人遇险后的焦急→准备救援的笃定→听到修仙说法的不屑→见到许清的震惊恐惧→被抓后的慌乱→到达宗门知晓要做杂役后的释然与期待",
+      "ending_hook": "",
+      "episode_premise": "通过展现书生孟浩科举失意后的经历，引出其意外踏入修仙界的契机，完成主角从世俗到修仙世界的身份转换铺垫",
+      "forbidden_additions": [
+        "不得添加原著不存在的本集出场角色",
+        "不得额外增加孟浩科举落榜的狗血相关情节",
+        "不得提前透露靠山宗的具体设定与后续剧情",
+        "不得修改许清高冷的行事风格设定"
+      ],
+      "logline": "赵国三次落榜的书生孟浩在大青山宣泄失意时，偶遇被困的王有材，救人途中被修仙者许清掳走，意外踏入靠山宗开启全新人生",
+      "must_keep_ending": "王有材询问所在地，绿袍执事告知此处是靠山宗，停在孟浩听到靠山宗名称后的反应处",
+      "obstacle": "科举接连失败的人生困境、救援王有材时没有绳索的现实限制、突然出现的修仙者许清带来的未知威胁",
+      "opening": "全景展现南赡大地赵国风貌，聚焦大青山黄昏山顶，落榜书生孟浩独自在山顶吹风消解失意",
+      "protagonist_goal": "本集初始目标是宣泄科举落榜的失意后下山谋生，后续本能目标是救下被困的王有材，被抓后目标是确认自身处境保障安全",
+      "script_format_note": "场次化台本稿",
+      "source_basis": "《我欲封天》原著第一章内容改编",
+      "stakes": "前期是孟浩是否能走出科举失意的困境维持生计，中期是王有材是否会坠崖丧命，后期是孟浩被掳走后是否能保全自身、未来人生走向是否会被彻底改变",
+      "title": "第一章书生孟浩"
+    },
+    "normalization_log": [],
+    "scene_derivations": [
+      {
+        "reference_key": "",
+        "relation_key": "BD0001",
+        "relation_type": "scene_transition",
+        "source_node_key": "S001-N001",
+        "source_scene_plan_key": "bp-sc001",
+        "summary": "孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然",
+        "target_node_key": "S001-N002",
+        "target_scene_plan_key": "bp-sc002"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0002",
+        "relation_type": "scene_transition",
+        "source_node_key": "S001-N002",
+        "source_scene_plan_key": "bp-sc002",
+        "summary": "孟浩拿出纸条认真端详，指尖捏着纸条边缘",
+        "target_node_key": "S001-N003",
+        "target_scene_plan_key": "bp-sc003"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0003",
+        "relation_type": "scene_transition",
+        "source_node_key": "S001-N003",
+        "source_scene_plan_key": "bp-sc003",
+        "summary": "孟浩深吸一口气，眼神从迷茫转为坚定",
+        "target_node_key": "S001-N004",
+        "target_scene_plan_key": "bp-sc004"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0004",
+        "relation_type": "scene_transition",
+        "source_node_key": "S001-N004",
+        "source_scene_plan_key": "bp-sc004",
+        "summary": "孟浩脚步顿住，侧耳倾听崖下的动静",
+        "target_node_key": "S001-N005",
+        "target_scene_plan_key": "bp-sc005"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0005",
+        "relation_type": "scene_transition",
+        "source_node_key": "S001-N005",
+        "source_scene_plan_key": "bp-sc005",
+        "summary": "王有材看到孟浩，脸上露出狂喜的神情，半个身子探在裂缝外",
+        "target_node_key": "S001-N006",
+        "target_scene_plan_key": "bp-sc006"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0006",
+        "relation_type": "scene_transition",
+        "source_node_key": "S001-N006",
+        "source_scene_plan_key": "bp-sc006",
+        "summary": "孟浩目光扫过周围的藤条，眼睛猛地亮了起来",
+        "target_node_key": "S001-N007",
+        "target_scene_plan_key": "bp-sc007"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0007",
+        "relation_type": "scene_transition",
+        "source_node_key": "S002-S001-N008",
+        "source_scene_plan_key": "bp-sc007",
+        "summary": "孟浩投放藤条时询问被困原因，王有材说明被抓情况及女子还缺一个人的招募要求，孟浩对仙人事说法嗤之以鼻",
+        "target_node_key": "S002-S001-N009",
+        "target_scene_plan_key": "bp-sc008"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0008",
+        "relation_type": "scene_transition",
+        "source_node_key": "S002-S001-N009",
+        "source_scene_plan_key": "bp-sc008",
+        "summary": "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "target_node_key": "S002-S001-N010",
+        "target_scene_plan_key": "bp-sc009"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0009",
+        "relation_type": "scene_transition",
+        "source_node_key": "S002-S001-N010",
+        "source_scene_plan_key": "bp-sc009",
+        "summary": "从赵国大青山山顶崖边转至赵国大青山半山腰裂缝",
+        "target_node_key": "S002-S001-N011",
+        "target_scene_plan_key": "bp-sc010"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0010",
+        "relation_type": "scene_transition",
+        "source_node_key": "S002-S001-N011",
+        "source_scene_plan_key": "bp-sc010",
+        "summary": "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "target_node_key": "S002-S001-N012",
+        "target_scene_plan_key": "bp-sc011"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0011",
+        "relation_type": "scene_transition",
+        "source_node_key": "S002-S001-N012",
+        "source_scene_plan_key": "bp-sc011",
+        "summary": "从赵国大青山半山腰裂缝转至大青山上空",
+        "target_node_key": "S002-S001-N013",
+        "target_scene_plan_key": "bp-sc012"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0012",
+        "relation_type": "scene_transition",
+        "source_node_key": "S002-S001-N013",
+        "source_scene_plan_key": "bp-sc012",
+        "summary": "从大青山上空转至修仙宗门外门半山腰青石空地",
+        "target_node_key": "S002-S001-N014",
+        "target_scene_plan_key": "bp-sc013"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0013",
+        "relation_type": "scene_transition",
+        "source_node_key": "S002-S001-N014",
+        "source_scene_plan_key": "bp-sc013",
+        "summary": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+        "target_node_key": "S002-S001-N015",
+        "target_scene_plan_key": "bp-sc014"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0014",
+        "relation_type": "scene_transition",
+        "source_node_key": "S003-S002-S001-N016",
+        "source_scene_plan_key": "bp-sc014",
+        "summary": "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+        "target_node_key": "S003-S002-S001-N017",
+        "target_scene_plan_key": "bp-sc015"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0015",
+        "relation_type": "scene_transition",
+        "source_node_key": "S003-S002-S001-N017",
+        "source_scene_plan_key": "bp-sc015",
+        "summary": "画面切出剧情，转入互动提示界面",
+        "target_node_key": "S003-S002-S001-N018",
+        "target_scene_plan_key": "bp-sc016"
+      },
+      {
+        "reference_key": "S001-F001",
+        "relation_key": "BD0016",
+        "relation_type": "state_requirement",
+        "source_node_key": "S001-N001",
+        "source_scene_plan_key": "bp-sc001",
+        "summary": "承接开篇世界观设定",
+        "target_node_key": "S001-N002",
+        "target_scene_plan_key": "bp-sc002"
+      },
+      {
+        "reference_key": "S001-F002",
+        "relation_key": "BD0017",
+        "relation_type": "state_requirement",
+        "source_node_key": "S001-N002",
+        "source_scene_plan_key": "bp-sc002",
+        "summary": "承接孟浩此前的迷茫状态",
+        "target_node_key": "S001-N003",
+        "target_scene_plan_key": "bp-sc003"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0018",
+        "relation_type": "decision_setup",
+        "source_node_key": "S001-N002",
+        "source_scene_plan_key": "bp-sc002",
+        "summary": "科举失败后对现实的无力感",
+        "target_node_key": "S001-N003",
+        "target_scene_plan_key": "bp-sc003"
+      },
+      {
+        "reference_key": "S001-F003",
+        "relation_key": "BD0019",
+        "relation_type": "state_requirement",
+        "source_node_key": "S001-N003",
+        "source_scene_plan_key": "bp-sc003",
+        "summary": "承接扔葫芦后的情绪节点",
+        "target_node_key": "S001-N004",
+        "target_scene_plan_key": "bp-sc004"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0020",
+        "relation_type": "decision_setup",
+        "source_node_key": "S001-N003",
+        "source_scene_plan_key": "bp-sc003",
+        "summary": "生活穷困的现实压力",
+        "target_node_key": "S001-N004",
+        "target_scene_plan_key": "bp-sc004"
+      },
+      {
+        "reference_key": "S001-F004",
+        "relation_key": "BD0021",
+        "relation_type": "state_requirement",
+        "source_node_key": "S001-N004",
+        "source_scene_plan_key": "bp-sc004",
+        "summary": "承接孟浩准备下山的状态",
+        "target_node_key": "S001-N005",
+        "target_scene_plan_key": "bp-sc005"
+      },
+      {
+        "reference_key": "S001-F005",
+        "relation_key": "BD0022",
+        "relation_type": "state_requirement",
+        "source_node_key": "S001-N005",
+        "source_scene_plan_key": "bp-sc005",
+        "summary": "承接发现被困者的节点",
+        "target_node_key": "S001-N006",
+        "target_scene_plan_key": "bp-sc006"
+      },
+      {
+        "reference_key": "S001-F006",
+        "relation_key": "BD0023",
+        "relation_type": "state_requirement",
+        "source_node_key": "S001-N006",
+        "source_scene_plan_key": "bp-sc006",
+        "summary": "承接王有材遇险的危急情况",
+        "target_node_key": "S001-N007",
+        "target_scene_plan_key": "bp-sc007"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0024",
+        "relation_type": "decision_setup",
+        "source_node_key": "S001-N006",
+        "source_scene_plan_key": "bp-sc006",
+        "summary": "王有材随时可能坠河的危急情况",
+        "target_node_key": "S001-N007",
+        "target_scene_plan_key": "bp-sc007"
+      },
+      {
+        "reference_key": "S002-S001-F008",
+        "relation_key": "BD0025",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N008",
+        "source_scene_plan_key": "bp-sc007",
+        "summary": "孟浩在等待藤条到位时询问情况",
+        "target_node_key": "S002-S001-N009",
+        "target_scene_plan_key": "bp-sc008"
+      },
+      {
+        "reference_key": "S002-S001-F009",
+        "relation_key": "BD0026",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N009",
+        "source_scene_plan_key": "bp-sc008",
+        "summary": "孟浩之前刚否定仙人存在，此刻遇到神秘女子形成强烈冲击",
+        "target_node_key": "S002-S001-N010",
+        "target_scene_plan_key": "bp-sc009"
+      },
+      {
+        "reference_key": "S002-S001-F010",
+        "relation_key": "BD0027",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N010",
+        "source_scene_plan_key": "bp-sc009",
+        "summary": "神秘女子突然出手控制孟浩",
+        "target_node_key": "S002-S001-N011",
+        "target_scene_plan_key": "bp-sc010"
+      },
+      {
+        "reference_key": "S002-S001-F009-1",
+        "relation_key": "BD0028",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N009",
+        "source_scene_plan_key": "bp-sc008",
+        "summary": "许师姐为了凑齐招募名额才出手抓捕孟浩",
+        "target_node_key": "S002-S001-N011",
+        "target_scene_plan_key": "bp-sc010"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0029",
+        "relation_type": "decision_setup",
+        "source_node_key": "S002-S001-N009",
+        "source_scene_plan_key": "bp-sc008",
+        "summary": "宗门杂役招募名额缺一人",
+        "target_node_key": "S002-S001-N011",
+        "target_scene_plan_key": "bp-sc010"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0030",
+        "relation_type": "decision_setup",
+        "source_node_key": "S002-S001-N010",
+        "source_scene_plan_key": "bp-sc009",
+        "summary": "宗门杂役招募名额缺一人",
+        "target_node_key": "S002-S001-N011",
+        "target_scene_plan_key": "bp-sc010"
+      },
+      {
+        "reference_key": "S002-S001-F011",
+        "relation_key": "BD0031",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N011",
+        "source_scene_plan_key": "bp-sc010",
+        "summary": "孟浩处于被控制的处境下询问对方身份",
+        "target_node_key": "S002-S001-N012",
+        "target_scene_plan_key": "bp-sc011"
+      },
+      {
+        "reference_key": "S002-S001-F012",
+        "relation_key": "BD0032",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N012",
+        "source_scene_plan_key": "bp-sc011",
+        "summary": "女子凑齐人数后带众人前往宗门",
+        "target_node_key": "S002-S001-N013",
+        "target_scene_plan_key": "bp-sc012"
+      },
+      {
+        "reference_key": "S002-S001-F014",
+        "relation_key": "BD0033",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N013",
+        "source_scene_plan_key": "bp-sc012",
+        "summary": "孟浩苏醒后确认所处新环境",
+        "target_node_key": "S002-S001-N014",
+        "target_scene_plan_key": "bp-sc013"
+      },
+      {
+        "reference_key": "S002-S001-F015",
+        "relation_key": "BD0034",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N014",
+        "source_scene_plan_key": "bp-sc013",
+        "summary": "绿袍执事对话发生在宗门空地，孟浩确认自身安全后开始思考当下处境的收益",
+        "target_node_key": "S002-S001-N015",
+        "target_scene_plan_key": "bp-sc014"
+      },
+      {
+        "reference_key": "S001-F002",
+        "relation_key": "BD0035",
+        "relation_type": "state_requirement",
+        "source_node_key": "S001-N002",
+        "source_scene_plan_key": "bp-sc002",
+        "summary": "孟浩过往的穷困处境让他对赚钱的机会格外敏感",
+        "target_node_key": "S002-S001-N015",
+        "target_scene_plan_key": "bp-sc014"
+      },
+      {
+        "reference_key": "S002-S001-F015",
+        "relation_key": "BD0036",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N014",
+        "source_scene_plan_key": "bp-sc013",
+        "summary": "只有抵达宗门后才能进行杂役岗位分配",
+        "target_node_key": "S003-S002-S001-N016",
+        "target_scene_plan_key": "bp-sc014"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0037",
+        "relation_type": "decision_setup",
+        "source_node_key": "S002-S001-N014",
+        "source_scene_plan_key": "bp-sc013",
+        "summary": "宗门职责要求",
+        "target_node_key": "S003-S002-S001-N016",
+        "target_scene_plan_key": "bp-sc014"
+      },
+      {
+        "reference_key": "S002-S001-F011",
+        "relation_key": "BD0038",
+        "relation_type": "state_requirement",
+        "source_node_key": "S002-S001-N011",
+        "source_scene_plan_key": "bp-sc010",
+        "summary": "孟浩和王有材一同被带至宗门，在场听到对话",
+        "target_node_key": "S003-S002-S001-N017",
+        "target_scene_plan_key": "bp-sc015"
+      },
+      {
+        "reference_key": "",
+        "relation_key": "BD0039",
+        "relation_type": "decision_setup",
+        "source_node_key": "S003-S002-S001-N016",
+        "source_scene_plan_key": "bp-sc014",
+        "summary": "对陌生环境的恐惧",
+        "target_node_key": "S003-S002-S001-N017",
+        "target_scene_plan_key": "bp-sc015"
+      }
+    ],
+    "scenes": [
+      {
+        "agency_contracts": [],
+        "character_keys": [],
+        "conflict": "",
+        "context_requirements": [],
+        "entry_state": "",
+        "exit_state": "少年坐在山顶，被风拂过衣摆",
+        "key": "bp-sc001",
+        "opening_image": "水墨风南赡大地山水远景，镜头拉向赵国大青山，黄昏夕阳洒在山顶少年背影上",
+        "previous_scene_exit_state": "",
+        "scene_heading": "【场1】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0001,SRC0002,SRC0003",
+        "story_function": "推进本场事件并完成状态变化：水墨风南赡大地山水远景，镜头拉向赵国大青山，黄昏夕阳洒在山顶少年背影上；少年坐在山顶，被风拂过衣摆",
+        "summary": "水墨风南赡大地山水远景，镜头拉向赵国大青山，黄昏夕阳洒在山顶少年背影上；少年坐在山顶，被风拂过衣摆",
+        "turn": "少年坐在山顶，被风拂过衣摆",
+        "units": [
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc001:SRC0001:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "舒缓的古乐渐起，镜头随水墨流动缓慢推展，整体氛围古朴悠远。",
+            "render_policy": "standalone",
+            "resulting_state": "故事开篇世界观背景正式引出。",
+            "source_segment_ids": [
+              "SRC0001"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "淡墨晕染的长卷缓缓铺开，南赡大地的山河轮廓在画面上逐渐清晰，“第一章 书生孟浩”的墨字逐笔显现，落在卷首。",
+            "unit_key": "bp-sc001:SRC0001:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc001:SRC0002:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头从山水远景落到都城地标，风铎晃动带出轻微铃声，烘托出时代氛围。",
+            "render_policy": "standalone",
+            "resulting_state": "赵国崇唐的社会背景交代完成，为孟浩的理想埋下伏笔。",
+            "source_segment_ids": [
+              "SRC0002"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "镜头扫过小国赵国的疆土，都城内与皇宫齐高的唐楼矗立在夕阳下，楼角的风铎轻轻晃动，映着举国上下对东土大唐、对长安的遥慕。",
+            "unit_key": "bp-sc001:SRC0002:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc001:SRC0003:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头随风的动线移动，最终定格在少年的背影上，风声隐约可闻，夕阳暖光铺满画面。",
+            "render_policy": "standalone",
+            "resulting_state": "少年坐在大青山山顶，衣摆被风拂动，故事主角正式登场。",
+            "source_segment_ids": [
+              "SRC0003"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "四月的风穿过北漠、掠过东土，裹着细碎的尘雾在黄昏的暖光里转了个弯，拂过大青山的草木，最终落在山顶坐着的青衫少年身上，吹得他衣摆轻轻扬起。",
+            "unit_key": "bp-sc001:SRC0003:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然",
+          "承接开篇世界观设定"
+        ],
+        "entry_state": "少年坐在山顶，被风拂过衣摆",
+        "exit_state": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "key": "bp-sc002",
+        "opening_image": "孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然",
+        "previous_scene_exit_state": "少年坐在山顶，被风拂过衣摆",
+        "scene_heading": "【场2】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0004,SRC0005,SRC0006,SRC0007,SRC0008,SRC0009,SRC0010,SRC0011",
+        "story_function": "推进本场事件并完成状态变化：孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然；孟浩垂头看着手里的葫芦，神色黯淡",
+        "summary": "孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然；孟浩垂头看着手里的葫芦，神色黯淡",
+        "turn": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0004:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "镜头聚焦孟浩面部，捕捉他皱起的眉头和茫然的眼神，葫芦被攥得微微变形，动作细节清晰。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩的外形与当下迷茫状态清晰展现。",
+            "source_segment_ids": [
+              "SRC0004"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "镜头转到少年正面，他身形有些瘦弱，穿着洗得干净的蓝色文士长衫，约莫十六七岁的年纪，个子不高，皮肤带着常年日晒的浅黑，清亮的眼睛本透着几分聪颖，此刻却紧紧皱着眉，指尖攥着一个葫芦，眼神里满是茫然。",
+            "unit_key": "bp-sc002:SRC0004:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0005:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "声音低沉，带着浓浓的疲惫和失落，尾音轻得几乎被风刮走。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩科举落榜的事实明确道出。",
+            "source_segment_ids": [
+              "SRC0005"
+            ],
+            "source_text": "“又落榜了……”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“又落榜了……”",
+            "unit_key": "bp-sc002:SRC0005:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0005:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "胸廓随叹气动作起伏，肩膀放松垮下，头微低。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩落榜后的失落情绪进一步流露。",
+            "source_segment_ids": [
+              "SRC0005"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩沉沉叹了口气，肩膀微微垮下来。",
+            "unit_key": "bp-sc002:SRC0005:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0006:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气里带着自嘲，说到“几yu作呕”时带着明显的压抑和不甘，尾句上扬，满是对自己的怀疑。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩对科举道路产生强烈质疑。",
+            "source_segment_ids": [
+              "SRC0006"
+            ],
+            "source_text": "“考了三年，这三年来整日看那些贤者书籍，已看的几yu作呕，莫非科举真的不是我孟浩未来的路？”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“考了三年，这三年来整日看那些贤者书籍，已看的几yu作呕，莫非科举真的不是我孟浩未来的路？”",
+            "unit_key": "bp-sc002:SRC0006:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0006:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "嘴角扯出一个极淡的苦笑，视线落到手中的葫芦上，眼神里的光又暗了些。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩垂头看着手里的葫芦，神色黯淡。",
+            "source_segment_ids": [
+              "SRC0006"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他自嘲地扯了扯嘴角，低头看向手里攥着的葫芦，神色又黯淡了几分。",
+            "unit_key": "bp-sc002:SRC0006:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0007:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气苦涩，说到“去东土大唐”时声音微微顿了一下，满是遗憾，最后一句几乎是咬着牙说出来的，透着不甘与无奈。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩明确意识到科举理想破灭，对书生身份产生自我否定。",
+            "source_segment_ids": [
+              "SRC0007"
+            ],
+            "source_text": "“当官发财做个有钱人的理想已经越来越远，更不用说有钱之后去东土大唐……百无一用是书生。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“当官发财做个有钱人的理想已经越来越远，更不用说有钱之后去东土大唐……百无一用是书生。”",
+            "unit_key": "bp-sc002:SRC0007:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0007:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "指尖无意识摩挲葫芦表面，眼神放空，脸上的苦笑久久没有散去。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩的迷茫情绪到达顶峰，对未来充满恐慌。",
+            "source_segment_ids": [
+              "SRC0007"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩苦笑着摇了摇头，坐在安静的山顶，指尖摩挲着葫芦的表皮，眼里的茫然越来越深，藏着对未知未来的恐惧。",
+            "unit_key": "bp-sc002:SRC0007:002:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0008:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头略微虚化，配合快速闪回的模糊想象片段，体现孟浩思绪的杂乱。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩陷入对未来的无序想象中，更加找不到方向。",
+            "source_segment_ids": [
+              "SRC0008"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "各种纷乱的念头在他脑海里盘旋：会不会有贵人赏识自己？会不会有深闺小姐中意自己？又或者自己一辈子都困在科举的循环里？",
+            "unit_key": "bp-sc002:SRC0008:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0009:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "孟浩微微打了个寒颤，指尖更用力地攥紧葫芦，指节微微发白。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩被迷茫情绪裹挟，心生恐惧。",
+            "source_segment_ids": [
+              "SRC0009"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "这些问题没人能给他答案，十六七岁的少年只觉得那看不到头的迷茫像一张无形的大口，要将他整个人吞噬进去，让他心底忍不住泛起一阵惧意。",
+            "unit_key": "bp-sc002:SRC0009:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0010:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气平静得近乎麻木，带着破罐破摔的自嘲，说完后许久没有出声。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩开始后悔选择读书科举的道路，对现实处境愈发不满。",
+            "source_segment_ids": [
+              "SRC0010"
+            ],
+            "source_text": "“哪怕是县城里的教习先生，每月也只有几钱银子，甚至不如王伯的木匠铺子赚钱，早知如此头些年不去读书，和王老伯去学木匠手艺，想来日后总算能解决温饱，好过如今一无所有。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“哪怕是县城里的教习先生，每月也只有几钱银子，甚至不如王伯的木匠铺子赚钱，早知如此头些年不去读书，和王老伯去学木匠手艺，想来日后总算能解决温饱，好过如今一无所有。”",
+            "unit_key": "bp-sc002:SRC0010:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0010:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩双唇紧抿，不再说话，只有衣摆被风吹动的声响。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩陷入沉默，情绪沉淀下来。",
+            "source_segment_ids": [
+              "SRC0010"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩沉默下来，只有风掠过他耳边的声音。",
+            "unit_key": "bp-sc002:SRC0010:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0011:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "声音压得很低，带着茫然的颤音，“怎么办”三个字轻得像在问风。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩直面眼下穷困的现实，对未来的困惑达到顶点。",
+            "source_segment_ids": [
+              "SRC0011"
+            ],
+            "source_text": "“家里已经没有多少粮食了，银两也都花的所剩无几，还欠了周员外三两银子，以后……怎么办。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“家里已经没有多少粮食了，银两也都花的所剩无几，还欠了周员外三两银子，以后……怎么办。”",
+            "unit_key": "bp-sc002:SRC0011:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0011:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩缓缓抬头，视线投向天空，眼神空洞，风拂过他的额发。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩抬头望天，完全陷入对未来的迷茫中。",
+            "source_segment_ids": [
+              "SRC0011"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他抬起头望向辽远的天空，湛蓝色的天幕广阔得看不到尽头，就像他完全看不清方向的未来。",
+            "unit_key": "bp-sc002:SRC0011:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "孟浩",
+            "agency_mode": "voluntary",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S001-N003"
+          }
+        ],
+        "character_keys": [
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩拿出纸条认真端详，指尖捏着纸条边缘",
+          "承接孟浩此前的迷茫状态",
+          "科举失败后对现实的无力感"
+        ],
+        "entry_state": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "exit_state": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "key": "bp-sc003",
+        "opening_image": "孟浩拿出纸条认真端详，指尖捏着纸条边缘",
+        "previous_scene_exit_state": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "scene_heading": "【场3】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0012,SRC0013,SRC0014",
+        "story_function": "推进本场事件并完成状态变化：孟浩拿出纸条认真端详，指尖捏着纸条边缘；孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "summary": "孟浩拿出纸条认真端详，指尖捏着纸条边缘；孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "turn": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc003:SRC0012:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "摇头动作缓慢而沉重，取纸条、塞葫芦、扔葫芦的动作连贯而用力，胳膊甩出的弧度很大，带着宣泄的力道。",
+            "render_policy": "standalone",
+            "resulting_state": "装着写有理想的纸条的葫芦被孟浩扔下了大青山。",
+            "source_segment_ids": [
+              "SRC0012"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "许久之后，孟浩轻轻摇了摇头，像是要把那些纷乱的念头都晃出去，他从怀里摸出一张皱巴巴的纸条，指尖捏着纸条边缘认真看了片刻，将纸条塞进葫芦里，接着站起身，攒尽力气把葫芦朝着山下扔了出去。",
+            "unit_key": "bp-sc003:SRC0012:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc003:SRC0013:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头跟着葫芦的下落轨迹移动，落到山脚下奔涌的河面上，河水翻着细碎的浪，水声清晰。",
+            "render_policy": "standalone",
+            "resulting_state": "葫芦落入山下通往东土的大河中。",
+            "source_segment_ids": [
+              "SRC0013"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "大青山脚下，一条大河奔涌流淌，河水四季不冻，当地人都传说这条河最终会流到东土大唐。",
+            "unit_key": "bp-sc003:SRC0013:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc003:SRC0014:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩站在山风里，身形站得笔直，视线牢牢锁着河面上的葫芦，眼眶微微泛红，直到葫芦变成一个小点再也看不清，也没有移开目光。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩站在山顶，目光追随着河面上远去的葫芦，情绪完成宣泄。",
+            "source_segment_ids": [
+              "SRC0014"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "山顶的孟浩站在原地，一瞬不瞬地盯着大河里载浮载沉、越飘越远的葫芦，没有眨眼，恍惚间仿佛在随着葫芦飘走的光影里看到了娘亲的笑脸，看到了儿时无忧无虑的时光——那葫芦里装着他所有没实现的理想，装着他对未来的全部憧憬，就这么顺着河水飘向不知名的远方，不知将来会被谁捡到，看到里面藏着的少年心事。",
+            "unit_key": "bp-sc003:SRC0014:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "孟浩",
+            "agency_mode": "voluntary",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S001-N004"
+          }
+        ],
+        "character_keys": [
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩深吸一口气，眼神从迷茫转为坚定",
+          "承接扔葫芦后的情绪节点",
+          "生活穷困的现实压力"
+        ],
+        "entry_state": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "exit_state": "孟浩转身抬脚，正要往山下走",
+        "key": "bp-sc004",
+        "opening_image": "孟浩深吸一口气，眼神从迷茫转为坚定",
+        "previous_scene_exit_state": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "scene_heading": "【场4】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0015,SRC0016,SRC0017",
+        "story_function": "推进本场事件并完成状态变化：孟浩深吸一口气，眼神从迷茫转为坚定；孟浩转身抬脚，正要往山下走",
+        "summary": "孟浩深吸一口气，眼神从迷茫转为坚定；孟浩转身抬脚，正要往山下走",
+        "turn": "孟浩转身抬脚，正要往山下走",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0015:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩眨眼的动作很慢，收回目光时肩背不自觉地挺直，吸气时胸廓明显起伏，眼神从放空逐渐变得清亮有神。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩收敛迷茫，神色转为坚定。",
+            "source_segment_ids": [
+              "SRC0015"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "数十息的时间过去，直到葫芦的影子彻底消失在河的尽头，孟浩才缓缓收回目光，将眼底的茫然一点点压下去藏好，他深深吸了一口山顶带着草木气的清冷空气，原本黯淡的眸子里逐渐亮起坚定的光。",
+            "unit_key": "bp-sc004:SRC0015:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0016:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气平稳而有力，没有了之前的迷茫和慌乱，带着少年人独有的韧性，每个字都说得格外认真。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩下定决心要直面困境，好好生活。",
+            "source_segment_ids": [
+              "SRC0016"
+            ],
+            "source_text": "“不管如何，读书也好，做工也罢，总要……生活下去。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“不管如何，读书也好，做工也罢，总要……生活下去。”",
+            "unit_key": "bp-sc004:SRC0016:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0016:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩抿了抿唇，脸上露出一个极淡却很笃定的表情，周身的气质都变得沉稳起来。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩的坚韧性格凸显，心态完全调整过来。",
+            "source_segment_ids": [
+              "SRC0016"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他本就是聪颖又坚韧的性子，若不是靠着这股韧劲儿，早年双亲失踪后他也不可能一个人撑到现在。",
+            "unit_key": "bp-sc004:SRC0016:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0017:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "抬头看天时眼神明亮，抬脚的动作利落干脆，背影在夕阳下挺得笔直。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩转身抬脚，正要往山下走，准备开启新的生活。",
+            "source_segment_ids": [
+              "SRC0017"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩抬头又看了一眼广阔的天空，眼里的坚定之意又深了几分，他抬脚踏出一步，就要朝着山下走去。",
+            "unit_key": "bp-sc004:SRC0017:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_b67de643afe6",
+          "person_e79ecc6793f5"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩脚步顿住，侧耳倾听崖下的动静",
+          "承接孟浩准备下山的状态"
+        ],
+        "entry_state": "孟浩转身抬脚，正要往山下走",
+        "exit_state": "孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "key": "bp-sc005",
+        "opening_image": "孟浩脚步顿住，侧耳倾听崖下的动静",
+        "previous_scene_exit_state": "孟浩转身抬脚，正要往山下走",
+        "scene_heading": "【场5】四月黄昏 / 赵国大青山山顶崖边",
+        "source_basis": "SRC0018,SRC0019,SRC0020,SRC0021,SRC0022",
+        "story_function": "推进本场事件并完成状态变化：孟浩脚步顿住，侧耳倾听崖下的动静；孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "summary": "孟浩脚步顿住，侧耳倾听崖下的动静；孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "turn": "孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc005:SRC0018:001:event",
+            "event_priority": "causal",
+            "function": "setup",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩刚抬起的脚悬在半空，眉头微蹙，耳廓轻轻动了动，视线循着声音来向转去。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩察觉崖下有异常声响，暂停了下山的动作。",
+            "source_segment_ids": [
+              "SRC0018"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "山风卷着草叶从崖边刮过，细碎的声响里，一缕微弱得几乎要被风撕碎的呼救声飘上来，擦过孟浩的耳尖。",
+            "unit_key": "bp-sc005:SRC0018:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc005:SRC0019:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_e79ecc6793f5 通过 audible 交付来源 SRC0019：“救命……救命……”",
+                "participant_key": "person_e79ecc6793f5",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "声音发颤，带着气音，每一个字都被风吹得断断续续，满是惊恐和绝望。",
+            "render_policy": "standalone",
+            "resulting_state": "呼救声清晰传入孟浩耳中，确认是有人求救。",
+            "source_segment_ids": [
+              "SRC0019"
+            ],
+            "source_text": "“救命……救命……”",
+            "speaker_key": "person_e79ecc6793f5",
+            "target_keys": [],
+            "text": "“救命……救命……”",
+            "unit_key": "bp-sc005:SRC0019:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc005:SRC0020:001:event",
+            "event_priority": "causal",
+            "function": "reaction",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他微微弓起背，一手搭在耳后，身体下意识朝着崖边倾了倾，原本放松的神色瞬间绷紧。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩确认自己没有听错，呼救声确实来自山崖下方。",
+            "source_segment_ids": [
+              "SRC0020"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩整个人猛地顿住，怔了一瞬后立刻屏住呼吸，侧过脸专心朝崖下聆听。",
+            "unit_key": "bp-sc005:SRC0020:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc005:SRC0021:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_e79ecc6793f5 通过 audible 交付来源 SRC0021：“救命……”",
+                "participant_key": "person_e79ecc6793f5",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "这次的声音比刚才清晰了些许，尾音抖得厉害，像是呼救的人已经快没了力气。",
+            "render_policy": "standalone",
+            "resulting_state": "呼救声再次传来，印证了孟浩的判断。",
+            "source_segment_ids": [
+              "SRC0021"
+            ],
+            "source_text": "“救命……”",
+            "speaker_key": "person_e79ecc6793f5",
+            "target_keys": [],
+            "text": "“救命……”",
+            "unit_key": "bp-sc005:SRC0021:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc005:SRC0022:001:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他脚尖抵着崖边凸起的石块，上半身探出去，目光快速扫过陡峭的崖壁，最终落在半山腰一处向外突出的天然裂缝上，瞳孔微微一缩。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩看清了裂缝里被困的人，确认了呼救者的位置。",
+            "source_segment_ids": [
+              "SRC0022"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩再不犹豫，快步冲到崖边，双手扶着旁边的岩石俯身向下望去。",
+            "unit_key": "bp-sc005:SRC0022:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_e79ecc6793f5",
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "王有材看到孟浩，脸上露出狂喜的神情，半个身子探在裂缝外",
+          "承接发现被困者的节点"
+        ],
+        "entry_state": "孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "exit_state": "王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "key": "bp-sc006",
+        "opening_image": "王有材看到孟浩，脸上露出狂喜的神情，半个身子探在裂缝外",
+        "previous_scene_exit_state": "孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "scene_heading": "【场6】四月黄昏 / 赵国大青山山顶崖边",
+        "source_basis": "SRC0023,SRC0024,SRC0025,SRC0026,SRC0027",
+        "story_function": "推进本场事件并完成状态变化：王有材看到孟浩，脸上露出狂喜的神情，半个身子探在裂缝外；王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "summary": "王有材看到孟浩，脸上露出狂喜的神情，半个身子探在裂缝外；王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "turn": "王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "units": [
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0023:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "participant_deliveries": [],
+            "performance": "王有材半个身子挂在裂缝外，眼睛猛地亮起来，声音里带着哭腔和绝处逢生的狂喜，几乎是拼尽全力喊出来的。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材认出孟浩，向他发出求救。",
+            "source_segment_ids": [
+              "SRC0023"
+            ],
+            "source_text": "“你……可是孟浩，救命，孟才子救我。”",
+            "speaker_key": "person_e79ecc6793f5",
+            "target_keys": [],
+            "text": "“你……可是孟浩，救命，孟才子救我。”",
+            "unit_key": "bp-sc006:SRC0023:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0023:002:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "participant_deliveries": [],
+            "performance": "他脸上满是灰尘和泪痕，嘴唇冻得发紫，看到孟浩后激动得脸颊涨红，身子一滑又慌忙抓住岩石，指节都泛了白。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材情绪激动，处境更加危险。",
+            "source_segment_ids": [
+              "SRC0023"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "王有材抓着裂缝边缘的手青筋暴起，因为过于激动，身体晃了晃，半个肩膀都探到了裂缝外面。",
+            "unit_key": "bp-sc006:SRC0023:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0024:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩睁大了眼睛，语气里满是诧异，下意识往前凑了凑，想看得更清楚些。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩认出被困者是相识的王有材。",
+            "source_segment_ids": [
+              "SRC0024"
+            ],
+            "source_text": "“王有材？”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“王有材？”",
+            "unit_key": "bp-sc006:SRC0024:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0024:002:event",
+            "event_priority": "causal",
+            "function": "reaction",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他指尖抠着岩石边缘，眉头拧成一团，原本紧绷的脸上多了几分凝重。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩确认被困者身份，意识到情况棘手。",
+            "source_segment_ids": [
+              "SRC0024"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩皱起眉，目光在王有材身上顿了顿，又扫过他身后狭窄的裂缝，神色沉了下来。",
+            "unit_key": "bp-sc006:SRC0024:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0025:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩的声音不自觉拔高，带着不敢置信，视线扫过裂缝下方几乎垂直的峭壁，语气里满是焦急。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩询问王有材被困的缘由。",
+            "source_segment_ids": [
+              "SRC0025"
+            ],
+            "source_text": "“你……你怎么跑这里来了？”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“你……你怎么跑这里来了？”",
+            "unit_key": "bp-sc006:SRC0025:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0025:002:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他喉结滚了滚，后背不自觉冒了层冷汗，抓着岩石的手更用力了些。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩意识到王有材一旦坠落便是九死一生，情况万分危急。",
+            "source_segment_ids": [
+              "SRC0025"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩下意识往崖下瞥了一眼，湍急的河水在崖底翻着白浪，轰鸣的水声顺着风传上来，震得人耳朵发疼。",
+            "unit_key": "bp-sc006:SRC0025:002:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0026:001:event",
+            "event_priority": "causal",
+            "function": "environment",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "水声轰隆隆的，连崖边的碎石都被震得簌簌往下掉，落入水中瞬间就被浪头吞没，连个影子都看不见。",
+            "render_policy": "standalone",
+            "resulting_state": "交代环境的危险性，突出救援的紧迫性。",
+            "source_segment_ids": [
+              "SRC0026"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "崖底的河水卷着碎石奔腾而过，浪头狠狠拍在峭壁上，溅起数丈高的水花，带着刺骨的寒意。",
+            "unit_key": "bp-sc006:SRC0026:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0027:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "participant_deliveries": [],
+            "performance": "王有材急得声音都破了音，一边喊一边往裂缝外挪，话音刚落，脚下的碎石突然一松，整个人往下滑了一截。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材说明还有其他人被困，催促孟浩赶紧救援。",
+            "source_segment_ids": [
+              "SRC0027"
+            ],
+            "source_text": "“不止是我，还有附近县其他几人，我们都在这里，孟兄先别说了，快救我们出去。”",
+            "speaker_key": "person_e79ecc6793f5",
+            "target_keys": [],
+            "text": "“不止是我，还有附近县其他几人，我们都在这里，孟兄先别说了，快救我们出去。”",
+            "unit_key": "bp-sc006:SRC0027:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc006:SRC0027:002:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "participant_deliveries": [],
+            "performance": "他吓得脸色惨白，大口喘着粗气，额头上的冷汗顺着脸颊往下掉，双腿还在止不住地打颤，再也不敢往裂缝外探了。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材险些坠河，处境更加危急，救援刻不容缓。",
+            "source_segment_ids": [
+              "SRC0027"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "王有材一声惊呼，一只手抓空，身子猛地往下坠，幸亏身后的同伴死死拽住他的后衣领，才勉强把他拉回裂缝里。",
+            "unit_key": "bp-sc006:SRC0027:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "孟浩",
+            "agency_mode": "voluntary",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S001-N007"
+          }
+        ],
+        "character_keys": [
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩目光扫过周围的藤条，眼睛猛地亮了起来",
+          "承接王有材遇险的危急情况",
+          "王有材随时可能坠河的危急情况"
+        ],
+        "entry_state": "王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "exit_state": "孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "key": "bp-sc007",
+        "opening_image": "孟浩目光扫过周围的藤条，眼睛猛地亮了起来",
+        "previous_scene_exit_state": "王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "scene_heading": "【场7】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0028,SRC0029",
+        "story_function": "推进本场事件并完成状态变化：孟浩目光扫过周围的藤条，眼睛猛地亮了起来；孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "summary": "孟浩目光扫过周围的藤条，眼睛猛地亮了起来；孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "turn": "孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc007:SRC0028:001:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他猛地转过身，目光扫过漫山遍野的藤条，抬手抹了把脸，转身就往藤条最密集的地方跑，脚步又快又急。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩想到用藤条做绳索的救援方案，立刻开始行动。",
+            "source_segment_ids": [
+              "SRC0028"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩看得心惊肉跳，他摸了摸身上，没有任何可以用来救援的绳索，正着急时，余光扫到了不远处山坡上盘绕的粗壮藤条，眼睛一下子亮了。",
+            "unit_key": "bp-sc007:SRC0028:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc007:SRC0029:001:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他额头上满是汗珠，后背的衣衫都被汗水浸透了，一边喊着王有材的名字，一边弯腰把藤条一头牢牢系在旁边的巨石上，另一头顺着崖壁慢慢往下放。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩收集好藤条返回崖边，开始投放救援工具。",
+            "source_segment_ids": [
+              "SRC0029"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩本就身体瘦弱，花了足足两柱香的时间，才收集到足够长的藤条，他胳膊被藤条划出好几道血痕，喘着粗气把藤条捆成一捆，快步跑回崖边。",
+            "unit_key": "bp-sc007:SRC0029:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_b67de643afe6",
+          "person_b9cd0397a07f",
+          "person_e79ecc6793f5"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩投放藤条时询问被困原因，王有材说明被抓情况及女子还缺一个人的招募要求，孟浩对仙人事说法嗤之以鼻",
+          "孟浩在等待藤条到位时询问情况"
+        ],
+        "entry_state": "孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "exit_state": "孟浩询问被困原因，王有材告知自己和另外两人是被会飞的女子抓走，对方说还要再抓一个才走，孟浩不信以为是孩童瞎编",
+        "key": "bp-sc008",
+        "opening_image": "孟浩投放藤条时询问被困原因，王有材说明被抓情况及女子还缺一个人的招募要求，孟浩对仙人事说法嗤之以鼻",
+        "previous_scene_exit_state": "孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "scene_heading": "【场8】四月黄昏 / 赵国大青山山顶崖边",
+        "source_basis": "SRC0030,SRC0031,SRC0032,SRC0033,SRC0034",
+        "story_function": "推进本场事件并完成状态变化：孟浩投放藤条时询问被困原因，王有材说明被抓情况及女子还缺一个人的招募要求，孟浩对仙人事说法嗤之以鼻；孟浩询问被困原因，王有材告知自己和另外两人是被会飞的女子抓走，对方说还要再抓一个才走，孟浩不信以为是孩童瞎编",
+        "summary": "孟浩投放藤条时询问被困原因，王有材说明被抓情况及女子还缺一个人的招募要求，孟浩对仙人事说法嗤之以鼻；孟浩询问被困原因，王有材告知自己和另外两人是被会飞的女子抓走，对方说还要再抓一个才走，孟浩不信以为是孩童瞎编",
+        "turn": "孟浩询问被困原因，王有材告知自己和另外两人是被会飞的女子抓走，对方说还要再抓一个才走，孟浩不信以为是孩童瞎编",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0030:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩一边慢慢放着藤条，一边对着崖下开口，语气里满是疑惑。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩趁投放藤条的间隙，询问几人被困的原因。",
+            "source_segment_ids": [
+              "SRC0030"
+            ],
+            "source_text": "“你还没说，你们到底怎么下去的？”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“你还没说，你们到底怎么下去的？”",
+            "unit_key": "bp-sc008:SRC0030:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0030:002:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他手上的动作稳而慢，避免藤条晃得太厉害撞到崖壁，眉头还微微皱着，等着王有材的回答。",
+            "render_policy": "standalone",
+            "resulting_state": "藤条持续向下降落，即将抵达王有材所在的裂缝。",
+            "source_segment_ids": [
+              "SRC0030"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩拉着藤条调整方向，确保藤条能落到裂缝旁边，视线时不时往下瞟，留意着藤条的位置。",
+            "unit_key": "bp-sc008:SRC0030:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b9cd0397a07f"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0031:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_b9cd0397a07f 通过 audible 交付来源 SRC0031：“飞！”",
+                "participant_key": "person_b9cd0397a07f",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "回答的是王有材旁边那个虎头虎脑的少年，声音脆生生的，喊得格外大声，带着点没回过神的懵。",
+            "render_policy": "standalone",
+            "resulting_state": "被困少年给出离谱的回答，让孟浩更加疑惑。",
+            "source_segment_ids": [
+              "SRC0031"
+            ],
+            "source_text": "“飞！”",
+            "speaker_key": "person_b9cd0397a07f",
+            "target_keys": [],
+            "text": "“飞！”",
+            "unit_key": "bp-sc008:SRC0031:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0031:002:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "崖下传来小声的争执，风一吹就散了，听不真切。",
+            "render_policy": "standalone",
+            "resulting_state": "少年的回答被王有材制止，引出后续更准确的说明。",
+            "source_segment_ids": [
+              "SRC0031"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "话音刚落，就传来王有材拍了少年一下的轻响，少年哎哟了一声，没再说话。",
+            "unit_key": "bp-sc008:SRC0031:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0032:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩嗤笑一声，语气里满是嘲讽，手上故意把藤条往上提了提。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩不相信少年的说辞，觉得对方是在胡说八道。",
+            "source_segment_ids": [
+              "SRC0032"
+            ],
+            "source_text": "“扯淡，飞什么飞，你能飞下去，现在怎么不飞上来。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“扯淡，飞什么飞，你能飞下去，现在怎么不飞上来。”",
+            "unit_key": "bp-sc008:SRC0032:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0032:002:event",
+            "event_priority": "causal",
+            "function": "action",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩挑了挑眉，手上没有继续往上拽，也没有往下放，就停在半空中。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩的动作让被困的人更加着急，催促王有材说出实情。",
+            "source_segment_ids": [
+              "SRC0032"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "藤条晃了晃，往上收了一小截，崖下立刻传来几声惊呼。",
+            "unit_key": "bp-sc008:SRC0032:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0033:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_e79ecc6793f5 通过 audible 交付来源 SRC0033：“别听他胡说，我们是被一个会飞的女人抓过来的，说是要带我们去什么宗做杂役。”",
+                "participant_key": "person_e79ecc6793f5",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "王有材急得连忙大喊，声音里满是慌张，生怕孟浩真的把藤条收回去。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材说出被困的真实原因，提到有会飞的女人抓他们去做杂役。",
+            "source_segment_ids": [
+              "SRC0033"
+            ],
+            "source_text": "“别听他胡说，我们是被一个会飞的女人抓过来的，说是要带我们去什么宗做杂役。”",
+            "speaker_key": "person_e79ecc6793f5",
+            "target_keys": [],
+            "text": "“别听他胡说，我们是被一个会飞的女人抓过来的，说是要带我们去什么宗做杂役。”",
+            "unit_key": "bp-sc008:SRC0033:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0033:002:event",
+            "event_priority": "causal",
+            "function": "exposition",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "他的声音发颤，提到那个女人的时候，语气里满是恐惧。",
+            "render_policy": "standalone",
+            "resulting_state": "透露出对方还缺一个招募名额的信息，为后续情节埋下伏笔。",
+            "source_segment_ids": [
+              "SRC0033"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "王有材说完还喘了口气，又赶紧补了一句，说那女人已经抓了三个，还差一个就够数了，抓够了就会回来带他们走。",
+            "unit_key": "bp-sc008:SRC0033:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0034:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩不屑地撇了撇嘴，语气里满是不以为然，手上动作不停，继续把藤条往下放。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩不相信王有材关于会飞女人的说法，只当是小孩子编的瞎话。",
+            "source_segment_ids": [
+              "SRC0034"
+            ],
+            "source_text": "“又扯淡了，会飞？那是传说中的仙人，谁信啊。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“又扯淡了，会飞？那是传说中的仙人，谁信啊。”",
+            "unit_key": "bp-sc008:SRC0034:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc008:SRC0034:002:event",
+            "event_priority": "causal",
+            "function": "reaction",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "他撇了撇嘴，脸上露出嘲讽的笑，摇了摇头，手上的动作更稳了些。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩对仙人之说嗤之以鼻，继续推进救援动作。",
+            "source_segment_ids": [
+              "SRC0034"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩摇了摇头，心里暗笑这些小孩真是异想天开，书里的仙人故事也能当真，注意力重新放回投放藤条的动作上。",
+            "unit_key": "bp-sc008:SRC0034:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_b67de643afe6",
+          "person_e79ecc6793f5",
+          "person_224fd998b1e7"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+          "孟浩之前刚否定仙人存在，此刻遇到神秘女子形成强烈冲击"
+        ],
+        "entry_state": "孟浩询问被困原因，王有材告知自己和另外两人是被会飞的女子抓走，对方说还要再抓一个才走，孟浩不信以为是孩童瞎编",
+        "exit_state": "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "key": "bp-sc009",
+        "opening_image": "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "previous_scene_exit_state": "孟浩询问被困原因，王有材告知自己和另外两人是被会飞的女子抓走，对方说还要再抓一个才走，孟浩不信以为是孩童瞎编",
+        "scene_heading": "【场9】四月黄昏 / 赵国大青山山顶崖边",
+        "source_basis": "SRC0035,SRC0036,SRC0037,SRC0038",
+        "story_function": "推进本场事件并完成状态变化：王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化；王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "summary": "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化；王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "turn": "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc009:SRC0035:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5"
+            ],
+            "participant_deliveries": [],
+            "performance": "近景跟拍孟浩的动作：他刚要俯身拉藤条，脖颈处的碎发突然被阴风刮得扬起，裸露在外的皮肤瞬间浮起鸡皮疙瘩，瞳孔猛地收缩，喉间溢出短促的惊呼，上半身不受控制地向后仰，手臂慌忙扶住身侧的岩石才稳住身形。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材抓住救援藤条，孟浩被身后突如其来的异常寒意惊动，转头发现了神秘女子的存在。",
+            "source_segment_ids": [
+              "SRC0035"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "藤条递到山崖裂缝处，王有材猛地伸手牢牢攥住，孟浩刚松了半口气，身后骤然阴风翻涌，周遭温度骤降好似瞬间落入寒冬，他浑身控制不住地打了个寒颤，下意识回头望去，当场惊呼出声，脚下一滑险些失足坠下山崖。",
+            "unit_key": "bp-sc009:SRC0035:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc009:SRC0036:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "镜头从孟浩震惊的脸后摇，落在女子身上：她周身半米范围内的草叶都结上了细碎的白霜，银袍下摆没有被风掀起丝毫，一双黑沉沉的眼睛直勾勾盯着孟浩，眼尾没有丝毫情绪波动，嘴唇泛着不正常的青白色。",
+            "render_policy": "standalone",
+            "resulting_state": "银袍女子突兀现身崖边，毫无预兆地出现在孟浩身后，周身散发着诡异阴冷的气息。",
+            "source_segment_ids": [
+              "SRC0036"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "身着银色长袍的女子静静站在他身后，面容绝美却看不出具体年纪，脸色是毫无血色的惨白，面无表情地望着孟浩，周身萦绕着刺骨的阴寒气息，好似刚从棺椁中爬出来一般。",
+            "unit_key": "bp-sc009:SRC0036:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc009:SRC0037:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "女子嘴唇几乎没动，声音像是两块骨头相互摩擦般干涩沙哑，语调没有任何起伏，目光扫过孟浩的经脉位置，像是在打量一件货物。",
+            "render_policy": "standalone",
+            "resulting_state": "女子开口点明孟浩符合招募条件，将他视为自己的目标猎物。",
+            "source_segment_ids": [
+              "SRC0037"
+            ],
+            "source_text": "“有些资质，既然自己找来，也算你的造化。”",
+            "speaker_key": "person_224fd998b1e7",
+            "target_keys": [],
+            "text": "“有些资质，既然自己找来，也算你的造化。”",
+            "unit_key": "bp-sc009:SRC0037:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc009:SRC0038:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "特写孟浩的表情：他的睫毛不受控制地剧烈颤抖，嘴唇瞬间失了血色，后背的衣衫瞬间被冷汗浸湿，想要移开目光却像是被定住了一般，浑身僵硬得动弹不得，连呼吸都下意识放轻。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩被女子的视线压制，全身发冷动弹不得，心中生出强烈的恐惧感。",
+            "source_segment_ids": [
+              "SRC0038"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "诡异的声音落进耳朵里像是冰碴子刮过骨膜，女子的双眼仿佛藏着能洞穿一切的奇异力量，孟浩只和她对视了一眼，便觉得浑身血液都像是冻住了一般，彻骨的寒意从脚底板窜到天灵盖，好似自己全身上下所有秘密都被对方一眼看透。",
+            "unit_key": "bp-sc009:SRC0038:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "许师姐",
+            "agency_mode": "voluntary",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S002-S001-N011"
+          }
+        ],
+        "character_keys": [
+          "person_224fd998b1e7",
+          "person_b67de643afe6",
+          "person_e79ecc6793f5",
+          "person_b9cd0397a07f",
+          "person_32ce878a56e2"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "从赵国大青山山顶崖边转至赵国大青山半山腰裂缝",
+          "神秘女子突然出手控制孟浩",
+          "许师姐为了凑齐招募名额才出手抓捕孟浩",
+          "宗门杂役招募名额缺一人"
+        ],
+        "entry_state": "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "exit_state": "银袍女子大袖甩出绿风卷住孟浩，将他扔到半山腰裂缝中，跟随进入吓退王有材等人",
+        "key": "bp-sc010",
+        "opening_image": "从赵国大青山山顶崖边转至赵国大青山半山腰裂缝",
+        "previous_scene_exit_state": "王有材抓住藤条时，孟浩身后突然出现面色苍白的银袍女子，开口称孟浩有资质是造化",
+        "scene_heading": "【场10】四月黄昏 / 赵国大青山半山腰裂缝",
+        "source_basis": "SRC0039,SRC0040",
+        "story_function": "推进本场事件并完成状态变化：从赵国大青山山顶崖边转至赵国大青山半山腰裂缝；银袍女子大袖甩出绿风卷住孟浩，将他扔到半山腰裂缝中，跟随进入吓退王有材等人",
+        "summary": "从赵国大青山山顶崖边转至赵国大青山半山腰裂缝；银袍女子大袖甩出绿风卷住孟浩，将他扔到半山腰裂缝中，跟随进入吓退王有材等人",
+        "turn": "银袍女子大袖甩出绿风卷住孟浩，将他扔到半山腰裂缝中，跟随进入吓退王有材等人",
+        "units": [
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc010:SRC0039:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6",
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "快剪镜头：女子衣袖扫过的瞬间，绿风裹挟着尘土炸开，孟浩的惊呼被风堵在喉咙里，整个人被绿风裹着向后倒飞，脚下瞬间踏空，山风刮得他脸颊生疼，视线里的天空和山崖飞速旋转。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐出手用绿风控制住孟浩，带着他一同向半山腰的裂缝坠落。",
+            "source_segment_ids": [
+              "SRC0039"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [
+              "person_b67de643afe6"
+            ],
+            "text": "女子的话音还在山间回荡，她便猛地一挥大袖，一股幽绿色的妖风骤然平地而起，瞬间卷住孟浩的腰腹，在孟浩的惊呼声中，带着他径直向着山崖下坠去，这一切发生得太快，孟浩的大脑当场一片空白。",
+            "unit_key": "bp-sc010:SRC0039:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc010:SRC0040:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_224fd998b1e7",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [],
+            "performance": "中景拍裂缝内的场景：孟浩被摔在干草堆上闷哼一声，王有材手里还攥着半段藤条，看到女子进来，吓得藤条“啪嗒”掉在地上，他和另外两个少年挤在一起，身体止不住地发抖，大气都不敢出。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩被扔入裂缝中与王有材等人汇合，许师姐进入裂缝，震慑住了被困的三个少年。",
+            "source_segment_ids": [
+              "SRC0040"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "text": "落到裂缝入口处时，女子抬手一甩，便将孟浩直接扔入裂缝内部，绿风呼啸着卷过洞壁，她自己也跟着抬步走了进去。她这一现身，原本守在裂缝里的王有材三人吓得面色煞白，连连向后退去，几乎贴到了洞壁上。",
+            "unit_key": "bp-sc010:SRC0040:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_224fd998b1e7",
+          "person_b67de643afe6",
+          "person_e79ecc6793f5",
+          "person_b9cd0397a07f",
+          "person_32ce878a56e2"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+          "孟浩处于被控制的处境下询问对方身份"
+        ],
+        "entry_state": "银袍女子大袖甩出绿风卷住孟浩，将他扔到半山腰裂缝中，跟随进入吓退王有材等人",
+        "exit_state": "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "key": "bp-sc011",
+        "opening_image": "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "previous_scene_exit_state": "银袍女子大袖甩出绿风卷住孟浩，将他扔到半山腰裂缝中，跟随进入吓退王有材等人",
+        "scene_heading": "【场11】四月黄昏 / 赵国大青山半山腰裂缝",
+        "source_basis": "SRC0041,SRC0042,SRC0043,SRC0044,SRC0045",
+        "story_function": "推进本场事件并完成状态变化：女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份；女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "summary": "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份；女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "turn": "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "units": [
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc011:SRC0041:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "女子的视线扫过藤条时，指尖微动，藤条瞬间被阴冻结上了一层薄冰，“咔嚓”一声自动断裂，顺着崖壁掉了下去，她收回目光，神色没有丝毫变化。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐毁掉了救援的藤条，彻底断了孟浩等人逃出去的可能。",
+            "source_segment_ids": [
+              "SRC0041"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "女子站在裂缝入口处没有说话，只是抬眼望向崖顶垂下来的那根藤条，目光冷淡，看不出喜怒。",
+            "unit_key": "bp-sc011:SRC0041:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc011:SRC0042:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩撑着地面的手被碎石划破，渗出细小的血珠，他却像是感觉不到疼一般，快速扫过洞壁和入口，看到断裂的藤条时，眼底闪过一丝绝望，指尖攥得指节发白。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩清醒过来，确认自己被困在半山腰的裂缝中，没有逃脱的路径。",
+            "source_segment_ids": [
+              "SRC0042"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩摔得浑身骨头都疼，控制不住地身子颤抖，心里满是慌乱，他咬着牙撑着地面爬起身，快速打量了一圈四周：这裂缝内部空间极小，站了四个人之后几乎没有空余的地方，岩壁上还渗着冰冷的水珠。",
+            "unit_key": "bp-sc011:SRC0042:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc011:SRC0043:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_e79ecc6793f5",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [],
+            "performance": "虎头虎脑的少年看到孟浩望过来，嘴唇抖了抖想说话，却被一旁的胖少年拽了拽袖子，两人吓得缩了缩脖子，把脸埋得更低，身体抖得更厉害了。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩看清了被困的另外两个少年的状态，确认所有人都处于恐惧之中。",
+            "source_segment_ids": [
+              "SRC0043"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他的目光落在王有材身上时，看到了他身边站着的另外两个少年：一个虎头虎脑，脸上还沾着泥灰，另一个白白净净、身子偏胖，两人此刻都吓得浑身哆嗦，眼眶通红，眼泪在眼眶里打转，眼看着就要哭出来。",
+            "unit_key": "bp-sc011:SRC0043:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc011:SRC0044:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "女子终于收回看向藤条的目光，冰冷的视线落在孟浩身上，语气平淡得像是在说一件再寻常不过的事，没有丝毫情绪波动。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐明确告知孟浩，他已经被定为杂役招募的最后一人，要和其他三人一同离开。",
+            "source_segment_ids": [
+              "SRC0044"
+            ],
+            "source_text": "“本就缺一个，你和他们一起吧。”",
+            "speaker_key": "person_224fd998b1e7",
+            "target_keys": [],
+            "text": "“本就缺一个，你和他们一起吧。”",
+            "unit_key": "bp-sc011:SRC0044:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc011:SRC0044:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "女子负手站在裂缝唯一的出口处，像一座无法跨越的冰山，绿风在她脚边缓缓盘旋，将所有想要逃跑的路径都堵得严严实实。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐守住裂缝出口，彻底控制住了在场的四个少年，等待出发。",
+            "source_segment_ids": [
+              "SRC0044"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "她说完这句话，便站在原地不再开口，周身的阴寒气息压得整个裂缝里的温度又降了几分，安静得只剩下几人急促的呼吸声。",
+            "unit_key": "bp-sc011:SRC0044:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc011:SRC0045:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩死死咬着后槽牙，逼着自己压下喉咙里的颤音，他读过的书此刻给了他些许底气，尽管后背已经被冷汗完全浸湿，还是强撑着迎上女子的视线，声音里的颤抖还是泄露了他的恐惧。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩强忍恐惧开口询问女子的身份，试图弄清楚眼前的处境。",
+            "source_segment_ids": [
+              "SRC0045"
+            ],
+            "source_text": "“你……你是谁。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“你……你是谁。”",
+            "unit_key": "bp-sc011:SRC0045:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc011:SRC0045:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "特写孟浩的手：掌心的伤口被掐得流出鲜血，顺着指缝滴落在地上的干草上，他的脊背挺得笔直，尽管双腿还在微微发抖，却没有丝毫后退的意思。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩强迫自己保持冷静，等待女子的回应，试图找到破局的可能。",
+            "source_segment_ids": [
+              "SRC0045"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "问出这句话后，孟浩的心脏砰砰狂跳，几乎要从胸腔里跳出来，他攥紧了拳头，指尖掐进掌心的伤口里，用疼痛逼着自己保持清醒，死死盯着女子的脸，等待她的回答。",
+            "unit_key": "bp-sc011:SRC0045:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_b67de643afe6",
+          "person_e79ecc6793f5",
+          "person_224fd998b1e7",
+          "person_b9cd0397a07f",
+          "person_32ce878a56e2"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "从赵国大青山半山腰裂缝转至大青山上空",
+          "女子凑齐人数后带众人前往宗门"
+        ],
+        "entry_state": "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "exit_state": "女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+        "key": "bp-sc012",
+        "opening_image": "从赵国大青山半山腰裂缝转至大青山上空",
+        "previous_scene_exit_state": "女子告知孟浩补上缺额和他们一起，孟浩强忍恐惧询问女子身份",
+        "scene_heading": "【场12】四月黄昏转黑夜 / 大青山上空",
+        "source_basis": "SRC0046,SRC0047,SRC0048",
+        "story_function": "推进本场事件并完成状态变化：从赵国大青山半山腰裂缝转至大青山上空；女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+        "summary": "从赵国大青山半山腰裂缝转至大青山上空；女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+        "turn": "女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_224fd998b1e7",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc012:SRC0046:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_224fd998b1e7",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [],
+            "performance": "远景拉镜头：绿风裹挟着五人从裂缝中冲出，速度快得在空中划出一道淡绿色的残影，山下的树木、河流飞速向后退去，夕阳的最后一点光落在他们身上，很快便被暗下来的天色吞没，大青山的轮廓越来越模糊，最终隐入夜色里。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐带着四个少年升空飞行，离开大青山，向着宗门的方向赶去。",
+            "source_segment_ids": [
+              "SRC0046"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "女子没有回答孟浩的问题，只是抬起右手随意一挥，幽绿色的风再次凭空出现，呼啸着卷住孟浩、王有材以及另外两个少年，带着四人跟着她一同飞出裂缝，径直向着高空飞去，不过眨眼的功夫便消失在天际，只剩下大青山依旧静静耸立，在渐沉的黄昏里慢慢融入浓稠的黑夜中。",
+            "unit_key": "bp-sc012:SRC0046:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc012:SRC0047:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "近景拍孟浩的脸：风刮得他的眼睛都睁不开，眼泪被吹得顺着眼角乱飞，他难以置信地看着脚下快速掠过的云层，嘴唇不断哆嗦，之前读过的所有志怪故事里的描述在脑海里疯狂闪过，过往的认知正在寸寸崩塌。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩亲身经历飞行过程，意识到眼前的女子拥有超出常人的能力，开始怀疑自己之前对仙人的否定。",
+            "source_segment_ids": [
+              "SRC0047"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩被绿风裹着，脸色白得像纸，他能清楚地看到脚下的山川河流飞速缩小，自己居然真的在天地间高速飞行，凛冽的风灌进他的口鼻，让他连呼吸都觉得困难，脑海里却不受控制地冒出来一个他之前无比否定的词语。",
+            "unit_key": "bp-sc012:SRC0047:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc012:SRC0048:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "这两个字几乎是下意识地从孟浩的喉咙里滚出来，声音轻得像是呢喃，又带着极致的震惊和茫然，他的视线开始模糊，耳边的风鸣声越来越远。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩脱口喊出“仙人”，确认了世上真的有仙人存在，过往的认知被彻底颠覆。",
+            "source_segment_ids": [
+              "SRC0048"
+            ],
+            "source_text": "“仙人？”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“仙人？”",
+            "unit_key": "bp-sc012:SRC0048:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc012:SRC0048:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩的眼白慢慢翻上来，瞳孔失去焦距，攥紧的拳头缓缓松开，头无力地歪向一边，彻底昏了过去，绿风稳稳托着他的身体，没有让他坠落。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩无法承受飞行的冲击，陷入昏厥状态，彻底失去了对自身处境的掌控。",
+            "source_segment_ids": [
+              "SRC0048"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他拼尽全力撑了数十息的时间，终究还是承受不住高空飞行的剧烈风压和认知崩塌的冲击，眼前一黑，彻底失去了意识，身体软软地倒在绿风里。",
+            "unit_key": "bp-sc012:SRC0048:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_b67de643afe6",
+          "person_e79ecc6793f5",
+          "person_224fd998b1e7",
+          "person_b9cd0397a07f",
+          "person_32ce878a56e2",
+          "person_46e7e8b742ed",
+          "person_8ff1cb1a5861"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "从大青山上空转至修仙宗门外门半山腰青石空地",
+          "孟浩苏醒后确认所处新环境"
+        ],
+        "entry_state": "女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+        "exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+        "key": "bp-sc013",
+        "opening_image": "从大青山上空转至修仙宗门外门半山腰青石空地",
+        "previous_scene_exit_state": "女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+        "scene_heading": "【场13】入夜 / 修仙宗门外门半山腰青石空地",
+        "source_basis": "SRC0049,SRC0050,SRC0051,SRC0052,SRC0053",
+        "story_function": "推进本场事件并完成状态变化：从大青山上空转至修仙宗门外门半山腰青石空地；孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+        "summary": "从大青山上空转至修仙宗门外门半山腰青石空地；孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+        "turn": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc013:SRC0049:001:event",
+            "event_priority": "causal",
+            "function": "establish_environment",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩手肘撑着地面坐起身，茫然地转动脖颈环顾四周，指尖下意识摩挲着粗糙的青石表面，眼底还残留着昏厥前的错愕。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩从昏厥中苏醒，初步确认自己身处非世俗的陌生环境。",
+            "source_segment_ids": [
+              "SRC0049"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩睫毛颤了颤，慢慢睁开眼，映入眼帘的是半山腰平整的青石空地，四周山峦层叠裹着缥缈云雾，不似凡世光景，错落的精美楼阁沿着山形分布在八方，入目全是陌生景致。",
+            "unit_key": "bp-sc013:SRC0049:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_224fd998b1e7",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc013:SRC0050:001:event",
+            "event_priority": "causal",
+            "function": "character_state_display",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_224fd998b1e7",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [],
+            "performance": "王有材抱着膝盖缩在地上，嘴唇哆嗦着不敢出声，另外两个少年也都脸色煞白，眼神紧紧黏在许师姐的背影上满是畏惧，孟浩顺着他们的目光看去，眉头微微蹙起。",
+            "render_policy": "standalone",
+            "resulting_state": "四名少年全部苏醒，均对眼前的许师姐抱有强烈恐惧，初步确认处境危险。",
+            "source_segment_ids": [
+              "SRC0050"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他身边的王有材和另外两个少年也都已经醒转，一个个身子止不住地发抖，惊惧地望着前方背对着他们站着的银袍女子。",
+            "unit_key": "bp-sc013:SRC0050:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_46e7e8b742ed",
+              "person_8ff1cb1a5861"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc013:SRC0051:001:event",
+            "event_priority": "causal",
+            "function": "character_introduction",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_46e7e8b742ed",
+              "person_8ff1cb1a5861"
+            ],
+            "participant_deliveries": [],
+            "performance": "两个绿袍执事垂手站在许师姐面前，腰微微躬着，绿油油的眼珠扫过四个少年时，带着毫不掩饰的审视，让几人更觉寒意上涌。",
+            "render_policy": "standalone",
+            "resulting_state": "两名绿袍执事登场，四名少年感知到对方的威压，恐惧情绪加深。",
+            "source_segment_ids": [
+              "SRC0051"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "许师姐对面站着两个二十岁左右的绿袍男子，二人都双眼凹陷，瞳孔泛着异样的墨绿色，看在眼里只让人觉得毛骨悚然。",
+            "unit_key": "bp-sc013:SRC0051:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc013:SRC0052:001:event",
+            "event_priority": "causal",
+            "function": "dialogue_delivery",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7",
+              "person_46e7e8b742ed"
+            ],
+            "participant_deliveries": [],
+            "performance": "绿袍执事甲脸上堆起恭维的笑，对着许师姐微微躬身，语气里满是讨好。",
+            "render_policy": "standalone",
+            "resulting_state": "绿袍执事甲向许师姐表示恭维，点明四名少年是拥有修仙资质的人选。",
+            "source_segment_ids": [
+              "SRC0052"
+            ],
+            "source_text": "“许师姐好手段，出门一次竟带回了四个拥有资质的小娃。”",
+            "speaker_key": "person_46e7e8b742ed",
+            "target_keys": [],
+            "text": "“许师姐好手段，出门一次竟带回了四个拥有资质的小娃。”",
+            "unit_key": "bp-sc013:SRC0052:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7",
+              "person_46e7e8b742ed"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc013:SRC0052:002:event",
+            "event_priority": "causal",
+            "function": "character_reaction",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7",
+              "person_46e7e8b742ed"
+            ],
+            "participant_deliveries": [],
+            "performance": "许师姐负在身后的手指动了动，衣摆被山风吹得猎猎作响，眼神扫过四个少年时毫无温度，仿佛在看几件无关紧要的物件。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐对恭维反应冷淡，明确表现出对四名少年的不在意。",
+            "source_segment_ids": [
+              "SRC0052"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "许师姐闻言神色没有半分波动，只淡淡瞥了他一眼，态度冷得像冰。",
+            "unit_key": "bp-sc013:SRC0052:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc013:SRC0053:001:event",
+            "event_priority": "causal",
+            "function": "dialogue_delivery",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "许师姐声音清冷，语气没有半分起伏，视线根本没在孟浩四人身上停留半秒。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐下达指令，安排两名绿袍执事将四名少年送往杂役处。",
+            "source_segment_ids": [
+              "SRC0053"
+            ],
+            "source_text": "“将他们带去杂役处。”",
+            "speaker_key": "person_224fd998b1e7",
+            "target_keys": [],
+            "text": "“将他们带去杂役处。”",
+            "unit_key": "bp-sc013:SRC0053:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_224fd998b1e7"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc013:SRC0053:002:event",
+            "event_priority": "causal",
+            "function": "scene_transition_preparation",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_224fd998b1e7"
+            ],
+            "participant_deliveries": [],
+            "performance": "绿袍执事甲连忙躬身应是，再抬头时许师姐已经没了踪影，只剩空中残留的淡淡灵光痕迹，四个少年看得目瞪口呆，更觉眼前的一切玄幻得离谱。",
+            "render_policy": "standalone",
+            "resulting_state": "许师姐离开宗门空地，四名少年交由两名绿袍执事接管。",
+            "source_segment_ids": [
+              "SRC0053"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "话音刚落，许师姐足下灵光一闪，整个人化作一道长虹，瞬间没入远处山峦之间消失不见。",
+            "unit_key": "bp-sc013:SRC0053:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "绿袍执事甲",
+            "agency_mode": "voluntary",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S003-S002-S001-N016"
+          }
+        ],
+        "character_keys": [
+          "person_b67de643afe6",
+          "person_8ff1cb1a5861",
+          "person_46e7e8b742ed",
+          "person_e79ecc6793f5",
+          "person_32ce878a56e2"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+          "绿袍执事对话发生在宗门空地，孟浩确认自身安全后开始思考当下处境的收益",
+          "孟浩过往的穷困处境让他对赚钱的机会格外敏感",
+          "只有抵达宗门后才能进行杂役岗位分配",
+          "宗门职责要求"
+        ],
+        "entry_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+        "exit_state": "王有材二人被指定去向，心生慌乱",
+        "key": "bp-sc014",
+        "opening_image": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+        "previous_scene_exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+        "scene_heading": "【场14】入夜 / 修仙宗门外门半山腰青石空地",
+        "source_basis": "SRC0054,SRC0055,SRC0056,SRC0057",
+        "story_function": "推进本场事件并完成状态变化：绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待；王有材二人被指定去向，心生慌乱",
+        "summary": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待；王有材二人被指定去向，心生慌乱",
+        "turn": "王有材二人被指定去向，心生慌乱",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc014:SRC0054:001:event",
+            "event_priority": "causal",
+            "function": "character_mind_show",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩捏了捏自己的手心，能清晰感觉到真实的触感，他看着远处山峦间若隐若现的楼阁，眼神从最初的茫然慢慢变成亮得惊人的渴求，心脏在胸腔里砰砰跳得飞快。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩从震惊中平复，意识到自己遇到了传说中的仙人，对未来生出前所未有的期待。",
+            "source_segment_ids": [
+              "SRC0054"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩此时已经平复了心神，他怔怔望着许师姐消失的方向，十六年人生里从未有过的神采渐渐浮现在他眼底，整颗心都跟着沸腾起来。",
+            "unit_key": "bp-sc014:SRC0054:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc014:SRC0055:001:event",
+            "event_priority": "causal",
+            "function": "dialogue_delivery",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩摸了摸自己空瘪的口袋，想到家里欠的债务，眼睛亮得更甚，嘴角不自觉地扬了起来，完全没了之前的慌乱。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩确认自身没有生命危险，务实的性格让他第一时间想到做杂役的收益，对接下来的生活充满期待。",
+            "source_segment_ids": [
+              "SRC0055"
+            ],
+            "source_text": "“杂役？这是要给仙人打工，应该不少赚吧。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“杂役？这是要给仙人打工，应该不少赚吧。”",
+            "unit_key": "bp-sc014:SRC0055:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc014:SRC0055:002:event",
+            "event_priority": "causal",
+            "function": "character_mind_show",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩手指无意识地掰着算，脸上的期待藏都藏不住，和旁边还在发抖的王有材形成鲜明对比。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩心态彻底稳定，将杂役工作视为赚钱改变生活的机会。",
+            "source_segment_ids": [
+              "SRC0055"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他越想越觉得靠谱，甚至已经在心里盘算着每个月能拿到多少工钱，多久能攒够还债的银子。",
+            "unit_key": "bp-sc014:SRC0055:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_8ff1cb1a5861"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc014:SRC0056:001:event",
+            "event_priority": "causal",
+            "function": "dialogue_delivery",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_8ff1cb1a5861 通过 audible 交付来源 SRC0056：“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”",
+                "participant_key": "person_8ff1cb1a5861",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "绿袍执事乙望着许师姐消失的方向，脸上满是艳羡的神色，语气里的向往几乎要溢出来。",
+            "render_policy": "standalone",
+            "resulting_state": "绿袍执事乙感慨许师姐的修为与法宝，侧面点明修仙者的能力层级。",
+            "source_segment_ids": [
+              "SRC0056"
+            ],
+            "source_text": "“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”",
+            "speaker_key": "person_8ff1cb1a5861",
+            "target_keys": [],
+            "text": "“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”",
+            "unit_key": "bp-sc014:SRC0056:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc014:SRC0056:002:event",
+            "event_priority": "causal",
+            "function": "action_preparation",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "participant_deliveries": [],
+            "performance": "绿袍执事乙抱着胳膊扫过四个少年，眉头微微皱着，像是在打量什么不值钱的货物，王有材被他看得又往缩了缩。",
+            "render_policy": "standalone",
+            "resulting_state": "绿袍执事结束对话，准备开始执行杂役分配的工作。",
+            "source_segment_ids": [
+              "SRC0056"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "感慨完，他收回目光，看向四个少年的眼神瞬间带上了高高在上的倨傲，仿佛在看一群待分配的仆役。",
+            "unit_key": "bp-sc014:SRC0056:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc014:SRC0057:001:event",
+            "event_priority": "causal",
+            "function": "dialogue_delivery",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_46e7e8b742ed 通过 audible 交付来源 SRC0057：“你，还有你，跟我走，去南区杂役处。”",
+                "participant_key": "person_46e7e8b742ed",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "绿袍执事甲抬手指向人群，语气不耐烦，带着居高临下的命令意味。",
+            "render_policy": "standalone",
+            "resulting_state": "绿袍执事甲下达分配指令，点名指定人员前往南区杂役处。",
+            "source_segment_ids": [
+              "SRC0057"
+            ],
+            "source_text": "“你，还有你，跟我走，去南区杂役处。”",
+            "speaker_key": "person_46e7e8b742ed",
+            "target_keys": [
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "text": "“你，还有你，跟我走，去南区杂役处。”",
+            "unit_key": "bp-sc014:SRC0057:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc014:SRC0057:002:event",
+            "event_priority": "causal",
+            "function": "action_execution",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_46e7e8b742ed 通过 audible 交付来源 SRC0057：“你，还有你，跟我走，去南区杂役处。”话语间，此人指了指王有材和其旁虎头虎脑的少年。",
+                "participant_key": "person_46e7e8b742ed",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "王有材被指到的时候浑身猛地一抖，脸色瞬间白了几分，虎头虎脑的少年也愣了一下，茫然地左右看了看，才敢确定是在叫自己。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材和大青山被困少年甲被明确分配至南区杂役处，二人对此产生慌乱情绪。",
+            "source_segment_ids": [
+              "SRC0057"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "text": "他的手指先是点了点缩在一旁的王有材，又指了指旁边那个虎头虎脑的少年，示意二人出列。",
+            "unit_key": "bp-sc014:SRC0057:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "王有材",
+            "agency_mode": "reluctant",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S003-S002-S001-N017"
+          }
+        ],
+        "character_keys": [
+          "person_e79ecc6793f5",
+          "person_46e7e8b742ed",
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+          "孟浩和王有材一同被带至宗门，在场听到对话",
+          "对陌生环境的恐惧"
+        ],
+        "entry_state": "王有材二人被指定去向，心生慌乱",
+        "exit_state": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+        "key": "bp-sc015",
+        "opening_image": "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+        "previous_scene_exit_state": "王有材二人被指定去向，心生慌乱",
+        "scene_heading": "【场15】入夜 / 修仙宗门外门半山腰青石空地",
+        "source_basis": "SRC0058,SRC0059",
+        "story_function": "推进本场事件并完成状态变化：王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事；众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+        "summary": "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事；众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+        "turn": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+        "units": [
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc015:SRC0058:001:event",
+            "event_priority": "causal",
+            "function": "dialogue_delivery",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_e79ecc6793f5 通过 audible 交付来源 SRC0058：“这……这里是什么地方？”",
+                "participant_key": "person_e79ecc6793f5",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "王有材牙齿都在打颤，声音抖得不成样子，眼神里满是惊恐，连抬头看绿袍执事的勇气都没有。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材被未知的安排吓到，在恐慌中开口询问所处地点。",
+            "source_segment_ids": [
+              "SRC0058"
+            ],
+            "source_text": "“这……这里是什么地方？”",
+            "speaker_key": "person_e79ecc6793f5",
+            "target_keys": [],
+            "text": "“这……这里是什么地方？”",
+            "unit_key": "bp-sc015:SRC0058:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_e79ecc6793f5"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc015:SRC0058:002:event",
+            "event_priority": "causal",
+            "function": "character_reaction",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_e79ecc6793f5 通过 audible 交付来源 SRC0058：“这……这里是什么地方？”被那人一指，王有材身子哆嗦，打着颤音开口。",
+                "participant_key": "person_e79ecc6793f5",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "王有材低着头，肩膀微微耸着，整个人都透着害怕，旁边的孟浩听见他的问题，也竖起了耳朵，等着绿袍执事的回答。",
+            "render_policy": "standalone",
+            "resulting_state": "王有材的问题问出，在场所有人都在等待绿袍执事给出答案。",
+            "source_segment_ids": [
+              "SRC0058"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他身子控制不住地哆嗦，双手紧紧攥着自己的衣角，指节都捏得泛白，好不容易才把这句话问出口。",
+            "unit_key": "bp-sc015:SRC0058:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc015:SRC0059:001:event",
+            "event_priority": "causal",
+            "function": "dialogue_delivery",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [
+              {
+                "audible": true,
+                "observable_claim": "person_46e7e8b742ed 通过 audible 交付来源 SRC0059：“靠山宗。”",
+                "participant_key": "person_46e7e8b742ed",
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "performance": "绿袍执事甲撇了撇嘴，语气不耐烦，仿佛回答这个问题都是浪费他的时间。",
+            "render_policy": "standalone",
+            "resulting_state": "众人得知所在宗门为靠山宗，孟浩对这个修仙宗门生出更强烈的好奇。",
+            "source_segment_ids": [
+              "SRC0059"
+            ],
+            "source_text": "“靠山宗。”",
+            "speaker_key": "person_46e7e8b742ed",
+            "target_keys": [],
+            "text": "“靠山宗。”",
+            "unit_key": "bp-sc015:SRC0059:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [],
+        "conflict": "",
+        "context_requirements": [
+          "画面切出剧情，转入互动提示界面"
+        ],
+        "entry_state": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+        "exit_state": "第一集内容结束，引导观众参与互动",
+        "key": "bp-sc016",
+        "opening_image": "水墨风弹窗界面，孟浩Q版形象在旁挥手",
+        "previous_scene_exit_state": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+        "scene_heading": "【场16】剧情外互动时段 / 剧情外弹窗界面",
+        "source_basis": "SRC0060,SRC0061,SRC0062",
+        "story_function": "推进本场事件并完成状态变化：水墨风弹窗界面，孟浩Q版形象在旁挥手；第一集内容结束，引导观众参与互动",
+        "summary": "水墨风弹窗界面，孟浩Q版形象在旁挥手；第一集内容结束，引导观众参与互动",
+        "turn": "第一集内容结束，引导观众参与互动",
+        "units": [
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc016:SRC0060:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "旁白语气亲切活泼，带着感染力，画面中水墨风弹窗同步展示活动规则和福利内容，旁侧Q版孟浩笑着挥手附和",
+            "render_policy": "standalone",
+            "resulting_state": "观众获取到新书活动的具体福利信息",
+            "source_segment_ids": [
+              "SRC0060"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "书生孟浩和大家见面啦，收藏和推荐票，一个都不要少呀，首页有新书活动，收藏有奖励，还有大转盘抽奖，耳根为大家争取了海量的起点币，还有电子书以及ipadmini，中奖率不小，我也会去抽抽看。",
+            "unit_key": "bp-sc016:SRC0060:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc016:SRC0061:001:event",
+            "event_priority": "causal",
+            "function": "prompt",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "旁白语气加重，热情高涨，弹窗上的“收藏”“推荐票”字样同步放大高亮，Q版孟浩做出比心的动作",
+            "render_policy": "standalone",
+            "resulting_state": "观众接收到明确的互动引导提示",
+            "source_segment_ids": [
+              "SRC0061"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "收藏，推荐票！！",
+            "unit_key": "bp-sc016:SRC0061:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc016:SRC0062:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "旁白语气带着期待感，弹窗底部同步显示更新时间和活动时间的醒目标注，Q版孟浩做出提醒的手势",
+            "render_policy": "standalone",
+            "resulting_state": "观众了解后续更新安排和活动信息，第一集互动引导完成",
+            "source_segment_ids": [
+              "SRC0062"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "晚上还有一章，今晚八点有语音活动，新书发布会。",
+            "unit_key": "bp-sc016:SRC0062:001:unit"
+          }
+        ]
+      }
+    ],
+    "source_ownership_hash": "692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6",
+    "source_scene_owners": {
+      "SRC0001": "bp-sc001",
+      "SRC0002": "bp-sc001",
+      "SRC0003": "bp-sc001",
+      "SRC0004": "bp-sc002",
+      "SRC0005": "bp-sc002",
+      "SRC0006": "bp-sc002",
+      "SRC0007": "bp-sc002",
+      "SRC0008": "bp-sc002",
+      "SRC0009": "bp-sc002",
+      "SRC0010": "bp-sc002",
+      "SRC0011": "bp-sc002",
+      "SRC0012": "bp-sc003",
+      "SRC0013": "bp-sc003",
+      "SRC0014": "bp-sc003",
+      "SRC0015": "bp-sc004",
+      "SRC0016": "bp-sc004",
+      "SRC0017": "bp-sc004",
+      "SRC0018": "bp-sc005",
+      "SRC0019": "bp-sc005",
+      "SRC0020": "bp-sc005",
+      "SRC0021": "bp-sc005",
+      "SRC0022": "bp-sc005",
+      "SRC0023": "bp-sc006",
+      "SRC0024": "bp-sc006",
+      "SRC0025": "bp-sc006",
+      "SRC0026": "bp-sc006",
+      "SRC0027": "bp-sc006",
+      "SRC0028": "bp-sc007",
+      "SRC0029": "bp-sc007",
+      "SRC0030": "bp-sc008",
+      "SRC0031": "bp-sc008",
+      "SRC0032": "bp-sc008",
+      "SRC0033": "bp-sc008",
+      "SRC0034": "bp-sc008",
+      "SRC0035": "bp-sc009",
+      "SRC0036": "bp-sc009",
+      "SRC0037": "bp-sc009",
+      "SRC0038": "bp-sc009",
+      "SRC0039": "bp-sc010",
+      "SRC0040": "bp-sc010",
+      "SRC0041": "bp-sc011",
+      "SRC0042": "bp-sc011",
+      "SRC0043": "bp-sc011",
+      "SRC0044": "bp-sc011",
+      "SRC0045": "bp-sc011",
+      "SRC0046": "bp-sc012",
+      "SRC0047": "bp-sc012",
+      "SRC0048": "bp-sc012",
+      "SRC0049": "bp-sc013",
+      "SRC0050": "bp-sc013",
+      "SRC0051": "bp-sc013",
+      "SRC0052": "bp-sc013",
+      "SRC0053": "bp-sc013",
+      "SRC0054": "bp-sc014",
+      "SRC0055": "bp-sc014",
+      "SRC0056": "bp-sc014",
+      "SRC0057": "bp-sc014",
+      "SRC0058": "bp-sc015",
+      "SRC0059": "bp-sc015",
+      "SRC0060": "bp-sc016",
+      "SRC0061": "bp-sc016",
+      "SRC0062": "bp-sc016"
+    }
+  }
+}

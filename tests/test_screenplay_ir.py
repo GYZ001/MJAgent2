@@ -22,7 +22,7 @@ from app.production.screenplay_document import (
     document_to_screenplay,
     screenplay_to_document,
 )
-from app.schemas import Bible, Character, EpisodeScreenplay, Scene, World
+from app.schemas import AtomicAction, Bible, Character, EpisodeScreenplay, Scene, World
 from app.screenplay_ir import (
     IREvent,
     ScreenplayIRIdentityConflictError,
@@ -55,6 +55,11 @@ SS001_ARTIFACT_FIXTURE = (
     Path(__file__).parent
     / "fixtures"
     / "screenplay_scene_shard_ss001_art_bcebe2075a55.json"
+)
+MERGED_IR_ARTIFACT_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_generation_ir_merged_art_949de359c598.json"
 )
 
 
@@ -658,6 +663,99 @@ def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
     assert offscreen_action.actor_ids
     assert offscreen_event.onscreen_entity_ids == ["谷言"]
     assert offscreen_action.participant_deliveries[0].audible is True
+
+
+def test_atomic_action_missing_agency_derives_from_owned_relations() -> None:
+    unattributed = AtomicAction.model_validate({
+        "action_id": "A-environment",
+        "actor_ids": [],
+        "target_ids": [],
+        "semantic_intent": "环境状态发生变化",
+        "completion_condition": "变化已可见",
+    })
+    attributed = AtomicAction.model_validate({
+        "action_id": "A-character",
+        "actor_ids": ["character-1"],
+        "target_ids": ["character-2"],
+        "semantic_intent": "人物改变目标状态",
+        "completion_condition": "目标状态已改变",
+    })
+
+    assert unattributed.action_agency.kind == "unattributed"
+    assert unattributed.action_agency.identity_bearing is False
+    assert attributed.action_agency.kind == "character"
+    assert attributed.action_agency.identity_bearing is True
+
+
+def test_production_merged_ir_missing_agency_round_trip_is_relation_owned() -> None:
+    fixture = json.loads(MERGED_IR_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
+    raw_units = [
+        unit
+        for scene in fixture["content"]["scenes"]
+        for unit in scene["units"]
+    ]
+
+    assert fixture["artifact_id"] == "art_949de359c598"
+    assert fixture["artifact_type"] == "screenplay_generation_ir_merged"
+    assert fixture["artifact_status"] == "validated"
+    assert fixture["content_hash"] == (
+        "0c375efd1d89780b67a6480d6e7b3c27db6930735313592821430ff9816dc152"
+    )
+    assert len(raw_units) == 86
+    assert all("action_agency" not in unit for unit in raw_units)
+
+    restored = ScreenplayGenerationIR.model_validate(fixture["content"])
+    serialized = restored.model_dump(mode="json")
+    restored_units = [
+        unit
+        for scene in restored.scenes
+        for unit in scene.units
+    ]
+    round_trip_units = [
+        unit
+        for scene in serialized["scenes"]
+        for unit in scene["units"]
+    ]
+    unattributed = [
+        unit
+        for unit in restored_units
+        if not unit.actor_keys and not unit.target_keys and not unit.speaker_key
+    ]
+    attributed = [
+        unit
+        for unit in restored_units
+        if unit.actor_keys or unit.target_keys or unit.speaker_key
+    ]
+
+    assert len(unattributed) == 12
+    assert all(unit.action_agency.kind == "unattributed" for unit in unattributed)
+    assert all(unit.action_agency.identity_bearing is False for unit in unattributed)
+    assert all(
+        unit.action_agency.source_segment_ids == unit.source_segment_ids
+        for unit in unattributed
+    )
+    assert all(not unit.actor_keys and not unit.target_keys for unit in unattributed)
+    assert len(attributed) == 74
+    assert all(unit.action_agency.identity_bearing is True for unit in attributed)
+    assert [
+        (
+            unit.actor_keys,
+            unit.target_keys,
+            unit.speaker_key,
+            unit.source_segment_ids,
+        )
+        for unit in restored_units
+    ] == [
+        (
+            unit["actor_keys"],
+            unit["target_keys"],
+            unit.get("speaker_key"),
+            unit["source_segment_ids"],
+        )
+        for unit in raw_units
+    ]
+    assert all("action_agency" in unit for unit in round_trip_units)
+    assert ScreenplayGenerationIR.model_validate(serialized) == restored
 
 
 def test_compiler_derives_removed_model_fields_without_downstream_drift() -> None:

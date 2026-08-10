@@ -1,0 +1,731 @@
+{
+  "artifact_id": "art_bcebe2075a55",
+  "artifact_type": "screenplay_scene_shard",
+  "artifact_status": "validated",
+  "scope_type": "episode",
+  "scope_id": "ep_711b29204aa9",
+  "contract_version": "screenplay-scene-shard.v6",
+  "content_hash": "19c41c704b3524969a0169c66da1e7a829aa2eaba023245ba9eb983fe23fc2f8",
+  "parent_artifact_ids": [
+    "art_ddfa322d874b"
+  ],
+  "content": {
+    "blueprint_hash": "34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253",
+    "boundary_hash": "2adfaa1ee7e8c12d0027e3973981df9c791a61b729d58177ea6a7f2617b057be",
+    "consumed_source_ids": [
+      "SRC0001",
+      "SRC0002",
+      "SRC0003",
+      "SRC0004",
+      "SRC0005",
+      "SRC0006",
+      "SRC0007",
+      "SRC0008",
+      "SRC0009",
+      "SRC0010",
+      "SRC0011",
+      "SRC0012",
+      "SRC0013",
+      "SRC0014",
+      "SRC0015",
+      "SRC0016",
+      "SRC0017"
+    ],
+    "contract_version": "screenplay-scene-shard.v6",
+    "episode_no": 1,
+    "generation_scaffold_hash": "08bd5e56daf5a293f0c579592b7fd59232cad8ce81758459e27eb4e60a1fbe75",
+    "identity_registry_hash": "cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f",
+    "identity_scaffold_hash": "bc3b05481544a79611212a94825fc45819d24cd87123ce431b4368323edd167c",
+    "scene_plan_keys": [
+      "bp-sc001",
+      "bp-sc002",
+      "bp-sc003",
+      "bp-sc004"
+    ],
+    "scenes": [
+      {
+        "agency_contracts": [],
+        "character_keys": [],
+        "conflict": "",
+        "context_requirements": [],
+        "entry_state": "",
+        "exit_state": "少年坐在山顶，被风拂过衣摆",
+        "key": "bp-sc001",
+        "opening_image": "水墨风南赡大地山水远景，镜头拉向赵国大青山，黄昏夕阳洒在山顶少年背影上",
+        "previous_scene_exit_state": "",
+        "scene_heading": "【场1】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0001,SRC0002,SRC0003",
+        "story_function": "推进本场事件并完成状态变化：水墨风南赡大地山水远景，镜头拉向赵国大青山，黄昏夕阳洒在山顶少年背影上；少年坐在山顶，被风拂过衣摆",
+        "summary": "水墨风南赡大地山水远景，镜头拉向赵国大青山，黄昏夕阳洒在山顶少年背影上；少年坐在山顶，被风拂过衣摆",
+        "turn": "少年坐在山顶，被风拂过衣摆",
+        "units": [
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc001:SRC0001:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "舒缓的古乐渐起，镜头随水墨流动缓慢推展，整体氛围古朴悠远。",
+            "render_policy": "standalone",
+            "resulting_state": "故事开篇世界观背景正式引出。",
+            "source_segment_ids": [
+              "SRC0001"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "淡墨晕染的长卷缓缓铺开，南赡大地的山河轮廓在画面上逐渐清晰，“第一章 书生孟浩”的墨字逐笔显现，落在卷首。",
+            "unit_key": "bp-sc001:SRC0001:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc001:SRC0002:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头从山水远景落到都城地标，风铎晃动带出轻微铃声，烘托出时代氛围。",
+            "render_policy": "standalone",
+            "resulting_state": "赵国崇唐的社会背景交代完成，为孟浩的理想埋下伏笔。",
+            "source_segment_ids": [
+              "SRC0002"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "镜头扫过小国赵国的疆土，都城内与皇宫齐高的唐楼矗立在夕阳下，楼角的风铎轻轻晃动，映着举国上下对东土大唐、对长安的遥慕。",
+            "unit_key": "bp-sc001:SRC0002:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc001:SRC0003:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头随风的动线移动，最终定格在少年的背影上，风声隐约可闻，夕阳暖光铺满画面。",
+            "render_policy": "standalone",
+            "resulting_state": "少年坐在大青山山顶，衣摆被风拂动，故事主角正式登场。",
+            "source_segment_ids": [
+              "SRC0003"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "四月的风穿过北漠、掠过东土，裹着细碎的尘雾在黄昏的暖光里转了个弯，拂过大青山的草木，最终落在山顶坐着的青衫少年身上，吹得他衣摆轻轻扬起。",
+            "unit_key": "bp-sc001:SRC0003:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [],
+        "character_keys": [
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然",
+          "承接开篇世界观设定"
+        ],
+        "entry_state": "少年坐在山顶，被风拂过衣摆",
+        "exit_state": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "key": "bp-sc002",
+        "opening_image": "孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然",
+        "previous_scene_exit_state": "少年坐在山顶，被风拂过衣摆",
+        "scene_heading": "【场2】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0004,SRC0005,SRC0006,SRC0007,SRC0008,SRC0009,SRC0010,SRC0011",
+        "story_function": "推进本场事件并完成状态变化：孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然；孟浩垂头看着手里的葫芦，神色黯淡",
+        "summary": "孟浩特写，眉头紧锁，手里攥着葫芦，眼神茫然；孟浩垂头看着手里的葫芦，神色黯淡",
+        "turn": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0004:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "镜头聚焦孟浩面部，捕捉他皱起的眉头和茫然的眼神，葫芦被攥得微微变形，动作细节清晰。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩的外形与当下迷茫状态清晰展现。",
+            "source_segment_ids": [
+              "SRC0004"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "镜头转到少年正面，他身形有些瘦弱，穿着洗得干净的蓝色文士长衫，约莫十六七岁的年纪，个子不高，皮肤带着常年日晒的浅黑，清亮的眼睛本透着几分聪颖，此刻却紧紧皱着眉，指尖攥着一个葫芦，眼神里满是茫然。",
+            "unit_key": "bp-sc002:SRC0004:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0005:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "声音低沉，带着浓浓的疲惫和失落，尾音轻得几乎被风刮走。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩科举落榜的事实明确道出。",
+            "source_segment_ids": [
+              "SRC0005"
+            ],
+            "source_text": "“又落榜了……”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“又落榜了……”",
+            "unit_key": "bp-sc002:SRC0005:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0005:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "胸廓随叹气动作起伏，肩膀放松垮下，头微低。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩落榜后的失落情绪进一步流露。",
+            "source_segment_ids": [
+              "SRC0005"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩沉沉叹了口气，肩膀微微垮下来。",
+            "unit_key": "bp-sc002:SRC0005:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0006:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气里带着自嘲，说到“几yu作呕”时带着明显的压抑和不甘，尾句上扬，满是对自己的怀疑。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩对科举道路产生强烈质疑。",
+            "source_segment_ids": [
+              "SRC0006"
+            ],
+            "source_text": "“考了三年，这三年来整日看那些贤者书籍，已看的几yu作呕，莫非科举真的不是我孟浩未来的路？”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“考了三年，这三年来整日看那些贤者书籍，已看的几yu作呕，莫非科举真的不是我孟浩未来的路？”",
+            "unit_key": "bp-sc002:SRC0006:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0006:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "嘴角扯出一个极淡的苦笑，视线落到手中的葫芦上，眼神里的光又暗了些。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩垂头看着手里的葫芦，神色黯淡。",
+            "source_segment_ids": [
+              "SRC0006"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他自嘲地扯了扯嘴角，低头看向手里攥着的葫芦，神色又黯淡了几分。",
+            "unit_key": "bp-sc002:SRC0006:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0007:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气苦涩，说到“去东土大唐”时声音微微顿了一下，满是遗憾，最后一句几乎是咬着牙说出来的，透着不甘与无奈。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩明确意识到科举理想破灭，对书生身份产生自我否定。",
+            "source_segment_ids": [
+              "SRC0007"
+            ],
+            "source_text": "“当官发财做个有钱人的理想已经越来越远，更不用说有钱之后去东土大唐……百无一用是书生。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“当官发财做个有钱人的理想已经越来越远，更不用说有钱之后去东土大唐……百无一用是书生。”",
+            "unit_key": "bp-sc002:SRC0007:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0007:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "指尖无意识摩挲葫芦表面，眼神放空，脸上的苦笑久久没有散去。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩的迷茫情绪到达顶峰，对未来充满恐慌。",
+            "source_segment_ids": [
+              "SRC0007"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩苦笑着摇了摇头，坐在安静的山顶，指尖摩挲着葫芦的表皮，眼里的茫然越来越深，藏着对未知未来的恐惧。",
+            "unit_key": "bp-sc002:SRC0007:002:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0008:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头略微虚化，配合快速闪回的模糊想象片段，体现孟浩思绪的杂乱。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩陷入对未来的无序想象中，更加找不到方向。",
+            "source_segment_ids": [
+              "SRC0008"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "各种纷乱的念头在他脑海里盘旋：会不会有贵人赏识自己？会不会有深闺小姐中意自己？又或者自己一辈子都困在科举的循环里？",
+            "unit_key": "bp-sc002:SRC0008:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0009:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "孟浩微微打了个寒颤，指尖更用力地攥紧葫芦，指节微微发白。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩被迷茫情绪裹挟，心生恐惧。",
+            "source_segment_ids": [
+              "SRC0009"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "这些问题没人能给他答案，十六七岁的少年只觉得那看不到头的迷茫像一张无形的大口，要将他整个人吞噬进去，让他心底忍不住泛起一阵惧意。",
+            "unit_key": "bp-sc002:SRC0009:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0010:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气平静得近乎麻木，带着破罐破摔的自嘲，说完后许久没有出声。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩开始后悔选择读书科举的道路，对现实处境愈发不满。",
+            "source_segment_ids": [
+              "SRC0010"
+            ],
+            "source_text": "“哪怕是县城里的教习先生，每月也只有几钱银子，甚至不如王伯的木匠铺子赚钱，早知如此头些年不去读书，和王老伯去学木匠手艺，想来日后总算能解决温饱，好过如今一无所有。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“哪怕是县城里的教习先生，每月也只有几钱银子，甚至不如王伯的木匠铺子赚钱，早知如此头些年不去读书，和王老伯去学木匠手艺，想来日后总算能解决温饱，好过如今一无所有。”",
+            "unit_key": "bp-sc002:SRC0010:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0010:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩双唇紧抿，不再说话，只有衣摆被风吹动的声响。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩陷入沉默，情绪沉淀下来。",
+            "source_segment_ids": [
+              "SRC0010"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩沉默下来，只有风掠过他耳边的声音。",
+            "unit_key": "bp-sc002:SRC0010:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0011:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "声音压得很低，带着茫然的颤音，“怎么办”三个字轻得像在问风。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩直面眼下穷困的现实，对未来的困惑达到顶点。",
+            "source_segment_ids": [
+              "SRC0011"
+            ],
+            "source_text": "“家里已经没有多少粮食了，银两也都花的所剩无几，还欠了周员外三两银子，以后……怎么办。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“家里已经没有多少粮食了，银两也都花的所剩无几，还欠了周员外三两银子，以后……怎么办。”",
+            "unit_key": "bp-sc002:SRC0011:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc002:SRC0011:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩缓缓抬头，视线投向天空，眼神空洞，风拂过他的额发。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩抬头望天，完全陷入对未来的迷茫中。",
+            "source_segment_ids": [
+              "SRC0011"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他抬起头望向辽远的天空，湛蓝色的天幕广阔得看不到尽头，就像他完全看不清方向的未来。",
+            "unit_key": "bp-sc002:SRC0011:002:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "孟浩",
+            "agency_mode": "voluntary",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S001-N003"
+          }
+        ],
+        "character_keys": [
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩拿出纸条认真端详，指尖捏着纸条边缘",
+          "承接孟浩此前的迷茫状态",
+          "科举失败后对现实的无力感"
+        ],
+        "entry_state": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "exit_state": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "key": "bp-sc003",
+        "opening_image": "孟浩拿出纸条认真端详，指尖捏着纸条边缘",
+        "previous_scene_exit_state": "孟浩垂头看着手里的葫芦，神色黯淡",
+        "scene_heading": "【场3】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0012,SRC0013,SRC0014",
+        "story_function": "推进本场事件并完成状态变化：孟浩拿出纸条认真端详，指尖捏着纸条边缘；孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "summary": "孟浩拿出纸条认真端详，指尖捏着纸条边缘；孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "turn": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc003:SRC0012:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "摇头动作缓慢而沉重，取纸条、塞葫芦、扔葫芦的动作连贯而用力，胳膊甩出的弧度很大，带着宣泄的力道。",
+            "render_policy": "standalone",
+            "resulting_state": "装着写有理想的纸条的葫芦被孟浩扔下了大青山。",
+            "source_segment_ids": [
+              "SRC0012"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "许久之后，孟浩轻轻摇了摇头，像是要把那些纷乱的念头都晃出去，他从怀里摸出一张皱巴巴的纸条，指尖捏着纸条边缘认真看了片刻，将纸条塞进葫芦里，接着站起身，攒尽力气把葫芦朝着山下扔了出去。",
+            "unit_key": "bp-sc003:SRC0012:001:unit"
+          },
+          {
+            "actor_keys": [],
+            "chain_key": "",
+            "event_key": "bp-sc003:SRC0013:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [],
+            "participant_deliveries": [],
+            "performance": "镜头跟着葫芦的下落轨迹移动，落到山脚下奔涌的河面上，河水翻着细碎的浪，水声清晰。",
+            "render_policy": "standalone",
+            "resulting_state": "葫芦落入山下通往东土的大河中。",
+            "source_segment_ids": [
+              "SRC0013"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "大青山脚下，一条大河奔涌流淌，河水四季不冻，当地人都传说这条河最终会流到东土大唐。",
+            "unit_key": "bp-sc003:SRC0013:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc003:SRC0014:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩站在山风里，身形站得笔直，视线牢牢锁着河面上的葫芦，眼眶微微泛红，直到葫芦变成一个小点再也看不清，也没有移开目光。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩站在山顶，目光追随着河面上远去的葫芦，情绪完成宣泄。",
+            "source_segment_ids": [
+              "SRC0014"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "山顶的孟浩站在原地，一瞬不瞬地盯着大河里载浮载沉、越飘越远的葫芦，没有眨眼，恍惚间仿佛在随着葫芦飘走的光影里看到了娘亲的笑脸，看到了儿时无忧无虑的时光——那葫芦里装着他所有没实现的理想，装着他对未来的全部憧憬，就这么顺着河水飘向不知名的远方，不知将来会被谁捡到，看到里面藏着的少年心事。",
+            "unit_key": "bp-sc003:SRC0014:001:unit"
+          }
+        ]
+      },
+      {
+        "agency_contracts": [
+          {
+            "actor_key": "孟浩",
+            "agency_mode": "voluntary",
+            "constraint_fact_key": "",
+            "narrative_attribution": "voluntary_choice",
+            "node_key": "S001-N004"
+          }
+        ],
+        "character_keys": [
+          "person_b67de643afe6"
+        ],
+        "conflict": "",
+        "context_requirements": [
+          "孟浩深吸一口气，眼神从迷茫转为坚定",
+          "承接扔葫芦后的情绪节点",
+          "生活穷困的现实压力"
+        ],
+        "entry_state": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "exit_state": "孟浩转身抬脚，正要往山下走",
+        "key": "bp-sc004",
+        "opening_image": "孟浩深吸一口气，眼神从迷茫转为坚定",
+        "previous_scene_exit_state": "孟浩站在山顶，目光追随着河面上远去的葫芦",
+        "scene_heading": "【场4】四月黄昏 / 赵国大青山山顶",
+        "source_basis": "SRC0015,SRC0016,SRC0017",
+        "story_function": "推进本场事件并完成状态变化：孟浩深吸一口气，眼神从迷茫转为坚定；孟浩转身抬脚，正要往山下走",
+        "summary": "孟浩深吸一口气，眼神从迷茫转为坚定；孟浩转身抬脚，正要往山下走",
+        "turn": "孟浩转身抬脚，正要往山下走",
+        "units": [
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0015:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩眨眼的动作很慢，收回目光时肩背不自觉地挺直，吸气时胸廓明显起伏，眼神从放空逐渐变得清亮有神。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩收敛迷茫，神色转为坚定。",
+            "source_segment_ids": [
+              "SRC0015"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "数十息的时间过去，直到葫芦的影子彻底消失在河的尽头，孟浩才缓缓收回目光，将眼底的茫然一点点压下去藏好，他深深吸了一口山顶带着草木气的清冷空气，原本黯淡的眸子里逐渐亮起坚定的光。",
+            "unit_key": "bp-sc004:SRC0015:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0016:001:event",
+            "event_priority": "causal",
+            "function": "dialogue",
+            "kind": "dialogue",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "语气平稳而有力，没有了之前的迷茫和慌乱，带着少年人独有的韧性，每个字都说得格外认真。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩下定决心要直面困境，好好生活。",
+            "source_segment_ids": [
+              "SRC0016"
+            ],
+            "source_text": "“不管如何，读书也好，做工也罢，总要……生活下去。”",
+            "speaker_key": "person_b67de643afe6",
+            "target_keys": [],
+            "text": "“不管如何，读书也好，做工也罢，总要……生活下去。”",
+            "unit_key": "bp-sc004:SRC0016:001:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0016:002:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "孟浩抿了抿唇，脸上露出一个极淡却很笃定的表情，周身的气质都变得沉稳起来。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩的坚韧性格凸显，心态完全调整过来。",
+            "source_segment_ids": [
+              "SRC0016"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "他本就是聪颖又坚韧的性子，若不是靠着这股韧劲儿，早年双亲失踪后他也不可能一个人撑到现在。",
+            "unit_key": "bp-sc004:SRC0016:002:unit"
+          },
+          {
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "chain_key": "",
+            "event_key": "bp-sc004:SRC0017:001:event",
+            "event_priority": "causal",
+            "function": "statement",
+            "kind": "action",
+            "narrative_layer": "story",
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "performance": "抬头看天时眼神明亮，抬脚的动作利落干脆，背影在夕阳下挺得笔直。",
+            "render_policy": "standalone",
+            "resulting_state": "孟浩转身抬脚，正要往山下走，准备开启新的生活。",
+            "source_segment_ids": [
+              "SRC0017"
+            ],
+            "source_text": "",
+            "speaker_key": null,
+            "target_keys": [],
+            "text": "孟浩抬头又看了一眼广阔的天空，眼里的坚定之意又深了几分，他抬脚踏出一步，就要朝着山下走去。",
+            "unit_key": "bp-sc004:SRC0017:001:unit"
+          }
+        ]
+      }
+    ],
+    "shard_id": "SS001",
+    "source_hash": "a73398064817b70e11215c2399134e0fb6efe7feae9acf82ecf62ac1879d0b90",
+    "source_ownership_hash": "692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6",
+    "unresolved_participants": []
+  }
+}

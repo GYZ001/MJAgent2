@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -22,9 +23,16 @@ from app.production.screenplay_authority import (
     screenplay_bible_payload,
     screenplay_authority_fingerprint,
 )
-from app.schemas import Bible
+from app.schemas import ActionAgency, Bible, Character, NarrativeIdentityContract, World
 from tests.test_narrative_continuity import _board, _screenplay
 from tests.test_narrative_review import _persist_review_projection
+
+
+MERGED_IR_ARTIFACT_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_generation_ir_merged_art_949de359c598.json"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +47,385 @@ def _published_case():
     artifact, _shot_artifacts = _persist_review_projection(screenplay, _board())
     authority = resolve_current_screenplay_authority("episode-generic")
     return screenplay, artifact, authority
+
+
+def _source_projection_case() -> dict:
+    from app.screenplay_ir import ScreenplayGenerationIR, compile_screenplay_ir
+
+    fixture = json.loads(MERGED_IR_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
+    ir = ScreenplayGenerationIR.model_validate(fixture["content"])
+    source_by_id: dict[str, list[str]] = {}
+    for scene in ir.scenes:
+        for unit in scene.units:
+            for source_id in unit.source_segment_ids:
+                source_by_id.setdefault(source_id, [])
+                text = (unit.source_text or unit.text).strip()
+                if text and text not in source_by_id[source_id]:
+                    source_by_id[source_id].append(text)
+    source_ids = list(ir.source_scene_owners)
+    source_body = "\n\n".join(
+        " ".join(source_by_id[source_id]) or f"来源段 {source_id}"
+        for source_id in source_ids
+    )
+
+    characters: list[Character] = []
+    for identity in ir.identities:
+        if identity.key == "narrator":
+            continue
+        identity.authority_id = f"bible:{identity.display_name}"
+        identity.kind = "named_character"
+        identity.role_type = "named_character"
+        identity.visual_policy = "canonical"
+        identity.asset_requirement = "required"
+        identity.visual_canonical = (
+            identity.visual_canonical or f"{identity.display_name}的稳定外形"
+        )
+        characters.append(Character(
+            name=identity.display_name,
+            role="角色",
+            appearance_canonical=identity.visual_canonical,
+            personality="稳定",
+            speech_style="自然",
+        ))
+    bible = Bible(
+        world=World(visual_style_canonical="统一动画电影风格"),
+        characters=characters,
+    )
+
+    episode_id = "episode-source-projection"
+    project_id = "project-source-projection"
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,bible_json,created_at) VALUES(?,?,?,?)",
+        (project_id, "source projection", bible.model_dump_json(), db.now()),
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content) VALUES(?,?,?,?)",
+        (project_id, 1, "Fixture", source_body),
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,source_chapters,target_duration_s,
+               status,screenplay_status,screenplay_character_resolutions,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            episode_id,
+            project_id,
+            1,
+            "Fixture",
+            "[1]",
+            1800,
+            "planned",
+            "pending",
+            "[]",
+            db.now(),
+        ),
+    )
+    conn.commit()
+    episode = dict(conn.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone())
+    source_text = f"【Fixture】\n{source_body}"
+    episode["authorized_source_chapters"] = {"1": source_body}
+    episode["character_resolutions"] = []
+    compiled = compile_screenplay_ir(
+        ir.model_copy(deep=True),
+        episode=episode,
+        source_text=source_text,
+        bible=bible,
+    )
+
+    blueprint = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content={"fixture": True},
+        contract_version="screenplay-narrative-blueprint.v3",
+    ))
+    identity_registry = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_identity_registry",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content={"fixture": True},
+        contract_version="screenplay-identity-registry.v1",
+    ))
+    envelope = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_envelope",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content={"fixture": True},
+        contract_version="screenplay-envelope.v1",
+    ))
+
+    merged_content = ir.model_dump(mode="json")
+    for scene in merged_content["scenes"]:
+        for unit in scene["units"]:
+            unit.pop("action_agency", None)
+    shard_content = {
+        "contract_version": "screenplay-scene-shard.v6",
+        "episode_no": 1,
+        "shard_id": "SS001",
+        "scene_plan_keys": [scene["key"] for scene in merged_content["scenes"]],
+        "scenes": merged_content["scenes"],
+        "consumed_source_ids": source_ids,
+        "unresolved_participants": [],
+        "source_hash": "",
+        "boundary_hash": "",
+        "blueprint_hash": "",
+        "identity_registry_hash": "",
+        "source_ownership_hash": "",
+        "identity_scaffold_hash": "",
+        "generation_scaffold_hash": "",
+    }
+    shard = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content=shard_content,
+        contract_version="screenplay-scene-shard.v6",
+    ))
+    merged = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir_merged",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content=merged_content,
+        parent_artifact_ids=[
+            blueprint["id"],
+            identity_registry["id"],
+            envelope["id"],
+            shard["id"],
+        ],
+        contract_version="screenplay-generation-ir-merged.v5",
+    ))
+    return {
+        "episode_id": episode_id,
+        "compiled": compiled,
+        "merged_artifact_id": merged["id"],
+    }
+
+
+def _drift_to_contextual_actor(screenplay):
+    drifted = screenplay.model_copy(deep=True)
+    plan = drifted.narrative_plan
+    assert plan is not None
+    action = next(
+        item for item in plan.atomic_actions
+        if not item.actor_ids and not item.target_ids
+    )
+    action.actor_ids = ["ID-08"]
+    action.action_agency = ActionAgency(
+        kind="character",
+        identity_bearing=True,
+        source_segment_ids=list(action.action_agency.source_segment_ids),
+    )
+    event = next(
+        item for item in plan.events
+        if action.action_id in item.action_ids
+    )
+    event.onscreen_entity_ids = ["ID-08"]
+    plan.identity_contracts.append(NarrativeIdentityContract(
+        identity_id="ID-08",
+        display_name="来源未归属的场景参与者",
+        kind="source_backed_scene_context_actor",
+        visual_policy="contextual",
+        visual_canonical="仅用于复现旧发布漂移的场景参与者",
+        asset_requirement="optional",
+    ))
+    return drifted
+
+
+def _publish_source_projection_case(case: dict, screenplay) -> tuple[dict, dict]:
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="validated",
+        trust_level="T2",
+        content=screenplay_artifact_payload(screenplay),
+        parent_artifact_ids=[case["merged_artifact_id"]],
+        contract_version="4.0.0",
+    ))
+    fingerprint = screenplay_authority_fingerprint(
+        case["episode_id"],
+        contract_version="4.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    revision = ensure_production_revision(
+        episode_id=case["episode_id"],
+        kind="screenplay",
+        input_fingerprint=fingerprint,
+        contract_version="4.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        resume=False,
+    )
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=artifact["id"],
+        working_artifact_id=artifact["id"],
+    )
+    qa = evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="score_only",
+            runtime_blocking=False,
+            score=100,
+            evidence={"authority_input_fingerprint": fingerprint},
+        ),
+    )
+    result = publish_screenplay(
+        episode_id=case["episode_id"],
+        revision_id=revision.id,
+        artifact_id=artifact["id"],
+        artifact_hash=artifact["content_hash"],
+        evaluation_ids=[qa["id"]],
+        input_fingerprint=fingerprint,
+        contract_version="4.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        clear_downstream=False,
+    )
+    return artifact, result
+
+
+def _action_agency_projection(screenplay) -> list[dict]:
+    plan = screenplay.narrative_plan
+    assert plan is not None
+    return [
+        {
+            "action_id": action.action_id,
+            "actor_ids": list(action.actor_ids),
+            "target_ids": list(action.target_ids),
+            "action_agency": action.action_agency.model_dump(mode="json"),
+        }
+        for action in plan.atomic_actions
+    ]
+
+
+def test_publish_rejects_contextual_drift_from_validated_v6_source() -> None:
+    from app.errors import ArtifactNeedsRebuildError
+
+    case = _source_projection_case()
+    drifted = _drift_to_contextual_actor(case["compiled"])
+
+    with pytest.raises(
+        ArtifactNeedsRebuildError,
+        match="source projection.*需要重建",
+    ):
+        _publish_source_projection_case(case, drifted)
+
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts "
+        "WHERE type='screenplay_document' AND scope_id=? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (case["episode_id"],),
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert "ARTIFACT_NEEDS_REBUILD" in row["stale_reason"]
+
+
+def test_compile_publish_action_projection_hash_is_identical() -> None:
+    case = _source_projection_case()
+    artifact, _result = _publish_source_projection_case(
+        case,
+        case["compiled"],
+    )
+
+    published = load_screenplay_from_artifact(artifact["id"])
+    compiled_projection = _action_agency_projection(case["compiled"])
+    published_projection = _action_agency_projection(published)
+
+    assert evidence_repository.content_hash(compiled_projection) == (
+        evidence_repository.content_hash(published_projection)
+    )
+    assert sum(
+        not action["actor_ids"] and not action["target_ids"]
+        for action in published_projection
+    ) == 12
+    assert not any(
+        identity_id == "ID-08"
+        for action in published_projection
+        for identity_id in [*action["actor_ids"], *action["target_ids"]]
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_marks_source_projection_drift_stale_and_blocks_storyboard() -> None:
+    from app.production.screenplay_document import (
+        ScreenplayDocument,
+        document_to_screenplay,
+    )
+
+    case = _source_projection_case()
+    artifact, published = _publish_source_projection_case(
+        case,
+        case["compiled"],
+    )
+    drifted = _drift_to_contextual_actor(
+        load_screenplay_from_artifact(artifact["id"])
+    )
+    drifted_payload = screenplay_artifact_payload(drifted)
+    drifted_hash = evidence_repository.content_hash(drifted_payload)
+    drifted_projection = document_to_screenplay(
+        ScreenplayDocument.model_validate(drifted_payload)
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET content_json=?,content_hash=? WHERE id=?",
+        (
+            json.dumps(drifted_payload, ensure_ascii=False),
+            drifted_hash,
+            artifact["id"],
+        ),
+    )
+    conn.execute(
+        "UPDATE completion_certificates SET artifact_hash=? WHERE id=?",
+        (drifted_hash, published["certificate_id"]),
+    )
+    conn.execute(
+        "UPDATE episodes SET screenplay_json=?,screenplay_status='failed',"
+        "screenplay_error=?,active_screenplay_run_id=NULL WHERE id=?",
+        (
+            drifted_projection.model_dump_json(),
+            "模拟服务重启前的旧状态",
+            case["episode_id"],
+        ),
+    )
+    conn.commit()
+
+    assert api.recover_screenplay_tasks() == 0
+
+    episode = conn.execute(
+        "SELECT screenplay_status,screenplay_error FROM episodes WHERE id=?",
+        (case["episode_id"],),
+    ).fetchone()
+    persisted_artifact = conn.execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert episode["screenplay_status"] == "failed"
+    assert "ARTIFACT_NEEDS_REBUILD" in episode["screenplay_error"]
+    assert persisted_artifact["status"] == "stale"
+    assert "source projection" in persisted_artifact["stale_reason"]
+
+    with pytest.raises(HTTPException) as blocked:
+        await api.start_storyboard(case["episode_id"])
+    assert blocked.value.status_code == 409
+    assert blocked.value.detail["code"] == "ARTIFACT_NEEDS_REBUILD"
 
 
 def test_cached_screenplay_artifact_model_is_isolated_from_mutable_readers() -> None:

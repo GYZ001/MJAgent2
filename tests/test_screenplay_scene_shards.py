@@ -39,6 +39,7 @@ from app.screenplay_scene_shards import (
     ScreenplaySceneMergeError,
     ScreenplaySceneInputContract,
     ScreenplaySceneParticipantBinding,
+    ScreenplaySceneCompiledUnitSlot,
     ScreenplaySceneShardError,
     ScreenplaySceneShardOwnershipLost,
     ScreenplaySceneShardIR,
@@ -92,6 +93,11 @@ RUN_D6BA3C89_REPLAY = (
     Path(__file__).parent
     / "fixtures"
     / "screenplay_scene_shard_run_d6ba3c89a60f.json"
+)
+SS001_FULL_ARTIFACT_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_ss001_art_bcebe2075a55_full.json"
 )
 
 
@@ -2171,6 +2177,76 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
     assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v6"
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v6"
+
+
+def test_compiled_unit_slot_round_trip_preserves_derived_action_agency() -> None:
+    slot = ScreenplaySceneCompiledUnitSlot.model_validate({
+        "unit_key": "unit-1",
+        "event_key": "event-1",
+        "scene_key": "scene-1",
+        "scene_order": 1,
+        "unit_order": 1,
+        "scene_unit_order": 1,
+        "kind": "action",
+        "source_segment_ids": ["SRC0001"],
+        "actor_keys": [],
+        "target_keys": [],
+    })
+
+    serialized = slot.model_dump(mode="json")
+
+    assert serialized["action_agency"] == {
+        "kind": "unattributed",
+        "identity_bearing": False,
+        "source_segment_ids": ["SRC0001"],
+    }
+    assert ScreenplaySceneCompiledUnitSlot.model_validate(serialized) == slot
+
+
+def test_full_production_ss001_missing_agency_round_trip_preserves_fields() -> None:
+    fixture = json.loads(
+        SS001_FULL_ARTIFACT_FIXTURE.read_text(encoding="utf-8")
+    )
+    raw_units = [
+        unit
+        for scene in fixture["content"]["scenes"]
+        for unit in scene["units"]
+    ]
+
+    assert fixture["artifact_id"] == "art_bcebe2075a55"
+    assert fixture["artifact_type"] == "screenplay_scene_shard"
+    assert fixture["artifact_status"] == "validated"
+    assert fixture["contract_version"] == "screenplay-scene-shard.v6"
+    assert fixture["content_hash"] == (
+        "19c41c704b3524969a0169c66da1e7a829aa2eaba023245ba9eb983fe23fc2f8"
+    )
+    assert len(raw_units) == 23
+    assert all("action_agency" not in unit for unit in raw_units)
+
+    shard = ScreenplaySceneShardIR.model_validate(fixture["content"])
+    serialized = shard.model_dump(mode="json")
+    round_trip = ScreenplaySceneShardIR.model_validate(serialized)
+    units = [unit for scene in shard.scenes for unit in scene.units]
+
+    assert sum(
+        not unit.actor_keys and not unit.target_keys and not unit.speaker_key
+        for unit in units
+    ) == 6
+    assert all(
+        unit.action_agency.identity_bearing
+        == bool(unit.actor_keys or unit.target_keys or unit.speaker_key)
+        for unit in units
+    )
+    assert all(
+        unit.action_agency.source_segment_ids == unit.source_segment_ids
+        for unit in units
+    )
+    assert all(
+        "action_agency" in unit
+        for scene in serialized["scenes"]
+        for unit in scene["units"]
+    )
+    assert round_trip == shard
 
 
 def test_scene_shard_error_has_generation_contract_classification() -> None:
