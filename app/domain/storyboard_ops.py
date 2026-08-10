@@ -43,16 +43,50 @@ _NARRATIVE_PRESENTATION_EDIT_FIELDS = frozenset({
 
 def _resolve_storyboard_mutation_screenplay(conn, episode_id: str):
     """Resolve the single screenplay authority used by every manual mutation."""
+    from app.errors import ArtifactNeedsRebuildError
     from app.production.screenplay_authority import resolve_downstream_screenplay
 
     try:
         return resolve_downstream_screenplay(episode_id, conn=conn)
+    except ArtifactNeedsRebuildError as exc:
+        raise HTTPException(409, {
+            "code": "ARTIFACT_NEEDS_REBUILD",
+            "message": str(exc),
+            "action": "请先重建并重新发布剧本，再继续分镜",
+        }) from exc
     except Exception as exc:  # noqa: BLE001 - mutation boundary must fail closed
         raise HTTPException(409, {
             "code": "storyboard_screenplay_authority_invalid",
             "message": f"分镜写入所依赖的已发布剧本权威链无效：{exc}",
             "action": "请先恢复剧本 Artifact、页面投影、完成凭证与发布 revision 的一致性",
         }) from exc
+
+
+def _screenplay_rebuild_block(conn, ep) -> dict | None:
+    artifact_id = str(
+        ep["published_screenplay_artifact_id"]
+        or ep["screenplay_artifact_id"]
+        or ""
+    )
+    if not artifact_id:
+        return None
+    artifact = conn.execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact_id,),
+    ).fetchone()
+    if artifact is None:
+        return None
+    reason = str(artifact["stale_reason"] or "")
+    if (
+        artifact["status"] != "stale"
+        or "[ARTIFACT_NEEDS_REBUILD]" not in reason
+    ):
+        return None
+    return {
+        "code": "ARTIFACT_NEEDS_REBUILD",
+        "message": reason,
+        "action": "请先重建并重新发布剧本，再继续分镜",
+    }
 
 
 def _narrative_semantic_edit_fields(changed_fields) -> list[str]:
@@ -539,6 +573,9 @@ def _storyboard_start_preflight_payload(episode_id: str) -> dict:
 
     ep = _episode_or_404(episode_id)
     if not _screenplay_ready(ep):
+        rebuild_block = _screenplay_rebuild_block(get_conn(), ep)
+        if rebuild_block is not None:
+            raise HTTPException(409, rebuild_block)
         raise HTTPException(409, "请先在剧本台生成本集可拍剧本")
     conn = get_conn()
     shots = int(conn.execute(
@@ -2342,6 +2379,9 @@ async def start_storyboard(episode_id: str, body: dict | None = Body(None)):
             "deduplicated": True,
         }
     if not _screenplay_ready(ep):
+        rebuild_block = _screenplay_rebuild_block(get_conn(), ep)
+        if rebuild_block is not None:
+            raise HTTPException(409, rebuild_block)
         raise HTTPException(409, "请先在剧本台生成本集可拍剧本")
     conn = get_conn()
     previous = {
@@ -2446,6 +2486,9 @@ async def resume_storyboard(episode_id: str, body: dict | None = Body(None)):
             "deduplicated": True,
         }
     if not _screenplay_ready(ep):
+        rebuild_block = _screenplay_rebuild_block(get_conn(), ep)
+        if rebuild_block is not None:
+            raise HTTPException(409, rebuild_block)
         raise HTTPException(409, "请先在剧本台生成本集可拍剧本")
     conn = get_conn()
     saved = conn.execute(

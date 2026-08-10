@@ -599,13 +599,24 @@ def recover_screenplay_tasks() -> int:
         try:
             if published_artifact_id:
                 load_screenplay_from_artifact(published_artifact_id)
-            if published["screenplay_status"] == "ready":
-                valid = _screenplay_ready(dict(published))
-            else:
+            has_immutable_authority = bool(
+                published["screenplay_completion_certificate_id"]
+                or published["screenplay_production_revision_id"]
+            )
+            if has_immutable_authority:
                 resolve_current_screenplay_authority(
                     str(published["id"]),
                     conn=conn,
                 )
+            if published["screenplay_status"] == "ready":
+                valid = _screenplay_ready(dict(published))
+            elif not has_immutable_authority:
+                resolve_current_screenplay_authority(
+                    str(published["id"]),
+                    conn=conn,
+                )
+                valid = True
+            else:
                 valid = True
         except ArtifactNeedsRebuildError as exc:
             conn.execute(
@@ -1778,12 +1789,25 @@ def _prepare_published_screenplay_revalidation(ep: dict):
     )
     from app.production.screenplay_authority import (
         SCREENPLAY_QA_PROFILE_VERSION,
+        assert_screenplay_matches_validated_v6_source,
         screenplay_authority_fingerprint,
     )
+    from app.errors import ArtifactNeedsRebuildError
 
     episode_id = str(ep["id"])
     artifact_id = str(ep.get("published_screenplay_artifact_id") or "")
     artifact = evidence_repository.get_artifact(artifact_id)
+    if (
+        artifact
+        and artifact.get("status") == "stale"
+        and "[ARTIFACT_NEEDS_REBUILD]"
+        in str(artifact.get("stale_reason") or "")
+    ):
+        raise HTTPException(409, {
+            "code": "ARTIFACT_NEEDS_REBUILD",
+            "message": str(artifact.get("stale_reason") or ""),
+            "action": "请重新生成并发布剧本，旧 published 不得继续复验",
+        })
     if (
         not artifact
         or artifact.get("type") != "screenplay_document"
@@ -1792,7 +1816,19 @@ def _prepare_published_screenplay_revalidation(ep: dict):
     ):
         raise HTTPException(409, "当前发布剧本缺少可复验的权威 Artifact")
     try:
-        load_screenplay_from_artifact(artifact_id)
+        published_screenplay = load_screenplay_from_artifact(artifact_id)
+        assert_screenplay_matches_validated_v6_source(
+            episode_id=episode_id,
+            artifact=artifact,
+            screenplay=published_screenplay,
+            conn=get_conn(),
+        )
+    except ArtifactNeedsRebuildError as exc:
+        raise HTTPException(409, {
+            "code": "ARTIFACT_NEEDS_REBUILD",
+            "message": str(exc),
+            "action": "请重新生成并发布剧本，旧 published 不得继续复验",
+        }) from exc
     except Exception as exc:
         raise HTTPException(409, "当前发布剧本 Artifact 无法读取") from exc
 
