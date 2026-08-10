@@ -9,11 +9,13 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
-from app import db
+from app import db, errors as app_errors
+from app import screenplay_scene_shards as scene_shards_module
 from app.harness import model_gateway
 from app.narrative_blueprint import (
     BlueprintScenePlan,
     NarrativeBlueprint,
+    NarrativeNode,
     derive_blueprint_scene_plans,
 )
 from app.evidence import repository as evidence_repository
@@ -77,6 +79,11 @@ SS004_REPLAY_INPUT = (
     Path(__file__).parent
     / "fixtures"
     / "screenplay_scene_shard_ss004.json"
+)
+ERR_20260810_533AC9_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_err_20260810_533ac9.json"
 )
 
 
@@ -2069,3 +2076,236 @@ def test_normalization_preserves_unbound_target_for_hard_gate() -> None:
         and "unbound-person" in error
         for error in errors
     )
+
+
+def _ss004_533ac9_compile_context():
+    replay = json.loads(
+        ERR_20260810_533AC9_REPLAY.read_text(encoding="utf-8")
+    )
+    replay_input = json.loads(SS004_REPLAY_INPUT.read_text(encoding="utf-8"))
+    plan, all_scene_plans, _contracts, _identity_keys = (
+        _ss004_replay_validation_context()
+    )
+    selected_keys = ["bp-sc014", "bp-sc015"]
+    scene_plans = {
+        key: all_scene_plans[key]
+        for key in selected_keys
+    }
+    source_owners = {
+        source_id: owner
+        for source_id, owner in plan.source_scene_owners.items()
+        if owner in selected_keys
+    }
+    selected_plan = plan.model_copy(update={
+        "scene_plan_keys": selected_keys,
+        "source_segment_ids": [
+            source_id
+            for key in selected_keys
+            for source_id in scene_plans[key].source_segment_ids
+        ],
+        "source_scene_owners": source_owners,
+    })
+    source_by_id = {
+        segment["source_segment_id"]: segment["text"]
+        for item in replay_input["scene_inputs"]
+        if item["scene_plan_key"] in selected_keys
+        for segment in item["source_segments"]
+    }
+    nodes = []
+    for index, evidence in enumerate(replay["action_evidence"]):
+        participants = list(dict.fromkeys(
+            item["identity_key"]
+            for item in evidence["participant_evidence"]
+        ))
+        node = {
+            "key": evidence["node_key"],
+            "source_segment_ids": evidence["source_segment_ids"],
+            "summary": f"回放动作证据 {index + 1}",
+            "temporal_domain_key": "T002",
+            "time_label": "入夜",
+            "time_relation": "continuous",
+            "location_key": "L004",
+            "location_label": "宗门青石空地",
+            "participants": participants,
+            "participant_evidence": evidence["participant_evidence"],
+            "action_logic": f"回放动作逻辑 {index + 1}",
+        }
+        if evidence["decision_actor_key"]:
+            node["decision"] = {
+                "actor_key": evidence["decision_actor_key"],
+                "choice": f"回放决定 {index + 1}",
+            }
+        nodes.append(NarrativeNode.model_validate(node))
+    contracts = build_screenplay_scene_input_contracts(
+        plan=selected_plan,
+        scene_plans=list(scene_plans.values()),
+        source_by_id=source_by_id,
+        identity_registry=replay_input["identity_registry"],
+        blueprint_nodes=nodes,
+    )
+    return replay, selected_plan, scene_plans, contracts
+
+
+def test_scene_shard_creative_schema_is_closed_and_rejects_identity_authority() -> None:
+    replay, _plan, _scene_plans, contracts = (
+        _ss004_533ac9_compile_context()
+    )
+    draft_type = getattr(
+        scene_shards_module,
+        "ScreenplaySceneShardCreativeIR",
+        None,
+    )
+    assert draft_type is not None
+
+    schema = build_screenplay_scene_shard_repair_schema(
+        scene_input_contracts=contracts,
+    )
+    assert schema["additionalProperties"] is False
+    for definition in schema["$defs"].values():
+        if definition.get("type") == "object":
+            assert definition["additionalProperties"] is False
+    unit_schema = schema["$defs"]["ScreenplaySceneShardCreativeUnit"]
+    assert not {
+        "actor_keys",
+        "target_keys",
+        "speaker_key",
+        "onscreen_entity_keys",
+        "participant_deliveries",
+    }.intersection(unit_schema["properties"])
+
+    for provider_response in replay["provider_responses"]:
+        unit = provider_response["identity_units"][0]
+        with pytest.raises(ValidationError) as caught:
+            scene_shards_module.ScreenplaySceneShardCreativeUnit.model_validate({
+                "kind": "action",
+                "text": "回放越权身份字段",
+                **unit,
+            })
+        forbidden_locations = {
+            error["loc"][0] for error in caught.value.errors()
+            if error["type"] == "extra_forbidden"
+        }
+        assert {
+            "actor_keys",
+            "target_keys",
+            "speaker_key",
+            "onscreen_entity_keys",
+            "participant_deliveries",
+        } <= forbidden_locations
+
+
+def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -> None:
+    replay, plan, scene_plans, contracts = (
+        _ss004_533ac9_compile_context()
+    )
+    assert replay["error_id"] == "ERR-20260810-533ac9"
+    assert [
+        item["provider_call_id"]
+        for item in replay["provider_responses"]
+    ] == [60904, 60905]
+    assert [
+        item["semantic_attempt"]
+        for item in replay["provider_responses"]
+    ] == [0, 1]
+    assert [
+        item["response_sha256"]
+        for item in replay["provider_responses"]
+    ] == [
+        "2a16517190ecd99ca74cc7af2376e202a2396e117728bce95c4256f2da3cffc7",
+        "383a1c60c74a636a7ca10447f9fba46d70ddc94554b0a4aa42fc77e7a1b429a8",
+    ]
+
+    draft_type = getattr(
+        scene_shards_module,
+        "ScreenplaySceneShardCreativeIR",
+        None,
+    )
+    compile_draft = getattr(
+        scene_shards_module,
+        "compile_screenplay_scene_shard_draft",
+        None,
+    )
+    assert draft_type is not None
+    assert callable(compile_draft)
+    draft = draft_type.model_validate(replay["creative_response"])
+    shard = compile_draft(
+        draft,
+        episode_no=1,
+        plan=plan,
+        scene_plans=scene_plans,
+        scene_input_contracts=contracts,
+    )
+
+    round_trip = ScreenplaySceneShardIR.model_validate(
+        shard.model_dump(mode="json")
+    )
+    assert round_trip == shard
+    scene_14 = next(scene for scene in shard.scenes if scene.key == "bp-sc014")
+    assignment_line = scene_14.units[4]
+    assert assignment_line.target_keys == [
+        "person_e79ecc6793f5",
+        "person_32ce878a56e2",
+    ]
+    assert assignment_line.speaker_key == "person_46e7e8b742ed"
+    assert assignment_line.onscreen_entity_keys == [
+        "person_e79ecc6793f5",
+        "person_32ce878a56e2",
+    ]
+    assert assignment_line.participant_deliveries[0].participant_key == (
+        "person_46e7e8b742ed"
+    )
+    assert assignment_line.participant_deliveries[0].audible is True
+
+    wrong_youth = "person_b9cd0397a07f"
+    meng_hao = "person_b67de643afe6"
+    for unit in scene_14.units[2:]:
+        assert wrong_youth not in {
+            *unit.actor_keys,
+            *unit.target_keys,
+            *unit.onscreen_entity_keys,
+        }
+        assert all(
+            delivery.participant_key != meng_hao
+            for delivery in unit.participant_deliveries
+        )
+
+    scene_15 = next(scene for scene in shard.scenes if scene.key == "bp-sc015")
+    location_answer = scene_15.units[2]
+    assert location_answer.speaker_key == "person_46e7e8b742ed"
+    assert location_answer.onscreen_entity_keys == [meng_hao]
+    assert [
+        delivery.participant_key
+        for delivery in location_answer.participant_deliveries
+    ] == ["person_46e7e8b742ed"]
+    assert location_answer.participant_deliveries[0].audible is True
+
+
+def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v5"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v5"
+
+
+def test_scene_shard_error_has_generation_contract_classification() -> None:
+    error = ScreenplaySceneShardError(
+        "SS004",
+        ["unit identity scaffold contract failed"],
+    )
+    assert app_errors.classify(error) == (
+        "generation_contract",
+        "GEN-CONTRACT",
+    )
+
+
+def test_scene_shard_unit_rejects_unknown_identity_authority_field() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    unit = _shard(plan, blueprint).scenes[0].units[0]
+    payload = unit.model_dump(mode="json")
+    payload["actor"] = "person_outside_typed_contract"
+
+    with pytest.raises(ValidationError, match="actor"):
+        type(unit).model_validate(payload)

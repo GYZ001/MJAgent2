@@ -1,0 +1,298 @@
+{
+  "error_id": "ERR-20260810-533ac9",
+  "case_id": "episode-1-ss004-calls-60904-60905",
+  "replay_scope": "unaltered contract-relevant units projected from complete provider responses",
+  "provider_responses": [
+    {
+      "provider_call_id": 60904,
+      "semantic_attempt": 0,
+      "response_sha256": "2a16517190ecd99ca74cc7af2376e202a2396e117728bce95c4256f2da3cffc7",
+      "identity_units": [
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 3,
+          "source_segment_ids": ["SRC0056"],
+          "actor_keys": ["person_8ff1cb1a5861"],
+          "target_keys": [
+            "person_b67de643afe6",
+            "person_e79ecc6793f5",
+            "person_b9cd0397a07f",
+            "person_32ce878a56e2"
+          ],
+          "speaker_key": null,
+          "onscreen_entity_keys": [
+            "person_8ff1cb1a5861",
+            "person_b67de643afe6",
+            "person_e79ecc6793f5",
+            "person_32ce878a56e2"
+          ],
+          "participant_deliveries": []
+        },
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 4,
+          "source_segment_ids": ["SRC0057"],
+          "actor_keys": ["person_46e7e8b742ed"],
+          "target_keys": [
+            "person_e79ecc6793f5",
+            "person_b9cd0397a07f"
+          ],
+          "speaker_key": "person_46e7e8b742ed",
+          "onscreen_entity_keys": [
+            "person_46e7e8b742ed",
+            "person_e79ecc6793f5",
+            "person_b9cd0397a07f"
+          ],
+          "participant_deliveries": [
+            {
+              "participant_key": "person_b67de643afe6",
+              "observable_claim": "孟浩听到分配指令",
+              "audible": true
+            }
+          ]
+        },
+        {
+          "scene_key": "bp-sc015",
+          "unit_index": 2,
+          "source_segment_ids": ["SRC0059"],
+          "actor_keys": ["person_46e7e8b742ed"],
+          "target_keys": ["person_e79ecc6793f5"],
+          "speaker_key": "person_46e7e8b742ed",
+          "onscreen_entity_keys": [
+            "person_46e7e8b742ed",
+            "person_e79ecc6793f5"
+          ],
+          "participant_deliveries": [
+            {
+              "participant_key": "person_b67de643afe6",
+              "observable_claim": "孟浩听到宗门名称，对靠山宗生出好奇",
+              "audible": true,
+              "visible_reaction": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "provider_call_id": 60905,
+      "semantic_attempt": 1,
+      "response_sha256": "383a1c60c74a636a7ca10447f9fba46d70ddc94554b0a4aa42fc77e7a1b429a8",
+      "identity_units": [
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 2,
+          "source_segment_ids": ["SRC0056"],
+          "actor_keys": ["person_8ff1cb1a5861"],
+          "target_keys": ["person_46e7e8b742ed"],
+          "speaker_key": "person_8ff1cb1a5861",
+          "onscreen_entity_keys": [
+            "person_46e7e8b742ed",
+            "person_8ff1cb1a5861",
+            "person_b67de643afe6"
+          ],
+          "participant_deliveries": [
+            {
+              "participant_key": "person_b67de643afe6",
+              "observable_claim": "孟浩听到绿袍执事的对话",
+              "audible": true,
+              "visible_effect": false,
+              "visible_reaction": false
+            }
+          ]
+        },
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 4,
+          "source_segment_ids": ["SRC0057"],
+          "actor_keys": ["person_46e7e8b742ed"],
+          "target_keys": [
+            "person_e79ecc6793f5",
+            "person_32ce878a56e2"
+          ],
+          "speaker_key": "person_46e7e8b742ed",
+          "onscreen_entity_keys": [
+            "person_46e7e8b742ed",
+            "person_e79ecc6793f5",
+            "person_32ce878a56e2",
+            "person_b67de643afe6"
+          ],
+          "participant_deliveries": [
+            {
+              "participant_key": "person_b67de643afe6",
+              "observable_claim": "孟浩听到分配指令",
+              "audible": true,
+              "visible_effect": false,
+              "visible_reaction": false
+            }
+          ]
+        },
+        {
+          "scene_key": "bp-sc015",
+          "unit_index": 2,
+          "source_segment_ids": ["SRC0059"],
+          "actor_keys": ["person_46e7e8b742ed"],
+          "target_keys": ["person_e79ecc6793f5"],
+          "speaker_key": "person_46e7e8b742ed",
+          "onscreen_entity_keys": [
+            "person_46e7e8b742ed",
+            "person_e79ecc6793f5",
+            "person_b67de643afe6"
+          ],
+          "participant_deliveries": [
+            {
+              "participant_key": "person_b67de643afe6",
+              "observable_claim": "孟浩听到宗门名称，对靠山宗生出好奇",
+              "audible": true,
+              "visible_effect": false,
+              "visible_reaction": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "action_evidence": [
+    {
+      "node_key": "S002-S001-N015",
+      "source_segment_ids": ["SRC0054", "SRC0055", "SRC0056"],
+      "participant_evidence": [
+        {
+          "identity_key": "孟浩",
+          "source_segment_ids": ["SRC0054", "SRC0055"],
+          "usage": "visible"
+        },
+        {
+          "identity_key": "绿袍执事乙",
+          "source_segment_ids": ["SRC0056"],
+          "usage": "voice"
+        },
+        {
+          "identity_key": "绿袍执事甲",
+          "source_segment_ids": ["SRC0056"],
+          "usage": "visible"
+        }
+      ],
+      "decision_actor_key": null
+    },
+    {
+      "node_key": "S003-S002-S001-N016",
+      "source_segment_ids": ["SRC0057"],
+      "participant_evidence": [
+        {
+          "identity_key": "绿袍执事甲",
+          "source_segment_ids": ["SRC0057"],
+          "usage": "voice"
+        },
+        {
+          "identity_key": "王有材",
+          "source_segment_ids": ["SRC0057"],
+          "usage": "visible"
+        },
+        {
+          "identity_key": "大青山被困少年乙",
+          "source_segment_ids": ["SRC0057"],
+          "usage": "visible"
+        }
+      ],
+      "decision_actor_key": "绿袍执事甲"
+    },
+    {
+      "node_key": "S003-S002-S001-N017",
+      "source_segment_ids": ["SRC0058", "SRC0059"],
+      "participant_evidence": [
+        {
+          "identity_key": "王有材",
+          "source_segment_ids": ["SRC0058"],
+          "usage": "voice"
+        },
+        {
+          "identity_key": "绿袍执事甲",
+          "source_segment_ids": ["SRC0059"],
+          "usage": "voice"
+        },
+        {
+          "identity_key": "孟浩",
+          "source_segment_ids": ["SRC0059"],
+          "usage": "visible"
+        }
+      ],
+      "decision_actor_key": "王有材"
+    }
+  ],
+  "creative_response": {
+    "contract_version": "screenplay-scene-creative.v1",
+    "scenes": [
+      {
+        "scene_plan_key": "bp-sc014",
+        "story_function": "推进杂役分配并建立孟浩对宗门生活的期待",
+        "summary": "绿袍执事议论许师姐并分配王有材二人的杂役去向",
+        "units": [
+          {
+            "kind": "action",
+            "text": "孟浩恢复心神，开始思考做杂役能否赚钱",
+            "source_segment_ids": ["SRC0054"],
+            "resulting_state": "孟浩从震惊中平复"
+          },
+          {
+            "kind": "dialogue",
+            "text": "杂役？这是要给仙人打工，应该不少赚吧。",
+            "source_segment_ids": ["SRC0055"],
+            "function": "thinking",
+            "source_text": "杂役？这是要给仙人打工，应该不少赚吧。"
+          },
+          {
+            "kind": "dialogue",
+            "text": "许师姐已经到了凝气第七层，被掌教赐了风幡。",
+            "source_segment_ids": ["SRC0056"],
+            "source_text": "许师姐已经到了凝气第七层，被掌教赐了风幡。"
+          },
+          {
+            "kind": "action",
+            "text": "绿袍执事乙看向空地上的新入门弟子",
+            "source_segment_ids": ["SRC0056"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "你，还有你，跟我走，去南区杂役处。",
+            "source_segment_ids": ["SRC0057"],
+            "function": "instruction",
+            "source_text": "你，还有你，跟我走，去南区杂役处。"
+          },
+          {
+            "kind": "action",
+            "text": "绿袍执事甲抬手指向王有材和少年乙",
+            "source_segment_ids": ["SRC0057"],
+            "resulting_state": "王有材和少年乙被指定去向"
+          }
+        ]
+      },
+      {
+        "scene_plan_key": "bp-sc015",
+        "story_function": "通过一问一答交代宗门名称并延续陌生环境压力",
+        "summary": "王有材询问所在地，绿袍执事回答靠山宗",
+        "units": [
+          {
+            "kind": "action",
+            "text": "王有材浑身哆嗦，慌乱地开口",
+            "source_segment_ids": ["SRC0058"],
+            "resulting_state": "王有材主动询问地点"
+          },
+          {
+            "kind": "dialogue",
+            "text": "这……这里是什么地方？",
+            "source_segment_ids": ["SRC0058"],
+            "function": "question",
+            "source_text": "这……这里是什么地方？"
+          },
+          {
+            "kind": "dialogue",
+            "text": "靠山宗。",
+            "source_segment_ids": ["SRC0059"],
+            "function": "answer",
+            "source_text": "靠山宗。"
+          }
+        ]
+      }
+    ]
+  }
+}
