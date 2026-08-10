@@ -1948,6 +1948,10 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+    # Provider claims are a project-owned accounting ledger. Migrate their
+    # ownership before any integrity repair can delete disposable jobs/assets.
+    from app.completion_grant import ensure_video_budget_authority_tables
+    ensure_video_budget_authority_tables(conn)
     conn.execute(
         """UPDATE provider_calls
               SET project_id=COALESCE(

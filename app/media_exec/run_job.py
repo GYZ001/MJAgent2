@@ -485,9 +485,10 @@ def _commit_provider_acceptance_in_transaction(
     )
     conn.execute(
         """UPDATE provider_video_budget_claims
-              SET status='accepted',updated_at=?
+              SET status='accepted',updated_at=?,
+                  accepted_at=COALESCE(accepted_at,?)
             WHERE operation_id=? AND job_id=?""",
-        (stamp, operation_id, job_id),
+        (stamp, stamp, operation_id, job_id),
     )
 
 
@@ -565,9 +566,9 @@ def _commit_video_result_checkpoint_in_transaction(
         raise LeaseLost(f"provider result version fenced: {job_id} / {owner}")
     conn.execute(
         """UPDATE provider_video_budget_claims
-              SET status='settled',updated_at=?
+              SET status='settled',updated_at=?,settled_at=?
             WHERE operation_id=? AND job_id=?""",
-        (stamp, operation_id, job_id),
+        (stamp, stamp, operation_id, job_id),
     )
 
 
@@ -3791,11 +3792,17 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             f"video submit error lost lease: {job_id} / {owner}"
                         )
                     if not create_outcome_unknown:
+                        released_at = now()
                         conn.execute(
                             """UPDATE provider_video_budget_claims
-                                  SET status='released',updated_at=?
+                                  SET status='released',updated_at=?,released_at=?
                                 WHERE operation_id=? AND job_id=?""",
-                            (now(), provider_operation_id, job_id),
+                            (
+                                released_at,
+                                released_at,
+                                provider_operation_id,
+                                job_id,
+                            ),
                         )
                     conn.commit()
                     if create_outcome_unknown:

@@ -21,6 +21,26 @@ DEFAULT_VIDEO_BUDGET_CAP_CNY = 150.0
 DEFAULT_VIDEO_WALL_CLOCK_CAP_S = 4 * 3600
 DEFAULT_FALLBACK_QUOTA_FRACTION = 0.2
 
+_PROVIDER_CLAIM_LEDGER_COLUMNS = {
+    "operation_id",
+    "project_id",
+    "episode_id",
+    "shot_id",
+    "job_id",
+    "version_id",
+    "origin_episode_id",
+    "origin_shot_id",
+    "origin_job_id",
+    "origin_version_id",
+    "amount_cny",
+    "status",
+    "created_at",
+    "updated_at",
+    "accepted_at",
+    "settled_at",
+    "released_at",
+}
+
 
 class VideoCompletionGrant(BaseModel):
     grant_id: str
@@ -67,60 +87,276 @@ class ProviderTasksNotTerminalError(ValueError):
         super().__init__(self.detail["message"])
 
 
-def ensure_video_budget_authority_tables(conn=None) -> None:
-    db = conn or get_conn()
-    db.executescript(
-        """CREATE TABLE IF NOT EXISTS episode_video_budget_authorities (
-               episode_id TEXT PRIMARY KEY,
-               baseline_cny REAL NOT NULL DEFAULT 0,
-               cap_cny REAL NOT NULL,
-               source TEXT NOT NULL,
-               authorized_at REAL NOT NULL,
-               updated_at REAL NOT NULL,
-               FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
-           );
-           CREATE TABLE IF NOT EXISTS provider_video_budget_claims (
+def _create_provider_claim_ledger_table(db, table_name: str) -> None:
+    if table_name not in {
+        "provider_video_budget_claims",
+        "provider_video_budget_claims_v2",
+    }:
+        raise ValueError("invalid provider claim ledger table name")
+    db.execute(
+        f"""CREATE TABLE {table_name} (
                operation_id TEXT PRIMARY KEY,
-               episode_id TEXT NOT NULL,
-               job_id TEXT NOT NULL,
-               version_id TEXT NOT NULL,
+               project_id TEXT NOT NULL,
+               episode_id TEXT,
+               shot_id TEXT,
+               job_id TEXT,
+               version_id TEXT,
+               origin_episode_id TEXT NOT NULL,
+               origin_shot_id TEXT,
+               origin_job_id TEXT NOT NULL,
+               origin_version_id TEXT NOT NULL,
                amount_cny REAL NOT NULL,
                status TEXT NOT NULL,
                created_at REAL NOT NULL,
                updated_at REAL NOT NULL,
-               FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
-               FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
-               FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE CASCADE
-           );
-           CREATE INDEX IF NOT EXISTS idx_provider_video_budget_episode
-               ON provider_video_budget_claims(episode_id,status);"""
+               accepted_at REAL,
+               settled_at REAL,
+               released_at REAL,
+               FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+               FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE SET NULL,
+               FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE SET NULL,
+               FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+               FOREIGN KEY(version_id) REFERENCES shot_versions(id) ON DELETE SET NULL
+           )"""
     )
-    if conn is None:
-        db.commit()
 
 
-def provider_task_clearance_snapshot(
+def _provider_claim_ledger_is_current(db) -> bool:
+    columns = {
+        str(row["name"])
+        for row in db.execute(
+            "PRAGMA table_info(provider_video_budget_claims)"
+        ).fetchall()
+    }
+    if not _PROVIDER_CLAIM_LEDGER_COLUMNS.issubset(columns):
+        return False
+    foreign_keys = {
+        (str(row["from"]), str(row["table"])): str(row["on_delete"]).upper()
+        for row in db.execute(
+            "PRAGMA foreign_key_list(provider_video_budget_claims)"
+        ).fetchall()
+    }
+    return foreign_keys == {
+        ("project_id", "projects"): "CASCADE",
+        ("episode_id", "episodes"): "SET NULL",
+        ("shot_id", "shots"): "SET NULL",
+        ("job_id", "jobs"): "SET NULL",
+        ("version_id", "shot_versions"): "SET NULL",
+    }
+
+
+def _legacy_claim_owner(db, row) -> dict[str, str | None]:
+    job = db.execute(
+        "SELECT id,project_id,episode_id,shot_id,version_id FROM jobs WHERE id=?",
+        (row["job_id"],),
+    ).fetchone()
+    version = db.execute(
+        "SELECT id,shot_id FROM shot_versions WHERE id=?",
+        (row["version_id"],),
+    ).fetchone()
+    shot_ids = {
+        str(value)
+        for value in (
+            job["shot_id"] if job else None,
+            version["shot_id"] if version else None,
+        )
+        if value
+    }
+    if len(shot_ids) > 1:
+        raise RuntimeError(
+            f"provider claim {row['operation_id']} has inconsistent shot ownership"
+        )
+    origin_shot_id = next(iter(shot_ids), None)
+    shot = (
+        db.execute(
+            "SELECT id,episode_id FROM shots WHERE id=?",
+            (origin_shot_id,),
+        ).fetchone()
+        if origin_shot_id
+        else None
+    )
+    episode_ids = {
+        str(value)
+        for value in (
+            row["episode_id"],
+            job["episode_id"] if job else None,
+            shot["episode_id"] if shot else None,
+        )
+        if value
+    }
+    if len(episode_ids) != 1:
+        raise RuntimeError(
+            f"provider claim {row['operation_id']} has unresolved episode ownership"
+        )
+    origin_episode_id = next(iter(episode_ids))
+    episode = db.execute(
+        "SELECT id,project_id FROM episodes WHERE id=?",
+        (origin_episode_id,),
+    ).fetchone()
+    project_ids = {
+        str(value)
+        for value in (
+            episode["project_id"] if episode else None,
+            job["project_id"] if job else None,
+        )
+        if value
+    }
+    if len(project_ids) != 1:
+        raise RuntimeError(
+            f"provider claim {row['operation_id']} has unresolved project ownership"
+        )
+    project_id = next(iter(project_ids))
+    if not db.execute(
+        "SELECT 1 FROM projects WHERE id=?",
+        (project_id,),
+    ).fetchone():
+        raise RuntimeError(
+            f"provider claim {row['operation_id']} project owner is missing"
+        )
+    if job and job["version_id"] and str(job["version_id"]) != str(row["version_id"]):
+        raise RuntimeError(
+            f"provider claim {row['operation_id']} has inconsistent version ownership"
+        )
+    return {
+        "project_id": project_id,
+        "episode_id": origin_episode_id if episode else None,
+        "shot_id": origin_shot_id if shot else None,
+        "job_id": str(row["job_id"]) if job else None,
+        "version_id": str(row["version_id"]) if version else None,
+        "origin_episode_id": origin_episode_id,
+        "origin_shot_id": origin_shot_id,
+        "origin_job_id": str(row["job_id"]),
+        "origin_version_id": str(row["version_id"]),
+    }
+
+
+def _migrate_provider_claim_ledger(db) -> None:
+    legacy_rows = db.execute(
+        "SELECT * FROM provider_video_budget_claims ORDER BY created_at,operation_id"
+    ).fetchall()
+    migrated = [
+        (row, _legacy_claim_owner(db, row))
+        for row in legacy_rows
+    ]
+    db.execute("DROP TABLE IF EXISTS provider_video_budget_claims_v2")
+    _create_provider_claim_ledger_table(db, "provider_video_budget_claims_v2")
+    for row, owner in migrated:
+        status = str(row["status"])
+        accepted_at = (
+            float(row["updated_at"])
+            if status in {"accepted", "settled"}
+            else None
+        )
+        settled_at = float(row["updated_at"]) if status == "settled" else None
+        released_at = float(row["updated_at"]) if status == "released" else None
+        db.execute(
+            """INSERT INTO provider_video_budget_claims_v2(
+                   operation_id,project_id,episode_id,shot_id,job_id,version_id,
+                   origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+                   amount_cny,status,created_at,updated_at,
+                   accepted_at,settled_at,released_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                row["operation_id"],
+                owner["project_id"],
+                owner["episode_id"],
+                owner["shot_id"],
+                owner["job_id"],
+                owner["version_id"],
+                owner["origin_episode_id"],
+                owner["origin_shot_id"],
+                owner["origin_job_id"],
+                owner["origin_version_id"],
+                row["amount_cny"],
+                status,
+                row["created_at"],
+                row["updated_at"],
+                accepted_at,
+                settled_at,
+                released_at,
+            ),
+        )
+    db.execute("DROP INDEX IF EXISTS idx_provider_video_budget_episode")
+    db.execute("DROP INDEX IF EXISTS idx_provider_video_budget_project")
+    db.execute("DROP INDEX IF EXISTS idx_provider_video_budget_shot")
+    db.execute("DROP TABLE provider_video_budget_claims")
+    db.execute(
+        "ALTER TABLE provider_video_budget_claims_v2 "
+        "RENAME TO provider_video_budget_claims"
+    )
+    migrated_count = int(db.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims"
+    ).fetchone()[0])
+    if migrated_count != len(legacy_rows):
+        raise RuntimeError("provider claim ledger migration lost rows")
+
+
+def ensure_video_budget_authority_tables(conn=None) -> None:
+    db = conn or get_conn()
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS episode_video_budget_authorities (
+                   episode_id TEXT PRIMARY KEY,
+                   baseline_cny REAL NOT NULL DEFAULT 0,
+                   cap_cny REAL NOT NULL,
+                   source TEXT NOT NULL,
+                   authorized_at REAL NOT NULL,
+                   updated_at REAL NOT NULL,
+                   FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+               )"""
+        )
+        claims_exist = bool(db.execute(
+            """SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='provider_video_budget_claims'"""
+        ).fetchone())
+        if not claims_exist:
+            _create_provider_claim_ledger_table(
+                db,
+                "provider_video_budget_claims",
+            )
+        elif not _provider_claim_ledger_is_current(db):
+            _migrate_provider_claim_ledger(db)
+        db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_provider_video_budget_episode
+                   ON provider_video_budget_claims(episode_id,status)"""
+        )
+        db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_provider_video_budget_project
+                   ON provider_video_budget_claims(project_id,status)"""
+        )
+        db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_provider_video_budget_shot
+                   ON provider_video_budget_claims(shot_id,status)"""
+        )
+        if owns_transaction:
+            db.commit()
+    except Exception:
+        if owns_transaction:
+            db.rollback()
+        raise
+
+
+def _provider_task_clearance_evaluation(
     *,
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
     conn=None,
-) -> dict[str, Any]:
-    """Return whether destructive cleanup can preserve provider authority.
-
-    Scope is selected by persisted resource relationships, never by job kind.
-    Any provider-backed operation without durable terminal evidence blocks the
-    cleanup so its task handle and billing claim remain recoverable.
-    """
+) -> tuple[dict[str, Any], list[str]]:
     db = conn or get_conn()
     normalized_shots = list(dict.fromkeys(str(value) for value in shot_ids if value))
     normalized_versions = list(
         dict.fromkeys(str(value) for value in version_ids if value)
     )
-    scope_clauses: list[str] = []
-    scope_params: list[str] = []
+    job_scope_clauses: list[str] = []
+    job_scope_params: list[str] = []
+    claim_scope_clauses: list[str] = []
+    claim_scope_params: list[str] = []
     if episode_id:
-        scope_clauses.extend([
+        job_scope_clauses.extend([
             "j.episode_id=?",
             "j.shot_id IN (SELECT id FROM shots WHERE episode_id=?)",
             """j.version_id IN (
@@ -129,59 +365,89 @@ def provider_task_clearance_snapshot(
                   WHERE s.episode_id=?
                )""",
         ])
-        scope_params.extend([episode_id, episode_id, episode_id])
+        job_scope_params.extend([episode_id, episode_id, episode_id])
+        claim_scope_clauses.append(
+            "(c.episode_id=? OR c.origin_episode_id=?)"
+        )
+        claim_scope_params.extend([episode_id, episode_id])
     if normalized_shots:
         marks = ",".join("?" for _ in normalized_shots)
-        scope_clauses.extend([
+        job_scope_clauses.extend([
             f"j.shot_id IN ({marks})",
             f"j.version_id IN (SELECT id FROM shot_versions WHERE shot_id IN ({marks}))",
         ])
-        scope_params.extend(normalized_shots)
-        scope_params.extend(normalized_shots)
+        job_scope_params.extend(normalized_shots)
+        job_scope_params.extend(normalized_shots)
+        claim_scope_clauses.append(
+            f"(c.shot_id IN ({marks}) OR c.origin_shot_id IN ({marks}))"
+        )
+        claim_scope_params.extend(normalized_shots)
+        claim_scope_params.extend(normalized_shots)
     if normalized_versions:
         marks = ",".join("?" for _ in normalized_versions)
-        scope_clauses.append(f"j.version_id IN ({marks})")
-        scope_params.extend(normalized_versions)
-    if not scope_clauses:
+        job_scope_clauses.append(f"j.version_id IN ({marks})")
+        job_scope_params.extend(normalized_versions)
+        claim_scope_clauses.append(
+            f"(c.version_id IN ({marks}) OR c.origin_version_id IN ({marks}))"
+        )
+        claim_scope_params.extend(normalized_versions)
+        claim_scope_params.extend(normalized_versions)
+    if not job_scope_clauses:
         raise ValueError("provider task clearance requires a resource scope")
 
     claims_available = bool(db.execute(
         """SELECT 1 FROM sqlite_master
             WHERE type='table' AND name='provider_video_budget_claims'"""
     ).fetchone())
-    claim_columns = (
-        "c.status AS claim_status,c.amount_cny AS claim_amount,"
-        if claims_available
-        else "NULL AS claim_status,NULL AS claim_amount,"
-    )
-    claim_join = (
-        "LEFT JOIN provider_video_budget_claims c ON c.job_id=j.id"
+    rows = []
+    if claims_available:
+        rows.extend(db.execute(
+            f"""SELECT COALESCE(j.id,c.origin_job_id) AS job_id,
+                       COALESCE(j.version_id,c.version_id,c.origin_version_id)
+                           AS version_id,
+                       j.id AS live_job_id,j.status AS job_status,
+                       j.cancellation_requested,j.abandoned,
+                       j.provider_non_cancellable,j.provider_operation_id,
+                       j.provider_create_state,j.provider_failure_disposition,
+                       v.provider_task_id,v.status AS version_status,
+                       v.video_path,v.cost_cny,
+                       c.status AS claim_status,c.amount_cny AS claim_amount,
+                       c.operation_id AS claim_operation_id
+                  FROM provider_video_budget_claims c
+                  LEFT JOIN jobs j ON j.id=c.job_id
+                  LEFT JOIN shot_versions v ON v.id=c.version_id
+                 WHERE {" OR ".join(claim_scope_clauses)}
+                 ORDER BY c.created_at,c.operation_id""",
+            claim_scope_params,
+        ).fetchall())
+    missing_claim_clause = (
+        """AND NOT EXISTS (
+               SELECT 1 FROM provider_video_budget_claims c
+                WHERE c.job_id=j.id
+           )"""
         if claims_available
         else ""
     )
-    claim_operation_column = (
-        "COALESCE(c.operation_id,j.provider_operation_id)"
-        if claims_available
-        else "j.provider_operation_id"
-    )
-    rows = db.execute(
-        f"""SELECT j.id AS job_id,j.version_id,j.status AS job_status,
+    rows.extend(db.execute(
+        f"""SELECT j.id AS job_id,j.version_id,j.id AS live_job_id,
+                   j.status AS job_status,
                    j.cancellation_requested,j.abandoned,
                    j.provider_non_cancellable,j.provider_operation_id,
                    j.provider_create_state,j.provider_failure_disposition,
                    v.provider_task_id,v.status AS version_status,
                    v.video_path,v.cost_cny,
-                   {claim_columns}
-                   {claim_operation_column} AS claim_operation_id
+                   NULL AS claim_status,NULL AS claim_amount,
+                   j.provider_operation_id AS claim_operation_id
               FROM jobs j
               LEFT JOIN shot_versions v ON v.id=j.version_id
-              {claim_join}
-             WHERE {" OR ".join(f"({clause})" for clause in scope_clauses)}
-             ORDER BY j.created_at,j.id,claim_operation_id""",
-        scope_params,
-    ).fetchall()
+             WHERE ({" OR ".join(f"({clause})" for clause in job_scope_clauses)})
+               {missing_claim_clause}
+             ORDER BY j.created_at,j.id""",
+        job_scope_params,
+    ).fetchall())
 
     blockers: list[dict[str, Any]] = []
+    releasable_operation_ids: list[str] = []
     for row in rows:
         create_state = str(row["provider_create_state"] or "").strip().lower()
         claim_status = (
@@ -195,7 +461,11 @@ def provider_task_clearance_snapshot(
             str(row["provider_operation_id"] or "").strip() or None
         )
         claim_is_current = (
-            claim_status is None or operation_id == current_operation_id
+            claim_status is None
+            or (
+                row["live_job_id"] is not None
+                and operation_id == current_operation_id
+            )
         )
         provider_task_for_recovery = (
             provider_task_id if claim_is_current else None
@@ -236,7 +506,11 @@ def provider_task_clearance_snapshot(
                 and failure_disposition == "external_terminal"
             )
         )
-        if terminal_evidence or not provider_may_exist:
+        if not provider_may_exist:
+            if claim_status == "reserved" and operation_id:
+                releasable_operation_ids.append(operation_id)
+            continue
+        if terminal_evidence:
             continue
 
         locally_recoverable_poll = bool(
@@ -275,11 +549,36 @@ def provider_task_clearance_snapshot(
                 )
             ),
         })
-    return {
-        "safe_to_clear": not blockers,
-        "resume_supported": bool(blockers),
-        "blockers": blockers,
-    }
+    return (
+        {
+            "safe_to_clear": not blockers,
+            "resume_supported": bool(blockers),
+            "blockers": blockers,
+        },
+        list(dict.fromkeys(releasable_operation_ids)),
+    )
+
+
+def provider_task_clearance_snapshot(
+    *,
+    episode_id: str | None = None,
+    shot_ids: list[str] | tuple[str, ...] = (),
+    version_ids: list[str] | tuple[str, ...] = (),
+    conn=None,
+) -> dict[str, Any]:
+    """Return whether destructive cleanup can preserve provider authority.
+
+    Scope comes from the project-owned claim ledger and live resources, never
+    from job kind. A provider-backed operation without durable terminal
+    evidence blocks cleanup so its task handle and billing authority survive.
+    """
+    clearance, _releasable = _provider_task_clearance_evaluation(
+        episode_id=episode_id,
+        shot_ids=shot_ids,
+        version_ids=version_ids,
+        conn=conn,
+    )
+    return clearance
 
 
 def assert_provider_tasks_clearable(
@@ -297,6 +596,35 @@ def assert_provider_tasks_clearable(
     )
     if not clearance["safe_to_clear"]:
         raise ProviderTasksNotTerminalError(clearance)
+    return clearance
+
+
+def prepare_provider_tasks_for_clear(
+    *,
+    episode_id: str | None = None,
+    shot_ids: list[str] | tuple[str, ...] = (),
+    version_ids: list[str] | tuple[str, ...] = (),
+    conn=None,
+) -> dict[str, Any]:
+    """Fence provider risk and explicitly release unsubmitted reservations."""
+    db = conn or get_conn()
+    clearance, releasable = _provider_task_clearance_evaluation(
+        episode_id=episode_id,
+        shot_ids=shot_ids,
+        version_ids=version_ids,
+        conn=db,
+    )
+    if not clearance["safe_to_clear"]:
+        raise ProviderTasksNotTerminalError(clearance)
+    if releasable:
+        marks = ",".join("?" for _ in releasable)
+        stamp = now()
+        db.execute(
+            f"""UPDATE provider_video_budget_claims
+                   SET status='released',updated_at=?,released_at=?
+                 WHERE operation_id IN ({marks}) AND status='reserved'""",
+            (stamp, stamp, *releasable),
+        )
     return clearance
 
 
@@ -475,8 +803,7 @@ def project_video_budget_snapshot(project_id: str, *, conn=None) -> dict[str, fl
     claimed = float(db.execute(
         """SELECT COALESCE(SUM(c.amount_cny),0) AS amount
              FROM provider_video_budget_claims c
-             JOIN episodes e ON e.id=c.episode_id
-            WHERE e.project_id=? AND c.status!='released'""",
+            WHERE c.project_id=? AND c.status!='released'""",
         (project_id,),
     ).fetchone()["amount"] or 0)
     used = baseline + legacy + claimed
@@ -503,10 +830,10 @@ def episode_video_completion_budget_requirement(
     claimed_shot_ids = {
         str(row["shot_id"])
         for row in db.execute(
-            """SELECT DISTINCT j.shot_id
+            """SELECT DISTINCT v.shot_id
                  FROM provider_video_budget_claims c
-                 JOIN jobs j ON j.id=c.job_id
-                 JOIN shots s ON s.id=j.shot_id
+                 JOIN shot_versions v ON v.id=c.version_id
+                 JOIN shots s ON s.id=v.shot_id
                 WHERE c.episode_id=? AND c.status!='released'
                   AND s.episode_id=?""",
             (episode_id, episode_id),
@@ -577,6 +904,22 @@ def reserve_provider_video_budget(
             if owns_transaction:
                 db.rollback()
             return False
+        scope = db.execute(
+            """SELECT e.project_id,s.episode_id,s.id AS shot_id
+                 FROM jobs j
+                 JOIN shot_versions v ON v.id=?
+                 JOIN shots s ON s.id=v.shot_id
+                 JOIN episodes e ON e.id=s.episode_id
+                WHERE j.id=? AND j.version_id=v.id AND j.shot_id=s.id
+                  AND j.episode_id=s.episode_id AND s.episode_id=?
+                  AND (j.project_id IS NULL OR j.project_id=e.project_id)""",
+            (version_id, job_id, episode_id),
+        ).fetchone()
+        if scope is None:
+            raise ValueError(
+                "provider budget claim ownership does not align with "
+                "job/version/shot/episode"
+            )
         existing = db.execute(
             "SELECT status FROM provider_video_budget_claims WHERE operation_id=?",
             (operation_id,),
@@ -600,12 +943,41 @@ def reserve_provider_video_budget(
         stamp = now()
         db.execute(
             """INSERT INTO provider_video_budget_claims(
-                   operation_id,episode_id,job_id,version_id,amount_cny,
-                   status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,'reserved',?,?)
+                   operation_id,project_id,episode_id,shot_id,job_id,version_id,
+                   origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+                   amount_cny,status,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'reserved',?,?)
                ON CONFLICT(operation_id) DO UPDATE SET
-                   status='reserved',updated_at=excluded.updated_at""",
-            (operation_id, episode_id, job_id, version_id, amount, stamp, stamp),
+                   project_id=excluded.project_id,
+                   episode_id=excluded.episode_id,
+                   shot_id=excluded.shot_id,
+                   job_id=excluded.job_id,
+                   version_id=excluded.version_id,
+                   origin_episode_id=excluded.origin_episode_id,
+                   origin_shot_id=excluded.origin_shot_id,
+                   origin_job_id=excluded.origin_job_id,
+                   origin_version_id=excluded.origin_version_id,
+                   amount_cny=excluded.amount_cny,
+                   status='reserved',
+                   accepted_at=NULL,
+                   settled_at=NULL,
+                   released_at=NULL,
+                   updated_at=excluded.updated_at""",
+            (
+                operation_id,
+                scope["project_id"],
+                episode_id,
+                scope["shot_id"],
+                job_id,
+                version_id,
+                episode_id,
+                scope["shot_id"],
+                job_id,
+                version_id,
+                amount,
+                stamp,
+                stamp,
+            ),
         )
         if owns_transaction:
             db.commit()
@@ -628,9 +1000,16 @@ def mark_provider_video_budget_claim(
         raise ValueError("job_id and lease_owner must be provided together")
     db = conn or get_conn()
     ensure_video_budget_authority_tables(db)
+    stamp = now()
     cursor = db.execute(
         """UPDATE provider_video_budget_claims
-              SET status=?,updated_at=?
+              SET status=?,updated_at=?,
+                  accepted_at=CASE
+                      WHEN ?='accepted' THEN COALESCE(accepted_at,?)
+                      ELSE accepted_at
+                  END,
+                  settled_at=CASE WHEN ?='settled' THEN ? ELSE settled_at END,
+                  released_at=CASE WHEN ?='released' THEN ? ELSE released_at END
             WHERE operation_id=?
               AND (
                   ? IS NULL OR EXISTS (
@@ -639,7 +1018,20 @@ def mark_provider_video_budget_claim(
                          AND cancellation_requested=0
                   )
               )""",
-        (status, now(), operation_id, job_id, job_id, lease_owner),
+        (
+            status,
+            stamp,
+            status,
+            stamp,
+            status,
+            stamp,
+            status,
+            stamp,
+            operation_id,
+            job_id,
+            job_id,
+            lease_owner,
+        ),
     )
     if conn is None:
         db.commit()

@@ -33,9 +33,9 @@ def _assert_provider_clear_scope(
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
 ) -> None:
-    from app.completion_grant import assert_provider_tasks_clearable
+    from app.completion_grant import prepare_provider_tasks_for_clear
 
-    assert_provider_tasks_clearable(
+    prepare_provider_tasks_for_clear(
         episode_id=episode_id,
         shot_ids=shot_ids,
         version_ids=version_ids,

@@ -1737,11 +1737,17 @@ def retry_job(job_id: str, body: dict | None = None):
                     and item.get("provider_create_state") == "not_started"
                     and item.get("provider_operation_id")
                 ):
+                    released_at = time.time()
                     conn.execute(
                         """UPDATE provider_video_budget_claims
-                              SET status='released',updated_at=?
+                              SET status='released',updated_at=?,released_at=?
                             WHERE operation_id=? AND job_id=? AND status='reserved'""",
-                        (time.time(), item["provider_operation_id"], job_id),
+                        (
+                            released_at,
+                            released_at,
+                            item["provider_operation_id"],
+                            job_id,
+                        ),
                     )
                 budget_reserved = worker.media_scheduler.reserve_budget(
                     job_id,
