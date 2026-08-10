@@ -2,7 +2,7 @@ import asyncio
 
 from app import stages
 from app.harness.types import Issue
-from app.production.screenplay_repair import _normalize_dialogue_lines_to_source
+from app.production.screenplay_repair import _normalize_screenplay_narrative_graph
 from app.schemas import (Bible, Character, EpisodeScreenplay, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn, PlotSpine,
                          PlotSpineBeat, ScriptScene, StoryEvent,
@@ -836,7 +836,10 @@ def test_source_dialogue_inventory_keeps_first_utterance_in_order() -> None:
 
 
 def test_dialogue_normalization_restores_exact_source_utterance() -> None:
+    from app.schemas import NarrativeContinuityPlan
+
     script, source = _screenplay_with_source_dialogue_chain()
+    script.narrative_plan = NarrativeContinuityPlan(scope_id="test-dialogue")
     turn = script.dialogue_chains[0].turns[0]
     old_line = "测验员宣布谷言只有三段斗之力"
     script.full_script_text = script.full_script_text.replace(
@@ -846,7 +849,10 @@ def test_dialogue_normalization_restores_exact_source_utterance() -> None:
     turn.line = old_line
     turn.source_text = "斗之力"
 
-    changes = _normalize_dialogue_lines_to_source(script, source)
+    changes = _normalize_screenplay_narrative_graph(
+        script,
+        authorized_source_chapters={"chapter-1": source},
+    )
 
     assert changes
     normalized_turn = script.dialogue_chains[0].turns[0]
@@ -854,6 +860,7 @@ def test_dialogue_normalization_restores_exact_source_utterance() -> None:
     assert normalized_turn.source_text == "斗之力，三段！"
     assert "测验员：斗之力，三段！" in script.full_script_text
     assert old_line not in script.full_script_text
+    assert script.key_lines[0] == "测验员：斗之力，三段！"
 
 
 def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None:

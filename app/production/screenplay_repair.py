@@ -1106,14 +1106,18 @@ def _normalize_screenplay_narrative_graph(
         if str(chapter_id).strip() and str(text)
     }
     dialogue_source = "\n".join(dict.fromkeys(chapters.values()))
-    changes.extend(_normalize_dialogue_lines_to_source(
+    dialogue_changes = _normalize_dialogue_lines_to_source(
         script,
         dialogue_source,
-    ))
-    changes.extend(_normalize_dialogue_chain_continuity(
+    )
+    changes.extend(dialogue_changes)
+    continuity_changes = _normalize_dialogue_chain_continuity(
         script,
         dialogue_source,
-    ))
+    )
+    changes.extend(continuity_changes)
+    if dialogue_changes or continuity_changes:
+        normalize_screenplay_dialogue_chains(script)
     source_contexts: dict[str, list[str]] = {}
     for proposition in data.get("propositions") or []:
         if not isinstance(proposition, dict):
