@@ -103,7 +103,22 @@ def publish_screenplay(
     if artifact["type"] != "screenplay_document":
         raise ValueError("只能发布完整 screenplay_document，禁止发布 IR/scene shard")
     from app.evidence import repository as evidence_repository
+    from app.production.screenplay_authority import (
+        assert_screenplay_matches_validated_v6_source,
+    )
 
+    artifact_record = evidence_repository.get_artifact(
+        artifact_id,
+        conn=conn,
+    )
+    if artifact_record is None:
+        raise ValueError("待发布 working Artifact 不存在")
+    assert_screenplay_matches_validated_v6_source(
+        episode_id=episode_id,
+        artifact=artifact_record,
+        screenplay=script,
+        conn=conn,
+    )
     lineage = evidence_repository.get_lineage(artifact_id)
     ancestor_types = {
         str(item.get("type") or "")

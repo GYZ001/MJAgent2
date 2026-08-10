@@ -1000,6 +1000,310 @@ class DownstreamScreenplayContext:
     immutable_authority_required: bool
 
 
+@dataclass(frozen=True)
+class ScreenplaySourceProjection:
+    source_screenplay: EpisodeScreenplay
+    source_projection_hash: str
+    published_projection_hash: str
+    merged_ir_artifact_id: str
+    source_shard_artifact_ids: tuple[str, ...]
+
+
+def screenplay_action_agency_projection(
+    screenplay: EpisodeScreenplay,
+) -> dict[str, Any]:
+    """Project only source-owned action identity/provenance semantics."""
+    plan = screenplay.narrative_plan
+    if plan is None:
+        return {
+            "contract_version": "screenplay-action-agency-projection.v1",
+            "actions": [],
+        }
+    return {
+        "contract_version": "screenplay-action-agency-projection.v1",
+        "actions": [
+            {
+                "action_id": action.action_id,
+                "actor_ids": list(action.actor_ids),
+                "target_ids": list(action.target_ids),
+                "action_agency": action.action_agency.model_dump(mode="json"),
+            }
+            for action in plan.atomic_actions
+        ],
+    }
+
+
+def _artifact_ancestors_by_depth(
+    artifact: dict[str, Any],
+    *,
+    conn: Any,
+) -> list[tuple[int, dict[str, Any]]]:
+    pending = [
+        (1, str(parent_id))
+        for parent_id in artifact.get("parent_artifact_ids") or []
+        if str(parent_id)
+    ]
+    seen: set[str] = set()
+    ancestors: list[tuple[int, dict[str, Any]]] = []
+    while pending:
+        depth, artifact_id = pending.pop(0)
+        if artifact_id in seen:
+            continue
+        seen.add(artifact_id)
+        parent = evidence_repository.get_artifact(artifact_id, conn=conn)
+        if parent is None:
+            continue
+        ancestors.append((depth, parent))
+        pending.extend(
+            (depth + 1, str(parent_id))
+            for parent_id in parent.get("parent_artifact_ids") or []
+            if str(parent_id) and str(parent_id) not in seen
+        )
+    return ancestors
+
+
+def _validated_v6_source_artifacts(
+    artifact: dict[str, Any],
+    *,
+    conn: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    from app.screenplay_scene_shards import SCREENPLAY_SCENE_SHARD_VERSION
+
+    for _depth, candidate in _artifact_ancestors_by_depth(
+        artifact,
+        conn=conn,
+    ):
+        if candidate.get("type") != "screenplay_generation_ir_merged":
+            continue
+        direct_parents = [
+            evidence_repository.get_artifact(str(parent_id), conn=conn)
+            for parent_id in candidate.get("parent_artifact_ids") or []
+        ]
+        shard_parents = [
+            parent
+            for parent in direct_parents
+            if parent is not None
+            and parent.get("type") == "screenplay_scene_shard"
+        ]
+        if not shard_parents:
+            continue
+        has_v6_source = any(
+            str(parent.get("contract_version") or "")
+            == SCREENPLAY_SCENE_SHARD_VERSION
+            for parent in shard_parents
+        )
+        if not has_v6_source:
+            continue
+        invalid = [
+            parent
+            for parent in shard_parents
+            if (
+                str(parent.get("contract_version") or "")
+                != SCREENPLAY_SCENE_SHARD_VERSION
+                or parent.get("status") != "validated"
+            )
+        ]
+        if invalid or candidate.get("status") != "validated":
+            from app.errors import ArtifactNeedsRebuildError
+
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason=(
+                    "source projection 依赖的 scene shards/merged IR "
+                    "不是完整 validated v6 权威"
+                ),
+            )
+        return candidate, shard_parents
+    return None
+
+
+def _compile_validated_v6_source_projection(
+    *,
+    episode_id: str,
+    artifact: dict[str, Any],
+    conn: Any,
+) -> tuple[EpisodeScreenplay, str, tuple[str, ...]] | None:
+    source_artifacts = _validated_v6_source_artifacts(
+        artifact,
+        conn=conn,
+    )
+    if source_artifacts is None:
+        return None
+    merged_artifact, shard_artifacts = source_artifacts
+    from app.errors import ArtifactNeedsRebuildError
+    from app.screenplay_ir import IRScene, ScreenplayGenerationIR, compile_screenplay_ir
+    from app.screenplay_scene_shards import (
+        SCREENPLAY_SCENE_SHARD_VERSION,
+        ScreenplaySceneShardIR,
+    )
+
+    try:
+        merged_ir = ScreenplayGenerationIR.model_validate(
+            merged_artifact.get("content") or {}
+        )
+        shards = [
+            ScreenplaySceneShardIR.model_validate(
+                shard_artifact.get("content") or {}
+            )
+            for shard_artifact in shard_artifacts
+        ]
+    except Exception as exc:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or ""),
+            reason=f"validated v6 source projection 无法解析：{exc}",
+        ) from exc
+    if any(
+        shard.contract_version != SCREENPLAY_SCENE_SHARD_VERSION
+        for shard in shards
+    ):
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or ""),
+            reason="validated v6 source projection 内容合同漂移",
+        )
+
+    source_scenes: dict[str, IRScene] = {}
+    for shard in sorted(shards, key=lambda item: item.shard_id):
+        for scene in shard.scenes:
+            if scene.key in source_scenes:
+                raise ArtifactNeedsRebuildError(
+                    artifact_id=str(artifact.get("id") or ""),
+                    artifact_type=str(artifact.get("type") or ""),
+                    reason=(
+                        "validated v6 source projection 含重复 scene："
+                        f"{scene.key}"
+                    ),
+                )
+            source_scenes[scene.key] = IRScene.model_validate(
+                scene.model_dump(mode="json")
+            )
+    merged_scene_keys = [scene.key for scene in merged_ir.scenes]
+    if set(source_scenes) != set(merged_scene_keys):
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or ""),
+            reason="validated v6 source shards 与 merged IR 场次集合漂移",
+        )
+    ordered_source_scenes = [
+        source_scenes[scene_key] for scene_key in merged_scene_keys
+    ]
+    if [
+        scene.model_dump(mode="json") for scene in ordered_source_scenes
+    ] != [
+        scene.model_dump(mode="json") for scene in merged_ir.scenes
+    ]:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or ""),
+            reason="validated v6 source shards 与 merged IR 内容漂移",
+        )
+    merged_ir.scenes = ordered_source_scenes
+
+    episode = conn.execute(
+        "SELECT * FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if episode is None:
+        raise ValueError(f"episode not found: {episode_id}")
+    project = conn.execute(
+        "SELECT * FROM projects WHERE id=?",
+        (_episode_value(episode, "project_id"),),
+    ).fetchone()
+    bible_projection = _project_bible_projection(project)
+    bible = Bible.model_validate(bible_projection or {})
+    _records, source_text = _source_records(conn, episode)
+    episode_input = dict(episode)
+    episode_input["character_resolutions"] = _decode_list(
+        _episode_value(episode, "screenplay_character_resolutions", "[]")
+    )
+    episode_input["authorized_source_chapters"] = (
+        screenplay_authorized_source_chapters(episode_id, conn=conn)
+    )
+    try:
+        source_screenplay = compile_screenplay_ir(
+            merged_ir,
+            episode=episode_input,
+            source_text=source_text,
+            bible=bible,
+        )
+    except Exception as exc:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or ""),
+            reason=f"validated v6 source projection 无法重新编译：{exc}",
+        ) from exc
+    return (
+        source_screenplay,
+        str(merged_artifact.get("id") or ""),
+        tuple(
+            str(shard_artifact.get("id") or "")
+            for shard_artifact in shard_artifacts
+        ),
+    )
+
+
+def assert_screenplay_matches_validated_v6_source(
+    *,
+    episode_id: str,
+    artifact: dict[str, Any],
+    screenplay: EpisodeScreenplay,
+    conn: Any | None = None,
+    mark_stale: bool = True,
+) -> ScreenplaySourceProjection | None:
+    """Fail closed when a v6 shard-derived action projection drifted."""
+    db = conn or get_conn()
+    try:
+        source = _compile_validated_v6_source_projection(
+            episode_id=episode_id,
+            artifact=artifact,
+            conn=db,
+        )
+        if source is None:
+            return None
+        source_screenplay, merged_artifact_id, shard_artifact_ids = source
+        source_projection_hash = evidence_repository.content_hash(
+            screenplay_action_agency_projection(source_screenplay)
+        )
+        published_projection_hash = evidence_repository.content_hash(
+            screenplay_action_agency_projection(screenplay)
+        )
+        if source_projection_hash != published_projection_hash:
+            from app.errors import ArtifactNeedsRebuildError
+
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason=(
+                    "source projection hash 与 published screenplay 漂移："
+                    f"source={source_projection_hash}, "
+                    f"published={published_projection_hash}, "
+                    f"merged_ir={merged_artifact_id}"
+                ),
+            )
+        return ScreenplaySourceProjection(
+            source_screenplay=source_screenplay,
+            source_projection_hash=source_projection_hash,
+            published_projection_hash=published_projection_hash,
+            merged_ir_artifact_id=merged_artifact_id,
+            source_shard_artifact_ids=shard_artifact_ids,
+        )
+    except Exception as exc:
+        from app.errors import ArtifactNeedsRebuildError
+
+        if not isinstance(exc, ArtifactNeedsRebuildError):
+            raise
+        if mark_stale:
+            db.execute(
+                "UPDATE artifacts SET status='stale',stale_reason=? "
+                "WHERE id=? AND status!='rejected'",
+                (str(exc), str(artifact.get("id") or "")),
+            )
+            db.commit()
+        raise
+
+
 def episode_requires_immutable_screenplay_authority(
     episode: Any,
     *,
@@ -1174,6 +1478,12 @@ def resolve_current_screenplay_authority(
     from app.production.patch import load_screenplay_from_artifact
 
     screenplay = load_screenplay_from_artifact(artifact_id)
+    assert_screenplay_matches_validated_v6_source(
+        episode_id=episode_id,
+        artifact=artifact,
+        screenplay=screenplay,
+        conn=db,
+    )
     raw_projection = _episode_value(episode, "screenplay_json", "")
     if not raw_projection:
         raise ValueError("已发布剧本缺少页面投影")

@@ -393,7 +393,7 @@ class AtomicAction(BaseModel):
     action_id: str
     actor_ids: list[str] = Field(default_factory=list)
     target_ids: list[str] = Field(default_factory=list)
-    action_agency: ActionAgency = Field(default_factory=ActionAgency)
+    action_agency: ActionAgency
     participant_deliveries: list[ActionParticipantDelivery] = Field(
         default_factory=list
     )
@@ -406,6 +406,33 @@ class AtomicAction(BaseModel):
     decision_not_applicable_reason: str | None = None
     temporal_phases: list[AtomicActionPhase] = Field(default_factory=list)
     splittable_boundaries: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_missing_action_agency(cls, value: object) -> object:
+        if not isinstance(value, dict) or value.get("action_agency") is not None:
+            return value
+        normalized = dict(value)
+        actor_ids = list(normalized.get("actor_ids") or [])
+        target_ids = list(normalized.get("target_ids") or [])
+        identity_bearing = bool(actor_ids or target_ids)
+        normalized["action_agency"] = {
+            "kind": "character" if identity_bearing else "unattributed",
+            "identity_bearing": identity_bearing,
+            "source_segment_ids": list(
+                normalized.get("source_segment_ids") or []
+            ),
+        }
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_action_agency_owner(self) -> "AtomicAction":
+        identity_bearing = bool(self.actor_ids or self.target_ids)
+        if self.action_agency.identity_bearing != identity_bearing:
+            raise ValueError(
+                "action_agency.identity_bearing 必须与 actor_ids/target_ids 等价"
+            )
+        return self
 
 
 class ActionSemanticRelationAudit(BaseModel):

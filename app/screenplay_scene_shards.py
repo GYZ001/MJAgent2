@@ -156,21 +156,31 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
         default_factory=list,
     )
     speaker_key: str | None = None
-    action_agency: ActionAgency | None = Field(default=None, exclude=True)
+    action_agency: ActionAgency | None = None
 
     @model_validator(mode="after")
     def _derive_action_agency(self) -> "ScreenplaySceneCompiledUnitSlot":
+        identity_bearing = bool(
+            self.actor_keys or self.target_keys or self.speaker_key
+        )
         if self.action_agency is None:
             self.action_agency = ActionAgency(
                 kind=(
                     "character"
-                    if self.actor_keys or self.target_keys or self.speaker_key
+                    if identity_bearing
                     else "unattributed"
                 ),
-                identity_bearing=bool(
-                    self.actor_keys or self.target_keys or self.speaker_key
-                ),
+                identity_bearing=identity_bearing,
                 source_segment_ids=list(self.source_segment_ids),
+            )
+        if self.action_agency.identity_bearing != identity_bearing:
+            raise ValueError(
+                "compiled slot action_agency.identity_bearing 必须与 "
+                "actor_keys/target_keys/speaker_key 等价"
+            )
+        if self.action_agency.source_segment_ids != self.source_segment_ids:
+            raise ValueError(
+                "compiled slot action_agency.source_segment_ids 必须与来源等价"
             )
         return self
 

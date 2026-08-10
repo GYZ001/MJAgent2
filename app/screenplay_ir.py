@@ -145,6 +145,46 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def derive_action_agency_payload(
+    value: dict[str, Any],
+    *,
+    actor_field: str,
+    target_field: str,
+    source_field: str,
+    speaker_field: str | None = None,
+) -> dict[str, Any]:
+    """Fill missing agency fields from the relation owner, never global defaults."""
+    normalized = dict(value)
+    relation_keys = [
+        *_as_list(normalized.get(actor_field)),
+        *_as_list(normalized.get(target_field)),
+    ]
+    if speaker_field and normalized.get(speaker_field):
+        relation_keys.append(normalized[speaker_field])
+    identity_bearing = any(
+        bool(str(key or "").strip()) for key in relation_keys
+    )
+    raw_agency = normalized.get("action_agency")
+    if isinstance(raw_agency, ActionAgency):
+        agency = raw_agency.model_dump(mode="json")
+    elif isinstance(raw_agency, dict):
+        agency = dict(raw_agency)
+    else:
+        agency = {}
+    if not str(agency.get("kind") or "").strip():
+        agency["kind"] = (
+            "character" if identity_bearing else "unattributed"
+        )
+    if agency.get("identity_bearing") is None:
+        agency["identity_bearing"] = identity_bearing
+    if agency.get("source_segment_ids") is None:
+        agency["source_segment_ids"] = _as_list(
+            normalized.get(source_field)
+        )
+    normalized["action_agency"] = agency
+    return normalized
+
+
 def screenplay_ir_version_key(value: object) -> tuple[int, int]:
     """Parse this contract family without enumerating accepted versions."""
     match = re.fullmatch(
@@ -395,36 +435,19 @@ class IRSceneUnit(BaseModel):
     def _normalize_kind(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
-        normalized = dict(value)
+        normalized = derive_action_agency_payload(
+            value,
+            actor_field="actor_keys",
+            target_field="target_keys",
+            speaker_field="speaker_key",
+            source_field="source_segment_ids",
+        )
         kind = str(normalized.get("kind") or "action").strip().lower()
         if kind in {"speech", "spoken", "line", "voice"}:
             kind = "dialogue"
         elif kind not in {"action", "dialogue"}:
             kind = "action"
         normalized["kind"] = kind
-        if "action_agency" not in normalized:
-            relation_keys = [
-                *_as_list(normalized.get("actor_keys")),
-                *_as_list(normalized.get("target_keys")),
-                *(
-                    [normalized.get("speaker_key")]
-                    if normalized.get("speaker_key")
-                    else []
-                ),
-            ]
-            normalized["action_agency"] = {
-                "kind": (
-                    "character"
-                    if any(str(key or "").strip() for key in relation_keys)
-                    else "unattributed"
-                ),
-                "identity_bearing": bool(
-                    any(str(key or "").strip() for key in relation_keys)
-                ),
-                "source_segment_ids": _as_list(
-                    normalized.get("source_segment_ids")
-                ),
-            }
         return normalized
 
     @field_validator(
@@ -550,25 +573,12 @@ class IREvent(BaseModel):
     def _normalize_numeric_ranges(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
-        normalized = dict(value)
-        if "action_agency" not in normalized:
-            relation_keys = [
-                *_as_list(normalized.get("actor_keys")),
-                *_as_list(normalized.get("target_keys")),
-            ]
-            normalized["action_agency"] = {
-                "kind": (
-                    "character"
-                    if any(str(key or "").strip() for key in relation_keys)
-                    else "unattributed"
-                ),
-                "identity_bearing": bool(
-                    any(str(key or "").strip() for key in relation_keys)
-                ),
-                "source_segment_ids": _as_list(
-                    normalized.get("source_segment_ids")
-                ),
-            }
+        normalized = derive_action_agency_payload(
+            value,
+            actor_field="actor_keys",
+            target_field="target_keys",
+            source_field="source_segment_ids",
+        )
         for field, default in (
             ("salience", 0.7),
             ("irreversibility", 0.5),

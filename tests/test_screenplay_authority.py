@@ -324,7 +324,7 @@ def test_publish_rejects_contextual_drift_from_validated_v6_source() -> None:
 
     with pytest.raises(
         ArtifactNeedsRebuildError,
-        match="source projection.*需要重建",
+        match="需要重建.*source projection",
     ):
         _publish_source_projection_case(case, drifted)
 
