@@ -728,3 +728,50 @@ def test_shot_clear_rejects_provider_risk_before_stopping_recoverable_job(
     assert conn.execute(
         "SELECT status,cancellation_requested,abandoned FROM jobs WHERE id='j-provider'"
     ).fetchone()[:] == ("waiting_provider", 0, 0)
+
+
+def test_episode_clear_rejects_provider_risk_before_reset_or_pause(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app import api, worker
+
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        api,
+        "_review_upstream_snapshot",
+        lambda _episode_id: {"active_upstream_runs": []},
+    )
+    reset_calls: list[str] = []
+    pause_calls: list[str] = []
+
+    async def record_reset(episode_id: str, *, reason: str) -> dict:
+        reset_calls.append(f"{episode_id}:{reason}")
+        return {}
+
+    monkeypatch.setattr(api, "reset_video_completion_state", record_reset)
+    monkeypatch.setattr(
+        worker,
+        "pause_episode_video_tasks",
+        lambda episode_id: pause_calls.append(episode_id),
+    )
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    with enter_handler(), pytest.raises(HTTPException) as blocked:
+        asyncio.run(api.clear_episode_artifacts("e"))
+
+    assert blocked.value.status_code == 409
+    assert blocked.value.detail["code"] == "PROVIDER_TASKS_NOT_TERMINAL"
+    assert reset_calls == []
+    assert pause_calls == []
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()[0] == "accepted"
