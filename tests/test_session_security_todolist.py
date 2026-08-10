@@ -1,4 +1,5 @@
 """2026-07-27 Todolist T1–T7：鉴权 / 脱敏 / 目录 grant 合同回归。"""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db
+from app import config, db
 from app.capabilities import ensure_catalog_loaded
 from app.capabilities.bus import reset_command_bus_for_tests
 from app.capabilities.dispatch import waiting_approval_payload
@@ -63,15 +64,24 @@ def test_public_health_and_session_need_no_auth(anon: TestClient) -> None:
     assert blocked.status_code == 403
 
 
-def test_keys_and_credentials_require_confirm(authed: SessionTestClient) -> None:
+def test_keys_and_credentials_require_confirm(
+    authed: SessionTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[dict[str, str]] = []
+
+    def save_keys(keys: dict[str, str]) -> list[str]:
+        saved.append(keys)
+        return list(keys)
+
+    monkeypatch.setattr(config, "save_keys_to_env", save_keys)
     denied = authed.put("/api/keys", json={"hiagent": "sk-test"})
     assert denied.status_code == 422
     assert "confirm" in denied.text
-    # confirm 通过后仍可能因空 key 等失败，但不得再因缺确认拒绝
-    okish = authed.put("/api/keys", json={"confirm": True, "hiagent": "sk-test-key"})
-    assert okish.status_code in {200, 422}
-    if okish.status_code == 200:
-        assert okish.json().get("ok") is True
+    accepted = authed.put("/api/keys", json={"confirm": True, "hiagent": "sk-test-key"})
+    assert accepted.status_code == 200
+    assert accepted.json().get("ok") is True
+    assert saved == [{"HIAGENT_API_KEY": "sk-test-key"}]
 
 
 @pytest.mark.parametrize(
@@ -207,9 +217,7 @@ def test_calls_list_omits_request_response_bodies(authed: SessionTestClient) -> 
 
 def test_keys_preview_does_not_expose_prefix(authed: SessionTestClient, monkeypatch) -> None:
     monkeypatch.setenv("HIAGENT_API_KEY", "sk-abcdefghijklmnopqrstuvwxyz")
-    from app import config
 
-    config._reload_keys()
     resp = authed.get("/api/keys")
     assert resp.status_code == 200
     preview = resp.json()["hiagent"]["preview"]

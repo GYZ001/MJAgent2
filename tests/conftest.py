@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.isolation import IsolationSession
+from tests.isolation import (
+    IsolationSession,
+    ProviderConfigurationIsolation,
+    UNROUTABLE_PROVIDER_BASE_URL,
+    isolate_provider_environment,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -14,9 +19,9 @@ if str(ROOT) not in sys.path:
 
 _LIVE_INTEGRATION = False
 _ISOLATION_SESSION: IsolationSession | None = None
+_PROVIDER_ISOLATION: ProviderConfigurationIsolation | None = None
 _SANDBOX: Path | None = None
 _SANDBOX_OWNED = False
-_UNROUTABLE_PROVIDER_BASE_URL = "http://pytest-deny-network.invalid"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -30,7 +35,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    global _LIVE_INTEGRATION, _ISOLATION_SESSION, _SANDBOX, _SANDBOX_OWNED
+    global _LIVE_INTEGRATION, _ISOLATION_SESSION, _PROVIDER_ISOLATION
+    global _SANDBOX, _SANDBOX_OWNED
 
     _LIVE_INTEGRATION = bool(config.getoption("--live-integration"))
     if _LIVE_INTEGRATION:
@@ -49,14 +55,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.option.basetemp = str(_SANDBOX / "pytest-tmp")
 
     os.environ["MANJU_TEST_PROFILE"] = "isolated"
-    os.environ["HIAGENT_API_KEY"] = ""
-    os.environ["OPENROUTER_API_KEY"] = ""
-    os.environ["BAILIAN_API_KEY"] = ""
-    os.environ["DASHSCOPE_API_KEY"] = ""
-    os.environ["DEEPSEEK_API_KEY"] = ""
-    os.environ["ZHIPU_API_KEY"] = ""
-    os.environ["MINIMAX_H3_API_KEY"] = ""
-    os.environ["MINIMAX_H3_BASE_URL"] = _UNROUTABLE_PROVIDER_BASE_URL
+    isolate_provider_environment(os.environ)
 
     # Configure the process before test module collection imports application code.
     from app import config as app_config
@@ -65,13 +64,12 @@ def pytest_configure(config: pytest.Config) -> None:
     app_config.PROJECTS_DIR = _SANDBOX / "projects"
     app_config.DATA_DIR = _SANDBOX / "data"
     app_config.DB_PATH = app_config.DATA_DIR / "manju.db"
-    app_config.HIAGENT_API_KEY = ""
-    app_config.OPENROUTER_API_KEY = ""
-    app_config.BAILIAN_API_KEY = ""
-    app_config.DEEPSEEK_API_KEY = ""
-    app_config.ZHIPU_API_KEY = ""
-    app_config.MINIMAX_H3_API_KEY = ""
-    app_config.MINIMAX_H3_BASE_URL = _UNROUTABLE_PROVIDER_BASE_URL
+    _PROVIDER_ISOLATION = ProviderConfigurationIsolation(
+        settings=app_config,
+        environment=os.environ,
+        blocked_endpoint=UNROUTABLE_PROVIDER_BASE_URL,
+    )
+    _PROVIDER_ISOLATION.apply()
     app_config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     app_config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -134,12 +132,17 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_capability_runtime():
+def _reset_capability_runtime(monkeypatch: pytest.MonkeyPatch):
     """各测试隔离 Command Bus 幂等缓存与审批令牌，避免共用 episode_id 等夹具键串扰。"""
     from app.capabilities.bus import reset_command_bus_for_tests
     from app.capabilities.idempotency import clear_for_tests
     from app.capabilities.policy import reset_approvals_for_tests
     from app import db
+
+    # Keep monkeypatch alive until this fixture has restored direct process mutations.
+    del monkeypatch
+    if _PROVIDER_ISOLATION is not None:
+        _PROVIDER_ISOLATION.apply()
 
     # 幂等清理会打开进程级 DB；若此前被建成空库，先补齐 SCHEMA，避免无 settings 表。
     try:
@@ -154,6 +157,8 @@ def _reset_capability_runtime():
     reset_command_bus_for_tests()
     reset_approvals_for_tests()
     clear_for_tests()
+    if _PROVIDER_ISOLATION is not None:
+        _PROVIDER_ISOLATION.apply()
 
 
 def session_headers() -> dict[str, str]:

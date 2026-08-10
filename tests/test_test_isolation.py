@@ -11,10 +11,22 @@ from pathlib import Path
 import pytest
 
 from app import config, db
-from tests.isolation import IsolationSession, TestIsolationViolation
+from tests.isolation import (
+    IsolationSession,
+    ProviderConfigurationIsolation,
+    TestIsolationViolation,
+    UNROUTABLE_PROVIDER_BASE_URL,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _provider_isolation() -> ProviderConfigurationIsolation:
+    return ProviderConfigurationIsolation(
+        settings=config,
+        environment=os.environ,
+    )
 
 
 def test_pytest_defaults_to_injected_runtime_sandbox() -> None:
@@ -29,64 +41,102 @@ def test_pytest_defaults_to_injected_runtime_sandbox() -> None:
     assert db.DB_PATH != ROOT / "data" / "manju.db"
 
 
+def test_pytest_allows_scoped_provider_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolation = _provider_isolation()
+    credential = isolation.schema.credentials[0]
+    endpoint = isolation.schema.endpoints[0]
+
+    monkeypatch.setenv(credential, "fake-credential")
+    monkeypatch.setattr(config, credential, "fake-credential")
+    monkeypatch.setenv(endpoint, "https://provider.example")
+    monkeypatch.setattr(config, endpoint, "https://provider.example")
+
+    assert os.environ[credential] == getattr(config, credential) == "fake-credential"
+    assert os.environ[endpoint] == getattr(config, endpoint) == "https://provider.example"
+
+
 def test_pytest_injects_provider_isolation_configuration() -> None:
-    assert {
-        "credentials": {
-            "environment": {
-                "HIAGENT_API_KEY": os.environ.get("HIAGENT_API_KEY"),
-                "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY"),
-                "BAILIAN_API_KEY": os.environ.get("BAILIAN_API_KEY"),
-                "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
-                "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY"),
-                "ZHIPU_API_KEY": os.environ.get("ZHIPU_API_KEY"),
-                "MINIMAX_H3_API_KEY": os.environ.get("MINIMAX_H3_API_KEY"),
-            },
-            "runtime": {
-                "HIAGENT_API_KEY": config.HIAGENT_API_KEY,
-                "OPENROUTER_API_KEY": config.OPENROUTER_API_KEY,
-                "BAILIAN_API_KEY": config.BAILIAN_API_KEY,
-                "DEEPSEEK_API_KEY": config.DEEPSEEK_API_KEY,
-                "ZHIPU_API_KEY": config.ZHIPU_API_KEY,
-                "MINIMAX_H3_API_KEY": config.MINIMAX_H3_API_KEY,
-            },
-        },
-        "endpoints": {
-            "environment": {
-                "MINIMAX_H3_BASE_URL": os.environ.get("MINIMAX_H3_BASE_URL"),
-            },
-            "runtime": {
-                "MINIMAX_H3_BASE_URL": config.MINIMAX_H3_BASE_URL,
-            },
-        },
-    } == {
-        "credentials": {
-            "environment": {
-                "HIAGENT_API_KEY": "",
-                "OPENROUTER_API_KEY": "",
-                "BAILIAN_API_KEY": "",
-                "DASHSCOPE_API_KEY": "",
-                "DEEPSEEK_API_KEY": "",
-                "ZHIPU_API_KEY": "",
-                "MINIMAX_H3_API_KEY": "",
-            },
-            "runtime": {
-                "HIAGENT_API_KEY": "",
-                "OPENROUTER_API_KEY": "",
-                "BAILIAN_API_KEY": "",
-                "DEEPSEEK_API_KEY": "",
-                "ZHIPU_API_KEY": "",
-                "MINIMAX_H3_API_KEY": "",
-            },
-        },
-        "endpoints": {
-            "environment": {
-                "MINIMAX_H3_BASE_URL": "http://pytest-deny-network.invalid",
-            },
-            "runtime": {
-                "MINIMAX_H3_BASE_URL": "http://pytest-deny-network.invalid",
-            },
-        },
-    }
+    state = _provider_isolation().state()
+
+    assert state["credentials"]["environment"]
+    assert state["credentials"]["runtime"]
+    assert state["endpoints"]["environment"]
+    assert state["endpoints"]["runtime"]
+    for values in state["credentials"].values():
+        assert set(values.values()) == {""}
+    for values in state["endpoints"].values():
+        assert set(values.values()) == {UNROUTABLE_PROVIDER_BASE_URL}
+
+
+def test_pytest_restores_direct_provider_mutations_between_tests(
+    tmp_path: Path,
+) -> None:
+    child_sandbox = tmp_path / "provider-boundary"
+    child_sandbox.mkdir()
+    probe = tmp_path / "test_provider_boundary_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import os
+
+            from app import config
+            from tests.isolation import ProviderConfigurationIsolation
+
+
+            def provider_isolation():
+                return ProviderConfigurationIsolation(
+                    settings=config,
+                    environment=os.environ,
+                )
+
+
+            def test_direct_provider_mutation_is_visible_to_its_owner():
+                isolation = provider_isolation()
+                credential = isolation.schema.credentials[0]
+                endpoint = isolation.schema.endpoints[0]
+                os.environ[credential] = "direct-fake"
+                setattr(config, credential, "direct-fake")
+                os.environ[endpoint] = "https://provider.example"
+                setattr(config, endpoint, "https://provider.example")
+                os.environ["FUTURE_PROVIDER_API_KEY"] = "future-fake"
+                assert getattr(config, credential) == "direct-fake"
+
+
+            def test_next_test_starts_fail_closed():
+                state = provider_isolation().state()
+                for values in state["credentials"].values():
+                    assert set(values.values()) == {""}
+                for values in state["endpoints"].values():
+                    assert set(values.values()) == {
+                        "http://pytest-deny-network.invalid"
+                    }
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["MANJU_TEST_SANDBOX"] = str(child_sandbox)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "tests.conftest",
+            str(probe),
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
 
 
 def test_isolated_profile_requires_an_explicit_sandbox() -> None:
