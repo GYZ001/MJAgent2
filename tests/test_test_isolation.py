@@ -36,7 +36,8 @@ def test_pytest_defaults_to_injected_runtime_sandbox() -> None:
     assert config.RUNTIME_ROOT == sandbox
     assert config.DATA_DIR == sandbox / "data"
     assert config.PROJECTS_DIR == sandbox / "projects"
-    assert config.DB_PATH == sandbox / "data" / "manju.db"
+    assert config.DB_PATH.name == "manju.db"
+    assert config.DB_PATH.is_relative_to(sandbox / "pytest-tmp")
     assert db.DB_PATH == config.DB_PATH
     assert db.DB_PATH != ROOT / "data" / "manju.db"
 
@@ -105,7 +106,8 @@ def test_pytest_restores_runtime_state_between_disruptive_tests(
                 assert config.RUNTIME_ROOT == sandbox
                 assert config.PROJECTS_DIR == sandbox / "projects"
                 assert config.DATA_DIR == sandbox / "data"
-                assert config.DB_PATH == sandbox / "data" / "manju.db"
+                assert config.DB_PATH.name == "manju.db"
+                assert config.DB_PATH.is_relative_to(sandbox / "pytest-tmp")
                 assert db.DATA_DIR == config.DATA_DIR
                 assert db.DB_PATH == config.DB_PATH
 
