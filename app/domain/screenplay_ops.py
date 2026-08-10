@@ -215,6 +215,54 @@ def _screenplay_cast_impact(conn, ep: dict, source_text: str) -> dict:
     }
 
 
+def _authoritative_stale_screenplay_error(ep):
+    """Return a typed rebuild error only for the bound published Artifact."""
+    from pydantic import ValidationError
+
+    from app.errors import ArtifactNeedsRebuildError
+    from app.production.patch import screenplay_from_artifact_record
+
+    data = dict(ep)
+    artifact_id = str(data.get("published_screenplay_artifact_id") or "")
+    if (
+        not artifact_id
+        or artifact_id != str(data.get("screenplay_artifact_id") or "")
+    ):
+        return None
+    artifact = evidence_repository.get_artifact(artifact_id)
+    if (
+        artifact is None
+        or artifact.get("type") != "screenplay_document"
+        or artifact.get("scope_type") != "episode"
+        or artifact.get("scope_id") != str(data.get("id") or "")
+        or artifact.get("status") != "stale"
+    ):
+        return None
+    try:
+        screenplay_from_artifact_record(artifact)
+    except ArtifactNeedsRebuildError as exc:
+        if (
+            exc.code == "ARTIFACT_NEEDS_REBUILD"
+            and exc.artifact_id == artifact_id
+            and exc.artifact_type == "screenplay_document"
+        ):
+            return exc
+    except ValidationError:
+        return None
+    return None
+
+
+def _screenplay_rebuild_state(snapshot: dict, exc) -> dict:
+    """Project a typed stale error without discarding runtime resume state."""
+    return {
+        **snapshot,
+        "code": exc.code,
+        "message": str(exc),
+        "artifact_id": exc.artifact_id,
+        "recommended_action": "resume_screenplay",
+    }
+
+
 def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None = None) -> dict:
     production = production or {}
     screenplay_active = bool(production.get("task_active"))
@@ -289,6 +337,7 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
         "code": code,
         "message": message,
         "recommended_action": action,
+        "can_resume": can_resume,
         "screenplay_status": screenplay_status,
         "storyboard_status": ep["status"],
         "screenplay_run_id": ep.get("active_screenplay_run_id"),

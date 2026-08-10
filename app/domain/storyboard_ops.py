@@ -4349,7 +4349,14 @@ def episode_detail(episode_id: str, view: str | None = None):
     ep = dict(_episode_or_404(episode_id))
     conn = get_conn()
     ep["source_chapters"] = json.loads(ep["source_chapters"] or "[]")
-    script = _load_screenplay(ep) if full or view in ("script", "board") else None
+    screenplay_rebuild_error = None
+    try:
+        script = _load_screenplay(ep) if full or view in ("script", "board") else None
+    except errors.ArtifactNeedsRebuildError as exc:
+        if view != "script":
+            raise
+        screenplay_rebuild_error = exc
+        script = None
     ep["screenplay"] = script.model_dump() if script and (full or view in ("script", "board")) else None
     narrative_workspace = view in ("script", "board")
     ep["narrative_contract_summary"] = (
@@ -4377,6 +4384,7 @@ def episode_detail(episode_id: str, view: str | None = None):
             ]
     if full or view == "script":
         from app.domain.screenplay_ops import (
+            _screenplay_rebuild_state,
             _screenplay_status_snapshot,
         )
     ep.pop("screenplay_required_dialogues", None)
@@ -4390,6 +4398,11 @@ def episode_detail(episode_id: str, view: str | None = None):
         artifact.pop("content_json", None)
         artifact.pop("content", None)
         artifact["evaluations"] = evidence_repository.get_evaluations(artifact_id)
+        if (
+            screenplay_rebuild_error is not None
+            and artifact.get("id") == screenplay_rebuild_error.artifact_id
+        ):
+            artifact["stale_code"] = screenplay_rebuild_error.code
     ep["screenplay_evidence"] = artifact
     if full or view == "script":
         from app.production.revision import screenplay_production_state
@@ -4479,6 +4492,11 @@ def episode_detail(episode_id: str, view: str | None = None):
         ep["screenplay_state"] = _screenplay_status_snapshot(
             ep, shot_count=shot_count, production=ep.get("screenplay_production")
         )
+        if screenplay_rebuild_error is not None:
+            ep["screenplay_state"] = _screenplay_rebuild_state(
+                ep["screenplay_state"],
+                screenplay_rebuild_error,
+            )
     else:
         ep["screenplay_state"] = None
     if view in ("script", "cinema"):

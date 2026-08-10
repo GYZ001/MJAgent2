@@ -15,7 +15,9 @@ from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.main import app
+from app.schemas import AtomicAction
 from tests.conftest import SessionTestClient
+from tests.test_narrative_continuity import _screenplay
 from tests.test_screenplay_edit_save import _seed_episode, _valid_script
 
 
@@ -774,7 +776,7 @@ def _bind_stale_screenplay_artifact(
                content_hash,stale_reason,created_at
            ) VALUES(
                'art-stale-screenplay','screenplay_document','episode','e1',1,
-               'stale','T2',?,?,?,?,1
+               'stale','T2',?,?,?,1
            )""",
         (
             json.dumps(artifact_content, ensure_ascii=False),
@@ -795,9 +797,18 @@ def _bind_stale_screenplay_artifact(
 
 
 def _legacy_screenplay_payload() -> dict:
-    payload = _valid_script().model_dump(mode="json")
+    screenplay = _screenplay()
+    screenplay.narrative_plan.atomic_actions = [AtomicAction(
+        action_id="A-legacy",
+        actor_ids=["character-1"],
+        target_ids=["entity-1"],
+        semantic_intent="Change the observable state.",
+        completion_condition="The changed state is visible.",
+    )]
+    payload = screenplay.model_dump(mode="json")
     for action in payload["narrative_plan"]["atomic_actions"]:
         action.pop("participant_deliveries")
+        action.pop("semantic_intent")
     return payload
 
 
@@ -822,6 +833,7 @@ def test_script_detail_projects_authoritative_stale_screenplay_as_rebuild_state(
     assert detail["screenplay_state"]["code"] == "ARTIFACT_NEEDS_REBUILD"
     assert detail["screenplay_state"]["artifact_id"] == "art-stale-screenplay"
     assert detail["screenplay_state"]["recommended_action"] == "resume_screenplay"
+    assert detail["screenplay_state"]["can_resume"] is False
 
 
 def test_script_detail_keeps_valid_screenplay_projection() -> None:
@@ -830,14 +842,14 @@ def test_script_detail_keeps_valid_screenplay_projection() -> None:
     detail = api.episode_detail("e1", view="script")
 
     assert detail["screenplay"]["title"] == _valid_script().title
-    assert detail["screenplay_state"]["code"] == "ready_storyboard_empty"
+    assert detail["screenplay_state"]["code"] == "qa_certificate_invalid"
 
 
 def test_script_detail_does_not_classify_unknown_validation_from_stale_reason() -> None:
     _seed_episode(with_artifact=False)
     _bind_stale_screenplay_artifact(
         _legacy_screenplay_payload(),
-        _valid_script().model_dump(mode="json"),
+        _screenplay().model_dump(mode="json"),
         stale_reason="[ARTIFACT_NEEDS_REBUILD] untrusted free text",
     )
 

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from pydantic import ValidationError
 
 from app import config, errors, task_registry, worker
 from app.compiler import clip_duration_value, compile_prompt, shot_cost_cny
@@ -200,7 +201,17 @@ def _episode_source_text(conn, ep) -> str:
 def _load_screenplay(ep) -> EpisodeScreenplay | None:
     if not ep["screenplay_json"]:
         return None
-    return EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+    try:
+        return EpisodeScreenplay.model_validate(json.loads(ep["screenplay_json"]))
+    except ValidationError:
+        from app.domain.screenplay_ops import (
+            _authoritative_stale_screenplay_error,
+        )
+
+        rebuild_error = _authoritative_stale_screenplay_error(ep)
+        if rebuild_error is None:
+            raise
+        raise rebuild_error
 
 
 LEGACY_SCREENPLAY_PURGED_ERROR = "旧版拍卡剧本已下线，请重新生成完整剧本。"
