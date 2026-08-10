@@ -2277,6 +2277,14 @@ async def generate_screenplay_scene_shards(
         plan: ScreenplaySceneShardPlan,
     ) -> tuple[ScreenplaySceneShardIR, str]:
         _assert_episode_owner(episode_id)
+        plan_scene_input_contracts = scene_input_contracts.get(
+            plan.shard_id, []
+        )
+        identity_scaffold_hash = (
+            screenplay_scene_identity_scaffold_hash(
+                plan_scene_input_contracts
+            )
+        )
         cached = _latest_validated_artifact(
             episode_id=episode_id,
             artifact_type="screenplay_scene_shard",
@@ -2287,7 +2295,11 @@ async def generate_screenplay_scene_shards(
                     "blueprint_hash", "identity_registry_hash",
                     "source_ownership_hash",
                 )
-            ) and content.get("contract_version") == SCREENPLAY_SCENE_SHARD_VERSION,
+            )
+            and content.get("identity_scaffold_hash")
+            == identity_scaffold_hash
+            and content.get("contract_version")
+            == SCREENPLAY_SCENE_SHARD_VERSION,
         )
         if cached:
             try:
@@ -2295,22 +2307,11 @@ async def generate_screenplay_scene_shards(
             except ValidationError:
                 shard = None
             if shard is not None:
-                normalize_screenplay_scene_shard(
-                    shard,
-                    episode_no=int(episode["episode_no"]),
-                    plan=plan,
-                    scene_plans=scene_plan_map,
-                    scene_input_contracts=scene_input_contracts.get(
-                        plan.shard_id, []
-                    ),
-                )
                 errors = validate_screenplay_scene_shard(
                     shard,
                     plan=plan,
                     scene_plans=scene_plan_map,
-                    scene_input_contracts=scene_input_contracts.get(
-                        plan.shard_id, []
-                    ),
+                    scene_input_contracts=plan_scene_input_contracts,
                     identity_keys=identity_keys,
                     front_matter_ids=front_matter_ids,
                 )
@@ -2319,6 +2320,7 @@ async def generate_screenplay_scene_shards(
                         "status": "validated",
                         "attempt": 0,
                         "normalized_artifact_id": str(cached["id"]),
+                        "identity_scaffold_hash": identity_scaffold_hash,
                         "reused": True,
                     })
                     emit_progress()
@@ -2328,9 +2330,6 @@ async def generate_screenplay_scene_shards(
             node_key for scene_plan in selected_scene_plans
             for node_key in scene_plan.node_keys
         }
-        plan_scene_input_contracts = scene_input_contracts.get(
-            plan.shard_id, []
-        )
         repair_contracts: list[dict[str, Any]] = []
         for contract in plan_scene_input_contracts:
             payload = contract.model_dump(mode="json")
@@ -2359,28 +2358,32 @@ async def generate_screenplay_scene_shards(
             f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
             f"{episode_id}:{plan.shard_id}:{plan.source_hash}:"
             f"{plan.boundary_hash}:{plan.blueprint_hash}:"
-            f"{plan.identity_registry_hash}:{plan.source_ownership_hash}"
+            f"{plan.identity_registry_hash}:{plan.source_ownership_hash}:"
+            f"{identity_scaffold_hash}"
         )
 
         def normalize_payload(value: dict[str, Any]) -> dict[str, Any]:
-            return normalize_screenplay_scene_shard_payload(
+            return normalize_screenplay_scene_creative_payload(
                 value,
-                episode_no=int(episode["episode_no"]),
-                plan=plan,
                 scene_plans=scene_plan_map,
                 blueprint=blueprint,
             )
 
-        def validate_shard(value: ScreenplaySceneShardIR) -> list[str]:
-            normalize_screenplay_scene_shard(
-                value,
-                episode_no=int(episode["episode_no"]),
-                plan=plan,
-                scene_plans=scene_plan_map,
-                scene_input_contracts=plan_scene_input_contracts,
-            )
+        def validate_draft(
+            value: ScreenplaySceneShardCreativeIR,
+        ) -> list[str]:
+            try:
+                compiled = compile_screenplay_scene_shard_draft(
+                    value,
+                    episode_no=int(episode["episode_no"]),
+                    plan=plan,
+                    scene_plans=scene_plan_map,
+                    scene_input_contracts=plan_scene_input_contracts,
+                )
+            except ScreenplaySceneShardError as exc:
+                return list(exc.errors)
             return validate_screenplay_scene_shard(
-                value,
+                compiled,
                 plan=plan,
                 scene_plans=scene_plan_map,
                 scene_input_contracts=plan_scene_input_contracts,
@@ -2389,12 +2392,10 @@ async def generate_screenplay_scene_shards(
             )
 
         def repair_schema(
-            value: ScreenplaySceneShardIR,
+            value: ScreenplaySceneShardCreativeIR,
         ) -> dict[str, Any]:
-            return build_screenplay_scene_shard_repair_schema(
-                value,
-                scene_input_contracts=plan_scene_input_contracts,
-            )
+            del value
+            return output_schema
 
         attempts: list[dict[str, Any]] = []
         recovered = _recover_scene_shard_from_provider_calls(
@@ -2417,10 +2418,10 @@ async def generate_screenplay_scene_shards(
                 })
                 emit_progress()
                 budget_meta = _screenplay_scene_shard_budget_meta(plan)
-                shard = await model_gateway.chat_structured(
+                draft = await model_gateway.chat_structured(
                     [{"role": "user", "content": prompt}],
-                    model_type=ScreenplaySceneShardIR,
-                    validate=validate_shard,
+                    model_type=ScreenplaySceneShardCreativeIR,
+                    validate=validate_draft,
                     operation_id=operation_id,
                     max_tokens=screenplay_scene_shard_token_budget(plan),
                     temperature=0.4,
@@ -2439,25 +2440,21 @@ async def generate_screenplay_scene_shards(
                         "episode_id": episode_id,
                         "source_count": len(plan.source_segment_ids),
                         "scene_count": len(plan.scene_plan_keys),
+                        "identity_scaffold_hash": identity_scaffold_hash,
                         "input_chars": len(prompt),
                         **budget_meta,
                     },
                     repair_context=json.dumps({
                         "root_contract": {
-                            "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
-                            "episode_no": int(episode["episode_no"]),
-                            "shard_id": plan.shard_id,
-                            "scene_plan_keys": list(plan.scene_plan_keys),
+                            "contract_version": (
+                                SCREENPLAY_SCENE_CREATIVE_VERSION
+                            ),
                             "required_root_fields": [
-                                "contract_version", "episode_no", "shard_id",
-                                "scene_plan_keys", "scenes",
-                                "consumed_source_ids",
-                                "unresolved_participants", "source_hash",
-                                "boundary_hash", "blueprint_hash",
-                                "identity_registry_hash",
-                                "source_ownership_hash",
+                                "contract_version", "scenes",
                             ],
-                            "root_must_not_be": "single_scene_or_unit",
+                            "identity_fields_owned_by": (
+                                "deterministic_unit_scaffold"
+                            ),
                         },
                         "scene_input_contracts": repair_contracts,
                         "action_participant_delivery_contract": (
@@ -2470,16 +2467,22 @@ async def generate_screenplay_scene_shards(
                             "each unit source_segment_ids must match that owner",
                             "cross-scene context must use derived_relations without consuming source again",
                             "all non-title scene-owned SRC must be consumed",
-                            "all identity relations must use the current scene participant_bindings",
-                            "every offscreen actor/target/speaker must have structured participant_deliveries evidence",
+                            "identity relations are forbidden in model output",
+                            "identity scaffold is compiled from action evidence",
                             "dialogue text must equal exact source_text",
-                            "unresolved placeholders are forbidden in relation fields",
                         ],
                     }, ensure_ascii=False, separators=(",", ":")),
                     output_schema=output_schema,
                     repair_schema=repair_schema,
                     normalize_payload=normalize_payload,
                     on_attempt=attempts.append,
+                )
+                shard = compile_screenplay_scene_shard_draft(
+                    draft,
+                    episode_no=int(episode["episode_no"]),
+                    plan=plan,
+                    scene_plans=scene_plan_map,
+                    scene_input_contracts=plan_scene_input_contracts,
                 )
         _assert_episode_owner(episode_id)
         trace = current_trace()
@@ -2495,9 +2498,8 @@ async def generate_screenplay_scene_shards(
                 trust_level="T0",
                 content={
                     "shard_id": plan.shard_id,
-                    "operation_id": (
-                        f"screenplay.scene-shard:{plan.source_hash}:{plan.boundary_hash}"
-                    ),
+                    "operation_id": operation_id,
+                    "identity_scaffold_hash": identity_scaffold_hash,
                     "attempts": attempts,
                 },
                 parent_artifact_ids=parents,
@@ -2519,6 +2521,7 @@ async def generate_screenplay_scene_shards(
                     "shard_id": plan.shard_id,
                     "scene_count": len(shard.scenes),
                     "unit_count": sum(len(scene.units) for scene in shard.scenes),
+                    "identity_scaffold_hash": identity_scaffold_hash,
                 },
             ),
             step_run_id=trace.step_run_id,
@@ -2527,6 +2530,7 @@ async def generate_screenplay_scene_shards(
             "status": "validated",
             "raw_artifact_id": raw_artifact["id"],
             "normalized_artifact_id": artifact["id"],
+            "identity_scaffold_hash": identity_scaffold_hash,
             "reused": False,
         })
         emit_progress()

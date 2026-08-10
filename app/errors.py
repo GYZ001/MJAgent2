@@ -28,6 +28,11 @@ CATEGORIES: dict[str, dict[str, Any]] = {
                    "hint": "大模型/外部服务调用失败，可稍后重试；若持续失败请把错误码反馈给技术人员。"},
     "generation": {"label": "内容生成", "technical": True,
                    "hint": "内容生成未通过格式或业务校验，可点击重试；若持续失败，请先按错误码检查具体原因，再决定是否调整「修复重试上限」。"},
+    "generation_contract": {
+        "label": "生成合同",
+        "technical": True,
+        "hint": "模型输出未通过确定性生成合同，请按错误码检查合同证据后重试。",
+    },
     "media":      {"label": "媒体处理", "technical": True,
                    "hint": "媒体处理失败（转码/文件读写等），请把错误码反馈给技术人员。"},
     "system":     {"label": "系统内部", "technical": True,
@@ -100,6 +105,8 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         return "quality_gate", "QA"
     if name == "ProviderError":
         return "provider", "LLM"
+    if name == "ScreenplaySceneShardError":
+        return "generation_contract", "GEN-CONTRACT"
     if name == "StageError" and "JSON 解析失败" in _extract_message(exc):
         return "generation", "JSON"
     if name in {
