@@ -296,9 +296,14 @@ def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
     shard.source_hash = "invented-source"
     shard.consumed_source_ids = ["SRC_TITLE", *shard.consumed_source_ids]
     shard.scenes[0].character_keys = ["旁白"]
-    shard.scenes[0].units[0].actor_keys = ["旁白"]
-    shard.scenes[0].units[0].target_keys = ["门板"]
-    shard.scenes[0].units[0].onscreen_entity_keys = ["旁白"]
+    unit = shard.scenes[0].units[0]
+    unit.kind = "dialogue"
+    unit.text = "说明性对白摘要"
+    unit.source_text = "原文实际口播"
+    unit.speaker_key = "旁白"
+    unit.actor_keys = ["旁白"]
+    unit.target_keys = ["门板"]
+    unit.onscreen_entity_keys = ["旁白"]
 
     normalized = normalize_screenplay_scene_shard(
         shard,
@@ -321,6 +326,7 @@ def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
     assert normalized.scenes[0].units[0].actor_keys == ["narrator"]
     assert normalized.scenes[0].units[0].target_keys == []
     assert normalized.scenes[0].units[0].onscreen_entity_keys == ["narrator"]
+    assert normalized.scenes[0].units[0].text == "原文实际口播"
     assert "SRC_TITLE" not in normalized.consumed_source_ids
     assert validate_screenplay_scene_shard(
         normalized,

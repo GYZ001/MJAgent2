@@ -933,6 +933,110 @@ def _source_evidence_span(
     return raw_start, raw_end, chapter[raw_start:raw_end]
 
 
+def _normalize_dialogue_lines_to_source(
+    script: EpisodeScreenplay,
+    source_text: str,
+) -> list[dict[str, Any]]:
+    """Use exact source utterances as spoken text and split only for capacity."""
+    if not source_text or not script.dialogue_chains:
+        return []
+    from app.screenplay_ir import _split_spoken_line
+    from app.validators import source_dialogue_fragments
+
+    source_dialogues = source_dialogue_fragments(source_text)
+    changes: list[dict[str, Any]] = []
+    for chain in script.dialogue_chains:
+        turns = list(chain.turns or [])
+        normalized_turns = []
+        index = 0
+        while index < len(turns):
+            turn = turns[index]
+            citation = str(turn.source_text or "").strip()
+            speaker = str(turn.speaker or "").strip()
+            group = [turn]
+            cursor = index + 1
+            while (
+                citation
+                and cursor < len(turns)
+                and str(turns[cursor].speaker or "").strip() == speaker
+                and textmatch.condense(turns[cursor].source_text)
+                == textmatch.condense(citation)
+            ):
+                group.append(turns[cursor])
+                cursor += 1
+
+            compact_citation = textmatch.condense(citation)
+            containing = [
+                candidate
+                for candidate in source_dialogues
+                if compact_citation
+                and compact_citation in textmatch.condense(candidate)
+            ]
+            evidence = (
+                containing[0]
+                if len(containing) == 1
+                else citation if citation in source_text else ""
+            )
+            spoken_parts = (
+                _split_spoken_line(
+                    evidence,
+                    max_chars=config.MAX_SPOKEN_CHARS_PER_SHOT,
+                )
+                if evidence
+                else []
+            )
+            if not spoken_parts:
+                normalized_turns.extend(group)
+                index = cursor
+                continue
+
+            current_parts = [str(item.line or "").strip() for item in group]
+            current_evidence = [
+                str(item.source_text or "").strip() for item in group
+            ]
+            if (
+                current_parts == spoken_parts
+                and all(value == evidence for value in current_evidence)
+            ):
+                normalized_turns.extend(group)
+                index = cursor
+                continue
+
+            replacements = []
+            for part_index, part in enumerate(spoken_parts):
+                replacement = group[0].model_copy(deep=True)
+                replacement.line = part
+                replacement.source_text = evidence
+                if part_index:
+                    replacement.function = "statement"
+                replacements.append(replacement)
+            normalized_turns.extend(replacements)
+
+            old_block = "\n".join(
+                f"{speaker}：{line}" for line in current_parts
+            )
+            new_block = "\n".join(
+                f"{speaker}：{line}" for line in spoken_parts
+            )
+            if old_block and old_block in (script.full_script_text or ""):
+                script.full_script_text = script.full_script_text.replace(
+                    old_block,
+                    new_block,
+                    1,
+                )
+            changes.append({
+                "kind": "dialogue_source_authority",
+                "id": chain.chain_id,
+                "turn_index": index,
+                "from_lines": current_parts,
+                "to_lines": spoken_parts,
+                "source_text": evidence,
+            })
+            index = cursor
+        chain.turns = normalized_turns
+    return changes
+
+
 def _normalize_screenplay_narrative_graph(
     script: EpisodeScreenplay,
     *,
@@ -1001,9 +1105,14 @@ def _normalize_screenplay_narrative_graph(
         for chapter_id, text in raw_chapters.items()
         if str(chapter_id).strip() and str(text)
     }
+    dialogue_source = "\n".join(dict.fromkeys(chapters.values()))
+    changes.extend(_normalize_dialogue_lines_to_source(
+        script,
+        dialogue_source,
+    ))
     changes.extend(_normalize_dialogue_chain_continuity(
         script,
-        "\n".join(dict.fromkeys(chapters.values())),
+        dialogue_source,
     ))
     source_contexts: dict[str, list[str]] = {}
     for proposition in data.get("propositions") or []:

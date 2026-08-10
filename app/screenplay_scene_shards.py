@@ -464,6 +464,8 @@ def normalize_screenplay_scene_shard(
         )
         scene.character_keys = normalize_refs(scene.character_keys)
         for unit in scene.units:
+            if unit.kind == "dialogue" and unit.source_text.strip():
+                unit.text = unit.source_text.strip()
             unit.actor_keys = normalize_refs(unit.actor_keys)
             unit.onscreen_entity_keys = normalize_refs(
                 unit.onscreen_entity_keys
@@ -1046,6 +1048,14 @@ async def generate_screenplay_scene_shards(
             except ValidationError:
                 shard = None
             if shard is not None:
+                normalize_screenplay_scene_shard(
+                    shard,
+                    episode_no=int(episode["episode_no"]),
+                    plan=plan,
+                    scene_plans=scene_plan_map,
+                    identity_registry=identity_registry,
+                    identity_keys=identity_keys,
+                )
                 errors = validate_screenplay_scene_shard(
                     shard,
                     plan=plan,

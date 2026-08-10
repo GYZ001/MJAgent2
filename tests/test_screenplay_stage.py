@@ -2,6 +2,7 @@ import asyncio
 
 from app import stages
 from app.harness.types import Issue
+from app.production.screenplay_repair import _normalize_dialogue_lines_to_source
 from app.schemas import (Bible, Character, EpisodeScreenplay, InformationItem,
                          KeyDialogueChain, KeyDialogueTurn, PlotSpine,
                          PlotSpineBeat, ScriptScene, StoryEvent,
@@ -832,6 +833,27 @@ def test_source_dialogue_inventory_keeps_first_utterance_in_order() -> None:
     assert source_dialogue_fragments(source) == [
         "斗之力，三段！", "只有三段？", "结果无误。",
     ]
+
+
+def test_dialogue_normalization_restores_exact_source_utterance() -> None:
+    script, source = _screenplay_with_source_dialogue_chain()
+    turn = script.dialogue_chains[0].turns[0]
+    old_line = "测验员宣布谷言只有三段斗之力"
+    script.full_script_text = script.full_script_text.replace(
+        f"测验员：{turn.line}",
+        f"测验员：{old_line}",
+    )
+    turn.line = old_line
+    turn.source_text = "斗之力"
+
+    changes = _normalize_dialogue_lines_to_source(script, source)
+
+    assert changes
+    normalized_turn = script.dialogue_chains[0].turns[0]
+    assert normalized_turn.line == "斗之力，三段！"
+    assert normalized_turn.source_text == "斗之力，三段！"
+    assert "测验员：斗之力，三段！" in script.full_script_text
+    assert old_line not in script.full_script_text
 
 
 def test_dialogue_chain_is_authoritative_and_allows_functional_trigger() -> None:
