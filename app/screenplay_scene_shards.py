@@ -33,10 +33,12 @@ from app.observability.tracing import current_trace
 from app.renderability import SCENE_STORY_FUNCTION_MIN_CHARS
 from app.schemas import Bible
 from app.screenplay_ir import (
+    IRActionParticipantDelivery,
     IRExperience,
     IRIdentity,
     IRMetadata,
     IRScene,
+    IRSceneUnit,
     ScreenplayGenerationIR,
     IR_VERSION,
 )
@@ -46,8 +48,13 @@ from app.source_excerpt import index_source_segments, structural_front_matter_id
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
 SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v4"
 SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v2"
-SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v3"
+SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v4"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v3"
+SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
+SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
+SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
+SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS = 128
+SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT = 20
 
 
 def _hash(value: Any) -> str:
@@ -142,8 +149,19 @@ class ScreenplaySceneParticipantBinding(BaseModel):
     identity_key: str
 
 
+class ScreenplayActionParticipantDeliveryContract(BaseModel):
+    contract_version: Literal["screenplay-generation-ir.v2"] = IR_VERSION
+    evidence_schema: dict[str, Any] = Field(
+        default_factory=IRActionParticipantDelivery.model_json_schema,
+    )
+    unit_field_required: Literal[True] = True
+    offscreen_relation_requires_evidence: Literal[True] = True
+    observable_claim_required: Literal[True] = True
+    perceivable_channel_required: Literal[True] = True
+
+
 class ScreenplaySceneInputContract(BaseModel):
-    contract_version: Literal["screenplay-scene-input.v3"] = (
+    contract_version: Literal["screenplay-scene-input.v4"] = (
         SCREENPLAY_SCENE_INPUT_VERSION
     )
     scene_plan_key: str
@@ -154,6 +172,9 @@ class ScreenplaySceneInputContract(BaseModel):
     source_scene_owners: dict[str, str]
     derived_relations: list[BlueprintSceneDerivation] = Field(
         default_factory=list,
+    )
+    action_participant_delivery_contract: (
+        ScreenplayActionParticipantDeliveryContract
     )
     source_ownership_hash: str
 
@@ -166,12 +187,20 @@ class UnresolvedParticipant(BaseModel):
     reason: str = ""
 
 
+class ScreenplaySceneShardUnit(IRSceneUnit):
+    participant_deliveries: list[IRActionParticipantDelivery]
+
+
+class ScreenplaySceneShardScene(IRScene):
+    units: list[ScreenplaySceneShardUnit] = Field(default_factory=list)
+
+
 class ScreenplaySceneShardIR(BaseModel):
     contract_version: Literal["screenplay-scene-shard.v4"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
-    scenes: list[IRScene]
+    scenes: list[ScreenplaySceneShardScene]
     consumed_source_ids: list[str] = Field(default_factory=list)
     unresolved_participants: list[UnresolvedParticipant] = Field(default_factory=list)
     source_hash: str = ""
@@ -348,6 +377,71 @@ def _scene_estimate(
     return units, output_chars
 
 
+def _screenplay_scene_shard_required_tokens(
+    *,
+    estimated_output_chars: int,
+    estimated_units: int,
+    scene_count: int,
+) -> int:
+    content_tokens = math.ceil(max(1, estimated_output_chars) / 1.5)
+    structural_reserve = (
+        max(1, scene_count) * SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS
+        + max(1, estimated_units) * SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS
+    )
+    subtotal = content_tokens + structural_reserve
+    return math.ceil(
+        subtotal
+        * (100 + SCREENPLAY_SCENE_SHARD_REASONING_RESERVE_PERCENT)
+        / 100
+    )
+
+
+def screenplay_scene_shard_token_budget(
+    plan: ScreenplaySceneShardPlan,
+) -> int:
+    """Return a bounded output budget derived from the shard structure."""
+    required = _screenplay_scene_shard_required_tokens(
+        estimated_output_chars=plan.estimated_output_chars,
+        estimated_units=plan.estimated_units,
+        scene_count=len(plan.scene_plan_keys),
+    )
+    return max(
+        SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS,
+        min(SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS, required),
+    )
+
+
+def _screenplay_scene_shard_budget_meta(
+    plan: ScreenplaySceneShardPlan,
+) -> dict[str, int | bool]:
+    content_tokens = math.ceil(plan.estimated_output_chars / 1.5)
+    structural_reserve = (
+        len(plan.scene_plan_keys)
+        * SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS
+        + plan.estimated_units
+        * SCREENPLAY_SCENE_SHARD_UNIT_RESERVE_TOKENS
+    )
+    required = _screenplay_scene_shard_required_tokens(
+        estimated_output_chars=plan.estimated_output_chars,
+        estimated_units=plan.estimated_units,
+        scene_count=len(plan.scene_plan_keys),
+    )
+    return {
+        "estimated_output_chars": plan.estimated_output_chars,
+        "estimated_units": plan.estimated_units,
+        "estimated_content_tokens": content_tokens,
+        "structural_reserve_tokens": structural_reserve,
+        "reasoning_reserve_tokens": (
+            required - content_tokens - structural_reserve
+        ),
+        "required_output_tokens": required,
+        "output_budget_tokens": screenplay_scene_shard_token_budget(plan),
+        "output_budget_limited": (
+            required > SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS
+        ),
+    }
+
+
 def build_screenplay_scene_shard_plans(
     blueprint: NarrativeBlueprint,
     *,
@@ -378,9 +472,16 @@ def build_screenplay_scene_shard_plans(
     current_domain = ""
     for plan in blueprint.scene_plans:
         units, output_chars = _scene_estimate(plan, source_by_id)
+        candidate_required_tokens = _screenplay_scene_shard_required_tokens(
+            estimated_output_chars=current_chars + output_chars,
+            estimated_units=current_units + units,
+            scene_count=len(current) + 1,
+        )
         would_overflow = bool(current) and (
             current_units + units > max_units
             or current_chars + output_chars > max_output_chars
+            or candidate_required_tokens
+            > SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS
         )
         # A temporal-domain change is a natural retry boundary.  Never combine
         # a later domain back into an earlier shard.
@@ -542,6 +643,9 @@ def build_screenplay_scene_input_contracts(
                 for relation in plan.derived_relations
                 if relation.target_scene_plan_key == scene_plan.key
             ],
+            action_participant_delivery_contract=(
+                ScreenplayActionParticipantDeliveryContract()
+            ),
             source_ownership_hash=plan.source_ownership_hash,
         ))
     if errors:
@@ -709,6 +813,17 @@ def _validate_scene_input_contracts(
         if actual_relations != expected_relations:
             errors.append(
                 f"{scene_key} 跨场派生关系与 shard plan 不一致"
+            )
+        expected_delivery_contract = (
+            ScreenplayActionParticipantDeliveryContract()
+        )
+        if (
+            contract.action_participant_delivery_contract
+            != expected_delivery_contract
+        ):
+            errors.append(
+                f"{scene_key} action participant delivery 合同与 "
+                f"{IR_VERSION} 不一致"
             )
         expected_blueprint_keys = list(expected_scene.participant_keys)
         actual_blueprint_keys = [
@@ -914,6 +1029,11 @@ def validate_screenplay_scene_shard(
                 f"至少 {SCENE_STORY_FUNCTION_MIN_CHARS} 个字符"
             )
         contract = contracts_by_scene.get(scene.key)
+        delivery_contract = (
+            contract.action_participant_delivery_contract
+            if contract is not None
+            else ScreenplayActionParticipantDeliveryContract()
+        )
         allowed_identity_keys = {
             binding.identity_key
             for binding in (
@@ -980,6 +1100,14 @@ def validate_screenplay_scene_shard(
                     else []
                 ),
             }
+            if (
+                delivery_contract.unit_field_required
+                and "participant_deliveries" not in unit.model_fields_set
+            ):
+                errors.append(
+                    f"{scene.key}.units[{unit_index}] 必须显式声明 "
+                    "participant_deliveries"
+                )
             delivery_keys: set[str] = set()
             for delivery in unit.participant_deliveries:
                 participant_key = delivery.participant_key.strip()
@@ -1005,19 +1133,26 @@ def validate_screenplay_scene_shard(
                         f"{scene.key}.units[{unit_index}] 的参与者交付 "
                         f"{participant_key} 已在画面中"
                     )
-                if (
-                    not delivery.observable_claim.strip()
-                    or not delivery.is_perceivable
-                ):
+                missing_claim = (
+                    delivery_contract.observable_claim_required
+                    and not delivery.observable_claim.strip()
+                )
+                missing_channel = (
+                    delivery_contract.perceivable_channel_required
+                    and not delivery.is_perceivable
+                )
+                if missing_claim or missing_channel:
                     errors.append(
                         f"{scene.key}.units[{unit_index}] 的参与者交付 "
                         f"{participant_key} 缺少结构化可感知证据"
                     )
-            missing_deliveries = (
-                relation_keys
-                - set(unit.onscreen_entity_keys)
-                - delivery_keys
-            )
+            missing_deliveries = set()
+            if delivery_contract.offscreen_relation_requires_evidence:
+                missing_deliveries = (
+                    relation_keys
+                    - set(unit.onscreen_entity_keys)
+                    - delivery_keys
+                )
             if missing_deliveries:
                 errors.append(
                     f"{scene.key}.units[{unit_index}] 未入画 actor/target/speaker "
@@ -1444,7 +1579,34 @@ def _scene_shard_prompt(
     blueprint_nodes: list[dict[str, Any]],
     scene_input_contracts: list[ScreenplaySceneInputContract],
     identity_registry: list[dict[str, Any]],
+    output_schema: dict[str, Any],
 ) -> str:
+    plan_payload = plan.model_dump(mode="json")
+    plan_payload["source_scene_owners"] = {
+        source_id: plan.source_scene_owners[source_id]
+        for source_id in plan.source_segment_ids
+    }
+    contract_payloads: list[dict[str, Any]] = []
+    bound_identity_keys: list[str] = []
+    for contract in scene_input_contracts:
+        payload = contract.model_dump(mode="json")
+        payload["source_scene_owners"] = {
+            source_id: contract.source_scene_owners[source_id]
+            for source_id in contract.source_segment_ids
+        }
+        contract_payloads.append(payload)
+        bound_identity_keys.extend(
+            binding.identity_key for binding in contract.participant_bindings
+        )
+    registry_by_key = {
+        str(item.get("identity_key") or ""): item
+        for item in identity_registry
+    }
+    projected_identity_registry = [
+        registry_by_key[identity_key]
+        for identity_key in dict.fromkeys(bound_identity_keys)
+        if identity_key in registry_by_key
+    ]
     return (
         "任务：只写指定 Blueprint 场次的紧凑语义 IR。场 key、heading、顺序和来源所有权"
         "均由程序拥有，不得改名、跨场挪 SRC 或输出整集 metadata/experience/events/beats/coverage。"
@@ -1462,9 +1624,11 @@ def _scene_shard_prompt(
         "actor_keys/target_keys 只能填写当前 unit 的实际动作执行者与受作用对象；"
         "onscreen_entity_keys 只能填写这一动作或话轮当下实际在画面中的冻结 identity_key；"
         "被台词提到、仅能听见或只感知事件的身份不得因此进入该列表。复杂动作可在同一 local event_key"
-        "下写有序 units。actor/target/speaker 未进入 onscreen_entity_keys 时，必须在同一 unit 的 "
+        "下写有序 units。每个 unit 必须显式输出 participant_deliveries，确无画外关系时输出空数组。"
+        "actor/target/speaker 未进入 onscreen_entity_keys 时，必须在同一 unit 的 "
         "participant_deliveries 中填写 participant_key、observable_claim，并按实际证据设置 "
-        "audible、visible_effect、visible_reaction 至少一项；不得只把身份塞入画外分区。\n"
+        "audible、visible_effect、visible_reaction 至少一项；不得只把身份塞入画外分区，"
+        "也不得为通过校验编造可听、可见影响或可见反应。\n"
         "输出根结构硬合同：根对象必须是完整 ScreenplaySceneShardIR，第一层必须包含 "
         "contract_version、episode_no、shard_id、scene_plan_keys、scenes、"
         "consumed_source_ids、unresolved_participants、source_hash、boundary_hash、"
@@ -1472,7 +1636,11 @@ def _scene_shard_prompt(
         "绝不能把单个 scene、unit、数组或解释文字"
         "作为根输出。scenes 必须按 scene_plan_keys 恰好各输出一次；consumed_source_ids "
         "必须等于 units 实际首次消费的 SRC 顺序并集。\nShard plan：\n"
-        + plan.model_dump_json()
+        + json.dumps(
+            plan_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         + "\nBlueprint scene plans：\n"
         + json.dumps(
             [value.model_dump(mode="json") for value in blueprint_scene_plans],
@@ -1481,18 +1649,19 @@ def _scene_shard_prompt(
         + "\n相关 Blueprint nodes：\n"
         + json.dumps(blueprint_nodes, ensure_ascii=False, separators=(",", ":"))
         + "\n冻结 identity registry：\n"
-        + json.dumps(identity_registry, ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(
+            projected_identity_registry,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         + "\n逐场输入合同（来源正文不得跨 scene_plan_key 使用）：\n"
         + json.dumps(
-            [
-                contract.model_dump(mode="json")
-                for contract in scene_input_contracts
-            ],
+            contract_payloads,
             ensure_ascii=False,
             separators=(",", ":"),
         )
         + "\n只输出 Schema 对象：\n"
-        + json.dumps(ScreenplaySceneShardIR.model_json_schema(), ensure_ascii=False)
+        + json.dumps(output_schema, ensure_ascii=False)
         + f"\n固定字段：episode_no={episode_no}, shard_id={plan.shard_id},"
         f" source_hash={plan.source_hash}, boundary_hash={plan.boundary_hash},"
         f" blueprint_hash={plan.blueprint_hash},"
@@ -1600,6 +1769,24 @@ async def generate_screenplay_scene_shards(
         plan_scene_input_contracts = scene_input_contracts.get(
             plan.shard_id, []
         )
+        bound_identity_keys = {
+            binding.identity_key
+            for contract in plan_scene_input_contracts
+            for binding in contract.participant_bindings
+        }
+        projected_identity_registry = [
+            item for item in identity_registry
+            if str(item.get("identity_key") or "") in bound_identity_keys
+        ]
+        repair_contracts: list[dict[str, Any]] = []
+        for contract in plan_scene_input_contracts:
+            payload = contract.model_dump(mode="json")
+            payload["source_scene_owners"] = {
+                source_id: contract.source_scene_owners[source_id]
+                for source_id in contract.source_segment_ids
+            }
+            repair_contracts.append(payload)
+        output_schema = ScreenplaySceneShardIR.model_json_schema()
         prompt = _scene_shard_prompt(
             episode_no=int(episode["episode_no"]),
             plan=plan,
@@ -1610,6 +1797,7 @@ async def generate_screenplay_scene_shards(
             ],
             scene_input_contracts=plan_scene_input_contracts,
             identity_registry=identity_registry,
+            output_schema=output_schema,
         )
         operation_id = (
             f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
@@ -1665,15 +1853,13 @@ async def generate_screenplay_scene_shards(
                     "status": "running", "attempt": 1,
                 })
                 emit_progress()
+                budget_meta = _screenplay_scene_shard_budget_meta(plan)
                 shard = await model_gateway.chat_structured(
                     [{"role": "user", "content": prompt}],
                     model_type=ScreenplaySceneShardIR,
                     validate=validate_shard,
                     operation_id=operation_id,
-                    max_tokens=max(
-                        4096,
-                        min(16384, math.ceil(plan.estimated_output_chars / 1.5)),
-                    ),
+                    max_tokens=screenplay_scene_shard_token_budget(plan),
                     temperature=0.4,
                     format_retry_limit=_setting_int(
                         "screenplay_format_retry_limit", 1, minimum=0, maximum=3
@@ -1691,6 +1877,7 @@ async def generate_screenplay_scene_shards(
                         "source_count": len(plan.source_segment_ids),
                         "scene_count": len(plan.scene_plan_keys),
                         "input_chars": len(prompt),
+                        **budget_meta,
                     },
                     repair_context=json.dumps({
                         "root_contract": {
@@ -1709,17 +1896,18 @@ async def generate_screenplay_scene_shards(
                             ],
                             "root_must_not_be": "single_scene_or_unit",
                         },
-                        "scene_input_contracts": [
-                            contract.model_dump(mode="json")
-                            for contract in plan_scene_input_contracts
-                        ],
+                        "scene_input_contracts": repair_contracts,
+                        "action_participant_delivery_contract": (
+                            ScreenplayActionParticipantDeliveryContract()
+                            .model_dump(mode="json")
+                        ),
                         "identity_registry": [
                             {
                                 "identity_key": item.get("identity_key"),
                                 "canonical_name": item.get("canonical_name"),
                                 "source_labels": item.get("source_labels") or [],
                             }
-                            for item in identity_registry
+                            for item in projected_identity_registry
                         ],
                         "final_gate_contract": [
                             "each unit must declare non-empty source_segment_ids",
@@ -1733,6 +1921,7 @@ async def generate_screenplay_scene_shards(
                             "unresolved placeholders are forbidden in relation fields",
                         ],
                     }, ensure_ascii=False, separators=(",", ":")),
+                    output_schema=output_schema,
                     normalize_payload=normalize_payload,
                     on_attempt=attempts.append,
                 )

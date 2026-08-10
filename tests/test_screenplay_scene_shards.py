@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import json
+from pathlib import Path
 import uuid
 
 import pytest
@@ -14,8 +15,15 @@ from app.narrative_blueprint import NarrativeBlueprint, derive_blueprint_scene_p
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
 from app.schemas import Bible, World
-from app.screenplay_ir import IRIdentity, IRScene, IRSceneUnit
+from app.screenplay_ir import (
+    IR_VERSION,
+    IRActionParticipantDelivery,
+    IRIdentity,
+    IRScene,
+    IRSceneUnit,
+)
 from app.screenplay_scene_shards import (
+    SCREENPLAY_SCENE_INPUT_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
     ScreenplayEnvelopeExperience,
     ScreenplayEnvelopeIR,
@@ -41,6 +49,11 @@ from app.source_excerpt import index_source_segments
 
 
 SOURCE = "甲推门进入。\n\n乙接过钥匙并回答。"
+ERR_20260810_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_err_20260810_2e8f0a.json"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +128,7 @@ def _shard(plan, blueprint: NarrativeBlueprint) -> ScreenplaySceneShardIR:
                 actor_keys=[],
                 target_keys=[],
                 onscreen_entity_keys=[],
+                participant_deliveries=[],
                 resulting_state=f"完成 {source_id}",
             ))
         scenes.append(IRScene(
@@ -126,18 +140,18 @@ def _shard(plan, blueprint: NarrativeBlueprint) -> ScreenplaySceneShardIR:
             exit_state=scene_plan.exit_state,
             units=units,
         ))
-    return ScreenplaySceneShardIR(
-        episode_no=1,
-        shard_id=plan.shard_id,
-        scene_plan_keys=plan.scene_plan_keys,
-        scenes=scenes,
-        consumed_source_ids=consumed,
-        source_hash=plan.source_hash,
-        boundary_hash=plan.boundary_hash,
-        blueprint_hash=plan.blueprint_hash,
-        identity_registry_hash=plan.identity_registry_hash,
-        source_ownership_hash=plan.source_ownership_hash,
-    )
+    return ScreenplaySceneShardIR.model_validate({
+        "episode_no": 1,
+        "shard_id": plan.shard_id,
+        "scene_plan_keys": plan.scene_plan_keys,
+        "scenes": [scene.model_dump(mode="json") for scene in scenes],
+        "consumed_source_ids": consumed,
+        "source_hash": plan.source_hash,
+        "boundary_hash": plan.boundary_hash,
+        "blueprint_hash": plan.blueprint_hash,
+        "identity_registry_hash": plan.identity_registry_hash,
+        "source_ownership_hash": plan.source_ownership_hash,
+    })
 
 
 def _envelope(blueprint: NarrativeBlueprint) -> ScreenplayEnvelopeIR:
@@ -297,6 +311,15 @@ def test_scene_input_contracts_align_source_and_frozen_participants_per_scene() 
         "blueprint_key": "甲",
         "identity_key": "person_a",
     }
+    delivery_contract = contracts[0].action_participant_delivery_contract
+    assert delivery_contract.contract_version == IR_VERSION
+    assert delivery_contract.unit_field_required is True
+    assert delivery_contract.offscreen_relation_requires_evidence is True
+    assert delivery_contract.observable_claim_required is True
+    assert delivery_contract.perceivable_channel_required is True
+    assert delivery_contract.evidence_schema == (
+        IRActionParticipantDelivery.model_json_schema()
+    )
     assert contracts[1].source_segment_ids == ["SRC0002"]
     assert contracts[1].participant_bindings[0].identity_key == "person_b"
     assert plan.source_scene_owners == blueprint.source_scene_owners
@@ -788,6 +811,168 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v4"
 
 
+def test_scene_shard_schema_requires_explicit_participant_deliveries() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    payload = _shard(plan, blueprint).model_dump(mode="json")
+    payload["scenes"][0]["units"][0].pop("participant_deliveries")
+
+    with pytest.raises(ValidationError, match="participant_deliveries"):
+        ScreenplaySceneShardIR.model_validate(payload)
+
+    schema = ScreenplaySceneShardIR.model_json_schema()
+    unit_schema = schema["$defs"]["ScreenplaySceneShardUnit"]
+    assert "participant_deliveries" in unit_schema["required"]
+
+
+def test_err_20260810_original_provider_response_fails_at_explicit_unit_schema() -> None:
+    replay = json.loads(ERR_20260810_REPLAY.read_text(encoding="utf-8"))
+
+    assert replay["error_id"] == "ERR-20260810-2e8f0a"
+    assert replay["blueprint"]["contract_version"] == (
+        "screenplay-narrative-blueprint.v3"
+    )
+    assert replay["envelope"]["contract_version"] == "screenplay-envelope.v1"
+    with pytest.raises(ValidationError, match="participant_deliveries"):
+        ScreenplaySceneShardIR.model_validate(replay["initial_response"])
+
+    assert {
+        (item["scene_key"], item["unit_index"])
+        for item in replay["failed_repair_deliveries"]
+    } == {
+        ("bp-sc006", 6),
+        ("bp-sc007", 1),
+        ("bp-sc008", 0),
+        ("bp-sc008", 3),
+        ("bp-sc008", 7),
+    }
+    assert all(
+        not (
+            item["audible"]
+            or item["visible_effect"]
+            or item["visible_reaction"]
+        )
+        for item in replay["failed_repair_deliveries"]
+    )
+
+
+@pytest.mark.parametrize(
+    "channel",
+    ["audible", "visible_effect", "visible_reaction"],
+)
+def test_validator_and_merge_accept_source_authored_offscreen_evidence(
+    channel: str,
+) -> None:
+    blueprint, plans, registry, identities, shard = _participant_case()
+    unit = shard.scenes[0].units[0]
+    unit.actor_keys = ["person_a"]
+    unit.onscreen_entity_keys = []
+    unit.participant_deliveries = [
+        IRActionParticipantDelivery(
+            participant_key="person_a",
+            observable_claim="画外动作通过本场可感知证据抵达观众",
+            **{channel: True},
+        )
+    ]
+    scene_input_contracts = _contracts(plans, blueprint, registry)
+
+    errors = validate_screenplay_scene_shard(
+        shard,
+        plan=plans[0],
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        scene_input_contracts=scene_input_contracts[plans[0].shard_id],
+        identity_keys={item.key for item in identities},
+    )
+    assert not any("参与者交付" in error for error in errors)
+
+    merged = merge_screenplay_scene_shards(
+        envelope=_envelope(blueprint),
+        identities=identities,
+        plans=plans,
+        shards=[shard],
+        scene_input_contracts=scene_input_contracts,
+        blueprint=blueprint,
+        source_text=SOURCE,
+    )
+    delivery = merged.scenes[0].units[0].participant_deliveries[0]
+    assert delivery.participant_key == "person_a"
+    assert getattr(delivery, channel) is True
+
+
+def test_validator_and_merge_reject_offscreen_claim_without_perceivable_channel() -> None:
+    blueprint, plans, registry, identities, shard = _participant_case()
+    unit = shard.scenes[0].units[0]
+    unit.actor_keys = ["person_a"]
+    unit.onscreen_entity_keys = []
+    unit.participant_deliveries = [
+        IRActionParticipantDelivery(
+            participant_key="person_a",
+            observable_claim="只有文字声称，没有任何可听或可见证据",
+        )
+    ]
+    scene_input_contracts = _contracts(plans, blueprint, registry)
+
+    errors = validate_screenplay_scene_shard(
+        shard,
+        plan=plans[0],
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        scene_input_contracts=scene_input_contracts[plans[0].shard_id],
+        identity_keys={item.key for item in identities},
+    )
+    assert any(
+        "person_a 缺少结构化可感知证据" in error
+        for error in errors
+    )
+    with pytest.raises(
+        ScreenplaySceneMergeError,
+        match="person_a 缺少结构化可感知证据",
+    ):
+        merge_screenplay_scene_shards(
+            envelope=_envelope(blueprint),
+            identities=identities,
+            plans=plans,
+            shards=[shard],
+            scene_input_contracts=scene_input_contracts,
+            blueprint=blueprint,
+            source_text=SOURCE,
+        )
+
+
+def test_normalization_does_not_invent_offscreen_participant_evidence() -> None:
+    blueprint, plans, registry, identities, shard = _participant_case()
+    unit = shard.scenes[0].units[0]
+    unit.target_keys = ["person_a"]
+    unit.onscreen_entity_keys = []
+    unit.participant_deliveries = []
+    scene_input_contracts = _contracts(plans, blueprint, registry)
+
+    normalize_screenplay_scene_shard(
+        shard,
+        episode_no=1,
+        plan=plans[0],
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        scene_input_contracts=scene_input_contracts[plans[0].shard_id],
+    )
+
+    assert unit.participant_deliveries == []
+    errors = validate_screenplay_scene_shard(
+        shard,
+        plan=plans[0],
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        scene_input_contracts=scene_input_contracts[plans[0].shard_id],
+        identity_keys={item.key for item in identities},
+    )
+    assert any(
+        "缺少 participant_deliveries" in error
+        and "person_a" in error
+        for error in errors
+    )
+
+
 def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> None:
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
@@ -888,6 +1073,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     prompts: dict[str, str] = {}
     repair_contexts: dict[str, dict] = {}
     operation_ids: dict[str, str] = {}
+    output_schemas: dict[str, dict] = {}
     scene_input_contracts = _contracts(plans, blueprint)
 
     async def fake_structured(messages, **kwargs):
@@ -895,6 +1081,8 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         prompt_key = str(meta["stage_key"] + ":" + meta.get("shard_id", ""))
         prompts[prompt_key] = messages[0]["content"]
         operation_ids[prompt_key] = kwargs["operation_id"]
+        if kwargs.get("output_schema"):
+            output_schemas[prompt_key] = kwargs["output_schema"]
         if kwargs.get("repair_context"):
             repair_contexts[prompt_key] = json.loads(kwargs["repair_context"])
         if meta["stage_key"] == "screenplay_envelope":
@@ -932,7 +1120,10 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert "dialogue.text 与 dialogue.source_text 必须填写同一段逐字原文对白" in first_prompt
     assert "禁止生成 unresolved_* 占位 ID" in first_prompt
     assert "逐场输入合同（来源正文不得跨 scene_plan_key 使用）" in first_prompt
-    assert '"contract_version":"screenplay-scene-input.v3"' in first_prompt
+    assert (
+        f'"contract_version":"{SCREENPLAY_SCENE_INPUT_VERSION}"'
+        in first_prompt
+    )
     assert "owned_source" not in repair_contexts["screenplay_scene_shards:SS001"]
     first_contracts = repair_contexts[
         "screenplay_scene_shards:SS001"
@@ -943,10 +1134,21 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         "source_segment_id": "SRC0001",
         "text": "甲推门进入。",
     }]
+    delivery_contract = first_contracts[0][
+        "action_participant_delivery_contract"
+    ]
+    assert delivery_contract["contract_version"] == IR_VERSION
+    assert delivery_contract["unit_field_required"] is True
+    assert '"action_participant_delivery_contract"' in first_prompt
+    unit_schema = output_schemas[
+        "screenplay_scene_shards:SS001"
+    ]["$defs"]["ScreenplaySceneShardUnit"]
+    assert "participant_deliveries" in unit_schema["required"]
     assert operation_ids["screenplay_scene_shards:SS001"].startswith(
         "screenplay.scene-shard:screenplay-scene-shard.v4:"
-        "screenplay-scene-input.v3:"
+        f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
     )
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v4"
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
@@ -992,6 +1194,10 @@ def test_generation_and_semantic_retry_reject_cross_scene_frozen_identity(
     assert "speaker_key 违反逐场参与者合同" in prompts[1]
     assert "onscreen_entity_keys 违反逐场参与者合同" in prompts[1]
     assert "actor/target 违反逐场参与者合同" in prompts[1]
+    assert '"action_participant_delivery_contract"' in prompts[0]
+    assert '"action_participant_delivery_contract"' in prompts[1]
+    assert IR_VERSION in prompts[0]
+    assert IR_VERSION in prompts[1]
     assert evidence_repository.latest_artifact(
         "screenplay_scene_shard",
         "episode",

@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from app import hiagent
 
 
@@ -41,6 +43,63 @@ def test_openrouter_retries_without_reasoning_when_budget_is_exhausted(monkeypat
     assert calls[1][1] == 0
     assert calls[1][2]["reasoning_fallback"] is True
     assert calls[1][2]["reasoning_fallback_cause"] == "reasoning_budget_exhausted"
+
+
+def test_nonempty_length_response_is_rejected_as_truncated(monkeypatch) -> None:
+    calls = 0
+
+    async def fake_post_json(client, url, payload, *, kind, model, retries=2,
+                             headers=None, key_name="", meta=None):
+        nonlocal calls
+        calls += 1
+        return {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": (
+                        '{"shard_id":"SS004","scenes":['
+                        '{"key":"bp-sc013"}'
+                    ),
+                },
+            }],
+            "usage": {
+                "prompt_tokens": 14507,
+                "completion_tokens": 4526,
+                "total_tokens": 19033,
+            },
+        }
+
+    monkeypatch.setattr(hiagent, "active_provider", lambda kind: "openrouter")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda kind, provider=None: "vendor/ss004-replay",
+    )
+    monkeypatch.setattr(
+        hiagent.config,
+        "OPENROUTER_TEXT_REASONING_EFFORT",
+        "none",
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *args: (
+            "https://openrouter.test/api/v1",
+            {"Authorization": "Bearer test"},
+        ),
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    with pytest.raises(hiagent.ProviderError, match="finish_reason=length") as exc:
+        asyncio.run(hiagent.chat(
+            [{"role": "user", "content": "return SS004 json"}],
+            max_tokens=4526,
+        ))
+
+    assert exc.value.failure_kind == "output_truncated"
+    assert exc.value.retryable is False
+    assert exc.value.replay_safe is False
+    assert calls == 1
 
 
 def test_openrouter_does_not_retry_unrelated_empty_content(monkeypatch) -> None:

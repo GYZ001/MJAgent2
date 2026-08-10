@@ -1,0 +1,238 @@
+{
+  "case_id": "episode-1-ss004-20260810",
+  "episode": {
+    "id": "ep-ss004-budget-replay",
+    "episode_no": 1
+  },
+  "recorded_request": {
+    "input_chars": 34733,
+    "model_context_window_tokens": 131072,
+    "model_max_output_tokens": 32768,
+    "requested_max_tokens": 4526,
+    "estimated_units": 12,
+    "estimated_output_chars": 6788,
+    "scene_count": 3,
+    "source_count": 11
+  },
+  "recorded_attempts": [
+    {
+      "format_attempt": 0,
+      "semantic_attempt": 0,
+      "request_chars": 34733,
+      "finish_reason": "length",
+      "completion_tokens": 4526,
+      "response_chars": 13620
+    },
+    {
+      "format_attempt": 1,
+      "semantic_attempt": 0,
+      "request_chars": 7988,
+      "finish_reason": "stop",
+      "completion_tokens": 1709,
+      "response_chars": 5491
+    },
+    {
+      "format_attempt": 1,
+      "semantic_attempt": 1,
+      "request_chars": 20909,
+      "finish_reason": "length",
+      "completion_tokens": 4526,
+      "response_chars": 13846
+    }
+  ],
+  "hashes": {
+    "source_hash": "16518756baf2aadae1ccf91bd1c139625f121af71dda7bf0e033190096f5b160",
+    "boundary_hash": "8343e89411a57ce55e4d44c76727d7b437bbdeffd62e177cada421be94fb574a",
+    "blueprint_hash": "34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253",
+    "identity_registry_hash": "cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f",
+    "source_ownership_hash": "692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6"
+  },
+  "source_scene_owners": {
+    "SRC0001": "bp-sc001",
+    "SRC0002": "bp-sc001",
+    "SRC0003": "bp-sc001",
+    "SRC0004": "bp-sc002",
+    "SRC0005": "bp-sc002",
+    "SRC0006": "bp-sc002",
+    "SRC0007": "bp-sc002",
+    "SRC0008": "bp-sc002",
+    "SRC0009": "bp-sc002",
+    "SRC0010": "bp-sc002",
+    "SRC0011": "bp-sc002",
+    "SRC0012": "bp-sc003",
+    "SRC0013": "bp-sc003",
+    "SRC0014": "bp-sc003",
+    "SRC0015": "bp-sc004",
+    "SRC0016": "bp-sc004",
+    "SRC0017": "bp-sc004",
+    "SRC0018": "bp-sc005",
+    "SRC0019": "bp-sc005",
+    "SRC0020": "bp-sc005",
+    "SRC0021": "bp-sc005",
+    "SRC0022": "bp-sc005",
+    "SRC0023": "bp-sc006",
+    "SRC0024": "bp-sc006",
+    "SRC0025": "bp-sc006",
+    "SRC0026": "bp-sc006",
+    "SRC0027": "bp-sc006",
+    "SRC0028": "bp-sc007",
+    "SRC0029": "bp-sc007",
+    "SRC0030": "bp-sc008",
+    "SRC0031": "bp-sc008",
+    "SRC0032": "bp-sc008",
+    "SRC0033": "bp-sc008",
+    "SRC0034": "bp-sc008",
+    "SRC0035": "bp-sc009",
+    "SRC0036": "bp-sc009",
+    "SRC0037": "bp-sc009",
+    "SRC0038": "bp-sc009",
+    "SRC0039": "bp-sc010",
+    "SRC0040": "bp-sc010",
+    "SRC0041": "bp-sc011",
+    "SRC0042": "bp-sc011",
+    "SRC0043": "bp-sc011",
+    "SRC0044": "bp-sc011",
+    "SRC0045": "bp-sc011",
+    "SRC0046": "bp-sc012",
+    "SRC0047": "bp-sc012",
+    "SRC0048": "bp-sc012",
+    "SRC0049": "bp-sc013",
+    "SRC0050": "bp-sc013",
+    "SRC0051": "bp-sc013",
+    "SRC0052": "bp-sc013",
+    "SRC0053": "bp-sc013",
+    "SRC0054": "bp-sc014",
+    "SRC0055": "bp-sc014",
+    "SRC0056": "bp-sc014",
+    "SRC0057": "bp-sc014",
+    "SRC0058": "bp-sc015",
+    "SRC0059": "bp-sc015",
+    "SRC0060": "bp-sc016",
+    "SRC0061": "bp-sc016",
+    "SRC0062": "bp-sc016"
+  },
+  "scene_plans": [
+    {
+      "key": "bp-sc013",
+      "node_keys": ["S002-S001-N014"],
+      "source_segment_ids": ["SRC0049", "SRC0050", "SRC0051", "SRC0052", "SRC0053"],
+      "temporal_domain_key": "T002",
+      "time_label": "入夜",
+      "location_key": "L004",
+      "location_label": "修仙宗门外门半山腰青石空地",
+      "transition_cue": "从大青山上空转至修仙宗门外门半山腰青石空地",
+      "previous_scene_exit_state": "女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+      "opening_image": "从大青山上空转至修仙宗门外门半山腰青石空地",
+      "exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+      "dramatic_load": 2,
+      "agency_contracts": [],
+      "participant_keys": ["孟浩", "王有材", "许师姐", "大青山被困少年甲", "大青山被困少年乙", "绿袍执事甲", "绿袍执事乙"],
+      "scene_heading": "【场13】入夜 / 修仙宗门外门半山腰青石空地"
+    },
+    {
+      "key": "bp-sc014",
+      "node_keys": ["S002-S001-N015", "S003-S002-S001-N016"],
+      "source_segment_ids": ["SRC0054", "SRC0055", "SRC0056", "SRC0057"],
+      "temporal_domain_key": "T002",
+      "time_label": "入夜",
+      "location_key": "L004",
+      "location_label": "修仙宗门外门半山腰青石空地",
+      "transition_cue": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+      "previous_scene_exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+      "opening_image": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+      "exit_state": "王有材二人被指定去向，心生慌乱",
+      "dramatic_load": 3,
+      "agency_contracts": [],
+      "participant_keys": ["孟浩", "绿袍执事甲", "绿袍执事乙", "王有材", "大青山被困少年乙"],
+      "scene_heading": "【场14】入夜 / 修仙宗门外门半山腰青石空地"
+    },
+    {
+      "key": "bp-sc015",
+      "node_keys": ["S003-S002-S001-N017"],
+      "source_segment_ids": ["SRC0058", "SRC0059"],
+      "temporal_domain_key": "T002",
+      "time_label": "入夜",
+      "location_key": "L004",
+      "location_label": "修仙宗门外门半山腰青石空地",
+      "transition_cue": "",
+      "previous_scene_exit_state": "王有材二人被指定去向，心生慌乱",
+      "opening_image": "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+      "exit_state": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+      "dramatic_load": 1,
+      "agency_contracts": [],
+      "participant_keys": ["王有材", "绿袍执事甲", "孟浩"],
+      "scene_heading": "【场15】入夜 / 修仙宗门外门半山腰青石空地"
+    }
+  ],
+  "scene_inputs": [
+    {
+      "scene_plan_key": "bp-sc013",
+      "node_keys": ["S002-S001-N014"],
+      "source_segments": [
+        {"source_segment_id": "SRC0049", "text": "当他睁开眼睛时，已经在了一处半山腰的青石空地上，四周山峦起伏，云雾缭绕绝非凡尘，能看到一些精美的阁楼环绕山峦八方，满眼陌生。"},
+        {"source_segment_id": "SRC0050", "text": "他身边王有材以及另外两个少年，此刻都已苏醒过来，正身子颤抖惊恐的望着前方背对着四人的女子。"},
+        {"source_segment_id": "SRC0051", "text": "在这女子的前方，有两个穿着绿色长袍的男子，年纪看起来都是二十许岁，但都是双眼凹陷，瞳孔绿油油的，让人望之生畏。"},
+        {"source_segment_id": "SRC0052", "text": "“许师姐好手段，出门一次竟带回了四个拥有资质的小娃。”两个男子中的一人，带着恭维向着那女子说道。"},
+        {"source_segment_id": "SRC0053", "text": "“将他们带去杂役处。”那女子神情冷漠，看都不看孟浩四人一眼，迈步间整个人化作了一道长虹，没入山峦之间消失不见。"}
+      ],
+      "participant_bindings": [
+        ["孟浩", "person_b67de643afe6"],
+        ["王有材", "person_e79ecc6793f5"],
+        ["许师姐", "person_224fd998b1e7"],
+        ["大青山被困少年甲", "person_b9cd0397a07f"],
+        ["大青山被困少年乙", "person_32ce878a56e2"],
+        ["绿袍执事甲", "person_46e7e8b742ed"],
+        ["绿袍执事乙", "person_8ff1cb1a5861"]
+      ]
+    },
+    {
+      "scene_plan_key": "bp-sc014",
+      "node_keys": ["S002-S001-N015", "S003-S002-S001-N016"],
+      "source_segments": [
+        {"source_segment_id": "SRC0054", "text": "此刻的孟浩已恢复了心神，他怔怔的看着那女子消失的地方，目中渐渐竟露出了一抹在他身上十六年来前所未有的神采，这神采让孟浩的内心，一下子沸腾了。"},
+        {"source_segment_id": "SRC0055", "text": "“杂役？这是要给仙人打工，应该不少赚吧。”孟浩期待起来，因为他看出来了，这里的人不是要害命。"},
+        {"source_segment_id": "SRC0056", "text": "“许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。”另一个绿袍修士，感慨的说道，随后神色带着高高在上之意，看向孟浩四人。"},
+        {"source_segment_id": "SRC0057", "text": "“你，还有你，跟我走，去南区杂役处。”话语间，此人指了指王有材和其旁虎头虎脑的少年。"}
+      ],
+      "participant_bindings": [
+        ["孟浩", "person_b67de643afe6"],
+        ["绿袍执事甲", "person_46e7e8b742ed"],
+        ["绿袍执事乙", "person_8ff1cb1a5861"],
+        ["王有材", "person_e79ecc6793f5"],
+        ["大青山被困少年乙", "person_32ce878a56e2"]
+      ]
+    },
+    {
+      "scene_plan_key": "bp-sc015",
+      "node_keys": ["S003-S002-S001-N017"],
+      "source_segments": [
+        {"source_segment_id": "SRC0058", "text": "“这……这里是什么地方？”被那人一指，王有材身子哆嗦，打着颤音开口。"},
+        {"source_segment_id": "SRC0059", "text": "“靠山宗。”"}
+      ],
+      "participant_bindings": [
+        ["王有材", "person_e79ecc6793f5"],
+        ["绿袍执事甲", "person_46e7e8b742ed"],
+        ["孟浩", "person_b67de643afe6"]
+      ]
+    }
+  ],
+  "identity_registry": [
+    {"identity_key": "person_b67de643afe6", "canonical_name": "孟浩", "source_labels": ["孟浩"]},
+    {"identity_key": "person_e79ecc6793f5", "canonical_name": "王有材", "source_labels": ["王有材"]},
+    {"identity_key": "person_224fd998b1e7", "canonical_name": "会飞的女人", "source_labels": ["会飞的女人", "许师姐"]},
+    {"identity_key": "person_b9cd0397a07f", "canonical_name": "大青山被困少年甲", "source_labels": ["大青山被困少年甲"]},
+    {"identity_key": "person_32ce878a56e2", "canonical_name": "大青山被困少年乙", "source_labels": ["大青山被困少年乙"]},
+    {"identity_key": "person_46e7e8b742ed", "canonical_name": "绿袍执事甲", "source_labels": ["绿袍执事甲"]},
+    {"identity_key": "person_8ff1cb1a5861", "canonical_name": "绿袍执事乙", "source_labels": ["绿袍执事乙"]},
+    {"identity_key": "person_59b6805875cd", "canonical_name": "曹阳", "source_labels": ["曹阳"]}
+  ],
+  "event_sources": {
+    "E001": ["SRC0049"],
+    "E002": ["SRC0050"],
+    "E003": ["SRC0051"],
+    "E004": ["SRC0052", "SRC0053"],
+    "E005": ["SRC0054", "SRC0055"],
+    "E006": ["SRC0056", "SRC0057"],
+    "E007": ["SRC0058", "SRC0059"]
+  }
+}

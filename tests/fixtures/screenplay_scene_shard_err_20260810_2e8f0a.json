@@ -1,0 +1,468 @@
+{
+  "error_id": "ERR-20260810-2e8f0a",
+  "provider_call_id": 60883,
+  "response_sha256": "fcd760f198d101adf840e1d9f1f1b6b5f80101531bd679455693d290043a2fdc",
+  "blueprint": {
+    "contract_version": "screenplay-narrative-blueprint.v3",
+    "episode_no": 1,
+    "participant_evidence": [
+      {
+        "node_key": "S001-N005",
+        "identity_key": "王有材",
+        "source_segment_ids": ["SRC0019", "SRC0021", "SRC0022"],
+        "usage": "voice"
+      },
+      {
+        "node_key": "S002-S001-N008",
+        "identity_key": "王有材",
+        "source_segment_ids": ["SRC0029"],
+        "usage": "mentioned"
+      },
+      {
+        "node_key": "S002-S001-N009",
+        "identity_key": "王有材",
+        "source_segment_ids": ["SRC0033"],
+        "usage": "voice"
+      },
+      {
+        "node_key": "S002-S001-N009",
+        "identity_key": "大青山被困少年甲",
+        "source_segment_ids": ["SRC0031"],
+        "usage": "voice"
+      }
+    ],
+    "scene_plans": [
+      {
+        "key": "bp-sc005",
+        "node_keys": ["S001-N005"],
+        "participant_keys": ["孟浩", "王有材"],
+        "source_segment_ids": ["SRC0018", "SRC0019", "SRC0020", "SRC0021", "SRC0022"]
+      },
+      {
+        "key": "bp-sc006",
+        "node_keys": ["S001-N006"],
+        "participant_keys": ["孟浩", "王有材"],
+        "source_segment_ids": ["SRC0023", "SRC0024", "SRC0025", "SRC0026", "SRC0027"]
+      },
+      {
+        "key": "bp-sc007",
+        "node_keys": ["S001-N007", "S002-S001-N008"],
+        "participant_keys": ["孟浩", "王有材"],
+        "source_segment_ids": ["SRC0028", "SRC0029"]
+      },
+      {
+        "key": "bp-sc008",
+        "node_keys": ["S002-S001-N009"],
+        "participant_keys": ["孟浩", "王有材", "大青山被困少年甲"],
+        "source_segment_ids": ["SRC0030", "SRC0031", "SRC0032", "SRC0033", "SRC0034"]
+      }
+    ]
+  },
+  "envelope": {
+    "contract_version": "screenplay-envelope.v1",
+    "episode_no": 1,
+    "blueprint_hash": "34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253",
+    "identity_registry_hash": "cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f",
+    "development": "孟浩自述三次落榜的窘境，将写有理想的纸条塞进葫芦扔下山，收拾情绪准备下山时听到崖下呼救声，认出被困者是王有材，寻找藤条准备救人",
+    "obstacle": "科举接连失败的人生困境、救援王有材时没有绳索的现实限制、突然出现的修仙者许清带来的未知威胁"
+  },
+  "initial_response": {
+    "contract_version": "screenplay-scene-shard.v4",
+    "episode_no": 1,
+    "shard_id": "SS002",
+    "scene_plan_keys": ["bp-sc005", "bp-sc006", "bp-sc007", "bp-sc008"],
+    "scenes": [
+      {
+        "key": "bp-sc005",
+        "scene_heading": "【场5】四月黄昏 / 赵国大青山山顶崖边",
+        "story_function": "孟浩听到崖下呼救声，发现半山腰裂缝里的被困者，打破原本下山的计划",
+        "character_keys": ["person_b67de643afe6", "person_e79ecc6793f5"],
+        "summary": "孟浩正准备下山时，听到崖下传来微弱的救命声，他走到崖边查看，看清了半山腰裂缝里有人正在呼救",
+        "previous_scene_exit_state": "孟浩转身抬脚，正要往山下走",
+        "opening_image": "孟浩脚步顿住，侧耳倾听崖下的动静",
+        "exit_state": "孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "agency_contracts": [],
+        "context_requirements": ["承接孟浩准备下山的状态"],
+        "units": [
+          {
+            "kind": "action",
+            "text": "山崖下传来微弱的呼救声，声音几乎被风吹散，落入孟浩耳中几乎难以察觉",
+            "event_key": "E005_001",
+            "source_segment_ids": ["SRC0018"],
+            "actor_keys": [],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6"],
+            "participant_deliveries": [
+              {
+                "participant_key": "person_e79ecc6793f5",
+                "observable_claim": "王有材在崖下发出呼救声，仅能被听见，未出现在画面中",
+                "audible": true
+              }
+            ]
+          },
+          {
+            "kind": "dialogue",
+            "text": "救命……救命……",
+            "event_key": "E005_001",
+            "source_segment_ids": ["SRC0019"],
+            "speaker_key": "person_e79ecc6793f5",
+            "source_text": "救命……救命……",
+            "actor_keys": [],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6"],
+            "participant_deliveries": [
+              {
+                "participant_key": "person_e79ecc6793f5",
+                "observable_claim": "王有材在崖下呼救，仅能被听见，未出现在画面中",
+                "audible": true
+              }
+            ]
+          },
+          {
+            "kind": "action",
+            "text": "孟浩脚步一顿，怔了一下后仔细倾听，救命声随着他的专注变得清晰了一些",
+            "event_key": "E005_002",
+            "source_segment_ids": ["SRC0020"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": [],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "救命……",
+            "event_key": "E005_002",
+            "source_segment_ids": ["SRC0021"],
+            "speaker_key": "person_e79ecc6793f5",
+            "source_text": "救命……",
+            "actor_keys": [],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6"],
+            "participant_deliveries": [
+              {
+                "participant_key": "person_e79ecc6793f5",
+                "observable_claim": "王有材在崖下持续呼救，仅能被听见，未出现在画面中",
+                "audible": true
+              }
+            ]
+          },
+          {
+            "kind": "action",
+            "text": "孟浩快走几步到了山顶边缘，向下看去，看到峭壁半山腰的裂缝里有人探出半个身子，面色苍白带着惊恐绝望，正在呼喊",
+            "event_key": "E005_003",
+            "source_segment_ids": ["SRC0022"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          }
+        ]
+      },
+      {
+        "key": "bp-sc006",
+        "scene_heading": "【场6】四月黄昏 / 赵国大青山山顶崖边",
+        "story_function": "孟浩认出被困者是王有材，确认对方处境危急，触发救人动机",
+        "character_keys": ["person_b67de643afe6", "person_e79ecc6793f5"],
+        "summary": "王有材看到孟浩后狂喜求救，孟浩认出对方是木匠铺王伯的儿子，得知还有其他人被困，王有材险些滑落，情况十分危急",
+        "previous_scene_exit_state": "孟浩俯身看向崖下，看清了裂缝里呼救的人",
+        "opening_image": "王有材看到孟浩，脸上露出狂喜的神情，半个身子探在裂缝外",
+        "exit_state": "王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "agency_contracts": [],
+        "context_requirements": ["承接发现被困者的节点"],
+        "units": [
+          {
+            "kind": "dialogue",
+            "text": "你……可是孟浩，救命，孟才子救我。",
+            "event_key": "E006_001",
+            "source_segment_ids": ["SRC0023"],
+            "speaker_key": "person_e79ecc6793f5",
+            "source_text": "你……可是孟浩，救命，孟才子救我。",
+            "actor_keys": [],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "action",
+            "text": "从半山腰探出身子的少年一眼看到孟浩，神色立刻露出惊喜，仿佛绝处将要逢生",
+            "event_key": "E006_001",
+            "source_segment_ids": ["SRC0023"],
+            "actor_keys": ["person_e79ecc6793f5"],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "王有材？",
+            "event_key": "E006_002",
+            "source_segment_ids": ["SRC0024"],
+            "speaker_key": "person_b67de643afe6",
+            "source_text": "王有材？",
+            "actor_keys": [],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "action",
+            "text": "孟浩睁大了眼，看着半山腰的少年，认出他是县城木匠铺王伯的儿子",
+            "event_key": "E006_002",
+            "source_segment_ids": ["SRC0024"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "你……你怎么跑这里来了？",
+            "event_key": "E006_003",
+            "source_segment_ids": ["SRC0025"],
+            "speaker_key": "person_b67de643afe6",
+            "source_text": "你……你怎么跑这里来了？",
+            "actor_keys": [],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "action",
+            "text": "孟浩看了一眼下方的山腰裂缝，那里极为陡峭，根本无法攀爬，稍有不慎就会坠落山下大河中",
+            "event_key": "E006_003",
+            "source_segment_ids": ["SRC0025"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": [],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          },
+          {
+            "kind": "action",
+            "text": "崖下河水湍急，一旦落入水中九死一生",
+            "event_key": "E006_004",
+            "source_segment_ids": ["SRC0026"],
+            "actor_keys": [],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": []
+          },
+          {
+            "kind": "dialogue",
+            "text": "不止是我，还有附近县其他几人，我们都在这里，孟兄先别说了，快救我们出去。",
+            "event_key": "E006_005",
+            "source_segment_ids": ["SRC0027"],
+            "speaker_key": "person_e79ecc6793f5",
+            "source_text": "不止是我，还有附近县其他几人，我们都在这里，孟兄先别说了，快救我们出去。",
+            "actor_keys": [],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "action",
+            "text": "王有材急忙开口，探身时间太长一手抓空，被身后同伴抓住衣衫才没有滑落，吓得面色更为苍白",
+            "event_key": "E006_005",
+            "source_segment_ids": ["SRC0027"],
+            "actor_keys": ["person_e79ecc6793f5"],
+            "target_keys": [],
+            "onscreen_entity_keys": ["person_e79ecc6793f5"]
+          }
+        ]
+      },
+      {
+        "key": "bp-sc007",
+        "scene_heading": "【场7】四月黄昏 / 赵国大青山山顶",
+        "story_function": "孟浩找到用藤条救人的方案，收集足够藤条后返回崖边开始救援",
+        "character_keys": ["person_b67de643afe6", "person_e79ecc6793f5"],
+        "summary": "孟浩发现没有绳索无法救人，看到漫山的藤条后想到办法，耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "previous_scene_exit_state": "王有材被身后同伴拽住，吓得脸色惨白，崖下河水湍急轰鸣",
+        "opening_image": "孟浩目光扫过周围的藤条，眼睛猛地亮了起来",
+        "exit_state": "孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "agency_contracts": [
+          {
+            "node_key": "S001-N007",
+            "actor_key": "person_b67de643afe6",
+            "agency_mode": "voluntary",
+            "narrative_attribution": "voluntary_choice",
+            "constraint_fact_key": ""
+          }
+        ],
+        "context_requirements": ["承接王有材遇险的危急情况"],
+        "units": [
+          {
+            "kind": "action",
+            "text": "孟浩看到王有材处境险急，独自上山没有绳索无法救人，回头看到漫山遍野的藤条，双眼一亮，立刻开始寻找合适的藤条",
+            "event_key": "E007_001",
+            "source_segment_ids": ["SRC0028"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": [],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          },
+          {
+            "kind": "action",
+            "text": "孟浩身子瘦弱，用了两柱香的时间才找到足够长的藤条，喘着粗气卷着藤条回到山崖边，一边喊着下方王有材的名字，一边弯腰将藤条顺下山崖",
+            "event_key": "E007_002",
+            "source_segment_ids": ["SRC0029"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          }
+        ]
+      },
+      {
+        "key": "bp-sc008",
+        "scene_heading": "【场8】四月黄昏 / 赵国大青山山顶崖边",
+        "story_function": "孟浩询问被困原因，王有材等人说明是被会飞的女子抓走，孟浩不相信仙人说法，以为是孩童编造",
+        "character_keys": ["person_b67de643afe6", "person_e79ecc6793f5", "person_b9cd0397a07f"],
+        "summary": "孟浩投放藤条时询问被困原因，被困的少年声称是飞下来的，孟浩嘲讽，王有材连忙解释是被会飞的女子抓来做杂役，孟浩不屑一顾，认为是书本编造的仙人故事",
+        "previous_scene_exit_state": "孟浩耗时两柱香找到足够藤条，返回崖边顺下藤条呼叫王有材",
+        "opening_image": "孟浩投放藤条时询问被困原因，王有材说明被抓情况及女子还缺一个人的招募要求，孟浩对仙人事说法嗤之以鼻",
+        "exit_state": "孟浩询问被困原因，王有材告知自己和另外两人是被会飞的女子抓走，对方说还要再抓一个才走，孟浩不信以为是孩童瞎编",
+        "agency_contracts": [],
+        "context_requirements": ["承接藤条已被顺下崖，即将抵达王有材所在位置的救援进度"],
+        "units": [
+          {
+            "kind": "dialogue",
+            "text": "你还没说，你们到底怎么下去的？",
+            "event_key": "E008_001",
+            "source_segment_ids": ["SRC0030"],
+            "speaker_key": "person_b67de643afe6",
+            "source_text": "你还没说，你们到底怎么下去的？",
+            "actor_keys": [],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "飞！",
+            "event_key": "E008_002",
+            "source_segment_ids": ["SRC0031"],
+            "speaker_key": "person_b9cd0397a07f",
+            "source_text": "飞！",
+            "actor_keys": [],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_b9cd0397a07f"]
+          },
+          {
+            "kind": "action",
+            "text": "说出这个字的是王有材旁边探出身子的八九岁虎头虎脑的少年，他大声开口回答",
+            "event_key": "E008_002",
+            "source_segment_ids": ["SRC0031"],
+            "actor_keys": ["person_b9cd0397a07f"],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_b9cd0397a07f"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "扯淡，飞什么飞，你能飞下去，现在怎么不飞上来。",
+            "event_key": "E008_003",
+            "source_segment_ids": ["SRC0032"],
+            "speaker_key": "person_b67de643afe6",
+            "source_text": "扯淡，飞什么飞，你能飞下去，现在怎么不飞上来。",
+            "actor_keys": [],
+            "target_keys": ["person_b9cd0397a07f"],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          },
+          {
+            "kind": "action",
+            "text": "孟浩出言嘲讽，索性把藤条向上拽了一些",
+            "event_key": "E008_003",
+            "source_segment_ids": ["SRC0032"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": [],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "别听他胡说，我们是被一个会飞的女人抓过来的，说是要带我们去什么宗做杂役。",
+            "event_key": "E008_004",
+            "source_segment_ids": ["SRC0033"],
+            "speaker_key": "person_e79ecc6793f5",
+            "source_text": "别听他胡说，我们是被一个会飞的女人抓过来的，说是要带我们去什么宗做杂役。",
+            "actor_keys": [],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "action",
+            "text": "王有材连忙开口，生怕招惹了孟浩收回藤条",
+            "event_key": "E008_004",
+            "source_segment_ids": ["SRC0033"],
+            "actor_keys": ["person_e79ecc6793f5"],
+            "target_keys": ["person_b67de643afe6"],
+            "onscreen_entity_keys": ["person_b67de643afe6", "person_e79ecc6793f5"]
+          },
+          {
+            "kind": "dialogue",
+            "text": "又扯淡了，会飞？那是传说中的仙人，谁信啊。",
+            "event_key": "E008_005",
+            "source_segment_ids": ["SRC0034"],
+            "speaker_key": "person_b67de643afe6",
+            "source_text": "又扯淡了，会飞？那是传说中的仙人，谁信啊。",
+            "actor_keys": [],
+            "target_keys": ["person_e79ecc6793f5"],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          },
+          {
+            "kind": "action",
+            "text": "孟浩不屑一顾，暗道自己看过的书籍里有不少遇到仙人成为有钱人的故事，这种事情只是书本骗人的罢了",
+            "event_key": "E008_005",
+            "source_segment_ids": ["SRC0034"],
+            "actor_keys": ["person_b67de643afe6"],
+            "target_keys": [],
+            "onscreen_entity_keys": ["person_b67de643afe6"]
+          }
+        ]
+      }
+    ],
+    "consumed_source_ids": [
+      "SRC0018", "SRC0019", "SRC0020", "SRC0021", "SRC0022",
+      "SRC0023", "SRC0024", "SRC0025", "SRC0026", "SRC0027",
+      "SRC0028", "SRC0029", "SRC0030", "SRC0031", "SRC0032",
+      "SRC0033", "SRC0034"
+    ],
+    "unresolved_participants": [],
+    "source_hash": "2dca261f924be23a31c2b9bdc404b9de0abf4a3157af0a0047028bea224a85d1",
+    "boundary_hash": "4739289c6efbe433cfff0ae5cf700b3f4405d0ad8d9ac649abe500843e2efaf7",
+    "blueprint_hash": "34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253",
+    "identity_registry_hash": "cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f",
+    "source_ownership_hash": "692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6"
+  },
+  "failed_repair_deliveries": [
+    {
+      "scene_key": "bp-sc006",
+      "unit_index": 6,
+      "participant_key": "person_e79ecc6793f5",
+      "observable_claim": "王有材身处崖下裂缝位置，坠落会受到湍急河水的威胁，未出现在画面中",
+      "audible": false,
+      "visible_effect": false,
+      "visible_reaction": false
+    },
+    {
+      "scene_key": "bp-sc007",
+      "unit_index": 1,
+      "participant_key": "person_e79ecc6793f5",
+      "observable_claim": "王有材在崖下等待救援，能听到孟浩的呼喊，未出现在画面中",
+      "audible": false,
+      "visible_effect": false,
+      "visible_reaction": false
+    },
+    {
+      "scene_key": "bp-sc008",
+      "unit_index": 0,
+      "participant_key": "person_e79ecc6793f5",
+      "observable_claim": "王有材在崖下接收孟浩的问题，未出现在画面中",
+      "audible": false,
+      "visible_effect": false,
+      "visible_reaction": false
+    },
+    {
+      "scene_key": "bp-sc008",
+      "unit_index": 3,
+      "participant_key": "person_b9cd0397a07f",
+      "observable_claim": "大青山被困少年甲在崖下接收孟浩的嘲讽，未出现在画面中",
+      "audible": false,
+      "visible_effect": false,
+      "visible_reaction": false
+    },
+    {
+      "scene_key": "bp-sc008",
+      "unit_index": 7,
+      "participant_key": "person_e79ecc6793f5",
+      "observable_claim": "王有材在崖下接收孟浩的质疑，未出现在画面中",
+      "audible": false,
+      "visible_effect": false,
+      "visible_reaction": false
+    }
+  ]
+}
