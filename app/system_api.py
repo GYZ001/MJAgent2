@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import string
 import time
 from pathlib import Path
@@ -1469,6 +1470,7 @@ def job_detail(job_id: str, source: str = "job"):
 def retry_job(job_id: str, body: dict | None = None):
     """低层媒体 Job 的显式重试/恢复；Run 任务继续使用统一 Run 控制接口。"""
     from app import worker
+    from app.hiagent import ProviderFailureDisposition
     from app.monitoring import audit
 
     request = body or {}
@@ -1505,9 +1507,14 @@ def retry_job(job_id: str, body: dict | None = None):
         item["status"] == "waiting_human"
         and item.get("reason_code") == "VIDEO_PROVIDER_CREATE_UNRESOLVED"
     )
+    waiting_provider_failure = bool(
+        item["status"] == "waiting_human"
+        and item.get("provider_failure_disposition")
+        == ProviderFailureDisposition.MANUAL_REVIEW.value
+    )
     if item["status"] not in {
         "failed", "cancelled", "paused", "paused_external", "paused_budget", "waiting_retry",
-    } and not waiting_input_repair and not waiting_provider_create_resolution:
+    } and not waiting_input_repair and not waiting_provider_create_resolution and not waiting_provider_failure:
         raise HTTPException(409, detail={
             "code": "JOB_STATE_CONFLICT", "message": f"当前状态 {item['status']} 不支持重试",
             "current_status": item["status"],
@@ -1573,8 +1580,12 @@ def retry_job(job_id: str, body: dict | None = None):
             else:
                 provider_recovery_unconfirmed = True
         provider_terminal_failure = bool(
-            has_provider_task
-            and item.get("provider_create_state") == "model_rejected"
+            item.get("provider_failure_disposition")
+            == ProviderFailureDisposition.EXTERNAL_TERMINAL.value
+            or (
+                has_provider_task
+                and item.get("provider_create_state") == "model_rejected"
+            )
         )
         if provider_terminal_failure:
             raise HTTPException(409, detail={
@@ -1587,7 +1598,40 @@ def retry_job(job_id: str, body: dict | None = None):
                     "message": "新版本会创建新的供应商任务，并可能产生新费用",
                 },
             })
-        if has_provider_task:
+        manual_provider_failure = bool(
+            item.get("provider_failure_disposition")
+            == ProviderFailureDisposition.MANUAL_REVIEW.value
+        )
+        if manual_provider_failure and not request.get("allow_new_submission"):
+            raise HTTPException(409, detail={
+                "code": "PROVIDER_TECHNICAL_FAILURE_CONFIRMATION_REQUIRED",
+                "message": "原供应商任务发生技术失败，重新提交可能产生新费用",
+                "retryability": {
+                    "retryable": True,
+                    "action": "confirm_new_submission",
+                    "paid_risk": "may_create_new_charge",
+                    "will_submit_new_provider_task": True,
+                    "will_continue_existing_provider_task": False,
+                    "message": "确认后将重新校验预算并创建新的供应商任务",
+                },
+            })
+        if manual_provider_failure:
+            target_status = "queued"
+            new_submission_epoch = True
+            if not item.get("episode_id"):
+                raise HTTPException(409, detail={
+                    "code": "JOB_RETRY_CONTEXT_MISSING",
+                    "message": "任务缺少分集上下文，不能安全重新提交",
+                })
+            retryability = {
+                "retryable": True,
+                "action": "new_submission_after_technical_failure",
+                "paid_risk": "may_create_new_charge",
+                "will_submit_new_provider_task": True,
+                "will_continue_existing_provider_task": False,
+                "message": "已确认技术失败重提并重新校验预算；将创建新的供应商任务",
+            }
+        elif has_provider_task:
             target_status = "waiting_provider"
             new_submission_epoch = False
             retryability = {
@@ -1630,6 +1674,35 @@ def retry_job(job_id: str, body: dict | None = None):
                 "will_continue_existing_provider_task": False,
                 "message": "该任务尚无供应商断点，将重新提交并可能产生新费用",
             }
+
+        def activate_video_slot() -> None:
+            try:
+                activated = conn.execute(
+                    """UPDATE jobs
+                          SET video_slot_active=1
+                        WHERE id=? AND status=?
+                          AND COALESCE(state_revision,0)=?""",
+                    (
+                        job_id,
+                        item["status"],
+                        int(item.get("state_revision") or 0),
+                    ),
+                )
+                if activated.rowcount != 1:
+                    raise HTTPException(409, "任务已被其他操作更新")
+                if item.get("version_id"):
+                    conn.execute(
+                        """UPDATE shot_versions
+                              SET video_slot_active=1
+                            WHERE id=?""",
+                        (item["version_id"],),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise HTTPException(409, detail={
+                    "code": "SHOT_VIDEO_ACTIVE_CONFLICT",
+                    "message": "同一镜头已有活动视频任务，请继续或停止当前任务后再重试",
+                }) from exc
+
         if new_submission_epoch:
             if not item.get("version_id"):
                 raise HTTPException(409, detail={
@@ -1652,6 +1725,7 @@ def retry_job(job_id: str, body: dict | None = None):
             )
             conn.execute("BEGIN IMMEDIATE")
             try:
+                activate_video_slot()
                 conn.execute(
                     """UPDATE budget_reservations
                           SET status='released',settled_at=?,actual_cost_cny=0
@@ -1715,6 +1789,7 @@ def retry_job(job_id: str, body: dict | None = None):
                 conn.execute(
                     """UPDATE jobs
                           SET status='paused_budget',reserved_cost_cny=0,error=?,
+                              video_slot_active=0,
                               reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
                               reason_text=?,updated_at=?
                         WHERE id=? AND status=? AND COALESCE(state_revision,0)=?""",
@@ -1726,6 +1801,10 @@ def retry_job(job_id: str, body: dict | None = None):
                         item["status"],
                         int(item.get("state_revision") or 0),
                     ),
+                )
+                conn.execute(
+                    "UPDATE shot_versions SET video_slot_active=0 WHERE id=?",
+                    (item["version_id"],),
                 )
                 conn.commit()
                 raise HTTPException(409, detail={
@@ -1743,6 +1822,8 @@ def retry_job(job_id: str, body: dict | None = None):
                           cancellation_requested=0,lease_owner=NULL,lease_expires_at=NULL,
                           provider_operation_id=?,provider_create_state='not_started',
                           provider_non_cancellable=0,provider_submitted_at=NULL,
+                          provider_failure_category=NULL,provider_failure_kind=NULL,
+                          provider_failure_disposition=NULL,provider_failure_retryable=NULL,
                           reason_code=NULL,reason_text=NULL,
                           state_revision=COALESCE(state_revision,0)+1,updated_at=?
                     WHERE id=? AND status=?
@@ -1757,6 +1838,12 @@ def retry_job(job_id: str, body: dict | None = None):
                 ),
             )
         else:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                activate_video_slot()
+            except Exception:
+                conn.rollback()
+                raise
             cursor = conn.execute(
                 """UPDATE jobs SET status=?,error=?,next_retry_at=NULL,
                            cancellation_requested=0,lease_owner=NULL,lease_expires_at=NULL,
@@ -1775,6 +1862,13 @@ def retry_job(job_id: str, body: dict | None = None):
         if cursor.rowcount != 1:
             conn.rollback()
             raise HTTPException(409, "任务已被其他操作更新")
+        if new_submission_epoch and item.get("version_id"):
+            conn.execute(
+                """UPDATE shot_versions
+                      SET provider_task_id=NULL,status='queued',error=NULL
+                    WHERE id=?""",
+                (item["version_id"],),
+            )
         if waiting_input_repair and item.get("version_id"):
             conn.execute(
                 """UPDATE shot_versions SET status='queued',error=NULL

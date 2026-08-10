@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS shot_versions (
     idem_key TEXT NOT NULL,
     provider_task_id TEXT,
     status TEXT DEFAULT 'queued',
+    video_slot_active INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     video_path TEXT,
     last_frame_url TEXT,
@@ -182,6 +183,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     episode_id TEXT,
     project_id TEXT,
     status TEXT DEFAULT 'queued',
+    video_slot_active INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
@@ -201,6 +203,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     provider_non_cancellable INTEGER NOT NULL DEFAULT 0,
     provider_operation_id TEXT,
     provider_create_state TEXT NOT NULL DEFAULT 'not_started',
+    provider_failure_category TEXT,
+    provider_failure_kind TEXT,
+    provider_failure_disposition TEXT,
+    provider_failure_retryable INTEGER,
     provider_submitted_at REAL,
     abandoned INTEGER NOT NULL DEFAULT 0,
     attempt_started_at REAL,
@@ -1336,6 +1342,10 @@ MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN provider_non_cancellable INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN provider_operation_id TEXT",
     "ALTER TABLE jobs ADD COLUMN provider_create_state TEXT NOT NULL DEFAULT 'not_started'",
+    "ALTER TABLE jobs ADD COLUMN provider_failure_category TEXT",
+    "ALTER TABLE jobs ADD COLUMN provider_failure_kind TEXT",
+    "ALTER TABLE jobs ADD COLUMN provider_failure_disposition TEXT",
+    "ALTER TABLE jobs ADD COLUMN provider_failure_retryable INTEGER",
     "ALTER TABLE jobs ADD COLUMN provider_submitted_at REAL",
     "ALTER TABLE jobs ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN attempt_started_at REAL",
@@ -1374,6 +1384,9 @@ MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN priority_class TEXT",
     "ALTER TABLE jobs ADD COLUMN ready_at REAL",
     "ALTER TABLE jobs ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0",
+    # 同镜视频付费链路使用显式数据库活动槽，不依赖 request key 或调用来源。
+    "ALTER TABLE jobs ADD COLUMN video_slot_active INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE shot_versions ADD COLUMN video_slot_active INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE reference_sets ADD COLUMN static_ready INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE reference_sets ADD COLUMN continuity_ready INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE reference_sets ADD COLUMN group_gate_passed INTEGER NOT NULL DEFAULT 0",
@@ -1438,6 +1451,12 @@ INTEGRITY_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, next_retry_at, lease_expires_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner_run ON jobs(owner_run_id, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_active_video_shot
+    ON jobs(shot_id)
+    WHERE kind='video' AND shot_id IS NOT NULL AND video_slot_active=1;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_versions_active_video_shot
+    ON shot_versions(shot_id)
+    WHERE video_slot_active=1;
 CREATE INDEX IF NOT EXISTS idx_provider_calls_operation ON provider_calls(operation_id, attempt_no);
 CREATE INDEX IF NOT EXISTS idx_provider_calls_project ON provider_calls(project_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_provider_calls_ts ON provider_calls(ts, id);
@@ -1596,6 +1615,110 @@ def _backup_before_integrity_repair(conn: sqlite3.Connection, stamp: str) -> str
     return str(backup_path)
 
 
+def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
+    """Project legacy video lifecycle rows into the single durable shot slot."""
+    if (
+        "video_slot_active" not in _column_names(conn, "jobs")
+        or "video_slot_active" not in _column_names(conn, "shot_versions")
+    ):
+        return 0
+    rows = conn.execute(
+        """SELECT j.id,j.shot_id,j.version_id,j.status,j.updated_at,
+                  j.lease_owner,j.provider_non_cancellable,j.provider_create_state,
+                  v.provider_task_id
+             FROM jobs j
+             LEFT JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.kind='video' AND j.shot_id IS NOT NULL
+              AND j.cancellation_requested=0 AND j.abandoned=0
+              AND (
+                  j.status IN (
+                      'queued','running','waiting_provider','waiting_retry',
+                      'waiting_human','waiting','paused'
+                  )
+                  OR (j.status='stale' AND j.provider_non_cancellable=1)
+              )
+            ORDER BY j.shot_id,
+              CASE
+                WHEN v.provider_task_id IS NOT NULL AND v.provider_task_id!='' THEN 0
+                WHEN j.provider_non_cancellable=1 THEN 1
+                WHEN j.lease_owner IS NOT NULL AND j.lease_owner!='' THEN 2
+                WHEN j.version_id IS NOT NULL THEN 3
+                ELSE 4
+              END,
+              j.updated_at DESC,j.id DESC"""
+    ).fetchall()
+    conn.execute(
+        "UPDATE jobs SET video_slot_active=0 WHERE kind='video'"
+    )
+    conn.execute("UPDATE shot_versions SET video_slot_active=0")
+    by_shot: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_shot.setdefault(str(row["shot_id"]), []).append(row)
+
+    reconciled = 0
+    stamp = now()
+    for shot_rows in by_shot.values():
+        owner = shot_rows[0]
+        conn.execute(
+            "UPDATE jobs SET video_slot_active=1 WHERE id=?",
+            (owner["id"],),
+        )
+        if owner["version_id"]:
+            conn.execute(
+                "UPDATE shot_versions SET video_slot_active=1 WHERE id=?",
+                (owner["version_id"],),
+            )
+        for duplicate in shot_rows[1:]:
+            provider_may_exist = bool(
+                duplicate["provider_task_id"]
+                or duplicate["provider_non_cancellable"]
+                or duplicate["provider_create_state"] in {
+                    "accepted", "submitting", "unknown",
+                }
+            )
+            terminal_status = "abandoned" if provider_may_exist else "cancelled"
+            message = (
+                "数据库同镜活动槽迁移：该历史重复任务已隔离，"
+                f"活动所有者为 {owner['id']}"
+            )
+            conn.execute(
+                """UPDATE jobs
+                      SET status=?,video_slot_active=0,cancellation_requested=1,
+                          abandoned=?,lease_owner=NULL,lease_expires_at=NULL,
+                          next_retry_at=NULL,error=?,updated_at=?
+                    WHERE id=?""",
+                (
+                    terminal_status,
+                    int(provider_may_exist),
+                    message,
+                    stamp,
+                    duplicate["id"],
+                ),
+            )
+            if duplicate["version_id"]:
+                conn.execute(
+                    """UPDATE shot_versions
+                          SET status=?,video_slot_active=0,error=?
+                        WHERE id=?""",
+                    (terminal_status, message, duplicate["version_id"]),
+                )
+            reservation_status = "settled" if provider_may_exist else "released"
+            conn.execute(
+                """UPDATE budget_reservations
+                      SET status=?,settled_at=?,
+                          actual_cost_cny=CASE WHEN ? THEN amount_cny ELSE 0 END
+                    WHERE job_id=? AND status IN ('reserved','running')""",
+                (
+                    reservation_status,
+                    stamp,
+                    int(provider_may_exist),
+                    duplicate["id"],
+                ),
+            )
+            reconciled += 1
+    return reconciled
+
+
 def _repair_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
     """Back up, report, repair and re-check legacy orphan/duplicate rows."""
     before = _integrity_findings(conn)
@@ -1645,13 +1768,15 @@ def _repair_integrity(conn: sqlite3.Connection) -> dict[str, Any]:
           (shot_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shots s WHERE s.id=jobs.shot_id)) OR
           (version_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shot_versions v WHERE v.id=jobs.version_id));
     """)
+    video_slot_repairs = _reconcile_video_slot_activity(conn)
     conn.executescript(INTEGRITY_SCHEMA)
     after = _integrity_findings(conn)
     report = {
         "schema_version": "1.0.0",
         "created_at": time.time(),
         "backup_path": backup_path,
-        "repair_count": repair_count,
+        "repair_count": repair_count + video_slot_repairs,
+        "video_slot_repairs": video_slot_repairs,
         "before": before,
         "after": after,
         "remaining_count": sum(item["count"] for item in after.values()),

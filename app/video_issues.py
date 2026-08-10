@@ -160,6 +160,8 @@ def issues_from_job_failure(
     shot_no: int | None = None,
 ) -> list[Issue]:
     """从持久化任务状态翻译 Issue；错误正文只展示，不参与分类。"""
+    from app.hiagent import ProviderFailureCategory, ProviderFailureDisposition
+
     def _get(obj: Any, key: str, default=None):
         if obj is None:
             return default
@@ -178,6 +180,10 @@ def issues_from_job_failure(
     stage = str(_get(job, "pipeline_stage") or "")
     reason_code = str(_get(job, "reason_code") or "")
     provider_state = str(_get(job, "provider_create_state") or "")
+    failure_category = str(_get(job, "provider_failure_category") or "")
+    failure_kind = str(_get(job, "provider_failure_kind") or "")
+    failure_disposition = str(_get(job, "provider_failure_disposition") or "")
+    failure_retryable = bool(_get(job, "provider_failure_retryable"))
 
     if reason_code == "VIDEO_PROMPT_PROVIDER_REJECTED":
         return [_mk(
@@ -200,7 +206,10 @@ def issues_from_job_failure(
             },
         )]
 
-    if provider_state == "model_rejected":
+    if (
+        failure_category == ProviderFailureCategory.MODEL_REJECTION.value
+        or provider_state == "model_rejected"
+    ):
         return [_mk(
             "VIDEO_PROVIDER_MODEL_REJECTED",
             IssueSeverity.BLOCKER,
@@ -214,8 +223,39 @@ def issues_from_job_failure(
             category="operational",
             extra={
                 "provider_create_state": provider_state,
+                "provider_failure_category": failure_category or None,
+                "provider_failure_kind": failure_kind or None,
+                "provider_failure_disposition": failure_disposition or None,
                 "provider_reason_code": reason_code or None,
                 "pause_state": "PAUSED_EXTERNAL",
+                "recommended_level": "L6",
+                "runtime_blocking": True,
+            },
+        )]
+
+    if (
+        failure_category == ProviderFailureCategory.TECHNICAL.value
+        and failure_disposition == ProviderFailureDisposition.MANUAL_REVIEW.value
+    ):
+        return [_mk(
+            "VIDEO_PROVIDER_TECHNICAL_FAILURE",
+            IssueSeverity.BLOCKER,
+            shot_id=sid,
+            message=message or "视频供应商发生技术失败，等待人工处理",
+            shot_no=shot_no,
+            version_id=vid,
+            job_id=jid,
+            rule_id=failure_kind or reason_code,
+            repairable=False,
+            category="operational",
+            extra={
+                "provider_create_state": provider_state,
+                "provider_failure_category": failure_category,
+                "provider_failure_kind": failure_kind,
+                "provider_failure_disposition": failure_disposition,
+                "provider_failure_retryable": failure_retryable,
+                "provider_reason_code": reason_code or None,
+                "pause_state": "WAITING_HUMAN",
                 "recommended_level": "L6",
                 "runtime_blocking": True,
             },

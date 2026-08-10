@@ -283,3 +283,111 @@ def test_external_terminal_failure_releases_shot_for_new_version(
         """SELECT COUNT(*) FROM jobs
            WHERE shot_id='s1' AND status IN ('queued','running','waiting_provider')"""
     ).fetchone()[0] == 1
+
+
+def test_database_rejects_second_active_job_and_version() -> None:
+    conn = _conn()
+    _seed_shot(conn)
+    conn.executescript(db.INTEGRITY_SCHEMA)
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               video_slot_active,created_at
+           ) VALUES('v1','s1',1,'p','i1','running',1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               video_slot_active,created_at,updated_at
+           ) VALUES('j1','video','s1','v1','e1','p1','running',1,1,1)"""
+    )
+    conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO jobs(
+                   id,kind,shot_id,episode_id,project_id,status,
+                   video_slot_active,created_at,updated_at
+               ) VALUES('j2','video','s1','e1','p1','queued',1,2,2)"""
+        )
+    conn.rollback()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO shot_versions(
+                   id,shot_id,version_no,prompt_text,idem_key,status,
+                   video_slot_active,created_at
+               ) VALUES('v2','s1',2,'p','i2','queued',1,2)"""
+        )
+
+
+def test_init_db_reconciles_legacy_duplicate_active_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "legacy-video-duplicates.db"
+    conn = sqlite3.connect(database)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    for stmt in db.MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    _seed_shot(conn)
+    conn.executemany(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               provider_task_id,created_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        [
+            ("v-paid", "s1", 1, "p", "i1", "running", "provider-task", 1),
+            ("v-local", "s1", 2, "p", "i2", "queued", None, 2),
+        ],
+    )
+    conn.executemany(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_non_cancellable,provider_create_state,created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        [
+            (
+                "j-paid", "video", "s1", "v-paid", "e1", "p1", "running",
+                1, "accepted", 1, 1,
+            ),
+            (
+                "j-local", "video", "s1", "v-local", "e1", "p1", "queued",
+                0, "not_started", 2, 2,
+            ),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+
+    db.init_db()
+
+    migrated = db.get_conn()
+    jobs = {
+        row["id"]: dict(row)
+        for row in migrated.execute(
+            """SELECT id,status,video_slot_active,cancellation_requested
+                 FROM jobs ORDER BY id"""
+        ).fetchall()
+    }
+    assert jobs["j-paid"]["video_slot_active"] == 1
+    assert jobs["j-local"] == {
+        "id": "j-local",
+        "status": "cancelled",
+        "video_slot_active": 0,
+        "cancellation_requested": 1,
+    }
+    assert migrated.execute(
+        "SELECT COUNT(*) FROM jobs WHERE shot_id='s1' AND video_slot_active=1"
+    ).fetchone()[0] == 1
+    indexes = {
+        row[1] for row in migrated.execute("PRAGMA index_list(jobs)").fetchall()
+    }
+    assert "uq_jobs_active_video_shot" in indexes

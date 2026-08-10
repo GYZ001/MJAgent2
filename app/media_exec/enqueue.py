@@ -276,8 +276,9 @@ def resume_episode_video_tasks(episode_id: str) -> dict[str, object]:
         retry_at = now() if not row["version_id"] else None
         cursor = conn.execute(
             """UPDATE jobs
-                  SET status=?, error=NULL, lease_owner=NULL, lease_expires_at=NULL,
-                      next_retry_at=?, updated_at=?
+                  SET status=?,error=NULL,video_slot_active=1,
+                      lease_owner=NULL,lease_expires_at=NULL,
+                      next_retry_at=?,updated_at=?
                 WHERE id=? AND status='paused' AND cancellation_requested=0 AND abandoned=0""",
             (next_status, retry_at, now(), row["id"]),
         )
@@ -285,7 +286,9 @@ def resume_episode_video_tasks(episode_id: str) -> dict[str, object]:
             continue
         if row["version_id"]:
             conn.execute(
-                "UPDATE shot_versions SET status='queued', error=NULL WHERE id=? AND status='paused'",
+                """UPDATE shot_versions
+                      SET status='queued',error=NULL,video_slot_active=1
+                    WHERE id=? AND status='paused'""",
                 (row["version_id"],),
             )
         resumed.append(row)
@@ -705,7 +708,7 @@ def _begin_video_preflight_job(
     shot_id: str,
     *,
     supervisor_run_id: str | None,
-) -> str:
+) -> dict[str, Any]:
     """先持久化轻量任务，再执行可能失败的输入校验。
 
     version_id 为空表示尚未进入付费媒体阶段；durable dispatcher 不会消费
@@ -715,64 +718,122 @@ def _begin_video_preflight_job(
     from app.media_pipeline.stage_state import set_pipeline_stage
 
     conn = get_conn()
-    shot = conn.execute(
-        """SELECT s.id, s.episode_id, e.project_id
-           FROM shots s JOIN episodes e ON e.id=s.episode_id
-           WHERE s.id=?""",
-        (shot_id,),
-    ).fetchone()
-    if not shot:
-        raise ValueError(f"镜头不存在：{shot_id}")
-    existing = conn.execute(
-        """SELECT id FROM jobs
-           WHERE shot_id=? AND kind='video' AND version_id IS NULL
-             AND status IN ('waiting_retry','waiting_human')
-             AND cancellation_requested=0 AND abandoned=0
-           ORDER BY created_at DESC LIMIT 1""",
-        (shot_id,),
-    ).fetchone()
-    job_id = existing["id"] if existing else new_id("job")
-    retry_at = now() + float(config.VIDEO_PREFLIGHT_VALIDATION_TIMEOUT)
-    if existing:
-        conn.execute(
-            """UPDATE jobs
-               SET status='waiting_retry', error=NULL, next_retry_at=?,
-                   owner_run_id=COALESCE(?, owner_run_id),
-                   lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-               WHERE id=?""",
-            (retry_at, supervisor_run_id, now(), job_id),
+    job_id = new_id("job")
+    claim_owner = new_id("preflight")
+    stamp = now()
+    retry_at = stamp + float(config.VIDEO_PREFLIGHT_VALIDATION_TIMEOUT)
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        shot = conn.execute(
+            """SELECT s.id, s.episode_id, e.project_id
+               FROM shots s JOIN episodes e ON e.id=s.episode_id
+               WHERE s.id=?""",
+            (shot_id,),
+        ).fetchone()
+        if not shot:
+            raise ValueError(f"镜头不存在：{shot_id}")
+        existing = conn.execute(
+            """SELECT id,version_id,status,lease_owner,lease_expires_at
+                 FROM jobs
+                WHERE shot_id=? AND kind='video' AND video_slot_active=1
+                LIMIT 1""",
+            (shot_id,),
+        ).fetchone()
+        acquired = False
+        if existing is not None:
+            job_id = str(existing["id"])
+            lease_inactive = (
+                existing["lease_owner"] is None
+                or existing["lease_expires_at"] is None
+                or float(existing["lease_expires_at"]) <= stamp
+            )
+            if existing["version_id"] is None and lease_inactive:
+                claimed = conn.execute(
+                    """UPDATE jobs
+                          SET status='waiting_retry',error=NULL,next_retry_at=?,
+                              owner_run_id=COALESCE(?,owner_run_id),
+                              lease_owner=?,lease_expires_at=?,updated_at=?
+                        WHERE id=? AND video_slot_active=1 AND version_id IS NULL
+                          AND (
+                              lease_owner IS NULL OR lease_expires_at IS NULL
+                              OR lease_expires_at<=?
+                          )""",
+                    (
+                        retry_at,
+                        supervisor_run_id,
+                        claim_owner,
+                        retry_at,
+                        stamp,
+                        job_id,
+                        stamp,
+                    ),
+                )
+                acquired = claimed.rowcount == 1
+        else:
+            conn.execute(
+                """INSERT INTO jobs(
+                       id,kind,shot_id,episode_id,project_id,status,
+                       video_slot_active,owner_run_id,next_retry_at,
+                       lease_owner,lease_expires_at,created_at,updated_at
+                   ) VALUES(
+                       ?,'video',?,?,?,'waiting_retry',1,?,?,?,?,?,?
+                   )""",
+                (
+                    job_id,
+                    shot_id,
+                    shot["episode_id"],
+                    shot["project_id"],
+                    supervisor_run_id,
+                    retry_at,
+                    claim_owner,
+                    retry_at,
+                    stamp,
+                    stamp,
+                ),
+            )
+            existing = None
+            acquired = True
+        if not acquired:
+            conn.commit()
+            return {
+                "acquired": False,
+                "job_id": job_id,
+                "version_id": existing["version_id"] if existing else None,
+                "status": existing["status"] if existing else None,
+                "claim_owner": None,
+            }
+        set_pipeline_stage(
+            job_id,
+            media_stages.STAGE_PREFLIGHT_VALIDATING,
+            reason_code="VIDEO_PREFLIGHT_VALIDATING",
+            reason_text="正在校验视频输入，尚未提交供应商",
+            stage_progress={
+                "attempt": int(conn.execute(
+                    "SELECT retry_count FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()["retry_count"] or 0) + 1,
+                "attempt_limit": int(config.VIDEO_PREFLIGHT_MAX_RETRIES) + 1,
+                "unit": "preflight_attempt",
+            },
+            conn=conn,
         )
-    else:
         conn.execute(
-            """INSERT INTO jobs(
-                   id, kind, shot_id, episode_id, project_id, status,
-                   owner_run_id, next_retry_at, created_at, updated_at
-               ) VALUES(?, 'video', ?, ?, ?, 'waiting_retry', ?, ?, ?, ?)""",
-            (
-                job_id, shot_id, shot["episode_id"], shot["project_id"],
-                supervisor_run_id, retry_at, now(), now(),
-            ),
+            "UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'",
+            (shot["episode_id"],),
         )
-    set_pipeline_stage(
-        job_id,
-        media_stages.STAGE_PREFLIGHT_VALIDATING,
-        reason_code="VIDEO_PREFLIGHT_VALIDATING",
-        reason_text="正在校验视频输入，尚未提交供应商",
-        stage_progress={
-            "attempt": int(conn.execute(
-                "SELECT retry_count FROM jobs WHERE id=?", (job_id,)
-            ).fetchone()["retry_count"] or 0) + 1,
-            "attempt_limit": int(config.VIDEO_PREFLIGHT_MAX_RETRIES) + 1,
-            "unit": "preflight_attempt",
-        },
-        conn=conn,
-    )
-    conn.execute(
-        "UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'",
-        (shot["episode_id"],),
-    )
-    conn.commit()
-    return job_id
+        conn.commit()
+        return {
+            "acquired": True,
+            "job_id": job_id,
+            "version_id": None,
+            "status": "waiting_retry",
+            "claim_owner": claim_owner,
+        }
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 def _preflight_failure_is_retryable(exc: Exception) -> bool:
@@ -785,7 +846,12 @@ def _preflight_failure_is_retryable(exc: Exception) -> bool:
     return bool(getattr(exc, "retryable", False))
 
 
-def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]:
+def _mark_video_preflight_failure(
+    job_id: str,
+    exc: Exception,
+    *,
+    claim_owner: str,
+) -> dict[str, Any]:
     """把未创建 version 的校验失败保留为可重试或显式阻塞任务。"""
     from app.media_pipeline import stages as media_stages
     from app.media_pipeline.stage_state import set_pipeline_stage
@@ -793,8 +859,10 @@ def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]
 
     conn = get_conn()
     row = conn.execute(
-        "SELECT version_id, retry_count, max_retries, episode_id, shot_id FROM jobs WHERE id=?",
-        (job_id,),
+        """SELECT version_id,retry_count,max_retries,episode_id,shot_id
+             FROM jobs
+            WHERE id=? AND video_slot_active=1 AND lease_owner=?""",
+        (job_id, claim_owner),
     ).fetchone()
     if not row or row["version_id"]:
         return {"retry_scheduled": False, "status": None}
@@ -815,8 +883,9 @@ def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]
         conn.execute(
             """UPDATE jobs SET status='waiting_retry', error=?, retry_count=?,
                       next_retry_at=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-               WHERE id=? AND version_id IS NULL""",
-            (reason, attempt, next_retry_at, now(), job_id),
+               WHERE id=? AND version_id IS NULL AND video_slot_active=1
+                 AND lease_owner=?""",
+            (reason, attempt, next_retry_at, now(), job_id, claim_owner),
         )
         set_pipeline_stage(
             job_id,
@@ -846,8 +915,9 @@ def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]
         conn.execute(
             """UPDATE jobs SET status='waiting_human', error=?, next_retry_at=NULL,
                       lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-               WHERE id=? AND version_id IS NULL""",
-            (reason, now(), job_id),
+               WHERE id=? AND version_id IS NULL AND video_slot_active=1
+                 AND lease_owner=?""",
+            (reason, now(), job_id, claim_owner),
         )
         set_pipeline_stage(
             job_id,
@@ -881,14 +951,16 @@ def _mark_video_preflight_failure(job_id: str, exc: Exception) -> dict[str, Any]
     return state
 
 
-def _close_reused_preflight_job(job_id: str) -> None:
+def _close_reused_preflight_job(job_id: str, *, claim_owner: str) -> None:
     """幂等复用旧版本时关闭仅用于校验的空壳任务。"""
     conn = get_conn()
     conn.execute(
         """UPDATE jobs SET status='succeeded', error='输入未变化，已复用已有版本',
-                  next_retry_at=NULL, stage_status='complete', updated_at=?
-           WHERE id=? AND version_id IS NULL""",
-        (now(), job_id),
+                  video_slot_active=0,next_retry_at=NULL,stage_status='complete',
+                  lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+           WHERE id=? AND version_id IS NULL AND video_slot_active=1
+             AND lease_owner=?""",
+        (now(), job_id, claim_owner),
     )
     conn.commit()
 
@@ -898,6 +970,8 @@ def _resume_reused_paused_job(
     *,
     supervisor_run_id: str | None,
     dependency_snapshot: dict[str, Any] | None,
+    preflight_job_id: str | None = None,
+    preflight_owner: str | None = None,
 ) -> dict[str, Any] | None:
     """Transfer an exact interrupted attempt to the current completion Supervisor."""
     if not supervisor_run_id:
@@ -1047,9 +1121,22 @@ def _resume_reused_paused_job(
         )
 
     next_status = "waiting_provider" if provider_task_id else "queued"
+    if preflight_job_id and preflight_owner:
+        released = conn.execute(
+            """UPDATE jobs
+                  SET status='succeeded',video_slot_active=0,
+                      lease_owner=NULL,lease_expires_at=NULL,next_retry_at=NULL,
+                      error='已将活动槽移交给原供应商任务',updated_at=?
+                WHERE id=? AND version_id IS NULL AND video_slot_active=1
+                  AND lease_owner=?""",
+            (now(), preflight_job_id, preflight_owner),
+        )
+        if released.rowcount != 1:
+            conn.rollback()
+            raise ValueError("视频输入校验任务状态已变化，请刷新后重试")
     updated = conn.execute(
         """UPDATE jobs
-              SET status=?, error=NULL, owner_run_id=?,
+              SET status=?,error=NULL,video_slot_active=1,owner_run_id=?,
                   provider_create_state=?, provider_non_cancellable=?,
                   provider_submitted_at=?, lease_owner=NULL,
                   lease_expires_at=NULL, next_retry_at=NULL,
@@ -1075,7 +1162,8 @@ def _resume_reused_paused_job(
             (provider_task_id, version_id),
         )
     conn.execute(
-        """UPDATE shot_versions SET status='queued', error=NULL
+        """UPDATE shot_versions
+              SET status='queued',error=NULL,video_slot_active=1
             WHERE id=? AND status IN ('paused','abandoned')""",
         (version_id,),
     )
@@ -1194,9 +1282,28 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             "[NARRATIVE_PROMPT_OVERRIDE_REQUIRES_CANDIDATE] 叙事权威镜头不允许用"
             "自由文本覆盖已发布的分镜语义；请通过受控分镜候选修订后重新发布"
         )
-    preflight_job_id = _begin_video_preflight_job(
+    preflight_claim = _begin_video_preflight_job(
         shot_id, supervisor_run_id=supervisor_run_id,
     )
+    if not preflight_claim["acquired"]:
+        result = {
+            "reused": True,
+            "job_id": preflight_claim["job_id"],
+            "task_accepted": True,
+            "active": True,
+        }
+        if preflight_claim.get("version_id"):
+            result["version_id"] = preflight_claim["version_id"]
+            resumed = _resume_reused_paused_job(
+                str(preflight_claim["version_id"]),
+                supervisor_run_id=supervisor_run_id,
+                dependency_snapshot=dependency_snapshot,
+            )
+            if resumed:
+                result.update(resumed)
+        return result
+    preflight_job_id = str(preflight_claim["job_id"])
+    preflight_owner = str(preflight_claim["claim_owner"])
     try:
         result = _enqueue_shot_impl(
             shot_id,
@@ -1210,9 +1317,14 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             dependency_snapshot=dependency_snapshot,
             critique_sources=critique_sources,
             preflight_job_id=preflight_job_id,
+            preflight_owner=preflight_owner,
         )
     except Exception as exc:
-        failure = _mark_video_preflight_failure(preflight_job_id, exc)
+        failure = _mark_video_preflight_failure(
+            preflight_job_id,
+            exc,
+            claim_owner=preflight_owner,
+        )
         if not failure.get("retry_scheduled"):
             raise
         result = {
@@ -1222,7 +1334,10 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             **failure,
         }
     if result.get("reused"):
-        _close_reused_preflight_job(preflight_job_id)
+        _close_reused_preflight_job(
+            preflight_job_id,
+            claim_owner=preflight_owner,
+        )
     return result
 
 
@@ -1234,6 +1349,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                        dependency_snapshot: dict[str, Any] | None = None,
                        critique_sources: list[dict[str, Any]] | None = None,
                        preflight_job_id: str | None = None,
+                       preflight_owner: str | None = None,
                        preflight_repair: dict[str, Any] | None = None) -> dict:
     """为镜头创建参考图模式视频版本并入队。
     critique：上一版 AI 评语问题，作为本次必须改正项写入 prompt。
@@ -1621,6 +1737,8 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                     existing["id"],
                     supervisor_run_id=supervisor_run_id,
                     dependency_snapshot=dependency_snapshot,
+                    preflight_job_id=preflight_job_id,
+                    preflight_owner=preflight_owner,
                 )
                 if resumed:
                     result.update(resumed)
@@ -1732,83 +1850,124 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             image_meta["reference_gallery_edited"] = True
         if reference_gallery.get("contract_override"):
             image_meta["reference_gallery_contract_override"] = True
-    conn.execute(
-        "INSERT INTO shot_versions(id, shot_id, version_no, prompt_text, idem_key, status, created_at, image_inputs) "
-        "VALUES(?,?,?,?,?, 'queued', ?, ?)",
-        (version_id, shot_id, version_no, prompt_text, key, now(),
-         json.dumps(image_meta, ensure_ascii=False)))
     job_id = preflight_job_id or new_id("job")
     budget_limit = episode_video_budget_limit(str(ep["id"]))
     run_id, step_run_id = ensure_media_trace(
         workflow_type="video_generation", scope_id=shot_id,
         input_value={"prompt": prompt_text, "version": version_no}, budget_limit_cny=budget_limit,
     )
-    if preflight_job_id:
-        updated = conn.execute(
-            """UPDATE jobs
-               SET version_id=?, episode_id=?, project_id=?, status='queued',
-                   error=NULL, next_retry_at=NULL, retry_count=0,
-                   reason_code=NULL, reason_text=NULL, stage_progress_json=NULL,
-                   after_shot_id=?, after_version_id=?, run_id=?,
-                   owner_run_id=?, step_run_id=?,
-                   lease_owner=NULL, lease_expires_at=NULL, updated_at=?
-               WHERE id=? AND shot_id=? AND kind='video' AND version_id IS NULL""",
-            (
-                version_id, ep["id"], project["id"], chain_after_shot_id,
-                chain_after_version_id, run_id, supervisor_run_id, step_run_id,
-                now(), job_id, shot_id,
-            ),
-        )
-        if updated.rowcount != 1:
-            conn.rollback()
-            raise ValueError("视频输入校验任务状态已变化，请刷新后重试")
-    else:
-        conn.execute(
-            "INSERT INTO jobs(id, kind, shot_id, version_id, episode_id, project_id, status, created_at, "
-            "updated_at, after_shot_id, after_version_id, run_id, owner_run_id, step_run_id) "
-            "VALUES(?, 'video', ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
-            (
-                job_id, shot_id, version_id, ep["id"], project["id"], now(), now(),
-                chain_after_shot_id, chain_after_version_id, run_id,
-                supervisor_run_id, step_run_id,
-            ))
-    try:
-        from app.media_pipeline import stages as media_stages
-        from app.media_pipeline.stage_state import set_pipeline_stage
-        set_pipeline_stage(job_id, media_stages.STAGE_JOB_QUEUED, conn=conn)
-    except Exception:  # noqa: BLE001
-        pass
-    conn.execute("UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'", (ep["id"],))
-    conn.commit()
     from app.video_cost_model import initial_shot_generation_cost
 
     estimate = initial_shot_generation_cost(float(shot.duration_s))
     try:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        version_no = (conn.execute(
+            "SELECT COALESCE(MAX(version_no),0)+1 AS n FROM shot_versions WHERE shot_id=?",
+            (shot_id,),
+        ).fetchone()["n"])
+        conn.execute(
+            """INSERT INTO shot_versions(
+                   id,shot_id,version_no,prompt_text,idem_key,status,
+                   video_slot_active,created_at,image_inputs
+               ) VALUES(?,?,?,?,?,'queued',1,?,?)""",
+            (
+                version_id,
+                shot_id,
+                version_no,
+                prompt_text,
+                key,
+                now(),
+                json.dumps(image_meta, ensure_ascii=False),
+            ),
+        )
+        if preflight_job_id:
+            updated = conn.execute(
+                """UPDATE jobs
+                      SET version_id=?,episode_id=?,project_id=?,status='queued',
+                          video_slot_active=1,error=NULL,next_retry_at=NULL,retry_count=0,
+                          reason_code=NULL,reason_text=NULL,stage_progress_json=NULL,
+                          after_shot_id=?,after_version_id=?,run_id=?,
+                          owner_run_id=?,step_run_id=?,
+                          lease_owner=NULL,lease_expires_at=NULL,updated_at=?
+                    WHERE id=? AND shot_id=? AND kind='video' AND version_id IS NULL
+                      AND video_slot_active=1 AND lease_owner=?""",
+                (
+                    version_id,
+                    ep["id"],
+                    project["id"],
+                    chain_after_shot_id,
+                    chain_after_version_id,
+                    run_id,
+                    supervisor_run_id,
+                    step_run_id,
+                    now(),
+                    job_id,
+                    shot_id,
+                    preflight_owner,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("视频输入校验任务状态已变化，请刷新后重试")
+        else:
+            conn.execute(
+                """INSERT INTO jobs(
+                       id,kind,shot_id,version_id,episode_id,project_id,status,
+                       video_slot_active,created_at,updated_at,after_shot_id,
+                       after_version_id,run_id,owner_run_id,step_run_id
+                   ) VALUES(
+                       ?,'video',?,?,?,?,'queued',1,?,?,?,?,?,?,?
+                   )""",
+                (
+                    job_id,
+                    shot_id,
+                    version_id,
+                    ep["id"],
+                    project["id"],
+                    now(),
+                    now(),
+                    chain_after_shot_id,
+                    chain_after_version_id,
+                    run_id,
+                    supervisor_run_id,
+                    step_run_id,
+                ),
+            )
+        try:
+            from app.media_pipeline import stages as media_stages
+            from app.media_pipeline.stage_state import set_pipeline_stage
+            set_pipeline_stage(job_id, media_stages.STAGE_JOB_QUEUED, conn=conn)
+        except Exception:  # noqa: BLE001
+            pass
         reserved = media_scheduler.reserve_budget(
             job_id, ep["id"], estimate, budget_limit, conn=conn
         )
-    except Exception as exc:
-        public = errors.record_and_format(
-            exc,
-            action="video_budget_reserve",
-            context={"job_id": job_id, "shot_id": shot_id, "episode_id": ep["id"]},
-        )
-        message = f"视频任务未能完成预算预留，尚未提交供应商，可直接重试。{public}"
+        if not reserved:
+            conn.execute(
+                """UPDATE jobs
+                      SET video_slot_active=0,lease_owner=NULL,lease_expires_at=NULL,
+                          updated_at=?
+                    WHERE id=?""",
+                (now(), job_id),
+            )
+            conn.execute(
+                """UPDATE shot_versions
+                      SET status='paused_budget',video_slot_active=0,
+                          error='集预算不足，任务已暂停'
+                    WHERE id=?""",
+                (version_id,),
+            )
         conn.execute(
-            "UPDATE jobs SET status='failed', error=?, updated_at=? WHERE id=?",
-            (message, now(), job_id),
-        )
-        conn.execute(
-            "UPDATE shot_versions SET status='failed', error=? WHERE id=?",
-            (message, version_id),
+            "UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'",
+            (ep["id"],),
         )
         conn.commit()
-        mark_media_job_state(run_id, step_run_id, "failed", message)
-        reconcile_episode_generation_status(ep["id"])
-        raise ValueError(message) from exc
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     if not reserved:
-        _set_version(version_id, status="paused_budget")
-        _set_job(job_id, "paused_budget", "集预算不足，任务已暂停")
         reconcile_episode_generation_status(ep["id"])
         result = {
             "reused": False, "version_id": version_id, "job_id": job_id,

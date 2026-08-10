@@ -218,6 +218,8 @@ def episode_plan(args) -> PreflightResult:
 
 
 def video_clear_episode(args) -> PreflightResult:
+    from app.completion_grant import provider_task_clearance_snapshot
+
     conn = get_conn()
     ep = conn.execute("SELECT id, episode_no, project_id, status FROM episodes WHERE id=?", (args.episode_id,)).fetchone()
     if not ep:
@@ -240,6 +242,37 @@ def video_clear_episode(args) -> PreflightResult:
     shots = conn.execute(
         "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (args.episode_id,)
     ).fetchone()["c"]
+    clearance = provider_task_clearance_snapshot(
+        episode_id=args.episode_id,
+        conn=conn,
+    )
+    if not clearance["safe_to_clear"]:
+        return PreflightResult(
+            command="video.clear_episode",
+            allowed=False,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            summary="供应商付费任务尚未终态，本次未清空任何资源",
+            affected=AffectedScope(
+                episodes=[args.episode_id],
+                shot_count=int(shots or 0),
+                invalidated_artifacts=int(versions or 0),
+                extra=clearance,
+            ),
+            warnings=["保留任务句柄与费用账本，待供应商状态收敛后可重试"],
+            state_fingerprint=_fp({
+                "episode_id": args.episode_id,
+                "status": ep["status"],
+                "versions": versions,
+                "shots": shots,
+                "provider_clearance": clearance,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="PROVIDER_TASKS_NOT_TERMINAL",
+            denial_message=(
+                "供应商付费任务尚未终态；请按恢复状态继续轮询或核对创建结果"
+            ),
+        )
     return PreflightResult(
         command="video.clear_episode",
         allowed=True,
@@ -264,6 +297,8 @@ def video_clear_episode(args) -> PreflightResult:
 
 
 def video_clear_shot(args) -> PreflightResult:
+    from app.completion_grant import provider_task_clearance_snapshot
+
     conn = get_conn()
     shot = conn.execute(
         "SELECT id, shot_no, episode_id, storyboard_artifact_id FROM shots WHERE id=?",
@@ -284,6 +319,37 @@ def video_clear_shot(args) -> PreflightResult:
     versions = conn.execute(
         "SELECT COUNT(*) AS c FROM shot_versions WHERE shot_id=?", (args.shot_id,)
     ).fetchone()["c"]
+    clearance = provider_task_clearance_snapshot(
+        shot_ids=[args.shot_id],
+        conn=conn,
+    )
+    if not clearance["safe_to_clear"]:
+        return PreflightResult(
+            command="video.clear_shot",
+            allowed=False,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            summary="供应商付费任务尚未终态，本次未清空任何资源",
+            affected=AffectedScope(
+                episodes=[shot["episode_id"]],
+                shots=[args.shot_id],
+                shot_count=1,
+                invalidated_artifacts=int(versions or 0),
+                extra=clearance,
+            ),
+            warnings=["保留任务句柄与费用账本，待供应商状态收敛后可重试"],
+            state_fingerprint=_fp({
+                "shot_id": args.shot_id,
+                "artifact": shot["storyboard_artifact_id"],
+                "versions": versions,
+                "provider_clearance": clearance,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="PROVIDER_TASKS_NOT_TERMINAL",
+            denial_message=(
+                "供应商付费任务尚未终态；请按恢复状态继续轮询或核对创建结果"
+            ),
+        )
     return PreflightResult(
         command="video.clear_shot",
         allowed=True,

@@ -130,18 +130,124 @@ def _latest_provider_operation_request(
     return None
 
 
+class ProviderFailureCategory(str, Enum):
+    TECHNICAL = "technical"
+    MODEL_REJECTION = "model_rejection"
+
+
+class ProviderFailureDisposition(str, Enum):
+    AUTOMATIC_RETRY = "automatic_retry"
+    MANUAL_REVIEW = "manual_review"
+    EXTERNAL_TERMINAL = "external_terminal"
+
+
+class ProviderFailureKind(str, Enum):
+    UNCLASSIFIED = "unclassified_provider_failure"
+    EXECUTION_FAILED = "provider_execution_failed"
+    TASK_NOT_FOUND = "provider_task_not_found"
+    OUTPUT_MISSING = "provider_output_missing"
+    PROVIDER_REJECTED = "provider_rejected"
+    PROMPT_PROVIDER_REJECTED = "prompt_provider_rejected"
+
+
+@dataclass(frozen=True)
+class ProviderFailure:
+    category: ProviderFailureCategory
+    kind: str
+    disposition: ProviderFailureDisposition
+    retryable: bool
+
+    @classmethod
+    def technical(
+        cls,
+        kind: str | ProviderFailureKind,
+        *,
+        retryable: bool = False,
+        requires_explicit_retry: bool = False,
+    ) -> ProviderFailure:
+        disposition = (
+            ProviderFailureDisposition.AUTOMATIC_RETRY
+            if retryable and not requires_explicit_retry
+            else ProviderFailureDisposition.MANUAL_REVIEW
+        )
+        return cls(
+            category=ProviderFailureCategory.TECHNICAL,
+            kind=kind.value if isinstance(kind, ProviderFailureKind) else str(kind),
+            disposition=disposition,
+            retryable=retryable,
+        )
+
+    @classmethod
+    def model_rejection(
+        cls,
+        kind: str | ProviderFailureKind = ProviderFailureKind.PROVIDER_REJECTED,
+    ) -> ProviderFailure:
+        return cls(
+            category=ProviderFailureCategory.MODEL_REJECTION,
+            kind=kind.value if isinstance(kind, ProviderFailureKind) else str(kind),
+            disposition=ProviderFailureDisposition.EXTERNAL_TERMINAL,
+            retryable=False,
+        )
+
+    @classmethod
+    def from_provider_payload(
+        cls,
+        payload: Any,
+        *,
+        default_kind: str | ProviderFailureKind = ProviderFailureKind.EXECUTION_FAILED,
+    ) -> ProviderFailure:
+        """Normalize typed adapter fields without inspecting provider error prose."""
+        default = (
+            default_kind.value
+            if isinstance(default_kind, ProviderFailureKind)
+            else str(default_kind)
+        )
+        if not isinstance(payload, dict):
+            return cls.technical(default)
+        kind = str(payload.get("kind") or default)
+        if payload.get("category") == ProviderFailureCategory.MODEL_REJECTION.value:
+            return cls.model_rejection(kind)
+        return cls.technical(kind, retryable=payload.get("retryable") is True)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "category": self.category.value,
+            "kind": self.kind,
+            "disposition": self.disposition.value,
+            "retryable": self.retryable,
+        }
+
+    @property
+    def reason_code(self) -> str:
+        suffix = "".join(
+            character if character.isalnum() else "_"
+            for character in self.kind.upper()
+        ).strip("_")
+        return f"VIDEO_{suffix or 'PROVIDER_FAILURE'}"
+
+
 class ProviderError(Exception):
     """对外调用失败。message 面向 UI，包含分类结论 + 原始报文摘要。"""
 
     def __init__(self, message: str, *, retryable: bool = False, raw: str = "",
                  timeout_phase: str | None = None, failure_kind: str = "",
                  delivery_state: str = "unknown", replay_safe: bool = False,
-                 requires_explicit_retry: bool = False):
+                 requires_explicit_retry: bool = False,
+                 failure: ProviderFailure | None = None):
         super().__init__(message)
-        self.retryable = retryable
+        if failure is None:
+            failure = ProviderFailure.technical(
+                failure_kind or ProviderFailureKind.UNCLASSIFIED,
+                retryable=retryable,
+                requires_explicit_retry=requires_explicit_retry,
+            )
+        self.failure = failure
+        self.retryable = failure.retryable
         self.raw = raw[:500]
         self.timeout_phase = timeout_phase
-        self.failure_kind = failure_kind
+        self.failure_kind = failure.kind
+        self.failure_category = failure.category.value
+        self.failure_disposition = failure.disposition.value
         self.delivery_state = delivery_state
         self.replay_safe = replay_safe
         self.requires_explicit_retry = requires_explicit_retry
@@ -1693,7 +1799,7 @@ async def create_video_task(
 
 
 async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dict:
-    """轮询单次。返回 {status, video_url, last_frame_url, error}。"""
+    """轮询单次；失败时返回结构化 failure，不从错误正文推断类别。"""
     from app import minimax_h3
 
     if minimax_h3.is_task_id(task_id):
@@ -1714,6 +1820,7 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
             retryable=True,
             raw=repr(exc),
             timeout_phase=_timeout_phase(exc) if isinstance(exc, httpx.TimeoutException) else None,
+            failure_kind="connection_failed",
         )
         merged_meta = _merge_call_meta(call_meta)
         log_provider_call(
@@ -1737,7 +1844,12 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
         raise err
     data = resp.json()
     status = data.get("status", "")
-    error_obj = data.get("error") or {}
+    error_obj = data.get("error") if isinstance(data.get("error"), dict) else {}
+    failure = (
+        ProviderFailure.from_provider_payload(error_obj.get("failure"))
+        if status == "failed"
+        else None
+    )
     if status == "failed":
         merged_meta = _merge_call_meta(call_meta)
         log_provider_call("video_poll", active_model("video", "hiagent"), "TASK_FAILED", 200, latency,
@@ -1750,7 +1862,7 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
         "video_url": _absolute_provider_url((data.get("content") or {}).get("video_url", ""), base_url),
         "last_frame_url": _absolute_provider_url((data.get("content") or {}).get("last_frame_url", ""), base_url),
         "error": error_obj.get("message", ""),
-        "failure_kind": "provider_rejected" if status == "failed" else "",
+        "failure": failure.to_payload() if failure else None,
     }
 
 

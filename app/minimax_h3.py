@@ -27,7 +27,7 @@ from app.db import (
     start_provider_call,
     update_provider_call_request,
 )
-from app.hiagent import ProviderError
+from app.hiagent import ProviderError, ProviderFailure, ProviderFailureKind
 
 
 TASK_PREFIX = "minimax_h3:"
@@ -794,6 +794,7 @@ async def poll_video_task(
         raise ProviderError("MiniMaxH3 状态响应不是合法 JSON", retryable=True) from exc
     status = str(data.get("status") or "").strip().lower()
     stage = str(data.get("stage") or "").strip().lower()
+    failure: ProviderFailure | None = None
     files = data.get("files") if isinstance(data.get("files"), list) else []
     output = next(
         (
@@ -816,9 +817,13 @@ async def poll_video_task(
     if status == "not_found":
         status = "failed"
         error_text = error_text or "MiniMaxH3 队列和历史中均找不到该任务"
+        failure = ProviderFailure.technical(ProviderFailureKind.TASK_NOT_FOUND)
     if status == "succeeded" and not output.get("url"):
         status = "failed"
         error_text = "MiniMaxH3 任务成功但未返回 MP4 文件"
+        failure = ProviderFailure.technical(ProviderFailureKind.OUTPUT_MISSING)
+    if status == "failed" and failure is None:
+        failure = ProviderFailure.from_provider_payload(data.get("failure"))
     timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     return {
@@ -835,6 +840,7 @@ async def poll_video_task(
         "video_url": str(output.get("url") or ""),
         "last_frame_url": "",
         "error": error_text,
+        "failure": failure.to_payload() if failure else None,
     }
 
 

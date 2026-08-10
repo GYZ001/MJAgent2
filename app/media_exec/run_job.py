@@ -467,7 +467,10 @@ def _commit_provider_acceptance_in_transaction(
     claimed = conn.execute(
         """UPDATE jobs
               SET provider_operation_id=?,provider_create_state='accepted',
-                  provider_non_cancellable=1,provider_submitted_at=?,updated_at=?
+                  provider_non_cancellable=1,provider_submitted_at=?,
+                  provider_failure_category=NULL,provider_failure_kind=NULL,
+                  provider_failure_disposition=NULL,provider_failure_retryable=NULL,
+                  updated_at=?
             WHERE id=? AND status='running' AND lease_owner=?
               AND cancellation_requested=0""",
         (operation_id, accepted_at, stamp, job_id, owner),
@@ -1204,11 +1207,25 @@ def _schedule_job_retry(
     delay = config.VIDEO_JOB_RETRY_BASE_DELAY * (2 ** (attempt - 1))
     note = (f"大模型/外部服务瞬时故障，已自动排队第 {attempt}/{max_retries} 次重试"
             f"（约 {int(delay)} 秒后）。无需处理；若多次重试后仍失败才需关注错误码。")
+    failure = exc.failure
     updated = conn.execute(
         """UPDATE jobs SET status='queued', error=?, retry_count=?, next_retry_at=?,
+                  provider_failure_category=?,provider_failure_kind=?,
+                  provider_failure_disposition=?,provider_failure_retryable=?,
                   lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE id=?"""
         + (" AND lease_owner=?" if lease_owner else ""),
-        (note, attempt, now() + delay, now(), job_id, *([lease_owner] if lease_owner else [])),
+        (
+            note,
+            attempt,
+            now() + delay,
+            failure.category.value,
+            failure.kind,
+            failure.disposition.value,
+            int(failure.retryable),
+            now(),
+            job_id,
+            *([lease_owner] if lease_owner else []),
+        ),
     )
     if updated.rowcount != 1:
         conn.rollback()
@@ -1486,7 +1503,8 @@ def _set_job(
     terminal = status in {"succeeded", "failed", "cancelled", "abandoned", "paused_budget"}
     if terminal:
         cursor = conn.execute(
-            "UPDATE jobs SET status=?, error=?, updated_at=?, lease_owner=NULL, lease_expires_at=NULL "
+            "UPDATE jobs SET status=?, error=?, updated_at=?, video_slot_active=0, "
+            "lease_owner=NULL, lease_expires_at=NULL "
             "WHERE id=?" + (" AND lease_owner=?" if lease_owner else ""),
             (status, error, now(), job_id, *([lease_owner] if lease_owner else [])),
         )
@@ -1499,6 +1517,13 @@ def _set_job(
     if cursor.rowcount != 1:
         conn.rollback()
         return False
+    if terminal:
+        conn.execute(
+            """UPDATE shot_versions
+                  SET video_slot_active=0
+                WHERE id=(SELECT version_id FROM jobs WHERE id=?)""",
+            (job_id,),
+        )
     conn.commit()
     row = conn.execute("SELECT run_id, step_run_id FROM jobs WHERE id=?", (job_id,)).fetchone()
     if row:
@@ -1531,14 +1556,14 @@ def _video_model_rejection_guidance(
     exc: ProviderError,
 ) -> tuple[str, str] | None:
     """Build guidance from a typed provider outcome, never from error prose."""
-    if exc.failure_kind == "prompt_provider_rejected":
+    if exc.failure.category is not hiagent.ProviderFailureCategory.MODEL_REJECTION:
+        return None
+    if exc.failure.kind == hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED.value:
         return (
             "VIDEO_PROMPT_PROVIDER_REJECTED",
             "AI 视频提示词服务明确拒绝了当前内容；系统未改写内容、未切换生成方式，"
             "也未向视频服务提交本镜。请更换获准的提示词模型或人工调整内容后再继续。",
         )
-    if exc.failure_kind != "provider_rejected":
-        return None
     mode = str(meta.get("mode") or meta.get("planned_mode") or "")
     return (
         "VIDEO_PROVIDER_MODEL_REJECTED",
@@ -1783,13 +1808,16 @@ def _reserve_or_pause_video_resubmit(job, version, shot, owner: str) -> bool:
     changed = conn.execute(
         """UPDATE jobs
            SET status='paused_budget', error=?, updated_at=?,
+               video_slot_active=0,
                lease_owner=NULL, lease_expires_at=NULL
            WHERE id=? AND status='running' AND lease_owner=?""",
         (message, now(), job["id"], owner),
     )
     if changed.rowcount == 1:
         conn.execute(
-            "UPDATE shot_versions SET status='paused_budget', error=? WHERE id=?",
+            """UPDATE shot_versions
+                  SET status='paused_budget',error=?,video_slot_active=0
+                WHERE id=?""",
             (message, version["id"]),
         )
         conn.commit()
@@ -1846,7 +1874,10 @@ def _persist_video_resubmit(
     conn.execute(
         """UPDATE jobs
            SET provider_operation_id=?, provider_create_state='not_started',
-               provider_non_cancellable=0, provider_submitted_at=NULL, updated_at=?
+               provider_non_cancellable=0, provider_submitted_at=NULL,
+               provider_failure_category=NULL,provider_failure_kind=NULL,
+               provider_failure_disposition=NULL,provider_failure_retryable=NULL,
+               updated_at=?
            WHERE id=?""",
         (operation_id, now(), job_id),
     )
@@ -3730,7 +3761,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             )
                             report_healthy(media_stages.RESOURCE_VIDEO_SUBMIT)
                         except ProviderError as submit_exc:
-                            if getattr(submit_exc, "retryable", False) or "429" in str(submit_exc):
+                            if submit_exc.retryable:
                                 report_congestion(media_stages.RESOURCE_VIDEO_SUBMIT, reason="submit")
                             raise
                     _assert_job_lease(job_id, owner)
@@ -3840,7 +3871,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         })
                     report_healthy(media_stages.RESOURCE_VIDEO_POLL)
                 except ProviderError as poll_exc:
-                    if getattr(poll_exc, "retryable", False) or "429" in str(poll_exc):
+                    if poll_exc.retryable:
                         report_congestion(media_stages.RESOURCE_VIDEO_POLL, reason="poll")
                     raise
             _assert_job_lease(job_id, owner)
@@ -3887,10 +3918,13 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 provider_label = str(
                     result.get("provider_label") or "视频模型"
                 )
+                failure = hiagent.ProviderFailure.from_provider_payload(
+                    result.get("failure")
+                )
                 raise ProviderError(
                     f"{provider_label} 任务失败：{error_text}",
                     raw=error_text,
-                    failure_kind=str(result.get("failure_kind") or "provider_rejected"),
+                    failure=failure,
                 )
             break
 
@@ -4034,35 +4068,38 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             except Exception:  # noqa: BLE001
                 resubmits = 0
             if not supervisor_controlled and resubmits < technical_resubmit_limit():
-                enqueue_shot(
-                    job["shot_id"],
-                    reroll=True,
-                    after_shot_id=job["after_shot_id"],
-                    auto_retake_count=resubmits + 1,
-                    dependency_snapshot=meta.get("review_dependency_snapshot"),
-                )
-                # 标记新版本的 technical_resubmit_count（尽力而为）
-                try:
-                    new_ver = get_conn().execute(
-                        """SELECT id, image_inputs FROM shot_versions
-                           WHERE shot_id=? ORDER BY version_no DESC LIMIT 1""",
-                        (job["shot_id"],),
-                    ).fetchone()
-                    if new_ver:
-                        import json as _json
-                        m = _json.loads(new_ver["image_inputs"] or "{}")
-                        if isinstance(m, dict):
-                            m["technical_resubmit_count"] = resubmits + 1
-                            get_conn().execute(
-                                "UPDATE shot_versions SET image_inputs=? WHERE id=?",
-                                (_json.dumps(m, ensure_ascii=False), new_ver["id"]),
-                            )
-                            get_conn().commit()
-                except Exception:  # noqa: BLE001
-                    pass
                 if _set_job(job_id, "succeeded", lease_owner=owner):
                     media_scheduler.settle_budget(job_id, cost, success=True)
                     reconcile_episode_generation_status(job["episode_id"])
+                    replacement = enqueue_shot(
+                        job["shot_id"],
+                        reroll=True,
+                        after_shot_id=job["after_shot_id"],
+                        auto_retake_count=resubmits + 1,
+                        dependency_snapshot=meta.get("review_dependency_snapshot"),
+                    )
+                    # 标记新版本的 technical_resubmit_count（尽力而为）
+                    try:
+                        new_version_id = replacement.get("version_id")
+                        new_ver = (
+                            get_conn().execute(
+                                "SELECT id,image_inputs FROM shot_versions WHERE id=?",
+                                (new_version_id,),
+                            ).fetchone()
+                            if new_version_id else None
+                        )
+                        if new_ver:
+                            import json as _json
+                            m = _json.loads(new_ver["image_inputs"] or "{}")
+                            if isinstance(m, dict):
+                                m["technical_resubmit_count"] = resubmits + 1
+                                get_conn().execute(
+                                    "UPDATE shot_versions SET image_inputs=? WHERE id=?",
+                                    (_json.dumps(m, ensure_ascii=False), new_ver["id"]),
+                                )
+                                get_conn().commit()
+                    except Exception:  # noqa: BLE001
+                        pass
                 return
             raise ProviderError("视频文件技术校验失败，候选不可采用")
         if not supervisor_controlled:
@@ -4093,6 +4130,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                   SET status='paused_budget',error=?,reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
                       reason_text=?,provider_non_cancellable=0,
                       provider_create_state='not_started',
+                      video_slot_active=0,
                       lease_owner=NULL,lease_expires_at=NULL,next_retry_at=NULL,
                       updated_at=?
                 WHERE id=? AND status='running' AND lease_owner=?""",
@@ -4102,6 +4140,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             conn.rollback()
             return
         _set_version(version["id"], status="paused_budget", error=message)
+        conn.execute(
+            "UPDATE shot_versions SET video_slot_active=0 WHERE id=?",
+            (version["id"],),
+        )
         conn.execute(
             """UPDATE budget_reservations
                   SET status='released',settled_at=?,actual_cost_cny=0
@@ -4222,8 +4264,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             exc = ProviderError(
                 "AI 视频提示词服务拒绝当前内容",
                 raw=str(exc),
-                retryable=False,
-                failure_kind="prompt_provider_rejected",
+                failure=hiagent.ProviderFailure.model_rejection(
+                    hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED
+                ),
                 delivery_state="not_sent",
                 replay_safe=True,
             )
@@ -4237,19 +4280,33 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             if isinstance(exc, ProviderError)
             else None
         )
-        reason_code = guidance[0] if guidance else None
+        provider_failure = exc.failure if isinstance(exc, ProviderError) else None
+        reason_code = (
+            guidance[0]
+            if guidance
+            else (provider_failure.reason_code if provider_failure else None)
+        )
         public = (
             f"{guidance[1]}（{guidance[0]} · {record.error_id}）"
             if guidance else record.public
         )
-        # 上游瞬时故障（超时/网络/限流/5xx）先 job 级延迟重排，扛过分钟级抖动；
-        # 重试次数耗尽或不可重试的错误才永久判失败。
+        # 仅结构化 retryable 故障自动重排；重试耗尽后转人工，不改变原始类别。
         if isinstance(exc, ProviderError) and _schedule_job_retry(
             job_id, exc, lease_owner=owner
         ):
             _set_version(version["id"], status="queued")
             return
-        if _set_job(job_id, "failed", public, lease_owner=owner):
+        external_terminal = bool(
+            provider_failure
+            and provider_failure.disposition
+            is hiagent.ProviderFailureDisposition.EXTERNAL_TERMINAL
+        )
+        final_status = (
+            "waiting_human"
+            if provider_failure and not external_terminal
+            else "failed"
+        )
+        if _set_job(job_id, final_status, public, lease_owner=owner):
             conn.execute(
                 """UPDATE video_generation_attempts
                       SET status='failed',error=?,updated_at=?
@@ -4262,21 +4319,43 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                           SET status='failed',updated_at=? WHERE id=?""",
                     (now(), str(meta["shot_plan_id"])),
                 )
-            if reason_code:
-                create_state = (
-                    "model_rejected"
-                    if exc.failure_kind == "provider_rejected"
-                    else "not_started"
+            if provider_failure:
+                persisted_disposition = (
+                    hiagent.ProviderFailureDisposition.EXTERNAL_TERMINAL
+                    if external_terminal
+                    else hiagent.ProviderFailureDisposition.MANUAL_REVIEW
                 )
                 conn.execute(
                     """UPDATE jobs
                           SET reason_code=?,reason_text=?,
-                              provider_create_state=?
-                        WHERE id=? AND status='failed'""",
-                    (reason_code, public, create_state, job_id),
+                              provider_failure_category=?,
+                              provider_failure_kind=?,
+                              provider_failure_disposition=?,
+                              provider_failure_retryable=?
+                        WHERE id=? AND status=?""",
+                    (
+                        reason_code,
+                        public,
+                        provider_failure.category.value,
+                        provider_failure.kind,
+                        persisted_disposition.value,
+                        int(provider_failure.retryable),
+                        job_id,
+                        final_status,
+                    ),
                 )
+                if (
+                    external_terminal
+                    and provider_failure.kind
+                    != hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED.value
+                ):
+                    conn.execute(
+                        """UPDATE jobs SET provider_create_state='model_rejected'
+                            WHERE id=? AND status='failed'""",
+                        (job_id,),
+                    )
             conn.commit()
-            _set_version(version["id"], status="failed", error=public)
+            _set_version(version["id"], status=final_status, error=public)
             media_scheduler.settle_budget(job_id, 0.0, success=False)
             reconcile_episode_generation_status(job["episode_id"])
 

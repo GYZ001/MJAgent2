@@ -51,8 +51,17 @@ def reserve_budget(
         ).fetchone()["amount"]
         if float(spent) + float(reserved) + amount > float(limit_cny) + 1e-9:
             db.execute(
-                "UPDATE jobs SET status='paused_budget', reserved_cost_cny=0, updated_at=? WHERE id=?",
+                """UPDATE jobs
+                      SET status='paused_budget',reserved_cost_cny=0,
+                          video_slot_active=0,updated_at=?
+                    WHERE id=?""",
                 (now(), job_id),
+            )
+            db.execute(
+                """UPDATE shot_versions
+                      SET video_slot_active=0
+                    WHERE id=(SELECT version_id FROM jobs WHERE id=?)""",
+                (job_id,),
             )
             if owns_transaction:
                 db.commit()
@@ -183,7 +192,7 @@ def reconcile_cancelled_version_states(
             continue
         cursor = db.execute(
             """UPDATE shot_versions
-                  SET status=?, error=?
+                  SET status=?, error=?, video_slot_active=0
                 WHERE id=?
                   AND EXISTS (
                       SELECT 1 FROM jobs j
@@ -310,7 +319,8 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
     status = "abandoned" if non_cancellable else "cancelled"
     cursor = db.execute(
         """UPDATE jobs SET cancellation_requested=1, abandoned=?, status=?, error=?,
-                  lease_owner=NULL, lease_expires_at=NULL, next_retry_at=NULL, updated_at=?
+                  video_slot_active=0,lease_owner=NULL,lease_expires_at=NULL,
+                  next_retry_at=NULL,updated_at=?
            WHERE id=? AND status IN (
                'queued','running','paused_budget','waiting_provider','waiting_retry','waiting','waiting_human'
            )""",
@@ -331,7 +341,9 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
         }
     if row["version_id"]:
         db.execute(
-            "UPDATE shot_versions SET status=?, error=? WHERE id=? AND status IN ('queued','running','paused_budget')",
+            """UPDATE shot_versions
+                  SET status=?,error=?,video_slot_active=0
+                WHERE id=? AND status IN ('queued','running','paused_budget')""",
             (status, reason, row["version_id"]),
         )
     db.commit()

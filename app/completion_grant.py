@@ -52,6 +52,21 @@ class VideoBudgetAuthorizationError(RuntimeError):
     """A payable provider video call would exceed the user-approved cap."""
 
 
+class ProviderTasksNotTerminalError(ValueError):
+    """Destructive cleanup would erase recovery or billing authority."""
+
+    def __init__(self, clearance: dict[str, Any]):
+        self.detail = {
+            "code": "PROVIDER_TASKS_NOT_TERMINAL",
+            "message": (
+                "供应商付费任务尚未终态，未清空任何资源；"
+                "请先按恢复状态继续轮询或核对供应商创建结果"
+            ),
+            **clearance,
+        }
+        super().__init__(self.detail["message"])
+
+
 def ensure_video_budget_authority_tables(conn=None) -> None:
     db = conn or get_conn()
     db.executescript(
@@ -82,6 +97,179 @@ def ensure_video_budget_authority_tables(conn=None) -> None:
     )
     if conn is None:
         db.commit()
+
+
+def provider_task_clearance_snapshot(
+    *,
+    episode_id: str | None = None,
+    shot_ids: list[str] | tuple[str, ...] = (),
+    version_ids: list[str] | tuple[str, ...] = (),
+    conn=None,
+) -> dict[str, Any]:
+    """Return whether destructive cleanup can preserve provider authority.
+
+    Scope is selected by persisted resource relationships, never by job kind.
+    Any provider-backed operation without durable terminal evidence blocks the
+    cleanup so its task handle and billing claim remain recoverable.
+    """
+    db = conn or get_conn()
+    normalized_shots = list(dict.fromkeys(str(value) for value in shot_ids if value))
+    normalized_versions = list(
+        dict.fromkeys(str(value) for value in version_ids if value)
+    )
+    scope_clauses: list[str] = []
+    scope_params: list[str] = []
+    if episode_id:
+        scope_clauses.extend([
+            "j.episode_id=?",
+            "j.shot_id IN (SELECT id FROM shots WHERE episode_id=?)",
+            """j.version_id IN (
+                   SELECT v.id FROM shot_versions v
+                   JOIN shots s ON s.id=v.shot_id
+                  WHERE s.episode_id=?
+               )""",
+        ])
+        scope_params.extend([episode_id, episode_id, episode_id])
+    if normalized_shots:
+        marks = ",".join("?" for _ in normalized_shots)
+        scope_clauses.extend([
+            f"j.shot_id IN ({marks})",
+            f"j.version_id IN (SELECT id FROM shot_versions WHERE shot_id IN ({marks}))",
+        ])
+        scope_params.extend(normalized_shots)
+        scope_params.extend(normalized_shots)
+    if normalized_versions:
+        marks = ",".join("?" for _ in normalized_versions)
+        scope_clauses.append(f"j.version_id IN ({marks})")
+        scope_params.extend(normalized_versions)
+    if not scope_clauses:
+        raise ValueError("provider task clearance requires a resource scope")
+
+    claims_available = bool(db.execute(
+        """SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='provider_video_budget_claims'"""
+    ).fetchone())
+    claim_columns = (
+        "c.status AS claim_status,c.amount_cny AS claim_amount,"
+        if claims_available
+        else "NULL AS claim_status,NULL AS claim_amount,"
+    )
+    claim_join = (
+        "LEFT JOIN provider_video_budget_claims c ON c.job_id=j.id"
+        if claims_available
+        else ""
+    )
+    rows = db.execute(
+        f"""SELECT j.id AS job_id,j.version_id,j.status AS job_status,
+                   j.cancellation_requested,j.abandoned,
+                   j.provider_non_cancellable,j.provider_operation_id,
+                   j.provider_create_state,
+                   v.provider_task_id,v.status AS version_status,
+                   v.video_path,v.cost_cny,
+                   {claim_columns}
+                   COALESCE(c.operation_id,j.provider_operation_id)
+                       AS claim_operation_id
+              FROM jobs j
+              LEFT JOIN shot_versions v ON v.id=j.version_id
+              {claim_join}
+             WHERE {" OR ".join(f"({clause})" for clause in scope_clauses)}
+             ORDER BY j.created_at,j.id,claim_operation_id""".replace(
+            "COALESCE(c.operation_id,j.provider_operation_id)",
+            (
+                "COALESCE(c.operation_id,j.provider_operation_id)"
+                if claims_available
+                else "j.provider_operation_id"
+            ),
+        ),
+        scope_params,
+    ).fetchall()
+
+    blockers: list[dict[str, Any]] = []
+    for row in rows:
+        create_state = str(row["provider_create_state"] or "").strip().lower()
+        claim_status = (
+            str(row["claim_status"]).strip().lower()
+            if row["claim_status"] is not None
+            else None
+        )
+        provider_task_id = str(row["provider_task_id"] or "").strip() or None
+        operation_id = str(row["claim_operation_id"] or "").strip() or None
+        result_checkpointed = (
+            str(row["version_status"] or "").strip().lower() == "succeeded"
+            and bool(
+                str(row["video_path"] or "").strip()
+                or float(row["cost_cny"] or 0) > 0
+            )
+        )
+        provider_may_exist = bool(
+            provider_task_id
+            or row["provider_non_cancellable"]
+            or create_state not in {"", "not_started"}
+            or (
+                claim_status is not None
+                and claim_status not in {"reserved", "released", "settled"}
+            )
+        )
+        terminal_evidence = bool(
+            result_checkpointed
+            or claim_status == "settled"
+            or (claim_status == "released" and not provider_may_exist)
+        )
+        if terminal_evidence or not provider_may_exist:
+            continue
+
+        locally_recoverable_poll = bool(
+            provider_task_id
+            and not row["cancellation_requested"]
+            and not row["abandoned"]
+        )
+        blockers.append({
+            "job_id": str(row["job_id"]),
+            "version_id": (
+                str(row["version_id"]) if row["version_id"] is not None else None
+            ),
+            "provider_operation_id": operation_id,
+            "provider_task_id": provider_task_id,
+            "job_status": str(row["job_status"] or ""),
+            "provider_create_state": create_state or "unknown",
+            "claim_status": claim_status,
+            "amount_cny": float(row["claim_amount"] or 0),
+            "recovery_status": (
+                "waiting_provider" if locally_recoverable_poll else "waiting_human"
+            ),
+            "recovery_action": (
+                "continue_provider_poll"
+                if locally_recoverable_poll
+                else (
+                    "restore_provider_poll"
+                    if provider_task_id
+                    else "reconcile_provider_create"
+                )
+            ),
+        })
+    return {
+        "safe_to_clear": not blockers,
+        "resume_supported": bool(blockers),
+        "blockers": blockers,
+    }
+
+
+def assert_provider_tasks_clearable(
+    *,
+    episode_id: str | None = None,
+    shot_ids: list[str] | tuple[str, ...] = (),
+    version_ids: list[str] | tuple[str, ...] = (),
+    conn=None,
+) -> dict[str, Any]:
+    clearance = provider_task_clearance_snapshot(
+        episode_id=episode_id,
+        shot_ids=shot_ids,
+        version_ids=version_ids,
+        conn=conn,
+    )
+    if not clearance["safe_to_clear"]:
+        raise ProviderTasksNotTerminalError(clearance)
+    return clearance
 
 
 def _historical_video_liability(episode_id: str, *, conn) -> float:

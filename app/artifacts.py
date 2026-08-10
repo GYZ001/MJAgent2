@@ -26,6 +26,23 @@ _MEDIA_CLEANUP_EXECUTION_TOKENS: dict[str, str] = {}
 _LOGGER = logging.getLogger(__name__)
 
 
+def _assert_provider_clear_scope(
+    conn,
+    *,
+    episode_id: str | None = None,
+    shot_ids: list[str] | tuple[str, ...] = (),
+    version_ids: list[str] | tuple[str, ...] = (),
+) -> None:
+    from app.completion_grant import assert_provider_tasks_clearable
+
+    assert_provider_tasks_clearable(
+        episode_id=episode_id,
+        shot_ids=shot_ids,
+        version_ids=version_ids,
+        conn=conn,
+    )
+
+
 def _begin_clear_transaction(
     conn,
     episode_id: str,
@@ -120,6 +137,11 @@ def _purge_shots(
 ) -> tuple[int, set[str]]:
     """删除给定镜头的全部版本、关键帧、任务与采用标记。
     返回 (删除版本数, 受影响剧集 id 集合)。"""
+    if shots:
+        _assert_provider_clear_scope(
+            conn,
+            shot_ids=[str(shot["id"]) for shot in shots],
+        )
     versions_removed = 0
     affected_eps: set[str] = set()
     for s in shots:
@@ -190,6 +212,8 @@ def delete_project_episodes(project_id: str) -> int:
     前端就出现“同一集号有两三条、剧情重复”。重新分集应是干净替换。"""
     conn = get_conn()
     eps = conn.execute("SELECT id, episode_no FROM episodes WHERE project_id=?", (project_id,)).fetchall()
+    for episode in eps:
+        _assert_provider_clear_scope(conn, episode_id=str(episode["id"]))
     shots = rows_to_dicts(conn.execute(
         "SELECT s.id, s.episode_id FROM shots s JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?",
         (project_id,)).fetchall())
@@ -212,6 +236,7 @@ def delete_episode_shots(
     """清空单集分镜及其衍生产物。用于剧本重生/编辑后让下游重新展开。"""
     conn = conn or get_conn()
     ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    _assert_provider_clear_scope(conn, episode_id=episode_id)
     shots = rows_to_dicts(conn.execute(
         "SELECT id, episode_id, shot_no FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
     for shot in shots:
@@ -254,6 +279,7 @@ def delete_video_version(version_id: str) -> str | None:
     v = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version_id,)).fetchone()
     if not v:
         return None
+    _assert_provider_clear_scope(conn, version_ids=[version_id])
     shot_id = v["shot_id"]
     _delete_version_files(v["video_path"])
     conn.execute("DELETE FROM shot_versions WHERE id=?", (version_id,))
@@ -275,6 +301,7 @@ def purge_shot_videos(shot_id: str) -> int:
     shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot:
         return 0
+    _assert_provider_clear_scope(conn, shot_ids=[shot_id])
     versions = conn.execute("SELECT id, video_path FROM shot_versions WHERE shot_id=?", (shot_id,)).fetchall()
     for v in versions:
         _delete_version_files(v["video_path"])
@@ -305,6 +332,7 @@ def _clear_shot_video_assets(conn, shot_row) -> int:
     video-only clear must therefore keep one metadata-only version, otherwise
     the separate reference-image tab would silently lose its assets too.
     """
+    _assert_provider_clear_scope(conn, shot_ids=[str(shot_row["id"])])
     versions = conn.execute(
         "SELECT * FROM shot_versions WHERE shot_id=? ORDER BY version_no DESC",
         (shot_row["id"],),
@@ -362,6 +390,7 @@ def clear_episode_video_assets(episode_id: str) -> dict:
     conn = get_conn()
     _begin_clear_transaction(conn, episode_id)
     try:
+        _assert_provider_clear_scope(conn, episode_id=episode_id)
         shots = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)
         ).fetchall()
@@ -730,6 +759,7 @@ def clear_shot_artifacts(
         allow_storyboard_workspace_mutation=True,
     )
     try:
+        _assert_provider_clear_scope(conn, shot_ids=[shot_id])
         refs = _delete_shot_reference_dir(conn, shot)
         _delete_shot_reference_records(conn, shot_id)
         versions, affected_eps = _purge_shots(conn, [dict(shot)])  # 视频+关键帧+任务、采用/审批标记、scene_status 复位
@@ -764,6 +794,7 @@ def stage_shot_artifact_cleanup(
         shot["episode_id"],
         active_storyboard_run_id=active_storyboard_run_id,
     )
+    _assert_provider_clear_scope(conn, shot_ids=[shot_id])
     ep = conn.execute(
         "SELECT project_id,episode_no FROM episodes WHERE id=?",
         (shot["episode_id"],),
@@ -867,6 +898,7 @@ def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
     ).fetchone()
     if ep is None:
         raise ValueError("分集不存在")
+    _assert_provider_clear_scope(conn, episode_id=episode_id)
     shots = rows_to_dicts(conn.execute(
         "SELECT id,shot_no FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,),
@@ -1127,6 +1159,7 @@ def clear_episode_artifacts(episode_id: str) -> dict:
     conn = get_conn()
     _begin_clear_transaction(conn, episode_id)
     try:
+        _assert_provider_clear_scope(conn, episode_id=episode_id)
         shots = rows_to_dicts(conn.execute(
             "SELECT * FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
         refs = 0

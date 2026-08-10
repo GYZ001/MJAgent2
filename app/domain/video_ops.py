@@ -1249,6 +1249,29 @@ async def confirm_episode(episode_id: str, body: dict | None = Body(None)):
     return respond_ui(result)
 
 
+def _require_provider_clearance(
+    conn,
+    *,
+    episode_id: str | None = None,
+    shot_ids: list[str] | tuple[str, ...] = (),
+    version_ids: list[str] | tuple[str, ...] = (),
+) -> None:
+    from app.completion_grant import (
+        ProviderTasksNotTerminalError,
+        assert_provider_tasks_clearable,
+    )
+
+    try:
+        assert_provider_tasks_clearable(
+            episode_id=episode_id,
+            shot_ids=shot_ids,
+            version_ids=version_ids,
+            conn=conn,
+        )
+    except ProviderTasksNotTerminalError as exc:
+        raise HTTPException(409, exc.detail) from exc
+
+
 @router.post("/episodes/{episode_id}/clear-artifacts")
 async def clear_episode_artifacts(episode_id: str):
     """清空整集所有镜头的参考图、视频与模型分析，并回退到「已确认」。"""
@@ -1264,12 +1287,13 @@ async def clear_episode_artifacts(episode_id: str):
             "message": "编剧或分镜任务仍在写入，不能普通清空；请先停止上游任务",
             "active_runs": snapshot["active_upstream_runs"],
         })
+    _require_provider_clearance(get_conn(), episode_id=episode_id)
     await reset_video_completion_state(episode_id, reason="CLEARED")
     worker.pause_episode_video_tasks(episode_id)
     try:
         result = worker.clear_episode_artifacts(episode_id)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, getattr(exc, "detail", str(exc))) from exc
     _review_write_audit("artifacts.clear_episode", "episode", episode_id, new_state=result)
     return result
 
@@ -1289,12 +1313,13 @@ async def clear_episode_videos(episode_id: str):
             "message": "编剧或分镜任务仍在写入，不能清空视频",
             "active_runs": snapshot["active_upstream_runs"],
         })
+    _require_provider_clearance(get_conn(), episode_id=episode_id)
     await reset_video_completion_state(episode_id, reason="VIDEOS_CLEARED")
     worker.pause_episode_video_tasks(episode_id)
     try:
         result = worker.clear_episode_video_assets(episode_id)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, getattr(exc, "detail", str(exc))) from exc
     _review_write_audit("artifacts.clear_episode_videos", "episode", episode_id, new_state=result)
     return result
 
@@ -1362,11 +1387,12 @@ async def clear_shot_artifacts(shot_id: str):
             "message": "编剧或分镜任务仍在写入，不能普通清空",
             "active_runs": snapshot["active_upstream_runs"],
         })
+    _require_provider_clearance(conn, shot_ids=[shot_id])
     worker.stop_shot_video_tasks(shot_id)
     try:
         result = worker.clear_shot_artifacts(shot_id)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, getattr(exc, "detail", str(exc))) from exc
     _review_write_audit("artifacts.clear_shot", "shot", shot_id, new_state=result)
     return result
 
@@ -1416,12 +1442,13 @@ async def clear_shot_videos(shot_id: str):
     routed = await ui_route("video.clear_shot_videos", {"shot_id": shot_id})
     if routed is not None:
         return routed
-    _, shot = _shot_clear_context(shot_id)
+    conn, shot = _shot_clear_context(shot_id)
+    _require_provider_clearance(conn, shot_ids=[shot_id])
     worker.stop_shot_video_tasks(shot_id)
     try:
         result = worker.clear_shot_video_assets(shot_id)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, getattr(exc, "detail", str(exc))) from exc
     _review_write_audit("artifacts.clear_shot_videos", "shot", shot_id, new_state=result)
     return result
 
@@ -1442,6 +1469,7 @@ async def delete_version(version_id: str):
     ).fetchone()
     if not v:
         raise HTTPException(404, "视频版本不存在")
+    _require_provider_clearance(conn, version_ids=[version_id])
     if v["adopted_version_id"] == version_id:
         raise HTTPException(409, "当前采用版受保护，请先采用其他版本")
     if v["active_job"]:
@@ -3633,15 +3661,7 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     if not eligible:
         raise HTTPException(409, "没有可补齐的已确认剧集")
 
-    spent_row = conn.execute(
-        """SELECT COALESCE(SUM(v.cost_cny),0) AS c
-           FROM shot_versions v
-           JOIN shots s ON s.id=v.shot_id
-           JOIN episodes e ON e.id=s.episode_id
-           WHERE e.project_id=? AND v.status='succeeded'""",
-        (project_id,),
-    ).fetchone()
-    project_spent = float(spent_row["c"] if spent_row else 0)
+    project_spent = _project_video_spent(project_id, conn=conn)
     remaining_global = max(0.0, global_cap - project_spent)
 
     plan = []
@@ -3781,16 +3801,14 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     }
 
 
-def _project_video_spent(project_id: str) -> float:
-    row = get_conn().execute(
-        """SELECT COALESCE(SUM(v.cost_cny),0) AS c
-           FROM shot_versions v
-           JOIN shots s ON s.id=v.shot_id
-           JOIN episodes e ON e.id=s.episode_id
-           WHERE e.project_id=? AND v.status='succeeded'""",
-        (project_id,),
-    ).fetchone()
-    return float(row["c"] if row else 0)
+def _project_video_spent(project_id: str, *, conn=None) -> float:
+    from app.completion_grant import project_video_budget_snapshot
+
+    snapshot = project_video_budget_snapshot(
+        project_id,
+        conn=conn or get_conn(),
+    )
+    return float(snapshot["used_cny"])
 
 
 # ---------- 成片台：预览 / 拼接 / 导出 ----------
