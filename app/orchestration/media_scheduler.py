@@ -291,12 +291,15 @@ def schedule_retry(job_id: str, message: str, *, max_retries: int, base_delay: f
 
 
 def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") -> dict[str, object]:
-    """Cancel locally; paid provider work may continue and is marked abandoned on completion."""
+    """Release local generation authority without losing accepted provider work."""
     db = get_conn()
     row = db.execute(
-        """SELECT status, provider_non_cancellable, version_id, run_id,
-                  step_run_id, episode_id
-             FROM jobs WHERE id=?""",
+        """SELECT j.status,j.provider_non_cancellable,j.provider_create_state,
+                  j.version_id,j.run_id,j.step_run_id,j.episode_id,
+                  v.provider_task_id
+             FROM jobs j
+             LEFT JOIN shot_versions v ON v.id=j.version_id
+            WHERE j.id=?""",
         (job_id,),
     ).fetchone()
     if not row:
@@ -313,6 +316,74 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
             "cancelled": False,
         }
     non_cancellable = bool(row["provider_non_cancellable"])
+    provider_accepted = bool(
+        row["provider_create_state"] == "accepted"
+        and (row["provider_task_id"] or non_cancellable)
+    )
+    if provider_accepted:
+        message = (
+            f"{reason}；供应商已接单，继续轮询原任务，迟到结果只进入隔离审计"
+        )
+        cursor = db.execute(
+            """UPDATE jobs
+                  SET status='waiting_provider',error=?,
+                      video_slot_active=0,provider_poll_required=1,
+                      provider_result_adoptable=0,
+                      cancellation_requested=0,abandoned=0,
+                      lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,
+                      updated_at=?
+                WHERE id=? AND status IN (
+                    'queued','running','paused_budget','waiting_provider',
+                    'waiting_retry','waiting','waiting_human'
+                )""",
+            (message, now(), now(), job_id),
+        )
+        if cursor.rowcount != 1:
+            db.rollback()
+            current = db.execute(
+                "SELECT status,provider_non_cancellable FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(job_id)
+            return {
+                "job_id": job_id,
+                "status": current["status"],
+                "provider_may_continue": bool(
+                    current["provider_non_cancellable"]
+                ),
+                "cancelled": False,
+            }
+        if row["version_id"]:
+            db.execute(
+                """UPDATE shot_versions
+                      SET status='waiting_provider',error=?,
+                          video_slot_active=0
+                    WHERE id=?""",
+                (message, row["version_id"]),
+            )
+        db.execute(
+            """UPDATE budget_reservations
+                  SET status='reserved',settled_at=NULL,actual_cost_cny=NULL
+                WHERE job_id=?""",
+            (job_id,),
+        )
+        db.commit()
+        from app.orchestration.media_runs import mark_media_job_state
+
+        mark_media_job_state(
+            row["run_id"],
+            row["step_run_id"],
+            "waiting_provider",
+            message,
+        )
+        return {
+            "job_id": job_id,
+            "status": "waiting_provider",
+            "provider_may_continue": True,
+            "cancelled": True,
+            "result_isolated": True,
+        }
     # A crashed process may already have recovered a provider-backed job from
     # running to queued. provider_non_cancellable remains the durable truth that
     # paid upstream work can still complete, so cancellation must stay abandoned.

@@ -3579,6 +3579,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
     provider_recovery_only = bool(
         job["provider_poll_required"] and not result_adoptable
     )
+    task_id = version["provider_task_id"]
 
     started = time.time()
     try:
@@ -3590,7 +3591,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             _row_value(job, "provider_operation_id")
             or f"video-create-{version['id']}"
         )
-        task_id = version["provider_task_id"]
         recovered_at = None
         if not task_id:
             recovered = _recover_paid_video_task(conn, provider_operation_id)
@@ -4959,14 +4959,16 @@ def recover_and_start(loop_concurrency: int | None = None) -> None:
 def _recover_one_media_job(
     conn, job_id: str, run_id: str | None, step_run_id: str | None, reason: str
 ) -> bool:
-    """把一个卡住的媒体 job 复位回 queued，等待持久调度器接管：
-    - running/queued/waiting_provider job 统一回到 queued，清空旧 lease；
-      provider_task_id 与持久化 retry 到期时间保留
+    """把一个卡住的媒体 job 复位给持久调度器：
+    - accepted provider task 回到 waiting_provider，其他任务回到 queued；
+      provider_task_id、轮询责任与持久化 retry 到期时间保留
     - Run 立即进入 WAITING_RETRY，监控页显示“恢复排队中”
     - 被中断的 Step 保持 FAILED 审计终态，并创建 iteration+1 的 READY attempt
     返回 True 表示实际复位过；False 表示 job 已不存在或被并发改动（调用方忽略）。"""
     cursor = conn.execute(
-        "UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL, "
+        "UPDATE jobs SET status=CASE WHEN provider_poll_required=1 "
+        "THEN 'waiting_provider' ELSE 'queued' END, "
+        "lease_owner=NULL, lease_expires_at=NULL, "
         "error=NULL, updated_at=? "
         "WHERE id=? AND status IN ('running','queued','waiting_provider') "
         "AND cancellation_requested=0 AND abandoned=0",

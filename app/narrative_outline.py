@@ -11,7 +11,10 @@ from app.identity_contracts import (
     identity_ids_in_authority_text,
     storyboard_action_relation_ids,
 )
-from app.narrative import _target_state_fragment_matches
+from app.narrative import (
+    _target_state_fragment_matches,
+    action_participant_delivery_errors,
+)
 from app.schemas import (
     AudienceStatePathRef,
     Bible,
@@ -1304,6 +1307,7 @@ def normalize_narrative_storyboard_outline(
         ]
         bound_actor_ids: set[str] = set()
         bound_target_ids: set[str] = set()
+        bound_participant_deliveries: list[Any] = []
         for action_id in action_ids:
             action = actions.get(action_id)
             if action is None:
@@ -1316,6 +1320,19 @@ def normalize_narrative_storyboard_outline(
             )
             bound_actor_ids.update(actor_ids)
             bound_target_ids.update(target_ids)
+            bound_participant_deliveries.extend(
+                delivery
+                for delivery in action.participant_deliveries
+                if (
+                    delivery.action_id == action_id
+                    and delivery.participant_id in {
+                        *actor_ids,
+                        *target_ids,
+                    }
+                    and delivery.is_perceivable
+                    and delivery.evidence_ids
+                )
+            )
 
         visible_ids = {
             entity_id
@@ -1451,12 +1468,26 @@ def normalize_narrative_storyboard_outline(
         shot.supporting_action_ids = supporting_action_ids
         shot.action_phase_ids = phase_ids
         shot.visible_entity_ids = sorted(visible_ids)
+        contracted_offscreen_ids = {
+            delivery.participant_id
+            for delivery in bound_participant_deliveries
+            if delivery.participant_id not in visible_ids
+        }
         shot.offscreen_action_actor_ids = sorted(
-            bound_actor_ids - visible_ids
+            (bound_actor_ids - visible_ids) & contracted_offscreen_ids
         )
         shot.offscreen_action_target_ids = sorted(
-            bound_target_ids - visible_ids
+            (bound_target_ids - visible_ids) & contracted_offscreen_ids
         )
+        delivered_offscreen_ids = {
+            *shot.offscreen_action_actor_ids,
+            *shot.offscreen_action_target_ids,
+        }
+        shot.action_participant_deliveries = [
+            delivery.model_copy(deep=True)
+            for delivery in bound_participant_deliveries
+            if delivery.participant_id in delivered_offscreen_ids
+        ]
 
         shot.planned_state_in_fact_ids = sorted(current_facts)
         declared_add_ids = set(event.effects_add) if is_last_occurrence else set()
@@ -1711,6 +1742,9 @@ def compile_narrative_storyboard_outline(
         raise ValueError("叙事剧本缺少 narrative_plan")
     if not events:
         raise ValueError("叙事剧本没有可编译事件")
+    participant_errors = action_participant_delivery_errors(screenplay)
+    if participant_errors:
+        raise ValueError("；".join(participant_errors))
     if not scenes:
         raise ValueError("叙事剧本没有场次结构")
     if len(scene_contracts) != len(scenes):

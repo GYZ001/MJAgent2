@@ -1287,6 +1287,7 @@ _STORYBOARD_NARRATIVE_AUTHORITY_FIELDS = (
     "supporting_action_ids", "action_phase_ids", "visible_entity_ids",
     "characters_visible",
     "offscreen_action_actor_ids", "offscreen_action_target_ids",
+    "action_participant_deliveries",
     "shot_contribution", "audience_state_paths",
     "planned_state_in_fact_ids", "planned_delta_add_fact_ids",
     "planned_delta_remove_fact_ids", "planned_state_out_fact_ids",
@@ -1299,6 +1300,7 @@ _STORYBOARD_VISUAL_STAGING_FIELDS = frozenset({
     "characters_visible",
     "offscreen_action_actor_ids",
     "offscreen_action_target_ids",
+    "action_participant_deliveries",
 })
 
 
@@ -1626,6 +1628,17 @@ def normalize_storyboard_shot_candidate(
             *_tokens(shot.get("offscreen_action_actor_ids")),
             *_tokens(shot.get("offscreen_action_target_ids")),
         ]))
+        contracted_offscreen = {
+            str(item.get("participant_id") or "").strip()
+            for item in (
+                outline_narrative_task.get("action_participant_deliveries")
+                or []
+            )
+            if (
+                isinstance(item, dict)
+                and str(item.get("participant_id") or "").strip()
+            )
+        }
         participant_ids = bound_actor_ids | bound_target_ids
         visual_partition_is_valid = bool(
             has_relation_authority
@@ -1640,6 +1653,7 @@ def normalize_storyboard_shot_candidate(
             and set(candidate_characters) == set(candidate_visible_names)
             and len(candidate_entity_ids) == len(candidate_characters)
             and declared_offscreen.issubset(participant_ids)
+            and declared_offscreen.issubset(contracted_offscreen)
         )
         if visual_partition_is_valid:
             canonical_offscreen_actors = [
@@ -1648,6 +1662,7 @@ def normalize_storyboard_shot_candidate(
                     outline_narrative_task.get("_bound_action_actor_ids")
                 )
                 if identity_id not in candidate_entity_ids
+                and identity_id in contracted_offscreen
             ]
             canonical_offscreen_targets = [
                 identity_id
@@ -1655,6 +1670,7 @@ def normalize_storyboard_shot_candidate(
                     outline_narrative_task.get("_bound_action_target_ids")
                 )
                 if identity_id not in candidate_entity_ids
+                and identity_id in contracted_offscreen
             ]
             for field, value in (
                 ("visible_entity_ids", candidate_entity_ids),
@@ -1677,6 +1693,7 @@ def normalize_storyboard_shot_candidate(
                 "visible_entity_ids",
                 "offscreen_action_actor_ids",
                 "offscreen_action_target_ids",
+                "action_participant_deliveries",
             ):
                 if field not in outline_narrative_task:
                     continue

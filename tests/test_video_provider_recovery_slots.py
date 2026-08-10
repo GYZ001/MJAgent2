@@ -8,6 +8,7 @@ import pytest
 
 from app import db, worker
 from app.completion_grant import ensure_video_budget_authority_tables
+from app.orchestration import media_scheduler
 
 
 def _create_database(path: Path) -> sqlite3.Connection:
@@ -148,13 +149,6 @@ def _create_database(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _job_columns(conn: sqlite3.Connection) -> set[str]:
-    return {
-        str(row["name"])
-        for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
-    }
-
-
 def test_startup_migration_keeps_every_accepted_task_pollable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -206,21 +200,11 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _create_database(tmp_path / "accepted-duplicate-restart.db")
-    columns = _job_columns(conn)
-    recovery_fields = (
-        ",provider_poll_required=1,provider_result_adoptable=?"
-        if "provider_poll_required" in columns
-        else ""
-    )
     conn.execute(
-        f"""UPDATE jobs SET video_slot_active=1{recovery_fields}
-             WHERE id='job-owner'""",
-        ((1,) if recovery_fields else ()),
-    )
-    conn.execute(
-        f"""UPDATE jobs SET video_slot_active=0{recovery_fields}
-             WHERE id='job-history'""",
-        ((0,) if recovery_fields else ()),
+        """UPDATE jobs
+              SET video_slot_active=1,provider_poll_required=1,
+                  provider_result_adoptable=1
+            WHERE id='job-owner'"""
     )
     conn.execute(
         "UPDATE shot_versions SET video_slot_active=1 WHERE id='version-owner'"
@@ -230,6 +214,27 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
     )
     conn.commit()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+
+    stopped = media_scheduler.request_cancel(
+        "job-history",
+        reason="重启前释放历史生成槽",
+    )
+
+    assert stopped["status"] == "waiting_provider"
+    assert stopped["result_isolated"] is True
+    history_job = conn.execute(
+        """SELECT video_slot_active,provider_poll_required,
+                  provider_result_adoptable,cancellation_requested,abandoned
+             FROM jobs WHERE id='job-history'"""
+    ).fetchone()
+    assert dict(history_job) == {
+        "video_slot_active": 0,
+        "provider_poll_required": 1,
+        "provider_result_adoptable": 0,
+        "cancellation_requested": 0,
+        "abandoned": 0,
+    }
 
     dispatched: list[str] = []
 

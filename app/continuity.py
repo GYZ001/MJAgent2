@@ -10,6 +10,7 @@ from typing import Any
 
 from app import config
 from app.schemas import (
+    ActionParticipantDelivery,
     AudienceStatePathRef,
     CONTINUITY_MODES,
     DELIVERY_OWNERS,
@@ -1587,6 +1588,10 @@ def shot_contract_dict(shot: Shot) -> dict[str, Any]:
         "visible_entity_ids": list(shot.visible_entity_ids or []),
         "offscreen_action_actor_ids": list(shot.offscreen_action_actor_ids or []),
         "offscreen_action_target_ids": list(shot.offscreen_action_target_ids or []),
+        "action_participant_deliveries": [
+            item.model_dump(mode="json")
+            for item in (shot.action_participant_deliveries or [])
+        ],
         "capacity_budget": capacity_budget,
         "shot_contribution": shot_contribution,
         "audience_state_paths": [
@@ -1642,6 +1647,14 @@ def apply_shot_contract(shot: Shot, payload: dict[str, Any] | str | None) -> Sho
     if "primary_action_id" in data:
         value = data["primary_action_id"]
         shot.primary_action_id = str(value) if value not in (None, "") else None
+    if (
+        "action_participant_deliveries" in data
+        and data["action_participant_deliveries"] is not None
+    ):
+        shot.action_participant_deliveries = [
+            ActionParticipantDelivery.model_validate(item)
+            for item in data["action_participant_deliveries"]
+        ]
     # 旧 payload 只有 new_information_ids；schema 校验器已双向归一，此处补齐直接 setattr 的分支。
     merged_info = list(dict.fromkeys([*(shot.information_ids or []), *(shot.new_information_ids or [])]))
     shot.information_ids = merged_info
