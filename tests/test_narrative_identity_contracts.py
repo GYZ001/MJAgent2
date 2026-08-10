@@ -424,7 +424,7 @@ def test_visual_relation_uses_structured_character_state_as_visibility_evidence(
         continuity_state_out={
             "characters": {
                 "newcomer-7": CharacterContinuityState(
-                    visibility="required",
+                    visible_in_frame=True,
                 ),
             },
         },

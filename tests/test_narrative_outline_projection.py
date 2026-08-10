@@ -333,6 +333,14 @@ def test_outline_projection_preserves_non_identity_action_participants() -> None
     from app.schemas import ActionAgency
 
     screenplay = _screenplay()
+    screenplay.scene_outline = [
+        ScriptScene(
+            scene_no=1,
+            scene_heading="【场1】日 / 中性空间",
+            story_function="交付一个可观察状态变化",
+            summary="画面完成当前事件的状态变化。",
+        ),
+    ]
     action = _attach_generic_action(screenplay)
     action.actor_ids = []
     action.target_ids = []

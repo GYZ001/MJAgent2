@@ -445,28 +445,6 @@ def storyboard_action_relation_ids(
     )
 
 
-def _longest_shared_authority_surface(left: str, right: str) -> str:
-    """Return the longest exact alphanumeric surface shared by two texts."""
-    left_key = _semantic_alias_key(left)
-    right_key = _semantic_alias_key(right)
-    if not left_key or not right_key:
-        return ""
-    previous = [0] * (len(right_key) + 1)
-    best_length = 0
-    best_end = 0
-    for left_index, left_char in enumerate(left_key, start=1):
-        current = [0] * (len(right_key) + 1)
-        for right_index, right_char in enumerate(right_key, start=1):
-            if left_char != right_char:
-                continue
-            current[right_index] = previous[right_index - 1] + 1
-            if current[right_index] > best_length:
-                best_length = current[right_index]
-                best_end = left_index
-        previous = current
-    return left_key[best_end - best_length:best_end]
-
-
 def storyboard_visual_identity_relation(
     shot: Shot,
     allowed_entity_ids: list[str],
@@ -490,29 +468,56 @@ def storyboard_visual_identity_relation(
             allowed.append(identity)
             allowed_ids.add(identity.identity_id)
 
-    visual_tokens = [
-        *(
-            str(value or "").strip()
+    visual_relations: list[tuple[str, str]] = [
+        *[
+            (str(value or "").strip(), "characters")
             for value in (shot.characters or [])
             if str(value or "").strip()
-        ),
-        *(
-            str(value or "").strip()
+        ],
+        *[
+            (str(value or "").strip(), "characters_visible")
             for value in (shot.characters_visible or [])
             if str(value or "").strip()
-        ),
+        ],
     ]
     for role in shot.reference_roles or []:
         prefix, separator, value = str(role or "").partition(":")
         if separator and prefix in {"character_identity", "collective_group"}:
-            visual_tokens.append(value.strip())
+            visual_relations.append((value.strip(), "reference_roles"))
+    continuity_states = [shot.continuity_state_out]
+    if not shot.continuity_from_prev:
+        continuity_states.insert(0, shot.continuity_state_in)
+    for state_name, continuity in zip(
+        (
+            ("continuity_state_out",)
+            if shot.continuity_from_prev
+            else ("continuity_state_in", "continuity_state_out")
+        ),
+        continuity_states,
+        strict=True,
+    ):
+        visual_relations.extend(
+            (
+                str(identity_id or "").strip(),
+                f"{state_name}.characters",
+            )
+            for identity_id, character_state in continuity.characters.items()
+            if (
+                str(identity_id or "").strip()
+                and character_state.visible_in_frame is True
+            )
+        )
 
     unexpected: dict[str, str] = {}
-    for token in dict.fromkeys(visual_tokens):
+    relation_sources: dict[str, list[str]] = {}
+    for token, source in dict.fromkeys(visual_relations):
         try:
             identity = resolver.resolve(token, usage="visual")
         except IdentityContractError:
             continue
+        sources = relation_sources.setdefault(identity.identity_id, [])
+        if source not in sources:
+            sources.append(source)
         if identity.identity_id not in allowed_ids:
             unexpected[identity.identity_id] = identity.display_name
 
@@ -545,6 +550,9 @@ def storyboard_visual_identity_relation(
             stored_visible_identity_ids.append(None)
             continue
         stored_visible_identity_ids.append(identity.identity_id)
+        sources = relation_sources.setdefault(identity.identity_id, [])
+        if "visible_entity_ids" not in sources:
+            sources.append("visible_entity_ids")
         if identity.identity_id not in allowed_ids:
             unexpected[identity.identity_id] = identity.display_name
 
@@ -572,91 +580,32 @@ def storyboard_visual_identity_relation(
             "visible_entity_id": stored_identity_id,
         })
 
-    # A chained shot's first frame is the previous adopted video's real tail.
-    # Identities visible only at that 0-second boundary belong to the previous
-    # shot contract; the current task owns the cast that persists through its
-    # action and resulting frame.
-    visual_text = "\n".join((
-        str(shot.action_desc or ""),
-        (
-            ""
-            if bool(shot.continuity_from_prev)
-            else str(shot.first_frame_desc or "")
+    required_text = shot.required_text
+    text_provenance = {
+        "required_text": (
+            required_text.model_dump(mode="json")
+            if required_text is not None else None
         ),
-        str(shot.last_frame_desc or ""),
-    ))
-    # Location authority can legitimately contain a person's display name
-    # (for example, "高义家卧室").  The location label itself is not evidence
-    # that its owner is visible; any separate action/frame mention remains.
-    for scene_surface in sorted(
-        {
-            str(value or "").strip()
-            for value in (shot.scene_name, shot.scene_setting)
-            if str(value or "").strip()
-        },
-        key=len,
-        reverse=True,
-    ):
-        visual_text = visual_text.replace(scene_surface, "")
-    unmatched_visual_text = visual_text
-    for token in sorted(
-        {
-            token
-            for identity in allowed
-            for token in (identity.identity_id, identity.display_name)
-            if token
-        },
-        key=len,
-        reverse=True,
-    ):
-        unmatched_visual_text = unmatched_visual_text.replace(token, "")
-    for identity in resolver.identities:
-        if not identity.can_be_visible or identity.identity_id in allowed_ids:
-            continue
-        if any(
-            token and token in unmatched_visual_text
-            for token in (identity.identity_id, identity.display_name)
-        ):
-            unexpected[identity.identity_id] = identity.display_name
-
-    # A model may describe a contracted identity by its canonical appearance
-    # instead of repeating its display name.  Match only an exact, sufficiently
-    # long appearance surface that is unique across the current typed identity
-    # registry.  The evidence is generated from authority data at runtime; no
-    # name, title, role, costume, or story-vocabulary list is maintained here.
-    visible_identities = [
-        identity for identity in resolver.identities
-        if (
-            identity.can_be_visible
-            and not identity.is_collective
-            and identity.visual_canonical.strip()
-        )
-    ]
-    authority_anchors = {
-        identity.identity_id: _semantic_alias_key(identity.visual_canonical)
-        for identity in visible_identities
+        "prop_text_states": [
+            {
+                "state": state_name,
+                "prop_id": prop_id,
+                "canonical_name": prop.canonical_name,
+                "text_state": prop.text_state,
+            }
+            for state_name, continuity in zip(
+                (
+                    ("continuity_state_out",)
+                    if shot.continuity_from_prev
+                    else ("continuity_state_in", "continuity_state_out")
+                ),
+                continuity_states,
+                strict=True,
+            )
+            for prop_id, prop in continuity.props.items()
+            if str(prop.text_state or "").strip()
+        ],
     }
-    for identity in visible_identities:
-        if identity.identity_id in allowed_ids or identity.identity_id in unexpected:
-            continue
-        surface = _longest_shared_authority_surface(
-            visual_text,
-            identity.visual_canonical,
-        )
-        if len(surface) < 5 or surface.isdigit():
-            continue
-        surface_owner_ids = {
-            owner_id
-            for owner_id, owner_anchor in authority_anchors.items()
-            if surface in owner_anchor
-        }
-        # Multiple contracts may intentionally share one group appearance.
-        # The surface is still decisive when every matching contract is outside
-        # this shot.  If even one allowed identity shares it, attribution is
-        # genuinely ambiguous and deterministic projection leaves it alone.
-        if surface_owner_ids & allowed_ids:
-            continue
-        unexpected[identity.identity_id] = identity.display_name
 
     return {
         "allowed_identity_ids": sorted(allowed_ids),
@@ -670,6 +619,8 @@ def storyboard_visual_identity_relation(
         "identity_binding_mismatches": identity_binding_mismatches,
         "unresolved_visible_tokens": unresolved_visible_tokens,
         "unresolved_visible_entity_ids": unresolved_visible_entity_ids,
+        "identity_relation_sources": relation_sources,
+        "text_provenance": text_provenance,
     }
 
 

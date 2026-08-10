@@ -7157,6 +7157,29 @@ def _storyboard_shot_visual_identity_issues(
         for value in (task.audio_cast or [])
         if str(value or "").strip()
     ))
+    authority_conflicts: list[dict[str, str]] = []
+    required_text = shot.required_text
+    if (
+        required_text is not None
+        and str(required_text.strategy or "").strip() == "embedded_prop"
+        and str(required_text.surface or "").strip()
+    ):
+        try:
+            text_surface_identity = narrative_identity_resolver(
+                bible,
+                screenplay,
+            ).resolve(required_text.surface, usage="visual")
+        except IdentityContractError:
+            text_surface_identity = None
+        if (
+            text_surface_identity is not None
+            and text_surface_identity.identity_id in unexpected_ids
+        ):
+            authority_conflicts.append({
+                "preserve_path": "required_text",
+                "remove_identity_id": text_surface_identity.identity_id,
+                "reason": "文字承载面要求该身份可见",
+            })
     audio_repair = (
         f"；本镜声轨身份 {task_audio_names} 可继续保留在 audio_cast、dialogues "
         "与 audio_timeline，但未同时属于 visible_entity_ids 的说话者必须使用 "
@@ -7190,16 +7213,17 @@ def _storyboard_shot_visual_identity_issues(
             "unexpected_identity_ids": unexpected_ids,
             "identity_binding_mismatches": binding_mismatches,
             "unresolved_visible_tokens": list(dict.fromkeys(unresolved_tokens)),
+            "identity_relation_sources": relation["identity_relation_sources"],
+            "text_provenance": relation["text_provenance"],
+            "authority_conflicts": authority_conflicts,
         },
         repair_hint=(
             f"从当前 typed identity registry 原子重建 characters_visible 与"
             f"visible_entity_ids，再将 characters 与角色 reference_roles 精确收敛到"
-            f"本镜任务对应的 {task_names}；从 action_desc、first_frame_desc、"
-            f"last_frame_desc 移除 {unexpected_names} 的"
-            f"可见描写{audio_repair}；原文中的非持久背景群体可保留为不绑定身份的"
-            "环境动作"
+            f"本镜任务对应的 {task_names}；required_text 与道具 text_state "
+            f"保持独立文字 provenance，不得按其中姓名改写可见身份{audio_repair}"
         ),
-        repairable=True,
+        repairable=not authority_conflicts,
     )]
 
 

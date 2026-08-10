@@ -55,7 +55,7 @@ from app.spoken_contract import content_char_count
 
 
 IR_VERSION = "screenplay-generation-ir.v2"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v2"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v3"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -1623,6 +1623,8 @@ def screenplay_ir_prompt_contract() -> str:
        "render_policy":"standalone",
        "actor_keys":["person_a"],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
+       "action_agency":{"kind":"character","identity_bearing":true,
+         "source_segment_ids":["SRC0001"]},
        "participant_deliveries":[],
        "resulting_state":"该动作完成后新成立的局势，禁止复述 text",
        "source_segment_ids":["SRC0001"]},
@@ -1632,6 +1634,8 @@ def screenplay_ir_prompt_contract() -> str:
        "render_policy":"merge_adjacent",
        "actor_keys":[],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
+       "action_agency":{"kind":"character_voice","identity_bearing":true,
+         "source_segment_ids":["SRC0001"]},
        "participant_deliveries":[],
        "resulting_state":"该话轮交付后人物/信息/决策发生的变化，禁止复述 text",
        "source_segment_ids":["SRC0001"],

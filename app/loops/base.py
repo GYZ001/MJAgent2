@@ -239,6 +239,19 @@ class AgentLoop(Generic[T]):
                     artifact_id=artifact_id,
                 )
 
+            if any(not issue.repairable for issue in repair_issues):
+                exit_reason = "authority_conflict"
+                if iteration_step_id:
+                    transition_step(
+                        iteration_step_id,
+                        "RUNNING",
+                        "FAILED",
+                        exit_reason,
+                        decision="escalate",
+                        output_artifact_id=artifact_id,
+                    )
+                break
+
             # Baseline-only：首轮结束后立即交出可解析候选（含 blocker），交由 Production Repair。
             baseline_handoff_blocked = bool(structural_issues)
             if (
@@ -298,6 +311,17 @@ class AgentLoop(Generic[T]):
                 issue for issue in last_value_issues
                 if issue.severity == IssueSeverity.BLOCKER
             ]
+            if exit_reason == "authority_conflict":
+                raise AgentLoopFailure(
+                    self.stage_key,
+                    [
+                        issue
+                        for issue in last_value_issues
+                        if not issue.repairable
+                    ],
+                    exit_reason,
+                    len(issue_history),
+                )
             if self.policy.repair_all_blockers and blockers:
                 reported: list[Issue] = []
                 seen: set[tuple[str, str]] = set()
@@ -314,7 +338,11 @@ class AgentLoop(Generic[T]):
                 raise AgentLoopFailure(
                     self.stage_key,
                     reported,
-                    "authority_blockers_exhausted",
+                    (
+                        "authority_conflict"
+                        if exit_reason == "authority_conflict"
+                        else "authority_blockers_exhausted"
+                    ),
                     len(issue_history),
                 )
             if last_value_artifact_id and self.policy.commit_accepted_artifact:

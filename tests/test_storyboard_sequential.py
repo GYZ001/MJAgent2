@@ -190,6 +190,7 @@ def test_shot_visual_identity_gate_does_not_treat_required_text_as_cast() -> Non
     shot = _shot(1)
     shot.characters = ["萧炎"]
     shot.characters_visible = ["萧炎"]
+    shot.visible_entity_ids = ["萧炎"]
     shot.action_desc = "片头卷轴上显现“未来出场者”，随后墨迹停稳。"
     shot.required_text = RequiredOnScreenText(
         surface="片头卷轴",
