@@ -38,9 +38,10 @@ def _conn() -> sqlite3.Connection:
     )
     conn.execute(
         """INSERT INTO shots(
-               id,episode_id,shot_no,duration_s,action_desc,characters,dialogues,
-               storyboard_artifact_id
-           ) VALUES('s1','e',1,5,'action','[]','[]','board-1')"""
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,action_desc,characters,dialogues,storyboard_artifact_id
+           ) VALUES('s1','e',1,5,'中景','固定','日，测试室内场景',
+                    'action','[]','[]','board-1')"""
     )
     conn.commit()
     return conn
@@ -1035,9 +1036,10 @@ def test_worker_does_not_self_fence_on_gallery_generated_by_current_job(monkeypa
     conn = _conn()
     conn.execute(
         """INSERT INTO shots(
-               id,episode_id,shot_no,duration_s,action_desc,characters,dialogues,
-               storyboard_artifact_id
-           ) VALUES('s2','e',2,5,'other','[]','[]','board-1')"""
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,action_desc,characters,dialogues,storyboard_artifact_id
+           ) VALUES('s2','e',2,5,'中景','固定','日，测试室内场景',
+                    'other','[]','[]','board-1')"""
     )
     stable_reference = {
         "id": "stable-ref", "selectedForSeedance": True,
@@ -1082,9 +1084,10 @@ def test_worker_still_fences_gallery_change_on_another_shot(monkeypatch) -> None
     conn = _conn()
     conn.execute(
         """INSERT INTO shots(
-               id,episode_id,shot_no,duration_s,action_desc,characters,dialogues,
-               storyboard_artifact_id
-           ) VALUES('s2','e',2,5,'other','[]','[]','board-1')"""
+               id,episode_id,shot_no,duration_s,shot_size,camera_move,
+               scene_setting,action_desc,characters,dialogues,storyboard_artifact_id
+           ) VALUES('s2','e',2,5,'中景','固定','日，测试室内场景',
+                    'other','[]','[]','board-1')"""
     )
     original_reference = {
         "id": "other-ref", "selectedForSeedance": True,
