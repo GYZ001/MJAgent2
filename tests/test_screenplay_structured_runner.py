@@ -99,6 +99,34 @@ def test_format_repair_keeps_outer_candidate_validation_error(
     assert "Field required" not in prompts[1]
 
 
+def test_structured_runner_applies_local_payload_normalizer(
+    monkeypatch,
+) -> None:
+    calls = 0
+    attempts: list[dict] = []
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return '{"value":1}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "original"}],
+        model_type=_Payload,
+        validate=None,
+        operation_id="test.local-normalizer:v1:abc",
+        max_tokens=128,
+        normalize_payload=lambda payload: {**payload, "value": 7},
+        on_attempt=attempts.append,
+    ))
+
+    assert result.value == 7
+    assert calls == 1
+    assert attempts[0]["local_recovery"] is True
+
+
 def test_structured_runner_semantic_retry_has_independent_budget(monkeypatch) -> None:
     prompts: list[str] = []
     metas: list[dict] = []

@@ -288,6 +288,7 @@ async def chat_structured(
     temperature: float = 0.1,
     call_meta: dict[str, Any] | None = None,
     repair_context: str = "",
+    normalize_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_attempt: Callable[[dict[str, Any]], Any] | None = None,
 ) -> T:
     """Run one typed model operation with separate format/semantic budgets.
@@ -364,8 +365,14 @@ async def chat_structured(
         parse_error: Exception | None = None
         repair_payload: dict[str, Any] | None = None
         for candidate_no, payload in enumerate(candidates):
+            candidate_payload = (
+                normalize_payload(payload)
+                if normalize_payload is not None
+                else payload
+            )
+            normalized_locally = candidate_payload != payload
             try:
-                parsed = _coerce_structured(model_type, payload)
+                parsed = _coerce_structured(model_type, candidate_payload)
             except (TypeError, ValueError, ValidationError) as exc:
                 # Candidates are ordered from the latest complete outer object
                 # to its nested objects. Preserve the outer object's error;
@@ -373,7 +380,7 @@ async def chat_structured(
                 # sends the format repair down the wrong path.
                 if parse_error is None:
                     parse_error = exc
-                    repair_payload = payload
+                    repair_payload = candidate_payload
                 continue
             try:
                 direct_payload = json.loads(last_raw.strip())
@@ -381,9 +388,10 @@ async def chat_structured(
                 direct_payload = None
             local_recovery = bool(
                 local_recovery
+                or normalized_locally
                 or candidate_no > 0
                 or not isinstance(direct_payload, dict)
-                or direct_payload != payload
+                or direct_payload != candidate_payload
             )
             break
         if parsed is None:

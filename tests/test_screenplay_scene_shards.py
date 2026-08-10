@@ -29,6 +29,7 @@ from app.screenplay_scene_shards import (
     generate_screenplay_scene_shards,
     merge_screenplay_scene_shards,
     normalize_screenplay_scene_shard,
+    normalize_screenplay_scene_shard_payload,
     validate_screenplay_scene_shard,
 )
 from app.source_excerpt import index_source_segments
@@ -226,6 +227,37 @@ def test_validated_shards_merge_in_blueprint_order_with_global_namespaces() -> N
     }
 
 
+def test_merge_does_not_require_front_matter_in_scene_units(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    shards = [_shard(plan, blueprint) for plan in plans]
+    front_matter_id = plans[0].source_segment_ids[0]
+    shards[0].scenes[0].units = []
+    shards[0].consumed_source_ids = []
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.structural_front_matter_ids",
+        lambda _segments: {front_matter_id},
+    )
+
+    merged = merge_screenplay_scene_shards(
+        envelope=_envelope(blueprint),
+        identities=_identities(),
+        plans=plans,
+        shards=shards,
+        blueprint=blueprint,
+        source_text=SOURCE,
+    )
+
+    assert merged.scenes[0].units == []
+    assert merged.scenes[1].units
+
+
 def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
@@ -262,6 +294,7 @@ def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
     shard.shard_id = "invented"
     shard.scene_plan_keys = ["invented-scene"]
     shard.source_hash = "invented-source"
+    shard.consumed_source_ids = ["SRC_TITLE", *shard.consumed_source_ids]
     shard.scenes[0].character_keys = ["旁白"]
     shard.scenes[0].units[0].actor_keys = ["旁白"]
     shard.scenes[0].units[0].target_keys = ["门板"]
@@ -288,12 +321,76 @@ def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
     assert normalized.scenes[0].units[0].actor_keys == ["narrator"]
     assert normalized.scenes[0].units[0].target_keys == []
     assert normalized.scenes[0].units[0].onscreen_entity_keys == ["narrator"]
+    assert "SRC_TITLE" not in normalized.consumed_source_ids
     assert validate_screenplay_scene_shard(
         normalized,
         plan=plan,
         scene_plans={item.key: item for item in blueprint.scene_plans},
         identity_keys={"narrator"},
     ) == []
+
+
+def test_scene_shard_payload_derives_generic_story_function_from_blueprint() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    payload = _shard(plan, blueprint).model_dump(mode="json")
+    payload["episode_no"] = 99
+    payload["shard_id"] = "invented"
+    payload["scenes"][0]["story_function"] = "setup"
+
+    normalized = normalize_screenplay_scene_shard_payload(
+        payload,
+        episode_no=1,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        blueprint=blueprint,
+    )
+
+    shard = ScreenplaySceneShardIR.model_validate(normalized)
+    assert shard.episode_no == 1
+    assert shard.shard_id == plan.shard_id
+    assert shard.scenes[0].story_function.startswith("推进本场事件：")
+    assert blueprint.nodes[0].summary in shard.scenes[0].story_function
+
+
+def test_scene_shard_does_not_require_front_matter_in_units() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    shard = _shard(plan, blueprint)
+    scene_plan = blueprint.scene_plans[0].model_copy(deep=True)
+    scene_plan.source_segment_ids = [
+        "SRC_TITLE",
+        *scene_plan.source_segment_ids,
+    ]
+    scene_plans = {
+        **{item.key: item for item in blueprint.scene_plans},
+        scene_plan.key: scene_plan,
+    }
+
+    without_exclusion = validate_screenplay_scene_shard(
+        shard,
+        plan=plan,
+        scene_plans=scene_plans,
+        identity_keys={"narrator"},
+    )
+    with_exclusion = validate_screenplay_scene_shard(
+        shard,
+        plan=plan,
+        scene_plans=scene_plans,
+        identity_keys={"narrator"},
+        front_matter_ids={"SRC_TITLE"},
+    )
+
+    assert any("SRC_TITLE" in error for error in without_exclusion)
+    assert with_exclusion == []
 
 
 def test_scene_shard_rejects_short_story_function() -> None:

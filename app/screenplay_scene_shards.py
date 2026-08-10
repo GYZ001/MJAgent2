@@ -12,6 +12,7 @@ import json
 import math
 import re
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -359,6 +360,62 @@ def build_screenplay_scene_shard_plans(
     return plans
 
 
+_GENERIC_STORY_FUNCTION_LABELS = {
+    "setup",
+    "development",
+    "complication",
+    "turn",
+    "climax",
+    "resolution",
+}
+
+
+def normalize_screenplay_scene_shard_payload(
+    payload: dict[str, Any],
+    *,
+    episode_no: int,
+    plan: ScreenplaySceneShardPlan,
+    scene_plans: dict[str, BlueprintScenePlan],
+    blueprint: NarrativeBlueprint,
+) -> dict[str, Any]:
+    """Fill program-owned fields before Pydantic rejects a usable candidate."""
+    normalized = deepcopy(payload)
+    normalized.update({
+        "episode_no": episode_no,
+        "shard_id": plan.shard_id,
+        "scene_plan_keys": list(plan.scene_plan_keys),
+        "source_hash": plan.source_hash,
+        "boundary_hash": plan.boundary_hash,
+        "blueprint_hash": plan.blueprint_hash,
+        "identity_registry_hash": plan.identity_registry_hash,
+    })
+    node_map = {node.key: node for node in blueprint.nodes}
+    for scene in normalized.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        expected = scene_plans.get(str(scene.get("key") or ""))
+        if expected is None:
+            continue
+        current = str(scene.get("story_function") or "").strip()
+        if (
+            len(current) >= SCENE_STORY_FUNCTION_MIN_CHARS
+            and current.lower() not in _GENERIC_STORY_FUNCTION_LABELS
+        ):
+            continue
+        summaries = [
+            str(node_map[node_key].summary or node_map[node_key].action_logic)
+            for node_key in expected.node_keys
+            if node_key in node_map
+            and str(
+                node_map[node_key].summary
+                or node_map[node_key].action_logic
+            ).strip()
+        ]
+        if summaries:
+            scene["story_function"] = "推进本场事件：" + "；".join(summaries)
+    return normalized
+
+
 def normalize_screenplay_scene_shard(
     shard: ScreenplaySceneShardIR,
     *,
@@ -431,6 +488,12 @@ def normalize_screenplay_scene_shard(
                 # Environment targets such as trees remain in the action prose;
                 # target_keys is reserved for identity relations.
             unit.target_keys = targets
+    shard.consumed_source_ids = list(dict.fromkeys(
+        source_id
+        for scene in shard.scenes
+        for unit in scene.units
+        for source_id in unit.source_segment_ids
+    ))
     return shard
 
 
@@ -440,7 +503,9 @@ def validate_screenplay_scene_shard(
     plan: ScreenplaySceneShardPlan,
     scene_plans: dict[str, BlueprintScenePlan],
     identity_keys: set[str],
+    front_matter_ids: set[str] | None = None,
 ) -> list[str]:
+    front_matter_ids = front_matter_ids or set()
     errors: list[str] = []
     if shard.shard_id != plan.shard_id:
         errors.append(f"shard_id 应为 {plan.shard_id}")
@@ -525,6 +590,7 @@ def validate_screenplay_scene_shard(
                     errors.append(f"跨场 chain_key 重复：{unit.chain_key}")
         missing_for_scene = [
             source_id for source_id in expected_scene.source_segment_ids
+            if source_id not in front_matter_ids
             if source_id not in {
                 source_id for unit in scene.units
                 for source_id in unit.source_segment_ids
@@ -546,6 +612,70 @@ def validate_screenplay_scene_shard(
         if actual != expected:
             errors.append(f"{field} 不匹配")
     return errors
+
+
+def _recover_scene_shard_from_provider_calls(
+    *,
+    operation_id: str,
+    episode_no: int,
+    plan: ScreenplaySceneShardPlan,
+    scene_plans: dict[str, BlueprintScenePlan],
+    blueprint: NarrativeBlueprint,
+    identity_registry: list[dict[str, Any]],
+    identity_keys: set[str],
+    front_matter_ids: set[str],
+) -> tuple[ScreenplaySceneShardIR, dict[str, Any]] | None:
+    """Revalidate a complete prior response before issuing another paid call."""
+    rows = get_conn().execute(
+        """SELECT id,response_json
+             FROM provider_calls
+            WHERE operation_id=? AND status='OK' AND response_json IS NOT NULL
+            ORDER BY id DESC LIMIT 10""",
+        (operation_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            envelope = json.loads(row["response_json"])
+            raw = str(envelope["choices"][0]["message"]["content"] or "")
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        for payload in model_gateway._json_candidates(raw):
+            try:
+                normalized_payload = normalize_screenplay_scene_shard_payload(
+                    payload,
+                    episode_no=episode_no,
+                    plan=plan,
+                    scene_plans=scene_plans,
+                    blueprint=blueprint,
+                )
+                shard = ScreenplaySceneShardIR.model_validate(
+                    normalized_payload
+                )
+            except (TypeError, ValueError, ValidationError):
+                continue
+            normalize_screenplay_scene_shard(
+                shard,
+                episode_no=episode_no,
+                plan=plan,
+                scene_plans=scene_plans,
+                identity_registry=identity_registry,
+                identity_keys=identity_keys,
+            )
+            errors = validate_screenplay_scene_shard(
+                shard,
+                plan=plan,
+                scene_plans=scene_plans,
+                identity_keys=identity_keys,
+                front_matter_ids=front_matter_ids,
+            )
+            if not errors:
+                return shard, {
+                    "outcome": "validated_provider_recovery",
+                    "provider_call_id": int(row["id"]),
+                    "local_recovery": True,
+                    "validation_errors": [],
+                }
+    return None
 
 
 def _namespace_shard_scene_keys(
@@ -596,6 +726,8 @@ def merge_screenplay_scene_shards(
     consumed: list[str] = []
     scene_plan_map = {plan.key: plan for plan in blueprint.scene_plans}
     identity_keys = {identity.key for identity in identities}
+    segments = index_source_segments(source_text)
+    front_matter_ids = structural_front_matter_ids(segments)
     for plan_index, plan in enumerate(plans):
         shard = by_id.get(plan.shard_id)
         if shard is None:
@@ -605,6 +737,7 @@ def merge_screenplay_scene_shards(
             plan=plan,
             scene_plans=scene_plan_map,
             identity_keys=identity_keys,
+            front_matter_ids=front_matter_ids,
         ))
         if plan_index and plan.boundary_state_in != plans[plan_index - 1].boundary_state_out:
             errors.append(f"{plan.shard_id} boundary state 与前一 shard 不闭合")
@@ -612,10 +745,9 @@ def merge_screenplay_scene_shards(
         consumed.extend(shard.consumed_source_ids)
     if [scene.key for scene in merged_scenes] != expected_scenes:
         errors.append("合并后 scene 顺序与 Blueprint 不一致")
-    segments = index_source_segments(source_text)
     required_ids = [
         segment.segment_id for segment in segments
-        if segment.segment_id not in structural_front_matter_ids(segments)
+        if segment.segment_id not in front_matter_ids
     ]
     missing = [source_id for source_id in required_ids if source_id not in consumed]
     if missing:
@@ -867,10 +999,12 @@ async def generate_screenplay_scene_shards(
     """Generate/reuse independent shards with a per-episode concurrency cap."""
     episode_id = str(episode.get("id") or f"episode-{episode['episode_no']}")
     scene_plan_map = {plan.key: plan for plan in blueprint.scene_plans}
+    source_segments = index_source_segments(source_text)
     source_by_id = {
         segment.segment_id: segment.text
-        for segment in index_source_segments(source_text)
+        for segment in source_segments
     }
+    front_matter_ids = structural_front_matter_ids(source_segments)
     identity_keys = {identity.key for identity in identities}
     parallelism = _setting_int(
         "screenplay_scene_shard_parallelism", 2, minimum=1, maximum=2
@@ -917,6 +1051,7 @@ async def generate_screenplay_scene_shards(
                     plan=plan,
                     scene_plans=scene_plan_map,
                     identity_keys=identity_keys,
+                    front_matter_ids=front_matter_ids,
                 )
                 if not errors:
                     checkpoint_rows[plan.shard_id].update({
@@ -943,6 +1078,21 @@ async def generate_screenplay_scene_shards(
             source_by_id=source_by_id,
             identity_registry=identity_registry,
         )
+        operation_id = (
+            f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
+            f"{episode_id}:{plan.shard_id}:{plan.source_hash}:"
+            f"{plan.boundary_hash}:{plan.blueprint_hash}:"
+            f"{plan.identity_registry_hash}"
+        )
+
+        def normalize_payload(value: dict[str, Any]) -> dict[str, Any]:
+            return normalize_screenplay_scene_shard_payload(
+                value,
+                episode_no=int(episode["episode_no"]),
+                plan=plan,
+                scene_plans=scene_plan_map,
+                blueprint=blueprint,
+            )
 
         def validate_shard(value: ScreenplaySceneShardIR) -> list[str]:
             normalize_screenplay_scene_shard(
@@ -958,62 +1108,73 @@ async def generate_screenplay_scene_shards(
                 plan=plan,
                 scene_plans=scene_plan_map,
                 identity_keys=identity_keys,
+                front_matter_ids=front_matter_ids,
             )
 
-        async with semaphore:
-            checkpoint_rows[plan.shard_id].update({
-                "status": "running", "attempt": 1,
-            })
-            emit_progress()
-            attempts: list[dict[str, Any]] = []
-            shard = await model_gateway.chat_structured(
-                [{"role": "user", "content": prompt}],
-                model_type=ScreenplaySceneShardIR,
-                validate=validate_shard,
-                operation_id=(
-                    f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
-                    f"{episode_id}:{plan.shard_id}:{plan.source_hash}:"
-                    f"{plan.boundary_hash}:{plan.blueprint_hash}:"
-                    f"{plan.identity_registry_hash}"
-                ),
-                max_tokens=max(
-                    4096,
-                    min(16384, math.ceil(plan.estimated_output_chars / 1.5)),
-                ),
-                temperature=0.4,
-                format_retry_limit=_setting_int(
-                    "screenplay_format_retry_limit", 1, minimum=0, maximum=3
-                ),
-                semantic_retry_limit=_setting_int(
-                    "screenplay_semantic_retry_limit", 1, minimum=0, maximum=3
-                ),
-                call_meta={
-                    "stage": "剧本场次分片",
-                    "stage_key": "screenplay_scene_shards",
-                    "substage": "scene_writing",
-                    "shard_id": plan.shard_id,
-                    "shard_count": len(plans),
-                    "episode_id": episode_id,
-                    "source_count": len(plan.source_segment_ids),
-                    "scene_count": len(plan.scene_plan_keys),
-                    "input_chars": len(prompt),
-                },
-                repair_context=json.dumps({
-                    "owned_source": {
-                        source_id: source_by_id.get(source_id, "")
-                        for source_id in plan.source_segment_ids
+        attempts: list[dict[str, Any]] = []
+        recovered = _recover_scene_shard_from_provider_calls(
+            operation_id=operation_id,
+            episode_no=int(episode["episode_no"]),
+            plan=plan,
+            scene_plans=scene_plan_map,
+            blueprint=blueprint,
+            identity_registry=identity_registry,
+            identity_keys=identity_keys,
+            front_matter_ids=front_matter_ids,
+        )
+        if recovered is not None:
+            shard, recovery_attempt = recovered
+            attempts.append(recovery_attempt)
+        else:
+            async with semaphore:
+                checkpoint_rows[plan.shard_id].update({
+                    "status": "running", "attempt": 1,
+                })
+                emit_progress()
+                shard = await model_gateway.chat_structured(
+                    [{"role": "user", "content": prompt}],
+                    model_type=ScreenplaySceneShardIR,
+                    validate=validate_shard,
+                    operation_id=operation_id,
+                    max_tokens=max(
+                        4096,
+                        min(16384, math.ceil(plan.estimated_output_chars / 1.5)),
+                    ),
+                    temperature=0.4,
+                    format_retry_limit=_setting_int(
+                        "screenplay_format_retry_limit", 1, minimum=0, maximum=3
+                    ),
+                    semantic_retry_limit=_setting_int(
+                        "screenplay_semantic_retry_limit", 1, minimum=0, maximum=3
+                    ),
+                    call_meta={
+                        "stage": "剧本场次分片",
+                        "stage_key": "screenplay_scene_shards",
+                        "substage": "scene_writing",
+                        "shard_id": plan.shard_id,
+                        "shard_count": len(plans),
+                        "episode_id": episode_id,
+                        "source_count": len(plan.source_segment_ids),
+                        "scene_count": len(plan.scene_plan_keys),
+                        "input_chars": len(prompt),
                     },
-                    "allowed_identities": [
-                        {
-                            "identity_key": item.get("identity_key"),
-                            "canonical_name": item.get("canonical_name"),
-                            "source_labels": item.get("source_labels") or [],
-                        }
-                        for item in identity_registry
-                    ],
-                }, ensure_ascii=False, separators=(",", ":")),
-                on_attempt=attempts.append,
-            )
+                    repair_context=json.dumps({
+                        "owned_source": {
+                            source_id: source_by_id.get(source_id, "")
+                            for source_id in plan.source_segment_ids
+                        },
+                        "allowed_identities": [
+                            {
+                                "identity_key": item.get("identity_key"),
+                                "canonical_name": item.get("canonical_name"),
+                                "source_labels": item.get("source_labels") or [],
+                            }
+                            for item in identity_registry
+                        ],
+                    }, ensure_ascii=False, separators=(",", ":")),
+                    normalize_payload=normalize_payload,
+                    on_attempt=attempts.append,
+                )
         _assert_episode_owner(episode_id)
         trace = current_trace()
         parents = [
