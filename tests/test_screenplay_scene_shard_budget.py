@@ -8,12 +8,14 @@ import pytest
 
 from app import db
 from app.narrative_blueprint import BlueprintScenePlan, NarrativeBlueprint
-from app.screenplay_ir import IRScene, IRSceneUnit
 from app.screenplay_scene_shards import (
+    ScreenplayActionParticipantDeliveryContract,
     ScreenplaySceneInputContract,
     ScreenplaySceneParticipantBinding,
     ScreenplaySceneShardIR,
     ScreenplaySceneShardPlan,
+    ScreenplaySceneShardScene,
+    ScreenplaySceneShardUnit,
     generate_screenplay_scene_shards,
 )
 
@@ -93,6 +95,9 @@ def _contracts(
                 in value["participant_bindings"]
             ],
             source_scene_owners=plan.source_scene_owners,
+            action_participant_delivery_contract=(
+                ScreenplayActionParticipantDeliveryContract()
+            ),
             source_ownership_hash=plan.source_ownership_hash,
         )
         for value in case["scene_inputs"]
@@ -108,25 +113,26 @@ def _complete_shard(
         for event_key, source_ids in case["event_sources"].items()
         for source_id in source_ids
     }
-    scenes: list[IRScene] = []
+    scenes: list[ScreenplaySceneShardScene] = []
     consumed_source_ids: list[str] = []
     for value in case["scene_inputs"]:
-        units: list[IRSceneUnit] = []
+        units: list[ScreenplaySceneShardUnit] = []
         for segment in value["source_segments"]:
             source_id = segment["source_segment_id"]
             consumed_source_ids.append(source_id)
-            units.append(IRSceneUnit(
+            units.append(ScreenplaySceneShardUnit(
                 kind="action",
                 text=segment["text"],
                 event_key=source_event[source_id],
                 source_segment_ids=[source_id],
+                participant_deliveries=[],
                 resulting_state=f"完成 {source_id}",
             ))
         scene_plan = next(
             item for item in case["scene_plans"]
             if item["key"] == value["scene_plan_key"]
         )
-        scenes.append(IRScene(
+        scenes.append(ScreenplaySceneShardScene(
             key=scene_plan["key"],
             scene_heading=scene_plan["scene_heading"],
             story_function="完整交付本场全部来源事件",
@@ -203,10 +209,18 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
     )
 
     recorded = case["recorded_request"]
+    assert captured["max_tokens"] == 9118
     assert captured["max_tokens"] > recorded["requested_max_tokens"]
     assert captured["max_tokens"] <= 16384
     assert captured["call_meta"]["estimated_units"] == 12
     assert captured["call_meta"]["estimated_output_chars"] == 6788
+    assert captured["call_meta"]["required_output_tokens"] == 9118
+    assert captured["call_meta"]["output_budget_tokens"] == 9118
+    assert captured["call_meta"]["output_budget_limited"] is False
+    assert len(captured["prompt"]) < recorded["input_chars"]
+    assert len(captured["repair_context"]) < case["recorded_attempts"][2][
+        "request_chars"
+    ]
     assert [row["status"] for row in rows] == ["validated"]
 
     expected_sources = plan.source_segment_ids

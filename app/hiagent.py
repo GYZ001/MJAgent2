@@ -146,6 +146,7 @@ class ProviderFailureKind(str, Enum):
     EXECUTION_FAILED = "provider_execution_failed"
     TASK_NOT_FOUND = "provider_task_not_found"
     OUTPUT_MISSING = "provider_output_missing"
+    OUTPUT_TRUNCATED = "output_truncated"
     MALFORMED_RESPONSE = "malformed_response"
     PROVIDER_REJECTED = "provider_rejected"
     PROMPT_PROVIDER_REJECTED = "prompt_provider_rejected"
@@ -653,6 +654,24 @@ def _empty_content_detail(data: dict) -> str:
             f"completion_tokens={completion_tokens}")
 
 
+def _reject_truncated_chat_response(data: dict) -> None:
+    try:
+        finish_reason = data["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return
+    if finish_reason != "length":
+        return
+    detail = _empty_content_detail(data)
+    raise ProviderError(
+        f"模型输出因响应 token 预算耗尽而截断（{detail}）",
+        retryable=False,
+        raw=detail,
+        failure_kind=ProviderFailureKind.OUTPUT_TRUNCATED,
+        delivery_state="responded",
+        replay_safe=False,
+    )
+
+
 def _infer_callsite_meta() -> dict[str, Any]:
     frame = inspect.currentframe()
     try:
@@ -921,6 +940,7 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
         data = await _post_json(client, url, fallback_payload, kind=kind, model=model, retries=0,
                                 headers=headers, key_name=key_name, meta=fallback_meta)
         content = _chat_content(data, label=f"{kind} reasoning fallback")
+    _reject_truncated_chat_response(data)
     if not content.strip():
         raise ProviderError(f"模型返回空内容（content 为空；{_empty_content_detail(data)}）")
     return content
@@ -1032,6 +1052,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             data, _ = await _post_bailian_chat_with_fallback(
                 client, payload, fallback_kind="text", log_kind="chat",
                 preferred_model=bailian_model, meta=call_meta)
+            _reject_truncated_chat_response(data)
             content = _chat_content(data, label="chat")
         elif provider == "deepseek":
             deepseek_model = selected_model
@@ -1073,6 +1094,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     key_name=f"model:{custom_model}",
                     meta=call_meta,
                 )
+            _reject_truncated_chat_response(data)
             content = _chat_content(data, label="custom chat")
         else:
             model = selected_model
@@ -1090,6 +1112,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     key_name=f"model:{model}",
                     meta=call_meta,
                 )
+            _reject_truncated_chat_response(data)
             content = _chat_content(data, label="chat")
 
     if not content or not content.strip():

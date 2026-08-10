@@ -175,7 +175,7 @@ class ScreenplaySceneInputContract(BaseModel):
     )
     action_participant_delivery_contract: (
         ScreenplayActionParticipantDeliveryContract
-    )
+    ) = Field(default_factory=ScreenplayActionParticipantDeliveryContract)
     source_ownership_hash: str
 
 

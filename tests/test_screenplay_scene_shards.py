@@ -837,6 +837,25 @@ def test_err_20260810_original_provider_response_fails_at_explicit_unit_schema()
         "screenplay-narrative-blueprint.v3"
     )
     assert replay["envelope"]["contract_version"] == "screenplay-envelope.v1"
+    assert replay["initial_response"]["blueprint_hash"] == (
+        replay["envelope"]["blueprint_hash"]
+    )
+    assert replay["initial_response"]["scene_plan_keys"] == [
+        item["key"] for item in replay["blueprint"]["scene_plans"]
+    ]
+    participant_evidence = {
+        (
+            item["identity_key"],
+            tuple(item["source_segment_ids"]),
+        ): item["usage"]
+        for item in replay["blueprint"]["participant_evidence"]
+    }
+    assert participant_evidence[
+        ("王有材", ("SRC0033",))
+    ] == "voice"
+    assert participant_evidence[
+        ("大青山被困少年甲", ("SRC0031",))
+    ] == "voice"
     with pytest.raises(ValidationError, match="participant_deliveries"):
         ScreenplaySceneShardIR.model_validate(replay["initial_response"])
 
@@ -857,6 +876,82 @@ def test_err_20260810_original_provider_response_fails_at_explicit_unit_schema()
             or item["visible_reaction"]
         )
         for item in replay["failed_repair_deliveries"]
+    )
+
+
+def test_err_20260810_provider_recovery_rejects_original_response(
+    monkeypatch,
+) -> None:
+    replay = json.loads(ERR_20260810_REPLAY.read_text(encoding="utf-8"))
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    episode_id = "ep-err-20260810-provider-replay"
+    operation_id = (
+        f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
+        f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
+        f"{episode_id}:{plan.shard_id}:{plan.source_hash}:"
+        f"{plan.boundary_hash}:{plan.blueprint_hash}:"
+        f"{plan.identity_registry_hash}:{plan.source_ownership_hash}"
+    )
+    db.log_provider_call(
+        "chat",
+        "fixture-provider",
+        "OK",
+        200,
+        1,
+        response_json={
+            "choices": [{
+                "message": {
+                    "content": json.dumps(
+                        replay["initial_response"],
+                        ensure_ascii=False,
+                    ),
+                },
+            }],
+        },
+        operation_id=operation_id,
+    )
+    provider_calls = 0
+
+    async def fake_structured(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return _shard(plan, blueprint)
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    contracts = _contracts([plan], blueprint)
+
+    shards, _artifact_ids, rows = asyncio.run(
+        generate_screenplay_scene_shards(
+            episode={"id": episode_id, "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=[plan],
+            scene_input_contracts=contracts,
+        )
+    )
+
+    assert provider_calls == 1
+    assert len(shards) == 1
+    assert rows[0]["status"] == "validated"
+    raw = evidence_repository.latest_artifact(
+        "screenplay_scene_shard_raw",
+        "episode",
+        episode_id,
+    )
+    assert raw is not None
+    assert all(
+        attempt.get("outcome") != "validated_provider_recovery"
+        for attempt in raw["content"]["attempts"]
     )
 
 
@@ -930,6 +1025,41 @@ def test_validator_and_merge_reject_offscreen_claim_without_perceivable_channel(
     with pytest.raises(
         ScreenplaySceneMergeError,
         match="person_a 缺少结构化可感知证据",
+    ):
+        merge_screenplay_scene_shards(
+            envelope=_envelope(blueprint),
+            identities=identities,
+            plans=plans,
+            shards=[shard],
+            scene_input_contracts=scene_input_contracts,
+            blueprint=blueprint,
+            source_text=SOURCE,
+        )
+
+
+def test_validator_and_merge_reject_participant_delivery_contract_drift() -> None:
+    blueprint, plans, registry, identities, shard = _participant_case()
+    scene_input_contracts = _contracts(plans, blueprint, registry)
+    contract = scene_input_contracts[plans[0].shard_id][0]
+    contract.action_participant_delivery_contract.evidence_schema = {
+        "type": "object",
+    }
+
+    errors = validate_screenplay_scene_shard(
+        shard,
+        plan=plans[0],
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        scene_input_contracts=scene_input_contracts[plans[0].shard_id],
+        identity_keys={item.key for item in identities},
+    )
+    assert any(
+        f"action participant delivery 合同与 {IR_VERSION} 不一致"
+        in error
+        for error in errors
+    )
+    with pytest.raises(
+        ScreenplaySceneMergeError,
+        match="action participant delivery 合同",
     ):
         merge_screenplay_scene_shards(
             envelope=_envelope(blueprint),
@@ -1144,6 +1274,9 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         "screenplay_scene_shards:SS001"
     ]["$defs"]["ScreenplaySceneShardUnit"]
     assert "participant_deliveries" in unit_schema["required"]
+    assert delivery_contract["evidence_schema"] == output_schemas[
+        "screenplay_scene_shards:SS001"
+    ]["$defs"]["IRActionParticipantDelivery"]
     assert operation_ids["screenplay_scene_shards:SS001"].startswith(
         "screenplay.scene-shard:screenplay-scene-shard.v4:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
