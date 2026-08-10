@@ -1,0 +1,244 @@
+{
+  "run_id": "run_195a69113451",
+  "error_id": "ERR-20260811-ec6240",
+  "calls": [
+    {
+      "provider_call_id": 61019,
+      "shard_id": "SS001",
+      "attempt_no": 1,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc001:SRC0001:001:unit": {
+            "text": "屏幕上浮现水墨风的章节标题：第一章 书生孟浩",
+            "text_provenance": {
+              "kind": "on_screen_text",
+              "identity_keys": []
+            },
+            "performance": "",
+            "resulting_state": "观众明确当前故事开篇的章节信息",
+            "function": "setup",
+            "agency_kind": "on_screen_text"
+          }
+        }
+      },
+      "slot_count": 23
+    },
+    {
+      "provider_call_id": 61020,
+      "shard_id": "SS002",
+      "attempt_no": 1,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc005:SRC0018:001:unit": {
+            "text": "山风卷着草屑从崖边卷过，刚抬步准备下山的孟浩忽然停下动作，耳尖微动，捕捉到风里夹杂着极其微弱的呼喊声。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "person_b67de643afe6"
+              ]
+            },
+            "performance": "孟浩刚抬起的右脚悬在半空，眉头微微蹙起，头不自觉偏向山崖方向，凝神细听，衣摆被风吹得猎猎作响。",
+            "resulting_state": "孟浩察觉到崖下传来异常声响，暂时停下下山的动作。",
+            "function": "narrative",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 26
+    },
+    {
+      "provider_call_id": 61022,
+      "shard_id": "SS002",
+      "attempt_no": 2,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc005:SRC0018:001:unit": {
+            "text": "山风卷着草屑从崖边卷过，刚抬步准备下山的孟浩忽然停下动作，耳尖微动，捕捉到风里夹杂着极其微弱的呼喊声。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "person_b67de643afe6"
+              ]
+            },
+            "performance": "孟浩刚抬起的右脚悬在半空，眉头微微蹙起，头不自觉偏向山崖方向，凝神细听，衣摆被风吹得猎猎作响。",
+            "resulting_state": "孟浩察觉到崖下传来异常声响，暂时停下下山的动作。",
+            "function": "narrative",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 26
+    },
+    {
+      "provider_call_id": 61023,
+      "shard_id": "SS001",
+      "attempt_no": 2,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc001:SRC0001:001:unit": {
+            "text": "屏幕上浮现水墨风的章节标题：第一章 书生孟浩",
+            "text_provenance": {
+              "kind": "on_screen_text",
+              "identity_keys": []
+            },
+            "performance": "",
+            "resulting_state": "观众明确当前故事开篇的章节信息",
+            "function": "setup",
+            "agency_kind": "on_screen_text"
+          }
+        }
+      },
+      "slot_count": 23
+    },
+    {
+      "provider_call_id": 61025,
+      "shard_id": "SS003",
+      "attempt_no": 1,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc009:SRC0035:001:unit": {
+            "text": "藤条伸到山崖裂缝处，王有材抬手一把攥住藤条，与此同时孟浩身后骤然涌起阴风，周遭温度骤降如坠寒冬，他忍不住打了个寒颤，下意识回头看去，瞬间惊呼出声，脚下一晃险些踏空坠下山崖。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "person_b67de643afe6",
+                "person_e79ecc6793f5"
+              ]
+            },
+            "performance": "王有材指尖攥紧藤条时面上露出狂喜，孟浩脖颈微动回头的瞬间瞳孔骤缩，惊呼时身子猛地向后一晃，脚边的碎石簌簌滚落山崖。",
+            "resulting_state": "孟浩察觉身后异象，即将看到突然出现的银袍女子。",
+            "function": "setup",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 17
+    },
+    {
+      "provider_call_id": 61026,
+      "shard_id": "SS004",
+      "attempt_no": 1,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc013:SRC0049:001:unit": {
+            "text": "孟浩缓缓睁开眼，发现自己躺在半山腰的青石空地上，四周山峦层叠，云雾在山腰间翻涌飘荡，不似凡境，远处错落分布着雕梁画栋的精美阁楼，处处都是陌生的景致。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "person_b67de643afe6"
+              ]
+            },
+            "performance": "孟浩睫毛轻颤，缓缓睁开眼眸，先是茫然地眨了眨眼，随后撑着地面坐起身，视线扫过四周的云雾和远处的阁楼，脸上露出震惊的神色。",
+            "resulting_state": "孟浩苏醒，确认自己身处陌生的非凡尘环境。",
+            "function": "establish_environment",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 17
+    },
+    {
+      "provider_call_id": 61027,
+      "shard_id": "SS004",
+      "attempt_no": 2,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc013:SRC0049:001:unit": {
+            "text": "孟浩缓缓睁开眼，发现自己躺在半山腰的青石空地上，四周山峦层叠，云雾在山腰间翻涌飘荡，不似凡境，远处错落分布着雕梁画栋的精美阁楼，处处都是陌生的景致。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "person_b67de643afe6"
+              ]
+            },
+            "performance": "孟浩睫毛轻颤，缓缓睁开眼眸，先是茫然地眨了眨眼，随后撑着地面坐起身，视线扫过四周的云雾和远处的阁楼，脸上露出震惊的神色。",
+            "resulting_state": "孟浩苏醒，确认自己身处陌生的非凡尘环境。",
+            "function": "establish_environment",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 17
+    },
+    {
+      "provider_call_id": 61028,
+      "shard_id": "SS003",
+      "attempt_no": 2,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc009:SRC0035:001:unit": {
+            "text": "藤条伸到山崖裂缝处，王有材抬手一把攥住藤条，与此同时孟浩身后骤然涌起阴风，周遭温度骤降如坠寒冬，他忍不住打了个寒颤，下意识回头看去，瞬间惊呼出声，脚下一晃险些踏空坠下山崖。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "person_b67de643afe6",
+                "person_e79ecc6793f5"
+              ]
+            },
+            "performance": "王有材指尖攥紧藤条时面上露出狂喜，孟浩脖颈微动回头的瞬间瞳孔骤缩，惊呼时身子猛地向后一晃，脚边的碎石簌簌滚落山崖。",
+            "resulting_state": "孟浩察觉身后异象，即将看到突然出现的银袍女子。",
+            "function": "setup",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 17
+    },
+    {
+      "provider_call_id": 61029,
+      "shard_id": "SS005",
+      "attempt_no": 1,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc016:SRC0060:001:unit": {
+            "text": "旁白以轻松活泼的语气播报：书生孟浩和大家见面啦，收藏和推荐票，一个都不要少呀，首页有新书活动，收藏有奖励，还有大转盘抽奖，耳根为大家争取了海量的起点币，还有电子书以及ipadmini，中奖率不小，我也会去抽抽看。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "narrator"
+              ]
+            },
+            "performance": "旁白语气轻快、有感染力，画面旁的Q版孟浩同步做出招手、比心的可爱动作，弹窗上同步显示对应活动介绍的文字",
+            "resulting_state": "观众了解到当前的新书收藏、抽奖福利活动",
+            "function": "exposition",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 3
+    },
+    {
+      "provider_call_id": 61030,
+      "shard_id": "SS005",
+      "attempt_no": 2,
+      "response": {
+        "contract_version": "screenplay-scene-creative.v3",
+        "slots": {
+          "bp-sc016:SRC0060:001:unit": {
+            "text": "书生孟浩和大家见面啦，收藏和推荐票，一个都不要少呀，首页有新书活动，收藏有奖励，还有大转盘抽奖，耳根为大家争取了海量的起点币，还有电子书以及ipadmini，中奖率不小，我也会去抽抽看。",
+            "text_provenance": {
+              "kind": "creative_action",
+              "identity_keys": [
+                "narrator"
+              ]
+            },
+            "performance": "旁白语气轻快、有感染力，画面旁的Q版孟浩同步做出招手、比心的可爱动作，弹窗上同步显示对应活动介绍的文字",
+            "resulting_state": "观众了解到当前的新书收藏、抽奖福利活动",
+            "function": "exposition",
+            "agency_kind": "character"
+          }
+        }
+      },
+      "slot_count": 3
+    }
+  ]
+}

@@ -26,6 +26,10 @@ from app.production.screenplay_authority import (
     screenplay_authority_fingerprint,
 )
 from app.schemas import ActionAgency, Bible, Character, NarrativeIdentityContract, World
+from app.screenplay_scene_shards import (
+    SCREENPLAY_MERGED_IR_VERSION,
+    SCREENPLAY_SCENE_SHARD_VERSION,
+)
 from tests.test_narrative_continuity import _board, _screenplay
 from tests.test_narrative_review import _persist_review_projection
 
@@ -171,7 +175,7 @@ def _source_projection_case() -> dict:
         for unit in scene["units"]:
             unit.pop("action_agency", None)
     shard_content = {
-        "contract_version": "screenplay-scene-shard.v6",
+        "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
         "episode_no": 1,
         "shard_id": "SS001",
         "scene_plan_keys": [scene["key"] for scene in merged_content["scenes"]],
@@ -193,7 +197,7 @@ def _source_projection_case() -> dict:
         status="validated",
         trust_level="T1",
         content=shard_content,
-        contract_version="screenplay-scene-shard.v6",
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
     merged = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_generation_ir_merged",
@@ -208,7 +212,7 @@ def _source_projection_case() -> dict:
             envelope["id"],
             shard["id"],
         ],
-        contract_version="screenplay-generation-ir-merged.v5",
+        contract_version=SCREENPLAY_MERGED_IR_VERSION,
     ))
     return {
         "episode_id": episode_id,
@@ -231,6 +235,7 @@ def _drift_to_contextual_actor(screenplay):
         identity_bearing=True,
         source_segment_ids=list(action.action_agency.source_segment_ids),
     )
+    action.text_provenance.identity_keys = ["ID-08"]
     event = next(
         item for item in plan.events
         if action.action_id in item.action_ids

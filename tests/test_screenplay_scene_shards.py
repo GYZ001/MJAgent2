@@ -100,6 +100,11 @@ RUN_D6BA3C89_REPLAY = (
     / "fixtures"
     / "screenplay_scene_shard_run_d6ba3c89a60f.json"
 )
+RUN_195A691_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_run_195a69113451_min.json"
+)
 SS001_FULL_ARTIFACT_FIXTURE = (
     Path(__file__).parent
     / "fixtures"
@@ -2231,6 +2236,37 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
     assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v7"
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v7"
+
+
+def test_run_195a691_replays_ten_ownership_overreaches() -> None:
+    replay = json.loads(RUN_195A691_REPLAY.read_text(encoding="utf-8"))
+
+    assert replay["run_id"] == "run_195a69113451"
+    assert replay["error_id"] == "ERR-20260811-ec6240"
+    assert [call["provider_call_id"] for call in replay["calls"]] == [
+        61019, 61020, 61022, 61023, 61025,
+        61026, 61027, 61028, 61029, 61030,
+    ]
+    assert {call["shard_id"] for call in replay["calls"]} == {
+        "SS001", "SS002", "SS003", "SS004", "SS005",
+    }
+    for call in replay["calls"]:
+        payload = deepcopy(call["response"])
+        payload["contract_version"] = SCREENPLAY_SCENE_CREATIVE_VERSION
+        with pytest.raises(ValidationError) as caught:
+            ScreenplaySceneShardCreativeIR.model_validate(payload)
+        forbidden = {
+            error["loc"][-1]
+            for error in caught.value.errors()
+            if error["type"] == "extra_forbidden"
+        }
+        assert forbidden == {"agency_kind", "text_provenance"}
+
+    with pytest.raises(ValidationError, match="identity_keys"):
+        ScreenplaySceneShardCreativeUnit.model_validate({
+            "text": "模型不得声明身份",
+            "identity_keys": ["person_b67de643afe6"],
+        })
 
 
 def test_compiled_unit_slot_round_trip_preserves_derived_action_agency() -> None:

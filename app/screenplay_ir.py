@@ -3081,10 +3081,10 @@ def compile_screenplay_ir(
                     source_segment_ids=list(existing.source_segment_ids),
                 )
                 existing.text_provenance = TextProvenance(
-                    kind=unit.text_provenance.kind,
+                    kind=existing.text_provenance.kind,
                     identity_keys=(
                         []
-                        if unit.text_provenance.kind in (
+                        if existing.text_provenance.kind in (
                             "required_text",
                             "prop_text",
                             "on_screen_text",
