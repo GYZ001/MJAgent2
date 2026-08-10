@@ -137,16 +137,8 @@ async def recover_all() -> dict[str, Any]:
         return result
 
     run_step("media", worker.recover_media_jobs)
-    from app.artifacts import (
-        flush_pending_media_cleanup,
-        start_media_cleanup_outbox_loop,
-    )
+    from app.artifacts import flush_pending_media_cleanup
     run_step("media_cleanup_outbox", flush_pending_media_cleanup)
-    run_step(
-        "media_cleanup_outbox_loop",
-        start_media_cleanup_outbox_loop,
-        record_empty=False,
-    )
     run_step(
         "abandoned_partial_files_removed",
         lambda: cleanup_abandoned_parts(PROJECTS_DIR),

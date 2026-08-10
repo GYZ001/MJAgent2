@@ -1124,6 +1124,31 @@ def _run_write_transaction_once(
         conn.close()
 
 
+async def run_in_thread_cancellation_safe(operation: Callable[[], _T]) -> _T:
+    """Run sync work off-loop and delay cancellation until its thread finishes."""
+    worker_task = asyncio.create_task(asyncio.to_thread(operation))
+    cancellation_requested = False
+    while True:
+        try:
+            result = await asyncio.shield(worker_task)
+        except asyncio.CancelledError:
+            cancellation_requested = True
+            if not worker_task.done():
+                continue
+            try:
+                worker_task.result()
+            except BaseException:
+                pass
+            raise
+        except BaseException:
+            if cancellation_requested:
+                raise asyncio.CancelledError
+            raise
+        if cancellation_requested:
+            raise asyncio.CancelledError
+        return result
+
+
 async def run_write_transaction(
     operation: Callable[[sqlite3.Connection], _T],
     *,
@@ -1137,17 +1162,9 @@ async def run_write_transaction(
     """
     for attempt in range(len(retry_delays) + 1):
         try:
-            write_task = asyncio.create_task(
-                asyncio.to_thread(_run_write_transaction_once, operation)
+            return await run_in_thread_cancellation_safe(
+                lambda: _run_write_transaction_once(operation)
             )
-            try:
-                return await asyncio.shield(write_task)
-            except asyncio.CancelledError:
-                try:
-                    await write_task
-                except BaseException:
-                    pass
-                raise
         except sqlite3.OperationalError as exc:
             if (
                 not _is_transient_sqlite_lock(exc)

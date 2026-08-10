@@ -489,6 +489,8 @@ export function isProviderCreateUnresolved(
   return job.reason_code === "VIDEO_PROVIDER_CREATE_UNRESOLVED"
     || Boolean(job.error?.includes("[VIDEO_PROVIDER_CREATE_UNRESOLVED]"));
 }
+export const PROVIDER_RESUBMISSION_WARNING =
+  "未找到可继续查询的供应商任务编号。请先核对供应商后台；确认后会创建新的 operation ID，重新核算本集额度并建立独立预算 claim。原请求费用仍可能已经产生。";
 export function jobNextStep(job: Job) {
   if (isProviderCreateUnresolved(job))
     return "供应商可能已接收创建请求；请先恢复原任务句柄，无法确认后再决定是否重新提交";
@@ -1075,7 +1077,7 @@ function JobDrawer({
             {confirmAction === "cancel"
               ? "取消会中止当前任务，已产生的上游费用仍会保留。"
               : confirmAction === "confirm_new_submission"
-                ? "未找到可继续查询的供应商任务编号。请先核对供应商后台；只有确认后才会重新提交 create，原请求费用仍可能已经产生。"
+                ? PROVIDER_RESUBMISSION_WARNING
               : confirmAction === "resume"
                 ? providerCreateUnresolved
                   ? "系统会先查找原供应商任务并继续查询，不会在此步骤重新提交 create。"

@@ -1,6 +1,6 @@
 import asyncio
 import json
-import os
+import multiprocessing
 import sqlite3
 import threading
 
@@ -2222,7 +2222,7 @@ def test_media_cleanup_outbox_keeps_files_until_database_commit(
     ).fetchone()[0] == "completed"
 
 
-def test_media_cleanup_outbox_retries_file_delete_errors(
+def test_media_cleanup_outbox_marks_file_delete_error_for_manual_cleanup(
     storyboard_db,
     tmp_path,
     monkeypatch,
@@ -2247,7 +2247,7 @@ def test_media_cleanup_outbox_retries_file_delete_errors(
     real_unlink = artifacts.Path.unlink
 
     def fail_target(path, *args, **kwargs):
-        if path == video_file:
+        if "cleanup-quarantine" in str(path):
             raise PermissionError("injected file lock")
         return real_unlink(path, *args, **kwargs)
 
@@ -2257,24 +2257,20 @@ def test_media_cleanup_outbox_retries_file_delete_errors(
         "SELECT status,attempts,last_error FROM media_cleanup_outbox WHERE id=?",
         (staged["outbox_id"],),
     ).fetchone()
-    assert pending["status"] == "pending"
+    assert pending["status"] == "manual_cleanup_required"
     assert pending["attempts"] == 1
     assert "injected file lock" in pending["last_error"]
-    assert video_file.exists()
-
-    created_at = storyboard_db.execute(
-        "SELECT created_at FROM media_cleanup_outbox WHERE id=?",
-        (staged["outbox_id"],),
-    ).fetchone()["created_at"]
-    final_file = projects_root / "p1" / "episodes" / "1" / "final" / "episode.mp4"
-    final_file.parent.mkdir(parents=True)
-    final_file.write_bytes(b"new authoritative final")
-    os.utime(final_file, (created_at + 10, created_at + 10))
+    assert not video_file.exists()
+    quarantines = list(tmp_path.glob(".cleanup-quarantine-*/*"))
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == b"video"
 
     monkeypatch.setattr(artifacts.Path, "unlink", real_unlink)
-    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
-    assert not video_file.exists()
-    assert not final_file.with_suffix(".stale").exists()
+    assert artifacts.flush_media_cleanup_outbox(
+        staged["outbox_id"],
+        staged["cleanup_execution_token"],
+    ) is False
+    assert quarantines[0].read_bytes() == b"video"
 
 
 def test_media_cleanup_outbox_skips_replaced_file_generation(
@@ -2305,14 +2301,13 @@ def test_media_cleanup_outbox_skips_replaced_file_generation(
     video_file.unlink()
     video_file.write_bytes(b"later new generation with the same path")
 
-    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is False
     assert video_file.read_bytes() == b"later new generation with the same path"
     completed = storyboard_db.execute(
         "SELECT status,last_error FROM media_cleanup_outbox WHERE id=?",
         (staged["outbox_id"],),
     ).fetchone()
-    assert completed["status"] == "completed"
-    assert "generation_fence_skips" in completed["last_error"]
+    assert completed["status"] == "manual_cleanup_required"
     assert "generation_mismatch" in completed["last_error"]
 
 
@@ -2343,13 +2338,14 @@ def test_media_cleanup_outbox_skips_changed_directory_generation(
     assert payload["directories"][0]["generation"]["tree_sha256"]
     old_reference.write_bytes(b"new directory generation")
 
-    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is False
     assert old_reference.read_bytes() == b"new directory generation"
-    last_error = storyboard_db.execute(
-        "SELECT last_error FROM media_cleanup_outbox WHERE id=?",
+    result = storyboard_db.execute(
+        "SELECT status,last_error FROM media_cleanup_outbox WHERE id=?",
         (staged["outbox_id"],),
-    ).fetchone()["last_error"]
-    assert "generation_mismatch" in last_error
+    ).fetchone()
+    assert result["status"] == "manual_cleanup_required"
+    assert "generation_mismatch" in result["last_error"]
 
 
 def test_episode_media_cleanup_stages_generation_fences(
@@ -2395,7 +2391,7 @@ def test_episode_media_cleanup_stages_generation_fences(
     assert missing_last_frame["generation"]["exists"] is False
 
 
-def test_media_cleanup_outbox_keeps_legacy_path_payload_compatible(
+def test_media_cleanup_outbox_never_deletes_legacy_string_payload(
     storyboard_db,
     tmp_path,
 ):
@@ -2417,9 +2413,14 @@ def test_media_cleanup_outbox_keeps_legacy_path_payload_compatible(
     )
     storyboard_db.commit()
 
-    assert artifacts.flush_media_cleanup_outbox("cleanup-legacy") is True
-    assert not legacy_file.exists()
-    assert not legacy_dir.exists()
+    assert artifacts.flush_media_cleanup_outbox("cleanup-legacy") is False
+    assert legacy_file.read_bytes() == b"legacy"
+    assert (legacy_dir / "reference.png").read_bytes() == b"legacy"
+    row = storyboard_db.execute(
+        "SELECT status,last_error FROM media_cleanup_outbox WHERE id='cleanup-legacy'"
+    ).fetchone()
+    assert row["status"] == "manual_cleanup_required"
+    assert row["last_error"] == "legacy_path_payload_not_deleted"
 
 
 def test_media_cleanup_outbox_sweep_is_bounded(storyboard_db) -> None:
@@ -2435,7 +2436,186 @@ def test_media_cleanup_outbox_sweep_is_bounded(storyboard_db) -> None:
 
     report = artifacts.sweep_pending_media_cleanup(limit=2)
 
-    assert report == {"attempted": 2, "completed": 2, "failed": 0}
+    assert report == {"attempted": 2, "completed": 0, "failed": 2}
     assert storyboard_db.execute(
         "SELECT COUNT(*) FROM media_cleanup_outbox WHERE status='pending'"
     ).fetchone()[0] == 2
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) FROM media_cleanup_outbox "
+        "WHERE status='manual_cleanup_required'"
+    ).fetchone()[0] == 2
+
+
+def test_media_cleanup_outbox_toctou_replacement_is_quarantined_not_deleted(
+    storyboard_db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app import artifacts
+
+    video_file = tmp_path / "toctou.mp4"
+    video_file.write_bytes(b"old")
+    storyboard_db.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('v-toctou','s1',1,'prompt','idem-toctou','done',?,1)""",
+        (str(video_file),),
+    )
+    storyboard_db.commit()
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    storyboard_db.commit()
+
+    real_rename = artifacts.os.rename
+    replaced = False
+
+    def replace_before_rename(source, target):
+        nonlocal replaced
+        if source == video_file and not replaced:
+            replaced = True
+            source.unlink()
+            source.write_bytes(b"new generation")
+        return real_rename(source, target)
+
+    monkeypatch.setattr(artifacts.os, "rename", replace_before_rename)
+    assert artifacts.flush_media_cleanup_outbox(
+        staged["outbox_id"],
+        staged["cleanup_execution_token"],
+    ) is False
+
+    row = storyboard_db.execute(
+        "SELECT status,last_error FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()
+    assert row["status"] == "manual_cleanup_required"
+    assert "generation_changed_during_quarantine" in row["last_error"]
+    quarantines = list(tmp_path.glob(".cleanup-quarantine-*/*"))
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == b"new generation"
+
+
+def test_media_cleanup_outbox_partial_rmtree_is_never_retried(
+    storyboard_db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app import artifacts
+
+    projects_root = tmp_path / "projects"
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", projects_root)
+    reference_dir = (
+        projects_root / "p1" / "episodes" / "1" / "shots" / "1" / "references"
+    )
+    reference_dir.mkdir(parents=True)
+    (reference_dir / "first.png").write_bytes(b"first")
+    (reference_dir / "second.png").write_bytes(b"second")
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    storyboard_db.commit()
+
+    def partial_rmtree(path):
+        (path / "first.png").unlink()
+        raise PermissionError("injected partial rmtree")
+
+    monkeypatch.setattr(artifacts.shutil, "rmtree", partial_rmtree)
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is False
+    quarantine = next(projects_root.rglob(".cleanup-quarantine-*")) / "references"
+    assert not (quarantine / "first.png").exists()
+    assert (quarantine / "second.png").read_bytes() == b"second"
+
+    assert artifacts.flush_media_cleanup_outbox(
+        staged["outbox_id"],
+        staged["cleanup_execution_token"],
+    ) is False
+    assert (quarantine / "second.png").read_bytes() == b"second"
+
+
+def test_media_cleanup_outbox_token_is_single_use_across_competing_flushes(
+    storyboard_db,
+    tmp_path,
+) -> None:
+    from app import artifacts
+
+    video_file = tmp_path / "single-use.mp4"
+    video_file.write_bytes(b"old")
+    storyboard_db.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('v-single','s1',1,'prompt','idem-single','done',?,1)""",
+        (str(video_file),),
+    )
+    storyboard_db.commit()
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    storyboard_db.commit()
+
+    artifacts._MEDIA_CLEANUP_EXECUTION_TOKENS.pop(staged["outbox_id"], None)
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"], "other-process") is False
+    assert video_file.read_bytes() == b"old"
+    assert storyboard_db.execute(
+        "SELECT status FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()["status"] == "pending"
+
+    assert artifacts.flush_media_cleanup_outbox(
+        staged["outbox_id"],
+        staged["cleanup_execution_token"],
+    ) is True
+    video_file.write_bytes(b"new reused path")
+    assert artifacts.flush_media_cleanup_outbox(
+        staged["outbox_id"],
+        staged["cleanup_execution_token"],
+    ) is True
+    assert video_file.read_bytes() == b"new reused path"
+
+
+def test_media_cleanup_outbox_two_processes_claim_only_once(
+    storyboard_db,
+    tmp_path,
+) -> None:
+    from app import artifacts
+
+    video_file = tmp_path / "two-process.mp4"
+    video_file.write_bytes(b"old")
+    storyboard_db.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('v-two-process','s1',1,'prompt','idem-two-process','done',?,1)""",
+        (str(video_file),),
+    )
+    storyboard_db.commit()
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    storyboard_db.commit()
+
+    context = multiprocessing.get_context("fork")
+    start = context.Event()
+    results = context.Queue()
+
+    def flush_in_child() -> None:
+        from app import artifacts as child_artifacts
+        from app import db as child_db
+
+        child_db._local = threading.local()
+        start.wait()
+        results.put(child_artifacts.flush_media_cleanup_outbox(
+            staged["outbox_id"],
+            staged["cleanup_execution_token"],
+        ))
+
+    processes = [context.Process(target=flush_in_child) for _ in range(2)]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+
+    assert [results.get(timeout=1) for _ in processes].count(True) >= 1
+    assert not video_file.exists()
+    row = storyboard_db.execute(
+        "SELECT status,attempts FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()
+    assert row["status"] == "completed"
+    assert row["attempts"] == 1

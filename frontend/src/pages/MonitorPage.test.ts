@@ -12,6 +12,7 @@ import {
   modelBusinessLabel,
   modelProviderOptions,
   normalizeDraft,
+  PROVIDER_RESUBMISSION_WARNING,
   settingOptionLabel,
   type Call,
   type Job,
@@ -87,6 +88,12 @@ describe("任务队列业务名称与恢复建议", () => {
     })).toBe(true);
     expect(jobNextStep(unresolved)).toContain("先恢复原任务句柄");
     expect(jobNextStep(unresolved)).not.toContain("重试");
+  });
+
+  it("重新提交明确使用新 operation 和独立预算 claim", () => {
+    expect(PROVIDER_RESUBMISSION_WARNING).toContain("新的 operation ID");
+    expect(PROVIDER_RESUBMISSION_WARNING).toContain("独立预算 claim");
+    expect(PROVIDER_RESUBMISSION_WARNING).not.toContain("复用原幂等标识");
   });
 });
 

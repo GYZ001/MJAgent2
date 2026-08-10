@@ -401,6 +401,53 @@ def _run_in_memory_write_transaction(conn, operation) -> None:
         raise
 
 
+def _commit_provider_create_unresolved(
+    conn,
+    *,
+    job_id: str,
+    version_id: str,
+    owner: str,
+    message: str,
+) -> bool:
+    """Atomically fence and persist the unresolved-create human handoff."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        changed = conn.execute(
+            """UPDATE jobs
+                  SET status='waiting_human',error=?,
+                      reason_code='VIDEO_PROVIDER_CREATE_UNRESOLVED',
+                      reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
+                      next_retry_at=NULL,updated_at=?
+                WHERE id=? AND status='running' AND lease_owner=?
+                  AND cancellation_requested=0""",
+            (message, message, now(), job_id, owner),
+        )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return False
+        changed = conn.execute(
+            """UPDATE shot_versions
+                  SET status='waiting_human',error=?
+                WHERE id=?""",
+            (message, version_id),
+        )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return False
+        conn.execute(
+            """UPDATE budget_reservations
+                  SET status='reserved'
+                WHERE job_id=? AND status='running'""",
+            (job_id,),
+        )
+        conn.commit()
+        return True
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def _commit_provider_acceptance_in_transaction(
     conn,
     *,
@@ -3609,10 +3656,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             amount_cny=shot_cost_cny(int(shot["duration_s"] or 0)),
                             conn=conn,
                         )
-                        if budget_claimed is False:
+                        if budget_claimed is not True:
                             raise VideoBudgetAuthorizationError(
-                                "本次供应商视频调用将超过用户已批准的费用上限；"
-                                "任务已在付费调用前暂停"
+                                "本集缺少有效的视频费用授权，或本次供应商视频调用将超过"
+                                "用户已批准的费用上限；任务已在付费调用前暂停"
                             )
                         marked = conn.execute(
                             """UPDATE jobs
@@ -4152,26 +4199,14 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         return
     except ProviderCreateUnresolved as exc:
         message = str(exc)
-        changed = conn.execute(
-            """UPDATE jobs
-                  SET status='waiting_human',error=?,
-                      reason_code='VIDEO_PROVIDER_CREATE_UNRESOLVED',
-                      reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
-                      next_retry_at=NULL,updated_at=?
-                WHERE id=? AND status='running' AND lease_owner=?""",
-            (message, message, now(), job_id, owner),
-        )
-        if changed.rowcount != 1:
-            conn.rollback()
+        if not _commit_provider_create_unresolved(
+            conn,
+            job_id=job_id,
+            version_id=version["id"],
+            owner=owner,
+            message=message,
+        ):
             return
-        _set_version(version["id"], status="waiting_human", error=message)
-        conn.execute(
-            """UPDATE budget_reservations
-                  SET status='reserved'
-                WHERE job_id=? AND status='running'""",
-            (job_id,),
-        )
-        conn.commit()
         mark_media_job_state(
             _row_value(job, "run_id"),
             _row_value(job, "step_run_id"),

@@ -1,11 +1,11 @@
 """Authoritative cleanup and invalidation of generated media artifacts."""
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import stat
 import threading
@@ -19,10 +19,10 @@ _CLEAR_TERMINAL_RUN_STATES = {
     "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED", "PARTIAL",
     "succeeded", "failed", "cancelled", "completed", "partial",
 }
-_MEDIA_CLEANUP_SWEEP_INTERVAL_SECONDS = 30.0
 _MEDIA_CLEANUP_SWEEP_LIMIT = 25
 _MEDIA_CLEANUP_FLUSH_LOCK = threading.Lock()
 _MEDIA_CLEANUP_FENCE_VERSION = 1
+_MEDIA_CLEANUP_EXECUTION_TOKENS: dict[str, str] = {}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -600,6 +600,87 @@ def _cleanup_entry(raw_entry: object) -> tuple[Path, object | None, bool]:
     return Path(str(raw_entry)), None, True
 
 
+class _CleanupSafetyError(RuntimeError):
+    def __init__(self, reason: str, *, quarantine: Path | None = None):
+        super().__init__(reason)
+        self.quarantine = quarantine
+
+
+def _issue_cleanup_execution_token(outbox_id: str, payload: dict) -> str:
+    token = secrets.token_urlsafe(32)
+    payload["execution_token_sha256"] = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    _MEDIA_CLEANUP_EXECUTION_TOKENS[outbox_id] = token
+    return token
+
+
+def _cleanup_token_matches(payload: dict, token: str | None) -> bool:
+    expected = str(payload.get("execution_token_sha256") or "")
+    if not expected or not token:
+        return False
+    actual = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return secrets.compare_digest(expected, actual)
+
+
+def _generation_matches_after_rename(expected: object, current: object) -> bool:
+    if not isinstance(expected, dict) or not isinstance(current, dict):
+        return False
+    if not expected.get("verifiable") or not current.get("verifiable"):
+        return False
+    expected_stable = {key: value for key, value in expected.items() if key != "ctime_ns"}
+    current_stable = {key: value for key, value in current.items() if key != "ctime_ns"}
+    return expected_stable == current_stable
+
+
+def _quarantine_cleanup_target(
+    path: Path,
+    expected: object,
+    kind: str,
+    outbox_id: str,
+) -> Path | None:
+    if not str(path) or str(path) == ".":
+        raise _CleanupSafetyError("empty_cleanup_path")
+    matches, reason = _cleanup_generation_matches(path, expected, kind)
+    if not matches:
+        raise _CleanupSafetyError(reason)
+    if reason == "already_missing":
+        return None
+
+    quarantine_root = path.parent / (
+        f".cleanup-quarantine-{outbox_id}-{secrets.token_hex(8)}"
+    )
+    quarantine_root.mkdir(mode=0o700)
+    quarantine = quarantine_root / path.name
+    try:
+        os.rename(path, quarantine)
+    except FileNotFoundError:
+        quarantine_root.rmdir()
+        if path.exists():
+            raise _CleanupSafetyError("path_replaced_during_quarantine")
+        return None
+    except Exception:
+        try:
+            quarantine_root.rmdir()
+        except OSError:
+            pass
+        raise
+
+    current = _capture_cleanup_generation(quarantine, kind)
+    if not _generation_matches_after_rename(expected, current):
+        raise _CleanupSafetyError(
+            "generation_changed_during_quarantine",
+            quarantine=quarantine,
+        )
+    return quarantine
+
+
+def _delete_quarantined_target(path: Path, kind: str) -> None:
+    if kind == "directory":
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    path.parent.rmdir()
+
+
 def _delete_shot_reference_dir(conn, shot_row) -> int:
     """删除某镜的历史参考图缓存目录。返回删除的文件数。"""
     ep = conn.execute(
@@ -754,6 +835,7 @@ def stage_shot_artifact_cleanup(
             if ep else None
         ),
     }
+    execution_token = _issue_cleanup_execution_token(outbox_id, payload)
     conn.execute(
         """INSERT INTO media_cleanup_outbox(
                id,episode_id,shot_id,payload_json,status,created_at
@@ -771,6 +853,7 @@ def stage_shot_artifact_cleanup(
         "videos": len(versions),
         "references": references,
         "outbox_id": outbox_id,
+        "cleanup_execution_token": execution_token,
     }
 
 
@@ -852,6 +935,7 @@ def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
             "episode_no": int(ep["episode_no"]),
         },
     }
+    execution_token = _issue_cleanup_execution_token(outbox_id, payload)
     conn.execute(
         """INSERT INTO media_cleanup_outbox(
                id,episode_id,shot_id,payload_json,status,created_at
@@ -869,55 +953,97 @@ def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
         "videos": versions_removed,
         "references": references_removed,
         "outbox_id": outbox_id,
+        "cleanup_execution_token": execution_token,
     }
 
 
-def flush_media_cleanup_outbox(outbox_id: str) -> bool:
-    """Delete files recorded by a committed cleanup transaction."""
+def flush_media_cleanup_outbox(
+    outbox_id: str,
+    cleanup_execution_token: str | None = None,
+) -> bool:
+    """Perform the creator request's single post-commit cleanup attempt."""
     with _MEDIA_CLEANUP_FLUSH_LOCK:
         conn = get_conn()
         row = conn.execute(
             "SELECT * FROM media_cleanup_outbox WHERE id=?",
             (outbox_id,),
         ).fetchone()
-        if not row or row["status"] == "completed":
-            return bool(row)
+        if not row:
+            _MEDIA_CLEANUP_EXECUTION_TOKENS.pop(outbox_id, None)
+            return False
+        if row["status"] == "completed":
+            _MEDIA_CLEANUP_EXECUTION_TOKENS.pop(outbox_id, None)
+            return True
+        if row["status"] != "pending":
+            _MEDIA_CLEANUP_EXECUTION_TOKENS.pop(outbox_id, None)
+            return False
+
+        token = cleanup_execution_token
+        if token is None:
+            token = _MEDIA_CLEANUP_EXECUTION_TOKENS.get(outbox_id)
         try:
             payload = json.loads(row["payload_json"] or "{}")
-            skipped: list[dict[str, str]] = []
-            for raw_entry in payload.get("files") or []:
-                path, generation, legacy = _cleanup_entry(raw_entry)
-                matches, reason = (
-                    (True, "legacy_payload")
-                    if legacy else
-                    _cleanup_generation_matches(path, generation, "file")
+            if not isinstance(payload, dict):
+                raise _CleanupSafetyError("invalid_cleanup_payload")
+        except Exception as exc:
+            conn.execute(
+                """UPDATE media_cleanup_outbox
+                      SET status='manual_cleanup_required',attempts=attempts+1,
+                          last_error=?
+                    WHERE id=? AND status='pending'""",
+                (f"invalid_payload:{exc}"[:800], outbox_id),
+            )
+            conn.commit()
+            _MEDIA_CLEANUP_EXECUTION_TOKENS.pop(outbox_id, None)
+            return False
+
+        entries = [
+            ("directory", raw_entry)
+            for raw_entry in (payload.get("directories") or [])
+        ] + [
+            ("file", raw_entry)
+            for raw_entry in (payload.get("files") or [])
+        ]
+        if any(_cleanup_entry(raw_entry)[2] for _, raw_entry in entries):
+            conn.execute(
+                """UPDATE media_cleanup_outbox
+                      SET status='manual_cleanup_required',attempts=attempts+1,
+                          last_error='legacy_path_payload_not_deleted'
+                    WHERE id=? AND status='pending'""",
+                (outbox_id,),
+            )
+            conn.commit()
+            _MEDIA_CLEANUP_EXECUTION_TOKENS.pop(outbox_id, None)
+            return False
+        if not _cleanup_token_matches(payload, token):
+            return False
+
+        claimed = conn.execute(
+            """UPDATE media_cleanup_outbox
+                  SET status='executing',attempts=attempts+1,last_error=NULL
+                WHERE id=? AND status='pending'""",
+            (outbox_id,),
+        ).rowcount
+        conn.commit()
+        _MEDIA_CLEANUP_EXECUTION_TOKENS.pop(outbox_id, None)
+        if claimed != 1:
+            return False
+
+        quarantines: list[str] = []
+        try:
+            for kind, raw_entry in entries:
+                path, generation, _legacy = _cleanup_entry(raw_entry)
+                quarantine = _quarantine_cleanup_target(
+                    path,
+                    generation,
+                    kind,
+                    outbox_id,
                 )
-                if not matches:
-                    skipped.append({
-                        "kind": "file",
-                        "path": str(path),
-                        "reason": reason,
-                    })
+                if quarantine is None:
                     continue
-                path.unlink(missing_ok=True)
-            for raw_entry in payload.get("directories") or []:
-                path, generation, legacy = _cleanup_entry(raw_entry)
-                matches, reason = (
-                    (True, "legacy_payload")
-                    if legacy else
-                    _cleanup_generation_matches(path, generation, "directory")
-                )
-                if not matches:
-                    skipped.append({
-                        "kind": "directory",
-                        "path": str(path),
-                        "reason": reason,
-                    })
-                    continue
-                try:
-                    shutil.rmtree(path)
-                except FileNotFoundError:
-                    pass
+                quarantines.append(str(quarantine))
+                _delete_quarantined_target(quarantine, kind)
+                quarantines.remove(str(quarantine))
             final = payload.get("invalidate_final") or {}
             if final.get("project_id") and final.get("episode_no") is not None:
                 _invalidate_final_video(
@@ -926,126 +1052,73 @@ def flush_media_cleanup_outbox(outbox_id: str) -> bool:
                     suppress_errors=False,
                     not_newer_than=float(row["created_at"]),
                 )
-            skip_summary = (
-                "generation_fence_skips="
-                + json.dumps(skipped, ensure_ascii=False, separators=(",", ":"))
-                if skipped else None
-            )
             conn.execute(
                 """UPDATE media_cleanup_outbox
-                      SET status='completed',attempts=attempts+1,last_error=?,completed_at=?
-                    WHERE id=?""",
+                      SET status='completed',last_error=NULL,completed_at=?
+                    WHERE id=? AND status='executing'""",
+                (now(), outbox_id),
+            )
+            conn.commit()
+            return True
+        except Exception as exc:
+            quarantine = getattr(exc, "quarantine", None)
+            if quarantine is not None and str(quarantine) not in quarantines:
+                quarantines.append(str(quarantine))
+            detail = {
+                "reason": str(exc),
+                "error_type": type(exc).__name__,
+                "quarantines": quarantines,
+            }
+            conn.execute(
+                """UPDATE media_cleanup_outbox
+                      SET status='manual_cleanup_required',last_error=?
+                    WHERE id=? AND status='executing'""",
                 (
-                    skip_summary[:800] if skip_summary else None,
-                    now(),
+                    json.dumps(detail, ensure_ascii=False, separators=(",", ":"))[:800],
                     outbox_id,
                 ),
             )
             conn.commit()
-            if skipped:
-                _LOGGER.warning(
-                    "Media cleanup skipped %d generation-mismatched resource(s) "
-                    "for outbox %s: %s",
-                    len(skipped),
-                    outbox_id,
-                    skip_summary,
-                )
-                from app.observability.metrics import inc
-
-                inc(
-                    "media_cleanup_generation_fence_skips_total",
-                    value=len(skipped),
-                )
-            return True
-        except Exception as exc:
-            conn.execute(
-                """UPDATE media_cleanup_outbox
-                      SET status='pending',attempts=attempts+1,last_error=?
-                    WHERE id=?""",
-                (str(exc)[:800], outbox_id),
+            _LOGGER.error(
+                "Media cleanup %s requires manual cleanup: %s",
+                outbox_id,
+                detail,
             )
-            conn.commit()
             return False
 
 
 def sweep_pending_media_cleanup(limit: int = _MEDIA_CLEANUP_SWEEP_LIMIT) -> dict[str, int]:
-    rows = get_conn().execute(
+    """Retire abandoned rows without touching any recorded path."""
+    conn = get_conn()
+    rows = conn.execute(
         """SELECT id FROM media_cleanup_outbox
-            WHERE status='pending'
+            WHERE status IN ('pending','executing')
             ORDER BY attempts,created_at
             LIMIT ?""",
         (max(1, min(int(limit), 1000)),),
     ).fetchall()
-    completed = sum(
-        flush_media_cleanup_outbox(str(row["id"]))
-        for row in rows
-    )
+    ids = [str(row["id"]) for row in rows]
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"""UPDATE media_cleanup_outbox
+                   SET status='manual_cleanup_required',
+                       last_error='deferred_cleanup_disabled_data_preserved'
+                 WHERE id IN ({placeholders})
+                   AND status IN ('pending','executing')""",
+            ids,
+        )
+        conn.commit()
     return {
         "attempted": len(rows),
-        "completed": completed,
-        "failed": len(rows) - completed,
+        "completed": 0,
+        "failed": len(rows),
     }
 
 
 def flush_pending_media_cleanup(limit: int = 100) -> int:
-    """Compatibility wrapper used by startup recovery."""
-    return sweep_pending_media_cleanup(limit)["completed"]
-
-
-async def media_cleanup_outbox_loop(
-    *,
-    interval_seconds: float = _MEDIA_CLEANUP_SWEEP_INTERVAL_SECONDS,
-    batch_limit: int = _MEDIA_CLEANUP_SWEEP_LIMIT,
-) -> None:
-    """Retry a bounded pending batch after each idle interval."""
-    interval = max(0.01, float(interval_seconds))
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            sweep_task = asyncio.create_task(
-                asyncio.to_thread(
-                    sweep_pending_media_cleanup,
-                    batch_limit,
-                )
-            )
-            try:
-                report = await asyncio.shield(sweep_task)
-            except asyncio.CancelledError:
-                await sweep_task
-                raise
-            if report["attempted"]:
-                from app.observability.metrics import inc
-
-                inc(
-                    "media_cleanup_outbox_attempts_total",
-                    value=report["attempted"],
-                    completed=report["completed"],
-                    failed=report["failed"],
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - one pass must not kill the loop
-            from app.errors import log_error
-
-            log_error(
-                exc,
-                action="background.media_cleanup_outbox",
-                context={"batch_limit": batch_limit},
-                meta={"stage": "background_sweep"},
-            )
-
-
-def start_media_cleanup_outbox_loop() -> None:
-    """Start the single owner-managed cleanup retry loop."""
-    from app import task_registry
-
-    if task_registry.active("system", "media_cleanup_outbox"):
-        return
-    task_registry.spawn(
-        "system",
-        "media_cleanup_outbox",
-        media_cleanup_outbox_loop(),
-    )
+    """Mark restart-delayed cleanup for manual handling without path access."""
+    return sweep_pending_media_cleanup(limit)["failed"]
 
 
 def clear_episode_artifacts(episode_id: str) -> dict:

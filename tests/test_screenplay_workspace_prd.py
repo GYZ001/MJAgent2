@@ -504,7 +504,7 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
     ).fetchone()["status"] == "candidate"
 
 
-def test_publish_persists_cleanup_outbox_and_recovers_deferred_file_delete(
+def test_publish_preserves_files_when_immediate_cleanup_does_not_run(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -570,12 +570,14 @@ def test_publish_persists_cleanup_outbox_and_recovers_deferred_file_delete(
     assert pending["status"] == "pending"
     assert video_file.exists()
 
-    assert real_flush(str(pending["id"])) is True
-    assert not video_file.exists()
+    artifacts._MEDIA_CLEANUP_EXECUTION_TOKENS.pop(str(pending["id"]), None)
+    assert real_flush(str(pending["id"])) is False
+    assert video_file.read_bytes() == b"old video"
+    assert artifacts.flush_pending_media_cleanup() == 1
     assert conn.execute(
         "SELECT status FROM media_cleanup_outbox WHERE id=?",
         (pending["id"],),
-    ).fetchone()["status"] == "completed"
+    ).fetchone()["status"] == "manual_cleanup_required"
 
 
 def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(

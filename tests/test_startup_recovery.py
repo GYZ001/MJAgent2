@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -550,11 +548,6 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
         "flush_pending_media_cleanup",
         recover("media_cleanup_outbox"),
     )
-    monkeypatch.setattr(
-        artifacts,
-        "start_media_cleanup_outbox_loop",
-        recover("media_cleanup_outbox_loop", 0),
-    )
     monkeypatch.setattr(atomic_io, "cleanup_abandoned_parts", recover("partial_cleanup", 2))
     monkeypatch.setattr(
         rejected_media,
@@ -583,7 +576,7 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     report = asyncio.run(recovery.recover_all())
 
     assert calls == [
-        "media", "media_cleanup_outbox", "media_cleanup_outbox_loop",
+        "media", "media_cleanup_outbox",
         "partial_cleanup", "rejected_media", "worker_start", "lease_sweeper",
         "character_bible", "character_references", "portrait_view_redo",
         "scene_references", "scene_history_review", "episode_mapping",
@@ -605,132 +598,38 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     assert report["recovery_meta"]["duration_ms"] >= 0
 
 
-def test_media_cleanup_loop_waits_between_bounded_observable_passes(monkeypatch) -> None:
-    import app.observability.metrics as metrics
-
-    sleeps: list[float] = []
-    sweep_limits: list[int] = []
-    observed: list[tuple[str, dict]] = []
-
-    async def controlled_sleep(delay: float) -> None:
-        sleeps.append(delay)
-        if len(sleeps) > 1:
-            raise asyncio.CancelledError
-
-    def sweep(limit: int) -> dict[str, int]:
-        sweep_limits.append(limit)
-        return {"attempted": 3, "completed": 2, "failed": 1}
-
-    monkeypatch.setattr(artifacts.asyncio, "sleep", controlled_sleep)
-    monkeypatch.setattr(artifacts, "sweep_pending_media_cleanup", sweep)
-    monkeypatch.setattr(
-        metrics,
-        "inc",
-        lambda name, **labels: observed.append((name, labels)),
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(artifacts.media_cleanup_outbox_loop(
-            interval_seconds=2.5,
-            batch_limit=3,
-        ))
-
-    assert sleeps == [2.5, 2.5]
-    assert sweep_limits == [3]
-    assert observed == [(
-        "media_cleanup_outbox_attempts_total",
-        {"value": 3, "completed": 2, "failed": 1},
-    )]
-
-
-def test_media_cleanup_loop_does_not_block_event_loop_during_slow_sweep(
+def test_startup_cleanup_recovery_only_marks_abandoned_rows_manual(
+    tmp_path,
     monkeypatch,
 ) -> None:
-    sweep_started = threading.Event()
-    sweep_release = threading.Event()
-
-    def slow_sweep(_limit: int) -> dict[str, int]:
-        sweep_started.set()
-        sweep_release.wait()
-        return {"attempted": 0, "completed": 0, "failed": 0}
-
-    monkeypatch.setattr(artifacts, "sweep_pending_media_cleanup", slow_sweep)
-
-    async def exercise() -> None:
-        task = asyncio.create_task(artifacts.media_cleanup_outbox_loop(
-            interval_seconds=0.01,
-            batch_limit=1,
-        ))
-        watchdog = threading.Timer(0.5, sweep_release.set)
-        watchdog.start()
-        started_at = time.monotonic()
-        try:
-            while not sweep_started.is_set():
-                await asyncio.sleep(0.001)
-            assert time.monotonic() - started_at < 0.2
-            await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.1)
-        finally:
-            sweep_release.set()
-            watchdog.cancel()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    asyncio.run(exercise())
-
-
-def test_media_cleanup_loop_has_single_owner_and_stops_with_registry() -> None:
-    async def exercise() -> None:
-        await task_registry.stop_all()
-        artifacts.start_media_cleanup_outbox_loop()
-        first = task_registry.get("system", "media_cleanup_outbox")
-        assert first is not None
-        assert not first.done()
-
-        artifacts.start_media_cleanup_outbox_loop()
-        assert task_registry.get("system", "media_cleanup_outbox") is first
-
-        await task_registry.stop_all()
-        assert first.done()
-        assert not task_registry.active("system", "media_cleanup_outbox")
-
-    asyncio.run(exercise())
-
-
-def test_media_cleanup_registry_stop_waits_for_inflight_sweep(monkeypatch) -> None:
-    sweep_started = threading.Event()
-    sweep_release = threading.Event()
-    original_loop = artifacts.media_cleanup_outbox_loop
-
-    def slow_sweep(_limit: int) -> dict[str, int]:
-        sweep_started.set()
-        sweep_release.wait()
-        return {"attempted": 0, "completed": 0, "failed": 0}
-
-    monkeypatch.setattr(artifacts, "sweep_pending_media_cleanup", slow_sweep)
-    monkeypatch.setattr(
-        artifacts,
-        "media_cleanup_outbox_loop",
-        lambda: original_loop(interval_seconds=0.01, batch_limit=1),
+    conn = _fresh_database(tmp_path, monkeypatch)
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,title,status,created_at)
+           VALUES('e1','p1',1,'Episode','planned',1)"""
     )
+    preserved = tmp_path / "preserved.mp4"
+    preserved.write_bytes(b"preserved")
+    conn.executemany(
+        """INSERT INTO media_cleanup_outbox(
+               id,episode_id,payload_json,status,created_at
+           ) VALUES(?,'e1',?,?,1)""",
+        [
+            ("cleanup-pending", json.dumps({"files": [str(preserved)]}), "pending"),
+            ("cleanup-executing", "{}", "executing"),
+        ],
+    )
+    conn.commit()
 
-    async def exercise() -> None:
-        await task_registry.stop_all()
-        artifacts.start_media_cleanup_outbox_loop()
-        while not sweep_started.is_set():
-            await asyncio.sleep(0.001)
-
-        stopping = asyncio.create_task(task_registry.stop_all())
-        await asyncio.sleep(0.01)
-        assert not stopping.done()
-
-        sweep_release.set()
-        await asyncio.wait_for(stopping, timeout=0.5)
-        assert not task_registry.active("system", "media_cleanup_outbox")
-
-    try:
-        asyncio.run(exercise())
-    finally:
-        sweep_release.set()
+    assert artifacts.flush_pending_media_cleanup() == 2
+    assert preserved.read_bytes() == b"preserved"
+    rows = conn.execute(
+        "SELECT status,last_error FROM media_cleanup_outbox ORDER BY id"
+    ).fetchall()
+    assert all(row["status"] == "manual_cleanup_required" for row in rows)
+    assert all(
+        row["last_error"] == "deferred_cleanup_disabled_data_preserved"
+        for row in rows
+    )
 
 
 def test_startup_recovery_isolates_failed_step_and_continues(monkeypatch) -> None:

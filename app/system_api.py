@@ -1523,21 +1523,7 @@ def retry_job(job_id: str, body: dict | None = None):
             "code": "JOB_VERSION_CONFLICT", "message": "任务状态已变化，请刷新后重试",
             "current_version": item.get("state_revision") or 0,
         })
-    if item["status"] == "paused_budget":
-        if not item.get("episode_id"):
-            raise HTTPException(409, "预算暂停任务缺少分集上下文，不能安全恢复")
-        resumed = worker.retry_paused(item["episode_id"], job_id=job_id)
-        if not resumed:
-            raise HTTPException(409, "预算仍不足，请先提高单集成本上限")
-        retryability = {
-            "retryable": True,
-            "action": "resume_budget_paused",
-            "paid_risk": "uses_reserved_budget",
-            "will_submit_new_provider_task": not bool(item.get("provider_task_id")),
-            "will_continue_existing_provider_task": bool(item.get("provider_task_id")),
-            "message": "预算已重新校验，任务将从已保存断点继续",
-        }
-    else:
+    if True:
         has_provider_task = bool(item.get("provider_task_id"))
         provider_recovery = bool(
             waiting_provider_create_resolution
@@ -1615,35 +1601,6 @@ def retry_job(job_id: str, body: dict | None = None):
                     "code": "JOB_RETRY_CONTEXT_MISSING",
                     "message": "任务缺少分集上下文，不能安全重新提交",
                 })
-            from app.video_cost_model import initial_shot_generation_cost
-            estimate = float(item.get("reserved_cost_cny") or 0)
-            if estimate <= 0:
-                estimate = initial_shot_generation_cost(
-                    float(item.get("duration_s") or 5)
-                )
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                budget_reserved = worker.media_scheduler.reserve_budget(
-                    job_id,
-                    item["episode_id"],
-                    estimate,
-                    worker.episode_video_budget_limit(item["episode_id"]),
-                    conn=conn,
-                )
-            except Exception:
-                conn.rollback()
-                raise
-            if not budget_reserved:
-                conn.commit()
-                raise HTTPException(409, detail={
-                    "code": "JOB_RETRY_BUDGET_BLOCKED",
-                    "message": "单集预算不足，任务已保持暂停；提高成本上限后可继续",
-                    "retryability": {
-                        "retryable": True,
-                        "action": "increase_budget",
-                        "paid_risk": "blocked_before_charge",
-                    },
-                })
             retryability = {
                 "retryable": True,
                 "action": "new_submission_after_unconfirmed_provider",
@@ -1654,40 +1611,11 @@ def retry_job(job_id: str, body: dict | None = None):
             }
         else:
             target_status = "queued"
-            new_submission_epoch = False
+            new_submission_epoch = True
             if not item.get("episode_id"):
                 raise HTTPException(409, detail={
                     "code": "JOB_RETRY_CONTEXT_MISSING",
                     "message": "任务缺少分集上下文，不能安全重新提交",
-                })
-            from app.video_cost_model import initial_shot_generation_cost
-            estimate = float(item.get("reserved_cost_cny") or 0)
-            if estimate <= 0:
-                estimate = initial_shot_generation_cost(
-                    float(item.get("duration_s") or 5)
-                )
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                budget_reserved = worker.media_scheduler.reserve_budget(
-                    job_id,
-                    item["episode_id"],
-                    estimate,
-                    worker.episode_video_budget_limit(item["episode_id"]),
-                    conn=conn,
-                )
-            except Exception:
-                conn.rollback()
-                raise
-            if not budget_reserved:
-                conn.commit()
-                raise HTTPException(409, detail={
-                    "code": "JOB_RETRY_BUDGET_BLOCKED",
-                    "message": "单集预算不足，任务已保持暂停；提高成本上限后可继续",
-                    "retryability": {
-                        "retryable": True,
-                        "action": "increase_budget",
-                        "paid_risk": "blocked_before_charge",
-                    },
                 })
             retryability = {
                 "retryable": True,
@@ -1698,10 +1626,108 @@ def retry_job(job_id: str, body: dict | None = None):
                 "message": "该任务尚无供应商断点，将重新提交并可能产生新费用",
             }
         if new_submission_epoch:
+            if not item.get("version_id"):
+                raise HTTPException(409, detail={
+                    "code": "JOB_RETRY_CONTEXT_MISSING",
+                    "message": "任务缺少视频版本上下文，不能安全重新提交",
+                })
+            from app.completion_grant import reserve_provider_video_budget
+            from app.video_cost_model import initial_shot_generation_cost
+
             version_or_job_id = str(item.get("version_id") or job_id)
             provider_operation_id = (
                 f"video-create-{version_or_job_id}-{new_id('epoch')}"
             )
+            estimate = initial_shot_generation_cost(
+                float(item.get("duration_s") or 5)
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    """UPDATE budget_reservations
+                          SET status='released',settled_at=?,actual_cost_cny=0
+                        WHERE job_id=? AND status IN ('reserved','running')""",
+                    (time.time(), job_id),
+                )
+                if (
+                    not provider_recovery_unconfirmed
+                    and item.get("provider_create_state") == "not_started"
+                    and item.get("provider_operation_id")
+                ):
+                    conn.execute(
+                        """UPDATE provider_video_budget_claims
+                              SET status='released',updated_at=?
+                            WHERE operation_id=? AND job_id=? AND status='reserved'""",
+                        (time.time(), item["provider_operation_id"], job_id),
+                    )
+                budget_reserved = worker.media_scheduler.reserve_budget(
+                    job_id,
+                    item["episode_id"],
+                    estimate,
+                    worker.episode_video_budget_limit(item["episode_id"]),
+                    conn=conn,
+                )
+                provider_budget_claimed = (
+                    budget_reserved
+                    and reserve_provider_video_budget(
+                        episode_id=str(item["episode_id"]),
+                        job_id=job_id,
+                        version_id=str(item["version_id"]),
+                        operation_id=provider_operation_id,
+                        amount_cny=estimate,
+                        conn=conn,
+                    )
+                )
+            except Exception:
+                conn.rollback()
+                raise
+            if not budget_reserved or not provider_budget_claimed:
+                authority = conn.execute(
+                    """SELECT 1 FROM episode_video_budget_authorities
+                        WHERE episode_id=?""",
+                    (item["episode_id"],),
+                ).fetchone()
+                message = (
+                    "本集缺少有效的视频费用授权，任务已在供应商调用前暂停"
+                    if authority is None
+                    else "本集剩余授权额度不足，任务已在供应商调用前暂停"
+                )
+                code = (
+                    "JOB_RETRY_AUTHORITY_MISSING"
+                    if authority is None
+                    else "JOB_RETRY_BUDGET_BLOCKED"
+                )
+                conn.execute(
+                    """UPDATE budget_reservations
+                          SET status='released',settled_at=?,actual_cost_cny=0
+                        WHERE job_id=? AND status IN ('reserved','running')""",
+                    (time.time(), job_id),
+                )
+                conn.execute(
+                    """UPDATE jobs
+                          SET status='paused_budget',reserved_cost_cny=0,error=?,
+                              reason_code='VIDEO_BUDGET_NOT_AUTHORIZED',
+                              reason_text=?,updated_at=?
+                        WHERE id=? AND status=? AND COALESCE(state_revision,0)=?""",
+                    (
+                        message,
+                        message,
+                        time.time(),
+                        job_id,
+                        item["status"],
+                        int(item.get("state_revision") or 0),
+                    ),
+                )
+                conn.commit()
+                raise HTTPException(409, detail={
+                    "code": code,
+                    "message": message,
+                    "retryability": {
+                        "retryable": True,
+                        "action": "increase_budget",
+                        "paid_risk": "blocked_before_charge",
+                    },
+                })
             cursor = conn.execute(
                 """UPDATE jobs
                       SET status=?,error=NULL,next_retry_at=NULL,

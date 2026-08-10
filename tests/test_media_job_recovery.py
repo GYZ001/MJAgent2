@@ -29,6 +29,85 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+def _authorize_video_retry(
+    conn: sqlite3.Connection,
+    episode_id: str,
+    *,
+    cap_cny: float = 100.0,
+) -> None:
+    from app.completion_grant import ensure_video_budget_authority_tables
+
+    ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO episode_video_budget_authorities(
+               episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
+           ) VALUES(?,0,?,'test-retry',1,1)
+           ON CONFLICT(episode_id) DO UPDATE SET cap_cny=excluded.cap_cny""",
+        (episode_id, cap_cny),
+    )
+    conn.commit()
+
+
+def _seed_retryable_video_job(
+    conn: sqlite3.Connection,
+    *,
+    job_id: str = "j-retry",
+    operation_id: str = "video-create-v-retry-old",
+) -> None:
+    conn.execute(
+        "INSERT INTO projects(id,name,created_at) VALUES('p-retry','P',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('e-retry','p-retry',1,'confirmed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
+           VALUES('s-retry','e-retry',1,5)"""
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v-retry','s-retry',1,'p','i-retry','failed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_operation_id,provider_create_state,reserved_cost_cny,
+               created_at,updated_at
+           ) VALUES(?, 'video','s-retry','v-retry','e-retry','p-retry','failed',
+                    ?,'not_started',0.25,1,1)""",
+        (job_id, operation_id),
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('budget-old',?,'episode','e-retry',0.25,'reserved',1)""",
+        (job_id,),
+    )
+    conn.commit()
+
+
+def _seed_unresolved_provider_create(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v1','s1',1,'prompt','idem','running',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,version_id,status,lease_owner,lease_expires_at,
+               created_at,updated_at
+           ) VALUES('j1','video','v1','running','worker-1',9999999999,1,1)"""
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('b1','j1','episode','e1',1,'running',1)"""
+    )
+    conn.commit()
+
+
 def _seed_restart_interrupted_job(conn: sqlite3.Connection, job_id: str = "j1") -> str:
     """模拟服务重启后 DB 的状态：
     - workflow_runs: status=PAUSED_EXTERNAL, failure_code=SERVICE_RESTART
@@ -300,6 +379,96 @@ def test_recovered_provider_handle_allows_poll_resume() -> None:
     }
 
     worker._assert_provider_create_resolved(job, "provider-task-1")
+
+
+def test_unresolved_provider_create_transition_is_atomic() -> None:
+    conn = _conn()
+    _seed_unresolved_provider_create(conn)
+
+    assert worker._commit_provider_create_unresolved(
+        conn,
+        job_id="j1",
+        version_id="v1",
+        owner="worker-1",
+        message="provider create unresolved",
+    )
+
+    job = conn.execute(
+        """SELECT status,reason_code,lease_owner
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    assert dict(job) == {
+        "status": "waiting_human",
+        "reason_code": "VIDEO_PROVIDER_CREATE_UNRESOLVED",
+        "lease_owner": None,
+    }
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v1'"
+    ).fetchone()["status"] == "waiting_human"
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone()["status"] == "reserved"
+
+
+def test_unresolved_provider_create_transition_rolls_back_every_write() -> None:
+    conn = _conn()
+    _seed_unresolved_provider_create(conn)
+    conn.execute(
+        """CREATE TRIGGER fail_unresolved_budget_transition
+           BEFORE UPDATE OF status ON budget_reservations
+           WHEN NEW.job_id='j1'
+           BEGIN
+               SELECT RAISE(ABORT, 'budget transition failed');
+           END"""
+    )
+    conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="budget transition failed"):
+        worker._commit_provider_create_unresolved(
+            conn,
+            job_id="j1",
+            version_id="v1",
+            owner="worker-1",
+            message="provider create unresolved",
+        )
+
+    job = conn.execute(
+        "SELECT status,reason_code,lease_owner FROM jobs WHERE id='j1'"
+    ).fetchone()
+    assert dict(job) == {
+        "status": "running",
+        "reason_code": None,
+        "lease_owner": "worker-1",
+    }
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v1'"
+    ).fetchone()["status"] == "running"
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone()["status"] == "running"
+
+
+def test_unresolved_provider_create_transition_keeps_lease_cas() -> None:
+    conn = _conn()
+    _seed_unresolved_provider_create(conn)
+
+    assert not worker._commit_provider_create_unresolved(
+        conn,
+        job_id="j1",
+        version_id="v1",
+        owner="stale-worker",
+        message="provider create unresolved",
+    )
+
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j1'"
+    ).fetchone()["status"] == "running"
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v1'"
+    ).fetchone()["status"] == "running"
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone()["status"] == "running"
 
 
 def test_restarted_submitting_job_never_calls_provider_create(monkeypatch) -> None:
@@ -668,11 +837,20 @@ def test_manual_retry_distinguishes_poll_from_new_submission(monkeypatch) -> Non
            ) VALUES('j-paid','video','failed','v-paid',1,1)"""
     )
     conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s-new','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v-new','s-new',1,'p','i-new','failed',1)"""
+    )
+    conn.execute(
         """INSERT INTO jobs(
-               id, kind, status, episode_id, created_at, updated_at
-           ) VALUES('j-new','video','failed','e1',1,1)"""
+               id,kind,status,shot_id,version_id,episode_id,created_at,updated_at
+           ) VALUES('j-new','video','failed','s-new','v-new','e1',1,1)"""
     )
     conn.commit()
+    _authorize_video_retry(conn, "e1")
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
@@ -689,18 +867,150 @@ def test_manual_retry_distinguishes_poll_from_new_submission(monkeypatch) -> Non
     assert new["job"]["status"] == "queued"
 
 
+def test_new_submission_retry_recalculates_budget_and_double_click_is_idempotent(
+    monkeypatch,
+) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+    from app.completion_grant import ensure_video_budget_authority_tables
+
+    conn = _conn()
+    _seed_retryable_video_job(conn)
+    _authorize_video_retry(conn, "e-retry")
+    ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,episode_id,job_id,version_id,amount_cny,status,
+               created_at,updated_at
+           ) VALUES(
+               'video-create-v-retry-old','e-retry','j-retry','v-retry',
+               0.25,'reserved',1,1
+           )"""
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    result = system_api.retry_job("j-retry", {"expected_version": 0})
+    new_operation_id = result["job"]["provider_operation_id"]
+
+    assert new_operation_id != "video-create-v-retry-old"
+    assert new_operation_id.startswith("video-create-v-retry-epoch_")
+    reservation = conn.execute(
+        """SELECT amount_cny,status FROM budget_reservations
+           WHERE job_id='j-retry'"""
+    ).fetchone()
+    assert dict(reservation) == {"amount_cny": 4.0, "status": "reserved"}
+    claims = conn.execute(
+        """SELECT operation_id,amount_cny,status
+           FROM provider_video_budget_claims ORDER BY created_at,operation_id"""
+    ).fetchall()
+    assert [dict(row) for row in claims] == [
+        {
+            "operation_id": "video-create-v-retry-old",
+            "amount_cny": 0.25,
+            "status": "released",
+        },
+        {
+            "operation_id": new_operation_id,
+            "amount_cny": 4.0,
+            "status": "reserved",
+        },
+    ]
+
+    with pytest.raises(HTTPException) as duplicate:
+        system_api.retry_job("j-retry", {"expected_version": 0})
+    assert duplicate.value.detail["code"] == "JOB_STATE_CONFLICT"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims"
+    ).fetchone()[0] == 2
+
+
+def test_new_submission_retry_fails_closed_without_episode_authority(
+    monkeypatch,
+) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    _seed_retryable_video_job(conn)
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    with pytest.raises(HTTPException) as blocked:
+        system_api.retry_job("j-retry")
+
+    assert blocked.value.detail["code"] == "JOB_RETRY_AUTHORITY_MISSING"
+    job = conn.execute(
+        "SELECT status,reserved_cost_cny,reason_code FROM jobs WHERE id='j-retry'"
+    ).fetchone()
+    assert dict(job) == {
+        "status": "paused_budget",
+        "reserved_cost_cny": 0.0,
+        "reason_code": "VIDEO_BUDGET_NOT_AUTHORIZED",
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims"
+    ).fetchone()[0] == 0
+
+
+def test_new_submission_retry_blocks_when_authority_budget_is_insufficient(
+    monkeypatch,
+) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    _seed_retryable_video_job(conn)
+    _authorize_video_retry(conn, "e-retry", cap_cny=3.0)
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    with pytest.raises(HTTPException) as blocked:
+        system_api.retry_job("j-retry")
+
+    assert blocked.value.detail["code"] == "JOB_RETRY_BUDGET_BLOCKED"
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j-retry'"
+    ).fetchone()["status"] == "paused_budget"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims"
+    ).fetchone()[0] == 0
+
+
 def test_manual_budget_retry_only_resumes_requested_job(monkeypatch) -> None:
     import app.monitoring as monitoring
     import app.system_api as system_api
 
     conn = _conn()
     conn.executemany(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,?,5)",
+        [("s-budget-1", "e1", 1), ("s-budget-2", "e1", 2)],
+    )
+    conn.executemany(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES(?,?,1,'p',?,'paused_budget',1)""",
+        [
+            ("v-budget-1", "s-budget-1", "i-budget-1"),
+            ("v-budget-2", "s-budget-2", "i-budget-2"),
+        ],
+    )
+    conn.executemany(
         """INSERT INTO jobs(
-               id, kind, status, episode_id, reserved_cost_cny, created_at, updated_at
-           ) VALUES(?, 'video', 'paused_budget', 'e1', 1, 1, 1)""",
-        [("j-budget-1",), ("j-budget-2",)],
+               id,kind,status,shot_id,version_id,episode_id,reserved_cost_cny,
+               created_at,updated_at
+           ) VALUES(?, 'video', 'paused_budget', ?, ?, 'e1', 1, 1, 1)""",
+        [
+            ("j-budget-1", "s-budget-1", "v-budget-1"),
+            ("j-budget-2", "s-budget-2", "v-budget-2"),
+        ],
     )
     conn.commit()
+    _authorize_video_retry(conn, "e1")
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
@@ -710,7 +1020,7 @@ def test_manual_budget_retry_only_resumes_requested_job(monkeypatch) -> None:
 
     result = system_api.retry_job("j-budget-1")
 
-    assert result["retryability"]["action"] == "resume_budget_paused"
+    assert result["retryability"]["action"] == "new_submission"
     statuses = {
         row["id"]: row["status"]
         for row in conn.execute(
@@ -749,6 +1059,7 @@ def test_manual_retry_recovers_persisted_provider_handle_before_queueing(monkeyp
         (json.dumps({"id": "provider-task-recovered"}),),
     )
     conn.commit()
+    _authorize_video_retry(conn, "e1")
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
     monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
@@ -784,6 +1095,7 @@ def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monke
            )"""
     )
     conn.commit()
+    _authorize_video_retry(conn, "e1")
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
@@ -844,6 +1156,7 @@ def test_manual_retry_cas_failure_rolls_back_new_epoch_budget(monkeypatch) -> No
            )"""
     )
     conn.commit()
+    _authorize_video_retry(conn, "e1")
     monkeypatch.setattr(system_api, "get_conn", lambda: conn)
     monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
     monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
@@ -971,6 +1284,7 @@ def test_manual_retry_resumes_video_input_repair_waiting_human(
            )"""
     )
     conn.commit()
+    _authorize_video_retry(conn, "e1")
     for module in (system_api, monitoring):
         monkeypatch.setattr(module, "get_conn", lambda: conn)
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
@@ -1121,6 +1435,7 @@ def test_media_run_resume_adapter_requeues_exact_paused_job(monkeypatch) -> None
            )"""
     )
     conn.commit()
+    _authorize_video_retry(conn, "e1")
     for module in (
         worker, monitoring, system_api, orchestration_api, media_scheduler, repository,
     ):

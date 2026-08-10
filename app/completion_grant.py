@@ -283,30 +283,34 @@ def reserve_provider_video_budget(
     operation_id: str,
     amount_cny: float,
     conn=None,
-) -> bool | None:
+) -> bool:
     """Atomically claim one provider create cost.
 
-    ``None`` is the explicit legacy compatibility result when no user approval
-    ledger exists. Modern public paid commands create the ledger before enqueue.
+    A payable create without episode authority is rejected. When a caller
+    supplies an active transaction, the claim participates in that transaction.
     """
     amount = max(0.0, float(amount_cny))
     db = conn or get_conn()
     ensure_video_budget_authority_tables(db)
-    db.execute("BEGIN IMMEDIATE")
+    owns_transaction = not db.in_transaction
     try:
+        if owns_transaction:
+            db.execute("BEGIN IMMEDIATE")
         authority = db.execute(
             "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
             (episode_id,),
         ).fetchone()
         if authority is None:
-            db.commit()
-            return None
+            if owns_transaction:
+                db.rollback()
+            return False
         existing = db.execute(
             "SELECT status FROM provider_video_budget_claims WHERE operation_id=?",
             (operation_id,),
         ).fetchone()
         if existing and existing["status"] != "released":
-            db.commit()
+            if owns_transaction:
+                db.commit()
             return True
         claimed = float(db.execute(
             """SELECT COALESCE(SUM(amount_cny),0) AS amount
@@ -317,7 +321,8 @@ def reserve_provider_video_budget(
         used = float(authority["baseline_cny"] or 0) + claimed
         cap = float(authority["cap_cny"] or 0)
         if used + amount > cap + 1e-9:
-            db.rollback()
+            if owns_transaction:
+                db.rollback()
             return False
         stamp = now()
         db.execute(
@@ -329,10 +334,12 @@ def reserve_provider_video_budget(
                    status='reserved',updated_at=excluded.updated_at""",
             (operation_id, episode_id, job_id, version_id, amount, stamp, stamp),
         )
-        db.commit()
+        if owns_transaction:
+            db.commit()
         return True
     except Exception:
-        db.rollback()
+        if owns_transaction:
+            db.rollback()
         raise
 
 

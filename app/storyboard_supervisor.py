@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import re
@@ -16,7 +15,11 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app import config, errors
-from app.db import get_conn, run_write_transaction
+from app.db import (
+    get_conn,
+    run_in_thread_cancellation_safe,
+    run_write_transaction,
+)
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
@@ -730,7 +733,7 @@ async def _persist_high_frequency_checkpoint(
     if _connection_uses_memory_database(conn):
         persist()
     else:
-        await asyncio.to_thread(persist)
+        await run_in_thread_cancellation_safe(persist)
 
 
 def _blocker_messages(draft) -> list[str]:
