@@ -34,6 +34,7 @@ _PROVIDER_CLAIM_LEDGER_COLUMNS = {
     "origin_version_id",
     "amount_cny",
     "status",
+    "liability_source",
     "created_at",
     "updated_at",
     "accepted_at",
@@ -109,6 +110,7 @@ def _create_provider_claim_ledger_table(db, table_name: str) -> None:
                origin_version_id TEXT NOT NULL,
                amount_cny REAL NOT NULL,
                status TEXT NOT NULL,
+               liability_source TEXT NOT NULL DEFAULT 'provider_operation',
                created_at REAL NOT NULL,
                updated_at REAL NOT NULL,
                accepted_at REAL,
@@ -285,14 +287,19 @@ def _migrate_provider_claim_ledger(db) -> None:
             if "closure_reason" in row.keys()
             else None
         )
+        liability_source = (
+            row["liability_source"]
+            if "liability_source" in row.keys()
+            else "provider_operation"
+        )
         db.execute(
             """INSERT INTO provider_video_budget_claims_v2(
                    operation_id,project_id,episode_id,shot_id,job_id,version_id,
                    origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
-                   amount_cny,status,created_at,updated_at,
+                   amount_cny,status,liability_source,created_at,updated_at,
                    accepted_at,settled_at,released_at,
                    liability_closed_at,closure_reason
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 row["operation_id"],
                 owner["project_id"],
@@ -306,6 +313,7 @@ def _migrate_provider_claim_ledger(db) -> None:
                 owner["origin_version_id"],
                 row["amount_cny"],
                 status,
+                liability_source,
                 row["created_at"],
                 row["updated_at"],
                 accepted_at,

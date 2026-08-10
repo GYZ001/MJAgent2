@@ -20,7 +20,7 @@ from app.source_excerpt import (
 )
 
 
-BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v2"
+BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v3"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 
 
@@ -258,11 +258,40 @@ class BlueprintScenePlan(BaseModel):
     scene_heading: str
 
 
+class BlueprintSceneDerivation(BaseModel):
+    relation_key: str
+    relation_type: str
+    source_scene_plan_key: str
+    target_scene_plan_key: str
+    source_node_key: str
+    target_node_key: str
+    reference_key: str = ""
+    summary: str = ""
+
+
+class BlueprintSourceOwnershipError(ValueError):
+    def __init__(self, conflicts: dict[str, list[str]]):
+        self.conflicts = {
+            source_id: list(scene_keys)
+            for source_id, scene_keys in conflicts.items()
+        }
+        self.errors = [
+            "[BLUEPRINT_SOURCE_OWNER_CONFLICT] "
+            f"{source_id} 同时归属 " + "、".join(scene_keys)
+            for source_id, scene_keys in self.conflicts.items()
+        ]
+        super().__init__("；".join(self.errors))
+
+
 class NarrativeBlueprint(BaseModel):
     format_version: str = BLUEPRINT_VERSION
     episode_no: int
     nodes: list[NarrativeNode]
     scene_plans: list[BlueprintScenePlan] = Field(default_factory=list)
+    source_scene_owners: dict[str, str] = Field(default_factory=dict)
+    scene_derivations: list[BlueprintSceneDerivation] = Field(
+        default_factory=list,
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -982,15 +1011,10 @@ def derive_blueprint_scene_plans(
             if index > 1
             else ""
         )
-        source_segment_ids = list(dict.fromkeys(
-            source_id
-            for node in nodes
-            for source_id in node.source_segment_ids
-        ))
         plans.append(BlueprintScenePlan(
             key=f"bp-sc{index:03d}",
             node_keys=[node.key for node in nodes],
-            source_segment_ids=source_segment_ids,
+            source_segment_ids=[],
             temporal_domain_key=first.temporal_domain_key,
             time_label=first.time_label,
             location_key=first.location_key,
@@ -1029,7 +1053,122 @@ def derive_blueprint_scene_plans(
                 f"【场{index}】{first.time_label} / {first.location_label}"
             ),
         ))
+
+    node_scene_owners: dict[str, str] = {}
+    source_scene_owners: dict[str, str] = {}
+    conflicts: dict[str, list[str]] = {}
+    for plan, nodes in zip(plans, groups, strict=True):
+        for node in nodes:
+            node_scene_owners[node.key] = plan.key
+            for source_id in node.source_segment_ids:
+                current_owner = source_scene_owners.get(source_id)
+                if current_owner is None:
+                    source_scene_owners[source_id] = plan.key
+                    continue
+                if current_owner == plan.key:
+                    continue
+                scene_keys = conflicts.setdefault(
+                    source_id,
+                    [current_owner],
+                )
+                if plan.key not in scene_keys:
+                    scene_keys.append(plan.key)
+    if conflicts:
+        raise BlueprintSourceOwnershipError(conflicts)
+
+    for plan in plans:
+        plan.source_segment_ids = [
+            source_id
+            for source_id, owner_scene_key in source_scene_owners.items()
+            if owner_scene_key == plan.key
+        ]
+
+    node_map = {node.key: node for node in blueprint.nodes}
+    derivations: list[BlueprintSceneDerivation] = []
+
+    def append_derivation(
+        relation_type: str,
+        source_node_key: str,
+        target_node_key: str,
+        *,
+        reference_key: str = "",
+        summary: str = "",
+    ) -> None:
+        source_scene_key = node_scene_owners.get(source_node_key)
+        target_scene_key = node_scene_owners.get(target_node_key)
+        if (
+            not source_scene_key
+            or not target_scene_key
+            or source_scene_key == target_scene_key
+        ):
+            return
+        derivations.append(BlueprintSceneDerivation(
+            relation_key=f"BD{len(derivations) + 1:04d}",
+            relation_type=relation_type,
+            source_scene_plan_key=source_scene_key,
+            target_scene_plan_key=target_scene_key,
+            source_node_key=source_node_key,
+            target_node_key=target_node_key,
+            reference_key=reference_key,
+            summary=summary,
+        ))
+
+    for previous_nodes, current_nodes in zip(groups, groups[1:]):
+        append_derivation(
+            "scene_transition",
+            previous_nodes[-1].key,
+            current_nodes[0].key,
+            summary=(
+                current_nodes[0].transition_cue
+                or current_nodes[0].opening_image
+                or current_nodes[0].summary
+            ),
+        )
+
+    fact_owner_nodes = {
+        change.fact_key: node.key
+        for node in blueprint.nodes
+        for change in node.state_changes
+        if change.fact_key
+    }
+    for target_node in blueprint.nodes:
+        for requirement in target_node.state_requirements:
+            source_node_key = fact_owner_nodes.get(
+                requirement.required_fact_key,
+            )
+            if source_node_key:
+                append_derivation(
+                    "state_requirement",
+                    source_node_key,
+                    target_node.key,
+                    reference_key=requirement.required_fact_key,
+                    summary=requirement.reason,
+                )
+        if target_node.decision is None:
+            continue
+        for source_node_key in target_node.decision.setup_node_keys:
+            if source_node_key in node_map:
+                append_derivation(
+                    "decision_setup",
+                    source_node_key,
+                    target_node.key,
+                    summary=target_node.decision.pressure,
+                )
+        for source_node_key in (
+            target_node.decision.constraint_release_node_keys
+        ):
+            if source_node_key in node_map:
+                append_derivation(
+                    "constraint_release",
+                    source_node_key,
+                    target_node.key,
+                    reference_key=target_node.decision.constraint_fact_key,
+                    summary=target_node.decision.agency_change_reason,
+                )
+
     blueprint.scene_plans = plans
+    blueprint.source_scene_owners = source_scene_owners
+    blueprint.scene_derivations = derivations
     return plans
 
 
@@ -1445,14 +1584,18 @@ def validate_narrative_blueprint(
     if flashback_active:
         errors.append("[BLUEPRINT_FLASHBACK_UNCLOSED] 回忆时间域没有返回现在")
 
-    plans = derive_blueprint_scene_plans(blueprint)
-    planned_node_keys = [
-        node_key for plan in plans for node_key in plan.node_keys
-    ]
-    if planned_node_keys != node_keys:
-        errors.append(
-            "[BLUEPRINT_SCENE_PARTITION_INVALID] 程序分场未完整保持节点顺序"
-        )
+    try:
+        plans = derive_blueprint_scene_plans(blueprint)
+    except BlueprintSourceOwnershipError as exc:
+        errors.extend(exc.errors)
+    else:
+        planned_node_keys = [
+            node_key for plan in plans for node_key in plan.node_keys
+        ]
+        if planned_node_keys != node_keys:
+            errors.append(
+                "[BLUEPRINT_SCENE_PARTITION_INVALID] 程序分场未完整保持节点顺序"
+            )
     return list(dict.fromkeys(errors))
 
 
@@ -1529,10 +1672,42 @@ def validate_and_apply_blueprint_scene_contract(
             f"{len(scenes)}/{len(plans)}"
         )
 
-    source_order: dict[str, int] = {}
-    for node in blueprint.nodes:
-        for source_id in node.source_segment_ids:
-            source_order.setdefault(source_id, len(source_order))
+    if hasattr(candidate, "source_scene_owners"):
+        candidate.source_scene_owners = dict(
+            blueprint.source_scene_owners
+        )
+    if hasattr(candidate, "scene_derivations"):
+        candidate.scene_derivations = [
+            relation.model_dump(mode="json")
+            for relation in blueprint.scene_derivations
+        ]
+
+    actual_source_scenes: defaultdict[str, list[str]] = defaultdict(list)
+    for scene_index, scene in enumerate(scenes):
+        if scene_index >= len(plans):
+            continue
+        scene_key = plans[scene_index].key
+        for unit in (getattr(scene, "units", []) or []):
+            for source_id in (
+                getattr(unit, "source_segment_ids", []) or []
+            ):
+                if scene_key not in actual_source_scenes[source_id]:
+                    actual_source_scenes[source_id].append(scene_key)
+    for source_id, scene_keys in actual_source_scenes.items():
+        if len(scene_keys) > 1:
+            errors.append(
+                "[BLUEPRINT_SOURCE_REUSED_ACROSS_SCENES] "
+                f"{source_id} 同时被 " + "、".join(scene_keys) + " 消费"
+            )
+    if errors:
+        return errors
+
+    source_order = {
+        source_id: index
+        for index, source_id in enumerate(
+            blueprint.source_scene_owners
+        )
+    }
     allowed_by_plan = [
         set(plan.source_segment_ids) for plan in plans
     ]
@@ -1689,7 +1864,20 @@ def blueprint_prompt_contract() -> dict[str, Any]:
         "time_relations": list(
             NarrativeNode.model_fields["time_relation"].annotation.__args__
         ),
-        "program_derived": ["scene_plans", "scene_heading", "scene_order"],
+        "program_derived": [
+            "scene_plans",
+            "scene_heading",
+            "scene_order",
+            "source_scene_owners",
+            "scene_derivations",
+        ],
+        "source_ownership": {
+            "contract": "each source_id has exactly one scene owner",
+            "cross_scene_context": (
+                "state/setup/transition information uses scene_derivations "
+                "and never consumes the original source_id again"
+            ),
+        },
         "participant_evidence_required": {
             "fields": ["identity_key", "source_segment_ids", "usage"],
             "usage": ["visible", "voice", "mentioned", "state_subject"],

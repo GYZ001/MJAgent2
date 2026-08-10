@@ -40,6 +40,28 @@ class ContentGenerationError(Exception):
     """A provider call succeeded, but generated content failed a quality gate."""
 
 
+class ArtifactNeedsRebuildError(ValueError):
+    """A persisted artifact predates a required evidence contract."""
+
+    code = "ARTIFACT_NEEDS_REBUILD"
+    retryable = False
+
+    def __init__(
+        self,
+        *,
+        artifact_id: str,
+        artifact_type: str,
+        reason: str,
+    ) -> None:
+        self.artifact_id = artifact_id
+        self.artifact_type = artifact_type
+        self.reason = reason
+        super().__init__(
+            f"[{self.code}] {artifact_type} {artifact_id or 'unknown'} "
+            f"需要重建：{reason}"
+        )
+
+
 @dataclass
 class ErrorRecord:
     error_id: str
@@ -72,6 +94,8 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
 
     用类名判断 ProviderError/StageError，避免 import app.hiagent/app.stages 造成环依赖。"""
     name = type(exc).__name__ if exc is not None else ""
+    if name == "ArtifactNeedsRebuildError":
+        return "conflict", "ARTIFACT-REBUILD"
     if name in {"ContentGenerationError", "ScreenplayNarrativeGateError"}:
         return "quality_gate", "QA"
     if name == "ProviderError":

@@ -164,6 +164,9 @@ class StoryEvent(BaseModel):
     visible_change: str = ""
     state_out: str = ""
     must_keep: bool = True
+    narrative_layer: Literal["story", "paratext"] = "story"
+    event_priority: Literal["causal", "supporting", "connective"] = "causal"
+    render_policy: Literal["standalone", "merge_adjacent", "exclude_from_spine"] = "standalone"
     adaptation_addition: bool = False
     adaptation_reason: str = ""
     approved: bool = False
