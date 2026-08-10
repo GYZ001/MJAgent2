@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sqlite3
 import threading
 
@@ -2228,6 +2229,8 @@ def test_media_cleanup_outbox_retries_file_delete_errors(
 ):
     from app import artifacts
 
+    projects_root = tmp_path / "projects"
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", projects_root)
     video_file = tmp_path / "locked-shot.mp4"
     video_file.write_bytes(b"video")
     storyboard_db.execute(
@@ -2259,6 +2262,35 @@ def test_media_cleanup_outbox_retries_file_delete_errors(
     assert "injected file lock" in pending["last_error"]
     assert video_file.exists()
 
+    created_at = storyboard_db.execute(
+        "SELECT created_at FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()["created_at"]
+    final_file = projects_root / "p1" / "episodes" / "1" / "final" / "episode.mp4"
+    final_file.parent.mkdir(parents=True)
+    final_file.write_bytes(b"new authoritative final")
+    os.utime(final_file, (created_at + 10, created_at + 10))
+
     monkeypatch.setattr(artifacts.Path, "unlink", real_unlink)
     assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
     assert not video_file.exists()
+    assert not final_file.with_suffix(".stale").exists()
+
+
+def test_media_cleanup_outbox_sweep_is_bounded(storyboard_db) -> None:
+    from app import artifacts
+
+    storyboard_db.executemany(
+        """INSERT INTO media_cleanup_outbox(
+               id,episode_id,payload_json,status,created_at
+           ) VALUES(?,'e1','{}','pending',?)""",
+        [(f"cleanup-{index}", float(index)) for index in range(4)],
+    )
+    storyboard_db.commit()
+
+    report = artifacts.sweep_pending_media_cleanup(limit=2)
+
+    assert report == {"attempted": 2, "completed": 2, "failed": 0}
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) FROM media_cleanup_outbox WHERE status='pending'"
+    ).fetchone()[0] == 2

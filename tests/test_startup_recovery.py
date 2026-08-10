@@ -8,7 +8,8 @@ import pytest
 from fastapi import HTTPException
 
 from app import (
-    api, atomic_io, db, planning, recovery, rejected_media, system_api, task_registry, worker,
+    api, artifacts, atomic_io, db, planning, recovery, rejected_media, system_api,
+    task_registry, worker,
 )
 from app.evidence import repository
 from app.orchestration import api as orchestration_api
@@ -542,6 +543,16 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     monkeypatch.setattr(worker, "recover_media_jobs", recover("media"))
     monkeypatch.setattr(worker, "recover_and_start", recover("worker_start", 0))
     monkeypatch.setattr(worker, "start_stale_lease_sweeper", recover("lease_sweeper", 0))
+    monkeypatch.setattr(
+        artifacts,
+        "flush_pending_media_cleanup",
+        recover("media_cleanup_outbox"),
+    )
+    monkeypatch.setattr(
+        artifacts,
+        "start_media_cleanup_outbox_loop",
+        recover("media_cleanup_outbox_loop", 0),
+    )
     monkeypatch.setattr(atomic_io, "cleanup_abandoned_parts", recover("partial_cleanup", 2))
     monkeypatch.setattr(
         rejected_media,
@@ -570,7 +581,8 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     report = asyncio.run(recovery.recover_all())
 
     assert calls == [
-        "media", "partial_cleanup", "rejected_media", "worker_start", "lease_sweeper",
+        "media", "media_cleanup_outbox", "media_cleanup_outbox_loop",
+        "partial_cleanup", "rejected_media", "worker_start", "lease_sweeper",
         "character_bible", "character_references", "portrait_view_redo",
         "scene_references", "scene_history_review", "episode_mapping",
         "screenplay", "storyboard", "video_completion", "project_video_completion", "delivery",
@@ -589,6 +601,48 @@ def test_unified_startup_recovery_runs_parent_before_all_child_adapters(monkeypa
     }
     assert report["recovery_meta"]["failed_steps"] == []
     assert report["recovery_meta"]["duration_ms"] >= 0
+
+
+def test_media_cleanup_loop_waits_between_bounded_observable_passes(monkeypatch) -> None:
+    import app.observability.metrics as metrics
+
+    sleeps: list[float] = []
+    sweep_limits: list[int] = []
+    observed: list[tuple[str, dict]] = []
+
+    async def controlled_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) > 1:
+            raise asyncio.CancelledError
+
+    def sweep(limit: int) -> dict[str, int]:
+        sweep_limits.append(limit)
+        return {"attempted": 3, "completed": 2, "failed": 1}
+
+    monkeypatch.setattr(
+        artifacts,
+        "asyncio",
+        SimpleNamespace(sleep=controlled_sleep, CancelledError=asyncio.CancelledError),
+    )
+    monkeypatch.setattr(artifacts, "sweep_pending_media_cleanup", sweep)
+    monkeypatch.setattr(
+        metrics,
+        "inc",
+        lambda name, **labels: observed.append((name, labels)),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(artifacts.media_cleanup_outbox_loop(
+            interval_seconds=2.5,
+            batch_limit=3,
+        ))
+
+    assert sleeps == [2.5, 2.5]
+    assert sweep_limits == [3]
+    assert observed == [(
+        "media_cleanup_outbox_attempts_total",
+        {"value": 3, "completed": 2, "failed": 1},
+    )]
 
 
 def test_startup_recovery_isolates_failed_step_and_continues(monkeypatch) -> None:

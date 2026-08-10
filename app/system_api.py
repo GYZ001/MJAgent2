@@ -1246,10 +1246,6 @@ def jobs_overview(include_all: bool = False):
                       ORDER BY j.updated_at DESC LIMIT 1
                     )
                   END AS linked_job_status,
-                  (
-                    SELECT j.reason_code FROM jobs j WHERE j.run_id=wr.id
-                    ORDER BY j.updated_at DESC LIMIT 1
-                  ) AS linked_job_reason_code,
                   CASE wr.scope_type
                     WHEN 'project' THEN wr.scope_id
                     WHEN 'episode' THEN scope_episode.project_id
@@ -1278,7 +1274,6 @@ def jobs_overview(include_all: bool = False):
         row["kind"] = row["workflow_type"]
         row["raw_status"] = row["status"]
         row["status"] = effective_run_status(row)
-        row["reason_code"] = row.get("linked_job_reason_code")
         row["error"] = (
             "服务重启后已自动重新排队，等待 worker 领取"
             if row["status"] == "recovering"
@@ -1545,7 +1540,8 @@ def retry_job(job_id: str, body: dict | None = None):
     else:
         has_provider_task = bool(item.get("provider_task_id"))
         provider_recovery = bool(
-            item.get("provider_non_cancellable")
+            waiting_provider_create_resolution
+            or item.get("provider_non_cancellable")
             or item.get("provider_create_state") in {"accepted", "submitting", "unknown"}
         )
         provider_recovery_unconfirmed = False

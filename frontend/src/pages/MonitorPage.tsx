@@ -483,8 +483,11 @@ export function jobBusinessLabel(job: Job) {
     jobStatusLabel(job.status),
   ].join(" · ");
 }
-export function isProviderCreateUnresolved(job: Pick<Job, "reason_code">) {
-  return job.reason_code === "VIDEO_PROVIDER_CREATE_UNRESOLVED";
+export function isProviderCreateUnresolved(
+  job: Pick<Job, "reason_code" | "error">,
+) {
+  return job.reason_code === "VIDEO_PROVIDER_CREATE_UNRESOLVED"
+    || Boolean(job.error?.includes("[VIDEO_PROVIDER_CREATE_UNRESOLVED]"));
 }
 export function jobNextStep(job: Job) {
   if (isProviderCreateUnresolved(job))

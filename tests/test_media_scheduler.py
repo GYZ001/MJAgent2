@@ -1,6 +1,8 @@
 import sqlite3
 
-from app import completion_grant, db
+import pytest
+
+from app import completion_grant, db, worker
 from app.orchestration import media_scheduler
 
 
@@ -90,6 +92,50 @@ def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
     conn.commit()
 
     assert accepted is False
+    assert conn.execute(
+        """SELECT status FROM provider_video_budget_claims
+           WHERE operation_id='op1'"""
+    ).fetchone()["status"] == "reserved"
+    with pytest.raises(worker.LeaseLost):
+        worker._commit_provider_acceptance(
+            conn,
+            job_id="j1",
+            version_id="v1",
+            owner="worker-a",
+            operation_id="op1",
+            task_id="provider-task-stale",
+        )
+    with pytest.raises(worker.LeaseLost):
+        worker._commit_video_result_checkpoint(
+            conn,
+            job_id="j1",
+            version_id="v1",
+            owner="worker-a",
+            operation_id="op1",
+            video_path="/tmp/stale.mp4",
+            last_frame_url=None,
+            cost_cny=1,
+            latency_s=1,
+            image_inputs="{}",
+        )
+
+    job = conn.execute(
+        """SELECT lease_owner,provider_create_state
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    version = conn.execute(
+        """SELECT status,provider_task_id,cost_cny
+             FROM shot_versions WHERE id='v1'"""
+    ).fetchone()
+    assert dict(job) == {
+        "lease_owner": "worker-b",
+        "provider_create_state": "not_started",
+    }
+    assert dict(version) == {
+        "status": "running",
+        "provider_task_id": None,
+        "cost_cny": 0.0,
+    }
     assert conn.execute(
         """SELECT status FROM provider_video_budget_claims
            WHERE operation_id='op1'"""

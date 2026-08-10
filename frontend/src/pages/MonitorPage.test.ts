@@ -6,6 +6,7 @@ import {
   categorizeSettingKeys,
   jobBusinessLabel,
   jobNextStep,
+  isProviderCreateUnresolved,
   modelAssignmentSettingKey,
   modelAssignmentValue,
   modelBusinessLabel,
@@ -70,6 +71,22 @@ describe("任务队列业务名称与恢复建议", () => {
       .toBe("任务未完成，可查看详情后重试");
     expect(jobNextStep({ ...job, status: "succeeded" }))
       .toBe("任务已完成，无需处理");
+  });
+
+  it("create 结果不确定时先恢复旧句柄，不引导直接重试", () => {
+    const unresolved = {
+      ...job,
+      status: "waiting_human",
+      reason_code: "VIDEO_PROVIDER_CREATE_UNRESOLVED",
+    };
+    expect(isProviderCreateUnresolved(unresolved)).toBe(true);
+    expect(isProviderCreateUnresolved({
+      ...job,
+      reason_code: undefined,
+      error: "[VIDEO_PROVIDER_CREATE_UNRESOLVED] create 结果未知",
+    })).toBe(true);
+    expect(jobNextStep(unresolved)).toContain("先恢复原任务句柄");
+    expect(jobNextStep(unresolved)).not.toContain("重试");
   });
 });
 

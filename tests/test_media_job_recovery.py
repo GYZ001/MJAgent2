@@ -623,7 +623,7 @@ def test_manual_retry_recovers_persisted_provider_handle_before_queueing(monkeyp
     ).fetchone()["provider_task_id"] == "provider-task-recovered"
 
 
-def test_manual_retry_requires_confirmation_for_unverified_provider_charge(monkeypatch) -> None:
+def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monkeypatch) -> None:
     import app.monitoring as monitoring
     import app.system_api as system_api
 
@@ -637,10 +637,10 @@ def test_manual_retry_requires_confirmation_for_unverified_provider_charge(monke
         """INSERT INTO jobs(
                id, kind, status, version_id, episode_id, provider_operation_id,
                provider_create_state, provider_non_cancellable, reserved_cost_cny,
-               created_at, updated_at
+               reason_code, created_at, updated_at
            ) VALUES(
-               'j-unknown','video','failed','v-unknown','e1','video-create-v-unknown',
-               'unknown',1,1,1,1
+               'j-unknown','video','waiting_human','v-unknown','e1','video-create-v-unknown',
+               'not_started',0,1,'VIDEO_PROVIDER_CREATE_UNRESOLVED',1,1
            )"""
     )
     conn.commit()
@@ -656,7 +656,7 @@ def test_manual_retry_requires_confirmation_for_unverified_provider_charge(monke
     assert rejected.value.detail["retryability"]["action"] == "confirm_new_submission"
     assert conn.execute(
         "SELECT status FROM jobs WHERE id='j-unknown'",
-    ).fetchone()["status"] == "failed"
+    ).fetchone()["status"] == "waiting_human"
 
     confirmed = system_api.retry_job(
         "j-unknown",

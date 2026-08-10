@@ -1,8 +1,10 @@
 """Authoritative cleanup and invalidation of generated media artifacts."""
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
+import threading
 from pathlib import Path
 
 from app import config
@@ -13,6 +15,9 @@ _CLEAR_TERMINAL_RUN_STATES = {
     "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED", "PARTIAL",
     "succeeded", "failed", "cancelled", "completed", "partial",
 }
+_MEDIA_CLEANUP_SWEEP_INTERVAL_SECONDS = 30.0
+_MEDIA_CLEANUP_SWEEP_LIMIT = 25
+_MEDIA_CLEANUP_FLUSH_LOCK = threading.Lock()
 
 
 def _begin_clear_transaction(
@@ -735,54 +740,118 @@ def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
 
 def flush_media_cleanup_outbox(outbox_id: str) -> bool:
     """Delete files recorded by a committed cleanup transaction."""
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT * FROM media_cleanup_outbox WHERE id=?",
-        (outbox_id,),
-    ).fetchone()
-    if not row or row["status"] == "completed":
-        return bool(row)
-    try:
-        payload = json.loads(row["payload_json"] or "{}")
-        for raw_path in payload.get("files") or []:
-            Path(str(raw_path)).unlink(missing_ok=True)
-        for raw_path in payload.get("directories") or []:
-            try:
-                shutil.rmtree(Path(str(raw_path)))
-            except FileNotFoundError:
-                pass
-        final = payload.get("invalidate_final") or {}
-        if final.get("project_id") and final.get("episode_no") is not None:
-            _invalidate_final_video(
-                str(final["project_id"]),
-                int(final["episode_no"]),
-                suppress_errors=False,
+    with _MEDIA_CLEANUP_FLUSH_LOCK:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT * FROM media_cleanup_outbox WHERE id=?",
+            (outbox_id,),
+        ).fetchone()
+        if not row or row["status"] == "completed":
+            return bool(row)
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+            for raw_path in payload.get("files") or []:
+                Path(str(raw_path)).unlink(missing_ok=True)
+            for raw_path in payload.get("directories") or []:
+                try:
+                    shutil.rmtree(Path(str(raw_path)))
+                except FileNotFoundError:
+                    pass
+            final = payload.get("invalidate_final") or {}
+            if final.get("project_id") and final.get("episode_no") is not None:
+                _invalidate_final_video(
+                    str(final["project_id"]),
+                    int(final["episode_no"]),
+                    suppress_errors=False,
+                    not_newer_than=float(row["created_at"]),
+                )
+            conn.execute(
+                """UPDATE media_cleanup_outbox
+                      SET status='completed',attempts=attempts+1,last_error=NULL,completed_at=?
+                    WHERE id=?""",
+                (now(), outbox_id),
             )
-        conn.execute(
-            """UPDATE media_cleanup_outbox
-                  SET status='completed',attempts=attempts+1,last_error=NULL,completed_at=?
-                WHERE id=?""",
-            (now(), outbox_id),
-        )
-        conn.commit()
-        return True
-    except Exception as exc:
-        conn.execute(
-            """UPDATE media_cleanup_outbox
-                  SET status='pending',attempts=attempts+1,last_error=?
-                WHERE id=?""",
-            (str(exc)[:800], outbox_id),
-        )
-        conn.commit()
-        return False
+            conn.commit()
+            return True
+        except Exception as exc:
+            conn.execute(
+                """UPDATE media_cleanup_outbox
+                      SET status='pending',attempts=attempts+1,last_error=?
+                    WHERE id=?""",
+                (str(exc)[:800], outbox_id),
+            )
+            conn.commit()
+            return False
+
+
+def sweep_pending_media_cleanup(limit: int = _MEDIA_CLEANUP_SWEEP_LIMIT) -> dict[str, int]:
+    rows = get_conn().execute(
+        """SELECT id FROM media_cleanup_outbox
+            WHERE status='pending'
+            ORDER BY attempts,created_at
+            LIMIT ?""",
+        (max(1, min(int(limit), 1000)),),
+    ).fetchall()
+    completed = sum(
+        flush_media_cleanup_outbox(str(row["id"]))
+        for row in rows
+    )
+    return {
+        "attempted": len(rows),
+        "completed": completed,
+        "failed": len(rows) - completed,
+    }
 
 
 def flush_pending_media_cleanup(limit: int = 100) -> int:
-    rows = get_conn().execute(
-        "SELECT id FROM media_cleanup_outbox WHERE status='pending' ORDER BY created_at LIMIT ?",
-        (max(1, min(int(limit), 1000)),),
-    ).fetchall()
-    return sum(flush_media_cleanup_outbox(str(row["id"])) for row in rows)
+    """Compatibility wrapper used by startup recovery."""
+    return sweep_pending_media_cleanup(limit)["completed"]
+
+
+async def media_cleanup_outbox_loop(
+    *,
+    interval_seconds: float = _MEDIA_CLEANUP_SWEEP_INTERVAL_SECONDS,
+    batch_limit: int = _MEDIA_CLEANUP_SWEEP_LIMIT,
+) -> None:
+    """Retry a bounded pending batch after each idle interval."""
+    interval = max(0.01, float(interval_seconds))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            report = sweep_pending_media_cleanup(batch_limit)
+            if report["attempted"]:
+                from app.observability.metrics import inc
+
+                inc(
+                    "media_cleanup_outbox_attempts_total",
+                    value=report["attempted"],
+                    completed=report["completed"],
+                    failed=report["failed"],
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one pass must not kill the loop
+            from app.errors import log_error
+
+            log_error(
+                exc,
+                action="background.media_cleanup_outbox",
+                context={"batch_limit": batch_limit},
+                meta={"stage": "background_sweep"},
+            )
+
+
+def start_media_cleanup_outbox_loop() -> None:
+    """Start the single owner-managed cleanup retry loop."""
+    from app import task_registry
+
+    if task_registry.active("system", "media_cleanup_outbox"):
+        return
+    task_registry.spawn(
+        "system",
+        "media_cleanup_outbox",
+        media_cleanup_outbox_loop(),
+    )
 
 
 def clear_episode_artifacts(episode_id: str) -> dict:
@@ -845,6 +914,7 @@ def _invalidate_final_video(
     episode_no: int,
     *,
     suppress_errors: bool = True,
+    not_newer_than: float | None = None,
 ) -> None:
     """标记某集已合成的整集成品为待更新，但不删除用户已经得到的成品。
 
@@ -855,7 +925,13 @@ def _invalidate_final_video(
     final_path = config.PROJECTS_DIR / project_id / "episodes" / str(episode_no) / "final" / "episode.mp4"
     stale_path = final_path.with_suffix(".stale")
     try:
-        if final_path.exists():
+        if (
+            final_path.exists()
+            and (
+                not_newer_than is None
+                or final_path.stat().st_mtime <= not_newer_than
+            )
+        ):
             atomic_write_text(stale_path, "outdated\n")
     except OSError:
         if not suppress_errors:

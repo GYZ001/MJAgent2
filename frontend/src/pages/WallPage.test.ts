@@ -20,6 +20,7 @@ import {
   episodeGenerationAction,
   episodeGenerationIsActive,
   incompleteVideoSupervisorState,
+  isProviderCreateUnresolved,
   isVideoModelInputRejection,
   refSourceLabel,
   referenceLibraryLabel,
@@ -397,6 +398,21 @@ describe('生成台对象稳定性', () => {
 })
 
 describe('视频预览工作区', () => {
+  it('只把类型化 create 未决状态进入人工恢复路径', () => {
+    expect(isProviderCreateUnresolved({
+      pipeline_status: 'waiting_human',
+      reason_code: 'VIDEO_PROVIDER_CREATE_UNRESOLVED',
+      candidate_count: 0,
+      retake_count: 0,
+    })).toBe(true)
+    expect(isProviderCreateUnresolved({
+      pipeline_status: 'waiting_human',
+      reason_code: 'VIDEO_INPUT_REPAIR_REQUIRED',
+      candidate_count: 0,
+      retake_count: 0,
+    })).toBe(false)
+  })
+
   it('每个候选读取独立的定稿倍速，并对异常历史值回退为 1×', () => {
     expect(videoPlaybackRate({ playback_rate: 1.5 })).toBe(1.5)
     expect(videoPlaybackRate({ playback_rate: null })).toBe(1)

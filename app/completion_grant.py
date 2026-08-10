@@ -340,17 +340,30 @@ def mark_provider_video_budget_claim(
     operation_id: str,
     status: Literal["accepted", "settled", "released"],
     *,
+    job_id: str | None = None,
+    lease_owner: str | None = None,
     conn=None,
-) -> None:
+) -> bool:
+    if (job_id is None) != (lease_owner is None):
+        raise ValueError("job_id and lease_owner must be provided together")
     db = conn or get_conn()
     ensure_video_budget_authority_tables(db)
-    db.execute(
+    cursor = db.execute(
         """UPDATE provider_video_budget_claims
-              SET status=?,updated_at=? WHERE operation_id=?""",
-        (status, now(), operation_id),
+              SET status=?,updated_at=?
+            WHERE operation_id=?
+              AND (
+                  ? IS NULL OR EXISTS (
+                      SELECT 1 FROM jobs
+                       WHERE id=? AND status='running' AND lease_owner=?
+                         AND cancellation_requested=0
+                  )
+              )""",
+        (status, now(), operation_id, job_id, job_id, lease_owner),
     )
     if conn is None:
         db.commit()
+    return cursor.rowcount == 1
 
 
 def _hash_token(token: str) -> str:
