@@ -22,6 +22,7 @@ _ISOLATION_SESSION: IsolationSession | None = None
 _PROVIDER_ISOLATION: ProviderConfigurationIsolation | None = None
 _SANDBOX: Path | None = None
 _SANDBOX_OWNED = False
+_ISOLATED_DB_INITIALIZED = False
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -36,12 +37,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     global _LIVE_INTEGRATION, _ISOLATION_SESSION, _PROVIDER_ISOLATION
-    global _SANDBOX, _SANDBOX_OWNED
+    global _SANDBOX, _SANDBOX_OWNED, _ISOLATED_DB_INITIALIZED
 
     _LIVE_INTEGRATION = bool(config.getoption("--live-integration"))
     if _LIVE_INTEGRATION:
         os.environ["MANJU_TEST_PROFILE"] = "live-integration"
         return
+    _ISOLATED_DB_INITIALIZED = False
 
     configured_sandbox = os.environ.get("MANJU_TEST_SANDBOX", "").strip()
     if configured_sandbox:
@@ -131,34 +133,61 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         shutil.rmtree(_SANDBOX, ignore_errors=True)
 
 
+def _restore_isolated_runtime(db) -> None:
+    if _SANDBOX is None:
+        return
+
+    from app import config as app_config
+
+    os.environ["MANJU_TEST_PROFILE"] = "isolated"
+    os.environ["MANJU_TEST_SANDBOX"] = str(_SANDBOX)
+    app_config.TEST_PROFILE = "isolated"
+    app_config._test_sandbox = str(_SANDBOX)
+    app_config.RUNTIME_ROOT = _SANDBOX
+    app_config.PROJECTS_DIR = _SANDBOX / "projects"
+    app_config.DATA_DIR = _SANDBOX / "data"
+    app_config.DB_PATH = app_config.DATA_DIR / "manju.db"
+    app_config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    app_config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    db._local.conn = None
+    db.DATA_DIR = app_config.DATA_DIR
+    db.DB_PATH = app_config.DB_PATH
+    if _PROVIDER_ISOLATION is not None:
+        _PROVIDER_ISOLATION.apply()
+
+
 @pytest.fixture(autouse=True)
 def _reset_capability_runtime(monkeypatch: pytest.MonkeyPatch):
     """各测试隔离 Command Bus 幂等缓存与审批令牌，避免共用 episode_id 等夹具键串扰。"""
+    global _ISOLATED_DB_INITIALIZED
+
     from app.capabilities.bus import reset_command_bus_for_tests
     from app.capabilities.idempotency import clear_for_tests
     from app.capabilities.policy import reset_approvals_for_tests
     from app import db
 
-    # Keep monkeypatch alive until this fixture has restored direct process mutations.
-    del monkeypatch
-    if _PROVIDER_ISOLATION is not None:
-        _PROVIDER_ISOLATION.apply()
-
-    # 幂等清理会打开进程级 DB；若此前被建成空库，先补齐 SCHEMA，避免无 settings 表。
+    _restore_isolated_runtime(db)
+    setup_connection = db.get_conn()
     try:
-        db.get_conn().execute("SELECT 1 FROM settings LIMIT 1").fetchone()
-    except Exception:  # noqa: BLE001
-        db.init_db()
+        if not _ISOLATED_DB_INITIALIZED:
+            db.init_db()
+            _ISOLATED_DB_INITIALIZED = True
+        reset_command_bus_for_tests()
+        reset_approvals_for_tests()
+        clear_for_tests()
+    finally:
+        setup_connection.close()
+        db._local.conn = None
 
-    reset_command_bus_for_tests()
-    reset_approvals_for_tests()
-    clear_for_tests()
-    yield
-    reset_command_bus_for_tests()
-    reset_approvals_for_tests()
-    clear_for_tests()
-    if _PROVIDER_ISOLATION is not None:
-        _PROVIDER_ISOLATION.apply()
+    try:
+        yield
+    finally:
+        try:
+            monkeypatch.undo()
+        finally:
+            reset_approvals_for_tests()
+            _restore_isolated_runtime(db)
 
 
 def session_headers() -> dict[str, str]:
