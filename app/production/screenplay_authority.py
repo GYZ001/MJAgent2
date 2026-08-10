@@ -1443,6 +1443,50 @@ def episode_requires_immutable_screenplay_authority(
     return False
 
 
+def published_stale_screenplay_rebuild_error(
+    episode: Any,
+    *,
+    conn: Any | None = None,
+):
+    """Return the typed rebuild error for the bound stale published Artifact.
+
+    A stale reason is diagnostic text, not an authority contract. Unknown
+    validation failures must propagate so callers fail closed.
+    """
+    from app.errors import ArtifactNeedsRebuildError
+    from app.production.patch import screenplay_from_artifact_record
+
+    artifact_id = str(
+        _episode_value(episode, "published_screenplay_artifact_id", "") or ""
+    )
+    if (
+        not artifact_id
+        or artifact_id
+        != str(_episode_value(episode, "screenplay_artifact_id", "") or "")
+    ):
+        return None
+    episode_id = str(_episode_value(episode, "id", "") or "")
+    artifact = evidence_repository.get_artifact(artifact_id, conn=conn)
+    if (
+        artifact is None
+        or artifact.get("type") != "screenplay_document"
+        or artifact.get("scope_type") != "episode"
+        or artifact.get("scope_id") != episode_id
+        or artifact.get("status") != "stale"
+    ):
+        return None
+    try:
+        screenplay_from_artifact_record(artifact)
+    except ArtifactNeedsRebuildError as exc:
+        if (
+            exc.artifact_id == artifact_id
+            and exc.artifact_type == "screenplay_document"
+        ):
+            return exc
+        raise
+    return None
+
+
 def resolve_downstream_screenplay(
     episode_id: str,
     *,

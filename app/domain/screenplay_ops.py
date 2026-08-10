@@ -215,43 +215,6 @@ def _screenplay_cast_impact(conn, ep: dict, source_text: str) -> dict:
     }
 
 
-def _authoritative_stale_screenplay_error(ep):
-    """Return a typed rebuild error only for the bound published Artifact."""
-    from pydantic import ValidationError
-
-    from app.errors import ArtifactNeedsRebuildError
-    from app.production.patch import screenplay_from_artifact_record
-
-    data = dict(ep)
-    artifact_id = str(data.get("published_screenplay_artifact_id") or "")
-    if (
-        not artifact_id
-        or artifact_id != str(data.get("screenplay_artifact_id") or "")
-    ):
-        return None
-    artifact = evidence_repository.get_artifact(artifact_id)
-    if (
-        artifact is None
-        or artifact.get("type") != "screenplay_document"
-        or artifact.get("scope_type") != "episode"
-        or artifact.get("scope_id") != str(data.get("id") or "")
-        or artifact.get("status") != "stale"
-    ):
-        return None
-    try:
-        screenplay_from_artifact_record(artifact)
-    except ArtifactNeedsRebuildError as exc:
-        if (
-            exc.code == "ARTIFACT_NEEDS_REBUILD"
-            and exc.artifact_id == artifact_id
-            and exc.artifact_type == "screenplay_document"
-        ):
-            return exc
-    except ValidationError:
-        return None
-    return None
-
-
 def _screenplay_rebuild_state(snapshot: dict, exc) -> dict:
     """Project a typed stale error without discarding runtime resume state."""
     return {
@@ -313,7 +276,7 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
         code, message, action = (
             "qa_certificate_invalid",
             "上游版本已变化，需重新校验剧本并签发完成凭证",
-            "resume_screenplay",
+            "generate_screenplay",
         )
     elif screenplay_status == "ready" and storyboard_active:
         code, message, action = "ready_storyboard_running", "剧本已交付｜分镜生成中", "view_storyboard"
@@ -358,13 +321,17 @@ def _screenplay_authority_state(
     production: dict | None = None,
     rebuild_error=_SCREENPLAY_REBUILD_ERROR_UNSET,
 ) -> dict:
+    from app.production.screenplay_authority import (
+        published_stale_screenplay_rebuild_error,
+    )
+
     snapshot = _screenplay_status_snapshot(
         ep,
         shot_count=shot_count,
         production=production,
     )
     if rebuild_error is _SCREENPLAY_REBUILD_ERROR_UNSET:
-        rebuild_error = _authoritative_stale_screenplay_error(ep)
+        rebuild_error = published_stale_screenplay_rebuild_error(ep)
     if rebuild_error is None:
         return snapshot
     return _screenplay_rebuild_state(snapshot, rebuild_error)
@@ -1864,24 +1831,21 @@ def _prepare_published_screenplay_revalidation(ep: dict):
     from app.production.screenplay_authority import (
         SCREENPLAY_QA_PROFILE_VERSION,
         assert_screenplay_matches_validated_v6_source,
+        published_stale_screenplay_rebuild_error,
         screenplay_authority_fingerprint,
     )
     from app.errors import ArtifactNeedsRebuildError
 
     episode_id = str(ep["id"])
     artifact_id = str(ep.get("published_screenplay_artifact_id") or "")
-    artifact = evidence_repository.get_artifact(artifact_id)
-    if (
-        artifact
-        and artifact.get("status") == "stale"
-        and "[ARTIFACT_NEEDS_REBUILD]"
-        in str(artifact.get("stale_reason") or "")
-    ):
+    rebuild_error = published_stale_screenplay_rebuild_error(ep, conn=get_conn())
+    if rebuild_error is not None:
         raise HTTPException(409, {
-            "code": "ARTIFACT_NEEDS_REBUILD",
-            "message": str(artifact.get("stale_reason") or ""),
+            "code": rebuild_error.code,
+            "message": str(rebuild_error),
             "action": "请重新生成并发布剧本，旧 published 不得继续复验",
-        })
+        }) from rebuild_error
+    artifact = evidence_repository.get_artifact(artifact_id)
     if (
         not artifact
         or artifact.get("type") != "screenplay_document"

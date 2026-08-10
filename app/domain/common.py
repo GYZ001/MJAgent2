@@ -199,11 +199,11 @@ def _episode_source_text(conn, ep) -> str:
 
 
 def _load_screenplay(ep) -> EpisodeScreenplay | None:
-    from app.domain.screenplay_ops import (
-        _authoritative_stale_screenplay_error,
+    from app.production.screenplay_authority import (
+        published_stale_screenplay_rebuild_error,
     )
 
-    rebuild_error = _authoritative_stale_screenplay_error(ep)
+    rebuild_error = published_stale_screenplay_rebuild_error(ep)
     if rebuild_error is not None:
         raise rebuild_error
     if not ep["screenplay_json"]:

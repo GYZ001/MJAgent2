@@ -63,28 +63,16 @@ def _resolve_storyboard_mutation_screenplay(conn, episode_id: str):
 
 
 def _screenplay_rebuild_block(conn, ep) -> dict | None:
-    artifact_id = str(
-        ep["published_screenplay_artifact_id"]
-        or ep["screenplay_artifact_id"]
-        or ""
+    from app.production.screenplay_authority import (
+        published_stale_screenplay_rebuild_error,
     )
-    if not artifact_id:
-        return None
-    artifact = conn.execute(
-        "SELECT status,stale_reason FROM artifacts WHERE id=?",
-        (artifact_id,),
-    ).fetchone()
-    if artifact is None:
-        return None
-    reason = str(artifact["stale_reason"] or "")
-    if (
-        artifact["status"] != "stale"
-        or "[ARTIFACT_NEEDS_REBUILD]" not in reason
-    ):
+
+    rebuild_error = published_stale_screenplay_rebuild_error(ep, conn=conn)
+    if rebuild_error is None:
         return None
     return {
-        "code": "ARTIFACT_NEEDS_REBUILD",
-        "message": reason,
+        "code": rebuild_error.code,
+        "message": str(rebuild_error),
         "action": "请先重建并重新发布剧本，再继续分镜",
     }
 
