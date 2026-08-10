@@ -2743,6 +2743,9 @@ async def _complete_episode_core(
     max_fallback = body.get("max_fallback_shots")
     allow_edit = bool(body.get("allow_storyboard_edit", False))
     grant_id = body.get("completion_grant_id")
+    grant_idempotency_key = (
+        str(body.get("idempotency_key") or "").strip() or None
+    )
     if mode == "resume" and not grant_id:
         raise HTTPException(422, {
             "code": "VIDEO_COMPLETION_GRANT_REQUIRED",
@@ -2772,6 +2775,7 @@ async def _complete_episode_core(
                     grant_id,
                     add_cny=float(add_budget or 0),
                     add_wall_s=float(add_wall or 0),
+                    idempotency_key=grant_idempotency_key,
                 )
         except GrantValidationError as exc:
             raise HTTPException(409, {
@@ -2805,8 +2809,9 @@ async def _complete_episode_core(
                 "auto_concatenate": False,
                 "auto_delivery": False,
             },
+            idempotency_key=grant_idempotency_key,
         )
-        issued_new_grant = True
+        issued_new_grant = bool(_token)
         grant_id = grant.grant_id
         budget_cap = grant.budget_cap_cny
         wall_cap = grant.wall_clock_cap_s
@@ -3523,6 +3528,11 @@ async def _run_project_video_completion_queue(
                     "wall_clock_cap_s": state["wall_clock_cap_s"],
                     "allow_fallback_adopt": state["allow_fallback_adopt"],
                     "allow_storyboard_edit": state["allow_storyboard_edit"],
+                    "idempotency_key": (
+                        f"{state['idempotency_key']}:episode:{episode_id}"
+                        if state.get("idempotency_key")
+                        else None
+                    ),
                 })
                 item["status"] = "started"
                 item["run_id"] = result.get("run_id")
@@ -3668,6 +3678,9 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     allow_fallback = bool(body.get("allow_fallback_adopt", True))
     allow_edit = bool(body.get("allow_storyboard_edit", False))
     episode_ids = body.get("episode_ids")
+    project_idempotency_key = (
+        str(body.get("idempotency_key") or "").strip() or None
+    )
 
     rows = conn.execute(
         """SELECT id, episode_no, status, storyboard_artifact_id FROM episodes
@@ -3738,6 +3751,11 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
             "wall_clock_cap_s": wall_cap,
             "allow_fallback_adopt": allow_fallback,
             "allow_storyboard_edit": allow_edit,
+            "idempotency_key": (
+                f"{project_idempotency_key}:episode:{item['episode_id']}"
+                if project_idempotency_key
+                else None
+            ),
         })
         item["status"] = "started"
         item["run_id"] = result.get("run_id")
@@ -3755,6 +3773,7 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                 "wall_clock_cap_s": wall_cap,
                 "allow_fallback_adopt": allow_fallback,
                 "allow_storyboard_edit": allow_edit,
+                "idempotency_key": project_idempotency_key,
                 "plan": plan,
             }
             recorder = None

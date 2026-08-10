@@ -272,6 +272,10 @@ def test_publish_storyboard_exact_retry_returns_existing_release(publish_db) -> 
     first = publish_storyboard(**case)
     before_retry = _release_snapshot(publish_db)
 
+    with pytest.raises(ValueError, match="artifact_hash 不匹配"):
+        publish_storyboard(**{**case, "artifact_hash": "mismatched-retry-hash"})
+    assert _release_snapshot(publish_db) == before_retry
+
     retried = publish_storyboard(**case)
 
     assert retried == first

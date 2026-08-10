@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from app import completion_grant, db
+from app import api, completion_grant, db
 
 
 @pytest.fixture
@@ -231,3 +231,96 @@ def test_concurrent_same_topup_key_is_applied_once(grant_db) -> None:
         """SELECT COUNT(*) FROM video_budget_authority_ledger
            WHERE event_type='grant_topped_up'"""
     ).fetchone()[0] == 1
+
+
+def _isolate_completion_core(grant_db, monkeypatch) -> None:
+    monkeypatch.setattr(api, "get_conn", lambda: grant_db)
+    monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
+    monkeypatch.setattr(
+        api,
+        "_review_assert_positive_action",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        api,
+        "_assert_storyboard_generation_gate",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        api,
+        "_ensure_video_episode_columns",
+        lambda: None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_completion_core_passes_idempotency_key_to_grant_issue(
+    grant_db,
+    monkeypatch,
+) -> None:
+    _isolate_completion_core(grant_db, monkeypatch)
+    captured = {}
+
+    def stop_after_capture(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after issue capture")
+
+    monkeypatch.setattr(
+        completion_grant,
+        "issue_video_completion_grant",
+        stop_after_capture,
+    )
+
+    with pytest.raises(RuntimeError, match="stop after issue capture"):
+        await api._complete_episode_core(
+            "grant-episode",
+            {
+                "mode": "fresh",
+                "budget_cap_cny": 50,
+                "idempotency_key": "episode-fresh-request",
+            },
+        )
+
+    assert captured["idempotency_key"] == "episode-fresh-request"
+
+
+@pytest.mark.asyncio
+async def test_completion_core_passes_idempotency_key_to_grant_topup(
+    grant_db,
+    monkeypatch,
+) -> None:
+    _isolate_completion_core(grant_db, monkeypatch)
+    captured = {}
+    monkeypatch.setattr(
+        completion_grant,
+        "validate_video_grant",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def stop_after_capture(grant_id, **kwargs):
+        captured.update({"grant_id": grant_id, **kwargs})
+        raise RuntimeError("stop after topup capture")
+
+    monkeypatch.setattr(
+        completion_grant,
+        "bump_video_grant_budget",
+        stop_after_capture,
+    )
+
+    with pytest.raises(RuntimeError, match="stop after topup capture"):
+        await api._complete_episode_core(
+            "grant-episode",
+            {
+                "mode": "resume",
+                "completion_grant_id": "grant-existing",
+                "add_budget_cny": 5,
+                "idempotency_key": "episode-topup-request",
+            },
+        )
+
+    assert captured == {
+        "grant_id": "grant-existing",
+        "add_cny": 5.0,
+        "add_wall_s": 0.0,
+        "idempotency_key": "episode-topup-request",
+    }

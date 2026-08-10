@@ -53,6 +53,10 @@ def _reset_connection(db_path: Path) -> None:
     config.DATA_DIR = db_path.parent
 
 
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
 def _database_snapshot_report(conn: sqlite3.Connection) -> dict:
     table_names = [
         str(row[0])
@@ -63,7 +67,7 @@ def _database_snapshot_report(conn: sqlite3.Connection) -> dict:
     table_counts = {
         table_name: int(
             conn.execute(
-                f'SELECT COUNT(*) FROM "{table_name.replace(chr(34), chr(34) * 2)}"'
+                f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
             ).fetchone()[0]
         )
         for table_name in table_names

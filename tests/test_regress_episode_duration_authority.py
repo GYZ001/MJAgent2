@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -59,13 +60,31 @@ def test_run_regression_copies_committed_wal_snapshot_before_mutation(
         assert Path(f"{source_db}-wal").stat().st_size > 32
 
         snapshot_validation: dict[str, object] = {}
+        snapshot_report = regression._database_snapshot_report
+        report_calls = 0
         create_snapshot = regression._create_verified_database_snapshot
+
+        def commit_while_snapshot_is_open(conn: sqlite3.Connection) -> dict:
+            nonlocal report_calls
+            result = snapshot_report(conn)
+            report_calls += 1
+            if report_calls == 1:
+                writer.execute(
+                    "INSERT INTO provider_calls(id, status) VALUES(3, 'DONE')"
+                )
+                writer.commit()
+            return result
 
         def capture_snapshot(source: Path, destination: Path) -> dict:
             result = create_snapshot(source, destination)
             snapshot_validation.update(result)
             return result
 
+        monkeypatch.setattr(
+            regression,
+            "_database_snapshot_report",
+            commit_while_snapshot_is_open,
+        )
         monkeypatch.setattr(
             regression,
             "_create_verified_database_snapshot",
@@ -115,12 +134,15 @@ def test_run_regression_copies_committed_wal_snapshot_before_mutation(
             "integrity_check": ["ok"],
             "foreign_key_check": [],
         }
-        with _open_readonly(source_db) as source, _open_readonly(copy_db) as copied:
+        with closing(_open_readonly(source_db)) as source, closing(
+            _open_readonly(copy_db)
+        ) as copied:
+            assert source.execute(
+                "SELECT COUNT(*) FROM provider_calls"
+            ).fetchone()[0] == 3
             assert copied.execute(
                 "SELECT COUNT(*) FROM provider_calls"
-            ).fetchone()[0] == source.execute(
-                "SELECT COUNT(*) FROM provider_calls"
-            ).fetchone()[0]
+            ).fetchone()[0] == 2
             assert copied.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
             assert copied.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == 1
             assert copied.execute("PRAGMA quick_check").fetchall() == [("ok",)]

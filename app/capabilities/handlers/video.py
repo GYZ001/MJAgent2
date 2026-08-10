@@ -73,6 +73,8 @@ async def complete_project(args: I.VideoCompleteProjectInput) -> CommandResult:
         "wall_clock_cap_s": args.wall_clock_cap_s,
         "allow_fallback_adopt": args.allow_fallback_adopt,
         "allow_storyboard_edit": args.allow_storyboard_edit,
+        "idempotency_key": args.idempotency_key,
+        "request_id": args.request_id,
     }
     outcome = await call_guarded(api._complete_project_videos_core, args.project_id, body)
     if isinstance(outcome, CommandResult):
