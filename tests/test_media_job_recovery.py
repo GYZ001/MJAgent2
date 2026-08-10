@@ -363,6 +363,145 @@ def test_restarted_submitting_job_never_calls_provider_create(monkeypatch) -> No
     }
 
 
+def test_create_response_without_task_id_waits_for_human_and_never_replays(
+    monkeypatch,
+) -> None:
+    from app import completion_grant
+    from app.media_pipeline import scheduler, stage_state
+    from app.media_pipeline import concurrency
+
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'generating',1)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
+           ) VALUES('v1','s1',1,'prompt','idem','running','{}',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               lease_owner,lease_expires_at,provider_create_state,
+               created_at,updated_at
+           ) VALUES(
+               'j1','video','s1','v1','e1','p1','running',
+               'worker-1',9999999999,'not_started',1,1
+           )"""
+    )
+    completion_grant.ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,episode_id,job_id,version_id,amount_cny,status,
+               created_at,updated_at
+           ) VALUES('video-create-v1','e1','j1','v1',1,'reserved',1,1)"""
+    )
+    conn.commit()
+    create_calls: list[str] = []
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def no_fence(*_args, **_kwargs) -> None:
+        return None
+
+    async def direct_await(awaitable, **_kwargs):
+        return await awaitable
+
+    async def prepare_inputs(
+        _conn, _job, _version, _shot, _episode, meta, prompt, **_kwargs,
+    ):
+        return meta, prompt
+
+    async def create_without_handle(*_args, **_kwargs) -> str:
+        create_calls.append("create")
+        raise worker.ProviderError(
+            "HTTP 202 response missing task id",
+            retryable=False,
+            delivery_state="unknown",
+            replay_safe=False,
+            requires_explicit_retry=True,
+        )
+
+    class Permit:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
+    monkeypatch.setattr(
+        worker, "_assert_video_provider_submission_authority_async", no_fence,
+    )
+    monkeypatch.setattr(worker, "_await_with_job_lease_heartbeat", direct_await)
+    monkeypatch.setattr(worker, "_ensure_ai_video_prompt", prepare_inputs)
+    monkeypatch.setattr(worker, "_prepare_planned_mode_inputs", prepare_inputs)
+    monkeypatch.setattr(
+        worker, "ensure_source_excerpt_in_prompt", lambda prompt, _shot: prompt,
+    )
+    monkeypatch.setattr(worker, "_load_shot_model", lambda _shot: object())
+    monkeypatch.setattr(worker, "_video_image_inputs_from_meta", lambda _meta: [])
+    monkeypatch.setattr(
+        worker.video_modes, "build_seedance_video_inputs", lambda _meta: [],
+    )
+    monkeypatch.setattr(worker.hiagent, "create_video_task", create_without_handle)
+
+    def admit(**_kwargs):
+        return True, None
+
+    monkeypatch.setattr(scheduler, "can_admit_video_submit", admit)
+    monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
+    monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        completion_grant, "reserve_provider_video_budget", lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    )
+
+    asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
+
+    job = conn.execute(
+        """SELECT status,reason_code,provider_create_state,
+                  provider_non_cancellable
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    assert dict(job) == {
+        "status": "waiting_human",
+        "reason_code": "VIDEO_PROVIDER_CREATE_UNRESOLVED",
+        "provider_create_state": "unknown",
+        "provider_non_cancellable": 1,
+    }, create_calls
+    assert conn.execute(
+        """SELECT status FROM provider_video_budget_claims
+           WHERE operation_id='video-create-v1'"""
+    ).fetchone()["status"] == "reserved"
+
+    conn.execute(
+        """UPDATE jobs
+              SET status='running',lease_owner='worker-2',lease_expires_at=9999999999
+            WHERE id='j1'"""
+    )
+    conn.commit()
+    asyncio.run(worker._run_job("j1", lease_owner="worker-2"))
+
+    assert create_calls == ["create"]
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id='j1'"
+    ).fetchone()["status"] == "waiting_human"
+
+
 def test_paid_provider_attempts_count_distinct_operations() -> None:
     conn = _conn()
     conn.executemany(
@@ -635,12 +774,13 @@ def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monke
     )
     conn.execute(
         """INSERT INTO jobs(
-               id, kind, status, version_id, episode_id, provider_operation_id,
+               id, kind, status, version_id, episode_id, error, provider_operation_id,
                provider_create_state, provider_non_cancellable, reserved_cost_cny,
-               reason_code, created_at, updated_at
+               provider_submitted_at, reason_code, reason_text, created_at, updated_at
            ) VALUES(
-               'j-unknown','video','waiting_human','v-unknown','e1','video-create-v-unknown',
-               'not_started',0,1,'VIDEO_PROVIDER_CREATE_UNRESOLVED',1,1
+               'j-unknown','video','waiting_human','v-unknown','e1','旧人工阻塞',
+               'video-create-v-unknown','unknown',1,1,5,
+               'VIDEO_PROVIDER_CREATE_UNRESOLVED','旧人工阻塞',1,1
            )"""
     )
     conn.commit()
@@ -665,6 +805,84 @@ def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monke
     assert confirmed["retryability"]["action"] == "new_submission_after_unconfirmed_provider"
     assert confirmed["retryability"]["will_submit_new_provider_task"] is True
     assert confirmed["job"]["status"] == "queued"
+    reset = conn.execute(
+        """SELECT error,provider_operation_id,provider_create_state,
+                  provider_non_cancellable,provider_submitted_at,
+                  reason_code,reason_text
+             FROM jobs WHERE id='j-unknown'"""
+    ).fetchone()
+    assert reset["error"] is None
+    assert reset["provider_operation_id"].startswith("video-create-v-unknown-epoch_")
+    assert reset["provider_operation_id"] != "video-create-v-unknown"
+    assert reset["provider_create_state"] == "not_started"
+    assert reset["provider_non_cancellable"] == 0
+    assert reset["provider_submitted_at"] is None
+    assert reset["reason_code"] is None
+    assert reset["reason_text"] is None
+
+
+def test_manual_retry_cas_failure_rolls_back_new_epoch_budget(monkeypatch) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v-race','s1',1,'p','i-race','failed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,status,version_id,episode_id,provider_operation_id,
+               provider_create_state,provider_non_cancellable,reserved_cost_cny,
+               reason_code,reason_text,created_at,updated_at
+           ) VALUES(
+               'j-race','video','waiting_human','v-race','e1',
+               'video-create-v-race','unknown',1,1,
+               'VIDEO_PROVIDER_CREATE_UNRESOLVED','旧人工阻塞',1,1
+           )"""
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(system_api, "get_setting", lambda *_args: "100")
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    reserve_budget = worker.media_scheduler.reserve_budget
+
+    def reserve_then_change_job(*args, **kwargs):
+        assert reserve_budget(*args, **kwargs)
+        conn.execute(
+            """UPDATE jobs
+                  SET state_revision=state_revision+1
+                WHERE id='j-race'"""
+        )
+        return True
+
+    monkeypatch.setattr(
+        worker.media_scheduler,
+        "reserve_budget",
+        reserve_then_change_job,
+    )
+
+    with pytest.raises(HTTPException) as conflict:
+        system_api.retry_job("j-race", {"allow_new_submission": True})
+
+    assert conflict.value.status_code == 409
+    assert conn.execute(
+        "SELECT 1 FROM budget_reservations WHERE job_id='j-race'"
+    ).fetchone() is None
+    job = conn.execute(
+        """SELECT status,reserved_cost_cny,provider_operation_id,
+                  provider_create_state,reason_code
+             FROM jobs WHERE id='j-race'"""
+    ).fetchone()
+    assert dict(job) == {
+        "status": "waiting_human",
+        "reserved_cost_cny": 1.0,
+        "provider_operation_id": "video-create-v-race",
+        "provider_create_state": "unknown",
+        "reason_code": "VIDEO_PROVIDER_CREATE_UNRESOLVED",
+    }
 
 
 def test_manual_retry_rejects_typed_terminal_provider_failure(monkeypatch) -> None:

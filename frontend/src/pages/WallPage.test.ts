@@ -28,6 +28,7 @@ import {
   resolvePreviewVersionId,
   resolveStableShotSelection,
   reviewContextRefreshKey,
+  shouldRetryReviewContextError,
   shotDetailRefreshKey,
   shotHasActiveGeneration,
   shotHasPausedGeneration,
@@ -316,6 +317,13 @@ describe('生成台对象稳定性', () => {
       active_storyboard_run_id: null,
     })
     expect(confirmed).not.toBe(running)
+  })
+
+  it('生成资格永久错误停止自动重试，服务端和网络故障继续恢复', () => {
+    expect(shouldRetryReviewContextError({ status: 422 })).toBe(false)
+    expect(shouldRetryReviewContextError({ status: 500 })).toBe(true)
+    expect(shouldRetryReviewContextError({ status: 0 })).toBe(true)
+    expect(shouldRetryReviewContextError(new Error('网络中断'))).toBe(true)
   })
 
   it('5 镜变 4 镜时不会把已删镜头静默换成相邻镜头', () => {

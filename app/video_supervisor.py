@@ -24,7 +24,7 @@ from app.completion_grant import (
     GrantValidationError,
 )
 from app.continuity import classify_video_hard_failures
-from app.db import get_conn, now
+from app.db import get_conn, new_id, now
 from app.evidence import repository as evidence_repository
 from app.evidence.media import (
     grade_shot_video,
@@ -168,6 +168,7 @@ def phase_label(phase: str | None) -> str:
     return _PHASE_LABELS.get(value, f"未知业务阶段（{value or '未记录'}）")
 
 _REFERENCE_ASSET_PREP_LOCKS: dict[str, asyncio.Lock] = {}
+_CHECKPOINT_WRITE_SEMAPHORE = asyncio.Semaphore(1)
 
 
 class ShotCoverageEntry(BaseModel):
@@ -586,12 +587,15 @@ def load_latest_checkpoint(episode_id: str) -> VideoSupervisorCheckpoint | None:
         return None
 
 
-def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None) -> str:
+def _persist_checkpoint_transaction(
+    conn: Any,
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None,
+) -> str:
     rid = run_id or cp.run_id
-    cp.last_heartbeat_at = now()
     if rid:
-        db = get_conn()
-        db.execute(
+        conn.execute(
             """UPDATE workflow_runs
                SET updated_at=?, deadline_at=COALESCE(deadline_at, ?)
                WHERE id=? AND status IN (
@@ -600,9 +604,8 @@ def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None)
                )""",
             (cp.last_heartbeat_at, cp.deadline_at, rid),
         )
-        db.commit()
 
-    existing = get_conn().execute(
+    existing = conn.execute(
         """SELECT id, content_json, created_at FROM artifacts
            WHERE type=? AND scope_type='episode' AND scope_id=?
              AND status IN ('candidate','validated','approved')
@@ -643,36 +646,133 @@ def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None)
             and cp.last_heartbeat_at - float(existing["created_at"] or 0) < 60
         ):
             return str(existing["id"])
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type=CHECKPOINT_ARTIFACT_TYPE,
-        scope_type="episode",
-        scope_id=cp.episode_id,
-        status="validated",
-        trust_level="T2",
-        content=cp.model_dump(mode="json"),
-        contract_version="video-supervisor-1.0.0",
-    ))
-    evidence_repository.create_evaluation(
-        artifact["id"],
-        Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="video_supervisor",
-            evaluator_version="1.0.0",
-            status="passed",
-            hard_gate_passed=True,
-            score=100,
-            evidence={"phase": cp.phase, "repair_epoch": cp.repair_epoch, "run_id": rid},
+    artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type=CHECKPOINT_ARTIFACT_TYPE,
+            scope_type="episode",
+            scope_id=cp.episode_id,
+            status="validated",
+            trust_level="T2",
+            content=cp.model_dump(mode="json"),
+            contract_version="video-supervisor-1.0.0",
+        ),
+        conn=conn,
+        commit=False,
+    )
+    evaluation = Evaluation(
+        evaluator_type="deterministic",
+        evaluator_name="video_supervisor",
+        evaluator_version="1.0.0",
+        status="passed",
+        hard_gate_passed=True,
+        score=100,
+        evidence={"phase": cp.phase, "repair_epoch": cp.repair_epoch, "run_id": rid},
+    )
+    conn.execute(
+        """INSERT INTO evaluations(
+               id, artifact_id, step_run_id, evaluator_type, evaluator_name,
+               evaluator_version, status, hard_gate_passed, evaluation_role,
+               score_status, runtime_blocking, retry_eligible, score,
+               dimension_scores_json, issues_json, evidence_json, raw_result_ref,
+               confidence, recovered, created_at
+           ) VALUES(?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            new_id("eval"),
+            artifact["id"],
+            evaluation.evaluator_type,
+            evaluation.evaluator_name,
+            evaluation.evaluator_version,
+            evaluation.status,
+            int(evaluation.hard_gate_passed),
+            evaluation.evaluation_role,
+            evaluation.score_status,
+            int(evaluation.runtime_blocking),
+            int(evaluation.retry_eligible),
+            evaluation.score,
+            json.dumps(evaluation.dimension_scores, ensure_ascii=False),
+            json.dumps(
+                [issue.model_dump(mode="json") for issue in evaluation.issues],
+                ensure_ascii=False,
+            ),
+            json.dumps(evaluation.evidence, ensure_ascii=False),
+            evaluation.raw_result_ref,
+            evaluation.confidence,
+            int(evaluation.recovered),
+            now(),
         ),
     )
     if rid:
-        evidence_repository.append_event(
-            rid,
-            "VIDEO_SUPERVISOR_CHECKPOINT",
-            "info",
-            f"Video supervisor checkpoint phase={cp.phase} epoch={cp.repair_epoch}",
-            payload={"phase": cp.phase, "coverage": cp.coverage, "tick_no": cp.tick_no},
+        conn.execute(
+            """INSERT INTO run_events(
+                   id, run_id, step_run_id, ts, event_type, severity, message,
+                   payload_json, trace_id
+               ) VALUES(?,?,NULL,?,?,?,?,?,NULL)""",
+            (
+                new_id("evt"),
+                rid,
+                now(),
+                "VIDEO_SUPERVISOR_CHECKPOINT",
+                "info",
+                f"Video supervisor checkpoint phase={cp.phase} epoch={cp.repair_epoch}",
+                json.dumps(
+                    {
+                        "phase": cp.phase,
+                        "coverage": cp.coverage,
+                        "tick_no": cp.tick_no,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
         )
     return artifact["id"]
+
+
+def save_checkpoint(cp: VideoSupervisorCheckpoint, *, run_id: str | None = None) -> str:
+    """Persist one complete checkpoint atomically on the caller's DB connection."""
+    cp.last_heartbeat_at = now()
+    conn = get_conn()
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        artifact_id = _persist_checkpoint_transaction(conn, cp, run_id=run_id)
+        conn.commit()
+        return artifact_id
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+async def _save_checkpoint_async(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None = None,
+) -> str:
+    """Serialize complete checkpoint writes and keep file-backed SQLite off-loop."""
+    cp.last_heartbeat_at = now()
+    snapshot = cp.model_copy(deep=True)
+    return await _run_checkpoint_write(save_checkpoint, snapshot, run_id=run_id)
+
+
+async def _run_checkpoint_write(operation: Any, *args: Any, **kwargs: Any) -> Any:
+    """Hold the bounded writer slot until an off-loop transaction really exits."""
+    async with _CHECKPOINT_WRITE_SEMAPHORE:
+        if not _supervisor_checks_can_use_worker_thread():
+            return operation(*args, **kwargs)
+        worker_task = asyncio.create_task(
+            asyncio.to_thread(operation, *args, **kwargs),
+        )
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(worker_task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                continue
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
 
 
 def _refresh_supervisor_heartbeat(
@@ -2562,7 +2662,7 @@ async def _adopt_ready_candidates_incrementally(
         fallback_quota=fallback_quota,
     )
     _merge_shot_state(cp, refreshed)
-    save_checkpoint(cp, run_id=run_id)
+    await _save_checkpoint_async(cp, run_id=run_id)
     return adopted
 
 
@@ -2826,6 +2926,34 @@ def _finalize_covered(
     return cp
 
 
+async def _deadline_closeout_async(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None,
+    reason: str,
+) -> VideoSupervisorCheckpoint:
+    return await _run_checkpoint_write(
+        _deadline_closeout,
+        cp,
+        run_id=run_id,
+        reason=reason,
+    )
+
+
+async def _finalize_covered_async(
+    cp: VideoSupervisorCheckpoint,
+    ledger: CoverageLedger,
+    *,
+    run_id: str | None,
+) -> VideoSupervisorCheckpoint:
+    return await _run_checkpoint_write(
+        _finalize_covered,
+        cp,
+        ledger,
+        run_id=run_id,
+    )
+
+
 def _assert_storyboard_version(cp: VideoSupervisorCheckpoint) -> bool:
     if not cp.grant_id or not cp.storyboard_artifact_id:
         return True
@@ -2901,7 +3029,7 @@ async def _asset_prep_heartbeat(
             if not owner or owner["active_video_run_id"] != run_id:
                 return
         cp.phase = "PREPARING_ASSETS"
-        save_checkpoint(cp, run_id=run_id)
+        await _save_checkpoint_async(cp, run_id=run_id)
 
 
 async def _prepare_episode_reference_assets(
@@ -2918,7 +3046,7 @@ async def _prepare_episode_reference_assets(
 
     cp.phase = "PREPARING_ASSETS"
     cp.outcome = None
-    save_checkpoint(cp, run_id=run_id)
+    await _save_checkpoint_async(cp, run_id=run_id)
     if run_id:
         evidence_repository.append_event(
             run_id,
@@ -3090,7 +3218,9 @@ async def run_video_completion_supervisor(
     )
     cp.deadline_at = cp.deadline_at or ((cp.started_at or now()) + initial_wall_cap)
     if now() >= cp.deadline_at:
-        return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
+        return await _deadline_closeout_async(
+            cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
+        )
 
     grant: VideoCompletionGrant | None = None
     if cp.grant_id:
@@ -3110,19 +3240,21 @@ async def run_video_completion_supervisor(
             cp.budget["wall_clock_cap_s"] = float(grant.wall_clock_cap_s)
         except GrantValidationError as exc:
             if cp.deadline_at and now() >= cp.deadline_at:
-                return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
+                return await _deadline_closeout_async(
+                    cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
+                )
             cp.phase = "WAITING_AUTHORIZATION"
             cp.outcome = exc.code
-            save_checkpoint(cp, run_id=run_id)
+            await _save_checkpoint_async(cp, run_id=run_id)
             return cp
 
     try:
         grant = await _ensure_supervisor_video_plan(cp)
-        save_checkpoint(cp, run_id=run_id)
+        await _save_checkpoint_async(cp, run_id=run_id)
     except GrantValidationError as exc:
         cp.phase = "WAITING_AUTHORIZATION"
         cp.outcome = exc.code
-        save_checkpoint(cp, run_id=run_id)
+        await _save_checkpoint_async(cp, run_id=run_id)
         return cp
 
     if run_id:
@@ -3141,11 +3273,11 @@ async def run_video_completion_supervisor(
     except GrantValidationError as exc:
         cp.phase = "WAITING_AUTHORIZATION"
         cp.outcome = exc.code
-        save_checkpoint(cp, run_id=run_id)
+        await _save_checkpoint_async(cp, run_id=run_id)
         return cp
     except Exception as exc:  # noqa: BLE001 - 资产失败降级，不得中断整集覆盖
         cp.quality_target_missed = True
-        save_checkpoint(cp, run_id=run_id)
+        await _save_checkpoint_async(cp, run_id=run_id)
         if run_id:
             evidence_repository.append_event(
                 run_id,
@@ -3163,11 +3295,13 @@ async def run_video_completion_supervisor(
 
     while True:
         if cp.deadline_at and now() >= cp.deadline_at:
-            return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
+            return await _deadline_closeout_async(
+                cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
+            )
         action = consume_control(episode_id)
         if action == "pause":
             cp.phase = "PAUSED_EXTERNAL"
-            save_checkpoint(cp, run_id=run_id)
+            await _save_checkpoint_async(cp, run_id=run_id)
             if run_id:
                 evidence_repository.append_event(
                     run_id, "VIDEO_SUPERVISOR_PAUSED", "info", "用户暂停",
@@ -3175,7 +3309,7 @@ async def run_video_completion_supervisor(
             return cp
         if action == "handoff":
             cp.phase = "WAITING_HUMAN"
-            save_checkpoint(cp, run_id=run_id)
+            await _save_checkpoint_async(cp, run_id=run_id)
             if run_id:
                 evidence_repository.append_event(
                     run_id, "VIDEO_SUPERVISOR_HANDOFF", "warning", "转交人工",
@@ -3198,7 +3332,7 @@ async def run_video_completion_supervisor(
                 else "WAITING_AUTHORIZATION"
             )
             cp.outcome = exc.code
-            save_checkpoint(cp, run_id=run_id)
+            await _save_checkpoint_async(cp, run_id=run_id)
             return cp
         if g:
             cp.budget["cap_cny"] = float(g.budget_cap_cny)
@@ -3237,24 +3371,28 @@ async def run_video_completion_supervisor(
                 budget_cap_cny=cap,
             )
         _merge_shot_state(cp, ledger)
-        save_checkpoint(cp, run_id=run_id)
+        await _save_checkpoint_async(cp, run_id=run_id)
 
         if ledger.covered_within_quota():
-            return _finalize_covered(cp, ledger, run_id=run_id)
+            return await _finalize_covered_async(cp, ledger, run_id=run_id)
 
         spent = float(ledger.cost_spent)
         if spent >= cap:
-            return _deadline_closeout(
+            return await _deadline_closeout_async(
                 cp, run_id=run_id, reason="VIDEO_BUDGET_EXHAUSTED_FALLBACK",
             )
         if cp.deadline_at and now() >= cp.deadline_at:
-            return _deadline_closeout(cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED")
+            return await _deadline_closeout_async(
+                cp, run_id=run_id, reason="VIDEO_WALL_CLOCK_EXCEEDED",
+            )
         if cp.repair_epoch > MAX_REPAIR_EPOCHS:
-            return _deadline_closeout(cp, run_id=run_id, reason="REPAIR_EPOCHS_EXHAUSTED")
+            return await _deadline_closeout_async(
+                cp, run_id=run_id, reason="REPAIR_EPOCHS_EXHAUSTED",
+            )
 
         if ledger.has_active_jobs() and not ledger.actionable():
             cp.phase = "OBSERVING"
-            save_checkpoint(cp, run_id=run_id)
+            await _save_checkpoint_async(cp, run_id=run_id)
             await asyncio.sleep(cp.tick_interval_s)
             continue
 
@@ -3281,7 +3419,7 @@ async def run_video_completion_supervisor(
                     "job_id": budget_paused_job_id,
                 }
                 _merge_shot_state(cp, ledger)
-                save_checkpoint(cp, run_id=run_id)
+                await _save_checkpoint_async(cp, run_id=run_id)
                 return cp
 
             # 单镜上限
@@ -3314,7 +3452,7 @@ async def run_video_completion_supervisor(
                 except GrantValidationError as exc:
                     cp.phase = "WAITING_AUTHORIZATION"
                     cp.outcome = exc.code
-                    save_checkpoint(cp, run_id=run_id)
+                    await _save_checkpoint_async(cp, run_id=run_id)
                     return cp
                 if dispatched:
                     progressed = True
@@ -3371,7 +3509,7 @@ async def run_video_completion_supervisor(
                 cp.phase = plan.pause_state  # type: ignore[assignment]
                 cp.outcome = plan.reason
                 _merge_shot_state(cp, ledger)
-                save_checkpoint(cp, run_id=run_id)
+                await _save_checkpoint_async(cp, run_id=run_id)
                 if run_id:
                     evidence_repository.append_event(
                         run_id, "VIDEO_REPAIR_PLAN_SELECTED", "warning",
@@ -3401,24 +3539,24 @@ async def run_video_completion_supervisor(
                     cp.phase = "WAITING_AUTHORIZATION"
                     cp.outcome = exc.code
                     _merge_shot_state(cp, ledger)
-                    save_checkpoint(cp, run_id=run_id)
+                    await _save_checkpoint_async(cp, run_id=run_id)
                     return cp
                 if amended:
                     cp.phase = "WAITING_HUMAN"
                     cp.outcome = "已创建分镜修改草稿；视频流水线已暂停，等待分镜台完整终态与人工重新确认"
                     _merge_shot_state(cp, ledger)
-                    save_checkpoint(cp, run_id=run_id)
+                    await _save_checkpoint_async(cp, run_id=run_id)
                     return cp
                 if grant and grant.allow_storyboard_edit:
                     cp.phase = "WAITING_HUMAN"
                     cp.outcome = "AI 语义分镜修复候选未通过全链路验证，需要人工处理"
                     _merge_shot_state(cp, ledger)
-                    save_checkpoint(cp, run_id=run_id)
+                    await _save_checkpoint_async(cp, run_id=run_id)
                     return cp
                 else:
                     cp.phase = "WAITING_AUTHORIZATION"
                     cp.outcome = "STORYBOARD_REPAIR_PROPOSAL_NOT_AUTHORIZED"
-                    save_checkpoint(cp, run_id=run_id)
+                    await _save_checkpoint_async(cp, run_id=run_id)
                     return cp
                 continue
 
@@ -3481,7 +3619,7 @@ async def run_video_completion_supervisor(
             except GrantValidationError as exc:
                 cp.phase = "WAITING_AUTHORIZATION"
                 cp.outcome = exc.code
-                save_checkpoint(cp, run_id=run_id)
+                await _save_checkpoint_async(cp, run_id=run_id)
                 return cp
             if dispatched:
                 progressed = True
@@ -3516,12 +3654,12 @@ async def run_video_completion_supervisor(
             if observed.has_active_jobs():
                 cp.phase = "OBSERVING"
                 cp.outcome = "VIDEO_BUDGET_CAPACITY_RESERVED_BY_ACTIVE_JOBS"
-                save_checkpoint(cp, run_id=run_id)
+                await _save_checkpoint_async(cp, run_id=run_id)
                 await asyncio.sleep(cp.tick_interval_s)
                 continue
             cp.phase = "PAUSED_BUDGET"
             cp.outcome = "VIDEO_BUDGET_CAPACITY_REACHED"
-            save_checkpoint(cp, run_id=run_id)
+            await _save_checkpoint_async(cp, run_id=run_id)
             return cp
 
         # 尝试预算耗尽后统一 best-effort 兜底；质量等级和旧 fallback quota
@@ -3553,7 +3691,7 @@ async def run_video_completion_supervisor(
             if progressed:
                 cp.idle_ticks = 0
                 cp.tick_interval_s = SUPERVISOR_TICK_INTERVAL_S
-        save_checkpoint(cp, run_id=run_id)
+        await _save_checkpoint_async(cp, run_id=run_id)
         await asyncio.sleep(cp.tick_interval_s)
 
 
@@ -3591,6 +3729,20 @@ def _mark_failed_closed(
         )
         conn.commit()
     return cp
+
+
+async def _mark_failed_closed_async(
+    cp: VideoSupervisorCheckpoint,
+    *,
+    run_id: str | None,
+    reason: str,
+) -> VideoSupervisorCheckpoint:
+    return await _run_checkpoint_write(
+        _mark_failed_closed,
+        cp,
+        run_id=run_id,
+        reason=reason,
+    )
 
 
 async def _run_video_completion_resilient_loop(
@@ -3632,7 +3784,7 @@ async def _run_video_completion_resilient_loop(
                 wall_cap = float(kwargs.get("wall_clock_cap_s") or 4 * 3600)
                 cp.deadline_at = (cp.started_at or now()) + wall_cap
             try:
-                save_checkpoint(cp, run_id=run_id)
+                await _save_checkpoint_async(cp, run_id=run_id)
                 if run_id:
                     evidence_repository.append_event(
                         run_id,
@@ -3648,13 +3800,13 @@ async def _run_video_completion_resilient_loop(
                 await asyncio.sleep(min(5.0, float(recoveries)))
                 continue
             try:
-                return _deadline_closeout(
+                return await _deadline_closeout_async(
                     cp,
                     run_id=run_id,
                     reason="CONTROL_PLANE_FAILURE",
                 )
             except Exception as close_exc:  # noqa: BLE001
-                return _mark_failed_closed(
+                return await _mark_failed_closed_async(
                     cp,
                     run_id=run_id,
                     reason=f"CONTROL_PLANE_CLOSEOUT_FAILED: {type(close_exc).__name__}: {close_exc}",

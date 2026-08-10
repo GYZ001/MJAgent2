@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from app.db import get_conn, now
+from app.db import get_conn, now, run_write_transaction
 from app.evidence import repository
 from app.harness.contracts import get_contract
 from app.harness.types import EvidenceArtifact
@@ -191,48 +191,81 @@ class WorkflowRecorder:
         context_manifest: dict[str, Any] | None = None,
     ) -> tuple[str, T]:
         contract = get_contract(contract_key) if contract_key else None
-        step_id = repository.create_step(
-            self.run_id,
-            step_key,
-            iteration_no=iteration_no,
-            agent_name=agent_name,
-            contract_version=contract.version if contract else None,
-            input_artifact_ids=input_artifact_ids,
-            context_manifest=context_manifest,
-        )
-        transition_step(step_id, "PENDING", "READY", "输入已就绪")
-        transition_step(step_id, "READY", "RUNNING", "步骤开始")
-        conn = get_conn()
-        conn.execute(
-            "UPDATE workflow_runs SET current_step_key=?, updated_at=? WHERE id=? AND status='RUNNING'",
-            (step_key, now(), self.run_id),
-        )
-        conn.commit()
-        repository.append_event(
+
+        def begin_step(conn) -> str:
+            step_id = repository.create_step(
+                self.run_id,
+                step_key,
+                iteration_no=iteration_no,
+                agent_name=agent_name,
+                contract_version=contract.version if contract else None,
+                input_artifact_ids=input_artifact_ids,
+                context_manifest=context_manifest,
+                conn=conn,
+            )
+            transition_step(step_id, "PENDING", "READY", "输入已就绪", conn=conn)
+            transition_step(step_id, "READY", "RUNNING", "步骤开始", conn=conn)
+            conn.execute(
+                "UPDATE workflow_runs SET current_step_key=?, updated_at=? "
+                "WHERE id=? AND status='RUNNING'",
+                (step_key, now(), self.run_id),
+            )
+            return step_id
+
+        step_id = await run_write_transaction(begin_step)
+        await repository.async_append_event(
             self.run_id, "STEP_STARTED", "info", f"步骤开始：{_step_label(step_key)}", step_run_id=step_id
         )
         try:
             with bind_trace(self.run_id, step_id):
                 result = await operation()
         except asyncio.CancelledError:
-            transition_step(step_id, "RUNNING", "CANCELLED", "运行被取消", decision="cancel")
-            repository.append_event(
+            await run_write_transaction(
+                lambda conn: transition_step(
+                    step_id,
+                    "RUNNING",
+                    "CANCELLED",
+                    "运行被取消",
+                    decision="cancel",
+                    conn=conn,
+                )
+            )
+            await repository.async_append_event(
                 self.run_id, "STEP_CANCELLED", "warning", f"步骤已取消：{_step_label(step_key)}", step_run_id=step_id
             )
             raise
         except Exception as exc:
-            transition_step(
-                step_id, "RUNNING", "FAILED", str(exc)[:1000], decision="escalate",
-                error_code=type(exc).__name__.upper(),
+            error_message = str(exc)[:1000]
+            error_type = type(exc).__name__
+            error_code = error_type.upper()
+            await run_write_transaction(
+                lambda conn: transition_step(
+                    step_id,
+                    "RUNNING",
+                    "FAILED",
+                    error_message,
+                    decision="escalate",
+                    error_code=error_code,
+                    conn=conn,
+                )
             )
-            repository.append_event(
+            await repository.async_append_event(
                 self.run_id, "STEP_FAILED", "error", f"步骤失败：{_step_label(step_key)}",
                 step_run_id=step_id,
-                payload={"error_type": type(exc).__name__, "message": str(exc)[:1000]},
+                payload={"error_type": error_type, "message": error_message},
             )
             raise
-        transition_step(step_id, "RUNNING", "SUCCEEDED", "步骤完成", decision="accept")
-        repository.append_event(
+        await run_write_transaction(
+            lambda conn: transition_step(
+                step_id,
+                "RUNNING",
+                "SUCCEEDED",
+                "步骤完成",
+                decision="accept",
+                conn=conn,
+            )
+        )
+        await repository.async_append_event(
             self.run_id, "STEP_SUCCEEDED", "info", f"步骤完成：{_step_label(step_key)}", step_run_id=step_id
         )
         return step_id, result

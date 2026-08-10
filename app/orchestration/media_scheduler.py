@@ -24,14 +24,17 @@ def reserve_budget(
 ) -> bool:
     """Atomically reserve episode budget before a payable job can run."""
     db = conn or get_conn()
+    owns_transaction = not db.in_transaction
     amount = max(0.0, float(amount_cny))
     try:
-        db.execute("BEGIN IMMEDIATE")
+        if owns_transaction:
+            db.execute("BEGIN IMMEDIATE")
         existing = db.execute(
             "SELECT status FROM budget_reservations WHERE job_id=?", (job_id,)
         ).fetchone()
         if existing and existing["status"] in ACTIVE_RESERVATIONS:
-            db.commit()
+            if owns_transaction:
+                db.commit()
             return True
         spent = db.execute(
             """SELECT COALESCE(SUM(v.cost_cny), 0) AS amount
@@ -51,7 +54,8 @@ def reserve_budget(
                 "UPDATE jobs SET status='paused_budget', reserved_cost_cny=0, updated_at=? WHERE id=?",
                 (now(), job_id),
             )
-            db.commit()
+            if owns_transaction:
+                db.commit()
             return False
         db.execute(
             """INSERT INTO budget_reservations(
@@ -66,10 +70,12 @@ def reserve_budget(
             "UPDATE jobs SET reserved_cost_cny=?, updated_at=? WHERE id=?",
             (amount, now(), job_id),
         )
-        db.commit()
+        if owns_transaction:
+            db.commit()
         return True
     except Exception:
-        db.rollback()
+        if owns_transaction:
+            db.rollback()
         raise
 
 

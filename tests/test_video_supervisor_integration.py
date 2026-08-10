@@ -5,6 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,7 @@ from app.video_supervisor import (
     _finalize_covered,
     _has_dispatch_budget_capacity,
     _reconcile_terminal_continuity_blocks,
+    _save_checkpoint_async,
     attempts_for,
     preview_video_completion_repair,
     reconcile_stale_video_supervisors,
@@ -91,6 +93,85 @@ def memdb(monkeypatch, tmp_path):
         monkeypatch.setattr(mod, "get_conn", _get)
     yield conn
     _TEST_MEDIA_DIR = None
+
+
+@pytest.mark.asyncio
+async def test_async_checkpoint_write_does_not_block_event_loop(monkeypatch) -> None:
+    import app.video_supervisor as video_supervisor
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_save(
+        _checkpoint: VideoSupervisorCheckpoint,
+        *,
+        run_id: str | None = None,
+    ) -> str:
+        del run_id
+        started.set()
+        release.wait(timeout=1)
+        return "checkpoint"
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_supervisor_checks_can_use_worker_thread",
+        lambda: True,
+    )
+    monkeypatch.setattr(video_supervisor, "save_checkpoint", blocking_save)
+
+    task = asyncio.create_task(
+        _save_checkpoint_async(VideoSupervisorCheckpoint(episode_id="e")),
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 0.5)
+        await asyncio.sleep(0.01)
+        assert task.done() is False
+    finally:
+        release.set()
+    assert await asyncio.wait_for(task, timeout=0.5) == "checkpoint"
+
+
+@pytest.mark.asyncio
+async def test_async_checkpoint_write_supports_memory_database(memdb) -> None:
+    checkpoint = VideoSupervisorCheckpoint(
+        episode_id="memory-episode",
+        phase="OBSERVING",
+        tick_no=7,
+        shot_state={"1": {"attempts_paid": 2}},
+    )
+
+    artifact_id = await _save_checkpoint_async(checkpoint)
+
+    row = memdb.execute(
+        "SELECT content_json FROM artifacts WHERE id=?",
+        (artifact_id,),
+    ).fetchone()
+    assert json.loads(row["content_json"])["shot_state"] == checkpoint.shot_state
+    assert memdb.execute(
+        "SELECT COUNT(*) AS c FROM evaluations WHERE artifact_id=?",
+        (artifact_id,),
+    ).fetchone()["c"] == 1
+
+
+def test_checkpoint_transaction_rolls_back_partial_artifact(
+    memdb,
+    monkeypatch,
+) -> None:
+    create_artifact = evidence_repository.create_artifact
+
+    def fail_after_artifact(*args, **kwargs):
+        create_artifact(*args, **kwargs)
+        raise RuntimeError("evaluation insert failed")
+
+    monkeypatch.setattr(evidence_repository, "create_artifact", fail_after_artifact)
+
+    with pytest.raises(RuntimeError, match="evaluation insert failed"):
+        save_checkpoint(VideoSupervisorCheckpoint(episode_id="atomic-episode"))
+
+    assert memdb.execute(
+        "SELECT COUNT(*) AS c FROM artifacts WHERE scope_id='atomic-episode'",
+    ).fetchone()["c"] == 0
+    assert memdb.execute("SELECT COUNT(*) AS c FROM evaluations").fetchone()["c"] == 0
 
 
 def _seed_episode(conn, n_shots: int = 11, *, episode_id: str = "ep_int", project_id: str = "proj_int"):

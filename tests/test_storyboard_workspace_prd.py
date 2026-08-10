@@ -2277,6 +2277,151 @@ def test_media_cleanup_outbox_retries_file_delete_errors(
     assert not final_file.with_suffix(".stale").exists()
 
 
+def test_media_cleanup_outbox_skips_replaced_file_generation(
+    storyboard_db,
+    tmp_path,
+):
+    from app import artifacts
+
+    video_file = tmp_path / "reused-name.mp4"
+    video_file.write_bytes(b"old generation")
+    storyboard_db.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('v-reused','s1',1,'prompt','idem-reused','done',?,1)""",
+        (str(video_file),),
+    )
+    storyboard_db.commit()
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    payload = json.loads(storyboard_db.execute(
+        "SELECT payload_json FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()["payload_json"])
+    storyboard_db.commit()
+
+    assert payload["files"]
+    assert all(item["generation"]["version"] == 1 for item in payload["files"])
+    video_file.unlink()
+    video_file.write_bytes(b"later new generation with the same path")
+
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
+    assert video_file.read_bytes() == b"later new generation with the same path"
+    completed = storyboard_db.execute(
+        "SELECT status,last_error FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()
+    assert completed["status"] == "completed"
+    assert "generation_fence_skips" in completed["last_error"]
+    assert "generation_mismatch" in completed["last_error"]
+
+
+def test_media_cleanup_outbox_skips_changed_directory_generation(
+    storyboard_db,
+    tmp_path,
+    monkeypatch,
+):
+    from app import artifacts
+
+    projects_root = tmp_path / "projects"
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", projects_root)
+    reference_dir = (
+        projects_root / "p1" / "episodes" / "1" / "shots" / "1" / "references"
+    )
+    reference_dir.mkdir(parents=True)
+    old_reference = reference_dir / "reference.png"
+    old_reference.write_bytes(b"old")
+
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_shot_artifact_cleanup(storyboard_db, "s1")
+    payload = json.loads(storyboard_db.execute(
+        "SELECT payload_json FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()["payload_json"])
+    storyboard_db.commit()
+
+    assert payload["directories"][0]["generation"]["tree_sha256"]
+    old_reference.write_bytes(b"new directory generation")
+
+    assert artifacts.flush_media_cleanup_outbox(staged["outbox_id"]) is True
+    assert old_reference.read_bytes() == b"new directory generation"
+    last_error = storyboard_db.execute(
+        "SELECT last_error FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()["last_error"]
+    assert "generation_mismatch" in last_error
+
+
+def test_episode_media_cleanup_stages_generation_fences(
+    storyboard_db,
+    tmp_path,
+    monkeypatch,
+):
+    from app import artifacts
+
+    projects_root = tmp_path / "projects"
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", projects_root)
+    reference_dir = (
+        projects_root / "p1" / "episodes" / "1" / "shots" / "1" / "references"
+    )
+    reference_dir.mkdir(parents=True)
+    (reference_dir / "reference.png").write_bytes(b"reference")
+    video_file = tmp_path / "episode-shot.mp4"
+    video_file.write_bytes(b"video")
+    storyboard_db.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,created_at
+           ) VALUES('v-episode','s1',1,'prompt','idem-episode','done',?,1)""",
+        (str(video_file),),
+    )
+    storyboard_db.commit()
+
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    staged = artifacts.stage_episode_artifact_cleanup(storyboard_db, "e1")
+    payload = json.loads(storyboard_db.execute(
+        "SELECT payload_json FROM media_cleanup_outbox WHERE id=?",
+        (staged["outbox_id"],),
+    ).fetchone()["payload_json"])
+    storyboard_db.rollback()
+
+    assert payload["files"]
+    assert payload["directories"]
+    assert all("generation" in item for item in payload["files"])
+    assert all("generation" in item for item in payload["directories"])
+    missing_last_frame = next(
+        item for item in payload["files"]
+        if item["path"].endswith("episode-shot_last.jpg")
+    )
+    assert missing_last_frame["generation"]["exists"] is False
+
+
+def test_media_cleanup_outbox_keeps_legacy_path_payload_compatible(
+    storyboard_db,
+    tmp_path,
+):
+    from app import artifacts
+
+    legacy_file = tmp_path / "legacy.mp4"
+    legacy_dir = tmp_path / "legacy-references"
+    legacy_file.write_bytes(b"legacy")
+    legacy_dir.mkdir()
+    (legacy_dir / "reference.png").write_bytes(b"legacy")
+    storyboard_db.execute(
+        """INSERT INTO media_cleanup_outbox(
+               id,episode_id,payload_json,status,created_at
+           ) VALUES('cleanup-legacy','e1',?,'pending',1)""",
+        (json.dumps({
+            "files": [str(legacy_file)],
+            "directories": [str(legacy_dir)],
+        }),),
+    )
+    storyboard_db.commit()
+
+    assert artifacts.flush_media_cleanup_outbox("cleanup-legacy") is True
+    assert not legacy_file.exists()
+    assert not legacy_dir.exists()
+
+
 def test_media_cleanup_outbox_sweep_is_bounded(storyboard_db) -> None:
     from app import artifacts
 

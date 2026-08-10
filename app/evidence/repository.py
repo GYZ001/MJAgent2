@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -8,7 +9,7 @@ import sqlite3
 import time
 from typing import Any
 
-from app.db import get_conn, new_id, now, rows_to_dicts
+from app.db import get_conn, new_id, now, rows_to_dicts, run_write_transaction
 from app.harness.types import Evaluation, EvidenceArtifact
 
 
@@ -169,10 +170,11 @@ def create_step(
     policy_version: str | None = None,
     input_artifact_ids: list[str] | None = None,
     context_manifest: dict[str, Any] | None = None,
+    conn=None,
 ) -> str:
     step_id = new_id("step")
-    conn = get_conn()
-    conn.execute(
+    db = conn or get_conn()
+    db.execute(
         """INSERT INTO step_runs(
             id, run_id, step_key, iteration_no, parent_step_run_id, status, agent_name,
             contract_version, prompt_version, policy_version, input_artifact_ids_json,
@@ -184,8 +186,40 @@ def create_step(
             _json(context_manifest or {}),
         ),
     )
-    conn.commit()
+    if conn is None:
+        db.commit()
     return step_id
+
+
+def _event_values(
+    run_id: str,
+    event_type: str,
+    severity: str,
+    message: str,
+    *,
+    step_run_id: str | None,
+    payload: dict[str, Any] | None,
+    trace_id: str | None,
+) -> tuple[Any, ...]:
+    return (
+        new_id("evt"),
+        run_id,
+        step_run_id,
+        now(),
+        event_type,
+        severity,
+        message,
+        _json(payload or {}),
+        trace_id,
+    )
+
+
+def _insert_event(conn, values: tuple[Any, ...]) -> None:
+    conn.execute(
+        "INSERT INTO run_events(id, run_id, step_run_id, ts, event_type, severity, message, payload_json, trace_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        values,
+    )
 
 
 def append_event(
@@ -198,26 +232,20 @@ def append_event(
     payload: dict[str, Any] | None = None,
     trace_id: str | None = None,
 ) -> str:
-    event_id = new_id("evt")
     conn = get_conn()
-    values = (
-        event_id,
+    values = _event_values(
         run_id,
-        step_run_id,
-        now(),
         event_type,
         severity,
         message,
-        _json(payload or {}),
-        trace_id,
+        step_run_id=step_run_id,
+        payload=payload,
+        trace_id=trace_id,
     )
+    event_id = str(values[0])
     for attempt in range(len(_EVENT_LOCK_RETRY_DELAYS_S) + 1):
         try:
-            conn.execute(
-                "INSERT INTO run_events(id, run_id, step_run_id, ts, event_type, severity, message, payload_json, trace_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
-                values,
-            )
+            _insert_event(conn, values)
             conn.commit()
             return event_id
         except sqlite3.OperationalError as exc:
@@ -232,6 +260,48 @@ def append_event(
                 )
                 return ""
             time.sleep(_EVENT_LOCK_RETRY_DELAYS_S[attempt])
+    return ""
+
+
+async def async_append_event(
+    run_id: str,
+    event_type: str,
+    severity: str,
+    message: str,
+    *,
+    step_run_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    trace_id: str | None = None,
+) -> str:
+    """Append an event off-loop while preserving the sync API's drop semantics."""
+    values = _event_values(
+        run_id,
+        event_type,
+        severity,
+        message,
+        step_run_id=step_run_id,
+        payload=payload,
+        trace_id=trace_id,
+    )
+    event_id = str(values[0])
+    for attempt in range(len(_EVENT_LOCK_RETRY_DELAYS_S) + 1):
+        try:
+            await run_write_transaction(
+                lambda conn: _insert_event(conn, values),
+                retry_delays=(),
+            )
+            return event_id
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            if attempt >= len(_EVENT_LOCK_RETRY_DELAYS_S):
+                _LOGGER.warning(
+                    "Dropped run event after SQLite lock retries: run=%s type=%s",
+                    run_id,
+                    event_type,
+                )
+                return ""
+            await asyncio.sleep(_EVENT_LOCK_RETRY_DELAYS_S[attempt])
     return ""
 
 

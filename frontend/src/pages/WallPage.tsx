@@ -28,7 +28,7 @@ type DetailState =
   | { status: 'error'; shotId: string; message: string; errorId?: string }
 type ReviewContextPollResult =
   | { ok: true; context: ReviewWallContext }
-  | { ok: false; error: string }
+  | { ok: false; error: string; retry: boolean }
 type ShotFilter = 'problem' | 'unproduced' | 'generating' | 'pending_adoption' | 'adopted' | 'failed' | 'grade_b' | 'continuity'
 
 export const REVIEW_TABS: Array<{ id: ReviewTab; label: string }> = [
@@ -190,6 +190,11 @@ export function reviewContextRefreshKey(ep: {
     ep.active_storyboard_run_id || '',
     ep.active_video_run_id || '',
   ].join('|')
+}
+
+export function shouldRetryReviewContextError(error: unknown): boolean {
+  const status = Number((error as { status?: number } | null)?.status)
+  return !Number.isFinite(status) || status < 400 || status >= 500
 }
 
 function commaList(value?: string[]) {
@@ -516,10 +521,14 @@ export default function WallPage() {
       try {
         return { ok: true, context: await api.getReviewContext(episodeId!) }
       } catch (reason) {
-        return { ok: false, error: reason instanceof Error ? reason.message : String(reason) }
+        return {
+          ok: false,
+          error: reason instanceof Error ? reason.message : String(reason),
+          retry: shouldRetryReviewContextError(reason),
+        }
       }
     },
-    result => result?.ok === false ? 3000 : 0,
+    result => result?.ok === false && result.retry ? 3000 : 0,
     [episodeId],
   )
   // Keep the pre-detail dependency stable. A fresh [] on every render makes

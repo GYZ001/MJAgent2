@@ -141,13 +141,11 @@ export default function CinemaPage() {
   const { episodeId, toast } = useNav()
   const { data: ep, error, loading, refresh: refreshEpisode } = useEpisode(episodeId!, 'cinema')
   const [mix, setMix] = useState<MixStatus | null>(null)
-  const [mixError, setMixError] = useState<string | null>(null)
   const [mixBusy, setMixBusy] = useState(false)
   const [mixConfirmOpen, setMixConfirmOpen] = useState(false)
   const [packageConfirmOpen, setPackageConfirmOpen] = useState(false)
   const [deliveryBusy, setDeliveryBusy] = useState(false)
   const [readiness, setReadiness] = useState<DeliveryReadiness | null>(null)
-  const [deliveryError, setDeliveryError] = useState<string | null>(null)
   const [packages, setPackages] = useState<DeliveryPackageRecord[]>([])
   const [selectedPackageId, setSelectedPackageId] = useState<string | null>(null)
   const [reviewer, setReviewer] = useState('')
@@ -175,7 +173,7 @@ export default function CinemaPage() {
   } = usePoll<MixStatus>(
     () => api.get(`/episodes/${episodeId}/mix-status`),
     cinemaPollInterval,
-    [episodeId],
+    [episodeId, cinemaPollInterval],
   )
   const {
     data: polledDelivery,
@@ -190,7 +188,7 @@ export default function CinemaPage() {
       return { readiness: nextReadiness, packages: nextPackages }
     },
     cinemaPollInterval,
-    [episodeId],
+    [episodeId, cinemaPollInterval],
   )
 
   useEffect(() => {

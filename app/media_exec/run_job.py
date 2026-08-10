@@ -22,6 +22,18 @@ class ProviderCreateUnresolved(RuntimeError):
     """The provider may have accepted create, but no durable task handle exists."""
 
 
+def _provider_create_outcome_unknown(exc: ProviderError) -> bool:
+    """Fail closed unless the provider response makes replay safety explicit."""
+    delivery_state = str(getattr(exc, "delivery_state", "unknown") or "unknown")
+    if bool(getattr(exc, "requires_explicit_retry", False)):
+        return True
+    if delivery_state == "unknown":
+        return True
+    if delivery_state == "responded":
+        return False
+    return not bool(getattr(exc, "replay_safe", False))
+
+
 def _assert_provider_create_resolved(job, task_id: str | None) -> None:
     if task_id:
         return
@@ -377,7 +389,19 @@ def _assert_job_lease(job_id: str, owner: str, *, lease_seconds: float = 180.0) 
         raise LeaseLost(f"job lease lost: {job_id} / {owner}")
 
 
-def _commit_provider_acceptance(
+def _run_in_memory_write_transaction(conn, operation) -> None:
+    """Keep private in-memory DB tests on their only usable connection."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        operation(conn)
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def _commit_provider_acceptance_in_transaction(
     conn,
     *,
     job_id: str,
@@ -387,44 +411,65 @@ def _commit_provider_acceptance(
     task_id: str,
     submitted_at: float | None = None,
 ) -> None:
-    """Commit paid provider acceptance only while this worker owns the lease."""
+    """Write paid provider acceptance while the caller owns the transaction."""
     from app.completion_grant import ensure_video_budget_authority_tables
 
     ensure_video_budget_authority_tables(conn)
     stamp = now()
     accepted_at = float(submitted_at or stamp)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        claimed = conn.execute(
-            """UPDATE jobs
-                  SET provider_operation_id=?,provider_create_state='accepted',
-                      provider_non_cancellable=1,provider_submitted_at=?,updated_at=?
-                WHERE id=? AND status='running' AND lease_owner=?
-                  AND cancellation_requested=0""",
-            (operation_id, accepted_at, stamp, job_id, owner),
-        )
-        if claimed.rowcount != 1:
-            raise LeaseLost(f"provider acceptance lost lease: {job_id} / {owner}")
-        conn.execute(
-            """UPDATE shot_versions
-                  SET provider_task_id=?,status='running',error=NULL
-                WHERE id=?""",
-            (task_id, version_id),
-        )
-        conn.execute(
-            """UPDATE provider_video_budget_claims
-                  SET status='accepted',updated_at=?
-                WHERE operation_id=? AND job_id=?""",
-            (stamp, operation_id, job_id),
-        )
-        conn.commit()
-    except BaseException:
-        if conn.in_transaction:
-            conn.rollback()
-        raise
+    claimed = conn.execute(
+        """UPDATE jobs
+              SET provider_operation_id=?,provider_create_state='accepted',
+                  provider_non_cancellable=1,provider_submitted_at=?,updated_at=?
+            WHERE id=? AND status='running' AND lease_owner=?
+              AND cancellation_requested=0""",
+        (operation_id, accepted_at, stamp, job_id, owner),
+    )
+    if claimed.rowcount != 1:
+        raise LeaseLost(f"provider acceptance lost lease: {job_id} / {owner}")
+    conn.execute(
+        """UPDATE shot_versions
+              SET provider_task_id=?,status='running',error=NULL
+            WHERE id=?""",
+        (task_id, version_id),
+    )
+    conn.execute(
+        """UPDATE provider_video_budget_claims
+              SET status='accepted',updated_at=?
+            WHERE operation_id=? AND job_id=?""",
+        (stamp, operation_id, job_id),
+    )
 
 
-def _commit_video_result_checkpoint(
+async def _commit_provider_acceptance(
+    conn,
+    *,
+    job_id: str,
+    version_id: str,
+    owner: str,
+    operation_id: str,
+    task_id: str,
+    submitted_at: float | None = None,
+) -> None:
+    """Commit paid provider acceptance off-loop when the DB is reopenable."""
+    def operation(write_conn) -> None:
+        _commit_provider_acceptance_in_transaction(
+            write_conn,
+            job_id=job_id,
+            version_id=version_id,
+            owner=owner,
+            operation_id=operation_id,
+            task_id=task_id,
+            submitted_at=submitted_at,
+        )
+
+    if _authority_checks_can_use_worker_thread(conn):
+        await run_write_transaction(operation)
+        return
+    _run_in_memory_write_transaction(conn, operation)
+
+
+def _commit_video_result_checkpoint_in_transaction(
     conn,
     *,
     job_id: str,
@@ -437,50 +482,77 @@ def _commit_video_result_checkpoint(
     latency_s: float,
     image_inputs: str,
 ) -> None:
-    """Fence the durable provider result and its budget settlement together."""
+    """Write the fenced provider result while the caller owns the transaction."""
     stamp = now()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        claimed = conn.execute(
-            """UPDATE jobs SET updated_at=?
-                WHERE id=? AND status='running' AND lease_owner=?
-                  AND cancellation_requested=0""",
-            (stamp, job_id, owner),
+    claimed = conn.execute(
+        """UPDATE jobs SET updated_at=?
+            WHERE id=? AND status='running' AND lease_owner=?
+              AND cancellation_requested=0""",
+        (stamp, job_id, owner),
+    )
+    if claimed.rowcount != 1:
+        raise LeaseLost(f"provider result lost lease: {job_id} / {owner}")
+    version = conn.execute(
+        """UPDATE shot_versions
+              SET status='succeeded',error=NULL,video_path=?,
+                  last_frame_url=?,cost_cny=?,latency_s=?,image_inputs=?
+            WHERE id=?
+              AND NOT EXISTS (
+                  SELECT 1 FROM jobs j
+                   WHERE j.version_id=shot_versions.id
+                     AND j.cancellation_requested=1
+              )""",
+        (
+            video_path,
+            last_frame_url,
+            cost_cny,
+            latency_s,
+            image_inputs,
+            version_id,
+        ),
+    )
+    if version.rowcount != 1:
+        raise LeaseLost(f"provider result version fenced: {job_id} / {owner}")
+    conn.execute(
+        """UPDATE provider_video_budget_claims
+              SET status='settled',updated_at=?
+            WHERE operation_id=? AND job_id=?""",
+        (stamp, operation_id, job_id),
+    )
+
+
+async def _commit_video_result_checkpoint(
+    conn,
+    *,
+    job_id: str,
+    version_id: str,
+    owner: str,
+    operation_id: str,
+    video_path: str,
+    last_frame_url: str | None,
+    cost_cny: float,
+    latency_s: float,
+    image_inputs: str,
+) -> None:
+    """Commit the provider result checkpoint off-loop when possible."""
+    def operation(write_conn) -> None:
+        _commit_video_result_checkpoint_in_transaction(
+            write_conn,
+            job_id=job_id,
+            version_id=version_id,
+            owner=owner,
+            operation_id=operation_id,
+            video_path=video_path,
+            last_frame_url=last_frame_url,
+            cost_cny=cost_cny,
+            latency_s=latency_s,
+            image_inputs=image_inputs,
         )
-        if claimed.rowcount != 1:
-            raise LeaseLost(f"provider result lost lease: {job_id} / {owner}")
-        version = conn.execute(
-            """UPDATE shot_versions
-                  SET status='succeeded',error=NULL,video_path=?,
-                      last_frame_url=?,cost_cny=?,latency_s=?,image_inputs=?
-                WHERE id=?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM jobs j
-                       WHERE j.version_id=shot_versions.id
-                         AND j.cancellation_requested=1
-                  )""",
-            (
-                video_path,
-                last_frame_url,
-                cost_cny,
-                latency_s,
-                image_inputs,
-                version_id,
-            ),
-        )
-        if version.rowcount != 1:
-            raise LeaseLost(f"provider result version fenced: {job_id} / {owner}")
-        conn.execute(
-            """UPDATE provider_video_budget_claims
-                  SET status='settled',updated_at=?
-                WHERE operation_id=? AND job_id=?""",
-            (stamp, operation_id, job_id),
-        )
-        conn.commit()
-    except BaseException:
-        if conn.in_transaction:
-            conn.rollback()
-        raise
+
+    if _authority_checks_can_use_worker_thread(conn):
+        await run_write_transaction(operation)
+        return
+    _run_in_memory_write_transaction(conn, operation)
 
 
 async def _await_with_job_lease_heartbeat(
@@ -3302,7 +3374,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         )
         result = None
         if task_id:
-            _commit_provider_acceptance(
+            await _commit_provider_acceptance(
                 conn,
                 job_id=job_id,
                 version_id=version["id"],
@@ -3601,7 +3673,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                     "version_no": version["version_no"],
                                     "operation_id": provider_operation_id,
                                 })
-                            _commit_provider_acceptance(
+                            await _commit_provider_acceptance(
                                 conn,
                                 job_id=job_id,
                                 version_id=version["id"],
@@ -3617,7 +3689,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     _assert_job_lease(job_id, owner)
                 except ProviderError as exc:
                     _assert_job_lease(job_id, owner)
-                    create_state = "unknown" if exc.retryable else "not_started"
+                    create_outcome_unknown = _provider_create_outcome_unknown(exc)
+                    create_state = (
+                        "unknown" if create_outcome_unknown else "not_started"
+                    )
                     changed = conn.execute(
                         """UPDATE jobs
                               SET provider_create_state=?,provider_non_cancellable=?,
@@ -3626,7 +3701,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                               AND cancellation_requested=0""",
                         (
                             create_state,
-                            int(bool(exc.retryable)),
+                            int(create_outcome_unknown),
                             now(),
                             job_id,
                             owner,
@@ -3637,7 +3712,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                         raise LeaseLost(
                             f"video submit error lost lease: {job_id} / {owner}"
                         )
-                    if not exc.retryable:
+                    if not create_outcome_unknown:
                         conn.execute(
                             """UPDATE provider_video_budget_claims
                                   SET status='released',updated_at=?
@@ -3645,6 +3720,16 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             (now(), provider_operation_id, job_id),
                         )
                     conn.commit()
+                    if create_outcome_unknown:
+                        raise ProviderCreateUnresolved(
+                            "[VIDEO_PROVIDER_CREATE_UNRESOLVED] Seedance create "
+                            "结果不确定且本地没有 task id，已禁止自动重复 create；"
+                            f"请在页面核对供应商任务（operation_id={provider_operation_id}, "
+                            f"delivery_state={exc.delivery_state}, "
+                            f"replay_safe={exc.replay_safe}, "
+                            "requires_explicit_retry="
+                            f"{exc.requires_explicit_retry}）"
+                        ) from exc
                     raise
                 if meta.get("shot_plan_id"):
                     from app.video_plan import (
@@ -3821,7 +3906,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         )
         meta["provider_paid_attempts"] = paid_attempts
         cost = shot_cost_cny(shot["duration_s"]) * paid_attempts
-        _commit_video_result_checkpoint(
+        await _commit_video_result_checkpoint(
             conn,
             job_id=job_id,
             version_id=version["id"],

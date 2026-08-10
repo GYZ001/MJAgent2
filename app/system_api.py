@@ -1598,6 +1598,7 @@ def retry_job(job_id: str, body: dict | None = None):
             })
         if has_provider_task:
             target_status = "waiting_provider"
+            new_submission_epoch = False
             retryability = {
                 "retryable": True,
                 "action": "continue_poll",
@@ -1608,6 +1609,7 @@ def retry_job(job_id: str, body: dict | None = None):
             }
         elif provider_recovery_unconfirmed:
             target_status = "queued"
+            new_submission_epoch = True
             if not item.get("episode_id"):
                 raise HTTPException(409, detail={
                     "code": "JOB_RETRY_CONTEXT_MISSING",
@@ -1619,13 +1621,20 @@ def retry_job(job_id: str, body: dict | None = None):
                 estimate = initial_shot_generation_cost(
                     float(item.get("duration_s") or 5)
                 )
-            if not worker.media_scheduler.reserve_budget(
-                job_id,
-                item["episode_id"],
-                estimate,
-                worker.episode_video_budget_limit(item["episode_id"]),
-                conn=conn,
-            ):
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                budget_reserved = worker.media_scheduler.reserve_budget(
+                    job_id,
+                    item["episode_id"],
+                    estimate,
+                    worker.episode_video_budget_limit(item["episode_id"]),
+                    conn=conn,
+                )
+            except Exception:
+                conn.rollback()
+                raise
+            if not budget_reserved:
+                conn.commit()
                 raise HTTPException(409, detail={
                     "code": "JOB_RETRY_BUDGET_BLOCKED",
                     "message": "单集预算不足，任务已保持暂停；提高成本上限后可继续",
@@ -1641,10 +1650,11 @@ def retry_job(job_id: str, body: dict | None = None):
                 "paid_risk": "may_create_new_charge",
                 "will_submit_new_provider_task": True,
                 "will_continue_existing_provider_task": False,
-                "message": "已确认继续并重新校验预算；将复用原幂等标识，但仍可能产生新费用",
+                "message": "已确认继续并重新校验预算；将开启新的提交批次，并可能产生新费用",
             }
         else:
             target_status = "queued"
+            new_submission_epoch = False
             if not item.get("episode_id"):
                 raise HTTPException(409, detail={
                     "code": "JOB_RETRY_CONTEXT_MISSING",
@@ -1656,13 +1666,20 @@ def retry_job(job_id: str, body: dict | None = None):
                 estimate = initial_shot_generation_cost(
                     float(item.get("duration_s") or 5)
                 )
-            if not worker.media_scheduler.reserve_budget(
-                job_id,
-                item["episode_id"],
-                estimate,
-                worker.episode_video_budget_limit(item["episode_id"]),
-                conn=conn,
-            ):
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                budget_reserved = worker.media_scheduler.reserve_budget(
+                    job_id,
+                    item["episode_id"],
+                    estimate,
+                    worker.episode_video_budget_limit(item["episode_id"]),
+                    conn=conn,
+                )
+            except Exception:
+                conn.rollback()
+                raise
+            if not budget_reserved:
+                conn.commit()
                 raise HTTPException(409, detail={
                     "code": "JOB_RETRY_BUDGET_BLOCKED",
                     "message": "单集预算不足，任务已保持暂停；提高成本上限后可继续",
@@ -1680,19 +1697,46 @@ def retry_job(job_id: str, body: dict | None = None):
                 "will_continue_existing_provider_task": False,
                 "message": "该任务尚无供应商断点，将重新提交并可能产生新费用",
             }
-        cursor = conn.execute(
-            """UPDATE jobs SET status=?,error=?,next_retry_at=NULL,
-                       cancellation_requested=0,lease_owner=NULL,lease_expires_at=NULL,
-                       state_revision=COALESCE(state_revision,0)+1,updated_at=?
-               WHERE id=? AND status=?""",
-            (
-                target_status,
-                retryability["message"],
-                time.time(),
-                job_id,
-                item["status"],
-            ),
-        )
+        if new_submission_epoch:
+            version_or_job_id = str(item.get("version_id") or job_id)
+            provider_operation_id = (
+                f"video-create-{version_or_job_id}-{new_id('epoch')}"
+            )
+            cursor = conn.execute(
+                """UPDATE jobs
+                      SET status=?,error=NULL,next_retry_at=NULL,
+                          cancellation_requested=0,lease_owner=NULL,lease_expires_at=NULL,
+                          provider_operation_id=?,provider_create_state='not_started',
+                          provider_non_cancellable=0,provider_submitted_at=NULL,
+                          reason_code=NULL,reason_text=NULL,
+                          state_revision=COALESCE(state_revision,0)+1,updated_at=?
+                    WHERE id=? AND status=?
+                      AND COALESCE(state_revision,0)=?""",
+                (
+                    target_status,
+                    provider_operation_id,
+                    time.time(),
+                    job_id,
+                    item["status"],
+                    int(item.get("state_revision") or 0),
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """UPDATE jobs SET status=?,error=?,next_retry_at=NULL,
+                           cancellation_requested=0,lease_owner=NULL,lease_expires_at=NULL,
+                           state_revision=COALESCE(state_revision,0)+1,updated_at=?
+                   WHERE id=? AND status=?
+                     AND COALESCE(state_revision,0)=?""",
+                (
+                    target_status,
+                    retryability["message"],
+                    time.time(),
+                    job_id,
+                    item["status"],
+                    int(item.get("state_revision") or 0),
+                ),
+            )
         if cursor.rowcount != 1:
             conn.rollback()
             raise HTTPException(409, "任务已被其他操作更新")

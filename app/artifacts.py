@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
+import os
 import shutil
+import stat
 import threading
 from pathlib import Path
 
@@ -18,6 +22,8 @@ _CLEAR_TERMINAL_RUN_STATES = {
 _MEDIA_CLEANUP_SWEEP_INTERVAL_SECONDS = 30.0
 _MEDIA_CLEANUP_SWEEP_LIMIT = 25
 _MEDIA_CLEANUP_FLUSH_LOCK = threading.Lock()
+_MEDIA_CLEANUP_FENCE_VERSION = 1
+_LOGGER = logging.getLogger(__name__)
 
 
 def _begin_clear_transaction(
@@ -469,6 +475,131 @@ def invalidate_episode_final(episode_id: str) -> bool:
     return True
 
 
+def _stat_generation(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+    }
+
+
+def _directory_generation_digest(root: Path) -> str:
+    """Hash directory entry identities without following symlinks."""
+    digest = hashlib.sha256()
+
+    def visit(directory: Path) -> None:
+        with os.scandir(directory) as entries:
+            ordered = sorted(entries, key=lambda entry: entry.name)
+        for entry in ordered:
+            entry_path = Path(entry.path)
+            generation = _stat_generation(entry.stat(follow_symlinks=False))
+            relative = str(entry_path.relative_to(root))
+            digest.update(json.dumps(
+                [relative, generation],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+            digest.update(b"\0")
+            if stat.S_ISDIR(generation["mode"]) and not entry.is_symlink():
+                visit(entry_path)
+
+    visit(root)
+    return digest.hexdigest()
+
+
+def _capture_cleanup_generation(path: Path, kind: str) -> dict:
+    """Capture a conservative, persistable identity for one cleanup target."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return {
+            "version": _MEDIA_CLEANUP_FENCE_VERSION,
+            "exists": False,
+            "verifiable": True,
+        }
+    except OSError as exc:
+        return {
+            "version": _MEDIA_CLEANUP_FENCE_VERSION,
+            "exists": True,
+            "verifiable": False,
+            "error": type(exc).__name__,
+        }
+
+    generation: dict = {
+        "version": _MEDIA_CLEANUP_FENCE_VERSION,
+        "exists": True,
+        "verifiable": True,
+        "kind": kind,
+        **_stat_generation(before),
+    }
+    if kind != "directory":
+        return generation
+    if not stat.S_ISDIR(before.st_mode):
+        generation["verifiable"] = False
+        generation["error"] = "not_directory"
+        return generation
+    try:
+        generation["tree_sha256"] = _directory_generation_digest(path)
+        after = path.lstat()
+    except FileNotFoundError:
+        return {
+            "version": _MEDIA_CLEANUP_FENCE_VERSION,
+            "exists": False,
+            "verifiable": False,
+            "error": "changed_during_capture",
+        }
+    except OSError as exc:
+        generation["verifiable"] = False
+        generation["error"] = type(exc).__name__
+        return generation
+    if _stat_generation(before) != _stat_generation(after):
+        generation["verifiable"] = False
+        generation["error"] = "changed_during_capture"
+    return generation
+
+
+def _stage_cleanup_entries(paths: list[str], kind: str) -> list[dict]:
+    return [
+        {
+            "path": raw_path,
+            "generation": _capture_cleanup_generation(Path(raw_path), kind),
+        }
+        for raw_path in dict.fromkeys(paths)
+    ]
+
+
+def _cleanup_generation_matches(
+    path: Path,
+    expected: object,
+    kind: str,
+) -> tuple[bool, str]:
+    if not isinstance(expected, dict):
+        return False, "missing_generation_fence"
+    current = _capture_cleanup_generation(path, kind)
+    if not current.get("exists"):
+        return True, "already_missing"
+    if not expected.get("verifiable") or not current.get("verifiable"):
+        return False, "unverifiable_generation"
+    if current != expected:
+        return False, "generation_mismatch"
+    return True, "matched"
+
+
+def _cleanup_entry(raw_entry: object) -> tuple[Path, object | None, bool]:
+    """Return path, fence and whether this is a legacy string payload."""
+    if isinstance(raw_entry, dict):
+        return (
+            Path(str(raw_entry.get("path") or "")),
+            raw_entry.get("generation"),
+            False,
+        )
+    return Path(str(raw_entry)), None, True
+
+
 def _delete_shot_reference_dir(conn, shot_row) -> int:
     """删除某镜的历史参考图缓存目录。返回删除的文件数。"""
     ep = conn.execute(
@@ -610,8 +741,11 @@ def stage_shot_artifact_cleanup(
     )
     outbox_id = new_id("cleanup")
     payload = {
-        "files": list(dict.fromkeys(files)),
-        "directories": [str(ref_dir)] if ref_dir else [],
+        "files": _stage_cleanup_entries(files, "file"),
+        "directories": (
+            _stage_cleanup_entries([str(ref_dir)], "directory")
+            if ref_dir else []
+        ),
         "invalidate_final": (
             {
                 "project_id": ep["project_id"],
@@ -711,8 +845,8 @@ def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
 
     outbox_id = new_id("cleanup")
     payload = {
-        "files": list(dict.fromkeys(files)),
-        "directories": list(dict.fromkeys(directories)),
+        "files": _stage_cleanup_entries(files, "file"),
+        "directories": _stage_cleanup_entries(directories, "directory"),
         "invalidate_final": {
             "project_id": ep["project_id"],
             "episode_no": int(ep["episode_no"]),
@@ -750,11 +884,38 @@ def flush_media_cleanup_outbox(outbox_id: str) -> bool:
             return bool(row)
         try:
             payload = json.loads(row["payload_json"] or "{}")
-            for raw_path in payload.get("files") or []:
-                Path(str(raw_path)).unlink(missing_ok=True)
-            for raw_path in payload.get("directories") or []:
+            skipped: list[dict[str, str]] = []
+            for raw_entry in payload.get("files") or []:
+                path, generation, legacy = _cleanup_entry(raw_entry)
+                matches, reason = (
+                    (True, "legacy_payload")
+                    if legacy else
+                    _cleanup_generation_matches(path, generation, "file")
+                )
+                if not matches:
+                    skipped.append({
+                        "kind": "file",
+                        "path": str(path),
+                        "reason": reason,
+                    })
+                    continue
+                path.unlink(missing_ok=True)
+            for raw_entry in payload.get("directories") or []:
+                path, generation, legacy = _cleanup_entry(raw_entry)
+                matches, reason = (
+                    (True, "legacy_payload")
+                    if legacy else
+                    _cleanup_generation_matches(path, generation, "directory")
+                )
+                if not matches:
+                    skipped.append({
+                        "kind": "directory",
+                        "path": str(path),
+                        "reason": reason,
+                    })
+                    continue
                 try:
-                    shutil.rmtree(Path(str(raw_path)))
+                    shutil.rmtree(path)
                 except FileNotFoundError:
                     pass
             final = payload.get("invalidate_final") or {}
@@ -765,13 +926,36 @@ def flush_media_cleanup_outbox(outbox_id: str) -> bool:
                     suppress_errors=False,
                     not_newer_than=float(row["created_at"]),
                 )
+            skip_summary = (
+                "generation_fence_skips="
+                + json.dumps(skipped, ensure_ascii=False, separators=(",", ":"))
+                if skipped else None
+            )
             conn.execute(
                 """UPDATE media_cleanup_outbox
-                      SET status='completed',attempts=attempts+1,last_error=NULL,completed_at=?
+                      SET status='completed',attempts=attempts+1,last_error=?,completed_at=?
                     WHERE id=?""",
-                (now(), outbox_id),
+                (
+                    skip_summary[:800] if skip_summary else None,
+                    now(),
+                    outbox_id,
+                ),
             )
             conn.commit()
+            if skipped:
+                _LOGGER.warning(
+                    "Media cleanup skipped %d generation-mismatched resource(s) "
+                    "for outbox %s: %s",
+                    len(skipped),
+                    outbox_id,
+                    skip_summary,
+                )
+                from app.observability.metrics import inc
+
+                inc(
+                    "media_cleanup_generation_fence_skips_total",
+                    value=len(skipped),
+                )
             return True
         except Exception as exc:
             conn.execute(

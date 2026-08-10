@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 
 import pytest
@@ -30,6 +31,26 @@ def test_budget_reservation_is_atomic_and_does_not_overrun(monkeypatch) -> None:
     assert not media_scheduler.reserve_budget("j2", "e", 5, 10, conn=conn)
     assert conn.execute("SELECT status FROM jobs WHERE id='j2'").fetchone()["status"] == "paused_budget"
     assert conn.execute("SELECT SUM(amount_cny) FROM budget_reservations WHERE status='reserved'").fetchone()[0] == 6
+
+
+def test_budget_reservation_joins_callers_transaction() -> None:
+    conn = _conn()
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert media_scheduler.reserve_budget("j1", "e", 6, 10, conn=conn)
+    assert conn.in_transaction is True
+    assert conn.execute(
+        "SELECT amount_cny FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone()["amount_cny"] == 6
+
+    conn.rollback()
+
+    assert conn.execute(
+        "SELECT 1 FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT reserved_cost_cny FROM jobs WHERE id='j1'"
+    ).fetchone()["reserved_cost_cny"] == 0
 
 
 def test_lease_claim_is_cas_and_expired_lease_can_be_reclaimed(monkeypatch) -> None:
@@ -97,26 +118,30 @@ def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
            WHERE operation_id='op1'"""
     ).fetchone()["status"] == "reserved"
     with pytest.raises(worker.LeaseLost):
-        worker._commit_provider_acceptance(
-            conn,
-            job_id="j1",
-            version_id="v1",
-            owner="worker-a",
-            operation_id="op1",
-            task_id="provider-task-stale",
+        asyncio.run(
+            worker._commit_provider_acceptance(
+                conn,
+                job_id="j1",
+                version_id="v1",
+                owner="worker-a",
+                operation_id="op1",
+                task_id="provider-task-stale",
+            )
         )
     with pytest.raises(worker.LeaseLost):
-        worker._commit_video_result_checkpoint(
-            conn,
-            job_id="j1",
-            version_id="v1",
-            owner="worker-a",
-            operation_id="op1",
-            video_path="/tmp/stale.mp4",
-            last_frame_url=None,
-            cost_cny=1,
-            latency_s=1,
-            image_inputs="{}",
+        asyncio.run(
+            worker._commit_video_result_checkpoint(
+                conn,
+                job_id="j1",
+                version_id="v1",
+                owner="worker-a",
+                operation_id="op1",
+                video_path="/tmp/stale.mp4",
+                last_frame_url=None,
+                cost_cny=1,
+                latency_s=1,
+                image_inputs="{}",
+            )
         )
 
     job = conn.execute(
@@ -158,14 +183,16 @@ def test_current_worker_can_recover_legacy_provider_handle_without_budget_ledger
     conn.commit()
     assert media_scheduler.claim_job("j1", "worker-a", lease_seconds=30)
 
-    worker._commit_provider_acceptance(
-        conn,
-        job_id="j1",
-        version_id="v1",
-        owner="worker-a",
-        operation_id="legacy-op",
-        task_id="legacy-task",
-        submitted_at=90,
+    asyncio.run(
+        worker._commit_provider_acceptance(
+            conn,
+            job_id="j1",
+            version_id="v1",
+            owner="worker-a",
+            operation_id="legacy-op",
+            task_id="legacy-task",
+            submitted_at=90,
+        )
     )
 
     job = conn.execute(
@@ -250,3 +277,47 @@ def test_heartbeat_operation_owns_file_database_connection(tmp_path) -> None:
     finally:
         file_conn.close()
         memory_conn.close()
+
+
+def test_provider_checkpoint_uses_async_write_transaction_for_file_db(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app import worker
+
+    calls = []
+
+    async def capture(operation):
+        calls.append(operation)
+
+    file_conn = sqlite3.connect(tmp_path / "worker.db")
+    monkeypatch.setattr(worker, "run_write_transaction", capture)
+    try:
+        asyncio.run(
+            worker._commit_provider_acceptance(
+                file_conn,
+                job_id="j1",
+                version_id="v1",
+                owner="worker-a",
+                operation_id="op1",
+                task_id="provider-task",
+            )
+        )
+        asyncio.run(
+            worker._commit_video_result_checkpoint(
+                file_conn,
+                job_id="j1",
+                version_id="v1",
+                owner="worker-a",
+                operation_id="op1",
+                video_path="/tmp/result.mp4",
+                last_frame_url=None,
+                cost_cny=1,
+                latency_s=1,
+                image_inputs="{}",
+            )
+        )
+    finally:
+        file_conn.close()
+
+    assert len(calls) == 2

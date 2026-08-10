@@ -6,6 +6,7 @@ import pytest
 from app import db
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+from app.orchestration import engine
 from app.orchestration.engine import WorkflowRecorder, fingerprint
 from app.orchestration.state_machine import StateConflict, transition_run
 from app.observability.tracing import bind_trace, current_trace, detached_trace
@@ -87,6 +88,75 @@ def test_workflow_recorder_persists_trace_evidence_and_commit(tmp_path, monkeypa
         "RUN_CREATED", "RUN_STARTED", "STEP_STARTED", "ARTIFACT_CREATED",
         "ARTIFACT_COMMITTED", "RUN_SUCCEEDED",
     }
+
+
+@pytest.mark.asyncio
+async def test_workflow_recorder_step_uses_async_write_paths(tmp_path, monkeypatch) -> None:
+    _fresh_database(tmp_path, monkeypatch)
+    recorder = WorkflowRecorder.create(
+        workflow_type="test_workflow",
+        scope_type="project",
+        scope_id="p1",
+        input_fingerprint="async-step",
+    )
+    recorder.start()
+    write_transactions = 0
+    real_run_write_transaction = engine.run_write_transaction
+
+    async def tracked_run_write_transaction(operation, **kwargs):
+        nonlocal write_transactions
+        write_transactions += 1
+        return await real_run_write_transaction(operation, **kwargs)
+
+    def reject_sync_event(*_args, **_kwargs):
+        raise AssertionError("WorkflowRecorder.step used synchronous append_event")
+
+    monkeypatch.setattr(engine, "run_write_transaction", tracked_run_write_transaction)
+    monkeypatch.setattr(repository, "append_event", reject_sync_event)
+
+    step_id, result = await recorder.step("screenplay", lambda: asyncio.sleep(0, result="ok"))
+
+    assert result == "ok"
+    assert write_transactions == 2
+    assert repository.get_steps(recorder.run_id)[0]["status"] == "SUCCEEDED"
+    assert [
+        event["event_type"] for event in repository.get_events(recorder.run_id)
+    ][-2:] == ["STEP_STARTED", "STEP_SUCCEEDED"]
+    assert step_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_event"),
+    [
+        (RuntimeError("failed"), "FAILED", "STEP_FAILED"),
+        (asyncio.CancelledError(), "CANCELLED", "STEP_CANCELLED"),
+    ],
+)
+async def test_workflow_recorder_step_persists_async_terminal_errors(
+    tmp_path,
+    monkeypatch,
+    error: BaseException,
+    expected_status: str,
+    expected_event: str,
+) -> None:
+    _fresh_database(tmp_path, monkeypatch)
+    recorder = WorkflowRecorder.create(
+        workflow_type="test_workflow",
+        scope_type="project",
+        scope_id="p1",
+        input_fingerprint=expected_status,
+    )
+    recorder.start()
+
+    async def operation() -> None:
+        raise error
+
+    with pytest.raises(type(error)):
+        await recorder.step("screenplay", operation)
+
+    assert repository.get_steps(recorder.run_id)[0]["status"] == expected_status
+    assert repository.get_events(recorder.run_id)[-1]["event_type"] == expected_event
 
 
 def test_workflow_recorder_process_shutdown_remains_recoverable(tmp_path, monkeypatch) -> None:
