@@ -277,6 +277,92 @@ def test_paid_provider_handle_is_recovered_from_successful_call() -> None:
     assert worker._recover_paid_video_task(conn, "video-create-other") is None
 
 
+@pytest.mark.parametrize("create_state", ["submitting", "unknown"])
+def test_unresolved_provider_create_is_fail_closed(create_state: str) -> None:
+    job = {
+        "provider_operation_id": "video-create-v1",
+        "provider_create_state": create_state,
+        "provider_non_cancellable": 1,
+    }
+
+    with pytest.raises(
+        worker.ProviderCreateUnresolved,
+        match="VIDEO_PROVIDER_CREATE_UNRESOLVED",
+    ):
+        worker._assert_provider_create_resolved(job, None)
+
+
+def test_recovered_provider_handle_allows_poll_resume() -> None:
+    job = {
+        "provider_operation_id": "video-create-v1",
+        "provider_create_state": "submitting",
+        "provider_non_cancellable": 1,
+    }
+
+    worker._assert_provider_create_resolved(job, "provider-task-1")
+
+
+def test_restarted_submitting_job_never_calls_provider_create(monkeypatch) -> None:
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e1','p1',1,'generating',1)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s1','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
+           ) VALUES('v1','s1',1,'prompt','idem','running','{}',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               lease_owner,lease_expires_at,provider_operation_id,
+               provider_create_state,provider_non_cancellable,created_at,updated_at
+           ) VALUES(
+               'j1','video','s1','v1','e1','p1','running',
+               'restart-worker',9999999999,'video-create-v1',
+               'submitting',1,1,1
+           )"""
+    )
+    conn.commit()
+    create_calls: list[bool] = []
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def no_fence(*_args, **_kwargs) -> None:
+        return None
+
+    async def create_task(*_args, **_kwargs) -> str:
+        create_calls.append(True)
+        return "duplicate-task"
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
+    monkeypatch.setattr(worker.hiagent, "create_video_task", create_task)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    )
+
+    asyncio.run(worker._run_job("j1", lease_owner="restart-worker"))
+
+    job = conn.execute(
+        "SELECT status,reason_code,provider_create_state FROM jobs WHERE id='j1'"
+    ).fetchone()
+    assert create_calls == []
+    assert dict(job) == {
+        "status": "waiting_human",
+        "reason_code": "VIDEO_PROVIDER_CREATE_UNRESOLVED",
+        "provider_create_state": "submitting",
+    }
+
+
 def test_paid_provider_attempts_count_distinct_operations() -> None:
     conn = _conn()
     conn.executemany(

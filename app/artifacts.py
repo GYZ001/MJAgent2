@@ -192,9 +192,14 @@ def delete_project_episodes(project_id: str) -> int:
     return len(eps)
 
 
-def delete_episode_shots(episode_id: str) -> int:
+def delete_episode_shots(
+    episode_id: str,
+    *,
+    conn=None,
+    commit: bool = True,
+) -> int:
     """清空单集分镜及其衍生产物。用于剧本重生/编辑后让下游重新展开。"""
-    conn = get_conn()
+    conn = conn or get_conn()
     ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (episode_id,)).fetchone()
     shots = rows_to_dicts(conn.execute(
         "SELECT id, episode_id, shot_no FROM shots WHERE episode_id=?", (episode_id,)).fetchall())
@@ -211,7 +216,8 @@ def delete_episode_shots(episode_id: str) -> int:
     conn.execute(
         "UPDATE episodes SET status='planned', script_error=NULL WHERE id=? AND status NOT IN ('planned','scripting','script_failed')",
         (episode_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     if ep:
         _invalidate_final_video(ep["project_id"], ep["episode_no"])
     return len(shots)
@@ -625,6 +631,104 @@ def stage_shot_artifact_cleanup(
         "shot_id": shot_id,
         "videos": len(versions),
         "references": references,
+        "outbox_id": outbox_id,
+    }
+
+
+def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
+    """Invalidate an episode's media rows and persist file cleanup atomically."""
+    if not conn.in_transaction:
+        raise RuntimeError("整集媒体清理必须加入调用方事务")
+    ep = conn.execute(
+        "SELECT project_id,episode_no FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if ep is None:
+        raise ValueError("分集不存在")
+    shots = rows_to_dicts(conn.execute(
+        "SELECT id,shot_no FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall())
+    files: list[str] = []
+    directories: list[str] = []
+    versions_removed = 0
+    references_removed = 0
+    for shot in shots:
+        ref_dir = (
+            config.PROJECTS_DIR / ep["project_id"] / "episodes"
+            / str(ep["episode_no"]) / "shots" / str(shot["shot_no"])
+            / "references"
+        )
+        directories.append(str(ref_dir))
+        if ref_dir.exists():
+            references_removed += sum(
+                1 for path in ref_dir.glob("*") if path.is_file()
+            )
+        versions = conn.execute(
+            "SELECT video_path FROM shot_versions WHERE shot_id=?",
+            (shot["id"],),
+        ).fetchall()
+        versions_removed += len(versions)
+        for version in versions:
+            if not version["video_path"]:
+                continue
+            video_path = Path(version["video_path"])
+            files.extend([
+                str(video_path),
+                str(Path(str(video_path.with_suffix("")) + "_last.jpg")),
+            ])
+        files.extend(
+            str(row["image_path"])
+            for row in conn.execute(
+                "SELECT image_path FROM shot_scenes "
+                "WHERE shot_id=? AND image_path IS NOT NULL",
+                (shot["id"],),
+            ).fetchall()
+            if row["image_path"]
+        )
+        files.extend(
+            str(row["path"])
+            for row in conn.execute(
+                "SELECT path FROM video_boundary_assets "
+                "WHERE shot_id=? AND path IS NOT NULL",
+                (shot["id"],),
+            ).fetchall()
+            if row["path"]
+        )
+        _delete_shot_reference_records(conn, str(shot["id"]))
+
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='shot_audio'"
+    ).fetchone():
+        conn.execute("DELETE FROM shot_audio WHERE episode_id=?", (episode_id,))
+    conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
+    conn.execute("DELETE FROM jobs WHERE episode_id=?", (episode_id,))
+
+    outbox_id = new_id("cleanup")
+    payload = {
+        "files": list(dict.fromkeys(files)),
+        "directories": list(dict.fromkeys(directories)),
+        "invalidate_final": {
+            "project_id": ep["project_id"],
+            "episode_no": int(ep["episode_no"]),
+        },
+    }
+    conn.execute(
+        """INSERT INTO media_cleanup_outbox(
+               id,episode_id,shot_id,payload_json,status,created_at
+           ) VALUES(?,?,NULL,?,'pending',?)""",
+        (
+            outbox_id,
+            episode_id,
+            json.dumps(payload, ensure_ascii=False),
+            now(),
+        ),
+    )
+    return {
+        "episode_id": episode_id,
+        "shots": len(shots),
+        "videos": versions_removed,
+        "references": references_removed,
         "outbox_id": outbox_id,
     }
 

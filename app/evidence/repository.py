@@ -730,12 +730,13 @@ def list_descendants(
     artifact_id: str,
     *,
     exclude_ids: set[str] | None = None,
+    conn=None,
 ) -> list[str]:
     """Return descendant artifact ids without mutating status (impact preview)."""
     if not artifact_id:
         return []
-    conn = get_conn()
-    all_rows = rows_to_dicts(conn.execute(
+    db = conn or get_conn()
+    all_rows = rows_to_dicts(db.execute(
         "SELECT id, parent_artifact_ids_json FROM artifacts"
     ).fetchall())
     children: dict[str, list[str]] = {}
@@ -765,16 +766,19 @@ def invalidate_descendants(
     reason: str,
     *,
     exclude_ids: set[str] | None = None,
+    conn=None,
+    commit: bool = True,
 ) -> list[str]:
     """Mark all descendants stale while preserving their immutable evidence rows."""
-    conn = get_conn()
+    db = conn or get_conn()
     excluded = set(exclude_ids or set())
-    excluded.update(_active_published_release_ids(conn))
-    stale = list_descendants(artifact_id, exclude_ids=excluded)
+    excluded.update(_active_published_release_ids(db))
+    stale = list_descendants(artifact_id, exclude_ids=excluded, conn=db)
     if stale:
-        conn.executemany(
+        db.executemany(
             "UPDATE artifacts SET status='stale', stale_reason=? WHERE id=? AND status!='rejected'",
             [(reason, child_id) for child_id in stale],
         )
-        conn.commit()
+        if commit:
+            db.commit()
     return stale

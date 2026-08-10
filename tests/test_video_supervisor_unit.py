@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 
 import pytest
 
+from app import db
 from app.harness.types import Issue, IssueSeverity
 from app.video_issues import (
     is_fatal,
@@ -25,10 +27,48 @@ from app.video_supervisor import (
     MIN_ATTEMPTS_PER_SHOT,
     CoverageLedger,
     ShotCoverageEntry,
+    _requeue_no_charge_job,
     attempts_for,
 )
 from app.evidence.media import grade_shot_video
 from app.compiler import CompileError
+
+
+def test_no_charge_requeue_preserves_budget_pause_gate() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    for statement in db.MIGRATIONS:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+    conn.executemany(
+        """INSERT INTO jobs(
+               id,kind,shot_id,status,retry_count,error,created_at,updated_at
+           ) VALUES(?, 'video', 'shot-budget', ?, 2, 'x', ?, 1)""",
+        [
+            ("job-failed", "failed", 1),
+            ("job-budget", "paused_budget", 2),
+        ],
+    )
+    conn.commit()
+
+    requeued = _requeue_no_charge_job(
+        conn,
+        shot_id="shot-budget",
+        run_id=None,
+    )
+
+    statuses = {
+        row["id"]: row["status"]
+        for row in conn.execute("SELECT id,status FROM jobs").fetchall()
+    }
+    assert requeued == "job-failed"
+    assert statuses == {
+        "job-failed": "queued",
+        "job-budget": "paused_budget",
+    }
 
 
 def test_grade_shot_video_a_b_c():

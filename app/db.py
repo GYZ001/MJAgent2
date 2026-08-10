@@ -1194,8 +1194,8 @@ CREATE INDEX IF NOT EXISTS idx_video_mode_qa_plan
 """
 
 
-def _open_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+def _open_connection(*, timeout: float = 30.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=timeout, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     # #region debug-point A-D:attach-sqlite-transaction-trace
     if _DEBUG_SQL_ENABLED:
@@ -1227,7 +1227,9 @@ def get_conn() -> sqlite3.Connection:
         with _task_connections_lock:
             conn = _task_connections.get(task)
             if conn is None:
-                conn = _open_connection()
+                # sqlite3 waits for writer locks synchronously. An asyncio task
+                # must fail fast so retry backoff can yield to the event loop.
+                conn = _open_connection(timeout=0)
                 _task_connections[task] = conn
                 task.add_done_callback(_release_task_connection)
         return conn

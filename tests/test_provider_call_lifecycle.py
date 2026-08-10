@@ -854,6 +854,69 @@ def test_video_create_sends_stable_idempotency_key(monkeypatch) -> None:
     assert seen_headers[1]["Idempotency-Key"] == "video-create-ver_1-safety-1"
 
 
+def test_video_create_persists_exact_request_and_rejects_operation_drift(
+    tmp_path, monkeypatch,
+) -> None:
+    posts: list[dict] = []
+
+    class Response:
+        status_code = 200
+        text = '{"id":"task-1"}'
+
+        def json(self):
+            return {"id": "task-1"}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, json, headers):
+            posts.append(json)
+            return Response()
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "seedance-request.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "hiagent")
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *_args: ("https://provider", {"x": "y"}),
+    )
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model")
+
+    operation_id = "video-create-ver-exact"
+    data_url = "data:image/png;base64,ZXhhY3QtYnl0ZXM="
+    assert asyncio.run(hiagent.create_video_task(
+        "prompt-one",
+        image_urls=[(data_url, "reference_image")],
+        call_meta={"operation_id": operation_id},
+    )) == "task-1"
+
+    saved = db.latest_provider_request_json(
+        "video_create", "video-model", operation_id,
+    )
+    assert saved["content"][1]["image_url"]["url"] == data_url
+
+    with pytest.raises(
+        hiagent.ProviderError,
+        match="同一业务操作的请求内容发生变化",
+    ) as caught:
+        asyncio.run(hiagent.create_video_task(
+            "prompt-two",
+            image_urls=[(data_url, "reference_image")],
+            call_meta={"operation_id": operation_id},
+        ))
+
+    assert caught.value.failure_kind == "idempotency_request_mismatch"
+    assert caught.value.requires_explicit_retry is True
+    assert len(posts) == 1
+
+
 def test_image_generation_sends_stable_idempotency_key(monkeypatch) -> None:
     seen_headers: list[dict[str, str]] = []
 

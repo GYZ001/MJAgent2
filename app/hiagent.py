@@ -27,8 +27,9 @@ import httpx
 from app import config
 from app.atomic_io import atomic_write_bytes
 from app.db import (finish_provider_call, get_conn, get_setting, log_provider_call,
-                    provider_operation_id, start_provider_call,
-                    update_provider_call_progress)
+                    latest_provider_request_json, provider_operation_id,
+                    start_provider_call, update_provider_call_progress,
+                    update_provider_call_request)
 from app.model_capabilities import (
     active_model_token_limits,
 )
@@ -528,7 +529,8 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
                      kind: str, model: str, retries: int = 2,
                      headers: dict | None = None, key_name: str = "HIAGENT_API_KEY",
                      meta: dict | None = None,
-                     idempotency_key: str | None = None) -> dict:
+                     idempotency_key: str | None = None,
+                     preserve_exact_request: bool = False) -> dict:
     last_err: ProviderError | None = None
     merged_meta = _merge_call_meta(meta)
     req_headers = dict(headers if headers is not None else _headers())
@@ -551,6 +553,8 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
             **(merged_meta or {}),
         }
         call_id = start_provider_call(kind, model, meta=attempt_meta, request_json=payload)
+        if preserve_exact_request:
+            update_provider_call_request(call_id, payload, preserve_exact=True)
         try:
             resp = await client.post(url, json=payload, headers=req_headers)
             latency = int((time.time() - start) * 1000)
@@ -1639,13 +1643,25 @@ async def create_video_task(
         operation_id = f"video-create-{call_meta['version_id']}"
     else:
         operation_id = provider_operation_id("video_create", model, payload)
+    saved_request = latest_provider_request_json(
+        "video_create", model, operation_id,
+    )
+    if saved_request is not None and saved_request != payload:
+        raise ProviderError(
+            "Seedance 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
+            "请保留原任务等待供应商结果确认，或通过页面明确创建新的生成尝试",
+            failure_kind="idempotency_request_mismatch",
+            delivery_state="unknown",
+            requires_explicit_retry=True,
+        )
     call_meta = {**(call_meta or {}), "operation_id": operation_id}
     timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_CREATE, write=30, pool=10)
     async with httpx.AsyncClient(timeout=timeout) as client:
         data = await _post_json(client, f"{base_url}/contents/generations/tasks", payload,
                                 kind="video_create", model=model, headers=model_headers,
                                 key_name=f"model:{model}", meta=call_meta,
-                                idempotency_key=operation_id)
+                                idempotency_key=operation_id,
+                                preserve_exact_request=True)
     task_id = data.get("id")
     if not task_id:
         raise ProviderError(f"视频任务创建响应缺少 id：{json.dumps(data, ensure_ascii=False)[:300]}")

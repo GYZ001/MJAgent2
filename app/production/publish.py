@@ -153,6 +153,7 @@ def publish_screenplay(
     projection_json = script.model_dump_json()
     if conn.in_transaction:
         raise RuntimeError("剧本发布前存在未收口事务")
+    cleanup_outbox_id: str | None = None
     conn.execute("BEGIN IMMEDIATE")
     try:
         current_revision = conn.execute(
@@ -218,6 +219,10 @@ def publish_screenplay(
         # 在发布事务中先切断下游权威指针。旧镜头/文件的物理清理必须在
         # 新剧本提交后执行；否则发布后半段失败会同时丢失旧下游和新发布。
         if clear_downstream:
+            from app.artifacts import stage_episode_artifact_cleanup
+
+            cleanup = stage_episode_artifact_cleanup(conn, episode_id)
+            cleanup_outbox_id = str(cleanup["outbox_id"])
             conn.execute(
                 """UPDATE episodes SET storyboard_outline_json=NULL, storyboard_artifact_id=NULL,
                           storyboard_warning=NULL, published_storyboard_artifact_id=NULL,
@@ -261,6 +266,14 @@ def publish_screenplay(
         )
         consume_completion_certificate(cert.certificate_id, conn=conn, commit=False)
         conn.execute("DELETE FROM screenplay_drafts WHERE episode_id=?", (episode_id,))
+        if previous_artifact_id and previous_artifact_id != artifact_id:
+            evidence_repository.invalidate_descendants(
+                previous_artifact_id,
+                f"上游剧本已由 {artifact_id} 替代",
+                exclude_ids={artifact_id},
+                conn=conn,
+                commit=False,
+            )
         conn.commit()
     except BaseException:
         if conn.in_transaction:
@@ -274,30 +287,24 @@ def publish_screenplay(
         )
     except Exception:
         pass
-    downstream_cleanup_error = None
-    if clear_downstream:
+    downstream_cleanup_pending = False
+    if cleanup_outbox_id:
         try:
-            from app import worker
+            from app.artifacts import flush_media_cleanup_outbox
 
-            worker.delete_episode_shots(episode_id)
-        except Exception as exc:  # noqa: BLE001 - published authority remains valid
-            downstream_cleanup_error = str(exc)
-    if previous_artifact_id and previous_artifact_id != artifact_id:
-        from app.evidence import repository as evidence_repository
-        evidence_repository.invalidate_descendants(
-            previous_artifact_id,
-            f"上游剧本已由 {artifact_id} 替代",
-            exclude_ids={artifact_id},
-        )
+            downstream_cleanup_pending = not flush_media_cleanup_outbox(
+                cleanup_outbox_id
+            )
+        except Exception:  # noqa: BLE001 - startup recovery owns the durable row
+            downstream_cleanup_pending = True
     result = {
         "episode_id": episode_id,
         "artifact_id": artifact_id,
         "certificate_id": cert.certificate_id,
         "status": "ready",
     }
-    if downstream_cleanup_error:
+    if downstream_cleanup_pending:
         result["downstream_cleanup_pending"] = True
-        result["downstream_cleanup_error"] = downstream_cleanup_error
     return result
 
 

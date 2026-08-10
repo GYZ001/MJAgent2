@@ -596,20 +596,30 @@ def recover_screenplay_tasks() -> int:
             if published["screenplay_status"] == "failed":
                 conn.execute(
                     "UPDATE episodes SET screenplay_status='ready',"
-                    "screenplay_error=NULL,screenplay_updated_at=? WHERE id=?",
-                    (now(), published["id"]),
+                    "screenplay_error=NULL,screenplay_updated_at=? "
+                    "WHERE id=? AND screenplay_status='failed' "
+                    "AND active_screenplay_run_id IS NULL "
+                    "AND screenplay_artifact_id=?",
+                    (
+                        now(),
+                        published["id"],
+                        published["screenplay_artifact_id"],
+                    ),
                 )
             continue
         if published["screenplay_status"] != "ready":
             continue
         conn.execute(
             "UPDATE episodes SET screenplay_status='failed',screenplay_error=?,"
-            "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+            "active_screenplay_run_id=NULL,screenplay_updated_at=? "
+            "WHERE id=? AND screenplay_status='ready' "
+            "AND screenplay_artifact_id=?",
             (
                 "现有完成凭证未通过当前生产门禁；旧剧本与证据已保留，"
                 "请重新发起剧本生成",
                 now(),
                 published["id"],
+                published["screenplay_artifact_id"],
             ),
         )
     conn.commit()
@@ -666,7 +676,8 @@ def recover_screenplay_tasks() -> int:
         ):
             conn.execute(
                 "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
-                "active_screenplay_run_id=NULL,screenplay_updated_at=? WHERE id=?",
+                "active_screenplay_run_id=NULL,screenplay_updated_at=? "
+                "WHERE id=? AND active_screenplay_run_id=?",
                 (
                     (
                         f"剧本工作副本使用旧合同 {revision.contract_version}；"
@@ -675,6 +686,7 @@ def recover_screenplay_tasks() -> int:
                     ),
                     now(),
                     episode_id,
+                    row["active_screenplay_run_id"],
                 ),
             )
             conn.commit()
@@ -735,12 +747,14 @@ def recover_screenplay_tasks() -> int:
             )
             conn.execute(
                 "UPDATE episodes SET screenplay_status=?, screenplay_error=?, "
-                "active_screenplay_run_id=NULL, screenplay_updated_at=? WHERE id=?",
+                "active_screenplay_run_id=NULL, screenplay_updated_at=? "
+                "WHERE id=? AND active_screenplay_run_id=?",
                 (
                     retry_status,
                     f"服务重启后的自动恢复未能启动；{retry_hint}。{public}",
                     now(),
                     episode_id,
+                    row["active_screenplay_run_id"],
                 ),
             )
             conn.commit()
@@ -2106,44 +2120,51 @@ async def delete_screenplay(episode_id: str):
         raise HTTPException(409, "剧本运行状态已变化，请刷新后重试删除") from None
 
     conn = get_conn()
-    latest_owner = conn.execute(
-        "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
-        (episode_id,),
-    ).fetchone()
-    if latest_owner and latest_owner["active_screenplay_run_id"] not in {
-        None, screenplay_run_id,
-    }:
-        raise HTTPException(409, "剧本已被新的运行接管，未执行删除")
-    shot_count = conn.execute(
-        "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
-    ).fetchone()["c"]
-    worker.delete_episode_shots(episode_id)
-    conn = get_conn()
-    stamp = now()
+    expected_owner = str(screenplay_run_id or "")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        latest_owner = conn.execute(
+            "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        actual_owner = str(
+            latest_owner["active_screenplay_run_id"] or ""
+        ) if latest_owner else "missing"
+        if not latest_owner or actual_owner != expected_owner:
+            raise StateConflict(
+                "screenplay_owner",
+                episode_id,
+                {expected_owner},
+                actual_owner,
+            )
+        shot_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM shots WHERE episode_id=?", (episode_id,)
+        ).fetchone()["c"]
+        worker.delete_episode_shots(episode_id, conn=conn, commit=False)
+        stamp = now()
 
-    # Revisions and grants are historical audit records; revoke/supersede them
-    # instead of deleting them.  No old working checkpoint may become active
-    # after the episode has returned to the pre-Baseline state.
-    conn.execute(
-        "UPDATE production_revisions SET status='superseded', updated_at=? "
-        "WHERE episode_id=? AND status='active'",
-        (stamp, episode_id),
-    )
-    conn.execute(
-        "UPDATE production_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE episode_id=?",
-        (stamp, episode_id),
-    )
-    conn.execute(
-        "UPDATE completion_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE episode_id=?",
-        (stamp, episode_id),
-    )
-    conn.execute(
-        "UPDATE delivery_packages SET status='superseded' "
-        "WHERE episode_id=? AND status NOT IN ('rejected','superseded')",
-        (episode_id,),
-    )
-    conn.execute(
-        """UPDATE episodes SET
+        # Revisions and grants are historical audit records; revoke/supersede
+        # them instead of deleting them.
+        conn.execute(
+            "UPDATE production_revisions SET status='superseded', updated_at=? "
+            "WHERE episode_id=? AND status='active'",
+            (stamp, episode_id),
+        )
+        conn.execute(
+            "UPDATE production_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE episode_id=?",
+            (stamp, episode_id),
+        )
+        conn.execute(
+            "UPDATE completion_grants SET revoked_at=COALESCE(revoked_at, ?) WHERE episode_id=?",
+            (stamp, episode_id),
+        )
+        conn.execute(
+            "UPDATE delivery_packages SET status='superseded' "
+            "WHERE episode_id=? AND status NOT IN ('rejected','superseded')",
+            (episode_id,),
+        )
+        cursor = conn.execute(
+            """UPDATE episodes SET
             screenplay_json=NULL,
             screenplay_character_resolutions='[]',
             screenplay_required_dialogues='[]',
@@ -2172,10 +2193,25 @@ async def delete_screenplay(episode_id: str):
             delivery_status='not_ready',
             status='planned',
             script_error=NULL
-        WHERE id=?""",
-        (stamp, episode_id),
-    )
-    conn.commit()
+        WHERE id=? AND COALESCE(active_screenplay_run_id, '')=?""",
+            (stamp, episode_id, expected_owner),
+        )
+        if cursor.rowcount != 1:
+            raise StateConflict(
+                "screenplay_owner",
+                episode_id,
+                {expected_owner},
+                "changed_during_delete",
+            )
+        conn.commit()
+    except StateConflict:
+        if conn.in_transaction:
+            conn.rollback()
+        raise HTTPException(409, "剧本已被新的运行接管，未执行删除") from None
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     return {
         "deleted": episode_id,
         "downstream_shots_cleared": int(shot_count or 0),

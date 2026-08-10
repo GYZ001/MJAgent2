@@ -1950,6 +1950,32 @@ def _patch_version_supervisor_meta(version_id: str, meta: dict[str, Any]) -> Non
     conn.commit()
 
 
+def _requeue_no_charge_job(
+    conn,
+    *,
+    shot_id: str,
+    run_id: str | None,
+) -> str | None:
+    """Requeue a retryable failure without crossing an intentional pause gate."""
+    job = conn.execute(
+        """SELECT id FROM jobs WHERE shot_id=? AND kind='video'
+           AND status IN ('failed','waiting_retry')
+           AND (? IS NULL OR owner_run_id=?)
+           ORDER BY created_at DESC LIMIT 1""",
+        (shot_id, run_id, run_id),
+    ).fetchone()
+    if not job:
+        return None
+    changed = conn.execute(
+        """UPDATE jobs
+              SET status='queued', retry_count=0, error=NULL, updated_at=?
+            WHERE id=? AND status IN ('failed','waiting_retry')""",
+        (now(), job["id"]),
+    )
+    conn.commit()
+    return str(job["id"]) if changed.rowcount == 1 else None
+
+
 def _collect_issues(
     entry: ShotCoverageEntry,
     *,
@@ -3460,20 +3486,17 @@ async def run_video_completion_supervisor(
                 })
 
             if plan.strategy == "requeue_no_charge":
-                # 重置活动/失败 job 的 retry_count 并重排
-                job = conn.execute(
-                    """SELECT id FROM jobs WHERE shot_id=? AND kind='video'
-                       AND status IN ('failed','waiting_retry','paused_budget')
-                       AND (? IS NULL OR owner_run_id=?)
-                       ORDER BY created_at DESC LIMIT 1""",
-                    (entry.shot_id, run_id, run_id),
-                ).fetchone()
-                if job and entry.no_charge_requeues < 2:
-                    conn.execute(
-                        "UPDATE jobs SET status='queued', retry_count=0, error=NULL, updated_at=? WHERE id=?",
-                        (now(), job["id"]),
+                # 预算暂停是页面确认门禁，不能作为普通失败免计费重排。
+                requeued_job_id = (
+                    _requeue_no_charge_job(
+                        conn,
+                        shot_id=entry.shot_id,
+                        run_id=run_id,
                     )
-                    conn.commit()
+                    if entry.no_charge_requeues < 2
+                    else None
+                )
+                if requeued_job_id:
                     entry.no_charge_requeues += 1
                     progressed = True
                     continue

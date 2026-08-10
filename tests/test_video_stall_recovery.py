@@ -92,6 +92,46 @@ def test_noop_stall_reconciliation_releases_write_transaction(
     assert conn.in_transaction is False
 
 
+def test_stall_reconciliation_never_resumes_budget_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _seed(conn)
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,episode_id,project_id,status,
+               reserved_cost_cny,created_at,updated_at
+           ) VALUES(
+               'budget-paused','video','s1','e1','p1','paused_budget',
+               1,1,1
+           )"""
+    )
+    conn.commit()
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        worker,
+        "retry_paused",
+        lambda *_args, **_kwargs: pytest.fail(
+            "巡检不得调用显式预算恢复入口"
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_enqueue_for_current_status",
+        lambda *_args, **_kwargs: pytest.fail(
+            "预算暂停任务不得由巡检重新入队"
+        ),
+    )
+
+    report = worker.reconcile_stalled_video_jobs()
+
+    job = conn.execute(
+        "SELECT status FROM jobs WHERE id='budget-paused'"
+    ).fetchone()
+    assert job["status"] == "paused_budget"
+    assert report["budget_resumed"] == 0
+
+
 def test_embedded_source_dialogue_is_not_inferred_or_mutated_during_enqueue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

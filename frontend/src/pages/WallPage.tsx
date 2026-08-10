@@ -843,6 +843,7 @@ export default function WallPage() {
       const failed = (result.enqueued || []).filter(item => item.error).length
       showToast([
         result.resumed_jobs ? `恢复 ${result.resumed_jobs} 个暂停任务` : '',
+        result.budget_resumed_jobs ? `恢复 ${result.budget_resumed_jobs} 个预算暂停任务` : '',
         created ? `补建 ${created} 个未完成任务` : '',
         reused ? `复用 ${reused} 个在途任务` : '',
         result.skipped_completed ? `跳过 ${result.skipped_completed} 个已完成分镜` : '',
@@ -1032,7 +1033,7 @@ export default function WallPage() {
             : generationDecision === 'stop'
               ? '系统会暂停本地排队和后续处理；供应商已接单的任务可能继续执行并产生费用。'
               : generationDecision === 'resume'
-                ? '系统会恢复暂停任务，并为仍未完成的镜头补建任务，可能产生新的模型费用。'
+                ? '只有确认本次页面操作后，系统才会恢复预算暂停任务，并为仍未完成的镜头补建任务；可能产生新的模型费用。'
                 : '将删除本集所有视频候选、采用关系、关键帧和参考图；分镜与剧本文本会保留。'}
           details={generationDecision === 'generate'
             ? [
@@ -1043,7 +1044,7 @@ export default function WallPage() {
             : generationDecision === 'stop'
               ? ['停止请求不代表供应商已经终止', '已完成候选和已发生费用会保留']
               : generationDecision === 'resume'
-                ? ['已完成镜头会跳过', '正在执行或可复用的任务不会重复创建']
+                ? ['巡检和服务重启不会自动恢复预算暂停任务', '已完成镜头会跳过', '正在执行或可复用的任务不会重复创建']
                 : ['此操作不可撤销，已发生费用不会退回', '清空后需重新准备图像并生成视频']}
           confirmLabel={generationDecision === 'generate'
             ? `确认生成 ${shots.length} 镜`

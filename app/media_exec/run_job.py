@@ -18,6 +18,27 @@ class VideoInputRepairRequired(RuntimeError):
     """The planned mode is still valid, but its local input assets need repair."""
 
 
+class ProviderCreateUnresolved(RuntimeError):
+    """The provider may have accepted create, but no durable task handle exists."""
+
+
+def _assert_provider_create_resolved(job, task_id: str | None) -> None:
+    if task_id:
+        return
+    create_state = str(_row_value(job, "provider_create_state") or "not_started")
+    provider_may_have_accepted = bool(
+        _row_value(job, "provider_non_cancellable")
+        or create_state in {"submitting", "unknown", "accepted"}
+    )
+    if provider_may_have_accepted:
+        operation_id = str(_row_value(job, "provider_operation_id") or "")
+        raise ProviderCreateUnresolved(
+            "[VIDEO_PROVIDER_CREATE_UNRESOLVED] Seedance create 可能已被供应商接收，"
+            f"但本地尚无 task id（operation_id={operation_id or 'missing'}，"
+            f"state={create_state}）；已禁止自动重复 create，请先在页面核对供应商任务"
+        )
+
+
 def _authority_checks_can_use_worker_thread(conn=None) -> bool:
     """A private in-memory SQLite database cannot be reopened in a worker thread."""
     try:
@@ -3145,6 +3166,7 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     (provider_operation_id, recovered_at, now(), job_id),
                 )
                 conn.commit()
+        _assert_provider_create_resolved(job, task_id)
         provider_submitted_at = (
             recovered_at
             if recovered_at is not None
@@ -3904,6 +3926,36 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
         )
         reconcile_episode_generation_status(job["episode_id"])
         return
+    except ProviderCreateUnresolved as exc:
+        message = str(exc)
+        changed = conn.execute(
+            """UPDATE jobs
+                  SET status='waiting_human',error=?,
+                      reason_code='VIDEO_PROVIDER_CREATE_UNRESOLVED',
+                      reason_text=?,lease_owner=NULL,lease_expires_at=NULL,
+                      next_retry_at=NULL,updated_at=?
+                WHERE id=? AND status='running' AND lease_owner=?""",
+            (message, message, now(), job_id, owner),
+        )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return
+        _set_version(version["id"], status="waiting_human", error=message)
+        conn.execute(
+            """UPDATE budget_reservations
+                  SET status='reserved'
+                WHERE job_id=? AND status='running'""",
+            (job_id,),
+        )
+        conn.commit()
+        mark_media_job_state(
+            _row_value(job, "run_id"),
+            _row_value(job, "step_run_id"),
+            "waiting_human",
+            message,
+        )
+        reconcile_episode_generation_status(job["episode_id"])
+        return
     except (ProviderError, Exception) as exc:  # noqa: BLE001 失败要响：原文进日志，前端给码+分类
         from app.harness.model_gateway import StructuredProviderRejection
 
@@ -4561,7 +4613,11 @@ def _block_orphaned_continuity_job(conn, row) -> bool:
 
 
 def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
-    """周期修复没有 worker 能消费的业务级卡死状态。"""
+    """周期修复没有 worker 能消费的业务级卡死状态。
+
+    ``paused_budget`` is an intentional user gate, not a stalled state. Only
+    an explicit page action may call ``retry_paused`` and move it to queued.
+    """
     from app.observability.metrics import inc
 
     conn = get_conn()
@@ -4688,20 +4744,6 @@ def reconcile_stalled_video_jobs(limit: int = 50) -> dict[str, int]:
         try:
             if _block_orphaned_continuity_job(conn, row):
                 report["dependency_repair_required"] += 1
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:  # noqa: BLE001
-                pass
-
-    paused_budget_episodes = conn.execute(
-        """SELECT DISTINCT episode_id FROM jobs
-           WHERE kind='video' AND status='paused_budget'
-             AND cancellation_requested=0 AND abandoned=0"""
-    ).fetchall()
-    for row in paused_budget_episodes:
-        try:
-            report["budget_resumed"] += retry_paused(str(row["episode_id"]))
         except Exception:
             try:
                 conn.rollback()
