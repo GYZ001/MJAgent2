@@ -468,6 +468,11 @@ class IRSceneUnit(BaseModel):
                 "action_agency.identity_bearing 必须与 "
                 "actor_keys/target_keys/speaker_key 等价"
             )
+        if self.action_agency.is_character_agency and not identity_bearing:
+            raise ValueError(
+                "character action_agency 必须由 "
+                "actor_keys/target_keys/speaker_key 承载"
+            )
         if self.action_agency.source_segment_ids != self.source_segment_ids:
             raise ValueError(
                 "action_agency.source_segment_ids 必须与 unit 来源等价"
@@ -604,6 +609,11 @@ class IREvent(BaseModel):
             raise ValueError(
                 "event.action_agency.identity_bearing 必须与 "
                 "actor_keys/target_keys 等价"
+            )
+        if self.action_agency.is_character_agency and not identity_bearing:
+            raise ValueError(
+                "event.character action_agency 必须由 "
+                "actor_keys/target_keys 承载"
             )
         if self.action_agency.source_segment_ids != self.source_segment_ids:
             raise ValueError(

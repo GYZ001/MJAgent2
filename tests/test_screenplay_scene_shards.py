@@ -29,6 +29,7 @@ from app.screenplay_ir import (
     IRScene,
 )
 from app.screenplay_scene_shards import (
+    SCREENPLAY_SCENE_CREATIVE_VERSION,
     SCREENPLAY_SCENE_INPUT_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
     ScreenplaySceneShardCreativeIR,
@@ -172,7 +173,7 @@ def _shard(
         identity_registry,
     )[plan.shard_id]
     return scene_shards_module.compile_screenplay_scene_shard_draft(
-        _creative_shard(plan, blueprint),
+        _creative_shard(plan, blueprint, contracts),
         episode_no=1,
         plan=plan,
         scene_plans={
@@ -185,8 +186,14 @@ def _shard(
 def _creative_shard(
     plan,
     blueprint: NarrativeBlueprint,
+    contracts: list[ScreenplaySceneInputContract] | None = None,
 ) -> ScreenplaySceneShardCreativeIR:
     del blueprint
+    compiled_by_key = {
+        slot.unit_key: slot
+        for contract in (contracts or [])
+        for slot in contract.unit_slots
+    }
     return ScreenplaySceneShardCreativeIR.model_validate({
         "slots": {
             slot.unit_key: {
@@ -198,6 +205,29 @@ def _creative_shard(
                 "resulting_state": (
                     f"完成 {slot.source_segment_ids[0]}"
                 ),
+                "text_provenance": {
+                    "kind": "creative_action",
+                    "identity_keys": list(dict.fromkeys([
+                        *compiled_by_key.get(
+                            slot.unit_key,
+                            ScreenplaySceneCompiledUnitSlot(
+                                **slot.model_dump(mode="python")
+                            ),
+                        ).actor_keys,
+                        *compiled_by_key.get(
+                            slot.unit_key,
+                            ScreenplaySceneCompiledUnitSlot(
+                                **slot.model_dump(mode="python")
+                            ),
+                        ).target_keys,
+                        *compiled_by_key.get(
+                            slot.unit_key,
+                            ScreenplaySceneCompiledUnitSlot(
+                                **slot.model_dump(mode="python")
+                            ),
+                        ).onscreen_entity_keys,
+                    ])),
+                },
             }
             for slot in plan.unit_slots
         },
@@ -250,7 +280,13 @@ def _a78_replay_models(
         }
     contract = ScreenplaySceneInputContract.model_validate(contract_payload)
     creative_payload = deepcopy(replay["provider_creative_response"])
-    creative_payload["slots"][plan.unit_slots[0].unit_key].update(
+    creative_payload["contract_version"] = SCREENPLAY_SCENE_CREATIVE_VERSION
+    creative_slot = creative_payload["slots"][plan.unit_slots[0].unit_key]
+    creative_slot["text_provenance"] = {
+        "kind": "creative_action",
+        "identity_keys": ["person_8ff1cb1a5861"],
+    }
+    creative_slot.update(
         creative_update or {}
     )
     creative = ScreenplaySceneShardCreativeIR.model_validate(creative_payload)
@@ -2291,7 +2327,10 @@ def test_creative_text_provenance_does_not_create_character_relation(
         creative_update={
             "text": text,
             "agency_kind": agency_kind,
-            "text_provenance": text_provenance,
+            "text_provenance": {
+                "kind": text_provenance,
+                "identity_keys": [],
+            },
         },
     )
 
@@ -2315,7 +2354,10 @@ def test_anonymous_group_action_does_not_require_identity_relation() -> None:
         creative_update={
             "text": "四个少年同时后退一步",
             "agency_kind": "collective",
-            "text_provenance": "creative_action",
+            "text_provenance": {
+                "kind": "creative_action",
+                "identity_keys": [],
+            },
         },
     )
 
@@ -2336,7 +2378,12 @@ def test_anonymous_group_action_does_not_require_identity_relation() -> None:
 
 def test_character_action_with_scaffold_relation_compiles() -> None:
     _replay, plan, scene_plan, contract, creative = _a78_replay_models(
-        creative_update={"text_provenance": "creative_action"},
+        creative_update={
+            "text_provenance": {
+                "kind": "creative_action",
+                "identity_keys": ["person_8ff1cb1a5861"],
+            },
+        },
         bind_actor=True,
     )
 

@@ -388,6 +388,18 @@ class ActionAgency(BaseModel):
     def _normalize_kind(cls, value: object) -> str:
         return str(value or "").strip() or "unattributed"
 
+    @property
+    def is_character_agency(self) -> bool:
+        return self.kind == "character" or self.kind.startswith("character_")
+
+    @model_validator(mode="after")
+    def _validate_character_identity_bearing(self) -> "ActionAgency":
+        if self.is_character_agency and not self.identity_bearing:
+            raise ValueError(
+                "character action_agency 必须声明 identity_bearing=true"
+            )
+        return self
+
 
 class AtomicAction(BaseModel):
     action_id: str
@@ -431,6 +443,10 @@ class AtomicAction(BaseModel):
         if self.action_agency.identity_bearing != identity_bearing:
             raise ValueError(
                 "action_agency.identity_bearing 必须与 actor_ids/target_ids 等价"
+            )
+        if self.action_agency.is_character_agency and not identity_bearing:
+            raise ValueError(
+                "character action_agency 必须由 actor_ids/target_ids 承载"
             )
         return self
 
