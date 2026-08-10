@@ -72,7 +72,10 @@ def test_issue_rolls_back_grant_when_budget_authority_write_fails(
     grant_db,
     monkeypatch,
 ) -> None:
-    def fail_authority(*_args, **_kwargs):
+    write_authority = completion_grant.authorize_episode_video_budget_absolute
+
+    def fail_authority(*args, **kwargs):
+        write_authority(*args, **kwargs)
         raise RuntimeError("injected authority failure")
 
     monkeypatch.setattr(
@@ -101,8 +104,10 @@ def test_topup_rolls_back_grant_when_budget_authority_write_fails(
         """SELECT cap_cny,source FROM episode_video_budget_authorities
            WHERE episode_id='grant-episode'"""
     ).fetchone()
+    write_authority = completion_grant.authorize_episode_video_budget_absolute
 
-    def fail_authority(*_args, **_kwargs):
+    def fail_authority(*args, **kwargs):
+        write_authority(*args, **kwargs)
         raise RuntimeError("injected topup authority failure")
 
     monkeypatch.setattr(
@@ -324,3 +329,49 @@ async def test_completion_core_passes_idempotency_key_to_grant_topup(
         "add_wall_s": 0.0,
         "idempotency_key": "episode-topup-request",
     }
+
+
+@pytest.mark.asyncio
+async def test_project_completion_derives_stable_episode_grant_key(
+    grant_db,
+    monkeypatch,
+) -> None:
+    import app.video_supervisor as video_supervisor
+
+    monkeypatch.setattr(api, "get_conn", lambda: grant_db)
+    monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
+    monkeypatch.setattr(
+        video_supervisor,
+        "rebuild_coverage_ledger",
+        lambda _episode_id: type(
+            "Ledger",
+            (),
+            {"covered_within_quota": lambda self: False},
+        )(),
+    )
+    captured = {}
+
+    async def capture_episode(episode_id, body, **_kwargs):
+        captured.update({"episode_id": episode_id, "body": body})
+        return {
+            "run_id": "run-episode",
+            "completion_grant_id": "grant-episode",
+        }
+
+    monkeypatch.setattr(api, "_complete_episode_core", capture_episode)
+
+    await api._complete_project_videos_core(
+        "grant-project",
+        {
+            "episode_ids": ["grant-episode"],
+            "global_budget_cap_cny": 50,
+            "per_episode_cap_cny": 50,
+            "wall_clock_cap_s": 3600,
+            "idempotency_key": "project-request",
+        },
+    )
+
+    assert captured["episode_id"] == "grant-episode"
+    assert captured["body"]["idempotency_key"] == (
+        "project-request:episode:grant-episode"
+    )
