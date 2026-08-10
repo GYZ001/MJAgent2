@@ -355,6 +355,31 @@ def ensure_video_budget_authority_tables(conn=None) -> None:
                    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
                )"""
         )
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS video_budget_authority_ledger (
+                   id TEXT PRIMARY KEY,
+                   operation_id TEXT NOT NULL UNIQUE,
+                   request_fingerprint TEXT NOT NULL,
+                   event_type TEXT NOT NULL,
+                   grant_id TEXT NOT NULL,
+                   episode_id TEXT NOT NULL,
+                   project_id TEXT NOT NULL,
+                   requested_add_cny REAL NOT NULL,
+                   prior_grant_cap_cny REAL,
+                   grant_cap_cny REAL NOT NULL,
+                   prior_authority_cap_cny REAL,
+                   authority_cap_cny REAL NOT NULL,
+                   prior_wall_clock_cap_s REAL,
+                   wall_clock_cap_s REAL NOT NULL,
+                   created_at REAL NOT NULL,
+                   FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE,
+                   FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+               )"""
+        )
+        db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_video_budget_authority_grant
+                   ON video_budget_authority_ledger(grant_id,created_at)"""
+        )
         claims_exist = bool(db.execute(
             """SELECT 1 FROM sqlite_master
                 WHERE type='table' AND name='provider_video_budget_claims'"""
@@ -875,7 +900,9 @@ def authorize_episode_video_budget_increment(
         raise ValueError("视频授权额度必须是非负有限数")
     db = conn or get_conn()
     ensure_video_budget_authority_tables(db)
-    db.execute("BEGIN IMMEDIATE")
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN IMMEDIATE")
     try:
         current = db.execute(
             "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
@@ -903,10 +930,12 @@ def authorize_episode_video_budget_increment(
                    authorized_at=excluded.authorized_at,updated_at=excluded.updated_at""",
             (episode_id, baseline, cap, source, stamp, stamp),
         )
-        db.commit()
+        if owns_transaction:
+            db.commit()
         return round(cap, 6)
     except Exception:
-        db.rollback()
+        if owns_transaction:
+            db.rollback()
         raise
 
 
@@ -923,7 +952,9 @@ def authorize_episode_video_budget_absolute(
         raise ValueError("视频授权上限必须是非负有限数")
     db = conn or get_conn()
     ensure_video_budget_authority_tables(db)
-    db.execute("BEGIN IMMEDIATE")
+    owns_transaction = not db.in_transaction
+    if owns_transaction:
+        db.execute("BEGIN IMMEDIATE")
     try:
         current = db.execute(
             "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
@@ -947,10 +978,12 @@ def authorize_episode_video_budget_absolute(
                    authorized_at=excluded.authorized_at,updated_at=excluded.updated_at""",
             (episode_id, baseline, cap, source, stamp, stamp),
         )
-        db.commit()
+        if owns_transaction:
+            db.commit()
         return round(cap, 6)
     except Exception:
-        db.rollback()
+        if owns_transaction:
+            db.rollback()
         raise
 
 
@@ -1764,6 +1797,101 @@ def current_video_completion_qualification(
     return material, _content_fingerprint(material)
 
 
+def _video_budget_authority_operation_id(
+    *,
+    event_type: str,
+    scope_id: str,
+    idempotency_key: str | None,
+    fallback_id: str,
+) -> str:
+    normalized = str(idempotency_key or "").strip()
+    if not normalized:
+        return fallback_id
+    material = _canonical_json({
+        "event_type": event_type,
+        "scope_id": scope_id,
+        "idempotency_key": normalized,
+    })
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"video-budget-authority:{digest}"
+
+
+def _idempotent_video_grant(
+    conn,
+    *,
+    operation_id: str,
+    request_fingerprint: str,
+) -> VideoCompletionGrant | None:
+    event = conn.execute(
+        """SELECT grant_id,request_fingerprint
+             FROM video_budget_authority_ledger
+            WHERE operation_id=?""",
+        (operation_id,),
+    ).fetchone()
+    if event is None:
+        return None
+    if str(event["request_fingerprint"]) != request_fingerprint:
+        raise GrantValidationError(
+            "GRANT_IDEMPOTENCY_CONFLICT",
+            "同一幂等键已用于不同的视频预算授权请求",
+        )
+    row = conn.execute(
+        "SELECT * FROM completion_grants WHERE id=?",
+        (event["grant_id"],),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "视频预算授权审计事件引用的 completion grant 不存在"
+        )
+    return _row_to_video_grant(row)
+
+
+def _record_video_budget_authority_event(
+    conn,
+    *,
+    operation_id: str,
+    request_fingerprint: str,
+    event_type: str,
+    grant_id: str,
+    episode_id: str,
+    project_id: str,
+    requested_add_cny: float,
+    prior_grant_cap_cny: float | None,
+    grant_cap_cny: float,
+    prior_authority_cap_cny: float | None,
+    authority_cap_cny: float,
+    prior_wall_clock_cap_s: float | None,
+    wall_clock_cap_s: float,
+    created_at: float,
+) -> None:
+    conn.execute(
+        """INSERT INTO video_budget_authority_ledger(
+               id,operation_id,request_fingerprint,event_type,grant_id,
+               episode_id,project_id,requested_add_cny,
+               prior_grant_cap_cny,grant_cap_cny,
+               prior_authority_cap_cny,authority_cap_cny,
+               prior_wall_clock_cap_s,wall_clock_cap_s,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            new_id("video_budget_authority"),
+            operation_id,
+            request_fingerprint,
+            event_type,
+            grant_id,
+            episode_id,
+            project_id,
+            requested_add_cny,
+            prior_grant_cap_cny,
+            grant_cap_cny,
+            prior_authority_cap_cny,
+            authority_cap_cny,
+            prior_wall_clock_cap_s,
+            wall_clock_cap_s,
+            created_at,
+        ),
+    )
+
+
 def issue_video_completion_grant(
     *,
     episode_id: str,
@@ -1778,121 +1906,214 @@ def issue_video_completion_grant(
     issued_by: str = "user",
     ttl_s: int = GRANT_TTL_S,
     impact_snapshot: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> tuple[VideoCompletionGrant, str]:
-    """签发视频补齐授权。"""
+    """Atomically issue one completion grant and its payable budget authority."""
     ensure_completion_grants_table()
     conn = get_conn()
-    episode = conn.execute(
-        "SELECT project_id FROM episodes WHERE id=?", (episode_id,)
-    ).fetchone()
-    if episode is None:
-        raise GrantValidationError("GRANT_SCOPE_MISSING", "视频补齐授权的分集不存在")
-    if str(episode["project_id"]) != str(project_id):
-        raise GrantValidationError("GRANT_PROJECT_MISMATCH", "视频补齐授权的项目与分集不匹配")
-    try:
-        qualification, qualification_hash = current_video_completion_qualification(
-            episode_id,
-            conn=conn,
-        )
-    except ValueError as exc:
-        raise GrantValidationError(
-            "RELEASE_QUALIFICATION_INVALID", str(exc)
-        ) from exc
-    bound_storyboard_id = str(
-        qualification["storyboard_authority"]["published_storyboard_artifact_id"]
+    ensure_video_budget_authority_tables(conn)
+    requested_budget = (
+        float(budget_cap_cny) if budget_cap_cny is not None else None
     )
-    if (storyboard_artifact_id or "") != bound_storyboard_id:
-        raise GrantValidationError(
-            "UPSTREAM_VERSION_CHANGED",
-            "请求授权的分镜 Artifact 不是当前发布版",
-        )
-    generation_plan = qualification["generation_plan"]
-    grant_id = new_id("grant")
-    token = secrets.token_urlsafe(24)
-    issued_at = now()
-    budget_requirement = episode_video_completion_budget_requirement(
-        episode_id,
-        conn=conn,
+    requested_wall = (
+        float(wall_clock_cap_s)
+        if wall_clock_cap_s is not None
+        else DEFAULT_VIDEO_WALL_CLOCK_CAP_S
     )
-    required_cap = float(
-        budget_requirement["required_completion_cap_cny"] or 0
-    )
-    cap = float(
-        budget_cap_cny
-        if budget_cap_cny is not None
-        else max(1.0, required_cap)
-    )
-    if cap + 1e-9 < required_cap:
-        raise GrantValidationError(
-            "VIDEO_BUDGET_BELOW_AUTHORITY_PLAN",
-            "视频授权低于当前权威镜头计划的一次完整生成成本："
-            f"requested={cap:g}, required={required_cap:g}",
-        )
-    wall = float(wall_clock_cap_s if wall_clock_cap_s is not None else DEFAULT_VIDEO_WALL_CLOCK_CAP_S)
-    if not math.isfinite(cap) or not 1 <= cap <= 100000:
-        raise GrantValidationError("INVALID_BUDGET", "视频补齐预算必须是 1–100000 的有限数")
-    if not math.isfinite(wall) or not 60 <= wall <= 604800:
-        raise GrantValidationError("INVALID_WALL_CLOCK", "视频补齐时长墙必须是 60–604800 秒的有限数")
-    deadline_at = issued_at + wall
-    expires_at = issued_at + max(60, int(ttl_s), int(wall) + 3600)
-    fallback_quota = (
+    requested_quota = (
         int(max_fallback_shots)
         if max_fallback_shots is not None
         else default_max_fallback_shots(shots_total)
     )
-    conn.execute(
-        """INSERT INTO completion_grants(
-            id, episode_id, project_id, screenplay_artifact_id, bible_artifact_id,
-            permission, token_hash, issued_by, issued_at, expires_at, consumed_at, revoked_at,
-            impact_snapshot_json, kind, storyboard_artifact_id, budget_cap_cny, wall_clock_cap_s, deadline_at,
-            allow_fallback_adopt, max_fallback_shots, allow_storyboard_edit,
-            release_qualification_json, release_qualification_hash,
-            episode_video_plan_id, episode_video_plan_revision,
-            video_plan_release_hash, capability_snapshot_id
-        ) VALUES(?,?,?,?,NULL,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            grant_id, episode_id, project_id, "",
-            VIDEO_PERMISSION, _hash_token(token), issued_by, issued_at, expires_at,
-            json.dumps(impact_snapshot or {}, ensure_ascii=False),
-            "video", storyboard_artifact_id or "", cap, wall, deadline_at,
-            1 if allow_fallback_adopt else 0, fallback_quota,
-            1 if allow_storyboard_edit else 0,
-            _canonical_json(qualification), qualification_hash,
-            generation_plan.get("episode_video_plan_id"),
-            generation_plan.get("plan_revision"),
-            generation_plan.get("release_qualification_hash"),
-            generation_plan.get("capability_snapshot_id"),
-        ),
+    request_fingerprint = _content_fingerprint({
+        "episode_id": episode_id,
+        "project_id": project_id,
+        "storyboard_artifact_id": storyboard_artifact_id or "",
+        "budget_cap_cny": requested_budget,
+        "wall_clock_cap_s": requested_wall,
+        "allow_fallback_adopt": bool(allow_fallback_adopt),
+        "max_fallback_shots": requested_quota,
+        "allow_storyboard_edit": bool(allow_storyboard_edit),
+        "shots_total": int(shots_total),
+        "issued_by": issued_by,
+        "ttl_s": int(ttl_s),
+        "impact_snapshot": impact_snapshot or {},
+    })
+    grant_id = new_id("grant")
+    token = secrets.token_urlsafe(24)
+    operation_id = _video_budget_authority_operation_id(
+        event_type="grant_issued",
+        scope_id=episode_id,
+        idempotency_key=idempotency_key,
+        fallback_id=f"completion-grant-issue:{grant_id}",
     )
-    conn.commit()
-    authorize_episode_video_budget_absolute(
-        episode_id,
-        cap,
-        source=f"completion_grant:{grant_id}",
-        conn=conn,
-    )
-    grant = VideoCompletionGrant(
-        grant_id=grant_id,
-        episode_id=episode_id,
-        project_id=project_id,
-        storyboard_artifact_id=storyboard_artifact_id or "",
-        release_qualification_hash=qualification_hash,
-        release_qualification=qualification,
-        episode_video_plan_id=generation_plan.get("episode_video_plan_id"),
-        episode_video_plan_revision=generation_plan.get("plan_revision"),
-        video_plan_release_hash=generation_plan.get("release_qualification_hash"),
-        capability_snapshot_id=generation_plan.get("capability_snapshot_id"),
-        budget_cap_cny=cap,
-        wall_clock_cap_s=wall,
-        deadline_at=deadline_at,
-        allow_fallback_adopt=allow_fallback_adopt,
-        max_fallback_shots=fallback_quota,
-        allow_storyboard_edit=allow_storyboard_edit,
-        issued_by=issued_by,
-        issued_at=issued_at,
-        expires_at=expires_at,
-    )
-    return grant, token
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        replay = _idempotent_video_grant(
+            conn,
+            operation_id=operation_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if replay is not None:
+            conn.commit()
+            return replay, ""
+        episode = conn.execute(
+            "SELECT project_id FROM episodes WHERE id=?", (episode_id,)
+        ).fetchone()
+        if episode is None:
+            raise GrantValidationError(
+                "GRANT_SCOPE_MISSING",
+                "视频补齐授权的分集不存在",
+            )
+        if str(episode["project_id"]) != str(project_id):
+            raise GrantValidationError(
+                "GRANT_PROJECT_MISMATCH",
+                "视频补齐授权的项目与分集不匹配",
+            )
+        qualification, qualification_hash = current_video_completion_qualification(
+            episode_id,
+            conn=conn,
+        )
+        bound_storyboard_id = str(
+            qualification["storyboard_authority"][
+                "published_storyboard_artifact_id"
+            ]
+        )
+        if (storyboard_artifact_id or "") != bound_storyboard_id:
+            raise GrantValidationError(
+                "UPSTREAM_VERSION_CHANGED",
+                "请求授权的分镜 Artifact 不是当前发布版",
+            )
+        generation_plan = qualification["generation_plan"]
+        issued_at = now()
+        budget_requirement = episode_video_completion_budget_requirement(
+            episode_id,
+            conn=conn,
+        )
+        required_cap = float(
+            budget_requirement["required_completion_cap_cny"] or 0
+        )
+        cap = float(
+            requested_budget
+            if requested_budget is not None
+            else max(1.0, required_cap)
+        )
+        if cap + 1e-9 < required_cap:
+            raise GrantValidationError(
+                "VIDEO_BUDGET_BELOW_AUTHORITY_PLAN",
+                "视频授权低于当前权威镜头计划的一次完整生成成本："
+                f"requested={cap:g}, required={required_cap:g}",
+            )
+        wall = requested_wall
+        if not math.isfinite(cap) or not 1 <= cap <= 100000:
+            raise GrantValidationError(
+                "INVALID_BUDGET",
+                "视频补齐预算必须是 1–100000 的有限数",
+            )
+        if not math.isfinite(wall) or not 60 <= wall <= 604800:
+            raise GrantValidationError(
+                "INVALID_WALL_CLOCK",
+                "视频补齐时长墙必须是 60–604800 秒的有限数",
+            )
+        deadline_at = issued_at + wall
+        expires_at = issued_at + max(60, int(ttl_s), int(wall) + 3600)
+        prior_authority = conn.execute(
+            """SELECT cap_cny FROM episode_video_budget_authorities
+               WHERE episode_id=?""",
+            (episode_id,),
+        ).fetchone()
+        prior_authority_cap = (
+            float(prior_authority["cap_cny"])
+            if prior_authority is not None
+            else None
+        )
+        conn.execute(
+            """INSERT INTO completion_grants(
+                id, episode_id, project_id, screenplay_artifact_id, bible_artifact_id,
+                permission, token_hash, issued_by, issued_at, expires_at, consumed_at, revoked_at,
+                impact_snapshot_json, kind, storyboard_artifact_id, budget_cap_cny, wall_clock_cap_s, deadline_at,
+                allow_fallback_adopt, max_fallback_shots, allow_storyboard_edit,
+                release_qualification_json, release_qualification_hash,
+                episode_video_plan_id, episode_video_plan_revision,
+                video_plan_release_hash, capability_snapshot_id
+            ) VALUES(?,?,?,?,NULL,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                grant_id, episode_id, project_id, "",
+                VIDEO_PERMISSION, _hash_token(token), issued_by, issued_at,
+                expires_at, json.dumps(impact_snapshot or {}, ensure_ascii=False),
+                "video", storyboard_artifact_id or "", cap, wall, deadline_at,
+                1 if allow_fallback_adopt else 0, requested_quota,
+                1 if allow_storyboard_edit else 0,
+                _canonical_json(qualification), qualification_hash,
+                generation_plan.get("episode_video_plan_id"),
+                generation_plan.get("plan_revision"),
+                generation_plan.get("release_qualification_hash"),
+                generation_plan.get("capability_snapshot_id"),
+            ),
+        )
+        authority_cap = authorize_episode_video_budget_absolute(
+            episode_id,
+            cap,
+            source=f"completion_grant:{grant_id}",
+            conn=conn,
+        )
+        _record_video_budget_authority_event(
+            conn,
+            operation_id=operation_id,
+            request_fingerprint=request_fingerprint,
+            event_type="grant_issued",
+            grant_id=grant_id,
+            episode_id=episode_id,
+            project_id=project_id,
+            requested_add_cny=cap,
+            prior_grant_cap_cny=None,
+            grant_cap_cny=cap,
+            prior_authority_cap_cny=prior_authority_cap,
+            authority_cap_cny=authority_cap,
+            prior_wall_clock_cap_s=None,
+            wall_clock_cap_s=wall,
+            created_at=issued_at,
+        )
+        grant = VideoCompletionGrant(
+            grant_id=grant_id,
+            episode_id=episode_id,
+            project_id=project_id,
+            storyboard_artifact_id=storyboard_artifact_id or "",
+            release_qualification_hash=qualification_hash,
+            release_qualification=qualification,
+            episode_video_plan_id=generation_plan.get("episode_video_plan_id"),
+            episode_video_plan_revision=generation_plan.get("plan_revision"),
+            video_plan_release_hash=generation_plan.get(
+                "release_qualification_hash"
+            ),
+            capability_snapshot_id=generation_plan.get(
+                "capability_snapshot_id"
+            ),
+            budget_cap_cny=cap,
+            wall_clock_cap_s=wall,
+            deadline_at=deadline_at,
+            allow_fallback_adopt=allow_fallback_adopt,
+            max_fallback_shots=requested_quota,
+            allow_storyboard_edit=allow_storyboard_edit,
+            issued_by=issued_by,
+            issued_at=issued_at,
+            expires_at=expires_at,
+        )
+        conn.commit()
+        return grant, token
+    except ValueError as exc:
+        if conn.in_transaction:
+            conn.rollback()
+        if isinstance(exc, GrantValidationError):
+            raise
+        raise GrantValidationError(
+            "RELEASE_QUALIFICATION_INVALID",
+            str(exc),
+        ) from exc
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 def _row_to_video_grant(row) -> VideoCompletionGrant:
@@ -2103,15 +2324,14 @@ def refresh_video_grant_storyboard_artifact(grant_id: str, storyboard_artifact_i
 
 
 def bump_video_grant_budget(
-    grant_id: str, *, add_cny: float, add_wall_s: float = 0
+    grant_id: str,
+    *,
+    add_cny: float,
+    add_wall_s: float = 0,
+    idempotency_key: str | None = None,
 ) -> VideoCompletionGrant:
-    """追加预算/时长并返回更新后的 grant。"""
+    """Atomically top up a grant, its budget authority and audit ledger."""
     ensure_completion_grants_table()
-    grant = get_video_grant(grant_id)
-    if grant is None:
-        raise GrantValidationError("GRANT_NOT_FOUND", "视频补齐授权不存在")
-    if grant.revoked_at is not None:
-        raise GrantValidationError("GRANT_REVOKED", "视频补齐授权已撤销")
     add_cny = float(add_cny)
     add_wall_s = float(add_wall_s)
     if not math.isfinite(add_cny) or add_cny < 0 or add_cny > 100000:
@@ -2120,29 +2340,125 @@ def bump_video_grant_budget(
         raise GrantValidationError("INVALID_WALL_CLOCK", "追加时长必须是 0–604800 秒的有限数")
     if add_cny == 0 and add_wall_s == 0:
         raise GrantValidationError("EMPTY_TOPUP", "追加预算和时长不能同时为 0")
-    new_cap = float(grant.budget_cap_cny) + add_cny
-    new_wall = float(grant.wall_clock_cap_s) + add_wall_s
-    if new_cap > 100000 or new_wall > 604800:
-        raise GrantValidationError("GRANT_LIMIT_EXCEEDED", "追加后授权超过最大上限")
-    new_deadline = float(grant.issued_at) + new_wall
-    new_expires = max(float(grant.expires_at), now() + GRANT_TTL_S)
+    request_fingerprint = _content_fingerprint({
+        "grant_id": grant_id,
+        "add_cny": add_cny,
+        "add_wall_s": add_wall_s,
+    })
+    operation_id = _video_budget_authority_operation_id(
+        event_type="grant_topped_up",
+        scope_id=grant_id,
+        idempotency_key=idempotency_key,
+        fallback_id=f"completion-grant-topup:{new_id('topup')}",
+    )
     conn = get_conn()
-    conn.execute(
-        """UPDATE completion_grants
-           SET budget_cap_cny=?, wall_clock_cap_s=?, deadline_at=?, expires_at=?, consumed_at=NULL
-           WHERE id=?""",
-        (new_cap, new_wall, new_deadline, new_expires, grant_id),
-    )
-    conn.commit()
-    authorize_episode_video_budget_absolute(
-        grant.episode_id,
-        new_cap,
-        source=f"completion_grant_topup:{grant_id}",
-        conn=conn,
-    )
-    updated = get_video_grant(grant_id)
-    assert updated is not None
-    return updated
+    ensure_video_budget_authority_tables(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        replay = _idempotent_video_grant(
+            conn,
+            operation_id=operation_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if replay is not None:
+            conn.commit()
+            return replay
+        row = conn.execute(
+            "SELECT * FROM completion_grants WHERE id=?",
+            (grant_id,),
+        ).fetchone()
+        if row is None or (
+            row["kind"] != "video" and row["permission"] != VIDEO_PERMISSION
+        ):
+            raise GrantValidationError(
+                "GRANT_NOT_FOUND",
+                "视频补齐授权不存在",
+            )
+        grant = _row_to_video_grant(row)
+        if grant.revoked_at is not None:
+            raise GrantValidationError(
+                "GRANT_REVOKED",
+                "视频补齐授权已撤销",
+            )
+        new_cap = float(grant.budget_cap_cny) + add_cny
+        new_wall = float(grant.wall_clock_cap_s) + add_wall_s
+        if new_cap > 100000 or new_wall > 604800:
+            raise GrantValidationError(
+                "GRANT_LIMIT_EXCEEDED",
+                "追加后授权超过最大上限",
+            )
+        stamp = now()
+        new_deadline = float(grant.issued_at) + new_wall
+        new_expires = max(float(grant.expires_at), stamp + GRANT_TTL_S)
+        prior_authority = conn.execute(
+            """SELECT cap_cny FROM episode_video_budget_authorities
+               WHERE episode_id=?""",
+            (grant.episode_id,),
+        ).fetchone()
+        prior_authority_cap = (
+            float(prior_authority["cap_cny"])
+            if prior_authority is not None
+            else None
+        )
+        updated = conn.execute(
+            """UPDATE completion_grants
+                  SET budget_cap_cny=?,wall_clock_cap_s=?,deadline_at=?,
+                      expires_at=?,consumed_at=NULL
+                WHERE id=? AND budget_cap_cny=? AND wall_clock_cap_s=?
+                  AND deadline_at=? AND expires_at=? AND revoked_at IS NULL""",
+            (
+                new_cap,
+                new_wall,
+                new_deadline,
+                new_expires,
+                grant_id,
+                grant.budget_cap_cny,
+                grant.wall_clock_cap_s,
+                grant.deadline_at,
+                grant.expires_at,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise GrantValidationError(
+                "GRANT_CONCURRENTLY_CHANGED",
+                "视频补齐授权在追加预算时已被并发修改",
+            )
+        authority_cap = authorize_episode_video_budget_absolute(
+            grant.episode_id,
+            new_cap,
+            source=f"completion_grant_topup:{grant_id}",
+            conn=conn,
+        )
+        _record_video_budget_authority_event(
+            conn,
+            operation_id=operation_id,
+            request_fingerprint=request_fingerprint,
+            event_type="grant_topped_up",
+            grant_id=grant_id,
+            episode_id=grant.episode_id,
+            project_id=grant.project_id,
+            requested_add_cny=add_cny,
+            prior_grant_cap_cny=grant.budget_cap_cny,
+            grant_cap_cny=new_cap,
+            prior_authority_cap_cny=prior_authority_cap,
+            authority_cap_cny=authority_cap,
+            prior_wall_clock_cap_s=grant.wall_clock_cap_s,
+            wall_clock_cap_s=new_wall,
+            created_at=stamp,
+        )
+        stored = conn.execute(
+            "SELECT * FROM completion_grants WHERE id=?",
+            (grant_id,),
+        ).fetchone()
+        if stored is None:
+            raise RuntimeError("追加后 completion grant 丢失")
+        result = _row_to_video_grant(stored)
+        conn.commit()
+        return result
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 def consume_grant(grant_id: str) -> None:

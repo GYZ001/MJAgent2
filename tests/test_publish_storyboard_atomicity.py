@@ -158,6 +158,13 @@ def _release_snapshot(conn) -> dict[str, Any]:
     ).fetchone()
     return {
         "episode": dict(episode),
+        "storyboard_artifacts": [
+            dict(row)
+            for row in conn.execute(
+                """SELECT id,status,trust_level,approved_at
+                     FROM artifacts WHERE type='storyboard' ORDER BY id"""
+            ).fetchall()
+        ],
         "outline_artifacts": conn.execute(
             "SELECT COUNT(*) AS count FROM artifacts WHERE type='storyboard_outline'"
         ).fetchone()["count"],
@@ -229,6 +236,16 @@ def test_publish_storyboard_commits_complete_legacy_release(publish_db) -> None:
     assert episode["storyboard_production_revision_id"] == case["revision_id"]
     assert episode["status"] == "scripted"
     assert episode["narrative_status"] == "legacy_unvalidated"
+    storyboard_artifact = snapshot["storyboard_artifacts"][0]
+    assert {
+        key: storyboard_artifact[key]
+        for key in ("id", "status", "trust_level")
+    } == {
+        "id": case["artifact_id"],
+        "status": "approved",
+        "trust_level": "T2",
+    }
+    assert storyboard_artifact["approved_at"] is not None
     assert snapshot["outline_artifacts"] == 1
     assert snapshot["certificate_rows"] == 1
     assert snapshot["certificate_artifacts"] == 1

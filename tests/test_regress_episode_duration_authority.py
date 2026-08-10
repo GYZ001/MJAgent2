@@ -58,6 +58,19 @@ def test_run_regression_copies_committed_wal_snapshot_before_mutation(
         writer.commit()
         assert Path(f"{source_db}-wal").stat().st_size > 32
 
+        snapshot_validation: dict[str, object] = {}
+        create_snapshot = regression._create_verified_database_snapshot
+
+        def capture_snapshot(source: Path, destination: Path) -> dict:
+            result = create_snapshot(source, destination)
+            snapshot_validation.update(result)
+            return result
+
+        monkeypatch.setattr(
+            regression,
+            "_create_verified_database_snapshot",
+            capture_snapshot,
+        )
         monkeypatch.setattr(
             regression,
             "replay",
@@ -89,6 +102,19 @@ def test_run_regression_copies_committed_wal_snapshot_before_mutation(
                 expected_source_segments=3,
             )
 
+        assert snapshot_validation == {
+            "source_matches_copy": True,
+            "table_counts": {
+                "episodes": 1,
+                "projects": 1,
+                "provider_calls": 2,
+            },
+            "provider_calls": 2,
+            "provider_call_max_id": 2,
+            "quick_check": ["ok"],
+            "integrity_check": ["ok"],
+            "foreign_key_check": [],
+        }
         with _open_readonly(source_db) as source, _open_readonly(copy_db) as copied:
             assert copied.execute(
                 "SELECT COUNT(*) FROM provider_calls"

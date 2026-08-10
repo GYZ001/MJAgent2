@@ -15,7 +15,7 @@ def grant_db(tmp_path, monkeypatch):
     if existing is not None:
         existing.close()
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "completion-grant-atomicity.db")
-    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db._local.conn = None
     db.init_db()
     conn = db.get_conn()
     conn.execute(
@@ -52,8 +52,6 @@ def grant_db(tmp_path, monkeypatch):
         )
     conn.commit()
     yield conn
-    conn.close()
-    db._local.conn = None
 
 
 def _issue(*, idempotency_key: str | None = None):

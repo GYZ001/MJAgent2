@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -53,6 +53,106 @@ def _reset_connection(db_path: Path) -> None:
     config.DATA_DIR = db_path.parent
 
 
+def _database_snapshot_report(conn: sqlite3.Connection) -> dict:
+    table_names = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name"
+        )
+    ]
+    table_counts = {
+        table_name: int(
+            conn.execute(
+                f'SELECT COUNT(*) FROM "{table_name.replace(chr(34), chr(34) * 2)}"'
+            ).fetchone()[0]
+        )
+        for table_name in table_names
+    }
+    if "provider_calls" not in table_counts:
+        raise RuntimeError("database snapshot missing required provider_calls table")
+    provider_call_max_id = int(
+        conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM provider_calls"
+        ).fetchone()[0]
+    )
+    return {
+        "table_counts": table_counts,
+        "provider_calls": table_counts["provider_calls"],
+        "provider_call_max_id": provider_call_max_id,
+        "quick_check": [
+            str(row[0]) for row in conn.execute("PRAGMA quick_check").fetchall()
+        ],
+        "integrity_check": [
+            str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()
+        ],
+        "foreign_key_check": [
+            list(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()
+        ],
+    }
+
+
+def _assert_healthy_snapshot(label: str, report: dict) -> None:
+    if report["quick_check"] != ["ok"]:
+        raise RuntimeError(f"{label} quick_check failed: {report['quick_check']}")
+    if report["integrity_check"] != ["ok"]:
+        raise RuntimeError(
+            f"{label} integrity_check failed: {report['integrity_check']}"
+        )
+    if report["foreign_key_check"]:
+        raise RuntimeError(
+            f"{label} foreign_key_check failed: {report['foreign_key_check']}"
+        )
+
+
+def _create_verified_database_snapshot(
+    source_db: Path,
+    copy_path: Path,
+) -> dict:
+    source_db = source_db.expanduser().resolve()
+    copy_path = copy_path.expanduser().resolve()
+    if source_db == copy_path:
+        raise ValueError("SQLite snapshot destination must differ from source DB")
+
+    source = sqlite3.connect(
+        source_db.as_uri() + "?mode=ro",
+        uri=True,
+    )
+    try:
+        source.execute("PRAGMA query_only=ON")
+        source.execute("PRAGMA foreign_keys=ON")
+        source.execute("BEGIN")
+        source_report = _database_snapshot_report(source)
+        _assert_healthy_snapshot("source snapshot", source_report)
+
+        target = sqlite3.connect(copy_path)
+        try:
+            source.backup(target)
+            target.execute("PRAGMA query_only=ON")
+            target_report = _database_snapshot_report(target)
+            _assert_healthy_snapshot("copied snapshot", target_report)
+        finally:
+            target.close()
+    finally:
+        if source.in_transaction:
+            source.rollback()
+        source.close()
+
+    mismatches = [
+        field
+        for field in source_report
+        if source_report[field] != target_report[field]
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "SQLite backup differs from source transaction snapshot: "
+            + ", ".join(mismatches)
+        )
+    return {
+        "source_matches_copy": True,
+        **target_report,
+    }
+
+
 def _shot_from_outline(
     brief: StoryboardOutlineShot,
     *,
@@ -92,8 +192,15 @@ def run_regression(
 ) -> dict:
     source_db = source_db.resolve()
     source_stat_before = source_db.stat()
+    if copy_path is None:
+        copy_dir = Path(tempfile.mkdtemp(prefix="manju-duration-authority-"))
+        copy_path = copy_dir / source_db.name
+    else:
+        copy_path = copy_path.expanduser().resolve()
+        copy_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_validation = _create_verified_database_snapshot(source_db, copy_path)
     replay_result = replay(
-        db_path=source_db,
+        db_path=copy_path,
         artifact_id=artifact_id,
         project_id=project_id,
     )
@@ -117,13 +224,6 @@ def run_regression(
     if failed:
         raise RuntimeError("production Artifact replay mismatch: " + ", ".join(failed))
 
-    if copy_path is None:
-        copy_dir = Path(tempfile.mkdtemp(prefix="manju-duration-authority-"))
-        copy_path = copy_dir / source_db.name
-    else:
-        copy_path = copy_path.expanduser().resolve()
-        copy_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_db, copy_path)
     _reset_connection(copy_path)
     db.init_db()
     conn = db.get_conn()
@@ -333,19 +433,27 @@ def run_regression(
         or grant.budget_cap_cny != expected_cost_cny
     ):
         raise RuntimeError("copied DB authority/cost/grant regression mismatch")
+    provider_calls_made = int(conn.execute(
+        "SELECT COUNT(*) FROM provider_calls WHERE id>?",
+        (snapshot_validation["provider_call_max_id"],),
+    ).fetchone()[0])
+    if provider_calls_made:
+        raise RuntimeError(
+            f"isolated regression made {provider_calls_made} provider calls"
+        )
 
     source_stat_after = source_db.stat()
     source_unchanged = (
         source_stat_before.st_size == source_stat_after.st_size
         and source_stat_before.st_mtime_ns == source_stat_after.st_mtime_ns
     )
-    if not source_unchanged:
-        raise RuntimeError("source production DB metadata changed during regression")
     return {
         "source_db": str(source_db),
         "isolated_db_copy": str(copy_path),
+        "source_db_access": "read_only",
         "source_db_unchanged": source_unchanged,
-        "provider_calls_made": 0,
+        "snapshot_validation": snapshot_validation,
+        "provider_calls_made": provider_calls_made,
         "episode_id": episode_id,
         "screenplay_artifact_id": artifact_id,
         "migrated_screenplay_artifact_id": normalized_screenplay_artifact["id"],

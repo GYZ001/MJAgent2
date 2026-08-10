@@ -362,7 +362,6 @@ def publish_storyboard(
         "shots": shots_payload,
     })
     board_artifact = evidence_repository.get_artifact(artifact_id)
-    narrative_authority = False
     verified_review_artifact_id: str | None = None
     calibration_authority = None
     if (
@@ -380,68 +379,182 @@ def publish_storyboard(
         raise ValueError(f"待发布分镜 Artifact 内容无法解析：{exc}") from exc
     if artifact_board.model_dump(mode="json") != board.model_dump(mode="json"):
         raise ValueError("待发布 shots_payload 与完成凭证绑定的 Artifact 内容不一致")
-    if episode_row["screenplay_json"]:
-        from app.production.screenplay_authority import (
-            resolve_downstream_screenplay,
-        )
-
-        screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
-        narrative_authority = screenplay_context.narrative_authority_required
-    outline_authority = None
-    if narrative_authority:
-        if not outline_json:
-            raise ValueError("叙事分镜发布缺少已版本化 storyboard outline")
-        from app.storyboard_authority import (
-            assert_storyboard_matches_outline_authority,
-            outline_fingerprint,
-            resolve_storyboard_outline_authority,
-        )
-
-        outline_authority = resolve_storyboard_outline_authority(
-            episode_id,
-            conn=conn,
-        )
-        if outline_fingerprint(outline_json) != outline_authority.fingerprint:
-            raise ValueError(
-                "待发布 outline JSON 不是当前权威 revision/fingerprint"
-            )
-        assert_storyboard_matches_outline_authority(outline_authority, board)
-    elif outline_json:
-        from app.storyboard_authority import (
-            assert_storyboard_matches_outline_authority,
-            persist_storyboard_outline_authority,
-        )
-
-        outline_authority = persist_storyboard_outline_authority(
-            episode_id,
-            outline_json,
-            conn=conn,
-        )
-        assert_storyboard_matches_outline_authority(outline_authority, board)
 
     if conn.in_transaction:
         raise RuntimeError("分镜发布前存在未收口事务")
     conn.execute("BEGIN IMMEDIATE")
     try:
         current_revision = conn.execute(
-            "SELECT status,working_artifact_id FROM production_revisions WHERE id=?",
+            """SELECT episode_id,kind,status,working_artifact_id,published_artifact_id,
+                      input_fingerprint,contract_version,qa_profile_version
+                 FROM production_revisions WHERE id=?""",
             (revision_id,),
         ).fetchone()
         if (
             current_revision is None
-            or current_revision["status"] != "active"
+            or current_revision["episode_id"] != episode_id
+            or current_revision["kind"] != "storyboard"
             or current_revision["working_artifact_id"] != artifact_id
         ):
             raise ValueError("待发布 storyboard production revision 已失效")
-        if outline_authority is not None:
+        effective_input_fingerprint = (
+            input_fingerprint or current_revision["input_fingerprint"]
+        )
+        effective_contract_version = (
+            contract_version or current_revision["contract_version"]
+        )
+        effective_qa_profile_version = (
+            qa_profile_version or current_revision["qa_profile_version"]
+        )
+        if (
+            input_fingerprint
+            and current_revision["input_fingerprint"]
+            and input_fingerprint != current_revision["input_fingerprint"]
+        ):
+            raise ValueError("发布 input_fingerprint 与 production revision 不匹配")
+        if (
+            contract_version
+            and current_revision["contract_version"]
+            and contract_version != current_revision["contract_version"]
+        ):
+            raise ValueError("发布 contract_version 与 production revision 不匹配")
+        if (
+            qa_profile_version
+            and current_revision["qa_profile_version"]
+            and qa_profile_version != current_revision["qa_profile_version"]
+        ):
+            raise ValueError("发布 qa_profile_version 与 production revision 不匹配")
+
+        current_episode = conn.execute(
+            "SELECT * FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        if current_episode is None:
+            raise ValueError("待发布分镜所属剧集不存在")
+        narrative_authority = False
+        if current_episode["screenplay_json"]:
+            from app.production.screenplay_authority import (
+                resolve_downstream_screenplay,
+            )
+
+            screenplay_context = resolve_downstream_screenplay(
+                episode_id,
+                conn=conn,
+            )
+            narrative_authority = screenplay_context.narrative_authority_required
+        if narrative_authority and not outline_json:
+            raise ValueError("叙事分镜发布缺少已版本化 storyboard outline")
+
+        if current_revision["status"] == "published":
+            if current_revision["published_artifact_id"] != artifact_id:
+                raise ValueError("已发布 storyboard production revision 权威漂移")
+            if (
+                current_episode["storyboard_artifact_id"] != artifact_id
+                or current_episode["published_storyboard_artifact_id"] != artifact_id
+                or current_episode["working_storyboard_artifact_id"] != artifact_id
+                or current_episode["storyboard_production_revision_id"] != revision_id
+                or not current_episode["storyboard_completion_certificate_id"]
+            ):
+                raise ValueError("已发布 storyboard episode 权威链漂移")
+            published_artifact = conn.execute(
+                "SELECT status FROM artifacts WHERE id=?",
+                (artifact_id,),
+            ).fetchone()
+            if published_artifact is None or published_artifact["status"] != "approved":
+                raise ValueError("已发布 storyboard Artifact 状态漂移")
+            cert = verify_completion_certificate(
+                str(current_episode["storyboard_completion_certificate_id"]),
+                expected_artifact_id=artifact_id,
+                expected_artifact_hash=artifact_hash,
+                expected_input_fingerprint=effective_input_fingerprint or None,
+                expected_contract_version=effective_contract_version or None,
+                expected_qa_profile_version=effective_qa_profile_version or None,
+                expected_kind="storyboard",
+                expected_scope_id=episode_id,
+                expected_production_revision_id=revision_id,
+                allow_consumed=True,
+                conn=conn,
+            )
+            if (
+                cert.consumed_at is None
+                or cert.evaluation_ids != list(evaluation_ids)
+                or cert.input_fingerprint != effective_input_fingerprint
+                or cert.contract_version != effective_contract_version
+                or cert.qa_profile_version != effective_qa_profile_version
+            ):
+                raise ValueError("已发布 storyboard 完成凭证与重试请求不匹配")
+            if outline_json:
+                from app.storyboard_authority import (
+                    assert_storyboard_matches_outline_authority,
+                    outline_fingerprint,
+                    resolve_storyboard_outline_authority,
+                )
+
+                outline_authority = resolve_storyboard_outline_authority(
+                    episode_id,
+                    conn=conn,
+                )
+                if outline_fingerprint(outline_json) != outline_authority.fingerprint:
+                    raise ValueError(
+                        "已发布 outline JSON 不是当前权威 revision/fingerprint"
+                    )
+                assert_storyboard_matches_outline_authority(
+                    outline_authority,
+                    board,
+                )
+            published_shots = conn.execute(
+                "SELECT shot_no,duration_s FROM shots "
+                "WHERE episode_id=? ORDER BY shot_no",
+                (episode_id,),
+            ).fetchall()
+            if len(published_shots) != len(board.shots) or any(
+                int(row["shot_no"]) != int(shot.shot_no)
+                or int(row["duration_s"] or 0) != int(shot.duration_s or 0)
+                for row, shot in zip(published_shots, board.shots)
+            ):
+                raise ValueError("已发布 shots 投影与重试请求不匹配")
+            conn.commit()
+            return {
+                "episode_id": episode_id,
+                "artifact_id": artifact_id,
+                "certificate_id": cert.certificate_id,
+                "shot_count": len(shots_payload),
+                "status": "scripted",
+            }
+        if current_revision["status"] != "active":
+            raise ValueError("待发布 storyboard production revision 已失效")
+
+        outline_authority = None
+        if narrative_authority:
             from app.storyboard_authority import (
                 assert_storyboard_matches_outline_authority,
+                outline_fingerprint,
                 resolve_storyboard_outline_authority,
             )
 
             outline_authority = resolve_storyboard_outline_authority(
                 episode_id,
                 conn=conn,
+            )
+            if outline_fingerprint(outline_json) != outline_authority.fingerprint:
+                raise ValueError(
+                    "待发布 outline JSON 不是当前权威 revision/fingerprint"
+                )
+            assert_storyboard_matches_outline_authority(
+                outline_authority,
+                board,
+            )
+        elif outline_json:
+            from app.storyboard_authority import (
+                assert_storyboard_matches_outline_authority,
+                persist_storyboard_outline_authority,
+            )
+
+            outline_authority = persist_storyboard_outline_authority(
+                episode_id,
+                outline_json,
+                conn=conn,
+                commit=False,
             )
             assert_storyboard_matches_outline_authority(
                 outline_authority,
@@ -453,9 +566,9 @@ def publish_storyboard(
             scope_id=episode_id,
             artifact_id=artifact_id,
             artifact_hash=artifact_hash,
-            input_fingerprint=input_fingerprint or rev.input_fingerprint,
-            contract_version=contract_version or rev.contract_version,
-            qa_profile_version=qa_profile_version or rev.qa_profile_version,
+            input_fingerprint=effective_input_fingerprint,
+            contract_version=effective_contract_version,
+            qa_profile_version=effective_qa_profile_version,
             evaluation_ids=evaluation_ids,
             blockers=0,
             must_fix_issues=0,
@@ -467,6 +580,12 @@ def publish_storyboard(
             cert,
             expected_artifact_id=artifact_id,
             expected_artifact_hash=artifact_hash,
+            expected_input_fingerprint=effective_input_fingerprint or None,
+            expected_contract_version=effective_contract_version or None,
+            expected_qa_profile_version=effective_qa_profile_version or None,
+            expected_kind="storyboard",
+            expected_scope_id=episode_id,
+            expected_production_revision_id=revision_id,
             conn=conn,
         )
         assert_publish_has_certificate(
@@ -474,6 +593,15 @@ def publish_storyboard(
             episode_id=episode_id,
             certificate_id=cert.certificate_id,
         )
+        artifact_cursor = conn.execute(
+            """UPDATE artifacts
+                  SET status='approved',trust_level='T2',
+                      approved_at=COALESCE(approved_at,?)
+                WHERE id=?""",
+            (now(), artifact_id),
+        )
+        if artifact_cursor.rowcount != 1:
+            raise ValueError("待发布 storyboard Artifact 批准发生冲突")
 
         # 正式投影、outline authority、证书和发布指针共用一个事务。
         shot_rows = conn.execute(
@@ -494,7 +622,7 @@ def publish_storyboard(
             )
 
         if narrative_authority and verified_review_artifact_id and calibration_authority:
-            conn.execute(
+            episode_cursor = conn.execute(
                 """UPDATE episodes
                       SET status='scripted', script_error=NULL, storyboard_warning=NULL,
                           storyboard_artifact_id=?, narrative_status='ready',
@@ -509,7 +637,7 @@ def publish_storyboard(
                 ),
             )
         else:
-            conn.execute(
+            episode_cursor = conn.execute(
                 """UPDATE episodes
                       SET status='scripted', script_error=NULL, storyboard_warning=NULL,
                           storyboard_artifact_id=?, narrative_status=?,
@@ -522,6 +650,8 @@ def publish_storyboard(
                     episode_id,
                 ),
             )
+        if episode_cursor.rowcount != 1:
+            raise ValueError("分镜发布 episode 更新发生冲突")
         set_published_artifact(
             revision_id,
             artifact_id,
@@ -535,8 +665,9 @@ def publish_storyboard(
             commit=False,
         )
         conn.commit()
-    except Exception:
-        conn.rollback()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
         raise
     return {
         "episode_id": episode_id,
