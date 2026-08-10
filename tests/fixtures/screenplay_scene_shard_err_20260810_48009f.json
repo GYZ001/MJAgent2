@@ -2,6 +2,7 @@
   "error_id": "ERR-20260810-48009f",
   "run_id": "run_82ac46b576af",
   "case_id": "episode-1-ss004-bp-sc014-unit-3",
+  "replay_scope": "unaltered contract-relevant units projected from each complete provider response",
   "scene_contract": {
     "scene_key": "bp-sc014",
     "canonical_identity_keys": [
@@ -17,7 +18,7 @@
     {
       "provider_call_id": 60900,
       "semantic_attempt": 0,
-      "response_sha256": "2a0dafcc87b59e92f3350c77438f4915dea6b1062443358664edbacaa0499a1c",
+      "response_sha256": "04aee9ca0916cdf52452e630ed58357cca80ad33d7772c684851eb09d975928f",
       "units": [
         {
           "scene_key": "bp-sc014",
@@ -100,7 +101,7 @@
     {
       "provider_call_id": 60901,
       "semantic_attempt": 1,
-      "response_sha256": "d9f341789269295fa2ce7858e6b03e13263dcb6aaae121843091843c9aa08d2f",
+      "response_sha256": "589c0dfb4f7df3bc8ab5165958bc0b87c8e3963d428dc1d54723d9e601ffab29",
       "units": [
         {
           "scene_key": "bp-sc014",

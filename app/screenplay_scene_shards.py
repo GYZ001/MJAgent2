@@ -295,7 +295,7 @@ def _canonical_identity_array_schema(
         key for key in candidate_keys if key in canonical_set
     ]
     schema["minItems"] = len(bound_candidate_keys)
-    schema["maxItems"] = min(len(candidate_keys), len(canonical_keys))
+    schema["maxItems"] = len(bound_candidate_keys)
     if bound_candidate_keys:
         schema["allOf"] = [
             {

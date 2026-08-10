@@ -1133,12 +1133,22 @@ def test_err_20260810_48009f_replay_uses_contract_canonical_keys_without_mutatio
 
     assert replay["error_id"] == "ERR-20260810-48009f"
     assert replay["run_id"] == "run_82ac46b576af"
+    assert replay["replay_scope"] == (
+        "unaltered contract-relevant units projected from each complete "
+        "provider response"
+    )
     assert [
         item["provider_call_id"] for item in replay["provider_responses"]
     ] == [60900, 60901]
     assert [
         item["semantic_attempt"] for item in replay["provider_responses"]
     ] == [0, 1]
+    assert [
+        item["response_sha256"] for item in replay["provider_responses"]
+    ] == [
+        "04aee9ca0916cdf52452e630ed58357cca80ad33d7772c684851eb09d975928f",
+        "589c0dfb4f7df3bc8ab5165958bc0b87c8e3963d428dc1d54723d9e601ffab29",
+    ]
 
     canonical_keys = replay["scene_contract"]["canonical_identity_keys"]
     similar_identity = replay["scene_contract"][
@@ -1165,7 +1175,7 @@ def test_err_20260810_48009f_replay_uses_contract_canonical_keys_without_mutatio
         assert unit_schema["properties"]["actor_keys"]["minItems"] == 1
         assert unit_schema["properties"]["actor_keys"]["maxItems"] == 1
         assert unit_schema["properties"]["target_keys"]["minItems"] == 3
-        assert unit_schema["properties"]["target_keys"]["maxItems"] == 4
+        assert unit_schema["properties"]["target_keys"]["maxItems"] == 3
         assert unit_schema["properties"]["speaker_key"] == {"type": "null"}
         delivery_schema = unit_schema["properties"][
             "participant_deliveries"
@@ -1264,7 +1274,7 @@ def test_scene_contract_schema_preserves_relation_cardinality_boundaries() -> No
     )
     assert speaker_unit["properties"]["speaker_key"] == {
         "type": "string",
-        "enum": replay["scene_contract"]["canonical_identity_keys"],
+        "enum": ["person_46e7e8b742ed"],
     }
     delivery_schema = speaker_unit["properties"]["participant_deliveries"]
     assert delivery_schema["minItems"] == 1
@@ -1274,6 +1284,43 @@ def test_scene_contract_schema_preserves_relation_cardinality_boundaries() -> No
         "person_46e7e8b742ed"
     ]
     assert delivery_item["properties"]["audible"] == {"const": True}
+
+
+def test_scene_contract_schema_does_not_interchange_similar_bound_identities() -> None:
+    replay = json.loads(ERR_20260810_B66DDA_REPLAY.read_text(encoding="utf-8"))
+    shard = _b66dda_shard(replay["provider_responses"][0]["response"])
+    _plan, _scene_plans, contracts, _identity_keys = (
+        _ss004_replay_validation_context()
+    )
+    first_youth = "person_b9cd0397a07f"
+    second_youth = "person_32ce878a56e2"
+    unit = shard.scenes[0].units[0]
+    unit.kind = "dialogue"
+    unit.actor_keys = [first_youth]
+    unit.target_keys = [second_youth]
+    unit.speaker_key = first_youth
+    unit.onscreen_entity_keys = [first_youth, second_youth]
+    unit.participant_deliveries = []
+
+    schema = build_screenplay_scene_shard_repair_schema(
+        shard,
+        scene_input_contracts=contracts,
+    )
+
+    unit_schema = _unit_contract_schema(schema, "bp-sc013", 0)
+    actor_schema = unit_schema["properties"]["actor_keys"]
+    target_schema = unit_schema["properties"]["target_keys"]
+    assert actor_schema["allOf"] == [{
+        "contains": {"const": first_youth},
+        "minContains": 1,
+        "maxContains": 1,
+    }]
+    assert target_schema["allOf"] == [{
+        "contains": {"const": second_youth},
+        "minContains": 1,
+        "maxContains": 1,
+    }]
+    assert unit_schema["properties"]["speaker_key"]["enum"] == [first_youth]
 
 
 def test_repair_schema_derives_relations_visibility_and_evidence_per_unit() -> None:
