@@ -569,7 +569,9 @@ def _screenplay_fallback_status(ep) -> str:
 
 def recover_screenplay_tasks() -> int:
     """Resume only work that was actually interrupted by a service restart."""
+    from app.errors import ArtifactNeedsRebuildError
     from app.generation_concurrency import PRIORITY_RECOVERY
+    from app.production.patch import load_screenplay_from_artifact
     from app.production.screenplay_authority import (
         resolve_current_screenplay_authority,
     )
@@ -588,7 +590,12 @@ def recover_screenplay_tasks() -> int:
                   )"""
     ).fetchall()
     for published in published_rows:
+        published_artifact_id = str(
+            published["screenplay_artifact_id"] or ""
+        )
         try:
+            if published_artifact_id:
+                load_screenplay_from_artifact(published_artifact_id)
             if published["screenplay_status"] == "ready":
                 valid = _screenplay_ready(dict(published))
             else:
@@ -597,6 +604,20 @@ def recover_screenplay_tasks() -> int:
                     conn=conn,
                 )
                 valid = True
+        except ArtifactNeedsRebuildError as exc:
+            conn.execute(
+                "UPDATE episodes SET screenplay_status='failed',"
+                "screenplay_error=?,active_screenplay_run_id=NULL,"
+                "screenplay_updated_at=? WHERE id=? "
+                "AND screenplay_artifact_id=?",
+                (
+                    str(exc),
+                    now(),
+                    published["id"],
+                    published_artifact_id,
+                ),
+            )
+            continue
         except Exception:
             valid = False
         if valid:
@@ -676,6 +697,24 @@ def recover_screenplay_tasks() -> int:
 
         revision = get_active_production_revision(episode_id, "screenplay")
         current_contract = get_contract("screenplay").version
+        if revision is not None and revision.working_artifact_id:
+            try:
+                load_screenplay_from_artifact(revision.working_artifact_id)
+            except ArtifactNeedsRebuildError as exc:
+                conn.execute(
+                    "UPDATE episodes SET screenplay_status='repairing',"
+                    "screenplay_error=?,active_screenplay_run_id=NULL,"
+                    "screenplay_updated_at=? WHERE id=? "
+                    "AND active_screenplay_run_id=?",
+                    (
+                        str(exc),
+                        now(),
+                        episode_id,
+                        row["active_screenplay_run_id"],
+                    ),
+                )
+                conn.commit()
+                continue
         if (
             revision is not None
             and revision.contract_version

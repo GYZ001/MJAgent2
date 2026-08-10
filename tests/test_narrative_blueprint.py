@@ -721,9 +721,8 @@ def test_blueprint_patch_can_split_one_node_without_losing_sources() -> None:
     second = original.model_copy(deep=True)
     second.key = "n1b"
     second.source_segment_ids = ["SRC0001"]
-    second.location_key = "home-bathroom"
-    second.location_label = "白洁家浴室"
-    second.transition_cue = "白洁走进浴室"
+    second.summary = "同一场内继续交付该来源段的后续动作"
+    second.action_logic = "同一场内拆分复合动作但不创建第二个来源 owner"
     patch = NarrativeBlueprintPatch.model_validate({
         "replacements": [{
             "node_key": "n1",

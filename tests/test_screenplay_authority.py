@@ -62,8 +62,13 @@ def test_legacy_screenplay_artifact_without_participant_deliveries_needs_rebuild
     screenplay = _screenplay()
     payload = screenplay_artifact_payload(screenplay)
     payload["narrative_plan"]["contract_version"] = "narrative-continuity.v1"
-    for action in payload["narrative_plan"]["atomic_actions"]:
-        action.pop("participant_deliveries", None)
+    payload["narrative_plan"]["atomic_actions"] = [{
+        "action_id": "A-legacy",
+        "actor_ids": ["character-1"],
+        "target_ids": ["entity-1"],
+        "semantic_intent": "Change the observable state.",
+        "completion_condition": "The changed state is visible.",
+    }]
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -94,6 +99,14 @@ def test_current_screenplay_artifact_with_participant_deliveries_loads() -> None
     screenplay = _screenplay()
     payload = screenplay_artifact_payload(screenplay)
     payload["narrative_plan"]["contract_version"] = "narrative-continuity.v2"
+    payload["narrative_plan"]["atomic_actions"] = [{
+        "action_id": "A-current",
+        "actor_ids": ["character-1"],
+        "target_ids": ["entity-1"],
+        "participant_deliveries": [],
+        "semantic_intent": "Change the observable state.",
+        "completion_condition": "The changed state is visible.",
+    }]
     assert all(
         "participant_deliveries" in action
         for action in payload["narrative_plan"]["atomic_actions"]

@@ -954,8 +954,13 @@ def test_recovery_stops_at_legacy_working_artifact_rebuild_boundary(
 ) -> None:
     payload = screenplay_artifact_payload(_screenplay())
     payload["narrative_plan"]["contract_version"] = "narrative-continuity.v1"
-    for action in payload["narrative_plan"]["atomic_actions"]:
-        action.pop("participant_deliveries", None)
+    payload["narrative_plan"]["atomic_actions"] = [{
+        "action_id": "A-legacy",
+        "actor_ids": ["character-1"],
+        "target_ids": ["entity-1"],
+        "semantic_intent": "Change the observable state.",
+        "completion_condition": "The changed state is visible.",
+    }]
     artifact = repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",

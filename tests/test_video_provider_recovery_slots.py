@@ -304,6 +304,7 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
     conn.commit()
     monkeypatch.setattr(worker, "get_conn", lambda: conn)
     monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_poll_queue", asyncio.Queue())
 
     stopped = media_scheduler.request_cancel(
         "job-history",

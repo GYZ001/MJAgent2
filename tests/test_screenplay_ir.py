@@ -2148,8 +2148,14 @@ def _participant_delivery_complete_ir_payload(version: str) -> dict:
     payload["format_version"] = version
     for scene in payload["scenes"]:
         for unit in scene["units"]:
+            unit["narrative_layer"] = "story"
+            unit["event_priority"] = "causal"
+            unit["render_policy"] = "standalone"
             unit["participant_deliveries"] = []
     for event in payload["events"]:
+        event["narrative_layer"] = "story"
+        event["event_priority"] = "causal"
+        event["render_policy"] = "standalone"
         event["participant_deliveries"] = []
     return payload
 

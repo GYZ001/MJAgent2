@@ -132,7 +132,7 @@ SYSTEM_PREFIX = (
 )
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
-SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.2.1"
+SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.3.0"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
@@ -3832,7 +3832,10 @@ async def _repair_narrative_blueprint(
             "只局部修复叙事蓝图的硬门禁问题，禁止重写整份蓝图。"
             "replacements 中只输出需要修改的完整 node；普通修改使用 node，"
             "需要拆分复合时空时使用 nodes。拆分前后 source_segment_ids 的集合"
-            "必须完全相同，允许多个新节点共同引用同一来源段；新节点 key 必须唯一。"
+            "必须完全相同；同一 SRC 只能归属一个程序分场。若拆分节点会落入不同场，"
+            "原 SRC 只保留在实际交付场，其他场必须通过 state_requirements、"
+            "decision.setup_node_keys 或 transition_cue 表达派生上下文，禁止重复消费。"
+            "新节点 key 必须唯一。"
             "仅当硬门禁明确给出 BLUEPRINT_SOURCE_MISSING 时，允许把下方列出的"
             "缺失 SRC 补入语义和原文位置最接近的节点。"
             "若错误节点是局部修复曾产生的重复/虚构节点，可写入 delete_node_keys；"
@@ -4706,6 +4709,8 @@ async def _generate_sharded_narrative_blueprint(
                     f"{shard_index}/{len(segment_shards)}。只处理 target_sources，"
                     "不得复述或重新拥有边界上下文中的来源。每个节点最多绑定 "
                     f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE} 个连续 SRC。"
+                    "同一 SRC 最终只能归属一个程序分场；跨场信息必须通过状态事实、"
+                    "决定前置或 transition_cue 派生，不得让不同场节点重复消费 SRC。"
                     "节点只承担一个核心动作、一个主要情绪/因果转折和一个离场结果；"
                     "跨时间域、跨地点或动作过载必须拆节点。participants、decision.actor_key"
                     " 和状态主体必须使用人物上下文中的稳定 character_key；未具名角色使用"
@@ -4973,7 +4978,9 @@ async def _generate_screenplay_narrative_blueprint(
 3. 每节点只有一个主要 location_key/location_label。人物改变地点时，transition_cue
    必须说明走路、乘车、下车、进入房间、字幕或匹配剪辑，禁止瞬移。
    location_label 禁止使用「/」「、」「+」「内外」合并大堂/房间、里间/外间、
-   车站/车厢等多个空间；同一原文段跨空间时可由多个节点重复引用该 SRC。
+   车站/车厢等多个空间。同一 SRC 只能归属一个程序分场；其他场需要该信息时，
+   必须通过 state_requirements、decision.setup_node_keys 或 transition_cue 建立
+   显式派生关系，不得重复消费原 SRC。
 4. 对后文会复用的持久事实建立 state_changes/state_requirements，包括但不限于：
    车辆所有者与司机、人物所在位置、住宿分配、房间结构、关键物品、掩护动作、
    谁知道什么。每个 state_change 必须建立本集唯一且递增的 fact_key（F001...）；
@@ -5161,11 +5168,9 @@ async def _generate_screenplay_scene_sharded_baseline(
         shard_progress,
     )
 
-    if not narrative_blueprint.scene_plans:
-        # Program-derived scene ownership is part of the Blueprint contract.
-        # Keep this guard at the orchestration boundary as well so resumed or
-        # test-injected validated nodes cannot produce an empty shard plan.
-        derive_blueprint_scene_plans(narrative_blueprint)
+    # Rebuild the complete ownership contract at the orchestration boundary.
+    # Resumed artifacts must not retain a pre-v3 scene projection.
+    derive_blueprint_scene_plans(narrative_blueprint)
 
     # The old fixed third identity scan is replaced by a typed audit after the
     # Blueprint exists.  Only participant references not already covered by the

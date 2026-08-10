@@ -46,7 +46,7 @@ from app.production.structured_issues import (
     must_fix_count,
     structured_issue,
 )
-from app.schemas import Bible, EpisodeScreenplay
+from app.schemas import Bible, EpisodeScreenplay, NARRATIVE_CONTRACT_VERSION
 from app.renderability import DIALOGUE_CHAIN_TURNS_HARD_MAX
 
 
@@ -5227,7 +5227,7 @@ async def _llm_field_patch_once(
             "stage": "screenplay_narrative_patch",
             "stage_key": "narrative_graph_patch",
             "call_role": "semantic_patch_planner",
-            "contract_version": "narrative-continuity.v1",
+            "contract_version": NARRATIVE_CONTRACT_VERSION,
             "reuse_successful_operation": True,
             "planner_attempt": planner_attempt,
             "prompt_context_chars": len(prompt_json),

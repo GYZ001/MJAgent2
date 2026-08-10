@@ -188,6 +188,32 @@ def screenplay_ir_missing_participant_delivery_paths(
     return missing
 
 
+def screenplay_ir_missing_event_semantic_paths(value: object) -> list[str]:
+    """Require explicit story-layer and rendering decisions in current IR."""
+    if not isinstance(value, dict):
+        return ["$"]
+    required = ("narrative_layer", "event_priority", "render_policy")
+    missing: list[str] = []
+    for scene_index, scene in enumerate(value.get("scenes") or []):
+        if not isinstance(scene, dict):
+            continue
+        for unit_index, unit in enumerate(scene.get("units") or []):
+            if not isinstance(unit, dict):
+                continue
+            for field in required:
+                if field not in unit:
+                    missing.append(
+                        f"scenes[{scene_index}].units[{unit_index}].{field}"
+                    )
+    for event_index, event in enumerate(value.get("events") or []):
+        if not isinstance(event, dict):
+            continue
+        for field in required:
+            if field not in event:
+                missing.append(f"events[{event_index}].{field}")
+    return missing
+
+
 class IRIdentity(BaseModel):
     key: str
     display_name: str
@@ -604,6 +630,9 @@ class ScreenplayGenerationIR(BaseModel):
     audience_priors: list[IRAudiencePrior] = Field(default_factory=list)
     experience: IRExperience | None = None
     normalization_log: list[dict[str, Any]] = Field(default_factory=list)
+    source_scene_owners: dict[str, str] = Field(default_factory=dict)
+    scene_derivations: list[dict[str, Any]] = Field(default_factory=list)
+    source_ownership_hash: str = ""
     legacy_screenplay: EpisodeScreenplay | None = Field(
         default=None,
         exclude=True,
@@ -624,7 +653,10 @@ class ScreenplayGenerationIR(BaseModel):
                 "legacy_screenplay": value,
             }
         if str(value.get("format_version") or IR_VERSION) == IR_VERSION:
-            missing = screenplay_ir_missing_participant_delivery_paths(value)
+            missing = [
+                *screenplay_ir_missing_participant_delivery_paths(value),
+                *screenplay_ir_missing_event_semantic_paths(value),
+            ]
             if missing:
                 raise ValueError(
                     "[IR_CONTRACT_FIELD_MISSING] 当前 IR 合同缺少显式字段："
@@ -1508,12 +1540,18 @@ def screenplay_ir_prompt_contract() -> str:
     "summary":"", "conflict":"", "turn":"",
     "units":[
       {"kind":"action","text":"可拍动作","event_key":"ev1",
+       "narrative_layer":"story",
+       "event_priority":"causal",
+       "render_policy":"standalone",
        "actor_keys":["person_a"],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
        "participant_deliveries":[],
        "resulting_state":"该动作完成后新成立的局势，禁止复述 text",
        "source_segment_ids":["SRC0001"]},
       {"kind":"dialogue","text":"改编台词","event_key":"ev1",
+       "narrative_layer":"story",
+       "event_priority":"supporting",
+       "render_policy":"merge_adjacent",
        "actor_keys":[],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
        "participant_deliveries":[],
@@ -1993,6 +2031,52 @@ def compile_screenplay_ir(
                     "IR units 引用了不存在的细粒度来源段："
                     + "、".join(sorted(unknown_source_ids)[:20])
                 )
+            if value.source_scene_owners:
+                ownership_payload = {
+                    "source_scene_owners": value.source_scene_owners,
+                    "scene_derivations": value.scene_derivations,
+                }
+                actual_ownership_hash = hashlib.sha256(
+                    json.dumps(
+                        ownership_payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if (
+                    value.source_ownership_hash
+                    and value.source_ownership_hash
+                    != actual_ownership_hash
+                ):
+                    raise ScreenplayIRFidelityError(
+                        "IR source_ownership_hash 与结构化 owner 合同不一致"
+                    )
+                missing_owner_contract = (
+                    expected_source_ids
+                    - set(value.source_scene_owners)
+                )
+                if missing_owner_contract:
+                    raise ScreenplayIRFidelityError(
+                        "IR source owner 合同漏掉来源段："
+                        + "、".join(sorted(missing_owner_contract)[:20])
+                    )
+                owner_conflicts = [
+                    (
+                        source_id,
+                        value.source_scene_owners.get(source_id),
+                        scene.key,
+                    )
+                    for scene, unit in flat_units
+                    for source_id in unit.source_segment_ids
+                    if value.source_scene_owners.get(source_id) != scene.key
+                ]
+                if owner_conflicts:
+                    source_id, expected_owner, consumer = owner_conflicts[0]
+                    raise ScreenplayIRFidelityError(
+                        f"IR 来源唯一归属冲突：{source_id} owner="
+                        f"{expected_owner or '未定义'}，consumer={consumer}"
+                    )
             units_without_source = [
                 f"{scene.key}:{unit.event_key or index}"
                 for index, (scene, unit) in enumerate(flat_units, start=1)
@@ -2691,6 +2775,20 @@ def compile_screenplay_ir(
                     )
             existing = derived_by_key.get(event_key)
             if existing is not None:
+                semantic_contract = (
+                    unit.narrative_layer,
+                    unit.event_priority,
+                    unit.render_policy,
+                )
+                if semantic_contract != (
+                    existing.narrative_layer,
+                    existing.event_priority,
+                    existing.render_policy,
+                ):
+                    raise ValueError(
+                        "同一 event_key 的语义优先级合同不一致："
+                        f"{event_key}"
+                    )
                 existing.source_segment_ids = list(dict.fromkeys([
                     *existing.source_segment_ids,
                     *source_ids,
@@ -2724,6 +2822,9 @@ def compile_screenplay_ir(
             derived_by_key[event_key] = IREvent(
                 key=event_key,
                 scene_key=scene.key,
+                narrative_layer=unit.narrative_layer,
+                event_priority=unit.event_priority,
+                render_policy=unit.render_policy,
                 source_segment_ids=source_ids,
                 adapted_statement=adapted_statement,
                 resulting_state=unit.resulting_state.strip(),
@@ -2752,6 +2853,73 @@ def compile_screenplay_ir(
         })
     if not value.events:
         raise ValueError("IR events 不能为空")
+
+    excluded_event_keys: set[str] = set()
+    excluded_source_ids: list[str] = []
+    for event in value.events:
+        if event.narrative_layer == "paratext":
+            if event.render_policy != "exclude_from_spine":
+                raise ValueError(
+                    f"paratext 事件 {event.key} 必须 exclude_from_spine"
+                )
+            excluded_event_keys.add(event.key)
+            excluded_source_ids.extend(event.source_segment_ids)
+        elif event.render_policy == "exclude_from_spine":
+            raise ValueError(
+                f"story 事件 {event.key} 不得 exclude_from_spine"
+            )
+    if excluded_event_keys:
+        excluded_ids = list(dict.fromkeys(excluded_source_ids))
+        covered_as_context = {
+            source_id
+            for group in value.coverage
+            if group.disposition == "context"
+            for source_id in group.source_segment_ids
+        }
+        missing_context_ids = [
+            source_id
+            for source_id in excluded_ids
+            if source_id not in covered_as_context
+        ]
+        if missing_context_ids:
+            value.coverage.append(IRCoverageGroup(
+                source_segment_ids=missing_context_ids,
+                disposition="context",
+                reason=(
+                    "来源内容属于非剧情旁文本，保留来源审计，"
+                    "不进入成片叙事 spine"
+                ),
+            ))
+        value.events = [
+            event for event in value.events
+            if event.key not in excluded_event_keys
+        ]
+        value.beats = [
+            beat for beat in value.beats
+            if not set(beat.source_segment_ids).issubset(excluded_ids)
+        ]
+        retained_scenes: list[IRScene] = []
+        for scene in value.scenes:
+            scene.units = [
+                unit for unit in scene.units
+                if unit.event_key not in excluded_event_keys
+            ]
+            if scene.units:
+                retained_scenes.append(scene)
+        value.scenes = retained_scenes
+        if not value.events or not value.scenes:
+            raise ValueError("非剧情旁文本隔离后没有可成片剧情事件")
+        metadata.must_keep_ending = (
+            value.events[-1].resulting_state
+            or value.events[-1].completion_condition
+            or metadata.must_keep_ending
+        )
+        compiler_audit.append({
+            "path": "events",
+            "operation": "exclude_paratext_from_picture_spine",
+            "event_keys": sorted(excluded_event_keys),
+            "source_segment_ids": excluded_ids,
+        })
 
     scene_by_key = _unique_by_key(value.scenes, "scenes")
     event_by_key = _unique_by_key(value.events, "events")
@@ -3894,6 +4062,9 @@ def compile_screenplay_ir(
             "salience": event.salience,
             "irreversibility": event.irreversibility,
             "must_keep": event.must_keep,
+            "narrative_layer": event.narrative_layer,
+            "event_priority": event.event_priority,
+            "render_policy": event.render_policy,
             "delivery_scope_id": str(episode.get("id") or f"episode-{episode_no}"),
             "delivery_policy": "deliver",
             "primary_delivery_window_id": f"RW-{position}",
@@ -3907,6 +4078,9 @@ def compile_screenplay_ir(
             visible_change=event.observable_claim,
             state_out=event.resulting_state,
             must_keep=event.must_keep,
+            narrative_layer=event.narrative_layer,
+            event_priority=event.event_priority,
+            render_policy=event.render_policy,
             adaptation_addition=event.adaptation_relation == "invent",
             adaptation_reason=event.adaptation_reason,
             approved=event.adaptation_relation != "invent",
