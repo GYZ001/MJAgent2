@@ -728,7 +728,9 @@ def test_successful_storyboard_is_not_reported_as_failed_checkpoint() -> None:
     assert failed["checkpoint_shot"] == 5
 
 
-def test_invalid_published_certificate_recommends_revalidation(monkeypatch) -> None:
+def test_invalid_published_certificate_without_resume_capability_regenerates(
+    monkeypatch,
+) -> None:
     _seed_episode(with_artifact=True)
     conn = db.get_conn()
     ep = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
@@ -738,7 +740,8 @@ def test_invalid_published_certificate_recommends_revalidation(monkeypatch) -> N
     state = api._screenplay_status_snapshot(ep, shot_count=8, production={})
 
     assert state["code"] == "qa_certificate_invalid"
-    assert state["recommended_action"] == "resume_screenplay"
+    assert state["can_resume"] is False
+    assert state["recommended_action"] == "generate_screenplay"
     assert "重新校验" in state["message"]
 
 
@@ -760,6 +763,7 @@ def test_resumable_screenplay_status_exposes_actual_stop_reason() -> None:
     assert "技术异常中断" in failed["message"]
     assert blocked["code"] == "workflow_gate_blocked"
     assert "门禁未通过" in blocked["message"]
+    assert failed["can_resume"] is blocked["can_resume"] is True
     assert failed["recommended_action"] == blocked["recommended_action"] == "resume_screenplay"
 
 
@@ -838,6 +842,15 @@ def test_script_and_status_project_authoritative_stale_screenplay_without_resume
     assert detail["screenplay_state"]["recommended_action"] == "generate_screenplay"
     assert detail["screenplay_state"]["can_resume"] is False
     assert status["screenplay_state"] == detail["screenplay_state"]
+    episode = dict(db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id='e1'"
+    ).fetchone())
+    storyboard_block = api._screenplay_rebuild_block(db.get_conn(), episode)
+    assert storyboard_block["code"] == "ARTIFACT_NEEDS_REBUILD"
+    with pytest.raises(HTTPException) as caught:
+        api._prepare_published_screenplay_revalidation(episode)
+    assert caught.value.status_code == 409
+    assert caught.value.detail["code"] == "ARTIFACT_NEEDS_REBUILD"
 
 
 @pytest.mark.parametrize("view", [None, "board"])
@@ -895,18 +908,51 @@ def test_script_detail_keeps_valid_screenplay_projection() -> None:
 
     assert detail["screenplay"]["title"] == _valid_script().title
     assert detail["screenplay_state"]["code"] == "qa_certificate_invalid"
+    assert detail["screenplay_state"]["can_resume"] is False
+    assert detail["screenplay_state"]["recommended_action"] == "generate_screenplay"
 
 
-def test_script_detail_does_not_classify_unknown_validation_from_stale_reason() -> None:
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        pytest.param(
+            lambda _episode: api.episode_detail("e1", view="script"),
+            id="detail",
+        ),
+        pytest.param(
+            lambda _episode: api.screenplay_lightweight_status("e1"),
+            id="status",
+        ),
+        pytest.param(
+            api._prepare_published_screenplay_revalidation,
+            id="resume",
+        ),
+        pytest.param(
+            lambda episode: api._screenplay_rebuild_block(
+                db.get_conn(),
+                episode,
+            ),
+            id="storyboard_gate",
+        ),
+    ],
+)
+def test_unknown_stale_artifact_validation_fails_closed_at_every_boundary(
+    boundary,
+) -> None:
     _seed_episode(with_artifact=False)
+    invalid_artifact = _screenplay().model_dump(mode="json")
+    invalid_artifact.pop("episode_no")
     _bind_stale_screenplay_artifact(
-        _legacy_screenplay_payload(),
-        _screenplay().model_dump(mode="json"),
+        _valid_script().model_dump(mode="json"),
+        invalid_artifact,
         stale_reason="[ARTIFACT_NEEDS_REBUILD] untrusted free text",
     )
+    episode = dict(db.get_conn().execute(
+        "SELECT * FROM episodes WHERE id='e1'"
+    ).fetchone())
 
     with pytest.raises(ValidationError):
-        api.episode_detail("e1", view="script")
+        boundary(episode)
 
 
 def test_1646_episode_picker_and_light_status_reduce_minute_payload_over_80_percent() -> None:

@@ -1476,7 +1476,14 @@ def published_stale_screenplay_rebuild_error(
     ):
         return None
     try:
-        screenplay_from_artifact_record(artifact)
+        screenplay = screenplay_from_artifact_record(artifact)
+        assert_screenplay_matches_validated_v6_source(
+            episode_id=episode_id,
+            artifact=artifact,
+            screenplay=screenplay,
+            conn=conn,
+            mark_stale=False,
+        )
     except ArtifactNeedsRebuildError as exc:
         if (
             exc.artifact_id == artifact_id
