@@ -39,6 +39,11 @@ from app.schemas import (
     StoryboardScenePack,
     extract_json,
 )
+from app.storyboard_authority import (
+    StoryboardOutlineAuthorityError,
+    persist_storyboard_outline_authority,
+    resolve_storyboard_outline_authority,
+)
 from app.stages import (
     StageError,
     StoryboardShotDraft,
@@ -979,7 +984,7 @@ def _recover_truncated_outline_from_approved_artifact(
         return outline
 
     rows = conn.execute(
-        """SELECT content_json,parent_artifact_ids_json FROM artifacts
+        """SELECT id,content_json,parent_artifact_ids_json FROM artifacts
            WHERE type='storyboard_outline' AND scope_type='episode' AND scope_id=?
              AND status IN ('approved','validated')
            ORDER BY created_at DESC""",
@@ -995,11 +1000,12 @@ def _recover_truncated_outline_from_approved_artifact(
             continue
         if len(candidate.shots) <= max(current_count, shot_count):
             continue
-        conn.execute(
-            "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-            (candidate.model_dump_json(), ep["id"]),
+        persist_storyboard_outline_authority(
+            str(ep["id"]),
+            candidate,
+            artifact_id=str(row["id"]),
+            conn=conn,
         )
-        conn.commit()
         cp.expected_total = len(candidate.shots)
         cp.phase = "VALIDATING_OUTLINE"
         cp.outcome = None
@@ -1093,9 +1099,15 @@ def _recover_outline_from_current_artifact(
         cp.expected_total = len(outline.shots)
         cp.phase = "VALIDATING_OUTLINE"
         cp.outcome = None
+        persist_storyboard_outline_authority(
+            str(ep["id"]),
+            outline,
+            artifact_id=artifact_id,
+            conn=conn,
+        )
         conn.execute(
-            "UPDATE episodes SET storyboard_outline_json=?, storyboard_warning=NULL WHERE id=?",
-            (outline.model_dump_json(), ep["id"]),
+            "UPDATE episodes SET storyboard_warning=NULL WHERE id=?",
+            (ep["id"],),
         )
         conn.commit()
         return outline
@@ -1828,9 +1840,11 @@ def _commit_repair_candidate(
                         conn=conn, commit=False,
                     )
         if candidate_outline is not None:
-            conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                (candidate_outline.model_dump_json(), episode_id),
+            persist_storyboard_outline_authority(
+                episode_id,
+                candidate_outline,
+                conn=conn,
+                commit=False,
             )
         projected_rows = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
@@ -2202,10 +2216,31 @@ async def run_storyboard_supervisor(
 
     outline: StoryboardOutline | None = None
     if resume and ep["storyboard_outline_json"]:
-        try:
-            outline = StoryboardOutline.model_validate_json(ep["storyboard_outline_json"])
-        except (TypeError, ValueError):
-            outline = None
+        if narrative_authority:
+            try:
+                outline_authority = resolve_storyboard_outline_authority(
+                    episode_id,
+                    conn=conn,
+                )
+            except StoryboardOutlineAuthorityError as exc:
+                raise StageError(
+                    "分镜大纲恢复",
+                    [f"已存 outline 权威版本无法验证，恢复已关闭：{exc}"],
+                ) from exc
+            outline = outline_authority.outline
+            ep_data["target_duration_s"] = (
+                outline_authority.authoritative_duration_s
+            )
+            ep_data["storyboard_outline_json"] = (
+                outline_authority.canonical_json
+            )
+        else:
+            try:
+                outline = StoryboardOutline.model_validate_json(
+                    ep["storyboard_outline_json"]
+                )
+            except (TypeError, ValueError):
+                outline = None
     outline = _recover_truncated_outline_from_approved_artifact(
         conn, ep, cp, outline,
     )
@@ -2280,12 +2315,17 @@ async def run_storyboard_supervisor(
                 screenplay,
                 bible,
             )
-            conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                (outline.model_dump_json(), episode_id),
+            outline_authority = persist_storyboard_outline_authority(
+                episode_id,
+                outline,
+                conn=conn,
             )
-            conn.commit()
-            ep_data["storyboard_outline_json"] = outline.model_dump_json()
+            ep_data["target_duration_s"] = (
+                outline_authority.authoritative_duration_s
+            )
+            ep_data["storyboard_outline_json"] = (
+                outline_authority.canonical_json
+            )
         if discarded_repair is not None:
             cp.legacy_repair_audit = {
                 **cp.legacy_repair_audit,
@@ -2512,9 +2552,13 @@ async def run_storyboard_supervisor(
                         narrative_authority=True,
                     )
                 if outline_identity_repairs and outline is not None:
-                    conn.execute(
-                        "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                        (outline.model_dump_json(), episode_id),
+                    outline_authority = persist_storyboard_outline_authority(
+                        episode_id,
+                        outline,
+                        conn=conn,
+                    )
+                    ep_data["target_duration_s"] = (
+                        outline_authority.authoritative_duration_s
                     )
                 conn.commit()
                 prefix_rows = list(_ensure_current_storyboard_shot_artifacts(
@@ -2734,14 +2778,29 @@ async def run_storyboard_supervisor(
                 raise StageError("分镜大纲", [public]) from exc
             if not _run_has_write_ownership():
                 return cp
+            outline_authority = persist_storyboard_outline_authority(
+                episode_id,
+                outline,
+                artifact_id=(
+                    str(getattr(outline, "evidence_artifact_id", "") or "")
+                    or None
+                ),
+                conn=conn,
+            )
             conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=?, storyboard_warning=NULL WHERE id=?",
-                (outline.model_dump_json(), episode_id),
+                "UPDATE episodes SET storyboard_warning=NULL WHERE id=?",
+                (episode_id,),
             )
             conn.commit()
+            ep_data["target_duration_s"] = (
+                outline_authority.authoritative_duration_s
+            )
+            ep_data["storyboard_outline_json"] = (
+                outline_authority.canonical_json
+            )
             cp.outline_artifact_id = str(
-                getattr(outline, "evidence_artifact_id", "") or ""
-            ) or None
+                outline_authority.artifact_id
+            )
             cp.phase = "VALIDATING_OUTLINE"
             cp.expected_total = len(outline.shots)
             planned_persisted = len(outline.shots)
@@ -2777,11 +2836,14 @@ async def run_storyboard_supervisor(
             )
             if derived_contexts:
                 if not repair_pending:
-                    conn.execute(
-                        "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                        (pack_outline.model_dump_json(), episode_id),
+                    outline_authority = persist_storyboard_outline_authority(
+                        episode_id,
+                        pack_outline,
+                        conn=conn,
                     )
-                    conn.commit()
+                    ep_data["target_duration_s"] = (
+                        outline_authority.authoritative_duration_s
+                    )
                 else:
                     cp.last_repair = {
                         **active_repair,
@@ -3657,11 +3719,15 @@ async def run_storyboard_supervisor(
                     row["storyboard_artifact_id"],
                     narrative_authority=narrative_authority,
                 )
-            conn.execute(
-                "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                (outline.model_dump_json(), episode_id),
+            outline_authority = persist_storyboard_outline_authority(
+                episode_id,
+                outline,
+                conn=conn,
             )
             conn.commit()
+            ep_data["target_duration_s"] = (
+                outline_authority.authoritative_duration_s
+            )
             completed = list(full_board.shots)
             if run_id:
                 evidence_repository.append_event(
@@ -3830,9 +3896,13 @@ async def run_storyboard_supervisor(
                     "fields": changed_fields,
                 })
             if outline_projection_repairs and outline is not None:
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                    (outline.model_dump_json(), episode_id),
+                outline_authority = persist_storyboard_outline_authority(
+                    episode_id,
+                    outline,
+                    conn=conn,
+                )
+                ep_data["target_duration_s"] = (
+                    outline_authority.authoritative_duration_s
                 )
             conn.commit()
             rebound_rows = list(_ensure_current_storyboard_shot_artifacts(

@@ -499,6 +499,52 @@ def _row_value(row: Any, key: str, default: Any = None) -> Any:
         return default
 
 
+def authoritative_storyboard_plan_cost(
+    episode_id: str,
+    *,
+    conn=None,
+) -> dict[str, Any]:
+    """Quote one first pass from the exact released outline/shot version."""
+    db = conn or get_conn()
+    manifest = current_storyboard_release_manifest(episode_id, conn=db)
+    rows = db.execute(
+        "SELECT id,shot_no,duration_s FROM shots WHERE episode_id=? ORDER BY shot_no",
+        (episode_id,),
+    ).fetchall()
+    if not rows:
+        raise ValueError("当前分镜发布版没有正式 shots")
+    duration_s = sum(int(row["duration_s"] or 0) for row in rows)
+    authoritative_duration_s = int(
+        manifest.get("authoritative_duration_s") or 0
+    )
+    if authoritative_duration_s and duration_s != authoritative_duration_s:
+        raise ValueError(
+            "视频计划 shots 时长与发布 outline authority 不一致"
+        )
+    from app.video_cost_model import initial_shot_generation_cost
+
+    estimated_cost_cny = round(sum(
+        initial_shot_generation_cost(float(row["duration_s"] or 0))
+        for row in rows
+    ), 6)
+    return {
+        "episode_id": episode_id,
+        "published_storyboard_artifact_id": manifest[
+            "published_storyboard_artifact_id"
+        ],
+        "release_qualification_hash": manifest["release_qualification_hash"],
+        "outline_revision": int(manifest.get("outline_revision") or 0),
+        "outline_fingerprint": str(
+            manifest.get("outline_fingerprint") or ""
+        ),
+        "shot_count": len(rows),
+        "authoritative_duration_s": (
+            authoritative_duration_s or duration_s
+        ),
+        "estimated_cost_cny": estimated_cost_cny,
+    }
+
+
 def canonical_shot_contract_fingerprint(row: Any) -> str:
     """Hash the complete canonical Shot, not a partial/raw DB projection."""
     shot = _shot_model_from_row(row)
@@ -535,7 +581,7 @@ def current_storyboard_release_manifest(
     episode_id: str,
     *,
     conn=None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Return the immutable storyboard release identity used by every plan."""
     db = conn or get_conn()
     episode = db.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
@@ -642,12 +688,38 @@ def current_storyboard_release_manifest(
             episode=episode,
             current_storyboard_content=board.model_dump(mode="json"),
         )
+    from app.storyboard_authority import (
+        OUTLINE_AUTHORITY_VERSION,
+        resolve_storyboard_outline_authority,
+    )
+
+    outline_authority = None
+    if (
+        narrative_authority
+        or str(_row_value(episode, "target_duration_authority", "") or "")
+        == OUTLINE_AUTHORITY_VERSION
+    ):
+        outline_authority = resolve_storyboard_outline_authority(
+            episode_id,
+            conn=db,
+            verify_shots=True,
+        )
     qualification_hash = _hash({
-        "manifest_version": "storyboard-release-manifest.v2",
+        "manifest_version": "storyboard-release-manifest.v3",
         "episode_id": episode_id,
         "published_storyboard_artifact_id": artifact_id,
         "published_storyboard_artifact_hash": artifact_hash,
         "completion_certificate_id": certificate_id,
+        "outline_revision": (
+            outline_authority.revision if outline_authority is not None else 0
+        ),
+        "outline_fingerprint": (
+            outline_authority.fingerprint if outline_authority is not None else ""
+        ),
+        "authoritative_duration_s": (
+            outline_authority.authoritative_duration_s
+            if outline_authority is not None else 0
+        ),
     })
     return {
         "published_storyboard_artifact_id": artifact_id,
@@ -657,6 +729,23 @@ def current_storyboard_release_manifest(
         # identity or invalidate an already published generation plan.
         "narrative_review_artifact_id": "",
         "narrative_calibration_artifact_id": "",
+        "outline_revision": (
+            outline_authority.revision if outline_authority is not None else 0
+        ),
+        "outline_fingerprint": (
+            outline_authority.fingerprint if outline_authority is not None else ""
+        ),
+        "outline_artifact_id": (
+            outline_authority.artifact_id if outline_authority is not None else ""
+        ),
+        "authoritative_duration_s": (
+            outline_authority.authoritative_duration_s
+            if outline_authority is not None else 0
+        ),
+        "planning_duration_s": (
+            outline_authority.planning_duration_s
+            if outline_authority is not None else 0
+        ),
         "release_qualification_hash": qualification_hash,
     }
 
@@ -664,7 +753,7 @@ def current_storyboard_release_manifest(
 def bind_plan_release_identity(
     plan: EpisodeVideoGenerationPlan,
     shot_rows: list[Any],
-    manifest: dict[str, str],
+    manifest: dict[str, Any],
 ) -> EpisodeVideoGenerationPlan:
     """Construction-only binding; runtime validation never fills missing data."""
     plan.published_storyboard_artifact_id = manifest["published_storyboard_artifact_id"]
@@ -1131,7 +1220,7 @@ def validate_episode_plan(
     shot_rows: list[Any],
     snapshot: ProviderVideoCapabilitySnapshot,
     *,
-    release_manifest: dict[str, str] | None = None,
+    release_manifest: dict[str, Any] | None = None,
 ) -> EpisodeVideoGenerationPlan:
     issues: list[dict[str, Any]] = []
     if release_manifest is not None:
@@ -1158,6 +1247,22 @@ def validate_episode_plan(
                 "current": release_manifest["published_storyboard_artifact_id"],
             })
     by_id = {str(row["id"]): row for row in shot_rows}
+    if release_manifest is not None:
+        authoritative_duration_s = int(
+            release_manifest.get("authoritative_duration_s") or 0
+        )
+        projected_duration_s = sum(
+            int(row["duration_s"] or 0) for row in shot_rows
+        )
+        if (
+            authoritative_duration_s
+            and projected_duration_s != authoritative_duration_s
+        ):
+            issues.append({
+                "code": "OUTLINE_DURATION_AUTHORITY_STALE",
+                "stored": projected_duration_s,
+                "current": authoritative_duration_s,
+            })
     aliases: dict[str, str] = {}
     for row in shot_rows:
         db_id = str(row["id"])

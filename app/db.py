@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS episodes (
     synopsis TEXT,
     source_chapters TEXT,
     target_duration_s INTEGER DEFAULT 50,
+    planning_target_duration_s INTEGER,
+    planning_duration_source TEXT,
+    target_duration_authority TEXT NOT NULL DEFAULT 'planning_estimate',
+    storyboard_outline_revision INTEGER NOT NULL DEFAULT 0,
+    storyboard_outline_fingerprint TEXT,
+    storyboard_outline_artifact_id TEXT,
     screenplay_json TEXT,
     screenplay_status TEXT DEFAULT 'pending',
     screenplay_error TEXT,
@@ -1305,6 +1311,14 @@ MIGRATIONS = (
     "ALTER TABLE provider_calls ADD COLUMN request_json TEXT",
     "ALTER TABLE provider_calls ADD COLUMN response_json TEXT",
     "ALTER TABLE episodes ADD COLUMN storyboard_outline_json TEXT",  # 分镜大纲（先规划后逐镜填充），供前端展示进度 k/N
+    # 规划估算与已通过门禁的 outline 时长分轨保存。target_duration_s 在
+    # outline 接受后是下游权威值，原估算保留用于剧本输入指纹和审计。
+    "ALTER TABLE episodes ADD COLUMN planning_target_duration_s INTEGER",
+    "ALTER TABLE episodes ADD COLUMN planning_duration_source TEXT",
+    "ALTER TABLE episodes ADD COLUMN target_duration_authority TEXT NOT NULL DEFAULT 'planning_estimate'",
+    "ALTER TABLE episodes ADD COLUMN storyboard_outline_revision INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE episodes ADD COLUMN storyboard_outline_fingerprint TEXT",
+    "ALTER TABLE episodes ADD COLUMN storyboard_outline_artifact_id TEXT",
     "ALTER TABLE episodes ADD COLUMN screenplay_artifact_id TEXT",
     "ALTER TABLE projects ADD COLUMN scene_refs_status TEXT DEFAULT 'idle'",  # 场景图素材库生成任务状态
     "ALTER TABLE projects ADD COLUMN scene_refs_error TEXT",

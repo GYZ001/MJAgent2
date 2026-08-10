@@ -413,6 +413,23 @@ def screenplay_authority_material(
             )
         projection_hash = evidence_repository.content_hash(bible_projection)
 
+    target_duration_s = int(
+        _episode_value(episode, "target_duration_s", 0) or 0
+    )
+    from app.storyboard_authority import OUTLINE_AUTHORITY_VERSION
+
+    if (
+        _episode_value(episode, "target_duration_authority", "")
+        == OUTLINE_AUTHORITY_VERSION
+        and _episode_value(episode, "planning_target_duration_s") is not None
+    ):
+        # Storyboard publication promotes the accepted outline duration for
+        # downstream production. The screenplay certificate remains bound to
+        # the planning estimate that was its actual generation input.
+        target_duration_s = int(
+            _episode_value(episode, "planning_target_duration_s", 0) or 0
+        )
+
     # The two dialogue fields are no longer production inputs. Keep their
     # historical values in v1 authority material so already-issued completion
     # certificates remain verifiable after the feature removal.
@@ -421,7 +438,7 @@ def screenplay_authority_material(
         "hook": _episode_value(episode, "hook", "") or "",
         "cliffhanger": _episode_value(episode, "cliffhanger", "") or "",
         "synopsis": _episode_value(episode, "synopsis", "") or "",
-        "target_duration_s": int(_episode_value(episode, "target_duration_s", 0) or 0),
+        "target_duration_s": target_duration_s,
         "required_dialogues": _decode_list(
             _episode_value(episode, "screenplay_required_dialogues", "[]")
         ),

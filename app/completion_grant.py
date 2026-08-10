@@ -1029,6 +1029,18 @@ def episode_video_completion_budget_requirement(
 
     db = conn or get_conn()
     ensure_video_budget_authority_tables(db)
+    release_row = db.execute(
+        "SELECT published_storyboard_artifact_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    cost_basis = None
+    if release_row and release_row["published_storyboard_artifact_id"]:
+        from app.video_plan import authoritative_storyboard_plan_cost
+
+        cost_basis = authoritative_storyboard_plan_cost(
+            episode_id,
+            conn=db,
+        )
     snapshot = episode_video_budget_snapshot(episode_id, conn=db)
     used = float((snapshot or {}).get("used_cny") or 0)
     claimed_shot_ids = {
@@ -1044,15 +1056,30 @@ def episode_video_completion_budget_requirement(
         ).fetchall()
     }
     remaining = 0.0
+    projected_first_pass = 0.0
     total_shots = 0
     for row in db.execute(
         "SELECT id,duration_s FROM shots WHERE episode_id=?",
         (episode_id,),
     ).fetchall():
         total_shots += 1
+        shot_cost = initial_shot_generation_cost(
+            float(row["duration_s"] or 0)
+        )
+        projected_first_pass += shot_cost
         if str(row["id"]) in claimed_shot_ids:
             continue
-        remaining += initial_shot_generation_cost(float(row["duration_s"] or 0))
+        remaining += shot_cost
+    if cost_basis is not None and (
+        total_shots != int(cost_basis["shot_count"])
+        or abs(
+            projected_first_pass
+            - float(cost_basis["estimated_cost_cny"])
+        ) > 1e-9
+    ):
+        raise ValueError(
+            "视频成本投影与当前 outline/release authority 不一致"
+        )
     return {
         "used_cny": round(used, 6),
         "claimed_current_shots": len(claimed_shot_ids),

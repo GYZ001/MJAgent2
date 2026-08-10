@@ -34,6 +34,7 @@ from app.production.screenplay_authority import (
     SCREENPLAY_QA_PROFILE_VERSION,
     screenplay_authority_fingerprint,
 )
+from app.schemas import StoryboardOutline, StoryboardOutlineShot
 from app.narrative_review import run_blind_audience_review
 from tests.test_narrative_continuity import _board, _screenplay
 from tests.test_narrative_review import _observation, _persist_review_projection
@@ -308,7 +309,24 @@ async def _reviewed_publish_candidate(monkeypatch) -> dict:
     screenplay = _screenplay()
     board = _board()
     board.shots[-1].is_final = True
+    outline = StoryboardOutline(
+        episode_no=board.episode_no,
+        shots=[
+            StoryboardOutlineShot.model_validate({
+                key: value
+                for key, value in shot.model_dump(mode="json").items()
+                if key in StoryboardOutlineShot.model_fields
+            })
+            for shot in board.shots
+        ],
+    )
     screenplay_artifact, shot_artifacts = _persist_review_projection(screenplay, board)
+    from app.storyboard_authority import persist_storyboard_outline_authority
+
+    persist_storyboard_outline_authority(
+        "episode-generic",
+        outline,
+    )
     screenplay_contract = get_contract("screenplay").version
     conn = db.get_conn()
     conn.execute(
@@ -463,6 +481,7 @@ async def _reviewed_publish_candidate(monkeypatch) -> dict:
             "artifact_id": working_candidate["id"],
             "artifact_hash": working_candidate["content_hash"],
             "shots_payload": [shot.model_dump(mode="json") for shot in board.shots],
+            "outline_json": outline.model_dump_json(),
         },
     }
 

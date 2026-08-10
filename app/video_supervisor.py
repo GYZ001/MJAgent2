@@ -2465,6 +2465,15 @@ async def _amend_storyboard(
             "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
             (episode_id,),
         ).fetchall()
+        from app.storyboard_authority import (
+            resolve_storyboard_outline_authority,
+        )
+
+        outline_authority = resolve_storyboard_outline_authority(
+            episode_id,
+            conn=conn,
+            verify_shots=True,
+        )
         board = _board_from_shot_rows(rows, int(episode["episode_no"] or 1))
         shot_index = next(
             index for index, item in enumerate(rows) if item["id"] == entry.shot_id
@@ -2475,7 +2484,7 @@ async def _amend_storyboard(
             database_shot_id=entry.shot_id,
             screenplay=screenplay,
             bible=bible,
-            target_duration_s=int(episode["target_duration_s"] or 0),
+            target_duration_s=outline_authority.authoritative_duration_s,
             episode_id=episode_id,
             repair_plan=plan,
             observed_issue_codes=list(

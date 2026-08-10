@@ -331,9 +331,14 @@ def _reconcile_storyboard_scene_projection(conn, episode_id: str, bible: Bible) 
                 if (brief.scene_time, brief.scene_setting, brief.scene_name) != before:
                     outline_changes += 1
             if outline_changes:
-                conn.execute(
-                    "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                    (outline.model_dump_json(), episode_id),
+                from app.storyboard_authority import (
+                    persist_storyboard_outline_authority,
+                )
+
+                persist_storyboard_outline_authority(
+                    episode_id,
+                    outline,
+                    conn=conn,
                 )
 
     shot_changes = 0
@@ -1278,9 +1283,13 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
     to_total = len(outline.shots)
     if to_total == persisted_total:
         return None
-    conn.execute("UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
-                 (outline.model_dump_json(), episode_id))
-    conn.commit()
+    from app.storyboard_authority import persist_storyboard_outline_authority
+
+    persist_storyboard_outline_authority(
+        episode_id,
+        outline,
+        conn=conn,
+    )
     reason = "shot_overflow" if appended else "covers_split"
     log_provider_call(
         "storyboard_plan_revised", config.MODEL_TEXT, "PLAN_REVISED", None, 0,
@@ -4051,12 +4060,20 @@ def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
             brief.new_information_ids = []
         outline_shots.append(brief)
     updated_outline = StoryboardOutline(episode_no=int(ep["episode_no"]), shots=outline_shots)
+    from app.storyboard_authority import persist_storyboard_outline_authority
+
+    persist_storyboard_outline_authority(
+        episode_id,
+        updated_outline,
+        conn=conn,
+        commit=False,
+    )
     conn.execute(
         """UPDATE episodes
-           SET status='scripted', script_error=NULL, storyboard_artifact_id=NULL,
-               storyboard_outline_json=?
-           WHERE id=?""",
-        (updated_outline.model_dump_json(), episode_id),
+              SET status='scripted', script_error=NULL,
+                  storyboard_artifact_id=NULL
+            WHERE id=?""",
+        (episode_id,),
     )
     from app.narrative_review import invalidate_episode_narrative_review
 
