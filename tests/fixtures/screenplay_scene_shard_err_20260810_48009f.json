@@ -1,0 +1,213 @@
+{
+  "error_id": "ERR-20260810-48009f",
+  "run_id": "run_82ac46b576af",
+  "case_id": "episode-1-ss004-bp-sc014-unit-3",
+  "scene_contract": {
+    "scene_key": "bp-sc014",
+    "canonical_identity_keys": [
+      "person_b67de643afe6",
+      "person_46e7e8b742ed",
+      "person_8ff1cb1a5861",
+      "person_e79ecc6793f5",
+      "person_32ce878a56e2"
+    ],
+    "similar_identity_outside_contract": "person_b9cd0397a07f"
+  },
+  "provider_responses": [
+    {
+      "provider_call_id": 60900,
+      "semantic_attempt": 0,
+      "response_sha256": "2a0dafcc87b59e92f3350c77438f4915dea6b1062443358664edbacaa0499a1c",
+      "units": [
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 0,
+          "unit": {
+            "kind": "action",
+            "text": "孟浩恢复心神，怔怔看着许师姐消失的方向，眼中露出十六年来未曾有过的神采，内心沸腾",
+            "event_key": "E014001",
+            "source_segment_ids": [
+              "SRC0054"
+            ],
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "target_keys": [],
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": []
+          }
+        },
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 3,
+          "unit": {
+            "kind": "action",
+            "text": "绿袍执事乙说完，神色带着高高在上的意味看向孟浩四人",
+            "event_key": "E014003",
+            "source_segment_ids": [
+              "SRC0056"
+            ],
+            "actor_keys": [
+              "person_8ff1cb1a5861"
+            ],
+            "target_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "onscreen_entity_keys": [
+              "person_8ff1cb1a5861",
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": []
+          }
+        },
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 4,
+          "unit": {
+            "kind": "dialogue",
+            "text": "你，还有你，跟我走，去南区杂役处。",
+            "source_text": "你，还有你，跟我走，去南区杂役处。",
+            "speaker_key": "person_46e7e8b742ed",
+            "event_key": "E014004",
+            "function": "instruction",
+            "source_segment_ids": [
+              "SRC0057"
+            ],
+            "actor_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "target_keys": [
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "onscreen_entity_keys": [
+              "person_46e7e8b742ed",
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": []
+          }
+        }
+      ]
+    },
+    {
+      "provider_call_id": 60901,
+      "semantic_attempt": 1,
+      "response_sha256": "d9f341789269295fa2ce7858e6b03e13263dcb6aaae121843091843c9aa08d2f",
+      "units": [
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 0,
+          "unit": {
+            "kind": "action",
+            "text": "孟浩恢复心神，怔怔看着许师姐消失的方向，眼中露出十六年来未曾有过的神采，内心沸腾",
+            "event_key": "E014001",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "source_segment_ids": [
+              "SRC0054"
+            ],
+            "actor_keys": [
+              "person_b67de643afe6"
+            ],
+            "target_keys": [],
+            "onscreen_entity_keys": [
+              "person_b67de643afe6"
+            ],
+            "participant_deliveries": [],
+            "resulting_state": "",
+            "speaker_key": null,
+            "function": "statement",
+            "source_text": "",
+            "chain_key": ""
+          }
+        },
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 3,
+          "unit": {
+            "kind": "action",
+            "text": "绿袍执事乙说完，神色带着高高在上的意味看向孟浩四人",
+            "event_key": "E014003",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "source_segment_ids": [
+              "SRC0056"
+            ],
+            "actor_keys": [
+              "person_8ff1cb1a5861"
+            ],
+            "target_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2"
+            ],
+            "onscreen_entity_keys": [
+              "person_8ff1cb1a5861",
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [
+              {
+                "participant_key": "person_b9cd0397a07f",
+                "observable_claim": "大青山被困少年甲未在镜头范围内，未出现在本次场景画面中",
+                "audible": false,
+                "visible_effect": false,
+                "visible_reaction": false
+              }
+            ],
+            "resulting_state": "",
+            "speaker_key": null,
+            "function": "statement",
+            "source_text": "",
+            "chain_key": ""
+          }
+        },
+        {
+          "scene_key": "bp-sc014",
+          "unit_index": 4,
+          "unit": {
+            "kind": "dialogue",
+            "text": "你，还有你，跟我走，去南区杂役处。",
+            "event_key": "E014004",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "source_segment_ids": [
+              "SRC0057"
+            ],
+            "actor_keys": [
+              "person_46e7e8b742ed"
+            ],
+            "target_keys": [
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "onscreen_entity_keys": [
+              "person_46e7e8b742ed",
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "participant_deliveries": [],
+            "resulting_state": "",
+            "speaker_key": "person_46e7e8b742ed",
+            "function": "instruction",
+            "source_text": "你，还有你，跟我走，去南区杂役处。",
+            "chain_key": ""
+          }
+        }
+      ]
+    }
+  ]
+}

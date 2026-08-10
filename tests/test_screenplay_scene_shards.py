@@ -68,6 +68,11 @@ ERR_20260810_B66DDA_REPLAY = (
     / "fixtures"
     / "screenplay_scene_shard_err_20260810_b66dda.json"
 )
+ERR_20260810_48009F_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_err_20260810_48009f.json"
+)
 SS004_REPLAY_INPUT = (
     Path(__file__).parent
     / "fixtures"
@@ -1068,6 +1073,207 @@ def _unit_delivery_array_schema(
         unit_index
     ]["allOf"][1]
     return unit_constraint["properties"]["participant_deliveries"]
+
+
+def _scene_contract_schema(schema: dict, scene_key: str) -> dict:
+    for item in schema["properties"]["scenes"]["prefixItems"]:
+        constraint = item["allOf"][1]
+        if constraint["properties"]["key"]["const"] == scene_key:
+            return constraint
+    raise AssertionError(f"missing schema for {scene_key}")
+
+
+def _unit_contract_schema(
+    schema: dict,
+    scene_key: str,
+    unit_index: int | None = None,
+) -> dict:
+    units_schema = _scene_contract_schema(schema, scene_key)["properties"][
+        "units"
+    ]
+    if unit_index is None:
+        return units_schema["items"]["allOf"][1]
+    return units_schema["prefixItems"][unit_index]["allOf"][1]
+
+
+def _err_48009f_candidate(
+    provider_response: dict,
+) -> ScreenplaySceneShardIR:
+    replay_units = {
+        item["unit_index"]: deepcopy(item["unit"])
+        for item in provider_response["units"]
+        if item["scene_key"] == "bp-sc014"
+    }
+    units = []
+    for unit_index in range(max(replay_units) + 1):
+        unit = deepcopy(replay_units.get(unit_index, replay_units[0]))
+        if unit_index not in replay_units:
+            unit["event_key"] = f"replay-placeholder-{unit_index}"
+            unit["source_segment_ids"] = ["SRC0055"]
+        units.append(unit)
+    return ScreenplaySceneShardIR.model_validate({
+        "episode_no": 1,
+        "shard_id": "SS004",
+        "scene_plan_keys": ["bp-sc014"],
+        "scenes": [{
+            "key": "bp-sc014",
+            "scene_heading": "日·外·靠山宗半山腰青石空地",
+            "story_function": "推进靠山宗杂役分配事件",
+            "summary": "绿袍执事分配新入门弟子",
+            "units": units,
+        }],
+    })
+
+
+def test_err_20260810_48009f_replay_uses_contract_canonical_keys_without_mutation() -> None:
+    replay = json.loads(ERR_20260810_48009F_REPLAY.read_text(encoding="utf-8"))
+    _plan, _scene_plans, contracts, _identity_keys = (
+        _ss004_replay_validation_context()
+    )
+
+    assert replay["error_id"] == "ERR-20260810-48009f"
+    assert replay["run_id"] == "run_82ac46b576af"
+    assert [
+        item["provider_call_id"] for item in replay["provider_responses"]
+    ] == [60900, 60901]
+    assert [
+        item["semantic_attempt"] for item in replay["provider_responses"]
+    ] == [0, 1]
+
+    canonical_keys = replay["scene_contract"]["canonical_identity_keys"]
+    similar_identity = replay["scene_contract"][
+        "similar_identity_outside_contract"
+    ]
+    for provider_response in replay["provider_responses"]:
+        shard = _err_48009f_candidate(provider_response)
+        original = shard.model_dump(mode="json")
+
+        schema = build_screenplay_scene_shard_repair_schema(
+            shard,
+            scene_input_contracts=contracts,
+        )
+
+        assert shard.model_dump(mode="json") == original
+        unit_schema = _unit_contract_schema(schema, "bp-sc014", 3)
+        for field in ("actor_keys", "target_keys"):
+            assert unit_schema["properties"][field]["items"]["enum"] == (
+                canonical_keys
+            )
+            assert similar_identity not in unit_schema["properties"][field][
+                "items"
+            ]["enum"]
+        assert unit_schema["properties"]["actor_keys"]["minItems"] == 1
+        assert unit_schema["properties"]["actor_keys"]["maxItems"] == 1
+        assert unit_schema["properties"]["target_keys"]["minItems"] == 3
+        assert unit_schema["properties"]["target_keys"]["maxItems"] == 4
+        assert unit_schema["properties"]["speaker_key"] == {"type": "null"}
+        delivery_schema = unit_schema["properties"][
+            "participant_deliveries"
+        ]
+        assert delivery_schema["minItems"] == 0
+        assert delivery_schema["maxItems"] == 0
+
+
+def test_scene_contract_schema_is_shared_by_initial_and_semantic_attempts() -> None:
+    replay = json.loads(ERR_20260810_48009F_REPLAY.read_text(encoding="utf-8"))
+    _plan, _scene_plans, contracts, _identity_keys = (
+        _ss004_replay_validation_context()
+    )
+    canonical_keys = replay["scene_contract"]["canonical_identity_keys"]
+    similar_identity = replay["scene_contract"][
+        "similar_identity_outside_contract"
+    ]
+
+    initial_schema = build_screenplay_scene_shard_repair_schema(
+        scene_input_contracts=contracts,
+    )
+    candidate = _err_48009f_candidate(replay["provider_responses"][0])
+    repair_schema = build_screenplay_scene_shard_repair_schema(
+        candidate,
+        scene_input_contracts=contracts,
+    )
+
+    initial_unit = _unit_contract_schema(initial_schema, "bp-sc014")
+    repair_unit = _unit_contract_schema(repair_schema, "bp-sc014", 3)
+    for field in ("actor_keys", "target_keys"):
+        assert initial_unit["properties"][field]["items"]["enum"] == (
+            canonical_keys
+        )
+        assert repair_unit["properties"][field]["items"]["enum"] == (
+            canonical_keys
+        )
+        assert similar_identity not in initial_unit["properties"][field][
+            "items"
+        ]["enum"]
+    initial_delivery_item = initial_unit["properties"][
+        "participant_deliveries"
+    ]["items"]["allOf"][1]
+    assert initial_delivery_item["properties"]["participant_key"]["enum"] == (
+        canonical_keys
+    )
+    assert initial_schema["x-schema-purpose"] == "scene-contract-bound"
+    assert repair_schema["x-schema-purpose"] == "scene-contract-bound"
+
+
+def test_scene_contract_schema_preserves_relation_cardinality_boundaries() -> None:
+    replay = json.loads(ERR_20260810_48009F_REPLAY.read_text(encoding="utf-8"))
+    _plan, _scene_plans, contracts, _identity_keys = (
+        _ss004_replay_validation_context()
+    )
+    candidate = _err_48009f_candidate(replay["provider_responses"][1])
+
+    schema = build_screenplay_scene_shard_repair_schema(
+        candidate,
+        scene_input_contracts=contracts,
+    )
+
+    empty_target = _unit_contract_schema(schema, "bp-sc014", 0)[
+        "properties"
+    ]["target_keys"]
+    assert empty_target["minItems"] == 0
+    assert empty_target["maxItems"] == 0
+
+    legal_multi_target = _unit_contract_schema(schema, "bp-sc014", 4)[
+        "properties"
+    ]["target_keys"]
+    assert legal_multi_target["minItems"] == 2
+    assert legal_multi_target["maxItems"] == 2
+
+    offscreen_speaker = candidate.model_copy(deep=True)
+    unit = offscreen_speaker.scenes[0].units[0]
+    unit.kind = "dialogue"
+    unit.actor_keys = []
+    unit.target_keys = []
+    unit.speaker_key = "person_46e7e8b742ed"
+    unit.onscreen_entity_keys = []
+    unit.participant_deliveries = [
+        IRActionParticipantDelivery(
+            participant_key="person_46e7e8b742ed",
+            observable_claim="画外说话人的原文对白清晰可闻",
+            audible=True,
+        )
+    ]
+    speaker_schema = build_screenplay_scene_shard_repair_schema(
+        offscreen_speaker,
+        scene_input_contracts=contracts,
+    )
+    speaker_unit = _unit_contract_schema(
+        speaker_schema,
+        "bp-sc014",
+        0,
+    )
+    assert speaker_unit["properties"]["speaker_key"] == {
+        "type": "string",
+        "enum": replay["scene_contract"]["canonical_identity_keys"],
+    }
+    delivery_schema = speaker_unit["properties"]["participant_deliveries"]
+    assert delivery_schema["minItems"] == 1
+    assert delivery_schema["maxItems"] == 1
+    delivery_item = delivery_schema["prefixItems"][0]
+    assert delivery_item["properties"]["participant_key"]["enum"] == [
+        "person_46e7e8b742ed"
+    ]
+    assert delivery_item["properties"]["audible"] == {"const": True}
 
 
 def test_repair_schema_derives_relations_visibility_and_evidence_per_unit() -> None:
