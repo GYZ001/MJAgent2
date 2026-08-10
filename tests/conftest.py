@@ -1,5 +1,6 @@
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -22,7 +23,8 @@ _ISOLATION_SESSION: IsolationSession | None = None
 _PROVIDER_ISOLATION: ProviderConfigurationIsolation | None = None
 _SANDBOX: Path | None = None
 _SANDBOX_OWNED = False
-_ISOLATED_DB_INITIALIZED = False
+_DATABASE_TEMPLATE: Path | None = None
+_DATABASE_TEMPLATE_INITIALIZED = False
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -37,13 +39,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     global _LIVE_INTEGRATION, _ISOLATION_SESSION, _PROVIDER_ISOLATION
-    global _SANDBOX, _SANDBOX_OWNED, _ISOLATED_DB_INITIALIZED
+    global _SANDBOX, _SANDBOX_OWNED
+    global _DATABASE_TEMPLATE, _DATABASE_TEMPLATE_INITIALIZED
 
     _LIVE_INTEGRATION = bool(config.getoption("--live-integration"))
+    _DATABASE_TEMPLATE = None
+    _DATABASE_TEMPLATE_INITIALIZED = False
     if _LIVE_INTEGRATION:
         os.environ["MANJU_TEST_PROFILE"] = "live-integration"
         return
-    _ISOLATED_DB_INITIALIZED = False
 
     configured_sandbox = os.environ.get("MANJU_TEST_SANDBOX", "").strip()
     if configured_sandbox:
@@ -65,15 +69,17 @@ def pytest_configure(config: pytest.Config) -> None:
     app_config.RUNTIME_ROOT = _SANDBOX
     app_config.PROJECTS_DIR = _SANDBOX / "projects"
     app_config.DATA_DIR = _SANDBOX / "data"
-    app_config.DB_PATH = app_config.DATA_DIR / "manju.db"
+    app_config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    app_config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    template_dir = Path(tempfile.mkdtemp(prefix="pytest-db-template-", dir=app_config.DATA_DIR))
+    _DATABASE_TEMPLATE = template_dir / "manju.db"
+    app_config.DB_PATH = _DATABASE_TEMPLATE
     _PROVIDER_ISOLATION = ProviderConfigurationIsolation(
         settings=app_config,
         environment=os.environ,
         blocked_endpoint=UNROUTABLE_PROVIDER_BASE_URL,
     )
     _PROVIDER_ISOLATION.apply()
-    app_config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-    app_config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     from app import db
 
@@ -133,12 +139,13 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         shutil.rmtree(_SANDBOX, ignore_errors=True)
 
 
-def _restore_isolated_runtime(db) -> None:
-    if _SANDBOX is None:
+def _restore_isolated_runtime(db, *, database_path: Path | None = None) -> None:
+    if _SANDBOX is None or _DATABASE_TEMPLATE is None:
         return
 
     from app import config as app_config
 
+    target_database = (database_path or _DATABASE_TEMPLATE).resolve()
     os.environ["MANJU_TEST_PROFILE"] = "isolated"
     os.environ["MANJU_TEST_SANDBOX"] = str(_SANDBOX)
     app_config.TEST_PROFILE = "isolated"
@@ -146,7 +153,7 @@ def _restore_isolated_runtime(db) -> None:
     app_config.RUNTIME_ROOT = _SANDBOX
     app_config.PROJECTS_DIR = _SANDBOX / "projects"
     app_config.DATA_DIR = _SANDBOX / "data"
-    app_config.DB_PATH = app_config.DATA_DIR / "manju.db"
+    app_config.DB_PATH = target_database
     app_config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     app_config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -157,28 +164,84 @@ def _restore_isolated_runtime(db) -> None:
         _PROVIDER_ISOLATION.apply()
 
 
-@pytest.fixture(autouse=True)
-def _reset_capability_runtime(monkeypatch: pytest.MonkeyPatch):
-    """各测试隔离 Command Bus 幂等缓存与审批令牌，避免共用 episode_id 等夹具键串扰。"""
-    global _ISOLATED_DB_INITIALIZED
+def _connection_database_path(connection: sqlite3.Connection) -> Path | None:
+    try:
+        row = connection.execute("PRAGMA database_list").fetchone()
+    except sqlite3.ProgrammingError:
+        return None
+    if row is None or not row[2]:
+        return None
+    return Path(row[2]).resolve()
 
-    from app.capabilities.bus import reset_command_bus_for_tests
-    from app.capabilities.idempotency import clear_for_tests
+
+def _release_local_connection(db, *, owned_database: Path) -> None:
+    connection = getattr(db._local, "conn", None)
+    if connection is None:
+        return
+    db._local.conn = None
+    if _connection_database_path(connection) != owned_database.resolve():
+        return
+    try:
+        if connection.in_transaction:
+            connection.rollback()
+    finally:
+        connection.close()
+
+
+def _initialize_database_template(db) -> None:
+    global _DATABASE_TEMPLATE_INITIALIZED
+
+    if _DATABASE_TEMPLATE_INITIALIZED:
+        return
+    if _DATABASE_TEMPLATE is None:
+        raise RuntimeError("pytest database template is not configured")
+
+    _restore_isolated_runtime(db, database_path=_DATABASE_TEMPLATE)
+    connection = db.get_conn()
+    try:
+        db.init_db()
+    finally:
+        connection.close()
+        db._local.conn = None
+    _DATABASE_TEMPLATE_INITIALIZED = True
+
+
+def _clone_database(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source_connection = sqlite3.connect(source)
+    destination_connection = sqlite3.connect(destination)
+    try:
+        source_connection.backup(destination_connection)
+    finally:
+        destination_connection.close()
+        source_connection.close()
+
+
+def _reset_command_bus_runtime(capability_bus) -> None:
+    capability_bus._BUS = capability_bus.CommandBus(capability_bus.get_registry())
+
+
+@pytest.fixture(autouse=True)
+def _reset_capability_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """每个测试独占数据库，并重置进程内 Command Bus 与审批状态。"""
+
+    from app.capabilities import bus as capability_bus
     from app.capabilities.policy import reset_approvals_for_tests
     from app import db
 
-    _restore_isolated_runtime(db)
-    setup_connection = db.get_conn()
-    try:
-        if not _ISOLATED_DB_INITIALIZED:
-            db.init_db()
-            _ISOLATED_DB_INITIALIZED = True
-        reset_command_bus_for_tests()
-        reset_approvals_for_tests()
-        clear_for_tests()
-    finally:
-        setup_connection.close()
-        db._local.conn = None
+    if _DATABASE_TEMPLATE is None:
+        raise RuntimeError("pytest database template is not configured")
+    _release_local_connection(db, owned_database=_DATABASE_TEMPLATE)
+    _initialize_database_template(db)
+
+    test_database = tmp_path / "manju.db"
+    _clone_database(_DATABASE_TEMPLATE, test_database)
+    _restore_isolated_runtime(db, database_path=test_database)
+    _reset_command_bus_runtime(capability_bus)
+    reset_approvals_for_tests()
 
     try:
         yield
@@ -186,8 +249,10 @@ def _reset_capability_runtime(monkeypatch: pytest.MonkeyPatch):
         try:
             monkeypatch.undo()
         finally:
+            _reset_command_bus_runtime(capability_bus)
             reset_approvals_for_tests()
-            _restore_isolated_runtime(db)
+            _release_local_connection(db, owned_database=test_database)
+            _restore_isolated_runtime(db, database_path=_DATABASE_TEMPLATE)
 
 
 def session_headers() -> dict[str, str]:

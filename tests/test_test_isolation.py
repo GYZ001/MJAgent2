@@ -355,3 +355,122 @@ def test_caught_access_violation_still_fails_pytest_session(
     assert "TEST ISOLATION VIOLATIONS" in result.stdout
     assert "external network" in result.stdout
     assert "persistent database outside test sandbox" in result.stdout
+
+
+def test_each_test_owns_its_database_and_completed_tasks_release_connections(
+    tmp_path: Path,
+) -> None:
+    child_sandbox = tmp_path / "database-ownership"
+    child_sandbox.mkdir()
+    probe = tmp_path / "test_database_ownership_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import asyncio
+            import sqlite3
+            import threading
+            from pathlib import Path
+
+            import pytest
+
+            from app import db
+
+
+            locked_database_path = None
+            release_lock = threading.Event()
+            holder_finished = threading.Event()
+            holder_thread = None
+
+
+            def test_01_connection_may_outlive_the_test_while_holding_a_write_lock():
+                global holder_thread, locked_database_path
+                locked_database_path = Path(db.DB_PATH).resolve()
+                assert "test_01_connection" in str(locked_database_path)
+                holder_ready = threading.Event()
+
+                def hold_write_lock():
+                    connection = sqlite3.connect(locked_database_path, timeout=0)
+                    try:
+                        connection.execute(
+                            "CREATE TABLE IF NOT EXISTS command_idempotency ("
+                            "idem_key TEXT PRIMARY KEY, command TEXT NOT NULL, "
+                            "status TEXT NOT NULL, result_json TEXT NOT NULL, "
+                            "created_at REAL NOT NULL, expires_at REAL NOT NULL)"
+                        )
+                        connection.commit()
+                        connection.execute("BEGIN IMMEDIATE")
+                        connection.execute(
+                            "INSERT INTO command_idempotency "
+                            "(idem_key, command, status, result_json, created_at, expires_at) "
+                            "VALUES('held', 'probe', 'running', '{}', 0, 3600)"
+                        )
+                        holder_ready.set()
+                        release_lock.wait(30)
+                        connection.rollback()
+                    finally:
+                        connection.close()
+                        holder_finished.set()
+
+                holder_thread = threading.Thread(target=hold_write_lock, daemon=True)
+                holder_thread.start()
+                assert holder_ready.wait(2)
+
+
+            def test_02_next_test_uses_an_independent_database():
+                assert Path(db.DB_PATH).resolve() != locked_database_path
+                release_lock.set()
+                holder_thread.join(timeout=2)
+                assert holder_finished.is_set()
+                assert not holder_thread.is_alive()
+
+
+            @pytest.mark.asyncio
+            async def test_03_completed_background_task_closes_its_connection():
+                connection_ready = asyncio.Event()
+                allow_finish = asyncio.Event()
+
+                async def background_work():
+                    connection = db.get_conn()
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection_ready.set()
+                    await allow_finish.wait()
+                    connection.rollback()
+                    return connection
+
+                task = asyncio.create_task(background_work())
+                await connection_ready.wait()
+                connection_released = asyncio.Event()
+                task.add_done_callback(lambda _: connection_released.set())
+                allow_finish.set()
+
+                connection = await task
+                await connection_released.wait()
+
+                with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                    connection.execute("SELECT 1")
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["MANJU_TEST_SANDBOX"] = str(child_sandbox)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "tests.conftest",
+            str(probe),
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=8,
+    )
+
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
