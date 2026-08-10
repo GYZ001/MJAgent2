@@ -12,6 +12,7 @@ type ScreenplayNoticeInput = {
     task_active?: boolean
     can_resume_repair?: boolean
     phase_label?: string
+    stage_stop_reason?: 'paused' | 'blocked' | 'failed' | ''
   } | null
 }
 
@@ -22,6 +23,19 @@ type StoryboardNoticeInput = {
 
 function messageText(value: string | null | undefined): string {
   return value?.trim() ?? ''
+}
+
+function resumableScreenplayMessage(
+  production: NonNullable<ScreenplayNoticeInput['screenplay_production']>,
+  message: string,
+): string {
+  const phase = production.phase_label ?? '剧本流程'
+  const prefix = production.stage_stop_reason === 'failed'
+    ? `${phase}异常中断`
+    : production.stage_stop_reason === 'blocked'
+      ? `${phase}门禁未通过`
+      : `${phase}已暂停`
+  return `${prefix}；${message}`
 }
 
 /**
@@ -43,7 +57,10 @@ export function screenplayTaskNotice(
     if (episode.screenplay_production?.can_resume_repair) {
       return {
         severity: 'warning',
-        message: `${episode.screenplay_production.phase_label ?? '剧本流程'}已暂停；${message}`,
+        message: resumableScreenplayMessage(
+          episode.screenplay_production,
+          message,
+        ),
       }
     }
     return { severity: 'error', message }
@@ -52,7 +69,10 @@ export function screenplayTaskNotice(
   if (episode.screenplay_status === 'repairing') {
     const production = episode.screenplay_production
     if (production?.can_resume_repair) {
-      return { severity: 'warning', message }
+      return {
+        severity: 'warning',
+        message: resumableScreenplayMessage(production, message),
+      }
     }
   }
 

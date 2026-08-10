@@ -738,6 +738,27 @@ def test_invalid_published_certificate_recommends_revalidation(monkeypatch) -> N
     assert "重新校验" in state["message"]
 
 
+def test_resumable_screenplay_status_exposes_actual_stop_reason() -> None:
+    _seed_episode(with_artifact=False)
+    conn = db.get_conn()
+    ep = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
+
+    failed = api._screenplay_status_snapshot(ep, shot_count=0, production={
+        "can_resume_baseline": True,
+        "stage_stop_reason": "failed",
+    })
+    blocked = api._screenplay_status_snapshot(ep, shot_count=0, production={
+        "can_resume_repair": True,
+        "stage_stop_reason": "blocked",
+    })
+
+    assert failed["code"] == "workflow_failed_recoverable"
+    assert "技术异常中断" in failed["message"]
+    assert blocked["code"] == "workflow_gate_blocked"
+    assert "门禁未通过" in blocked["message"]
+    assert failed["recommended_action"] == blocked["recommended_action"] == "resume_screenplay"
+
+
 def test_1646_episode_picker_and_light_status_reduce_minute_payload_over_80_percent() -> None:
     conn = db.get_conn()
     conn.execute("INSERT INTO projects(id,name,status,created_at) VALUES('p1','P','planned',1)")

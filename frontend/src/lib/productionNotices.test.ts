@@ -35,6 +35,28 @@ describe('生产任务提示语义', () => {
     })?.severity).toBe('warning')
 
     expect(screenplayTaskNotice({
+      screenplay_status: 'repairing',
+      screenplay_error: '恢复点已保留',
+      screenplay_production: {
+        task_active: false,
+        can_resume_repair: true,
+        phase_label: '场次写作',
+        stage_stop_reason: 'failed',
+      },
+    })?.message).toBe('场次写作异常中断；恢复点已保留')
+
+    expect(screenplayTaskNotice({
+      screenplay_status: 'repairing',
+      screenplay_error: '工作稿未发布',
+      screenplay_production: {
+        task_active: false,
+        can_resume_repair: true,
+        phase_label: '结构校验',
+        stage_stop_reason: 'blocked',
+      },
+    })?.message).toBe('结构校验门禁未通过；工作稿未发布')
+
+    expect(screenplayTaskNotice({
       screenplay_status: 'ready',
       screenplay_error: '历史文本',
     })).toBeNull()

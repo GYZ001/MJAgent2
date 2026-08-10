@@ -246,15 +246,22 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
         )
         action = "stop_screenplay"
     elif can_resume:
-        code, message, action = (
-            "workflow_paused",
-            (
-                "剧本流程已暂停，可从已验证场次继续首版生成"
-                if production.get("can_resume_baseline")
-                else "剧本流程已暂停，可从完整工作副本继续校验"
-            ),
-            "resume_screenplay",
+        resume_point = (
+            "可从已验证场次继续首版生成"
+            if production.get("can_resume_baseline")
+            else "可从完整工作副本继续校验"
         )
+        stop_reason = str(production.get("stage_stop_reason") or "paused")
+        if stop_reason == "failed":
+            code = "workflow_failed_recoverable"
+            message = f"剧本流程因技术异常中断，{resume_point}"
+        elif stop_reason == "blocked":
+            code = "workflow_gate_blocked"
+            message = f"剧本生产门禁未通过，{resume_point}"
+        else:
+            code = "workflow_paused"
+            message = f"剧本流程已暂停，{resume_point}"
+        action = "resume_screenplay"
     elif screenplay_status == "ready" and not screenplay_ready:
         code, message, action = (
             "qa_certificate_invalid",
