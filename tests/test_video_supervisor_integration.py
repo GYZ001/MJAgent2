@@ -132,6 +132,51 @@ async def test_async_checkpoint_write_does_not_block_event_loop(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_cancelled_checkpoint_keeps_bounded_writer_slot(monkeypatch) -> None:
+    import app.video_supervisor as video_supervisor
+
+    first_started = threading.Event()
+    first_release = threading.Event()
+    calls = 0
+
+    def blocking_first_save(
+        _checkpoint: VideoSupervisorCheckpoint,
+        *,
+        run_id: str | None = None,
+    ) -> str:
+        nonlocal calls
+        del run_id
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            first_release.wait(timeout=1)
+        return f"checkpoint-{calls}"
+
+    monkeypatch.setattr(
+        video_supervisor,
+        "_supervisor_checks_can_use_worker_thread",
+        lambda: True,
+    )
+    monkeypatch.setattr(video_supervisor, "save_checkpoint", blocking_first_save)
+
+    first = asyncio.create_task(
+        _save_checkpoint_async(VideoSupervisorCheckpoint(episode_id="first")),
+    )
+    assert await asyncio.to_thread(first_started.wait, 0.5)
+    first.cancel()
+    second = asyncio.create_task(
+        _save_checkpoint_async(VideoSupervisorCheckpoint(episode_id="second")),
+    )
+    await asyncio.sleep(0.01)
+    assert calls == 1
+
+    first_release.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert results[1] == "checkpoint-2"
+
+
+@pytest.mark.asyncio
 async def test_async_checkpoint_write_supports_memory_database(memdb) -> None:
     checkpoint = VideoSupervisorCheckpoint(
         episode_id="memory-episode",

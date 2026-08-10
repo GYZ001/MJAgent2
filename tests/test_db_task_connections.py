@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -70,6 +71,48 @@ def test_async_write_does_not_retry_non_lock_operational_error(
             )
 
     asyncio.run(fail())
+
+
+def test_async_write_cancellation_waits_for_transaction_to_finish(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "cancelled-write.db"
+    setup = sqlite3.connect(database_path)
+    setup.execute("CREATE TABLE events(id TEXT PRIMARY KEY)")
+    setup.commit()
+    setup.close()
+    monkeypatch.setattr(db, "DB_PATH", database_path)
+    write_started = threading.Event()
+    write_release = threading.Event()
+
+    def delayed_write(conn: sqlite3.Connection) -> None:
+        write_started.set()
+        write_release.wait()
+        conn.execute("INSERT INTO events(id) VALUES('committed-before-cancel')")
+
+    async def exercise() -> None:
+        task = asyncio.create_task(db.run_write_transaction(delayed_write))
+        while not write_started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        write_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        write_release.set()
+
+    verification = sqlite3.connect(database_path)
+    try:
+        rows = verification.execute("SELECT id FROM events").fetchall()
+    finally:
+        verification.close()
+    assert rows == [("committed-before-cancel",)]
 
 
 def test_async_tasks_have_isolated_transactions_and_release_connections(

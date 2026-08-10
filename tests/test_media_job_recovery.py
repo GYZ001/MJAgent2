@@ -819,6 +819,7 @@ def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monke
     assert reset["provider_submitted_at"] is None
     assert reset["reason_code"] is None
     assert reset["reason_text"] is None
+    worker._assert_provider_create_resolved(reset, None)
 
 
 def test_manual_retry_cas_failure_rolls_back_new_epoch_budget(monkeypatch) -> None:

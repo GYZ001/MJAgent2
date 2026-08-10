@@ -5,17 +5,18 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import time
-from typing import Any, Literal
+from typing import Any, Callable, Literal, TypeVar
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from app import config, errors
-from app.db import get_conn
+from app.db import get_conn, run_write_transaction
 from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
@@ -70,6 +71,7 @@ STORYBOARD_REPAIR_SAFETY_LIMIT = 24
 STORYBOARD_REPAIR_ACTIVATION_LIMIT = 6
 STORYBOARD_REPAIR_MAX_FINGERPRINT_ATTEMPTS = 4
 STORYBOARD_REPAIR_PLANNER_VERSION = "storyboard-repair-v2"
+_T = TypeVar("_T")
 
 
 _PHASE_LABELS: dict[str, str] = {
@@ -661,6 +663,74 @@ def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> s
             payload=cp.model_dump(mode="json"),
         )
     return artifact["id"]
+
+
+def _connection_uses_memory_database(conn: Any) -> bool:
+    """Return whether an isolated SQLite connection would lose this database."""
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    main = next((row for row in rows if str(row[1]) == "main"), None)
+    return main is not None and not str(main[2] or "")
+
+
+async def _run_storyboard_projection_transaction(
+    conn: Any,
+    operation: Callable[[Any], _T],
+) -> _T:
+    """Run a short projection write off-loop while preserving in-memory tests."""
+    if not _connection_uses_memory_database(conn):
+        return await run_write_transaction(operation)
+
+    owns_transaction = not bool(conn.in_transaction)
+    savepoint = "storyboard_supervisor_async_write"
+    try:
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(f"SAVEPOINT {savepoint}")
+        result = operation(conn)
+        if owns_transaction:
+            conn.commit()
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return result
+    except BaseException:
+        if owns_transaction:
+            if conn.in_transaction:
+                conn.rollback()
+        else:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+
+
+async def _persist_high_frequency_checkpoint(
+    conn: Any,
+    cp: SupervisorCheckpoint,
+    *,
+    run_id: str | None,
+    event_type: str,
+    severity: str,
+    message: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Persist one loop checkpoint and its progress event without blocking."""
+    snapshot = cp.model_copy(deep=True)
+
+    def persist() -> None:
+        if run_id:
+            evidence_repository.append_event(
+                run_id,
+                event_type,
+                severity,
+                message,
+                payload=payload,
+            )
+        save_checkpoint(snapshot, run_id=run_id)
+
+    if _connection_uses_memory_database(conn):
+        persist()
+    else:
+        await asyncio.to_thread(persist)
 
 
 def _blocker_messages(draft) -> list[str]:
@@ -2952,53 +3022,56 @@ async def run_storyboard_supervisor(
                             },
                         )
                     continue
-                conn.execute("SAVEPOINT scene_pack_commit")
-                try:
+                committed_count = len(completed)
+
+                def commit_scene_pack(write_conn: Any) -> None:
                     _sync_storyboard_shot_timing(
-                        conn,
+                        write_conn,
                         episode_id,
                         candidate_board,
                         expected_screenplay_artifact_id,
                     )
-                    for shot in candidate_board.shots[len(completed):]:
+                    for shot in candidate_board.shots[committed_count:]:
                         _insert_storyboard_shot(
-                            conn,
+                            write_conn,
                             episode_id,
                             screenplay,
                             shot,
                             expected_screenplay_artifact_id,
                         )
-                    conn.execute(
+                    write_conn.execute(
                         "UPDATE episodes SET status='scripting',script_error=NULL WHERE id=?",
                         (episode_id,),
                     )
-                    conn.execute("RELEASE SAVEPOINT scene_pack_commit")
-                except Exception:
-                    conn.execute("ROLLBACK TO SAVEPOINT scene_pack_commit")
-                    conn.execute("RELEASE SAVEPOINT scene_pack_commit")
-                    raise
-                conn.commit()
+
+                await _run_storyboard_projection_transaction(
+                    conn,
+                    commit_scene_pack,
+                )
                 completed = _reload_completed()
                 cp.scene_pack_candidates.pop(batch_key, None)
                 cp.phase = "GENERATING_SHOTS"
                 cp.expected_total = len(outline.shots)
                 cp.validated_prefix_end = len(completed)
                 cp.next_shot_no = len(completed) + 1
-                save_checkpoint(cp, run_id=run_id)
-                if run_id:
-                    evidence_repository.append_event(
-                        run_id,
-                        "SCENE_PACK_BATCH_COMMITTED",
-                        "info",
-                        f"{context.scene_id} 已原子提交第 {scene_start}~{scene_end} 镜",
-                        payload={
-                            "batch_key": batch_key,
-                            "scene_id": context.scene_id,
-                            "scene_no": context.scene_no,
-                            "shot_start": scene_start,
-                            "shot_end": scene_end,
-                        },
-                    )
+                await _persist_high_frequency_checkpoint(
+                    conn,
+                    cp,
+                    run_id=run_id,
+                    event_type="SCENE_PACK_BATCH_COMMITTED",
+                    severity="info",
+                    message=(
+                        f"{context.scene_id} 已原子提交第 "
+                        f"{scene_start}~{scene_end} 镜"
+                    ),
+                    payload={
+                        "batch_key": batch_key,
+                        "scene_id": context.scene_id,
+                        "scene_no": context.scene_no,
+                        "shot_start": scene_start,
+                        "shot_end": scene_end,
+                    },
+                )
 
             if scene_pack_failure is None and any(
                 int(batch["end"]) > len(completed)
@@ -3336,16 +3409,29 @@ async def run_storyboard_supervisor(
                 save_checkpoint(cp, run_id=run_id)
                 continue
 
-            _sync_storyboard_shot_timing(
-                conn, episode_id, board, expected_screenplay_artifact_id
+            def commit_shot_projection(write_conn: Any) -> None:
+                _sync_storyboard_shot_timing(
+                    write_conn,
+                    episode_id,
+                    board,
+                    expected_screenplay_artifact_id,
+                )
+                _insert_storyboard_shot(
+                    write_conn,
+                    episode_id,
+                    screenplay,
+                    shot,
+                    expected_screenplay_artifact_id,
+                )
+                write_conn.execute(
+                    "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?",
+                    (episode_id,),
+                )
+
+            await _run_storyboard_projection_transaction(
+                conn,
+                commit_shot_projection,
             )
-            _insert_storyboard_shot(
-                conn, episode_id, screenplay, shot, expected_screenplay_artifact_id
-            )
-            conn.execute(
-                "UPDATE episodes SET status='scripting', script_error=NULL WHERE id=?", (episode_id,)
-            )
-            conn.commit()
             completed = _reload_completed()
             revision = (
                 None
@@ -3362,13 +3448,15 @@ async def run_storyboard_supervisor(
             if revision is not None:
                 planned_persisted = revision[1]
                 cp.expected_total = revision[1]
-            if run_id:
-                evidence_repository.append_event(
-                    run_id, "SHOT_CHECKPOINT_VALIDATED", "info",
-                    f"第 {shot.shot_no} 镜已通过",
-                    payload={"shot_no": shot.shot_no},
-                )
-            save_checkpoint(cp, run_id=run_id)
+            await _persist_high_frequency_checkpoint(
+                conn,
+                cp,
+                run_id=run_id,
+                event_type="SHOT_CHECKPOINT_VALIDATED",
+                severity="info",
+                message=f"第 {shot.shot_no} 镜已通过",
+                payload={"shot_no": shot.shot_no},
+            )
 
             if draft.is_final:
                 break

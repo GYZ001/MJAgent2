@@ -1129,10 +1129,25 @@ async def run_write_transaction(
     *,
     retry_delays: tuple[float, ...] = ASYNC_WRITE_RETRY_DELAYS_S,
 ) -> _T:
-    """Run one short transaction off-loop with bounded async lock retries."""
+    """Run one short transaction off-loop with bounded async lock retries.
+
+    Cancellation waits for the current thread transaction to commit or roll
+    back before it propagates, so no database write can land after the caller
+    has already observed cancellation.
+    """
     for attempt in range(len(retry_delays) + 1):
         try:
-            return await asyncio.to_thread(_run_write_transaction_once, operation)
+            write_task = asyncio.create_task(
+                asyncio.to_thread(_run_write_transaction_once, operation)
+            )
+            try:
+                return await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                try:
+                    await write_task
+                except BaseException:
+                    pass
+                raise
         except sqlite3.OperationalError as exc:
             if (
                 not _is_transient_sqlite_lock(exc)
