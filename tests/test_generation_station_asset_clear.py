@@ -1,7 +1,13 @@
+import asyncio
 import json
 import sqlite3
+from types import SimpleNamespace
 
-from app import artifacts, db
+import pytest
+from fastapi import HTTPException
+
+from app import artifacts, completion_grant, db
+from app.capabilities.direct import enter_handler
 
 
 def _database() -> sqlite3.Connection:
@@ -287,3 +293,282 @@ def test_episode_resource_clear_supersedes_active_video_plan(
         "superseded",
         "用户已清空本集生成资源",
     )
+
+
+def _seed_unsettled_provider_task(
+    conn: sqlite3.Connection,
+    *,
+    create_state: str,
+    claim_status: str,
+    provider_task_id: str | None,
+) -> None:
+    conn.execute("PRAGMA foreign_keys=ON")
+    completion_grant.ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,provider_task_id,
+               status,image_inputs,created_at
+           ) VALUES('v-provider','s',1,'prompt','provider-idem',?,?,'{}',1)""",
+        (
+            provider_task_id,
+            "running" if provider_task_id else "waiting_human",
+        ),
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_non_cancellable,provider_operation_id,
+               provider_create_state,created_at,updated_at
+           ) VALUES(
+               'j-provider','future-provider-work','s','v-provider','e','p',?,
+               1,'op-provider',?,1,1
+           )""",
+        (
+            "waiting_provider" if provider_task_id else "waiting_human",
+            create_state,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,episode_id,job_id,version_id,amount_cny,status,
+               created_at,updated_at
+           ) VALUES(
+               'op-provider','e','j-provider','v-provider',4,?,1,1
+           )""",
+        (claim_status,),
+    )
+    conn.commit()
+
+
+def _assert_provider_clear_blocked(
+    exc: ValueError,
+    *,
+    create_state: str,
+    claim_status: str,
+    recovery_status: str,
+) -> None:
+    detail = getattr(exc, "detail", None)
+    assert detail is not None
+    assert detail["code"] == "PROVIDER_TASKS_NOT_TERMINAL"
+    assert detail["safe_to_clear"] is False
+    assert detail["resume_supported"] is True
+    assert detail["blockers"] == [
+        {
+            "job_id": "j-provider",
+            "version_id": "v-provider",
+            "provider_operation_id": "op-provider",
+            "provider_task_id": (
+                "provider-task-1" if create_state == "accepted" else None
+            ),
+            "job_status": (
+                "waiting_provider" if create_state == "accepted" else "waiting_human"
+            ),
+            "provider_create_state": create_state,
+            "claim_status": claim_status,
+            "amount_cny": 4.0,
+            "recovery_status": recovery_status,
+            "recovery_action": (
+                "continue_provider_poll"
+                if recovery_status == "waiting_provider"
+                else "reconcile_provider_create"
+            ),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("create_state", "claim_status", "provider_task_id", "recovery_status"),
+    [
+        pytest.param(
+            "accepted",
+            "accepted",
+            "provider-task-1",
+            "waiting_provider",
+            id="供应商已接单",
+        ),
+        pytest.param(
+            "submitting",
+            "reserved",
+            None,
+            "waiting_human",
+            id="提交结果尚未落定",
+        ),
+        pytest.param(
+            "unknown",
+            "reserved",
+            None,
+            "waiting_human",
+            id="创建结果未知",
+        ),
+    ],
+)
+def test_resource_clear_blocks_unsettled_paid_provider_tasks_without_type_rules(
+    tmp_path,
+    monkeypatch,
+    create_state: str,
+    claim_status: str,
+    provider_task_id: str | None,
+    recovery_status: str,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state=create_state,
+        claim_status=claim_status,
+        provider_task_id=provider_task_id,
+    )
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    with pytest.raises(ValueError) as blocked:
+        artifacts.clear_shot_artifacts("s")
+
+    _assert_provider_clear_blocked(
+        blocked.value,
+        create_state=create_state,
+        claim_status=claim_status,
+        recovery_status=recovery_status,
+    )
+    assert conn.execute(
+        "SELECT provider_create_state FROM jobs WHERE id='j-provider'"
+    ).fetchone()[0] == create_state
+    assert conn.execute(
+        "SELECT provider_task_id FROM shot_versions WHERE id='v-provider'"
+    ).fetchone()[0] == provider_task_id
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()[0] == claim_status
+
+
+def test_video_only_clear_preserves_unsettled_provider_handle_and_claim(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    conn.execute(
+        "UPDATE shot_versions SET image_inputs=? WHERE id='v-provider'",
+        (json.dumps({"reference_images": [{"id": "reference-1"}]}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    with pytest.raises(ValueError) as blocked:
+        artifacts.clear_shot_video_assets("s")
+
+    _assert_provider_clear_blocked(
+        blocked.value,
+        create_state="accepted",
+        claim_status="accepted",
+        recovery_status="waiting_provider",
+    )
+    assert conn.execute(
+        "SELECT provider_task_id,status FROM shot_versions WHERE id='v-provider'"
+    ).fetchone()[:] == ("provider-task-1", "running")
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()[0] == "accepted"
+
+
+@pytest.mark.parametrize("scope", ["shot", "episode"])
+def test_staged_cleanup_rejects_unsettled_provider_task_in_callers_transaction(
+    tmp_path,
+    monkeypatch,
+    scope: str,
+) -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+    conn.execute("BEGIN IMMEDIATE")
+
+    with pytest.raises(ValueError) as blocked:
+        if scope == "shot":
+            artifacts.stage_shot_artifact_cleanup(conn, "s")
+        else:
+            artifacts.stage_episode_artifact_cleanup(conn, "e")
+
+    _assert_provider_clear_blocked(
+        blocked.value,
+        create_state="accepted",
+        claim_status="accepted",
+        recovery_status="waiting_provider",
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE id='j-provider'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()[0] == 1
+    conn.rollback()
+
+
+def test_clear_preflight_returns_recoverable_provider_state(monkeypatch) -> None:
+    from app.capabilities import preflight
+
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="unknown",
+        claim_status="reserved",
+        provider_task_id=None,
+    )
+    monkeypatch.setattr(preflight, "get_conn", lambda: conn)
+
+    result = preflight.video_clear_shot(SimpleNamespace(shot_id="s"))
+
+    assert result.allowed is False
+    assert result.denial_code == "PROVIDER_TASKS_NOT_TERMINAL"
+    assert result.requires_confirmation is False
+    assert result.affected.extra["safe_to_clear"] is False
+    assert result.affected.extra["blockers"][0]["recovery_status"] == "waiting_human"
+
+
+def test_shot_clear_rejects_provider_risk_before_stopping_recoverable_job(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app import api, worker
+
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(
+        api,
+        "_review_upstream_snapshot",
+        lambda _episode_id: {"active_upstream_runs": []},
+    )
+    stop_calls: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "stop_shot_video_tasks",
+        lambda shot_id: stop_calls.append(shot_id),
+    )
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    with enter_handler(), pytest.raises(HTTPException) as blocked:
+        asyncio.run(api.clear_shot_artifacts("s"))
+
+    assert blocked.value.status_code == 409
+    assert blocked.value.detail["code"] == "PROVIDER_TASKS_NOT_TERMINAL"
+    assert blocked.value.detail["blockers"][0]["recovery_status"] == "waiting_provider"
+    assert stop_calls == []
+    assert conn.execute(
+        "SELECT status,cancellation_requested,abandoned FROM jobs WHERE id='j-provider'"
+    ).fetchone()[:] == ("waiting_provider", 0, 0)

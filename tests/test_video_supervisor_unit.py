@@ -242,6 +242,36 @@ def test_structured_model_rejection_is_non_repairable_and_never_retried() -> Non
     assert plan.pause_state == "PAUSED_EXTERNAL"
 
 
+def test_structured_technical_failure_routes_to_human_without_external_terminal() -> None:
+    issues = issues_from_job_failure(
+        {
+            "id": "job-technical",
+            "shot_id": "shot-technical",
+            "status": "waiting_human",
+            "reason_code": "VIDEO_PROVIDER_OUTPUT_MISSING",
+            "provider_create_state": "accepted",
+            "provider_failure_category": "technical",
+            "provider_failure_kind": "provider_output_missing",
+            "provider_failure_disposition": "manual_review",
+            "provider_failure_retryable": 0,
+            "error": "provider reported success without an MP4 output",
+        },
+        None,
+        shot_no=4,
+    )
+
+    assert len(issues) == 1
+    assert issues[0].code == "VIDEO_PROVIDER_TECHNICAL_FAILURE"
+    assert issues[0].evidence["provider_failure_category"] == "technical"
+    assert issues[0].evidence["provider_failure_kind"] == "provider_output_missing"
+    assert issues[0].evidence["pause_state"] == "WAITING_HUMAN"
+    assert issues[0].repairable is False
+    plan = route(issues)
+    assert plan.is_paid is False
+    assert plan.strategy == "handoff_human"
+    assert plan.pause_state == "WAITING_HUMAN"
+
+
 def test_prompt_provider_rejection_is_non_repairable_before_video_submission() -> None:
     issues = issues_from_job_failure(
         {

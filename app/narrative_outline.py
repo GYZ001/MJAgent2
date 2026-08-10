@@ -1302,6 +1302,20 @@ def normalize_narrative_storyboard_outline(
             if action is not None
             for phase in action.temporal_phases
         ]
+        bound_actor_ids: set[str] = set()
+        bound_target_ids: set[str] = set()
+        for action_id in action_ids:
+            action = actions.get(action_id)
+            if action is None:
+                continue
+            actor_ids, target_ids = storyboard_action_relation_ids(
+                screenplay,
+                event_id,
+                action,
+                bible=bible,
+            )
+            bound_actor_ids.update(actor_ids)
+            bound_target_ids.update(target_ids)
 
         visible_ids = {
             entity_id
@@ -1437,10 +1451,12 @@ def normalize_narrative_storyboard_outline(
         shot.supporting_action_ids = supporting_action_ids
         shot.action_phase_ids = phase_ids
         shot.visible_entity_ids = sorted(visible_ids)
-        shot.offscreen_action_actor_ids = (
-            sorted(redundant_context_ids) if is_last_occurrence else []
+        shot.offscreen_action_actor_ids = sorted(
+            bound_actor_ids - visible_ids
         )
-        shot.offscreen_action_target_ids = []
+        shot.offscreen_action_target_ids = sorted(
+            bound_target_ids - visible_ids
+        )
 
         shot.planned_state_in_fact_ids = sorted(current_facts)
         declared_add_ids = set(event.effects_add) if is_last_occurrence else set()

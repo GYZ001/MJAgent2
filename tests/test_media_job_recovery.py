@@ -1337,6 +1337,80 @@ def test_manual_retry_rejects_typed_terminal_provider_failure(monkeypatch) -> No
     assert rejected.value.detail["retryability"]["action"] == "create_new_version"
 
 
+def test_manual_retry_requires_confirmation_for_technical_provider_failure(
+    monkeypatch,
+) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)")
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('e1','p1',1,'generating',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
+           VALUES('s1','e1',1,5)"""
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               provider_task_id,created_at
+           ) VALUES(
+               'v1','s1',1,'p','i1','waiting_human','provider-task-1',1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_operation_id,provider_create_state,
+               provider_non_cancellable,provider_failure_category,
+               provider_failure_kind,provider_failure_disposition,
+               provider_failure_retryable,reason_code,created_at,updated_at
+           ) VALUES(
+               'j1','video','s1','v1','e1','p1','waiting_human',
+               'video-create-v1','accepted',1,'technical',
+               'provider_task_not_found','manual_review',0,
+               'VIDEO_PROVIDER_TASK_NOT_FOUND',1,1
+           )"""
+    )
+    conn.commit()
+    _authorize_video_retry(conn, "e1")
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    with pytest.raises(HTTPException) as confirmation:
+        system_api.retry_job("j1")
+
+    assert confirmation.value.status_code == 409
+    assert confirmation.value.detail["code"] == "PROVIDER_TECHNICAL_FAILURE_CONFIRMATION_REQUIRED"
+    assert confirmation.value.detail["retryability"]["action"] == "confirm_new_submission"
+
+    result = system_api.retry_job("j1", {"allow_new_submission": True})
+
+    assert result["job"]["status"] == "queued"
+    assert result["retryability"]["action"] == "new_submission_after_technical_failure"
+    reset = conn.execute(
+        """SELECT provider_create_state,provider_failure_category,
+                  provider_failure_kind,provider_failure_disposition,
+                  provider_failure_retryable,reason_code
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    assert dict(reset) == {
+        "provider_create_state": "not_started",
+        "provider_failure_category": None,
+        "provider_failure_kind": None,
+        "provider_failure_disposition": None,
+        "provider_failure_retryable": None,
+        "reason_code": None,
+    }
+    assert conn.execute(
+        "SELECT provider_task_id FROM shot_versions WHERE id='v1'"
+    ).fetchone()["provider_task_id"] is None
+
+
 def test_manual_retry_resumes_video_input_repair_waiting_human(
     monkeypatch,
 ) -> None:

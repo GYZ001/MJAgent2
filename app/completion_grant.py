@@ -232,6 +232,46 @@ def episode_video_budget_snapshot(episode_id: str, *, conn=None) -> dict[str, fl
     }
 
 
+def project_video_budget_snapshot(project_id: str, *, conn=None) -> dict[str, float]:
+    """Aggregate durable provider liability across every episode in a project.
+
+    Claim release is the accounting boundary. Job and version outcomes only
+    describe execution; they cannot return capacity after a provider call may
+    have incurred a charge. Episodes without an authority row use the legacy
+    liability estimator until their first grant freezes that amount as baseline.
+    """
+    db = conn or get_conn()
+    ensure_video_budget_authority_tables(db)
+    episodes = db.execute(
+        """SELECT e.id,a.baseline_cny
+             FROM episodes e
+             LEFT JOIN episode_video_budget_authorities a ON a.episode_id=e.id
+            WHERE e.project_id=?""",
+        (project_id,),
+    ).fetchall()
+    baseline = 0.0
+    legacy = 0.0
+    for row in episodes:
+        if row["baseline_cny"] is None:
+            legacy += _historical_video_liability(str(row["id"]), conn=db)
+        else:
+            baseline += float(row["baseline_cny"] or 0)
+    claimed = float(db.execute(
+        """SELECT COALESCE(SUM(c.amount_cny),0) AS amount
+             FROM provider_video_budget_claims c
+             JOIN episodes e ON e.id=c.episode_id
+            WHERE e.project_id=? AND c.status!='released'""",
+        (project_id,),
+    ).fetchone()["amount"] or 0)
+    used = baseline + legacy + claimed
+    return {
+        "baseline_cny": round(baseline, 6),
+        "legacy_cny": round(legacy, 6),
+        "claimed_cny": round(claimed, 6),
+        "used_cny": round(used, 6),
+    }
+
+
 def episode_video_completion_budget_requirement(
     episode_id: str,
     *,

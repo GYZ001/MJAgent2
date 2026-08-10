@@ -356,6 +356,90 @@ def test_outline_projection_uses_event_onscreen_relation_not_scene_or_perceivers
     assert outline.shots[0].characters_visible == ["当前人物"]
 
 
+def test_outline_projection_partitions_bound_action_participants_before_hard_gate() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["character-1", "offscreen-actor"]
+    action.target_ids = ["entity-1", "offscreen-target"]
+    screenplay.narrative_plan.propositions[1].entity_ids.extend([
+        "offscreen-actor",
+        "offscreen-target",
+    ])
+    screenplay.narrative_plan.events[0].onscreen_entity_ids = [
+        "character-1",
+        "entity-1",
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The visible participants complete the event.",
+                covers="The event result is observable.",
+            )
+        ],
+    )
+
+    normalize_narrative_storyboard_outline(outline, screenplay)
+
+    shot = outline.shots[0]
+    assert shot.visible_entity_ids == ["character-1", "entity-1"]
+    assert shot.offscreen_action_actor_ids == ["offscreen-actor"]
+    assert shot.offscreen_action_target_ids == ["offscreen-target"]
+    errors = validate_storyboard_narrative(
+        None,
+        screenplay,
+        outline=outline,
+        complete=False,
+    )
+    assert not any("ACTION_ACTOR_UNDELIVERED" in error for error in errors)
+    assert not any("ACTION_TARGET_UNDELIVERED" in error for error in errors)
+
+
+def test_storyboard_hard_gate_rejects_removed_offscreen_action_partition() -> None:
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = ["character-1", "offscreen-actor"]
+    action.target_ids = ["entity-1", "offscreen-target"]
+    screenplay.narrative_plan.propositions[1].entity_ids.extend([
+        "offscreen-actor",
+        "offscreen-target",
+    ])
+    screenplay.narrative_plan.events[0].onscreen_entity_ids = [
+        "character-1",
+        "entity-1",
+    ]
+    outline = StoryboardOutline(
+        episode_no=1,
+        shots=[
+            StoryboardOutlineShot(
+                shot_no=1,
+                scene_id="SC-generic",
+                story_event_id="E-1",
+                event_ids=["E-1"],
+                beat="The visible participants complete the event.",
+                covers="The event result is observable.",
+            )
+        ],
+    )
+    normalize_narrative_storyboard_outline(outline, screenplay)
+    outline.shots[0].offscreen_action_actor_ids = []
+    outline.shots[0].offscreen_action_target_ids = []
+
+    errors = validate_storyboard_narrative(
+        None,
+        screenplay,
+        outline=outline,
+        complete=False,
+    )
+
+    assert any("ACTION_ACTOR_UNDELIVERED" in error for error in errors)
+    assert any("ACTION_TARGET_UNDELIVERED" in error for error in errors)
+
+
 def test_legacy_action_projection_does_not_promote_quoted_identity_to_actor() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)

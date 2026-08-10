@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 
 import pytest
 
@@ -131,6 +133,78 @@ def test_provider_video_budget_claims_never_exceed_approved_cap() -> None:
         operation_id="video-create-budget-v2",
         amount_cny=4.0,
     ) is True
+
+
+def test_concurrent_provider_video_budget_claims_share_one_atomic_cap() -> None:
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('race-p','P','created',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('race-e','race-p',1,'confirmed',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(
+               id,episode_id,shot_no,duration_s,characters,dialogues
+           ) VALUES('race-s','race-e',1,5,'[]','[]')"""
+    )
+    for index in (1, 2):
+        conn.execute(
+            """INSERT INTO shot_versions(
+                   id,shot_id,version_no,prompt_text,idem_key,status,created_at
+               ) VALUES(?,?,?,?,?,'queued',1)""",
+            (
+                f"race-v{index}",
+                "race-s",
+                index,
+                "prompt",
+                f"race-key-{index}",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO jobs(
+                   id,kind,shot_id,version_id,episode_id,project_id,status,
+                   created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,'queued',1,1)""",
+            (
+                f"race-j{index}",
+                "video",
+                "race-s",
+                f"race-v{index}",
+                "race-e",
+                "race-p",
+            ),
+        )
+    conn.commit()
+    authorize_episode_video_budget_increment(
+        "race-e",
+        4.0,
+        source="concurrency-test",
+    )
+    barrier = threading.Barrier(2)
+
+    def reserve(index: int) -> bool:
+        barrier.wait()
+        return reserve_provider_video_budget(
+            episode_id="race-e",
+            job_id=f"race-j{index}",
+            version_id=f"race-v{index}",
+            operation_id=f"video-create-race-v{index}",
+            amount_cny=4.0,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, (1, 2)))
+
+    assert sorted(results) == [False, True]
+    assert episode_video_budget_snapshot("race-e") == {
+        "baseline_cny": 0.0,
+        "claimed_cny": 4.0,
+        "used_cny": 4.0,
+        "cap_cny": 4.0,
+        "remaining_cny": 0.0,
+    }
 
 
 def test_completion_budget_requirement_includes_sunk_duplicate_claims() -> None:
