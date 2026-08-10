@@ -2092,6 +2092,18 @@ def test_scene_shard_error_has_generation_contract_classification() -> None:
         "generation_contract",
         "GEN-CONTRACT",
     )
+    record = app_errors.log_error(error)
+    assert record.category == "generation_contract"
+    assert record.code == "GEN-CONTRACT"
+    row = db.get_conn().execute(
+        "SELECT category,code FROM error_logs WHERE id=?",
+        (record.error_id,),
+    ).fetchone()
+    assert row is not None
+    assert (row["category"], row["code"]) == (
+        "generation_contract",
+        "GEN-CONTRACT",
+    )
 
 
 def test_scene_shard_unit_rejects_unknown_identity_authority_field() -> None:

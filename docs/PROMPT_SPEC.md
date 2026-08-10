@@ -29,10 +29,13 @@
   程序以来源称谓生成唯一显示名；未命名群众使用地点与戏剧职责构成稳定实体，不使用
   按出现顺序生成的临时编号，也不使用姓名黑白名单。
 
-- 剧本 Baseline 使用 `screenplay-envelope.v1` + `screenplay-scene-shard.v4` 生成并合并为
+- 剧本 Baseline 使用 `screenplay-envelope.v1` + `screenplay-scene-shard.v5` 生成并合并为
   `screenplay-generation-ir.v1.5`。Envelope 只接收 Blueprint 全局摘要、集元数据和冻结
   identity registry，不接收完整原文；Scene Shard 只接收其 Blueprint scene plans、owned
-  SRC、边界状态和冻结身份。模型负责场次有序单元、对白与观众意图；后端从 units 确定性生成 events、beats、动作阶段、
+  SRC、边界状态和冻结身份。模型只输出 closed creative schema 中的场次文本、表演内容、
+  unit kind 与 source bindings；每个 unit 的 actor/target/speaker/onscreen 和 participant
+  delivery 资格/通道由 Blueprint action evidence 编译并以 scaffold hash 锁定，首轮与语义
+  修复共用同一 schema，任何越权身份字段均明确失败。后端再从 units 确定性生成 events、beats、动作阶段、
   audience priors、稳定 ID、
   精确来源 offset、状态重放、双向引用、窗口预算和最终 `EpisodeScreenplay`。
 - 发布字段没有精简：`plot_spine/source_coverage/scene_outline/full_script_text`、
@@ -54,7 +57,8 @@
 - 每个 Envelope/Scene Shard 只允许当前小单元的一次格式修复和一次语义修复。原始响应分别
   保存为 `screenplay_envelope_raw` / `screenplay_scene_shard_raw`，只有 Schema 与业务门禁均通过的
   normalized Artifact 才能复用。服务恢复按 contract version、Blueprint hash、identity registry
-  hash、source hash、boundary hash 和 source ownership hash 复用已验证分片；禁止再次计费生成。
+  hash、source hash、boundary hash、source ownership hash 和 identity scaffold hash 复用已验证
+  分片；禁止再次计费生成。
 - 若供应商因长度上限在 events 等程序派生尾部截断，但顶层 `scenes` 数组已由标准 JSON
   decoder 证明完整，系统只恢复完整成员并从 units 重建尾部；不猜测或补闭未完成场次。
 - `v1.4` 不允许未被 unit 直接消费的来源段发布；未知 ID、漏段、来源首次入戏顺序错误、
