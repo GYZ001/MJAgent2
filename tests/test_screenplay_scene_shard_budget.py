@@ -12,10 +12,10 @@ from app.screenplay_scene_shards import (
     ScreenplayActionParticipantDeliveryContract,
     ScreenplaySceneInputContract,
     ScreenplaySceneParticipantBinding,
-    ScreenplaySceneShardIR,
+    ScreenplaySceneShardCreativeIR,
+    ScreenplaySceneShardCreativeScene,
+    ScreenplaySceneShardCreativeUnit,
     ScreenplaySceneShardPlan,
-    ScreenplaySceneShardScene,
-    ScreenplaySceneShardUnit,
     generate_screenplay_scene_shards,
 )
 
@@ -107,51 +107,30 @@ def _contracts(
 def _complete_shard(
     case: dict,
     plan: ScreenplaySceneShardPlan,
-) -> ScreenplaySceneShardIR:
-    source_event = {
-        source_id: event_key
-        for event_key, source_ids in case["event_sources"].items()
-        for source_id in source_ids
-    }
-    scenes: list[ScreenplaySceneShardScene] = []
-    consumed_source_ids: list[str] = []
+) -> ScreenplaySceneShardCreativeIR:
+    scenes: list[ScreenplaySceneShardCreativeScene] = []
     for value in case["scene_inputs"]:
-        units: list[ScreenplaySceneShardUnit] = []
+        units: list[ScreenplaySceneShardCreativeUnit] = []
         for segment in value["source_segments"]:
             source_id = segment["source_segment_id"]
-            consumed_source_ids.append(source_id)
-            units.append(ScreenplaySceneShardUnit(
+            units.append(ScreenplaySceneShardCreativeUnit(
                 kind="action",
                 text=segment["text"],
-                event_key=source_event[source_id],
                 source_segment_ids=[source_id],
-                participant_deliveries=[],
                 resulting_state=f"完成 {source_id}",
             ))
         scene_plan = next(
             item for item in case["scene_plans"]
             if item["key"] == value["scene_plan_key"]
         )
-        scenes.append(ScreenplaySceneShardScene(
-            key=scene_plan["key"],
-            scene_heading=scene_plan["scene_heading"],
+        scenes.append(ScreenplaySceneShardCreativeScene(
+            scene_plan_key=scene_plan["key"],
             story_function="完整交付本场全部来源事件",
             summary=scene_plan["exit_state"],
-            entry_state=scene_plan["previous_scene_exit_state"],
-            exit_state=scene_plan["exit_state"],
             units=units,
         ))
-    return ScreenplaySceneShardIR(
-        episode_no=1,
-        shard_id=plan.shard_id,
-        scene_plan_keys=plan.scene_plan_keys,
+    return ScreenplaySceneShardCreativeIR(
         scenes=scenes,
-        consumed_source_ids=consumed_source_ids,
-        source_hash=plan.source_hash,
-        boundary_hash=plan.boundary_hash,
-        blueprint_hash=plan.blueprint_hash,
-        identity_registry_hash=plan.identity_registry_hash,
-        source_ownership_hash=plan.source_ownership_hash,
     )
 
 
@@ -237,7 +216,11 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
     }
     assert actual_sources == expected_sources
     assert shards[0].consumed_source_ids == expected_sources
-    assert actual_events == set(case["event_sources"])
+    assert actual_events == {
+        f"unit-{index + 1:03d}"
+        for scene in shards[0].scenes
+        for index, _unit in enumerate(scene.units)
+    }
 
     for source_input in case["scene_inputs"]:
         for segment in source_input["source_segments"]:

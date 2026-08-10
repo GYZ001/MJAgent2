@@ -1646,6 +1646,59 @@ def validate_screenplay_scene_shard(
                 elif source_id not in actual_consumed:
                     actual_consumed.append(source_id)
             if (
+                contract is not None
+                and any(
+                    action.participants
+                    for action in contract.action_evidence
+                )
+            ):
+                creative_unit = ScreenplaySceneShardCreativeUnit(
+                    kind=unit.kind,
+                    text=unit.text,
+                    narrative_layer=unit.narrative_layer,
+                    event_priority=unit.event_priority,
+                    render_policy=unit.render_policy,
+                    source_segment_ids=list(unit.source_segment_ids),
+                    resulting_state=unit.resulting_state,
+                    function=unit.function,
+                    source_text=unit.source_text,
+                    chain_key=unit.chain_key,
+                )
+                expected_unit, scaffold_errors = (
+                    _compile_unit_identity_scaffold(
+                        creative_unit,
+                        scene_key=scene.key,
+                        unit_index=unit_index,
+                        contract=contract,
+                    )
+                )
+                errors.extend(scaffold_errors)
+                actual_identity_projection = {
+                    "actor_keys": list(unit.actor_keys),
+                    "target_keys": list(unit.target_keys),
+                    "speaker_key": unit.speaker_key,
+                    "onscreen_entity_keys": list(
+                        unit.onscreen_entity_keys
+                    ),
+                    "participant_deliveries": [
+                        delivery.model_dump(mode="json")
+                        for delivery in unit.participant_deliveries
+                    ],
+                }
+                expected_identity_projection = {
+                    field: expected_unit[field]
+                    for field in actual_identity_projection
+                }
+                if (
+                    actual_identity_projection
+                    != expected_identity_projection
+                ):
+                    errors.append(
+                        f"{scene.key}.units[{unit_index}] identity scaffold "
+                        "drift，禁止改写 actor/target/speaker/onscreen/"
+                        "participant_deliveries"
+                    )
+            if (
                 unit.speaker_key
                 and unit.speaker_key not in allowed_identity_keys
             ):
