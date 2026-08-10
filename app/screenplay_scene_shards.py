@@ -359,6 +359,81 @@ def build_screenplay_scene_shard_plans(
     return plans
 
 
+def normalize_screenplay_scene_shard(
+    shard: ScreenplaySceneShardIR,
+    *,
+    episode_no: int,
+    plan: ScreenplaySceneShardPlan,
+    scene_plans: dict[str, BlueprintScenePlan],
+    identity_registry: list[dict[str, Any]],
+    identity_keys: set[str],
+) -> ScreenplaySceneShardIR:
+    """Normalize program-owned fields without changing authored scene prose."""
+    shard.episode_no = episode_no
+    shard.shard_id = plan.shard_id
+    shard.scene_plan_keys = list(plan.scene_plan_keys)
+    shard.source_hash = plan.source_hash
+    shard.boundary_hash = plan.boundary_hash
+    shard.blueprint_hash = plan.blueprint_hash
+    shard.identity_registry_hash = plan.identity_registry_hash
+
+    aliases = {key: key for key in identity_keys}
+    for item in identity_registry:
+        identity_key = str(item.get("identity_key") or "").strip()
+        if not identity_key:
+            continue
+        for value in (
+            identity_key,
+            item.get("canonical_name"),
+            *(item.get("source_labels") or []),
+        ):
+            label = str(value or "").strip()
+            if label:
+                aliases[label] = identity_key
+
+    def normalize_refs(values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            label = str(value or "").strip()
+            resolved = aliases.get(label, label)
+            if resolved and resolved not in normalized:
+                normalized.append(resolved)
+        return normalized
+
+    for scene in shard.scenes:
+        expected_scene = scene_plans.get(scene.key)
+        participant_aliases = set(
+            expected_scene.participant_keys if expected_scene else []
+        )
+        scene.character_keys = normalize_refs(scene.character_keys)
+        for unit in scene.units:
+            unit.actor_keys = normalize_refs(unit.actor_keys)
+            unit.onscreen_entity_keys = normalize_refs(
+                unit.onscreen_entity_keys
+            )
+            if unit.speaker_key:
+                unit.speaker_key = aliases.get(
+                    unit.speaker_key,
+                    unit.speaker_key,
+                )
+            targets: list[str] = []
+            for value in unit.target_keys:
+                label = str(value or "").strip()
+                resolved = aliases.get(label)
+                if resolved:
+                    if resolved not in targets:
+                        targets.append(resolved)
+                    continue
+                if label in participant_aliases and label not in targets:
+                    # A Blueprint participant missing from the frozen registry
+                    # must remain visible to the hard validator.
+                    targets.append(label)
+                # Environment targets such as trees remain in the action prose;
+                # target_keys is reserved for identity relations.
+            unit.target_keys = targets
+    return shard
+
+
 def validate_screenplay_scene_shard(
     shard: ScreenplaySceneShardIR,
     *,
@@ -870,6 +945,14 @@ async def generate_screenplay_scene_shards(
         )
 
         def validate_shard(value: ScreenplaySceneShardIR) -> list[str]:
+            normalize_screenplay_scene_shard(
+                value,
+                episode_no=int(episode["episode_no"]),
+                plan=plan,
+                scene_plans=scene_plan_map,
+                identity_registry=identity_registry,
+                identity_keys=identity_keys,
+            )
             return validate_screenplay_scene_shard(
                 value,
                 plan=plan,
@@ -916,8 +999,18 @@ async def generate_screenplay_scene_shards(
                     "input_chars": len(prompt),
                 },
                 repair_context=json.dumps({
-                    source_id: source_by_id.get(source_id, "")
-                    for source_id in plan.source_segment_ids
+                    "owned_source": {
+                        source_id: source_by_id.get(source_id, "")
+                        for source_id in plan.source_segment_ids
+                    },
+                    "allowed_identities": [
+                        {
+                            "identity_key": item.get("identity_key"),
+                            "canonical_name": item.get("canonical_name"),
+                            "source_labels": item.get("source_labels") or [],
+                        }
+                        for item in identity_registry
+                    ],
                 }, ensure_ascii=False, separators=(",", ":")),
                 on_attempt=attempts.append,
             )

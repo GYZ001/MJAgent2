@@ -362,11 +362,18 @@ async def chat_structured(
                 local_recovery = True
         parsed: T | None = None
         parse_error: Exception | None = None
+        repair_payload: dict[str, Any] | None = None
         for candidate_no, payload in enumerate(candidates):
             try:
                 parsed = _coerce_structured(model_type, payload)
             except (TypeError, ValueError, ValidationError) as exc:
-                parse_error = exc
+                # Candidates are ordered from the latest complete outer object
+                # to its nested objects. Preserve the outer object's error;
+                # overwriting it with a nested unit's missing-root-fields error
+                # sends the format repair down the wrong path.
+                if parse_error is None:
+                    parse_error = exc
+                    repair_payload = payload
                 continue
             try:
                 direct_payload = json.loads(last_raw.strip())
@@ -397,7 +404,15 @@ async def chat_structured(
                     f"{operation_id} 结构化输出失败：{detail}"
                 ) from parse_error
             format_attempt += 1
-            tail = last_raw[-6000:]
+            candidate_text = (
+                json.dumps(
+                    repair_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                if repair_payload is not None
+                else last_raw
+            )
             current_messages = [
                 {
                     "role": "user",
@@ -405,8 +420,10 @@ async def chat_structured(
                         "只修复下面响应的 JSON 格式和 Schema，不改写其语义。"
                         "只输出一个完整 JSON 对象。\nSchema:\n"
                         + json.dumps(_model_schema(model_type), ensure_ascii=False)
-                        + "\n坏响应尾部：\n"
-                        + tail
+                        + "\nSchema 校验错误：\n"
+                        + str(parse_error or "找不到完整 JSON 对象")
+                        + "\n完整候选：\n"
+                        + candidate_text
                     ),
                 }
             ]

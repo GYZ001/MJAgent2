@@ -3,13 +3,21 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.harness import model_gateway
 
 
 class _Payload(BaseModel):
     value: int
+
+
+class _Scene(BaseModel):
+    story_function: str = Field(min_length=6)
+
+
+class _ScenePayload(BaseModel):
+    scenes: list[_Scene]
 
 
 def test_structured_runner_recovers_complete_trailing_json(monkeypatch) -> None:
@@ -61,6 +69,34 @@ def test_structured_runner_uses_one_format_repair(monkeypatch) -> None:
     assert "original large context" not in prompts[1]
     assert [meta["format_attempt"] for meta in metas] == [0, 1]
     assert [meta["semantic_attempt"] for meta in metas] == [0, 0]
+
+
+def test_format_repair_keeps_outer_candidate_validation_error(
+    monkeypatch,
+) -> None:
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        if len(prompts) == 1:
+            return '{"scenes":[{"story_function":"setup"}]}'
+        return '{"scenes":[{"story_function":"建立本场冲突"}]}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "original"}],
+        model_type=_ScenePayload,
+        validate=None,
+        operation_id="test.outer-format-error:v1:abc",
+        max_tokens=128,
+        format_retry_limit=1,
+    ))
+
+    assert result.scenes[0].story_function == "建立本场冲突"
+    assert "String should have at least 6 characters" in prompts[1]
+    assert '"story_function":"setup"' in prompts[1]
+    assert "Field required" not in prompts[1]
 
 
 def test_structured_runner_semantic_retry_has_independent_budget(monkeypatch) -> None:

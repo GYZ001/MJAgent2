@@ -28,6 +28,7 @@ from app.screenplay_scene_shards import (
     generate_screenplay_envelope,
     generate_screenplay_scene_shards,
     merge_screenplay_scene_shards,
+    normalize_screenplay_scene_shard,
     validate_screenplay_scene_shard,
 )
 from app.source_excerpt import index_source_segments
@@ -247,6 +248,52 @@ def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
     )
     assert any("来源越界" in error for error in errors)
     assert any("未冻结参与者" in error for error in errors)
+
+
+def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    shard = _shard(plan, blueprint)
+    shard.episode_no = 99
+    shard.shard_id = "invented"
+    shard.scene_plan_keys = ["invented-scene"]
+    shard.source_hash = "invented-source"
+    shard.scenes[0].character_keys = ["旁白"]
+    shard.scenes[0].units[0].actor_keys = ["旁白"]
+    shard.scenes[0].units[0].target_keys = ["门板"]
+    shard.scenes[0].units[0].onscreen_entity_keys = ["旁白"]
+
+    normalized = normalize_screenplay_scene_shard(
+        shard,
+        episode_no=1,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        identity_registry=[{
+            "identity_key": "narrator",
+            "canonical_name": "旁白",
+            "source_labels": ["旁白"],
+        }],
+        identity_keys={"narrator"},
+    )
+
+    assert normalized.episode_no == 1
+    assert normalized.shard_id == plan.shard_id
+    assert normalized.scene_plan_keys == plan.scene_plan_keys
+    assert normalized.source_hash == plan.source_hash
+    assert normalized.scenes[0].character_keys == ["narrator"]
+    assert normalized.scenes[0].units[0].actor_keys == ["narrator"]
+    assert normalized.scenes[0].units[0].target_keys == []
+    assert normalized.scenes[0].units[0].onscreen_entity_keys == ["narrator"]
+    assert validate_screenplay_scene_shard(
+        normalized,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        identity_keys={"narrator"},
+    ) == []
 
 
 def test_scene_shard_rejects_short_story_function() -> None:
