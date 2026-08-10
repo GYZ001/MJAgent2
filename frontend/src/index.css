@@ -10485,9 +10485,19 @@ label.f {
   background: #a8842c;
 }
 .screenplay-stage-rail li[data-status="paused"] {
+  border-color: rgba(168, 132, 44, 0.4);
+  color: #7f651f;
+  background: #fff9e8;
+}
+.screenplay-stage-rail li[data-status="blocked"] {
   border-color: rgba(181, 72, 56, 0.45);
   color: var(--cinnabar-deep);
   background: #fff4f1;
+}
+.screenplay-stage-rail li[data-status="failed"] {
+  border-color: rgba(153, 43, 32, 0.6);
+  color: #8f2f24;
+  background: #fff0ed;
 }
 .screenplay-quality-summary {
   display: flex;

@@ -616,12 +616,14 @@ export default function ScriptPage() {
             <ol className="screenplay-stage-rail" aria-label="剧本制作阶段">
               {ep.screenplay_production.stages.map((stage, index) => (
                 <li key={stage.key} data-status={stage.status}
-                  aria-current={stage.status === 'in_progress' || stage.status === 'paused' ? 'step' : undefined}>
+                  aria-current={['in_progress', 'paused', 'blocked', 'failed'].includes(stage.status) ? 'step' : undefined}>
                   <i>{stage.status === 'completed' ? '✓' : index + 1}</i>
                   <span>{stage.label}</span>
                   <small>{
                     stage.status === 'completed' ? '已完成'
                       : stage.status === 'in_progress' ? '进行中'
+                        : stage.status === 'blocked' ? '门禁未通过'
+                          : stage.status === 'failed' ? '异常中断'
                         : stage.status === 'paused' ? '已暂停'
                           : '待开始'
                   }</small>

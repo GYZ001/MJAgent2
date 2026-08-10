@@ -26,6 +26,56 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
+def test_structural_identity_audit_accepts_typed_blueprint_key(
+    monkeypatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    async def fake_structured(messages, **kwargs):
+        seen["prompt"] = messages[0]["content"]
+        seen["operation_id"] = kwargs["operation_id"]
+        return type("Response", (), {
+            "characters": [{
+                "source_label": "北区杂役处未知闯入者",
+                "canonical_name": "",
+                "identity_kind": "functional",
+                "identity_group": "structural:intruder",
+                "kind": "onscreen",
+                "evidence": "该声音与踹门动作由同一 owned SRC 支持",
+            }],
+        })()
+
+    monkeypatch.setattr(
+        portraits.model_gateway,
+        "chat_structured",
+        fake_structured,
+    )
+    source = "就在这时，房门被人一脚踹开，一声冷哼随之传入房间。"
+    audited = asyncio.run(
+        portraits.audit_identity_coverage_from_structural_evidence(
+            [],
+            structural_evidence=[{
+                "identity_key": "北区杂役处未知闯入者",
+                "source_label": "北区杂役处未知闯入者",
+                "source_segment_ids": ["SRC0001"],
+                "usage": "voice",
+                "node_key": "node-1",
+            }],
+            source_text=source,
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="测试"),
+            ),
+            episode_no=2,
+        )
+    )
+
+    assert audited[0]["source_label"] == "北区杂役处未知闯入者"
+    assert audited[0]["identity_kind"] == "functional"
+    assert seen["operation_id"].startswith("screenplay.identity.coverage.v3:")
+    assert "逐字复用未决结构证据中的 identity_key" in str(seen["prompt"])
+
+
 def _seed_project(conn: sqlite3.Connection, chapter_content: str) -> None:
     bible = Bible(world=World(visual_style_canonical="国风"),
                   characters=[Character(name="萧炎", role="主角",

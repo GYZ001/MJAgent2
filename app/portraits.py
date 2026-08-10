@@ -60,6 +60,9 @@ CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
 IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v6"
 FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v6"
+STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
+    "screenplay-identity-structural-coverage.v2"
+)
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -1245,7 +1248,10 @@ async def audit_identity_coverage_from_structural_evidence(
         })
     prompt = (
         "任务：审计结构化蓝图/IR 中未绑定的人物引用。只处理给定引用及其 owned SRC，"
-        "不得重扫全章或新增无关人物。已有人物候选：\n"
+        "不得重扫全章或新增无关人物。source_label 必须逐字复用未决结构证据中的 "
+        "identity_key，不得润色、扩写或另造称谓；该 identity_key 是后续回填蓝图引用的"
+        "稳定句柄，即使它是程序合成标签而未逐字出现在原文中也必须原样返回。"
+        "已有同一实体时复用其 identity_group 和 canonical_name。\n已有人物候选：\n"
         + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
         + "\n已有角色权威投影：\n"
         + json.dumps(
@@ -1259,7 +1265,7 @@ async def audit_identity_coverage_from_structural_evidence(
         + "\n未决结构证据：\n"
         + json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
         + "\n只输出 JSON："
-        '{"characters":[{"source_label":"原文逐字称谓","canonical_name":"真名或空串",'
+        '{"characters":[{"source_label":"逐字复用 identity_key","canonical_name":"真名或空串",'
         '"identity_kind":"named|functional","identity_group":"稳定分组",'
         '"kind":"onscreen","evidence":"依据"}]}'
     )
@@ -1268,7 +1274,7 @@ async def audit_identity_coverage_from_structural_evidence(
         model_type=_IdentityCandidateResponse,
         validate=None,
         operation_id=(
-            f"screenplay.identity.coverage.v2:{episode_no}:"
+            f"screenplay.identity.coverage.v3:{episode_no}:"
             + evidence_repository.content_hash(minimal)
         ),
         max_tokens=4096,
@@ -1289,21 +1295,31 @@ async def audit_identity_coverage_from_structural_evidence(
     owned_text = "\n".join(
         text for item in minimal for text in item.get("source_segments", {}).values()
     )
+    structural_by_key = {
+        str(item.get("identity_key") or "").strip(): item
+        for item in minimal
+        if (
+            str(item.get("identity_key") or "").strip()
+            and item.get("source_segment_ids")
+        )
+    }
     for raw in response.characters:
         label = str(raw.get("source_label") or "").strip()
-        if not label or label not in owned_text:
+        typed_evidence = structural_by_key.get(label)
+        if not label or (typed_evidence is None and label not in owned_text):
             continue
         identity_kind = str(raw.get("identity_kind") or "functional")
         canonical_name = str(raw.get("canonical_name") or "").strip()
         group = str(raw.get("identity_group") or f"structural:{label}")
         if (label, group) in existing:
             continue
+        usage = str((typed_evidence or {}).get("usage") or "").strip()
         additions.append({
             "name": canonical_name or label,
             "source_label": label,
             "identity_kind": identity_kind if identity_kind in {"named", "functional"} else "functional",
             "identity_group": group,
-            "kind": "onscreen",
+            "kind": "mentioned" if usage == "mentioned" else "onscreen",
             "evidence": str(raw.get("evidence") or "")[:80],
             "future_evidence": "",
         })
@@ -3042,7 +3058,10 @@ async def ensure_structural_identity_coverage(
     and the model sees only unresolved typed references plus their owned SRC.
     """
     conn = get_conn()
-    structural_hash = evidence_repository.content_hash(structural_evidence)
+    structural_hash = evidence_repository.content_hash({
+        "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        "structural_evidence": structural_evidence,
+    })
     rows = conn.execute(
         """SELECT id,content_json FROM artifacts
              WHERE scope_type='episode' AND scope_id=?
@@ -3118,6 +3137,7 @@ async def ensure_structural_identity_coverage(
                 trust_level="T0",
                 content={
                     "mode": "structural_coverage",
+                    "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                     "structural_evidence_hash": structural_hash,
                     "model_candidates": [],
                 },
@@ -3137,6 +3157,7 @@ async def ensure_structural_identity_coverage(
                     "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                     "episode_no": episode_no,
                     "mode": "structural_coverage",
+                    "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                     "candidates": audited,
                     "source_hash": evidence_repository.content_hash(source_text),
                     "structural_evidence_hash": structural_hash,
@@ -3184,6 +3205,7 @@ async def ensure_structural_identity_coverage(
             trust_level="T0",
             content={
                 "mode": "structural_coverage",
+                "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "structural_evidence_hash": structural_hash,
                 "model_candidates": additions,
             },
@@ -3203,6 +3225,7 @@ async def ensure_structural_identity_coverage(
                 "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
                 "episode_no": episode_no,
                 "mode": "structural_coverage",
+                "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "candidates": audited,
                 "source_hash": evidence_repository.content_hash(source_text),
                 "structural_evidence_hash": structural_hash,

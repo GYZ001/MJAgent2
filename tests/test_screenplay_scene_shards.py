@@ -594,6 +594,10 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert "乙接过钥匙并回答。" not in envelope_prompt
     first_prompt = prompts["screenplay_scene_shards:SS001"]
     second_prompt = prompts["screenplay_scene_shards:SS002"]
+    assert "根对象必须是完整 ScreenplaySceneShardIR" in first_prompt
+    assert "绝不能把单个 scene、unit、数组或解释文字作为根输出" in first_prompt
+    assert "dialogue.text 与 dialogue.source_text 必须填写同一段逐字原文对白" in first_prompt
+    assert "禁止生成 unresolved_* 占位 ID" in first_prompt
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt

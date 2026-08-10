@@ -958,13 +958,23 @@ def _scene_shard_prompt(
     return (
         "任务：只写指定 Blueprint 场次的紧凑语义 IR。场 key、heading、顺序和来源所有权"
         "均由程序拥有，不得改名、跨场挪 SRC 或输出整集 metadata/experience/events/beats/coverage。"
-        "每个非标题来源必须由至少一个 action/dialogue unit 消费；dialogue.source_text 必须"
-        "逐字来自其声明 SRC。speaker_key 只能逐字引用冻结 identity_key。发现无法绑定的"
-        "参与者时写 unresolved_participants，绝不自行创建 ID。每个 unit 的 "
+        "每个非标题来源必须由至少一个 action/dialogue unit 消费。dialogue.text 与 "
+        "dialogue.source_text 必须填写同一段逐字原文对白，不得把剧情摘要、转述或扩写写进 "
+        "text；表演和动作另写 action unit。speaker_key 只能逐字引用冻结 identity_key。"
+        "冻结表已完成蓝图参与者收口：actor_keys、target_keys、onscreen_entity_keys 和 "
+        "speaker_key 只能使用冻结表中的 identity_key，禁止生成 unresolved_* 占位 ID。"
+        "确实无法绑定时只能记录到 unresolved_participants，且该候选会被退回上游身份收口，"
+        "不得把未冻结值同时塞入任何关系字段。每个 unit 的 "
         "actor_keys/target_keys 只能填写当前 unit 的实际动作执行者与受作用对象；"
         "onscreen_entity_keys 只能填写这一动作或话轮当下实际在画面中的冻结 identity_key；"
         "被台词提到、仅能听见或只感知事件的身份不得因此进入该列表。复杂动作可在同一 local event_key"
-        "下写有序 units。\nShard plan：\n"
+        "下写有序 units。\n"
+        "输出根结构硬合同：根对象必须是完整 ScreenplaySceneShardIR，第一层必须包含 "
+        "contract_version、episode_no、shard_id、scene_plan_keys、scenes、"
+        "consumed_source_ids、unresolved_participants、source_hash、boundary_hash、"
+        "blueprint_hash、identity_registry_hash。绝不能把单个 scene、unit、数组或解释文字"
+        "作为根输出。scenes 必须按 scene_plan_keys 恰好各输出一次；consumed_source_ids "
+        "必须等于 units 实际首次消费的 SRC 顺序并集。\nShard plan：\n"
         + plan.model_dump_json()
         + "\nBlueprint scene plans：\n"
         + json.dumps(
@@ -1169,6 +1179,21 @@ async def generate_screenplay_scene_shards(
                         "input_chars": len(prompt),
                     },
                     repair_context=json.dumps({
+                        "root_contract": {
+                            "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+                            "episode_no": int(episode["episode_no"]),
+                            "shard_id": plan.shard_id,
+                            "scene_plan_keys": list(plan.scene_plan_keys),
+                            "required_root_fields": [
+                                "contract_version", "episode_no", "shard_id",
+                                "scene_plan_keys", "scenes",
+                                "consumed_source_ids",
+                                "unresolved_participants", "source_hash",
+                                "boundary_hash", "blueprint_hash",
+                                "identity_registry_hash",
+                            ],
+                            "root_must_not_be": "single_scene_or_unit",
+                        },
                         "owned_source": {
                             source_id: source_by_id.get(source_id, "")
                             for source_id in plan.source_segment_ids
@@ -1180,6 +1205,12 @@ async def generate_screenplay_scene_shards(
                                 "source_labels": item.get("source_labels") or [],
                             }
                             for item in identity_registry
+                        ],
+                        "final_gate_contract": [
+                            "all non-title owned SRC must be consumed",
+                            "all identity relations must use allowed identity_key",
+                            "dialogue text must equal exact source_text",
+                            "unresolved placeholders are forbidden in relation fields",
                         ],
                     }, ensure_ascii=False, separators=(",", ":")),
                     normalize_payload=normalize_payload,

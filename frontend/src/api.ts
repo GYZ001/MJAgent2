@@ -1785,7 +1785,7 @@ export interface Episode {
     stages?: Array<{
       key: string;
       label: string;
-      status: "pending" | "in_progress" | "paused" | "completed";
+      status: "pending" | "in_progress" | "paused" | "blocked" | "failed" | "completed";
     }>;
     baseline_done: boolean;
     first_evaluation_done: boolean;
@@ -1805,6 +1805,7 @@ export interface Episode {
     quality_issue_count?: number;
     gate_retry_exhausted?: boolean;
     yield_reason?: string;
+    stage_stop_reason?: "paused" | "blocked" | "failed" | "";
   } | null;
   shots?: Shot[];
   storyboard_planned_shots?: number | null;

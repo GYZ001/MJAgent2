@@ -89,6 +89,56 @@ def test_production_state_resumes_post_baseline_stages() -> None:
     assert completed["quality_issue_count"] == 3
 
 
+def test_production_state_distinguishes_technical_failure_from_pause() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    save_checkpoint(revision.id, {"phase": "SCENE_SHARD_GENERATION"})
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint="failure",
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE workflow_runs SET status='FAILED',failure_code='RUNTIMEERROR' "
+        "WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=? WHERE id='e1'",
+        (run_id,),
+    )
+    conn.commit()
+
+    state = screenplay_production_state("e1")
+
+    assert state["stage_stop_reason"] == "failed"
+    assert state["stages"][state["stage_index"]]["status"] == "failed"
+
+
+def test_production_state_marks_open_gate_as_blocked() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    save_checkpoint(revision.id, {
+        "phase": "WAITING_HUMAN",
+        "yield_reason": "narrative_gate_needs_review",
+        "open_issue_ids": ["issue-1"],
+    })
+
+    state = screenplay_production_state("e1")
+
+    assert state["phase"] == "STRUCTURE_VALIDATION"
+    assert state["stage_stop_reason"] == "blocked"
+    assert state["stages"][state["stage_index"]]["status"] == "blocked"
+
+
 def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
     revision = ensure_production_revision(
         episode_id="e1",

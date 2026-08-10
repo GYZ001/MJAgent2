@@ -340,6 +340,15 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
     ).fetchone()
     from app.evidence import repository as evidence_repository
 
+    current_run = (
+        conn.execute(
+            "SELECT status,failure_code,failure_message FROM workflow_runs "
+            "WHERE id=?",
+            (episode["active_screenplay_run_id"],),
+        ).fetchone()
+        if episode and episode["active_screenplay_run_id"]
+        else None
+    )
     active = bool(
         task_registry.active("screenplay", episode_id)
         or (
@@ -378,6 +387,7 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             "patch_count": 0,
             "open_issue_count": 0,
             "yield_reason": "",
+            "stage_stop_reason": "",
         }
     checkpoint = dict(rev.checkpoint_json or {})
     has_working_baseline = bool(rev.baseline_done and rev.working_artifact_id)
@@ -413,12 +423,26 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         if phase in stage_keys
         else (len(stage_order) - 1 if published else 0)
     )
+    yield_reason = str(checkpoint.get("yield_reason") or "")
+    gate_stop_reasons = {
+        "character_identity_hard_gate",
+        "narrative_gate_needs_review",
+        "quality_gate_needs_review",
+    }
+    if active or published:
+        stage_stop_reason = ""
+    elif yield_reason in gate_stop_reasons or checkpoint.get("open_issue_ids"):
+        stage_stop_reason = "blocked"
+    elif current_run and current_run["status"] == "FAILED":
+        stage_stop_reason = "failed"
+    else:
+        stage_stop_reason = "paused"
     stages = []
     for index, (key, label) in enumerate(stage_order):
         if published or index < stage_index:
             status = "completed"
         elif index == stage_index:
-            status = "in_progress" if active else "paused"
+            status = "in_progress" if active else stage_stop_reason
         else:
             status = "pending"
         stages.append({"key": key, "label": label, "status": status})
@@ -541,7 +565,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         "quality_score": checkpoint.get("quality_score"),
         "quality_issue_count": int(checkpoint.get("quality_issue_count") or 0),
         "gate_retry_exhausted": bool(checkpoint.get("gate_retry_exhausted")),
-        "yield_reason": str(checkpoint.get("yield_reason") or ""),
+        "yield_reason": yield_reason,
+        "stage_stop_reason": stage_stop_reason,
     }
 
 
