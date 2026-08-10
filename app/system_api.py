@@ -1523,7 +1523,12 @@ def retry_job(job_id: str, body: dict | None = None):
             "code": "JOB_VERSION_CONFLICT", "message": "任务状态已变化，请刷新后重试",
             "current_version": item.get("state_revision") or 0,
         })
-    if True:
+    if item.get("kind") != "video":
+        raise HTTPException(409, detail={
+            "code": "JOB_RETRY_UNSUPPORTED_KIND",
+            "message": "只有视频供应商任务支持此重试入口",
+        })
+    else:
         has_provider_task = bool(item.get("provider_task_id"))
         provider_recovery = bool(
             waiting_provider_create_resolution
@@ -1631,9 +1636,13 @@ def retry_job(job_id: str, body: dict | None = None):
                     "code": "JOB_RETRY_CONTEXT_MISSING",
                     "message": "任务缺少视频版本上下文，不能安全重新提交",
                 })
-            from app.completion_grant import reserve_provider_video_budget
+            from app.completion_grant import (
+                ensure_video_budget_authority_tables,
+                reserve_provider_video_budget,
+            )
             from app.video_cost_model import initial_shot_generation_cost
 
+            ensure_video_budget_authority_tables(conn)
             version_or_job_id = str(item.get("version_id") or job_id)
             provider_operation_id = (
                 f"video-create-{version_or_job_id}-{new_id('epoch')}"

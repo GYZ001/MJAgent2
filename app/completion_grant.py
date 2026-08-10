@@ -291,7 +291,24 @@ def reserve_provider_video_budget(
     """
     amount = max(0.0, float(amount_cny))
     db = conn or get_conn()
-    ensure_video_budget_authority_tables(db)
+    if db.in_transaction:
+        tables = {
+            str(row["name"])
+            for row in db.execute(
+                """SELECT name FROM sqlite_master
+                    WHERE type='table' AND name IN (
+                        'episode_video_budget_authorities',
+                        'provider_video_budget_claims'
+                    )"""
+            ).fetchall()
+        }
+        if tables != {
+            "episode_video_budget_authorities",
+            "provider_video_budget_claims",
+        }:
+            return False
+    else:
+        ensure_video_budget_authority_tables(db)
     owns_transaction = not db.in_transaction
     try:
         if owns_transaction:

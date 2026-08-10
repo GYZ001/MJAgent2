@@ -7,6 +7,7 @@ import {
   EPISODE_COMPLETION_WALL_CLOCK_CAP_S,
   InfoSection,
   MaterialGallery,
+  PROVIDER_RESUBMISSION_WARNING,
   REVIEW_TABS,
   boundarySourceLabel,
   currentMaterialVersion,
@@ -58,6 +59,14 @@ function version(
     image_inputs: { reference_images: refs },
   }
 }
+
+describe('供应商重新提交文案', () => {
+  it('明确新 operation ID、独立 claim 与重新核算额度', () => {
+    expect(PROVIDER_RESUBMISSION_WARNING).toContain('新的 operation ID')
+    expect(PROVIDER_RESUBMISSION_WARNING).toContain('独立预算 claim')
+    expect(PROVIDER_RESUBMISSION_WARNING).not.toContain('复用原幂等标识')
+  })
+})
 
 describe('currentVersionRefs', () => {
   it('优先展示运行中新版本已流出的参考图，而不是旧采用版', () => {
