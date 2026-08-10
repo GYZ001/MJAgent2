@@ -366,6 +366,7 @@ class IRSceneUnit(BaseModel):
     kind: Literal["action", "dialogue"]
     text: str
     event_key: str
+    unit_key: str = ""
     narrative_layer: Literal["story", "paratext"] = "story"
     event_priority: Literal["causal", "supporting", "connective"] = "causal"
     render_policy: Literal[
@@ -385,6 +386,7 @@ class IRSceneUnit(BaseModel):
     function: str = "statement"
     source_text: str = ""
     chain_key: str = ""
+    performance: str = ""
 
     @model_validator(mode="before")
     @classmethod

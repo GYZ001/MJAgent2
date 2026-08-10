@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, Literal
@@ -47,11 +48,11 @@ from app.source_excerpt import index_source_segments, structural_front_matter_id
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v5"
-SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v2"
-SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v5"
-SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v1"
-SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v3"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v6"
+SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v3"
+SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v6"
+SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v2"
+SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v4"
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
@@ -121,12 +122,45 @@ class ScreenplayEnvelopeIR(BaseModel):
     blueprint_hash: str
     identity_registry_hash: str
 
+
+class ScreenplaySceneUnitSlotPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    unit_key: str
+    event_key: str
+    scene_key: str
+    scene_order: int = Field(ge=1)
+    unit_order: int = Field(ge=1)
+    scene_unit_order: int = Field(ge=1)
+    kind: Literal["action", "dialogue"]
+    narrative_layer: Literal["story", "paratext"] = "story"
+    event_priority: Literal["causal", "supporting", "connective"] = "causal"
+    render_policy: Literal[
+        "standalone", "merge_adjacent", "exclude_from_spine",
+    ] = "standalone"
+    source_segment_ids: list[str] = Field(min_length=1)
+    source_text: str = ""
+
+
+class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
+    actor_keys: list[str] = Field(default_factory=list)
+    target_keys: list[str] = Field(default_factory=list)
+    onscreen_entity_keys: list[str] = Field(default_factory=list)
+    participant_deliveries: list[IRActionParticipantDelivery] = Field(
+        default_factory=list,
+    )
+    speaker_key: str | None = None
+
+
 class ScreenplaySceneShardPlan(BaseModel):
-    contract_version: Literal["screenplay-scene-shard-plan.v2"] = SCREENPLAY_SHARD_PLAN_VERSION
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["screenplay-scene-shard-plan.v3"] = SCREENPLAY_SHARD_PLAN_VERSION
     shard_id: str
     scene_plan_keys: list[str]
     source_segment_ids: list[str]
     source_scene_owners: dict[str, str]
+    unit_slots: list[ScreenplaySceneUnitSlotPlan]
     derived_relations: list[BlueprintSceneDerivation] = Field(
         default_factory=list,
     )
@@ -185,7 +219,9 @@ class ScreenplayActionParticipantDeliveryContract(BaseModel):
 
 
 class ScreenplaySceneInputContract(BaseModel):
-    contract_version: Literal["screenplay-scene-input.v5"] = (
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["screenplay-scene-input.v6"] = (
         SCREENPLAY_SCENE_INPUT_VERSION
     )
     scene_plan_key: str
@@ -203,6 +239,7 @@ class ScreenplaySceneInputContract(BaseModel):
     action_evidence: list[ScreenplaySceneActionEvidence] = Field(
         default_factory=list,
     )
+    unit_slots: list[ScreenplaySceneCompiledUnitSlot]
     identity_scaffold_hash: str = ""
     source_ownership_hash: str
 
@@ -218,40 +255,19 @@ class UnresolvedParticipant(BaseModel):
 class ScreenplaySceneShardCreativeUnit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["action", "dialogue"]
-    text: str
-    narrative_layer: Literal["story", "paratext"] = "story"
-    event_priority: Literal["causal", "supporting", "connective"] = "causal"
-    render_policy: Literal[
-        "standalone", "merge_adjacent", "exclude_from_spine",
-    ] = "standalone"
-    source_segment_ids: list[str] = Field(min_length=1)
+    text: str = Field(min_length=1)
+    performance: str = ""
     resulting_state: str = ""
     function: str = "statement"
-    source_text: str = ""
-    chain_key: str = ""
-
-
-class ScreenplaySceneShardCreativeScene(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    scene_plan_key: str
-    story_function: str = Field(min_length=SCENE_STORY_FUNCTION_MIN_CHARS)
-    summary: str
-    conflict: str = ""
-    turn: str = ""
-    source_basis: str = ""
-    context_requirements: list[str] = Field(default_factory=list)
-    units: list[ScreenplaySceneShardCreativeUnit] = Field(default_factory=list)
 
 
 class ScreenplaySceneShardCreativeIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-creative.v1"] = (
+    contract_version: Literal["screenplay-scene-creative.v2"] = (
         SCREENPLAY_SCENE_CREATIVE_VERSION
     )
-    scenes: list[ScreenplaySceneShardCreativeScene]
+    slots: dict[str, ScreenplaySceneShardCreativeUnit]
 
 
 class ScreenplaySceneShardUnit(IRSceneUnit):
@@ -269,7 +285,7 @@ class ScreenplaySceneShardScene(IRScene):
 class ScreenplaySceneShardIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard.v5"] = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v6"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
@@ -282,6 +298,7 @@ class ScreenplaySceneShardIR(BaseModel):
     identity_registry_hash: str = ""
     source_ownership_hash: str = ""
     identity_scaffold_hash: str = ""
+    generation_scaffold_hash: str = ""
 
 
 _PARTICIPANT_PERCEPTION_CHANNELS = (
@@ -306,6 +323,10 @@ def _contract_identity_scaffold_hash(
             evidence.model_dump(mode="json")
             for evidence in contract.action_evidence
         ],
+        "unit_slots": [
+            slot.model_dump(mode="json")
+            for slot in contract.unit_slots
+        ],
     })
 
 
@@ -327,73 +348,82 @@ def screenplay_scene_identity_scaffold_hash(
     })
 
 
+def screenplay_scene_generation_scaffold_hash(
+    plan: ScreenplaySceneShardPlan,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+) -> str:
+    return _hash({
+        "shard_contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+        "plan_contract_version": SCREENPLAY_SHARD_PLAN_VERSION,
+        "input_contract_version": SCREENPLAY_SCENE_INPUT_VERSION,
+        "creative_contract_version": SCREENPLAY_SCENE_CREATIVE_VERSION,
+        "shard_id": plan.shard_id,
+        "scene_plan_keys": plan.scene_plan_keys,
+        "source_segment_ids": plan.source_segment_ids,
+        "source_scene_owners": plan.source_scene_owners,
+        "unit_slots": [
+            slot.model_dump(mode="json")
+            for slot in plan.unit_slots
+        ],
+        "scene_contracts": [
+            {
+                "scene_plan_key": contract.scene_plan_key,
+                "identity_scaffold_hash": (
+                    contract.identity_scaffold_hash
+                    or _contract_identity_scaffold_hash(contract)
+                ),
+                "unit_slots": [
+                    slot.model_dump(mode="json")
+                    for slot in contract.unit_slots
+                ],
+            }
+            for contract in scene_input_contracts
+        ],
+    })
+
+
 def build_screenplay_scene_shard_repair_schema(
     shard: ScreenplaySceneShardIR | None = None,
     *,
+    plan: ScreenplaySceneShardPlan,
     scene_input_contracts: list[ScreenplaySceneInputContract],
 ) -> dict[str, Any]:
-    """Build the same closed creative-content schema for every model attempt."""
+    """Build one closed slot-content schema for initial and repair attempts."""
     del shard
     schema = deepcopy(ScreenplaySceneShardCreativeIR.model_json_schema())
-    scene_schemas: list[dict[str, Any]] = []
-    for contract in scene_input_contracts:
-        scene_schemas.append({
+    slot_schemas: dict[str, dict[str, Any]] = {}
+    for slot in plan.unit_slots:
+        constraints: dict[str, Any] = {"type": "object"}
+        if slot.kind == "dialogue":
+            constraints["properties"] = {
+                "text": {"const": slot.source_text},
+            }
+        slot_schemas[slot.unit_key] = {
             "allOf": [
-                {"$ref": "#/$defs/ScreenplaySceneShardCreativeScene"},
-                {
-                    "type": "object",
-                    "properties": {
-                        "scene_plan_key": {
-                            "const": contract.scene_plan_key,
-                        },
-                        "units": {
-                            "type": "array",
-                            "items": {
-                                "allOf": [
-                                    {
-                                        "$ref": (
-                                            "#/$defs/"
-                                            "ScreenplaySceneShardCreativeUnit"
-                                        )
-                                    },
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "source_segment_ids": {
-                                                "type": "array",
-                                                "minItems": 1,
-                                                "uniqueItems": True,
-                                                "items": {
-                                                    "type": "string",
-                                                    "enum": list(
-                                                        contract.source_segment_ids
-                                                    ),
-                                                },
-                                            },
-                                        },
-                                        "required": ["source_segment_ids"],
-                                    },
-                                ],
-                            },
-                        },
-                    },
-                    "required": ["scene_plan_key", "units"],
-                },
+                {"$ref": "#/$defs/ScreenplaySceneShardCreativeUnit"},
+                constraints,
             ],
-        })
-
-    schema["properties"]["scenes"] = {
-        "type": "array",
-        "prefixItems": scene_schemas,
-        "items": False,
-        "minItems": len(scene_schemas),
-        "maxItems": len(scene_schemas),
+        }
+    slot_keys = [slot.unit_key for slot in plan.unit_slots]
+    schema["properties"]["slots"] = {
+        "type": "object",
+        "properties": slot_schemas,
+        "required": slot_keys,
+        "additionalProperties": False,
+        "minProperties": len(slot_keys),
+        "maxProperties": len(slot_keys),
     }
     schema["x-schema-purpose"] = (
-        "creative-content-with-deterministic-identity-scaffold"
+        "creative-content-for-deterministic-generation-slots"
     )
     schema["x-identity-scaffold-hash"] = (
         screenplay_scene_identity_scaffold_hash(scene_input_contracts)
+    )
+    schema["x-generation-scaffold-hash"] = (
+        screenplay_scene_generation_scaffold_hash(
+            plan,
+            scene_input_contracts,
+        )
     )
     return schema
 
@@ -409,14 +439,12 @@ def _ordered_unique(values: list[str]) -> list[str]:
 
 
 def _compile_unit_identity_scaffold(
-    unit: ScreenplaySceneShardCreativeUnit,
+    slot: ScreenplaySceneUnitSlotPlan,
     *,
-    scene_key: str,
-    unit_index: int,
     contract: ScreenplaySceneInputContract,
-) -> tuple[dict[str, Any], list[str]]:
+) -> tuple[ScreenplaySceneCompiledUnitSlot, list[str]]:
     errors: list[str] = []
-    source_ids = _ordered_unique(unit.source_segment_ids)
+    source_ids = _ordered_unique(slot.source_segment_ids)
     source_set = set(source_ids)
     participant_usages: dict[str, set[str]] = {}
     participant_channels: dict[str, list[str]] = {}
@@ -462,12 +490,12 @@ def _compile_unit_identity_scaffold(
     actor_keys: list[str] = []
     target_keys: list[str] = []
 
-    if unit.kind == "dialogue":
+    if slot.kind == "dialogue":
         if len(voice_keys) == 1:
             speaker_key = voice_keys[0]
         elif len(voice_keys) > 1:
             errors.append(
-                f"{scene_key}.units[{unit_index}] 来源含多个 voice identity，"
+                f"{slot.unit_key} 来源含多个 voice identity，"
                 "必须按说话证据拆分 unit"
             )
         elif len(decision_actor_keys) == 1:
@@ -476,7 +504,7 @@ def _compile_unit_identity_scaffold(
             speaker_key = visible_keys[0]
         else:
             errors.append(
-                f"{scene_key}.units[{unit_index}] dialogue 缺少唯一 speaker "
+                f"{slot.unit_key} dialogue 缺少唯一 speaker "
                 "action evidence"
             )
         if speaker_key:
@@ -488,8 +516,8 @@ def _compile_unit_identity_scaffold(
     else:
         if len(decision_actor_keys) > 1:
             errors.append(
-                f"{scene_key}.units[{unit_index}] 来源含多个 decision actor，"
-                "必须拆分 action unit"
+                f"{slot.unit_key} 来源含多个 decision actor，"
+                "必须在 Blueprint 中拆分来源动作"
             )
         elif decision_actor_keys:
             actor_keys = list(decision_actor_keys)
@@ -506,18 +534,21 @@ def _compile_unit_identity_scaffold(
         *([speaker_key] if speaker_key else []),
     ])
     participant_deliveries: list[IRActionParticipantDelivery] = []
-    observable_basis = (
-        unit.source_text.strip()
-        or unit.text.strip()
-        or "当前来源动作"
-    )
+    source_text_by_id = {
+        segment.source_segment_id: segment.text
+        for segment in contract.source_segments
+    }
+    observable_basis = slot.source_text.strip() or " ".join(
+        source_text_by_id.get(source_id, "")
+        for source_id in source_ids
+    ).strip()
     for participant_key in relation_keys:
         if participant_key in visible_keys:
             continue
         channels = participant_channels.get(participant_key, [])
         if not channels:
             errors.append(
-                f"{scene_key}.units[{unit_index}] 画外参与者 "
+                f"{slot.unit_key} 画外参与者 "
                 f"{participant_key} 缺少确定性可感知通道"
             )
             continue
@@ -532,36 +563,25 @@ def _compile_unit_identity_scaffold(
             visible_reaction="visible_reaction" in channels,
         ))
 
-    if (
-        unit.kind == "dialogue"
-        and unit.source_text.strip()
-        and unit.text.strip() != unit.source_text.strip()
-    ):
-        errors.append(
-            f"{scene_key}.units[{unit_index}] dialogue.text 必须等于 source_text"
-        )
+    return ScreenplaySceneCompiledUnitSlot(
+        **slot.model_dump(mode="python"),
+        actor_keys=actor_keys,
+        target_keys=target_keys,
+        onscreen_entity_keys=visible_keys,
+        participant_deliveries=participant_deliveries,
+        speaker_key=speaker_key,
+    ), errors
 
-    return {
-        "kind": unit.kind,
-        "text": unit.text.strip(),
-        "event_key": f"unit-{unit_index + 1:03d}",
-        "narrative_layer": unit.narrative_layer,
-        "event_priority": unit.event_priority,
-        "render_policy": unit.render_policy,
-        "source_segment_ids": source_ids,
-        "actor_keys": actor_keys,
-        "target_keys": target_keys,
-        "onscreen_entity_keys": visible_keys,
-        "participant_deliveries": [
-            delivery.model_dump(mode="json")
-            for delivery in participant_deliveries
-        ],
-        "resulting_state": unit.resulting_state,
-        "speaker_key": speaker_key,
-        "function": unit.function,
-        "source_text": unit.source_text,
-        "chain_key": unit.chain_key,
-    }, errors
+
+def _structural_slot(
+    slot: ScreenplaySceneCompiledUnitSlot,
+) -> ScreenplaySceneUnitSlotPlan:
+    return ScreenplaySceneUnitSlotPlan.model_validate(
+        slot.model_dump(
+            mode="python",
+            include=set(ScreenplaySceneUnitSlotPlan.model_fields),
+        )
+    )
 
 
 def compile_screenplay_scene_shard_draft(
@@ -572,26 +592,77 @@ def compile_screenplay_scene_shard_draft(
     scene_plans: dict[str, BlueprintScenePlan],
     scene_input_contracts: list[ScreenplaySceneInputContract],
 ) -> ScreenplaySceneShardIR:
-    """Compile creative prose with program-owned per-unit identity authority."""
+    """Join creative slot content to the immutable generation scaffold."""
     errors: list[str] = []
-    expected_scene_keys = list(plan.scene_plan_keys)
-    actual_scene_keys = [
-        scene.scene_plan_key for scene in draft.scenes
+    expected_slot_keys = [
+        slot.unit_key for slot in plan.unit_slots
     ]
-    if actual_scene_keys != expected_scene_keys:
+    actual_slot_keys = set(draft.slots)
+    missing_slot_keys = [
+        unit_key
+        for unit_key in expected_slot_keys
+        if unit_key not in actual_slot_keys
+    ]
+    extra_slot_keys = sorted(
+        actual_slot_keys - set(expected_slot_keys)
+    )
+    if missing_slot_keys:
         errors.append(
-            "creative scenes 必须按 shard plan 恰好输出一次："
-            f"expected={expected_scene_keys}, actual={actual_scene_keys}"
+            "[GENERATION_CONTRACT] 缺失 slot："
+            + ",".join(missing_slot_keys)
+        )
+    if extra_slot_keys:
+        errors.append(
+            "[GENERATION_CONTRACT] 多余 slot："
+            + ",".join(extra_slot_keys)
         )
 
     contracts_by_scene = {
         contract.scene_plan_key: contract
         for contract in scene_input_contracts
     }
+    compiled_slots_by_key: dict[
+        str, ScreenplaySceneCompiledUnitSlot
+    ] = {}
+    plan_slots_by_key = {
+        slot.unit_key: slot for slot in plan.unit_slots
+    }
+    for contract in scene_input_contracts:
+        for compiled_slot in contract.unit_slots:
+            if compiled_slot.unit_key in compiled_slots_by_key:
+                errors.append(
+                    "[GENERATION_CONTRACT] unit_key 重复："
+                    + compiled_slot.unit_key
+                )
+                continue
+            compiled_slots_by_key[compiled_slot.unit_key] = compiled_slot
+            planned_slot = plan_slots_by_key.get(compiled_slot.unit_key)
+            if planned_slot is None:
+                errors.append(
+                    "[GENERATION_CONTRACT] 输入合同含未计划 slot："
+                    + compiled_slot.unit_key
+                )
+            elif _structural_slot(compiled_slot) != planned_slot:
+                errors.append(
+                    "[GENERATION_CONTRACT] slot 结构漂移："
+                    + compiled_slot.unit_key
+                )
+    missing_compiled_slots = [
+        unit_key
+        for unit_key in expected_slot_keys
+        if unit_key not in compiled_slots_by_key
+    ]
+    if missing_compiled_slots:
+        errors.append(
+            "[GENERATION_CONTRACT] 输入合同缺失 slot："
+            + ",".join(missing_compiled_slots)
+        )
+    if errors:
+        raise ScreenplaySceneShardError(plan.shard_id, errors)
+
     scenes: list[ScreenplaySceneShardScene] = []
     consumed_source_ids: list[str] = []
-    for creative_scene in draft.scenes:
-        scene_key = creative_scene.scene_plan_key
+    for scene_key in plan.scene_plan_keys:
         scene_plan = scene_plans.get(scene_key)
         contract = contracts_by_scene.get(scene_key)
         if scene_plan is None or contract is None:
@@ -599,25 +670,49 @@ def compile_screenplay_scene_shard_draft(
             continue
         units: list[ScreenplaySceneShardUnit] = []
         character_keys: list[str] = []
-        allowed_sources = set(contract.source_segment_ids)
-        for unit_index, creative_unit in enumerate(creative_scene.units):
-            escaped_sources = (
-                set(creative_unit.source_segment_ids) - allowed_sources
-            )
-            if escaped_sources:
+        for planned_slot in (
+            slot for slot in plan.unit_slots
+            if slot.scene_key == scene_key
+        ):
+            compiled_slot = compiled_slots_by_key[planned_slot.unit_key]
+            creative_unit = draft.slots[planned_slot.unit_key]
+            text = creative_unit.text.strip()
+            if (
+                planned_slot.kind == "dialogue"
+                and text != planned_slot.source_text.strip()
+            ):
                 errors.append(
-                    f"{scene_key}.units[{unit_index}] 引用非本场来源："
-                    f"{sorted(escaped_sources)}"
+                    f"{planned_slot.unit_key} dialogue.text 必须等于 "
+                    "scaffold source_text"
                 )
                 continue
-            unit_payload, unit_errors = _compile_unit_identity_scaffold(
-                creative_unit,
-                scene_key=scene_key,
-                unit_index=unit_index,
-                contract=contract,
+            unit = ScreenplaySceneShardUnit(
+                unit_key=planned_slot.unit_key,
+                kind=planned_slot.kind,
+                text=text,
+                event_key=planned_slot.event_key,
+                narrative_layer=planned_slot.narrative_layer,
+                event_priority=planned_slot.event_priority,
+                render_policy=planned_slot.render_policy,
+                source_segment_ids=list(
+                    planned_slot.source_segment_ids
+                ),
+                actor_keys=list(compiled_slot.actor_keys),
+                target_keys=list(compiled_slot.target_keys),
+                onscreen_entity_keys=list(
+                    compiled_slot.onscreen_entity_keys
+                ),
+                participant_deliveries=[
+                    delivery.model_copy(deep=True)
+                    for delivery in compiled_slot.participant_deliveries
+                ],
+                resulting_state=creative_unit.resulting_state,
+                speaker_key=compiled_slot.speaker_key,
+                function=creative_unit.function,
+                source_text=planned_slot.source_text,
+                chain_key="",
+                performance=creative_unit.performance,
             )
-            errors.extend(unit_errors)
-            unit = ScreenplaySceneShardUnit.model_validate(unit_payload)
             units.append(unit)
             for identity_key in [
                 *unit.actor_keys,
@@ -634,23 +729,32 @@ def compile_screenplay_scene_shard_draft(
             for source_id in unit.source_segment_ids:
                 if source_id not in consumed_source_ids:
                     consumed_source_ids.append(source_id)
+        context_requirements = _ordered_unique([
+            relation.summary
+            for relation in contract.derived_relations
+            if relation.summary.strip()
+        ])
+        opening = scene_plan.opening_image.strip()
+        exit_state = scene_plan.exit_state.strip()
+        summary = "；".join(
+            value for value in (opening, exit_state) if value
+        ) or scene_plan.scene_heading
+        story_function = "推进本场事件并完成状态变化：" + summary
         scenes.append(ScreenplaySceneShardScene(
             key=scene_key,
             scene_heading=scene_plan.scene_heading,
-            story_function=creative_scene.story_function,
+            story_function=story_function,
             character_keys=character_keys,
-            summary=creative_scene.summary,
-            conflict=creative_scene.conflict,
-            turn=creative_scene.turn,
-            source_basis=creative_scene.source_basis,
+            summary=summary,
+            conflict="",
+            turn=exit_state,
+            source_basis=",".join(scene_plan.source_segment_ids),
             previous_scene_exit_state=scene_plan.previous_scene_exit_state,
             opening_image=scene_plan.opening_image,
             agency_contracts=deepcopy(scene_plan.agency_contracts),
             entry_state=scene_plan.previous_scene_exit_state,
             exit_state=scene_plan.exit_state,
-            context_requirements=list(
-                creative_scene.context_requirements
-            ),
+            context_requirements=context_requirements,
             units=units,
         ))
     if errors:
@@ -669,6 +773,12 @@ def compile_screenplay_scene_shard_draft(
         source_ownership_hash=plan.source_ownership_hash,
         identity_scaffold_hash=screenplay_scene_identity_scaffold_hash(
             scene_input_contracts
+        ),
+        generation_scaffold_hash=(
+            screenplay_scene_generation_scaffold_hash(
+                plan,
+                scene_input_contracts,
+            )
         ),
     )
 
@@ -841,6 +951,98 @@ def _scene_estimate(
     return units, output_chars
 
 
+def _source_creative_parts(
+    source_text: str,
+) -> list[tuple[Literal["action", "dialogue"], str]]:
+    text = str(source_text or "").strip()
+    if not text:
+        return [("action", "")]
+    parts: list[tuple[Literal["action", "dialogue"], str]] = []
+    outside: list[str] = []
+    quoted: list[str] = []
+    quote_open = ""
+
+    def has_content(value: str) -> bool:
+        return any(
+            not (
+                char.isspace()
+                or unicodedata.category(char).startswith("P")
+            )
+            for char in value
+        )
+
+    def flush_outside() -> None:
+        value = "".join(outside).strip()
+        outside.clear()
+        if value and has_content(value):
+            parts.append(("action", value))
+
+    for char in text:
+        category = unicodedata.category(char)
+        quotation_mark = "QUOTATION MARK" in unicodedata.name(char, "")
+        if not quote_open:
+            if category == "Pi" or quotation_mark:
+                flush_outside()
+                quote_open = char
+                quoted.append(char)
+            else:
+                outside.append(char)
+            continue
+        quoted.append(char)
+        if category == "Pf" or (
+            quotation_mark and char == quote_open
+        ):
+            value = "".join(quoted).strip()
+            quoted.clear()
+            quote_open = ""
+            if value:
+                parts.append(("dialogue", value))
+
+    if quoted:
+        outside.extend(quoted)
+    flush_outside()
+    return parts or [("action", text)]
+
+
+def _build_group_unit_slots(
+    group: list[BlueprintScenePlan],
+    *,
+    source_by_id: dict[str, str],
+    scene_order_by_key: dict[str, int],
+) -> list[ScreenplaySceneUnitSlotPlan]:
+    slots: list[ScreenplaySceneUnitSlotPlan] = []
+    unit_order = 0
+    for scene_plan in group:
+        scene_unit_order = 0
+        for source_id in scene_plan.source_segment_ids:
+            for source_part_order, (kind, source_part) in enumerate(
+                _source_creative_parts(
+                    source_by_id.get(source_id, "")
+                ),
+                start=1,
+            ):
+                unit_order += 1
+                scene_unit_order += 1
+                key_base = (
+                    f"{scene_plan.key}:{source_id}:"
+                    f"{source_part_order:03d}"
+                )
+                slots.append(ScreenplaySceneUnitSlotPlan(
+                    unit_key=f"{key_base}:unit",
+                    event_key=f"{key_base}:event",
+                    scene_key=scene_plan.key,
+                    scene_order=scene_order_by_key[scene_plan.key],
+                    unit_order=unit_order,
+                    scene_unit_order=scene_unit_order,
+                    kind=kind,
+                    source_segment_ids=[source_id],
+                    source_text=(
+                        source_part if kind == "dialogue" else ""
+                    ),
+                ))
+    return slots
+
+
 def _screenplay_scene_shard_required_tokens(
     *,
     estimated_output_chars: int,
@@ -964,6 +1166,13 @@ def build_screenplay_scene_shard_plans(
 
     plans: list[ScreenplaySceneShardPlan] = []
     previous_boundary: dict[str, Any] = {}
+    scene_order_by_key = {
+        scene_plan.key: scene_order
+        for scene_order, scene_plan in enumerate(
+            blueprint.scene_plans,
+            start=1,
+        )
+    }
     for index, group in enumerate(groups, start=1):
         group_scene_keys = [plan.key for plan in group]
         source_ids = [
@@ -984,18 +1193,24 @@ def build_screenplay_scene_shard_plans(
             source_id: source_by_id.get(source_id, "") for source_id in source_ids
         })
         boundary_hash = _hash({"in": boundary_in, "out": boundary_out})
+        unit_slots = _build_group_unit_slots(
+            group,
+            source_by_id=source_by_id,
+            scene_order_by_key=scene_order_by_key,
+        )
         plans.append(ScreenplaySceneShardPlan(
             shard_id=f"SS{index:03d}",
             scene_plan_keys=group_scene_keys,
             source_segment_ids=source_ids,
             source_scene_owners=dict(blueprint.source_scene_owners),
+            unit_slots=unit_slots,
             derived_relations=[
                 relation.model_copy(deep=True)
                 for relation in blueprint.scene_derivations
                 if relation.target_scene_plan_key in group_scene_keys
             ],
             source_ownership_hash=source_ownership_hash,
-            estimated_units=sum(value[0] for value in estimated),
+            estimated_units=len(unit_slots),
             estimated_output_chars=sum(value[1] for value in estimated),
             boundary_state_in=boundary_in,
             boundary_state_out=boundary_out,
@@ -1179,8 +1394,42 @@ def build_screenplay_scene_input_contracts(
                 ScreenplayActionParticipantDeliveryContract()
             ),
             action_evidence=action_evidence,
+            unit_slots=[],
             source_ownership_hash=plan.source_ownership_hash,
         )
+        scene_slots = [
+            slot
+            for slot in plan.unit_slots
+            if slot.scene_key == scene_plan.key
+        ]
+        if not scene_slots:
+            errors.append(
+                f"{scene_plan.key} generation scaffold 缺少 unit slot"
+            )
+        for slot in scene_slots:
+            invalid_slot_sources = [
+                source_id
+                for source_id in slot.source_segment_ids
+                if (
+                    source_id not in owned_source_ids
+                    or plan.source_scene_owners.get(source_id)
+                    != scene_plan.key
+                )
+            ]
+            if invalid_slot_sources:
+                errors.append(
+                    f"{slot.unit_key} source owner 不匹配："
+                    + ",".join(invalid_slot_sources)
+                )
+                continue
+            compiled_slot, slot_errors = (
+                _compile_unit_identity_scaffold(
+                    slot,
+                    contract=contract,
+                )
+            )
+            errors.extend(slot_errors)
+            contract.unit_slots.append(compiled_slot)
         contract.identity_scaffold_hash = (
             _contract_identity_scaffold_hash(contract)
         )
@@ -1251,6 +1500,33 @@ def _validate_scene_input_contracts(
     if plan.source_segment_ids != expected_plan_source_ids:
         errors.append(
             "shard plan source_segment_ids 与唯一 owner 投影不一致"
+        )
+    unit_keys = [slot.unit_key for slot in plan.unit_slots]
+    event_keys = [slot.event_key for slot in plan.unit_slots]
+    if len(set(unit_keys)) != len(unit_keys):
+        errors.append("shard plan unit_key 必须唯一")
+    if len(set(event_keys)) != len(event_keys):
+        errors.append("shard plan event_key 必须唯一")
+    if [slot.unit_order for slot in plan.unit_slots] != list(
+        range(1, len(plan.unit_slots) + 1)
+    ):
+        errors.append("shard plan unit_order 必须连续且按播放顺序递增")
+    invalid_slot_owners = [
+        slot.unit_key
+        for slot in plan.unit_slots
+        if (
+            slot.scene_key not in plan.scene_plan_keys
+            or any(
+                plan.source_scene_owners.get(source_id)
+                != slot.scene_key
+                for source_id in slot.source_segment_ids
+            )
+        )
+    ]
+    if invalid_slot_owners:
+        errors.append(
+            "shard plan slot 来源归属不匹配："
+            + ",".join(invalid_slot_owners)
         )
     invalid_relations = [
         relation.relation_key
@@ -1363,15 +1639,48 @@ def _validate_scene_input_contracts(
                 f"{scene_key} action participant delivery 合同与 "
                 f"{IR_VERSION} 不一致"
             )
-        if contract.action_evidence:
-            expected_scaffold_hash = _contract_identity_scaffold_hash(
-                contract
+        expected_unit_slots = [
+            slot for slot in plan.unit_slots
+            if slot.scene_key == scene_key
+        ]
+        actual_structural_slots = [
+            _structural_slot(slot)
+            for slot in contract.unit_slots
+        ]
+        if actual_structural_slots != expected_unit_slots:
+            errors.append(
+                f"{scene_key} unit slot 与 shard plan 不一致"
             )
-            if contract.identity_scaffold_hash != expected_scaffold_hash:
-                errors.append(
-                    f"{scene_key} identity_scaffold_hash 与 action evidence "
-                    "不一致"
+        for actual_slot in contract.unit_slots:
+            planned_slot = next(
+                (
+                    slot for slot in expected_unit_slots
+                    if slot.unit_key == actual_slot.unit_key
+                ),
+                None,
+            )
+            if planned_slot is None:
+                continue
+            expected_slot, slot_errors = (
+                _compile_unit_identity_scaffold(
+                    planned_slot,
+                    contract=contract,
                 )
+            )
+            errors.extend(slot_errors)
+            if actual_slot != expected_slot:
+                errors.append(
+                    f"{actual_slot.unit_key} identity scaffold drift"
+                )
+        expected_scaffold_hash = _contract_identity_scaffold_hash(
+            contract
+        )
+        if contract.identity_scaffold_hash != expected_scaffold_hash:
+            errors.append(
+                f"{scene_key} identity_scaffold_hash 与 unit scaffold "
+                "不一致"
+            )
+        if contract.action_evidence:
             invalid_evidence_identities = [
                 participant.identity_key
                 for action in contract.action_evidence
