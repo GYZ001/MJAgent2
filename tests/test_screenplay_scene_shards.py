@@ -156,81 +156,41 @@ def _shard(
     blueprint: NarrativeBlueprint,
     identity_registry: list[dict] | None = None,
 ) -> ScreenplaySceneShardIR:
-    scene_map = {scene.key: scene for scene in blueprint.scene_plans}
-    scenes: list[IRScene] = []
-    consumed: list[str] = []
-    for scene_key in plan.scene_plan_keys:
-        scene_plan = scene_map[scene_key]
-        units = []
-        for source_id in scene_plan.source_segment_ids:
-            consumed.append(source_id)
-            units.append(IRSceneUnit(
-                kind="action",
-                text=f"交付 {source_id}",
-                event_key="local-event-1",
-                source_segment_ids=[source_id],
-                actor_keys=[],
-                target_keys=[],
-                onscreen_entity_keys=[],
-                participant_deliveries=[],
-                resulting_state=f"完成 {source_id}",
-            ))
-        scenes.append(IRScene(
-            key=scene_plan.key,
-            scene_heading=scene_plan.scene_heading,
-            story_function="完整交付本场来源",
-            summary="交付来源",
-            entry_state=scene_plan.previous_scene_exit_state,
-            exit_state=scene_plan.exit_state,
-            units=units,
-        ))
     contracts = _contracts(
         [plan],
         blueprint,
         identity_registry,
     )[plan.shard_id]
-    return ScreenplaySceneShardIR.model_validate({
-        "episode_no": 1,
-        "shard_id": plan.shard_id,
-        "scene_plan_keys": plan.scene_plan_keys,
-        "scenes": [scene.model_dump(mode="json") for scene in scenes],
-        "consumed_source_ids": consumed,
-        "source_hash": plan.source_hash,
-        "boundary_hash": plan.boundary_hash,
-        "blueprint_hash": plan.blueprint_hash,
-        "identity_registry_hash": plan.identity_registry_hash,
-        "source_ownership_hash": plan.source_ownership_hash,
-        "identity_scaffold_hash": (
-            screenplay_scene_identity_scaffold_hash(contracts)
-        ),
-    })
+    return scene_shards_module.compile_screenplay_scene_shard_draft(
+        _creative_shard(plan, blueprint),
+        episode_no=1,
+        plan=plan,
+        scene_plans={
+            scene.key: scene for scene in blueprint.scene_plans
+        },
+        scene_input_contracts=contracts,
+    )
 
 
 def _creative_shard(
     plan,
     blueprint: NarrativeBlueprint,
 ) -> ScreenplaySceneShardCreativeIR:
-    scene_map = {scene.key: scene for scene in blueprint.scene_plans}
+    del blueprint
     return ScreenplaySceneShardCreativeIR.model_validate({
-        "scenes": [
-            {
-                "scene_plan_key": scene_key,
-                "story_function": "完整交付本场来源",
-                "summary": "交付来源",
-                "units": [
-                    {
-                        "kind": "action",
-                        "text": f"交付 {source_id}",
-                        "source_segment_ids": [source_id],
-                        "resulting_state": f"完成 {source_id}",
-                    }
-                    for source_id in scene_map[
-                        scene_key
-                    ].source_segment_ids
-                ],
+        "slots": {
+            slot.unit_key: {
+                "text": (
+                    slot.source_text
+                    if slot.kind == "dialogue"
+                    else f"交付 {slot.source_segment_ids[0]}"
+                ),
+                "resulting_state": (
+                    f"完成 {slot.source_segment_ids[0]}"
+                ),
             }
-            for scene_key in plan.scene_plan_keys
-        ],
+            for slot in plan.unit_slots
+        },
     })
 
 
