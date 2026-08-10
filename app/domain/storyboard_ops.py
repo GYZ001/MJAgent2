@@ -332,10 +332,10 @@ def _reconcile_storyboard_scene_projection(conn, episode_id: str, bible: Bible) 
                     outline_changes += 1
             if outline_changes:
                 from app.storyboard_authority import (
-                    persist_storyboard_outline_authority,
+                    persist_storyboard_outline_projection,
                 )
 
-                persist_storyboard_outline_authority(
+                persist_storyboard_outline_projection(
                     episode_id,
                     outline,
                     conn=conn,
@@ -1279,13 +1279,14 @@ def _reconcile_storyboard_plan(conn, episode_id: str, episode_no: int,
                 scene_setting=shot.scene_setting or "",
                 beat=beat,
                 covers="",
+                duration_s=int(shot.duration_s or 0) or None,
             ))
     to_total = len(outline.shots)
     if to_total == persisted_total:
         return None
-    from app.storyboard_authority import persist_storyboard_outline_authority
+    from app.storyboard_authority import persist_storyboard_outline_projection
 
-    persist_storyboard_outline_authority(
+    persist_storyboard_outline_projection(
         episode_id,
         outline,
         conn=conn,
@@ -4093,9 +4094,9 @@ def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
             brief.new_information_ids = []
         outline_shots.append(brief)
     updated_outline = StoryboardOutline(episode_no=int(ep["episode_no"]), shots=outline_shots)
-    from app.storyboard_authority import persist_storyboard_outline_authority
+    from app.storyboard_authority import persist_storyboard_outline_projection
 
-    persist_storyboard_outline_authority(
+    persist_storyboard_outline_projection(
         episode_id,
         updated_outline,
         conn=conn,

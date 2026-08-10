@@ -362,6 +362,82 @@ def persist_storyboard_outline_authority(
         raise
 
 
+def persist_storyboard_outline_projection(
+    episode_id: str,
+    outline: StoryboardOutline | dict[str, Any] | str,
+    *,
+    artifact_id: str | None = None,
+    conn=None,
+    commit: bool = True,
+) -> StoryboardOutlineAuthority | None:
+    """Persist modern authority strictly while retaining plan-null legacy drafts."""
+    db = conn or get_conn()
+    model = (
+        outline.model_copy(deep=True)
+        if isinstance(outline, StoryboardOutline)
+        else StoryboardOutline.model_validate_json(outline)
+        if isinstance(outline, str)
+        else StoryboardOutline.model_validate(outline)
+    )
+    row = db.execute(
+        "SELECT * FROM episodes WHERE id=?", (episode_id,)
+    ).fetchone()
+    if row is None:
+        raise StoryboardOutlineAuthorityError(f"剧集不存在：{episode_id}")
+    narrative_authority = False
+    raw_screenplay = str(row["screenplay_json"] or "")
+    if raw_screenplay:
+        from app.schemas import EpisodeScreenplay
+
+        try:
+            narrative_authority = (
+                EpisodeScreenplay.model_validate_json(
+                    raw_screenplay
+                ).narrative_plan
+                is not None
+            )
+        except (TypeError, ValueError):
+            narrative_authority = bool(
+                str(row["target_duration_authority"] or "")
+                == OUTLINE_AUTHORITY_VERSION
+            )
+    authority_required = bool(
+        narrative_authority
+        or str(row["target_duration_authority"] or "")
+        == OUTLINE_AUTHORITY_VERSION
+    )
+    has_complete_durations = bool(
+        model.shots
+        and all(int(shot.duration_s or 0) > 0 for shot in model.shots)
+    )
+    if authority_required or has_complete_durations:
+        return persist_storyboard_outline_authority(
+            episode_id,
+            model,
+            artifact_id=artifact_id,
+            conn=db,
+            commit=commit,
+            allow_unversioned_migration=(
+                has_complete_durations and not authority_required
+            ),
+            migration_reason=(
+                "legacy_plan_null_outline_adoption"
+                if has_complete_durations and not authority_required
+                else None
+            ),
+        )
+
+    # A plan-null legacy draft without durations is not an authoritative
+    # production input. Preserve its resumable JSON without inventing a total.
+    db.execute(
+        "UPDATE episodes SET storyboard_outline_json=? WHERE id=?",
+        (model.model_dump_json(), episode_id),
+    )
+    if commit:
+        db.commit()
+    return None
+
+
 def migrate_storyboard_outline_authority(
     episode_id: str,
     *,

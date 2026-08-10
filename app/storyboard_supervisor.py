@@ -41,7 +41,7 @@ from app.schemas import (
 )
 from app.storyboard_authority import (
     StoryboardOutlineAuthorityError,
-    persist_storyboard_outline_authority,
+    persist_storyboard_outline_projection,
     resolve_storyboard_outline_authority,
 )
 from app.stages import (
@@ -1000,7 +1000,7 @@ def _recover_truncated_outline_from_approved_artifact(
             continue
         if len(candidate.shots) <= max(current_count, shot_count):
             continue
-        persist_storyboard_outline_authority(
+        persist_storyboard_outline_projection(
             str(ep["id"]),
             candidate,
             artifact_id=str(row["id"]),
@@ -1099,7 +1099,7 @@ def _recover_outline_from_current_artifact(
         cp.expected_total = len(outline.shots)
         cp.phase = "VALIDATING_OUTLINE"
         cp.outcome = None
-        persist_storyboard_outline_authority(
+        persist_storyboard_outline_projection(
             str(ep["id"]),
             outline,
             artifact_id=artifact_id,
@@ -1840,7 +1840,7 @@ def _commit_repair_candidate(
                         conn=conn, commit=False,
                     )
         if candidate_outline is not None:
-            persist_storyboard_outline_authority(
+            persist_storyboard_outline_projection(
                 episode_id,
                 candidate_outline,
                 conn=conn,
@@ -2315,7 +2315,7 @@ async def run_storyboard_supervisor(
                 screenplay,
                 bible,
             )
-            outline_authority = persist_storyboard_outline_authority(
+            outline_authority = persist_storyboard_outline_projection(
                 episode_id,
                 outline,
                 conn=conn,
@@ -2552,7 +2552,7 @@ async def run_storyboard_supervisor(
                         narrative_authority=True,
                     )
                 if outline_identity_repairs and outline is not None:
-                    outline_authority = persist_storyboard_outline_authority(
+                    outline_authority = persist_storyboard_outline_projection(
                         episode_id,
                         outline,
                         conn=conn,
@@ -2778,7 +2778,7 @@ async def run_storyboard_supervisor(
                 raise StageError("分镜大纲", [public]) from exc
             if not _run_has_write_ownership():
                 return cp
-            outline_authority = persist_storyboard_outline_authority(
+            outline_authority = persist_storyboard_outline_projection(
                 episode_id,
                 outline,
                 artifact_id=(
@@ -2836,7 +2836,7 @@ async def run_storyboard_supervisor(
             )
             if derived_contexts:
                 if not repair_pending:
-                    outline_authority = persist_storyboard_outline_authority(
+                    outline_authority = persist_storyboard_outline_projection(
                         episode_id,
                         pack_outline,
                         conn=conn,
@@ -3719,7 +3719,7 @@ async def run_storyboard_supervisor(
                     row["storyboard_artifact_id"],
                     narrative_authority=narrative_authority,
                 )
-            outline_authority = persist_storyboard_outline_authority(
+            outline_authority = persist_storyboard_outline_projection(
                 episode_id,
                 outline,
                 conn=conn,
@@ -3896,7 +3896,7 @@ async def run_storyboard_supervisor(
                     "fields": changed_fields,
                 })
             if outline_projection_repairs and outline is not None:
-                outline_authority = persist_storyboard_outline_authority(
+                outline_authority = persist_storyboard_outline_projection(
                     episode_id,
                     outline,
                     conn=conn,

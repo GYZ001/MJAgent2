@@ -19,11 +19,19 @@ from app.evidence import repository as evidence_repository
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.narrative_priority import compile_authoritative_delivery_outline
-from app.production.patch import load_screenplay_from_artifact
-from app.production.publish import publish_storyboard
+from app.production.patch import screenplay_artifact_payload
+from app.production.publish import publish_screenplay, publish_storyboard
 from app.production.revision import (
     ensure_production_revision,
     mark_baseline_generated,
+)
+from app.production.screenplay_authority import (
+    SCREENPLAY_QA_PROFILE_VERSION,
+    screenplay_authority_fingerprint,
+)
+from app.production.screenplay_document import (
+    ScreenplayDocument,
+    document_to_screenplay,
 )
 from app.schemas import Shot, Storyboard, StoryboardOutlineShot
 from app.storyboard_authority import (
@@ -130,7 +138,9 @@ def run_regression(
     if episode_before is None:
         raise RuntimeError(f"copied DB missing episode: {episode_id}")
     planning_duration_s = int(episode_before["target_duration_s"] or 0)
-    screenplay = load_screenplay_from_artifact(artifact_id)
+    screenplay = document_to_screenplay(
+        ScreenplayDocument.model_validate(artifact["content"])
+    )
     project = conn.execute(
         "SELECT bible_json FROM projects WHERE id=?",
         (episode_before["project_id"],),
@@ -142,9 +152,71 @@ def run_regression(
         if project is not None and project["bible_json"]
         else None
     )
-    _projected, outline, _audit = compile_authoritative_delivery_outline(
+    screenplay, outline, _audit = compile_authoritative_delivery_outline(
         screenplay,
         bible=bible,
+    )
+    screenplay_contract = get_contract("screenplay").version
+    normalized_screenplay_artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_document",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="validated",
+            trust_level="T2",
+            content=screenplay_artifact_payload(screenplay),
+            parent_artifact_ids=[artifact_id],
+            contract_version=screenplay_contract,
+            prompt_version="production-artifact-contract-migration.v1",
+        )
+    )
+    screenplay_fingerprint = screenplay_authority_fingerprint(
+        episode_id,
+        conn=conn,
+        contract_version=screenplay_contract,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    screenplay_gate = evidence_repository.create_evaluation(
+        normalized_screenplay_artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="score_only",
+            runtime_blocking=False,
+            retry_eligible=False,
+            score=100,
+            evidence={
+                "authority_input_fingerprint": screenplay_fingerprint,
+                "production_artifact_replay": artifact_id,
+            },
+        ),
+    )
+    screenplay_revision = ensure_production_revision(
+        episode_id=episode_id,
+        kind="screenplay",
+        input_fingerprint=screenplay_fingerprint,
+        contract_version=screenplay_contract,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        resume=False,
+    )
+    mark_baseline_generated(
+        screenplay_revision.id,
+        baseline_artifact_id=normalized_screenplay_artifact["id"],
+        working_artifact_id=normalized_screenplay_artifact["id"],
+    )
+    publish_screenplay(
+        episode_id=episode_id,
+        revision_id=screenplay_revision.id,
+        artifact_id=normalized_screenplay_artifact["id"],
+        artifact_hash=normalized_screenplay_artifact["content_hash"],
+        evaluation_ids=[screenplay_gate["id"]],
+        input_fingerprint=screenplay_fingerprint,
+        contract_version=screenplay_contract,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        clear_downstream=False,
     )
     authority = persist_storyboard_outline_authority(
         episode_id,
@@ -184,7 +256,7 @@ def run_regression(
             episode_id,
             screenplay,
             shot,
-            str(episode_before["screenplay_artifact_id"] or ""),
+            normalized_screenplay_artifact["id"],
         )
     conn.commit()
 
@@ -196,7 +268,10 @@ def run_regression(
         status="validated",
         trust_level="T2",
         content=board.model_dump(mode="json"),
-        parent_artifact_ids=[authority.artifact_id, artifact_id],
+        parent_artifact_ids=[
+            authority.artifact_id,
+            normalized_screenplay_artifact["id"],
+        ],
         contract_version=contract_version,
     ))
     full_gate = evidence_repository.create_evaluation(
@@ -273,6 +348,7 @@ def run_regression(
         "provider_calls_made": 0,
         "episode_id": episode_id,
         "screenplay_artifact_id": artifact_id,
+        "migrated_screenplay_artifact_id": normalized_screenplay_artifact["id"],
         "planning_duration_s": planning_duration_s,
         "authoritative_duration_s": restarted.authoritative_duration_s,
         "outline_revision": restarted.revision,
