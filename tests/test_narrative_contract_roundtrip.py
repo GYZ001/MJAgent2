@@ -9,6 +9,7 @@ from app.production.screenplay_document import (
     screenplay_to_document,
 )
 from app.schemas import (
+    ActionParticipantDelivery,
     AudienceStatePathRef,
     EpisodeScreenplay,
     NarrativeBoundaryContract,
@@ -410,6 +411,14 @@ def _narrative_shot_fields() -> dict:
         "event_ids": ["E-1"],
         "primary_action_id": None,
         "supporting_action_ids": ["A-support"],
+        "action_participant_deliveries": [
+            ActionParticipantDelivery(
+                action_id="A-support",
+                participant_id="entity-offscreen",
+                evidence_ids=["EV-1"],
+                visible_effect=True,
+            )
+        ],
         "shot_contribution": _contribution(),
         "audience_state_paths": [
             AudienceStatePathRef(

@@ -1637,6 +1637,25 @@ def normalize_storyboard_shot_candidate(
             if (
                 isinstance(item, dict)
                 and str(item.get("participant_id") or "").strip()
+                and str(item.get("action_id") or "").strip() in {
+                    str(outline_narrative_task.get("primary_action_id") or "").strip(),
+                    *(
+                        str(action_id or "").strip()
+                        for action_id in (
+                            outline_narrative_task.get("supporting_action_ids")
+                            or []
+                        )
+                    ),
+                }
+                and any((
+                    bool(item.get("audible")),
+                    bool(item.get("visible_effect")),
+                    bool(item.get("visible_reaction")),
+                ))
+                and any(
+                    str(evidence_id or "").strip()
+                    for evidence_id in (item.get("evidence_ids") or [])
+                )
             )
         }
         participant_ids = bound_actor_ids | bound_target_ids
@@ -1654,6 +1673,9 @@ def normalize_storyboard_shot_candidate(
             and len(candidate_entity_ids) == len(candidate_characters)
             and declared_offscreen.issubset(participant_ids)
             and declared_offscreen.issubset(contracted_offscreen)
+            and (
+                participant_ids - set(candidate_entity_ids)
+            ).issubset(contracted_offscreen)
         )
         if visual_partition_is_valid:
             canonical_offscreen_actors = [
@@ -8432,10 +8454,37 @@ def _scene_pack_visual_partition(
         brief,
         bible=bible,
     )
+    bound_action_ids = {
+        *([brief.primary_action_id] if brief.primary_action_id else []),
+        *brief.supporting_action_ids,
+    }
+    contracted_offscreen_ids = {
+        delivery.participant_id
+        for delivery in brief.action_participant_deliveries
+        if (
+            delivery.action_id in bound_action_ids
+            and delivery.is_perceivable
+            and delivery.evidence_ids
+        )
+    }
     return (
         visible_ids,
-        [identity_id for identity_id in actor_ids if identity_id not in visible_ids],
-        [identity_id for identity_id in target_ids if identity_id not in visible_ids],
+        [
+            identity_id
+            for identity_id in actor_ids
+            if (
+                identity_id not in visible_ids
+                and identity_id in contracted_offscreen_ids
+            )
+        ],
+        [
+            identity_id
+            for identity_id in target_ids
+            if (
+                identity_id not in visible_ids
+                and identity_id in contracted_offscreen_ids
+            )
+        ],
     )
 
 

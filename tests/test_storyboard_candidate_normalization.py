@@ -156,12 +156,21 @@ def test_storyboard_candidate_preserves_renderable_structured_visual_partition()
         },
     }
     task = {
+        "primary_action_id": "ACT-1",
         "visible_entity_ids": [
             "actor", "context-actor", "target-a", "target-b",
         ],
         "characters_visible": ["主体", "同场执行者", "对象甲", "对象乙"],
         "offscreen_action_actor_ids": [],
         "offscreen_action_target_ids": [],
+        "action_participant_deliveries": [{
+            "action_id": "ACT-1",
+            "participant_id": "context-actor",
+            "evidence_ids": ["EV-CONTEXT-ACTOR"],
+            "audible": False,
+            "visible_effect": False,
+            "visible_reaction": True,
+        }],
         "_bound_action_actor_ids": ["actor", "context-actor"],
         "_bound_action_target_ids": ["target-a", "target-b"],
     }
@@ -182,6 +191,44 @@ def test_storyboard_candidate_preserves_renderable_structured_visual_partition()
         change["reason"] == "structured_visual_staging_partition"
         for change in changes
     )
+
+
+def test_storyboard_candidate_does_not_offscreen_uncontracted_action_actor() -> None:
+    candidate = {
+        "episode_no": 1,
+        "shot": {
+            "shot_no": 7,
+            "characters": ["主体", "作用对象"],
+            "characters_visible": ["主体", "作用对象"],
+            "visible_entity_ids": ["actor", "target"],
+            "offscreen_action_actor_ids": [],
+            "offscreen_action_target_ids": [],
+        },
+    }
+    task = {
+        "primary_action_id": "ACT-1",
+        "visible_entity_ids": ["actor", "missing-actor", "target"],
+        "characters_visible": ["主体", "缺席执行者", "作用对象"],
+        "offscreen_action_actor_ids": [],
+        "offscreen_action_target_ids": [],
+        "action_participant_deliveries": [],
+        "_bound_action_actor_ids": ["actor", "missing-actor"],
+        "_bound_action_target_ids": ["target"],
+    }
+
+    normalized, _changes = normalize_storyboard_shot_candidate(
+        candidate,
+        episode_no=1,
+        shot_no=7,
+        outline_narrative_task=task,
+    )
+
+    shot = normalized["shot"]
+    assert shot["characters"] == ["主体", "缺席执行者", "作用对象"]
+    assert shot["characters_visible"] == ["主体", "缺席执行者", "作用对象"]
+    assert shot["visible_entity_ids"] == ["actor", "missing-actor", "target"]
+    assert shot["offscreen_action_actor_ids"] == []
+    assert shot["offscreen_action_target_ids"] == []
 
 
 def test_single_spoken_voice_does_not_collapse_structured_action_staging() -> None:

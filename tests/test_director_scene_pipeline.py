@@ -8,6 +8,7 @@ from app.production.screenplay_document import (
     screenplay_to_document,
 )
 from app.schemas import (
+    ActionParticipantDelivery,
     AtomicAction,
     Bible,
     Character,
@@ -1035,6 +1036,12 @@ def test_scene_pack_uses_model_focal_subset_and_graph_offscreen_partition() -> N
         "对象甲",
         "对象乙",
     ]
+    offscreen_delivery = ActionParticipantDelivery(
+        action_id="ACT-1",
+        participant_id="同场执行者",
+        evidence_ids=["EV-OFFSCREEN-ACTOR"],
+        visible_reaction=True,
+    )
     screenplay = EpisodeScreenplay(
         episode_no=1,
         narrative_plan=NarrativeContinuityPlan(
@@ -1043,6 +1050,7 @@ def test_scene_pack_uses_model_focal_subset_and_graph_offscreen_partition() -> N
                 action_id="ACT-1",
                 actor_ids=["主体", "同场执行者"],
                 target_ids=["对象甲", "对象乙"],
+                participant_deliveries=[offscreen_delivery],
                 semantic_intent="主体完成面向两个对象的单一可见动作。",
                 completion_condition="两个对象接收到动作结果。",
             )],
@@ -1064,6 +1072,7 @@ def test_scene_pack_uses_model_focal_subset_and_graph_offscreen_partition() -> N
         primary_action_id="ACT-1",
         characters_visible=list(identities),
         visible_entity_ids=list(identities),
+        action_participant_deliveries=[offscreen_delivery],
     )
 
     characters = stages._scene_pack_characters(
