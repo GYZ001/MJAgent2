@@ -11,7 +11,11 @@ from pydantic import ValidationError
 
 from app import db
 from app.harness import model_gateway
-from app.narrative_blueprint import NarrativeBlueprint, derive_blueprint_scene_plans
+from app.narrative_blueprint import (
+    BlueprintScenePlan,
+    NarrativeBlueprint,
+    derive_blueprint_scene_plans,
+)
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
 from app.schemas import Bible, World
@@ -29,9 +33,13 @@ from app.screenplay_scene_shards import (
     ScreenplayEnvelopeIR,
     ScreenplayEnvelopeMetadata,
     ScreenplaySceneMergeError,
+    ScreenplaySceneInputContract,
+    ScreenplaySceneParticipantBinding,
     ScreenplaySceneShardError,
     ScreenplaySceneShardOwnershipLost,
     ScreenplaySceneShardIR,
+    ScreenplaySceneShardPlan,
+    ScreenplaySceneSourceSegment,
     UnresolvedParticipant,
     blueprint_content_hash,
     build_screenplay_scene_shard_repair_schema,
@@ -59,6 +67,11 @@ ERR_20260810_B66DDA_REPLAY = (
     Path(__file__).parent
     / "fixtures"
     / "screenplay_scene_shard_err_20260810_b66dda.json"
+)
+SS004_REPLAY_INPUT = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_ss004.json"
 )
 
 
@@ -968,12 +981,79 @@ def _unit_delivery_contracts(schema: dict) -> dict[tuple[str, int], dict]:
     }
 
 
-def _b66dda_shard(response: dict) -> ScreenplaySceneShardIR:
+def _normalize_b66dda_payload(response: dict) -> dict:
     payload = deepcopy(response)
     for scene in payload["scenes"]:
         if len(str(scene.get("story_function") or "").strip()) < 6:
             scene["story_function"] = "推进本场事件：" + scene["summary"]
-    return ScreenplaySceneShardIR.model_validate(payload)
+    return payload
+
+
+def _b66dda_shard(response: dict) -> ScreenplaySceneShardIR:
+    return ScreenplaySceneShardIR.model_validate(
+        _normalize_b66dda_payload(response)
+    )
+
+
+def _ss004_replay_validation_context() -> tuple[
+    ScreenplaySceneShardPlan,
+    dict[str, BlueprintScenePlan],
+    list[ScreenplaySceneInputContract],
+    set[str],
+]:
+    replay_input = json.loads(SS004_REPLAY_INPUT.read_text(encoding="utf-8"))
+    scene_plans = {
+        item["key"]: BlueprintScenePlan.model_validate(item)
+        for item in replay_input["scene_plans"]
+    }
+    hashes = replay_input["hashes"]
+    plan = ScreenplaySceneShardPlan(
+        shard_id="SS004",
+        scene_plan_keys=list(scene_plans),
+        source_segment_ids=[
+            source_id
+            for scene_plan in scene_plans.values()
+            for source_id in scene_plan.source_segment_ids
+        ],
+        source_scene_owners=replay_input["source_scene_owners"],
+        source_ownership_hash=hashes["source_ownership_hash"],
+        estimated_units=replay_input["recorded_request"]["estimated_units"],
+        estimated_output_chars=replay_input["recorded_request"][
+            "estimated_output_chars"
+        ],
+        source_hash=hashes["source_hash"],
+        boundary_hash=hashes["boundary_hash"],
+        blueprint_hash=hashes["blueprint_hash"],
+        identity_registry_hash=hashes["identity_registry_hash"],
+    )
+    contracts = [
+        ScreenplaySceneInputContract(
+            scene_plan_key=item["scene_plan_key"],
+            node_keys=item["node_keys"],
+            source_segment_ids=[
+                segment["source_segment_id"]
+                for segment in item["source_segments"]
+            ],
+            source_segments=[
+                ScreenplaySceneSourceSegment.model_validate(segment)
+                for segment in item["source_segments"]
+            ],
+            participant_bindings=[
+                ScreenplaySceneParticipantBinding(
+                    blueprint_key=blueprint_key,
+                    identity_key=identity_key,
+                )
+                for blueprint_key, identity_key in item["participant_bindings"]
+            ],
+            source_scene_owners=replay_input["source_scene_owners"],
+            source_ownership_hash=hashes["source_ownership_hash"],
+        )
+        for item in replay_input["scene_inputs"]
+    ]
+    identity_keys = {
+        item["identity_key"] for item in replay_input["identity_registry"]
+    }
+    return plan, scene_plans, contracts, identity_keys
 
 
 def _unit_delivery_array_schema(
@@ -1150,6 +1230,83 @@ def test_err_20260810_b66dda_replays_60895_and_60897_without_runtime_access() ->
         else:
             assert final_answer["required_deliveries"] == []
         assert shard.scenes[2].units[2].participant_deliveries
+
+
+def test_err_20260810_b66dda_semantic_retry_uses_60895_bound_schema(
+    monkeypatch,
+) -> None:
+    replay = json.loads(ERR_20260810_B66DDA_REPLAY.read_text(encoding="utf-8"))
+    responses = [
+        item["response"] for item in replay["provider_responses"]
+    ]
+    prompts: list[str] = []
+    attempts: list[dict] = []
+    plan, scene_plans, contracts, identity_keys = (
+        _ss004_replay_validation_context()
+    )
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return json.dumps(
+            responses[len(prompts) - 1],
+            ensure_ascii=False,
+        )
+
+    def validate_candidate(shard: ScreenplaySceneShardIR) -> list[str]:
+        normalize_screenplay_scene_shard(
+            shard,
+            episode_no=1,
+            plan=plan,
+            scene_plans=scene_plans,
+            scene_input_contracts=contracts,
+        )
+        return validate_screenplay_scene_shard(
+            shard,
+            plan=plan,
+            scene_plans=scene_plans,
+            scene_input_contracts=contracts,
+            identity_keys=identity_keys,
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="业务校验失败",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "SS004 replay"}],
+            model_type=ScreenplaySceneShardIR,
+            validate=validate_candidate,
+            operation_id="test.ss004-b66dda-replay:v1",
+            max_tokens=1024,
+            format_retry_limit=0,
+            semantic_retry_limit=1,
+            output_schema=ScreenplaySceneShardIR.model_json_schema(),
+            repair_schema=build_screenplay_scene_shard_repair_schema,
+            normalize_payload=_normalize_b66dda_payload,
+            on_attempt=attempts.append,
+        ))
+
+    assert len(prompts) == 2
+    assert [item["outcome"] for item in attempts] == [
+        "semantic_error",
+        "semantic_error",
+    ]
+    schema_text = prompts[1].split(
+        "\n输出 Schema：\n",
+        maxsplit=1,
+    )[1].split("\n当前候选：\n", maxsplit=1)[0]
+    repair_schema = json.loads(schema_text)
+    unit_contracts = _unit_delivery_contracts(repair_schema)
+    assert unit_contracts[("bp-sc014", 5)]["required_deliveries"] == []
+    assert unit_contracts[("bp-sc014", 6)]["required_deliveries"] == []
+    assert unit_contracts[("bp-sc015", 1)]["required_deliveries"] == []
+    assert unit_contracts[("bp-sc015", 2)]["required_deliveries"] == [{
+        "participant_key": "person_e79ecc6793f5",
+        "perception_channels": ["audible"],
+    }]
+    assert "canonical_name" not in schema_text
 
 
 @pytest.mark.parametrize(
@@ -1455,6 +1612,10 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         in first_prompt
     )
     assert "owned_source" not in repair_contexts["screenplay_scene_shards:SS001"]
+    assert (
+        "identity_registry"
+        not in repair_contexts["screenplay_scene_shards:SS001"]
+    )
     first_contracts = repair_contexts[
         "screenplay_scene_shards:SS001"
     ]["scene_input_contracts"]

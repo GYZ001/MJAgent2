@@ -1946,15 +1946,6 @@ async def generate_screenplay_scene_shards(
         plan_scene_input_contracts = scene_input_contracts.get(
             plan.shard_id, []
         )
-        bound_identity_keys = {
-            binding.identity_key
-            for contract in plan_scene_input_contracts
-            for binding in contract.participant_bindings
-        }
-        projected_identity_registry = [
-            item for item in identity_registry
-            if str(item.get("identity_key") or "") in bound_identity_keys
-        ]
         repair_contracts: list[dict[str, Any]] = []
         for contract in plan_scene_input_contracts:
             payload = contract.model_dump(mode="json")
@@ -2078,14 +2069,6 @@ async def generate_screenplay_scene_shards(
                             ScreenplayActionParticipantDeliveryContract()
                             .model_dump(mode="json")
                         ),
-                        "identity_registry": [
-                            {
-                                "identity_key": item.get("identity_key"),
-                                "canonical_name": item.get("canonical_name"),
-                                "source_labels": item.get("source_labels") or [],
-                            }
-                            for item in projected_identity_registry
-                        ],
                         "final_gate_contract": [
                             "each unit must declare non-empty source_segment_ids",
                             "each source_id must resolve to exactly one scene owner",
