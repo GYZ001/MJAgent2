@@ -2514,9 +2514,6 @@ def validate_storyboard_narrative(
             starts_action = (
                 not action_phase_ids or action_phase_ids[0] in delivered_for_action
             )
-            completes_action = (
-                not action_phase_ids or action_phase_ids[-1] in delivered_for_action
-            )
             owner_event_id = action_event_owner.get(action_id, "")
             action_entry_state = event_entry_states.get(
                 owner_event_id,
