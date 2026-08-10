@@ -356,10 +356,12 @@ def create_evaluation(
     evaluation: Evaluation,
     *,
     step_run_id: str | None = None,
+    conn=None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     evaluation_id = new_id("eval")
-    conn = get_conn()
-    conn.execute(
+    db = conn or get_conn()
+    db.execute(
         """INSERT INTO evaluations(
             id, artifact_id, step_run_id, evaluator_type, evaluator_name, evaluator_version,
             status, hard_gate_passed, evaluation_role, score_status, runtime_blocking,
@@ -377,8 +379,13 @@ def create_evaluation(
             int(evaluation.recovered), now(),
         ),
     )
-    conn.commit()
-    return get_evaluations(artifact_id)[-1]
+    if commit:
+        db.commit()
+    row = db.execute(
+        "SELECT * FROM evaluations WHERE id=?",
+        (evaluation_id,),
+    ).fetchone()
+    return _decode_rows([dict(row)])[0] if row else {}
 
 
 def _active_published_release_ids(conn) -> set[str]:

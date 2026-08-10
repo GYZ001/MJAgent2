@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,11 @@ SOURCE = "\n\n".join([
     "旧友推门出现，把钥匙递给谷言说：“拿好这把钥匙。”",
     "门外响起更重的敲门声，旧友立刻说：“别开门。”危险已经逼近。",
 ])
+SS001_ARTIFACT_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_ss001_art_bcebe2075a55.json"
+)
 
 
 def _bible() -> Bible:
@@ -568,6 +574,85 @@ def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor()
     assert first_action.actor_ids == ["谷言"]
     assert "旧友" not in first_action.actor_ids
     assert first_event.onscreen_entity_ids == ["谷言"]
+
+
+def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
+    replay = json.loads(SS001_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
+    payload = _ir_payload()
+    payload["format_version"] = "screenplay-generation-ir.v2"
+    units = [
+        unit
+        for scene in payload["scenes"]
+        for unit in scene["units"]
+    ]
+    title = replay["units"]["title"]
+    units[0].update({
+        "unit_key": title["unit_key"],
+        "text": title["text"],
+        "event_key": "ss001-title-event",
+    })
+    relation_rows = (
+        ((), (), (), []),
+        (("g",), (), ("g",), []),
+        (("friend",), ("g",), ("g", "friend"), []),
+        (("friend",), (), ("g", "friend"), []),
+        ((), (), (), []),
+        (
+            ("friend",),
+            (),
+            ("g",),
+            [{
+                "participant_key": "friend",
+                "observable_claim": "旧友的画外警告清晰可听。",
+                "audible": True,
+            }],
+        ),
+    )
+    for index, (unit, (actors, targets, onscreen, deliveries)) in enumerate(
+        zip(units, relation_rows, strict=True)
+    ):
+        unit["source_segment_ids"] = [f"SRC{index // 2 + 1:04d}"]
+        unit["actor_keys"] = list(actors)
+        unit["target_keys"] = list(targets)
+        unit["onscreen_entity_keys"] = list(onscreen)
+        unit["participant_deliveries"] = deliveries
+        unit["narrative_layer"] = "story"
+        unit["event_priority"] = "causal"
+        unit["render_policy"] = "standalone"
+
+    candidate = ScreenplayGenerationIR.model_validate(payload)
+    screenplay = compile_screenplay_ir(
+        candidate,
+        episode={
+            "id": replay["episode_id"],
+            "episode_no": replay["episode_no"],
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    title_event = screenplay.narrative_plan.events[0]
+    title_action = screenplay.narrative_plan.atomic_actions[0]
+    assert replay["artifact_id"] == "art_bcebe2075a55"
+    assert replay["artifact_content_hash"] == (
+        "19c41c704b3524969a0169c66da1e7a829aa2eaba023245ba9eb983fe23fc2f8"
+    )
+    assert title_event.onscreen_entity_ids == []
+    assert title_action.actor_ids == []
+    assert title_action.target_ids == []
+    assert not any(
+        identity.identity_id.startswith("context:")
+        for identity in screenplay.narrative_plan.identity_contracts
+    )
+    assert title_action.action_agency.identity_bearing is False
+    assert title_action.action_agency.source_segment_ids == ["SRC0001"]
+
+    offscreen_action = screenplay.narrative_plan.atomic_actions[-1]
+    offscreen_event = screenplay.narrative_plan.events[-1]
+    assert offscreen_action.actor_ids
+    assert offscreen_event.onscreen_entity_ids == ["谷言"]
+    assert offscreen_action.participant_deliveries[0].audible is True
 
 
 def test_compiler_derives_removed_model_fields_without_downstream_drift() -> None:

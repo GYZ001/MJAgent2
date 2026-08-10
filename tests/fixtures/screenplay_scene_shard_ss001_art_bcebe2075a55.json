@@ -1,0 +1,77 @@
+{
+  "artifact_id": "art_bcebe2075a55",
+  "artifact_type": "screenplay_scene_shard",
+  "artifact_status": "validated",
+  "artifact_content_hash": "19c41c704b3524969a0169c66da1e7a829aa2eaba023245ba9eb983fe23fc2f8",
+  "contract_version": "screenplay-scene-shard.v6",
+  "episode_id": "ep_711b29204aa9",
+  "episode_no": 1,
+  "episode_title": "第一章书生孟浩",
+  "shard_id": "SS001",
+  "units": {
+    "title": {
+      "unit_key": "bp-sc001:SRC0001:001:unit",
+      "kind": "action",
+      "text": "淡墨晕染的长卷缓缓铺开，南赡大地的山河轮廓在画面上逐渐清晰，“第一章 书生孟浩”的墨字逐笔显现，落在卷首。",
+      "event_key": "bp-sc001:SRC0001:001:event",
+      "source_segment_ids": [
+        "SRC0001"
+      ],
+      "actor_keys": [],
+      "target_keys": [],
+      "speaker_key": null,
+      "onscreen_entity_keys": [],
+      "participant_deliveries": []
+    },
+    "environment": {
+      "unit_key": "bp-sc001:SRC0002:001:unit",
+      "kind": "action",
+      "text": "镜头扫过小国赵国的疆土，都城内与皇宫齐高的唐楼矗立在夕阳下，楼角的风铎轻轻晃动，映着举国上下对东土大唐、对长安的遥慕。",
+      "event_key": "bp-sc001:SRC0002:001:event",
+      "source_segment_ids": [
+        "SRC0002"
+      ],
+      "actor_keys": [],
+      "target_keys": [],
+      "speaker_key": null,
+      "onscreen_entity_keys": [],
+      "participant_deliveries": []
+    },
+    "character": {
+      "unit_key": "bp-sc002:SRC0004:001:unit",
+      "kind": "action",
+      "text": "镜头转到少年正面，他身形有些瘦弱，穿着洗得干净的蓝色文士长衫，约莫十六七岁的年纪，个子不高，皮肤带着常年日晒的浅黑，清亮的眼睛本透着几分聪颖，此刻却紧紧皱着眉，指尖攥着一个葫芦，眼神里满是茫然。",
+      "event_key": "bp-sc002:SRC0004:001:event",
+      "source_segment_ids": [
+        "SRC0004"
+      ],
+      "actor_keys": [
+        "person_b67de643afe6"
+      ],
+      "target_keys": [],
+      "speaker_key": null,
+      "onscreen_entity_keys": [
+        "person_b67de643afe6"
+      ],
+      "participant_deliveries": []
+    },
+    "dialogue": {
+      "unit_key": "bp-sc002:SRC0005:001:unit",
+      "kind": "dialogue",
+      "text": "“又落榜了……”",
+      "event_key": "bp-sc002:SRC0005:001:event",
+      "source_segment_ids": [
+        "SRC0005"
+      ],
+      "actor_keys": [
+        "person_b67de643afe6"
+      ],
+      "target_keys": [],
+      "speaker_key": "person_b67de643afe6",
+      "onscreen_entity_keys": [
+        "person_b67de643afe6"
+      ],
+      "participant_deliveries": []
+    }
+  }
+}

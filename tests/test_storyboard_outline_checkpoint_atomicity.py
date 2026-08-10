@@ -102,6 +102,8 @@ def _outline_artifact(
 
 
 def _checkpoint_for(authority, *, candidate_outline=None) -> SupervisorCheckpoint:
+    artifact = evidence_repository.get_artifact(authority.artifact_id)
+    assert artifact is not None
     last_repair = None
     if candidate_outline is not None:
         last_repair = {
@@ -118,7 +120,7 @@ def _checkpoint_for(authority, *, candidate_outline=None) -> SupervisorCheckpoin
             "storyboard_outline_artifact_id": authority.artifact_id,
             "storyboard_outline_revision": str(authority.revision),
             "storyboard_outline_fingerprint": authority.fingerprint,
-            "storyboard_outline_prompt_version": authority.prompt_version,
+            "storyboard_outline_prompt_version": artifact["prompt_version"],
         },
         last_repair=last_repair,
     )
@@ -154,6 +156,12 @@ def _episode_authority_row(conn) -> dict:
     )
 
 
+def _authority_prompt_version(authority) -> str:
+    artifact = evidence_repository.get_artifact(authority.artifact_id)
+    assert artifact is not None
+    return str(artifact["prompt_version"] or "")
+
+
 def test_outline_revisions_advance_episode_and_checkpoint_as_one_authority(
     outline_checkpoint_db,
 ) -> None:
@@ -176,7 +184,7 @@ def test_outline_revisions_advance_episode_and_checkpoint_as_one_authority(
         "storyboard_outline_artifact_id": r3.artifact_id,
         "storyboard_outline_revision": str(r3.revision),
         "storyboard_outline_fingerprint": r3.fingerprint,
-        "storyboard_outline_prompt_version": r3.prompt_version,
+        "storyboard_outline_prompt_version": _authority_prompt_version(r3),
     }
     assert r1.artifact_id != r2.artifact_id != r3.artifact_id
 
@@ -289,7 +297,7 @@ def test_restart_reads_episode_authority_and_discards_stale_outline_candidate(
     assert recovered_checkpoint.repair_candidate_shots == []
     assert recovered_checkpoint.input_versions[
         "storyboard_outline_prompt_version"
-    ] == r3.prompt_version
+    ] == _authority_prompt_version(r3)
     assert db.get_conn().execute(
         "SELECT COUNT(*) FROM provider_calls"
     ).fetchone()[0] == 0

@@ -15,12 +15,15 @@ from app.identity_contracts import (
 from app.schemas import (
     Bible,
     Character,
+    CharacterContinuityState,
     Dialogue,
     EpisodeScreenplay,
     IdentityContractEvidence,
     NarrativeContinuityPlan,
     NarrativeIdentityContract,
     NarrativeProposition,
+    PropContinuityState,
+    RequiredOnScreenText,
     ScriptScene,
     Shot,
     Storyboard,
@@ -229,15 +232,60 @@ def test_keyframe_contract_uses_text_verification_for_contextual_identity() -> N
     )
 
 
-def test_visual_relation_reports_prose_violation_without_mutating_candidate() -> None:
+@pytest.mark.parametrize(
+    "action_desc, required_text, prop",
+    [
+        pytest.param(
+            "卷首墨字逐笔显现：第一章 阿烬。",
+            RequiredOnScreenText(
+                surface="卷首",
+                exact_text="第一章 阿烬",
+                strategy="deterministic_insert",
+            ),
+            None,
+            id="title_with_registered_name",
+        ),
+        pytest.param(
+            "木牌上的道具文字写着“阿烬”。",
+            RequiredOnScreenText(
+                surface="木牌",
+                exact_text="阿烬",
+                strategy="embedded_prop",
+            ),
+            PropContinuityState(
+                canonical_name="刻字木牌",
+                visibility="required",
+                text_state="阿烬",
+                required=True,
+            ),
+            id="prop_text_with_registered_name",
+        ),
+        pytest.param(
+            "风掠过名为阿烬的山谷，云层向远处散开。",
+            None,
+            None,
+            id="environment_surface_with_registered_name",
+        ),
+    ],
+)
+def test_visual_relation_does_not_infer_identity_from_text_surfaces(
+    action_desc,
+    required_text,
+    prop,
+) -> None:
     screenplay = _screenplay()
     shot = _shot(
         characters=["云吞七号"],
         characters_visible=["云吞七号"],
         visible_entity_ids=["transient-node"],
-        action_desc="阿烬站在云吞七号身旁回头。",
-        first_frame_desc="阿烬与云吞七号并肩站立。",
-        last_frame_desc="阿烬仍留在画面里。",
+        action_desc=action_desc,
+        first_frame_desc="卷轴、木牌或山谷按当前镜头结构建立。",
+        last_frame_desc="画面保持当前非人物文字或环境状态。",
+        required_text=required_text,
+        continuity_state_out={
+            "props": {"prop-1": prop}
+            if prop is not None else {},
+        },
     )
     before = (
         shot.action_desc,
@@ -251,7 +299,7 @@ def test_visual_relation_reports_prose_violation_without_mutating_candidate() ->
         screenplay,
     )
 
-    assert relation["unexpected_identity_ids"] == ["newcomer-7"]
+    assert relation["unexpected_identity_ids"] == []
     assert (
         shot.action_desc,
         shot.first_frame_desc,
@@ -277,7 +325,7 @@ def test_visual_relation_uses_unique_typed_appearance_without_mutation() -> None
         screenplay,
     )
 
-    assert relation["unexpected_identity_ids"] == ["newcomer-7"]
+    assert relation["unexpected_identity_ids"] == []
     assert shot.action_desc == before
 
 
@@ -330,7 +378,7 @@ def test_visual_relation_allows_previous_tail_identity_only_at_boundary() -> Non
         _bible(),
         screenplay,
     )
-    assert persisted["unexpected_identity_ids"] == ["newcomer-7"]
+    assert persisted["unexpected_identity_ids"] == []
 
 
 def test_visual_relation_does_not_treat_scene_owner_as_visible_cast() -> None:
@@ -361,7 +409,35 @@ def test_visual_relation_does_not_treat_scene_owner_as_visible_cast() -> None:
         _bible(),
         screenplay,
     )
-    assert visible_owner["unexpected_identity_ids"] == ["newcomer-7"]
+    assert visible_owner["unexpected_identity_ids"] == []
+
+
+def test_visual_relation_uses_structured_character_state_as_visibility_evidence() -> None:
+    screenplay = _screenplay()
+    shot = _shot(
+        characters=["云吞七号"],
+        characters_visible=["云吞七号"],
+        visible_entity_ids=["transient-node"],
+        action_desc="当前人物关系由结构化 continuity state 声明。",
+        first_frame_desc="镜头从当前状态开始。",
+        last_frame_desc="镜头停在当前状态。",
+        continuity_state_out={
+            "characters": {
+                "newcomer-7": CharacterContinuityState(
+                    visibility="required",
+                ),
+            },
+        },
+    )
+
+    relation = storyboard_visual_identity_relation(
+        shot,
+        ["transient-node"],
+        _bible(),
+        screenplay,
+    )
+
+    assert relation["unexpected_identity_ids"] == ["newcomer-7"]
 
 
 def test_authority_text_relation_includes_bible_only_identity() -> None:

@@ -40,6 +40,7 @@ from app.schemas import (
     extract_json,
 )
 from app.storyboard_authority import (
+    StoryboardOutlineAuthority,
     StoryboardOutlineAuthorityError,
     persist_storyboard_outline_projection,
     resolve_storyboard_outline_authority,
@@ -75,6 +76,10 @@ SupervisorPhase = Literal[
 ]
 
 CHECKPOINT_TYPE = "storyboard_supervisor_checkpoint"
+OUTLINE_ARTIFACT_INPUT_VERSION = "storyboard_outline_artifact_id"
+OUTLINE_REVISION_INPUT_VERSION = "storyboard_outline_revision"
+OUTLINE_FINGERPRINT_INPUT_VERSION = "storyboard_outline_fingerprint"
+OUTLINE_PROMPT_INPUT_VERSION = "storyboard_outline_prompt_version"
 STORYBOARD_REPAIR_SAFETY_LIMIT = 24
 STORYBOARD_REPAIR_ACTIVATION_LIMIT = 6
 STORYBOARD_REPAIR_MAX_FINGERPRINT_ATTEMPTS = 4
@@ -544,43 +549,326 @@ def _current_storyboard_projection_has_material(conn, episode_id: str, ep) -> bo
     )
 
 
-def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
-    try:
-        from app.production.revision import get_active_production_revision
+def _revision_checkpoint_row(conn, episode_id: str):
+    row = conn.execute(
+        """SELECT id,status,checkpoint_json
+             FROM production_revisions
+            WHERE episode_id=? AND kind='storyboard' AND status='active'
+            ORDER BY updated_at DESC,id DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    if row is not None:
+        return row
+    pointer = conn.execute(
+        "SELECT storyboard_production_revision_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    revision_id = pointer["storyboard_production_revision_id"] if pointer else None
+    if not revision_id:
+        return None
+    return conn.execute(
+        """SELECT id,status,checkpoint_json
+             FROM production_revisions
+            WHERE id=? AND kind='storyboard'
+              AND status IN ('active','published')""",
+        (revision_id,),
+    ).fetchone()
 
-        revision = get_active_production_revision(episode_id, "storyboard")
-        raw_checkpoint = dict(revision.checkpoint_json or {}) if revision else {}
-        raw_supervisor = raw_checkpoint.get("supervisor_checkpoint")
-        if isinstance(raw_supervisor, dict) and raw_supervisor:
-            return _migrate_checkpoint(SupervisorCheckpoint.model_validate(raw_supervisor))
+
+def _checkpoint_from_payload(raw: Any) -> SupervisorCheckpoint | None:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    try:
+        return _migrate_checkpoint(SupervisorCheckpoint.model_validate(raw))
     except (TypeError, ValueError):
-        pass
+        return None
+
+
+def _bind_checkpoint_to_outline_authority(
+    cp: SupervisorCheckpoint,
+    authority: StoryboardOutlineAuthority,
+) -> SupervisorCheckpoint:
+    old_artifact_id = str(
+        cp.outline_artifact_id
+        or cp.input_versions.get(OUTLINE_ARTIFACT_INPUT_VERSION)
+        or ""
+    )
+    authority_changed = bool(
+        old_artifact_id
+        and old_artifact_id != authority.artifact_id
+    )
+    if authority_changed:
+        cp.legacy_repair_audit = {
+            **cp.legacy_repair_audit,
+            "discarded_stale_outline_authority": {
+                "artifact_id": old_artifact_id,
+                "replacement_artifact_id": authority.artifact_id,
+                "last_repair": cp.last_repair,
+            },
+        }
+        cp.last_repair = None
+        cp.repair_candidate_shots = []
+        cp.scene_pack_candidates = {}
+        if cp.phase == "REPAIRING":
+            cp.phase = "VALIDATING_OUTLINE"
+        cp.outcome = None
+    cp.outline_artifact_id = authority.artifact_id
+    cp.expected_total = len(authority.outline.shots)
+    cp.input_versions = {
+        **cp.input_versions,
+        OUTLINE_ARTIFACT_INPUT_VERSION: authority.artifact_id,
+        OUTLINE_REVISION_INPUT_VERSION: str(authority.revision),
+        OUTLINE_FINGERPRINT_INPUT_VERSION: authority.fingerprint,
+        OUTLINE_PROMPT_INPUT_VERSION: authority.prompt_version,
+    }
+    return cp
+
+
+def _bind_checkpoint_to_current_outline(
+    conn,
+    cp: SupervisorCheckpoint,
+) -> SupervisorCheckpoint:
+    row = conn.execute(
+        """SELECT storyboard_outline_json,storyboard_outline_revision,
+                  storyboard_outline_fingerprint,storyboard_outline_artifact_id,
+                  target_duration_authority
+             FROM episodes WHERE id=?""",
+        (cp.episode_id,),
+    ).fetchone()
+    if (
+        row is None
+        or not row["storyboard_outline_json"]
+        or int(row["storyboard_outline_revision"] or 0) <= 0
+        or not row["storyboard_outline_fingerprint"]
+        or not row["storyboard_outline_artifact_id"]
+    ):
+        return cp
+    try:
+        authority = resolve_storyboard_outline_authority(
+            cp.episode_id,
+            conn=conn,
+        )
+    except StoryboardOutlineAuthorityError:
+        return cp
+    return _bind_checkpoint_to_outline_authority(cp, authority)
+
+
+def _outline_authority_cas(
+    cp: SupervisorCheckpoint,
+) -> dict[str, Any]:
+    artifact_id = (
+        cp.outline_artifact_id
+        or cp.input_versions.get(OUTLINE_ARTIFACT_INPUT_VERSION)
+    )
+    raw_revision = cp.input_versions.get(OUTLINE_REVISION_INPUT_VERSION)
+    revision = None
+    if raw_revision not in {None, ""}:
+        try:
+            revision = int(raw_revision)
+        except (TypeError, ValueError):
+            revision = None
+    fingerprint = cp.input_versions.get(
+        OUTLINE_FINGERPRINT_INPUT_VERSION
+    )
+    return {
+        "expected_outline_artifact_id": artifact_id,
+        "expected_outline_revision": revision,
+        "expected_outline_fingerprint": fingerprint,
+    }
+
+
+def _restore_checkpoint(
+    target: SupervisorCheckpoint,
+    snapshot: SupervisorCheckpoint,
+) -> None:
+    for field_name in type(target).model_fields:
+        setattr(
+            target,
+            field_name,
+            getattr(snapshot, field_name),
+        )
+
+
+def _checkpoint_payload_for_revision(
+    row,
+    cp: SupervisorCheckpoint,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["checkpoint_json"] or "{}") if row else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["supervisor_checkpoint"] = cp.model_dump(mode="json")
+    payload["activation_no"] = cp.activation_no
+    payload["activation_attempt_count"] = cp.activation_attempt_count
+    payload["lifetime_repair_count"] = cp.repair_epoch
+    payload["phase"] = cp.phase
+    payload["yield_reason"] = cp.outcome
+    return payload
+
+
+def _persist_checkpoint_payload(
+    conn,
+    cp: SupervisorCheckpoint,
+    *,
+    run_id: str | None = None,
+) -> str:
+    payload = cp.model_dump(mode="json")
+    payload_hash = evidence_repository.content_hash(payload)
+    revision = _revision_checkpoint_row(conn, cp.episode_id)
+    if revision is not None:
+        revision_payload = _checkpoint_payload_for_revision(revision, cp)
+        cursor = conn.execute(
+            """UPDATE production_revisions
+                  SET checkpoint_json=?,updated_at=?
+                WHERE id=? AND status IN ('active','published')
+                  AND checkpoint_json=?""",
+            (
+                json.dumps(revision_payload, ensure_ascii=False),
+                time.time(),
+                revision["id"],
+                revision["checkpoint_json"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "storyboard supervisor checkpoint revision CAS 冲突"
+            )
+
+    latest = conn.execute(
+        """SELECT id,content_hash FROM artifacts
+           WHERE type=? AND scope_type='episode' AND scope_id=?
+             AND status IN ('candidate','validated','approved')
+           ORDER BY created_at DESC,version DESC LIMIT 1""",
+        (CHECKPOINT_TYPE, cp.episode_id),
+    ).fetchone()
+    if latest and latest["content_hash"] == payload_hash:
+        return str(latest["id"])
+    artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type=CHECKPOINT_TYPE,
+            scope_type="episode",
+            scope_id=cp.episode_id,
+            status="validated",
+            trust_level="T2",
+            content=payload,
+            contract_version=get_contract("storyboard").version,
+        ),
+        conn=conn,
+        commit=False,
+    )
+    evidence_repository.create_evaluation(
+        artifact["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="storyboard_supervisor",
+            evaluator_version="1.0.0",
+            status="passed",
+            hard_gate_passed=True,
+            score=100,
+            evidence={
+                "phase": cp.phase,
+                "repair_epoch": cp.repair_epoch,
+                "run_id": run_id,
+            },
+        ),
+        conn=conn,
+        commit=False,
+    )
+    return str(artifact["id"])
+
+
+def _persist_outline_authority_checkpoint(
+    conn,
+    authority: StoryboardOutlineAuthority,
+) -> None:
+    revision = _revision_checkpoint_row(conn, authority.episode_id)
+    checkpoint = None
+    if revision is not None:
+        try:
+            revision_payload = json.loads(
+                revision["checkpoint_json"] or "{}"
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            revision_payload = {}
+        checkpoint = _checkpoint_from_payload(
+            revision_payload.get("supervisor_checkpoint")
+            if isinstance(revision_payload, dict)
+            else None
+        )
+    if checkpoint is None:
+        row = conn.execute(
+            """SELECT content_json FROM artifacts
+               WHERE type=? AND scope_type='episode' AND scope_id=?
+                 AND status IN ('candidate','validated','approved')
+               ORDER BY created_at DESC,version DESC LIMIT 1""",
+            (CHECKPOINT_TYPE, authority.episode_id),
+        ).fetchone()
+        if row is not None:
+            try:
+                checkpoint = _checkpoint_from_payload(
+                    json.loads(row["content_json"] or "{}")
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                checkpoint = None
+    if checkpoint is None:
+        return
+    _bind_checkpoint_to_outline_authority(checkpoint, authority)
+    _persist_checkpoint_payload(conn, checkpoint)
+
+
+def load_latest_checkpoint(episode_id: str) -> SupervisorCheckpoint | None:
     conn = get_conn()
+    revision = _revision_checkpoint_row(conn, episode_id)
+    if revision is not None:
+        try:
+            raw_checkpoint = json.loads(revision["checkpoint_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_checkpoint = {}
+        checkpoint = _checkpoint_from_payload(
+            raw_checkpoint.get("supervisor_checkpoint")
+            if isinstance(raw_checkpoint, dict)
+            else None
+        )
+        if checkpoint is not None:
+            return _bind_checkpoint_to_current_outline(conn, checkpoint)
     row = conn.execute(
         """SELECT id, content_json FROM artifacts
            WHERE type=? AND scope_type='episode' AND scope_id=?
              AND status IN ('candidate','validated','approved')
-           ORDER BY created_at DESC LIMIT 1""",
+           ORDER BY created_at DESC,version DESC LIMIT 1""",
         (CHECKPOINT_TYPE, episode_id),
     ).fetchone()
     if not row:
         return None
     try:
         raw = json.loads(row["content_json"] or "{}")
-        return _migrate_checkpoint(SupervisorCheckpoint.model_validate(raw))
+        checkpoint = _checkpoint_from_payload(raw)
+        return (
+            _bind_checkpoint_to_current_outline(conn, checkpoint)
+            if checkpoint is not None
+            else None
+        )
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
-def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> str:
+def save_checkpoint(
+    cp: SupervisorCheckpoint,
+    *,
+    run_id: str | None = None,
+    conn=None,
+    commit: bool = True,
+) -> str:
     cp = _migrate_checkpoint(cp)
+    db = conn or get_conn()
     if run_id:
-        fence_conn = get_conn()
-        run_row = fence_conn.execute(
+        run_row = db.execute(
             "SELECT status FROM workflow_runs WHERE id=?",
             (run_id,),
         ).fetchone()
-        owner = fence_conn.execute(
+        owner = db.execute(
             "SELECT active_storyboard_run_id FROM episodes WHERE id=?",
             (cp.episode_id,),
         ).fetchone()
@@ -592,7 +880,7 @@ def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> s
                 or owner["active_storyboard_run_id"] != run_id
             )
         ):
-            current = fence_conn.execute(
+            current = db.execute(
                 """SELECT id FROM artifacts
                      WHERE type=? AND scope_type='episode' AND scope_id=?
                        AND status IN ('candidate','validated','approved')
@@ -600,69 +888,23 @@ def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> s
                 (CHECKPOINT_TYPE, cp.episode_id),
             ).fetchone()
             return str(current["id"]) if current else ""
-    payload = cp.model_dump(mode="json")
-    payload_hash = evidence_repository.content_hash(payload)
-    # The production revision owns the current mutable recovery point.  Audit
-    # artifacts are appended only when material state changed.
+    started_transaction = not db.in_transaction
+    if started_transaction:
+        db.execute("BEGIN IMMEDIATE")
     try:
-        from app.production.revision import (
-            get_active_production_revision,
-            get_production_revision,
-            save_checkpoint as save_revision_checkpoint,
+        _bind_checkpoint_to_current_outline(db, cp)
+        artifact_id = _persist_checkpoint_payload(
+            db,
+            cp,
+            run_id=run_id,
         )
-
-        revision = get_active_production_revision(cp.episode_id, "storyboard")
-        if revision is None:
-            pointer = get_conn().execute(
-                "SELECT storyboard_production_revision_id FROM episodes WHERE id=?",
-                (cp.episode_id,),
-            ).fetchone()
-            revision_id = pointer["storyboard_production_revision_id"] if pointer else None
-            revision = get_production_revision(revision_id) if revision_id else None
-        if revision:
-            revision_checkpoint = dict(revision.checkpoint_json or {})
-            revision_checkpoint["supervisor_checkpoint"] = payload
-            revision_checkpoint["activation_no"] = cp.activation_no
-            revision_checkpoint["activation_attempt_count"] = cp.activation_attempt_count
-            revision_checkpoint["lifetime_repair_count"] = cp.repair_epoch
-            revision_checkpoint["phase"] = cp.phase
-            revision_checkpoint["yield_reason"] = cp.outcome
-            save_revision_checkpoint(revision.id, revision_checkpoint)
-    except Exception:  # noqa: BLE001 - legacy databases remain readable
-        pass
-
-    conn = get_conn()
-    latest = conn.execute(
-        """SELECT id,content_hash FROM artifacts
-           WHERE type=? AND scope_type='episode' AND scope_id=?
-             AND status IN ('candidate','validated','approved')
-           ORDER BY created_at DESC LIMIT 1""",
-        (CHECKPOINT_TYPE, cp.episode_id),
-    ).fetchone()
-    if latest and latest["content_hash"] == payload_hash:
-        return str(latest["id"])
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type=CHECKPOINT_TYPE,
-        scope_type="episode",
-        scope_id=cp.episode_id,
-        status="validated",
-        trust_level="T2",
-        content=payload,
-        contract_version=get_contract("storyboard").version,
-    ))
-    evidence_repository.create_evaluation(
-        artifact["id"],
-        Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="storyboard_supervisor",
-            evaluator_version="1.0.0",
-            status="passed",
-            hard_gate_passed=True,
-            score=100,
-            evidence={"phase": cp.phase, "repair_epoch": cp.repair_epoch, "run_id": run_id},
-        ),
-    )
-    if run_id:
+        if commit:
+            db.commit()
+    except BaseException:
+        if started_transaction or commit:
+            db.rollback()
+        raise
+    if run_id and commit:
         evidence_repository.append_event(
             run_id,
             "STORYBOARD_SUPERVISOR_CHECKPOINT",
@@ -670,7 +912,7 @@ def save_checkpoint(cp: SupervisorCheckpoint, *, run_id: str | None = None) -> s
             f"检查点：{_phase_label(cp.phase)}（已通过 {cp.validated_prefix_end} 镜）",
             payload=cp.model_dump(mode="json"),
         )
-    return artifact["id"]
+    return artifact_id
 
 
 def _connection_uses_memory_database(conn: Any) -> bool:
@@ -1670,6 +1912,7 @@ def _commit_repair_candidate(
     from app.production.revision import get_production_revision
 
     repair = cp.last_repair or {}
+    checkpoint_before = cp.model_copy(deep=True)
     candidate_outline = _repair_outline_for_checkpoint(cp, None)
     expected_board_hash = str(repair.get("base_hash") or "")
     current_hash = _storyboard_hash(current_board)
@@ -1840,12 +2083,18 @@ def _commit_repair_candidate(
                         conn=conn, commit=False,
                     )
         if candidate_outline is not None:
-            persist_storyboard_outline_projection(
+            outline_authority = persist_storyboard_outline_projection(
                 episode_id,
                 candidate_outline,
                 conn=conn,
                 commit=False,
+                **_outline_authority_cas(cp),
             )
+            if outline_authority is not None:
+                _bind_checkpoint_to_outline_authority(
+                    cp,
+                    outline_authority,
+                )
         projected_rows = conn.execute(
             "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,),
         ).fetchall()
@@ -1863,6 +2112,7 @@ def _commit_repair_candidate(
         conn.commit()
     except Exception:
         conn.rollback()
+        _restore_checkpoint(cp, checkpoint_before)
         raise
 
     patch_artifact = evidence_repository.create_artifact(EvidenceArtifact(

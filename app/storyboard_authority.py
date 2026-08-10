@@ -13,6 +13,7 @@ from app.schemas import Storyboard, StoryboardOutline
 
 OUTLINE_AUTHORITY_VERSION = "storyboard-outline-authority.v1"
 PLANNING_DURATION_SOURCE = "episodes.target_duration_s.before_storyboard_outline"
+_EXPECTED_OUTLINE_ARTIFACT_UNSET = object()
 
 
 class StoryboardOutlineAuthorityError(ValueError):
@@ -34,6 +35,7 @@ class StoryboardOutlineAuthority:
     revision: int
     fingerprint: str
     artifact_id: str
+    prompt_version: str
 
 
 def _outline_values(
@@ -166,6 +168,7 @@ def _resolve_row(
         revision=revision,
         fingerprint=fingerprint,
         artifact_id=artifact_id,
+        prompt_version=str(artifact.get("prompt_version") or ""),
     )
 
 
@@ -253,6 +256,12 @@ def persist_storyboard_outline_authority(
     commit: bool = True,
     allow_unversioned_migration: bool = False,
     migration_reason: str | None = None,
+    expected_outline_artifact_id: str | None | object = (
+        _EXPECTED_OUTLINE_ARTIFACT_UNSET
+    ),
+    expected_outline_revision: int | None = None,
+    expected_outline_fingerprint: str | None = None,
+    sync_supervisor_checkpoint: bool = True,
 ) -> StoryboardOutlineAuthority:
     """Atomically adopt one gate-passed outline and its duration authority."""
     db = conn or get_conn()
@@ -266,6 +275,37 @@ def persist_storyboard_outline_authority(
         ).fetchone()
         if row is None:
             raise StoryboardOutlineAuthorityError(f"剧集不存在：{episode_id}")
+        observed_artifact_id = str(
+            row["storyboard_outline_artifact_id"] or ""
+        )
+        observed_revision = int(row["storyboard_outline_revision"] or 0)
+        observed_fingerprint = str(
+            row["storyboard_outline_fingerprint"] or ""
+        )
+        if (
+            expected_outline_artifact_id
+            is not _EXPECTED_OUTLINE_ARTIFACT_UNSET
+            and observed_artifact_id
+            != str(expected_outline_artifact_id or "")
+        ):
+            raise StoryboardOutlineAuthorityError(
+                "storyboard outline authority CAS 并发冲突：Artifact 已变化"
+            )
+        if (
+            expected_outline_revision is not None
+            and observed_revision != int(expected_outline_revision)
+        ):
+            raise StoryboardOutlineAuthorityError(
+                "storyboard outline authority CAS 并发冲突：revision 已变化"
+            )
+        if (
+            expected_outline_fingerprint is not None
+            and observed_fingerprint
+            != str(expected_outline_fingerprint or "")
+        ):
+            raise StoryboardOutlineAuthorityError(
+                "storyboard outline authority CAS 并发冲突：fingerprint 已变化"
+            )
         existing_json = str(row["storyboard_outline_json"] or "")
         if existing_json and not _metadata_complete(row):
             if not allow_unversioned_migration:
@@ -289,6 +329,15 @@ def persist_storyboard_outline_authority(
                         raise StoryboardOutlineAuthorityError(
                             "不得把 storyboard outline revision 回退到旧 Artifact"
                         )
+                if sync_supervisor_checkpoint:
+                    from app.storyboard_supervisor import (
+                        _persist_outline_authority_checkpoint,
+                    )
+
+                    _persist_outline_authority_checkpoint(
+                        db,
+                        current,
+                    )
                 if commit:
                     db.commit()
                 return current
@@ -325,7 +374,10 @@ def persist_storyboard_outline_authority(
                       storyboard_outline_revision=?,
                       storyboard_outline_fingerprint=?,
                       storyboard_outline_artifact_id=?
-                WHERE id=?""",
+                WHERE id=?
+                  AND COALESCE(storyboard_outline_artifact_id,'')=?
+                  AND storyboard_outline_revision=?
+                  AND COALESCE(storyboard_outline_fingerprint,'')=?""",
             (
                 planning_duration_s,
                 planning_source,
@@ -336,6 +388,9 @@ def persist_storyboard_outline_authority(
                 fingerprint,
                 str(artifact["id"]),
                 episode_id,
+                observed_artifact_id,
+                observed_revision,
+                observed_fingerprint,
             ),
         )
         if cursor.rowcount != 1:
@@ -353,6 +408,15 @@ def persist_storyboard_outline_authority(
             raise StoryboardOutlineAuthorityError(
                 "storyboard outline authority 持久化后内容对账失败"
             )
+        if sync_supervisor_checkpoint:
+            from app.storyboard_supervisor import (
+                _persist_outline_authority_checkpoint,
+            )
+
+            _persist_outline_authority_checkpoint(
+                db,
+                adopted,
+            )
         if commit:
             db.commit()
         return adopted
@@ -369,6 +433,12 @@ def persist_storyboard_outline_projection(
     artifact_id: str | None = None,
     conn=None,
     commit: bool = True,
+    expected_outline_artifact_id: str | None | object = (
+        _EXPECTED_OUTLINE_ARTIFACT_UNSET
+    ),
+    expected_outline_revision: int | None = None,
+    expected_outline_fingerprint: str | None = None,
+    sync_supervisor_checkpoint: bool = True,
 ) -> StoryboardOutlineAuthority | None:
     """Persist modern authority strictly while retaining plan-null legacy drafts."""
     db = conn or get_conn()
@@ -425,6 +495,10 @@ def persist_storyboard_outline_projection(
                 if has_complete_durations and not authority_required
                 else None
             ),
+            expected_outline_artifact_id=expected_outline_artifact_id,
+            expected_outline_revision=expected_outline_revision,
+            expected_outline_fingerprint=expected_outline_fingerprint,
+            sync_supervisor_checkpoint=sync_supervisor_checkpoint,
         )
 
     # A plan-null legacy draft without durations is not an authoritative

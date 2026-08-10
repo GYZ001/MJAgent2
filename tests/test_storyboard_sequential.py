@@ -16,7 +16,8 @@ from app.compiler import CompileError
 from app.harness.types import Issue, IssueSeverity
 from app.schemas import (Bible, Character, Dialogue, EpisodeScreenplay,
                          InformationItem, Scene, Shot, StoryboardOutline,
-                         StoryboardOutlineShot, NarrativeContinuityPlan, World)
+                         StoryboardOutlineShot, NarrativeContinuityPlan,
+                         RequiredOnScreenText, World)
 from app.stages import (StoryboardShotDraft, _storyboard_progress_block,
                         _project_shot_scene_from_outline,
                         _relevant_text_windows, _render_completed_shots_context,
@@ -177,7 +178,7 @@ def test_shot_visual_identity_must_belong_to_current_narrative_task() -> None:
     assert "lip_sync=false" in issues[0].repair_hint
 
 
-def test_shot_visual_identity_gate_reads_visual_prose_not_only_cast_lists() -> None:
+def test_shot_visual_identity_gate_does_not_treat_required_text_as_cast() -> None:
     bible = _bible()
     bible.characters.append(Character(
         name="未来出场者",
@@ -189,7 +190,12 @@ def test_shot_visual_identity_gate_reads_visual_prose_not_only_cast_lists() -> N
     shot = _shot(1)
     shot.characters = ["萧炎"]
     shot.characters_visible = ["萧炎"]
-    shot.action_desc = "未来出场者站在萧炎身旁，听完他的话后闭口作出反应。"
+    shot.action_desc = "片头卷轴上显现“未来出场者”，随后墨迹停稳。"
+    shot.required_text = RequiredOnScreenText(
+        surface="片头卷轴",
+        exact_text="未来出场者",
+        strategy="deterministic_insert",
+    )
     task = StoryboardOutlineShot(
         shot_no=1,
         visible_entity_ids=["萧炎"],
@@ -203,10 +209,7 @@ def test_shot_visual_identity_gate_reads_visual_prose_not_only_cast_lists() -> N
         episode_id="e2",
     )
 
-    assert [issue.code for issue in issues] == [
-        "SHOT_VISIBLE_IDENTITY_NOT_GROUNDED"
-    ]
-    assert issues[0].evidence["unexpected_identity_ids"] == ["未来出场者"]
+    assert issues == []
 
 
 def _validate(draft: StoryboardShotDraft, *, allow_finish: bool, must_finish: bool,

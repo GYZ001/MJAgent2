@@ -329,6 +329,36 @@ def test_outline_projection_drops_redundant_compiler_context_actor() -> None:
     )
 
 
+def test_outline_projection_preserves_non_identity_action_participants() -> None:
+    from app.schemas import ActionAgency
+
+    screenplay = _screenplay()
+    action = _attach_generic_action(screenplay)
+    action.actor_ids = []
+    action.target_ids = []
+    action.action_agency = ActionAgency(
+        kind="on_screen_text",
+        identity_bearing=False,
+        source_segment_ids=["SRC0001"],
+    )
+    screenplay.narrative_plan.events[0].onscreen_entity_ids = []
+    outline = compile_narrative_storyboard_outline(screenplay)
+
+    assert not any(
+        "[ACTION_PARTICIPANT_MISSING]" in error
+        for error in validate_screenplay_narrative(screenplay)
+    )
+    title_shot = next(
+        shot for shot in outline.shots
+        if shot.primary_action_id == action.action_id
+    )
+    assert title_shot.visible_entity_ids == []
+    assert title_shot.characters_visible == []
+    assert title_shot.offscreen_action_actor_ids == []
+    assert title_shot.offscreen_action_target_ids == []
+    assert title_shot.action_participant_deliveries == []
+
+
 def test_outline_projection_uses_event_onscreen_relation_not_scene_or_perceivers() -> None:
     screenplay = _screenplay()
     action = _attach_generic_action(screenplay)

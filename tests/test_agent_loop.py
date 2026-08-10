@@ -228,6 +228,56 @@ def test_agent_loop_fails_closed_when_authority_blockers_are_exhausted() -> None
         asyncio.run(loop.run(producer, evaluate))
 
 
+def test_agent_loop_does_not_dispatch_repair_for_authority_conflict() -> None:
+    calls = 0
+
+    async def producer(_iteration, *_args):
+        nonlocal calls
+        calls += 1
+        return '{"value": 1}'
+
+    def evaluate(raw: str):
+        value = Candidate.model_validate(json.loads(raw))
+        return value, [
+            Issue(
+                code="AUTHORITY_CONFLICT",
+                severity=IssueSeverity.BLOCKER,
+                category="structural",
+                subject="storyboard:e1:shot1",
+                message="保留文字载体与移除其可见身份不能同时满足",
+                evidence={
+                    "path": "shots[0]",
+                    "rule_id": "repair_authority_conflict",
+                    "authority_conflicts": [{
+                        "preserve_path": "required_text",
+                        "remove_identity_id": "person-1",
+                    }],
+                },
+                repairable=False,
+            )
+        ]
+
+    loop = AgentLoop(
+        stage_key="storyboard_shot_1",
+        contract_key="storyboard",
+        goal="stop before an impossible repair",
+        scope_type="storyboard_checkpoint",
+        scope_id="e1:1",
+        artifact_type="storyboard_shot",
+        policy=AgentLoopPolicy(
+            max_iterations=3,
+            stall_rounds=3,
+            no_gain_rounds=3,
+            repair_all_blockers=True,
+        ),
+    )
+
+    with pytest.raises(AgentLoopFailure, match="authority_conflict"):
+        asyncio.run(loop.run(producer, evaluate))
+
+    assert calls == 1
+
+
 @pytest.mark.asyncio
 async def test_stage_adapter_preserves_agent_loop_exhaustion_metadata(
     monkeypatch,
