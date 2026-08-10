@@ -298,7 +298,7 @@ def test_waiting_provider_restart_polls_existing_task_with_new_step(tmp_path) ->
     assert state["interrupted_run"] == "PAUSED_EXTERNAL"
     assert state["interrupted_step"] == "FAILED"
     assert state["resumed"] == 1
-    assert state["recovered_job_status"] == "queued"
+    assert state["recovered_job_status"] == "waiting_provider"
     assert state["first_claim"] is True
     assert state["second_claim"] is True
     assert state["create_calls"] == 0
