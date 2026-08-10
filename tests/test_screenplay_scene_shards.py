@@ -136,6 +136,7 @@ def _shard(plan, blueprint: NarrativeBlueprint) -> ScreenplaySceneShardIR:
         boundary_hash=plan.boundary_hash,
         blueprint_hash=plan.blueprint_hash,
         identity_registry_hash=plan.identity_registry_hash,
+        source_ownership_hash=plan.source_ownership_hash,
     )
 
 
@@ -519,8 +520,11 @@ def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
         scene_input_contracts=scene_input_contracts,
         identity_keys={"narrator"},
     )
-    assert any("来源越界" in error for error in errors)
-    assert any("规划归属：bp-sc002" in error for error in errors)
+    assert any("来源唯一归属冲突" in error for error in errors)
+    assert any(
+        "owner=bp-sc002" in error and "consumer=bp-sc001" in error
+        for error in errors
+    )
     assert any("未冻结参与者" in error for error in errors)
 
 
@@ -649,19 +653,13 @@ def test_scene_shard_does_not_require_front_matter_in_units() -> None:
         identity_registry_hash="identity-hash",
     )[0]
     shard = _shard(plan, blueprint)
-    scene_plan = blueprint.scene_plans[0].model_copy(deep=True)
-    scene_plan.source_segment_ids = [
-        "SRC_TITLE",
-        *scene_plan.source_segment_ids,
-    ]
+    front_matter_id = plan.source_segment_ids[0]
+    shard.scenes[0].units = []
+    shard.consumed_source_ids = []
     scene_plans = {
-        **{item.key: item for item in blueprint.scene_plans},
-        scene_plan.key: scene_plan,
+        item.key: item for item in blueprint.scene_plans
     }
     scene_input_contracts = _contracts([plan], blueprint)[plan.shard_id]
-    scene_input_contracts[0].source_segment_ids = list(
-        scene_plan.source_segment_ids
-    )
 
     without_exclusion = validate_screenplay_scene_shard(
         shard,
@@ -676,10 +674,10 @@ def test_scene_shard_does_not_require_front_matter_in_units() -> None:
         scene_plans=scene_plans,
         scene_input_contracts=scene_input_contracts,
         identity_keys={"narrator"},
-        front_matter_ids={"SRC_TITLE"},
+        front_matter_ids={front_matter_id},
     )
 
-    assert any("SRC_TITLE" in error for error in without_exclusion)
+    assert any(front_matter_id in error for error in without_exclusion)
     assert with_exclusion == []
 
 
@@ -781,7 +779,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v3"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v4"
 
 
 def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> None:
@@ -928,7 +926,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert "dialogue.text 与 dialogue.source_text 必须填写同一段逐字原文对白" in first_prompt
     assert "禁止生成 unresolved_* 占位 ID" in first_prompt
     assert "逐场输入合同（来源正文不得跨 scene_plan_key 使用）" in first_prompt
-    assert '"contract_version":"screenplay-scene-input.v2"' in first_prompt
+    assert '"contract_version":"screenplay-scene-input.v3"' in first_prompt
     assert "owned_source" not in repair_contexts["screenplay_scene_shards:SS001"]
     first_contracts = repair_contexts[
         "screenplay_scene_shards:SS001"
@@ -940,8 +938,8 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         "text": "甲推门进入。",
     }]
     assert operation_ids["screenplay_scene_shards:SS001"].startswith(
-        "screenplay.scene-shard:screenplay-scene-shard.v3:"
-        "screenplay-scene-input.v2:"
+        "screenplay.scene-shard:screenplay-scene-shard.v4:"
+        "screenplay-scene-input.v3:"
     )
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt

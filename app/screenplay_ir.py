@@ -1253,7 +1253,9 @@ def prepare_ir_identity_authorities(
         if str(character.name or "").strip()
     }
     legacy_self_authority = bool(
-        screenplay_ir_version_key(value.format_version) < (1, 4)
+        not str(value.format_version or "").startswith(
+            "screenplay-generation-ir.v1.4"
+        )
         and not (episode.get("character_resolutions") or [])
     )
     changes: list[dict[str, Any]] = []
@@ -1849,7 +1851,7 @@ def compile_screenplay_ir(
     )
     segments_list = (
         index_compact_source_segments(source_text)
-        if version_key >= (1, 2)
+        if format_version.startswith("screenplay-generation-ir.v1.2")
         else index_source_segments(source_text)
     )
     segments = {item.segment_id: item for item in segments_list}
@@ -4375,19 +4377,35 @@ def compile_screenplay_ir(
 
     plot_beats = []
     for beat in value.beats:
-        related_event_ids = [
-            event_ids[event.key]
+        related_events = [
+            event
             for event in value.events
             if set(event.source_segment_ids).intersection(
                 beat.source_segment_ids
             )
         ]
+        related_event_ids = [event_ids[event.key] for event in related_events]
+        priority = (
+            "causal"
+            if any(event.event_priority == "causal" for event in related_events)
+            else "supporting"
+            if any(event.event_priority == "supporting" for event in related_events)
+            else "connective"
+        )
+        render_policy = (
+            "standalone"
+            if any(event.render_policy == "standalone" for event in related_events)
+            else "merge_adjacent"
+        )
         plot_beats.append(PlotSpineBeat(
             beat_id=beat_ids[beat.key],
             who=beat.who,
             does=beat.does,
             turn=beat.turn,
             must_keep=beat.must_keep,
+            narrative_layer="story",
+            event_priority=priority,
+            render_policy=render_policy,
             source_segment_ids=beat.source_segment_ids,
             purpose=beat.purpose,
             information_ids=list(dict.fromkeys(

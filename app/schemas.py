@@ -202,6 +202,9 @@ class PlotSpineBeat(BaseModel):
     does: str = ""
     turn: str = ""
     must_keep: bool = True
+    narrative_layer: Literal["story", "paratext"] = "story"
+    event_priority: Literal["causal", "supporting", "connective"] = "causal"
+    render_policy: Literal["standalone", "merge_adjacent", "exclude_from_spine"] = "standalone"
     source_segment_ids: list[str] = Field(default_factory=list)
     purpose: str = ""
     # VAL-422 §4.4.3：可选绑定信息原子/关键台词；跨镜聚合校验时按这些 ID 核对交付。

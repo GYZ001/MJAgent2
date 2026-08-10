@@ -593,7 +593,6 @@ def _episode_6_relationship_golden() -> tuple[EpisodeScreenplay, Storyboard]:
         AtomicAction(
             action_id="A-E6-TRAIN",
             actor_ids=["character-1"],
-            target_ids=["entity-1"],
             semantic_intent="Choose training in response to the disclosed evidence.",
             completion_condition="The training decision is observably committed.",
         )
@@ -753,7 +752,6 @@ def _episode_6_relationship_golden() -> tuple[EpisodeScreenplay, Storyboard]:
         ),
     )
     decision.capacity_budget.action_phase_s = 1.0
-    decision.offscreen_action_target_ids = ["entity-1"]
     return screenplay, Storyboard(
         episode_no=6,
         shots=[accident, misjudgment, reveal, decision],

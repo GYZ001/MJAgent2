@@ -118,6 +118,7 @@ from app.screenplay_ir import (
     recover_complete_screenplay_ir_prefix,
     scene_heading_has_multiple_locations,
     screenplay_ir_bible_context,
+    screenplay_ir_missing_event_semantic_paths,
     screenplay_ir_missing_participant_delivery_paths,
     screenplay_ir_prompt_contract,
     screenplay_ir_version_key,
@@ -309,15 +310,16 @@ def _recover_screenplay_ir_candidate(
                 payload = content
             if not isinstance(payload, dict):
                 continue
-            missing_paths = screenplay_ir_missing_participant_delivery_paths(
-                payload
-            )
+            missing_paths = [
+                *screenplay_ir_missing_participant_delivery_paths(payload),
+                *screenplay_ir_missing_event_semantic_paths(payload),
+            ]
             if missing_paths:
                 raise ArtifactNeedsRebuildError(
                     artifact_id=str(row["id"]),
                     artifact_type=str(row["type"]),
                     reason=(
-                        "缺少显式参与者交付字段 "
+                        "缺少当前合同要求的显式字段 "
                         + "、".join(missing_paths[:10])
                     ),
                 )
@@ -756,14 +758,27 @@ def _merge_ir_fidelity_patch(
             continue
         valid_units: list[IRSceneUnit] = []
         for patch_unit in new_scene.units:
-            source_ids = list(dict.fromkeys(
-                patch_unit.source_segment_ids
-            ))
+            source_ids = list(patch_unit.source_segment_ids)
             if (
                 not source_ids
                 or any(source_id not in source_order for source_id in source_ids)
             ):
                 continue
+            if len(source_ids) != len(set(source_ids)):
+                raise ValueError(
+                    "保真补写 unit.source_segment_ids 不得重复"
+                )
+            if candidate.source_scene_owners:
+                owner_scene_keys = {
+                    candidate.source_scene_owners.get(source_id)
+                    for source_id in source_ids
+                }
+                if owner_scene_keys != {new_scene.key}:
+                    raise ValueError(
+                        "保真补写 new_scene 违反 source 唯一归属："
+                        f"{source_ids} -> {sorted(str(value) for value in owner_scene_keys)}，"
+                        f"target={new_scene.key}"
+                    )
             inserted += 1
             event_key = f"fidelity-r{round_no}-{inserted}"
             while event_key in occupied_keys:
@@ -784,35 +799,59 @@ def _merge_ir_fidelity_patch(
         )
     for insertion in patch.insertions:
         for patch_unit in insertion.units:
-            source_ids = list(dict.fromkeys(
-                patch_unit.source_segment_ids
-            ))
+            source_ids = list(patch_unit.source_segment_ids)
             if (
                 not source_ids
                 or any(source_id not in source_order for source_id in source_ids)
             ):
                 continue
-            target_index = min(source_order[source_id] for source_id in source_ids)
-            nearest_scene = min(
-                (
+            if len(source_ids) != len(set(source_ids)):
+                raise ValueError(
+                    "保真补写 unit.source_segment_ids 不得重复"
+                )
+            target_scene = None
+            if candidate.source_scene_owners:
+                owner_scene_keys = {
+                    candidate.source_scene_owners.get(source_id)
+                    for source_id in source_ids
+                }
+                if len(owner_scene_keys) != 1 or None in owner_scene_keys:
+                    raise ValueError(
+                        "保真补写 unit 跨越多个 source owner："
+                        f"{source_ids} -> {sorted(str(value) for value in owner_scene_keys)}"
+                    )
+                owner_scene_key = next(iter(owner_scene_keys))
+                target_scene = scenes.get(owner_scene_key)
+                if target_scene is None:
+                    raise ValueError(
+                        f"保真补写缺少 source owner scene：{owner_scene_key}"
+                    )
+            else:
+                target_index = min(
+                    source_order[source_id] for source_id in source_ids
+                )
+                nearest_scene = min(
                     (
-                        min(
-                            abs(source_order[source_id] - target_index)
+                        (
+                            min(
+                                abs(source_order[source_id] - target_index)
+                                for source_id in unit.source_segment_ids
+                                if source_id in source_order
+                            ),
+                            scene,
+                        )
+                        for scene, unit in existing_units
+                        if any(
+                            source_id in source_order
                             for source_id in unit.source_segment_ids
-                            if source_id in source_order
-                        ),
-                        scene,
-                    )
-                    for scene, unit in existing_units
-                    if any(
-                        source_id in source_order
-                        for source_id in unit.source_segment_ids
-                    )
-                ),
-                key=lambda item: item[0],
-                default=(0, scenes.get(insertion.scene_key)),
-            )[1]
-            target_scene = nearest_scene or scenes.get(insertion.scene_key)
+                        )
+                    ),
+                    key=lambda item: item[0],
+                    default=(0, scenes.get(insertion.scene_key)),
+                )[1]
+                target_scene = (
+                    nearest_scene or scenes.get(insertion.scene_key)
+                )
             if target_scene is None:
                 continue
             inserted += 1
