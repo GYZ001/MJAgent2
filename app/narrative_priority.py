@@ -1130,3 +1130,79 @@ def merge_outline_delivery_beats(
 
 def authoritative_outline_duration_s(outline: StoryboardOutline) -> int:
     return sum(int(shot.duration_s or 0) for shot in outline.shots)
+
+
+def compile_authoritative_delivery_outline(
+    screenplay: EpisodeScreenplay,
+    *,
+    bible=None,
+) -> tuple[EpisodeScreenplay, StoryboardOutline, dict[str, Any]]:
+    """Build the single deterministic picture and duration authority."""
+    from app.narrative_outline import (
+        compile_narrative_storyboard_outline,
+        normalize_narrative_storyboard_outline,
+    )
+    from app.validators import (
+        assign_outline_delivery_ids,
+        normalize_outline_dialogue_ownership,
+        normalize_outline_spoken_durations,
+        split_outline_on_speaker_changes,
+        split_outline_over_action_capacity,
+        split_outline_over_key_line_capacity,
+        storyboard_shot_count_range,
+    )
+
+    projected, projection_report = picture_screenplay_projection(screenplay)
+    outline = compile_narrative_storyboard_outline(projected)
+    max_shots = storyboard_shot_count_range(0)[1]
+    projection_changes = normalize_narrative_storyboard_outline(
+        outline,
+        projected,
+        bible=bible,
+    )
+    assign_outline_delivery_ids(outline, projected)
+    split_changes = [
+        *split_outline_over_action_capacity(
+            outline,
+            max_shots=max_shots,
+        ),
+        *split_outline_on_speaker_changes(
+            outline,
+            projected,
+            max_shots=max_shots,
+        ),
+        *split_outline_over_key_line_capacity(
+            outline,
+            projected,
+            max_shots=max_shots,
+        ),
+        *normalize_outline_dialogue_ownership(
+            outline,
+            projected,
+        ),
+    ]
+    projection_changes.extend(
+        normalize_narrative_storyboard_outline(
+            outline,
+            projected,
+            bible=bible,
+        )
+    )
+    projection_changes.extend(
+        normalize_outline_dialogue_ownership(
+            outline,
+            projected,
+        )
+    )
+    normalize_outline_spoken_durations(outline, projected)
+    beat_merge_changes = merge_outline_delivery_beats(
+        outline,
+        projected,
+    )
+    return projected, outline, {
+        "picture_projection": projection_report,
+        "projection_change_count": len(projection_changes),
+        "split_change_count": len(split_changes),
+        "beat_merge_changes": beat_merge_changes,
+        "authoritative_duration_s": authoritative_outline_duration_s(outline),
+    }

@@ -2145,6 +2145,21 @@ def validate_storyboard_narrative(
                 )
             if action:
                 phase_deliveries[action.action_id].append((position, phase_index, phase_id))
+        for action_id in supporting:
+            action = index.actions.get(action_id)
+            action_phase_ids = [
+                phase.phase_id
+                for phase in (action.temporal_phases if action else [])
+            ]
+            if not action_phase_ids or action_phase_ids[0] not in phase_ids:
+                continue
+            previous = action_owners.get(action_id)
+            if previous and previous != label:
+                errors.append(
+                    f"[ACTION_PRIMARY_OWNER_DUPLICATE] {action_id} 在 "
+                    f"{previous}/{label} 重复开始执行"
+                )
+            action_owners[action_id] = label
         visible_or_audible_entities = {
             _norm(value)
             for value in (
@@ -2456,41 +2471,37 @@ def validate_storyboard_narrative(
                         errors.append(f"[BOUNDARY_TRANSITION_BASIS_INVALID] {transition_id} 的结构依据非法；未预设关系必须用 other")
         previous_state_out = planned_out
 
-        event_preconditions = {
-            fact_id
-            for event_id in event_ids
-            if event_id in index.events
-            and event_occurrences[event_id]
-            and position == event_occurrences[event_id][0][0]
-            for fact_id in index.events[event_id].precondition_fact_ids
-        }
-        event_adds = {
-            fact_id
-            for event_id in event_ids
-            if complete
-            and event_id in index.events
-            and event_occurrences[event_id]
-            and position == event_occurrences[event_id][-1][0]
-            for fact_id in index.events[event_id].effects_add
-        }
-        event_removes = {
-            fact_id
-            for event_id in event_ids
-            if complete
-            and event_id in index.events
-            and event_occurrences[event_id]
-            and position == event_occurrences[event_id][-1][0]
-            for fact_id in index.events[event_id].effects_remove
-        }
-        if not event_preconditions.issubset(planned_in):
-            errors.append(f"[SHOT_EVENT_PRECONDITION_MISSING] {label} 未承接事件前置事实")
-        effective_event_removes = event_removes & planned_in
-        effective_event_adds = event_adds - planned_in - effective_event_removes
-        if (
-            not effective_event_adds.issubset(delta_add)
-            or not effective_event_removes.issubset(delta_remove)
-        ):
-            errors.append(f"[SHOT_EVENT_EFFECT_MISSING] {label} 的计划状态变化未覆盖所声明事件效果")
+        running_event_state = set(planned_in)
+        event_entry_states: dict[str, set[str]] = {}
+        event_effect_fact_ids: set[str] = set()
+        for event_id in event_ids:
+            event = index.events.get(event_id)
+            occurrences = event_occurrences.get(event_id, [])
+            if event is None or not occurrences:
+                continue
+            starts_here = position == occurrences[0][0]
+            completes_here = complete and position == occurrences[-1][0]
+            if starts_here:
+                event_entry_states[event_id] = set(running_event_state)
+                missing = (
+                    set(event.precondition_fact_ids)
+                    - running_event_state
+                )
+                if missing:
+                    errors.append(
+                        f"[SHOT_EVENT_PRECONDITION_MISSING] {label}/"
+                        f"{event_id} 镜内顺序缺少前置事实 {sorted(missing)}"
+                    )
+            if completes_here:
+                event_effect_fact_ids.update(event.effects_add)
+                event_effect_fact_ids.update(event.effects_remove)
+                running_event_state.difference_update(event.effects_remove)
+                running_event_state.update(event.effects_add)
+        if complete and running_event_state != planned_out:
+            errors.append(
+                f"[SHOT_EVENT_EFFECT_MISSING] {label} 的镜内事件顺序重放"
+                "结果不等于 planned_state_out"
+            )
         minimum_action_s = 0.0
         for action_id in bound_action_ids:
             action = index.actions.get(action_id)
@@ -2506,13 +2517,18 @@ def validate_storyboard_narrative(
             completes_action = (
                 not action_phase_ids or action_phase_ids[-1] in delivered_for_action
             )
-            if starts_action and not set(action.precondition_fact_ids).issubset(planned_in):
-                errors.append(f"[SHOT_ACTION_PRECONDITION_MISSING] {label} 未满足 {action_id} 的前置事实")
-            if completes_action and (
-                not set(action.effects_add).issubset(delta_add)
-                or not set(action.effects_remove).issubset(delta_remove)
-            ):
-                errors.append(f"[SHOT_ACTION_EFFECT_MISSING] {label} 的完成状态未覆盖 {action_id} 的效果")
+            owner_event_id = action_event_owner.get(action_id, "")
+            action_entry_state = event_entry_states.get(
+                owner_event_id,
+                planned_in,
+            )
+            if starts_action and not set(
+                action.precondition_fact_ids
+            ).issubset(action_entry_state):
+                errors.append(
+                    f"[SHOT_ACTION_PRECONDITION_MISSING] {label} 未按镜内"
+                    f"事件顺序满足 {action_id} 的前置事实"
+                )
             minimum_action_s += sum(
                 max(0.0, phase.estimated_min_s)
                 for phase in action.temporal_phases
@@ -2558,7 +2574,9 @@ def validate_storyboard_narrative(
                 if previous_owner:
                     errors.append(f"[AUDIENCE_STATE_DELTA_OWNER_DUPLICATE] {state_id} 被 {previous_owner}/{label} 重复主交付")
                 contribution_audience_owners[state_id] = label
-            if not set(contribution.story_delta_fact_ids).issubset(delta_add | delta_remove):
+            if not set(contribution.story_delta_fact_ids).issubset(
+                delta_add | delta_remove | event_effect_fact_ids
+            ):
                 errors.append(f"[SHOT_CONTRIBUTION_STATE_MISMATCH] {label} 声明的故事状态贡献不在本镜 delta 中")
             for evidence_id in contribution.evidence_ids:
                 evidence = index.evidence.get(evidence_id)

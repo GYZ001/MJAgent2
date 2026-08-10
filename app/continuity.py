@@ -641,8 +641,10 @@ def narrative_action_capacity_profile(
     phase_count = 0
     estimated_min_s = 0.0
     task_state_in = set(getattr(shot, "planned_state_in_fact_ids", []) or [])
-    task_adds = set(getattr(shot, "planned_delta_add_fact_ids", []) or [])
-    task_removes = set(getattr(shot, "planned_delta_remove_fact_ids", []) or [])
+    task_state_out = set(
+        getattr(shot, "planned_state_out_fact_ids", []) or []
+    )
+    running_state = set(task_state_in)
     valid_assigned: dict[str, tuple[Any, Any]] = {}
     for phase_id in assigned_phase_ids:
         owned = phase_by_id.get(phase_id)
@@ -698,28 +700,29 @@ def narrative_action_capacity_profile(
         starts_action = not phases or bool(phase_ids and phase_ids[0] in delivered_phase_ids)
         completes_action = not phases or bool(phase_ids and phase_ids[-1] in delivered_phase_ids)
         missing_preconditions = (
-            set(action.precondition_fact_ids) - task_state_in if starts_action else set()
+            set(action.precondition_fact_ids) - running_state
+            if starts_action else set()
         )
-        missing_adds = set(action.effects_add) - task_adds if completes_action else set()
-        missing_removes = set(action.effects_remove) - task_removes if completes_action else set()
-        if missing_preconditions or missing_adds or missing_removes:
-            details: list[str] = []
-            if missing_preconditions:
-                details.append(f"precondition={sorted(missing_preconditions)}")
-            if missing_adds:
-                details.append(f"effects_add={sorted(missing_adds)}")
-            if missing_removes:
-                details.append(f"effects_remove={sorted(missing_removes)}")
+        if missing_preconditions:
             errors.append(
                 f"[NARRATIVE_SHOT_TASK_ACTION_DRIFT] shot_no={shot.shot_no} "
-                f"未完整承接 {action_id} 的前置/效果合同：{', '.join(details)}"
+                f"未按镜内动作顺序承接 {action_id} 的前置事实："
+                f"{sorted(missing_preconditions)}"
             )
+        if completes_action:
+            running_state.difference_update(action.effects_remove)
+            running_state.update(action.effects_add)
         if not str(action.completion_condition or "").strip():
             errors.append(
                 f"[NARRATIVE_ACTION_COMPLETION_MISSING] shot_no={shot.shot_no} "
                 f"AtomicAction {action_id} 缺少可观察完成条件"
             )
 
+    if running_state != task_state_out:
+        errors.append(
+            f"[NARRATIVE_SHOT_TASK_STATE_DRIFT] shot_no={shot.shot_no} "
+            "镜内动作顺序重放结果不等于 planned_state_out"
+        )
     budget = getattr(shot, "capacity_budget", None)
     if budget is not None and float(budget.action_phase_s or 0.0) + 1e-9 < estimated_min_s:
         errors.append(
