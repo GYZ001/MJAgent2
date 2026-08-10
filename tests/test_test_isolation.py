@@ -29,30 +29,64 @@ def test_pytest_defaults_to_injected_runtime_sandbox() -> None:
     assert db.DB_PATH != ROOT / "data" / "manju.db"
 
 
-def test_pytest_does_not_inherit_provider_credentials() -> None:
-    credential_names = (
-        "HIAGENT_API_KEY",
-        "OPENROUTER_API_KEY",
-        "BAILIAN_API_KEY",
-        "DASHSCOPE_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "ZHIPU_API_KEY",
-        "MINIMAX_H3_API_KEY",
-    )
-
-    assert all(os.environ.get(name) == "" for name in credential_names)
-    assert config.HIAGENT_API_KEY == ""
-    assert config.OPENROUTER_API_KEY == ""
-    assert config.BAILIAN_API_KEY == ""
-    assert config.DEEPSEEK_API_KEY == ""
-    assert config.ZHIPU_API_KEY == ""
-
-
-def test_pytest_injects_minimax_mock_base_url_without_credentials() -> None:
-    assert os.environ["MINIMAX_H3_API_KEY"] == ""
-    assert config.MINIMAX_H3_API_KEY == ""
-    assert os.environ["MINIMAX_H3_BASE_URL"] == config.MINIMAX_H3_BASE_URL
-    assert config.MINIMAX_H3_BASE_URL
+def test_pytest_injects_provider_isolation_configuration() -> None:
+    assert {
+        "credentials": {
+            "environment": {
+                "HIAGENT_API_KEY": os.environ.get("HIAGENT_API_KEY"),
+                "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY"),
+                "BAILIAN_API_KEY": os.environ.get("BAILIAN_API_KEY"),
+                "DASHSCOPE_API_KEY": os.environ.get("DASHSCOPE_API_KEY"),
+                "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY"),
+                "ZHIPU_API_KEY": os.environ.get("ZHIPU_API_KEY"),
+                "MINIMAX_H3_API_KEY": os.environ.get("MINIMAX_H3_API_KEY"),
+            },
+            "runtime": {
+                "HIAGENT_API_KEY": config.HIAGENT_API_KEY,
+                "OPENROUTER_API_KEY": config.OPENROUTER_API_KEY,
+                "BAILIAN_API_KEY": config.BAILIAN_API_KEY,
+                "DEEPSEEK_API_KEY": config.DEEPSEEK_API_KEY,
+                "ZHIPU_API_KEY": config.ZHIPU_API_KEY,
+                "MINIMAX_H3_API_KEY": config.MINIMAX_H3_API_KEY,
+            },
+        },
+        "endpoints": {
+            "environment": {
+                "MINIMAX_H3_BASE_URL": os.environ.get("MINIMAX_H3_BASE_URL"),
+            },
+            "runtime": {
+                "MINIMAX_H3_BASE_URL": config.MINIMAX_H3_BASE_URL,
+            },
+        },
+    } == {
+        "credentials": {
+            "environment": {
+                "HIAGENT_API_KEY": "",
+                "OPENROUTER_API_KEY": "",
+                "BAILIAN_API_KEY": "",
+                "DASHSCOPE_API_KEY": "",
+                "DEEPSEEK_API_KEY": "",
+                "ZHIPU_API_KEY": "",
+                "MINIMAX_H3_API_KEY": "",
+            },
+            "runtime": {
+                "HIAGENT_API_KEY": "",
+                "OPENROUTER_API_KEY": "",
+                "BAILIAN_API_KEY": "",
+                "DEEPSEEK_API_KEY": "",
+                "ZHIPU_API_KEY": "",
+                "MINIMAX_H3_API_KEY": "",
+            },
+        },
+        "endpoints": {
+            "environment": {
+                "MINIMAX_H3_BASE_URL": "http://pytest-deny-network.invalid",
+            },
+            "runtime": {
+                "MINIMAX_H3_BASE_URL": "http://pytest-deny-network.invalid",
+            },
+        },
+    }
 
 
 def test_isolated_profile_requires_an_explicit_sandbox() -> None:

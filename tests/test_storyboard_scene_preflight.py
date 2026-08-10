@@ -261,14 +261,20 @@ def test_scene_projection_reconciliation_does_not_wait_for_full_episode_success(
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
-        "CREATE TABLE episodes (id TEXT, storyboard_outline_json TEXT)"
+        "CREATE TABLE episodes ("
+        "id TEXT PRIMARY KEY, "
+        "storyboard_outline_json TEXT, "
+        "screenplay_json TEXT, "
+        "target_duration_authority TEXT NOT NULL DEFAULT 'planning_estimate'"
+        ")"
     )
     conn.execute(
         "CREATE TABLE shots (id TEXT, episode_id TEXT, shot_no INTEGER, "
         "scene_time TEXT, scene_setting TEXT, scene_name TEXT)"
     )
     conn.execute(
-        "INSERT INTO episodes VALUES('ep-1', ?)", (outline.model_dump_json(),),
+        "INSERT INTO episodes(id, storyboard_outline_json) VALUES('ep-1', ?)",
+        (outline.model_dump_json(),),
     )
     conn.execute(
         "INSERT INTO shots VALUES('shot-5','ep-1',5,'','黄昏，大青山顶山崖','大青山山顶')"
