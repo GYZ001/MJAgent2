@@ -1019,13 +1019,38 @@ def reserve_provider_video_budget(
                 "job/version/shot/episode"
             )
         existing = db.execute(
-            "SELECT status FROM provider_video_budget_claims WHERE operation_id=?",
+            """SELECT project_id,origin_episode_id,origin_shot_id,
+                      origin_job_id,origin_version_id,amount_cny,status
+                 FROM provider_video_budget_claims WHERE operation_id=?""",
             (operation_id,),
         ).fetchone()
-        if existing and existing["status"] != "released":
-            if owns_transaction:
-                db.commit()
-            return True
+        if existing:
+            existing_owner = (
+                str(existing["project_id"]),
+                str(existing["origin_episode_id"]),
+                str(existing["origin_shot_id"]),
+                str(existing["origin_job_id"]),
+                str(existing["origin_version_id"]),
+            )
+            requested_owner = (
+                str(scope["project_id"]),
+                episode_id,
+                str(scope["shot_id"]),
+                job_id,
+                version_id,
+            )
+            if (
+                existing_owner != requested_owner
+                or abs(float(existing["amount_cny"]) - amount) > 1e-9
+            ):
+                raise ValueError(
+                    "provider operation is already owned by a different "
+                    "budget claim"
+                )
+            if existing["status"] != "released":
+                if owns_transaction:
+                    db.commit()
+                return True
         claimed = float(db.execute(
             """SELECT COALESCE(SUM(amount_cny),0) AS amount
                  FROM provider_video_budget_claims

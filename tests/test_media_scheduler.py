@@ -172,6 +172,58 @@ def test_stale_worker_cannot_accept_provider_budget_after_lease_takeover(
     ).fetchone()["status"] == "reserved"
 
 
+def test_provider_operation_cannot_rebind_to_another_budget_owner() -> None:
+    conn = _conn()
+    completion_grant.ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        """INSERT INTO episode_video_budget_authorities(
+               episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
+           ) VALUES('e',0,10,'test',1,1)"""
+    )
+    conn.executemany(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES(?,?,?,5)",
+        [("s1", "e", 1), ("s2", "e", 2)],
+    )
+    conn.executemany(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES(?,?,1,'prompt',?,'queued',1)""",
+        [("v1", "s1", "idem-1"), ("v2", "s2", "idem-2")],
+    )
+    conn.execute(
+        "UPDATE jobs SET shot_id='s1',version_id='v1' WHERE id='j1'"
+    )
+    conn.execute(
+        "UPDATE jobs SET shot_id='s2',version_id='v2' WHERE id='j2'"
+    )
+    conn.commit()
+
+    assert completion_grant.reserve_provider_video_budget(
+        episode_id="e",
+        job_id="j1",
+        version_id="v1",
+        operation_id="shared-operation",
+        amount_cny=1,
+        conn=conn,
+    )
+    with pytest.raises(ValueError, match="different budget claim"):
+        completion_grant.reserve_provider_video_budget(
+            episode_id="e",
+            job_id="j2",
+            version_id="v2",
+            operation_id="shared-operation",
+            amount_cny=1,
+            conn=conn,
+        )
+
+    claim = conn.execute(
+        """SELECT origin_job_id,origin_version_id
+             FROM provider_video_budget_claims
+            WHERE operation_id='shared-operation'"""
+    ).fetchone()
+    assert tuple(claim) == ("j1", "v1")
+
+
 def test_current_worker_can_recover_legacy_provider_handle_without_budget_ledger(
     monkeypatch,
 ) -> None:
