@@ -686,6 +686,11 @@ def normalize_screenplay_scene_shard(
                     unit.speaker_key,
                 )
             unit.target_keys = normalize_refs(unit.target_keys)
+            for delivery in unit.participant_deliveries:
+                delivery.participant_key = aliases.get(
+                    delivery.participant_key,
+                    delivery.participant_key,
+                )
     shard.consumed_source_ids = list(dict.fromkeys(
         source_id
         for scene in shard.scenes
@@ -810,6 +815,59 @@ def validate_screenplay_scene_shard(
                 errors.append(
                     f"{scene.key}.units[{unit_index}] actor/target "
                     f"违反逐场参与者合同：{unowned_action_relations}"
+                )
+            relation_keys = {
+                *unit.actor_keys,
+                *unit.target_keys,
+                *(
+                    [unit.speaker_key]
+                    if unit.kind == "dialogue" and unit.speaker_key
+                    else []
+                ),
+            }
+            delivery_keys: set[str] = set()
+            for delivery in unit.participant_deliveries:
+                participant_key = delivery.participant_key.strip()
+                if participant_key in delivery_keys:
+                    errors.append(
+                        f"{scene.key}.units[{unit_index}] 对 "
+                        f"{participant_key} 重复声明参与者交付"
+                    )
+                    continue
+                delivery_keys.add(participant_key)
+                if participant_key not in allowed_identity_keys:
+                    errors.append(
+                        f"{scene.key}.units[{unit_index}].participant_deliveries "
+                        f"违反逐场参与者合同：{participant_key}"
+                    )
+                if participant_key not in relation_keys:
+                    errors.append(
+                        f"{scene.key}.units[{unit_index}] 的参与者交付 "
+                        f"{participant_key} 不属于 actor/target/speaker"
+                    )
+                if participant_key in unit.onscreen_entity_keys:
+                    errors.append(
+                        f"{scene.key}.units[{unit_index}] 的参与者交付 "
+                        f"{participant_key} 已在画面中"
+                    )
+                if (
+                    not delivery.observable_claim.strip()
+                    or not delivery.is_perceivable
+                ):
+                    errors.append(
+                        f"{scene.key}.units[{unit_index}] 的参与者交付 "
+                        f"{participant_key} 缺少结构化可感知证据"
+                    )
+            missing_deliveries = (
+                relation_keys
+                - set(unit.onscreen_entity_keys)
+                - delivery_keys
+            )
+            if missing_deliveries:
+                errors.append(
+                    f"{scene.key}.units[{unit_index}] 未入画 actor/target/speaker "
+                    "缺少 participant_deliveries："
+                    f"{sorted(missing_deliveries)}"
                 )
             if "onscreen_entity_keys" not in unit.model_fields_set:
                 errors.append(
@@ -1214,7 +1272,9 @@ def _scene_shard_prompt(
         "actor_keys/target_keys 只能填写当前 unit 的实际动作执行者与受作用对象；"
         "onscreen_entity_keys 只能填写这一动作或话轮当下实际在画面中的冻结 identity_key；"
         "被台词提到、仅能听见或只感知事件的身份不得因此进入该列表。复杂动作可在同一 local event_key"
-        "下写有序 units。\n"
+        "下写有序 units。actor/target/speaker 未进入 onscreen_entity_keys 时，必须在同一 unit 的 "
+        "participant_deliveries 中填写 participant_key、observable_claim，并按实际证据设置 "
+        "audible、visible_effect、visible_reaction 至少一项；不得只把身份塞入画外分区。\n"
         "输出根结构硬合同：根对象必须是完整 ScreenplaySceneShardIR，第一层必须包含 "
         "contract_version、episode_no、shard_id、scene_plan_keys、scenes、"
         "consumed_source_ids、unresolved_participants、source_hash、boundary_hash、"
@@ -1471,6 +1531,7 @@ async def generate_screenplay_scene_shards(
                             "each unit source_segment_ids must belong to its scene input contract",
                             "all non-title scene-owned SRC must be consumed",
                             "all identity relations must use the current scene participant_bindings",
+                            "every offscreen actor/target/speaker must have structured participant_deliveries evidence",
                             "dialogue text must equal exact source_text",
                             "unresolved placeholders are forbidden in relation fields",
                         ],

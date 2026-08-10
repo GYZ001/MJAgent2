@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import threading
 from pathlib import Path
@@ -106,7 +107,7 @@ def _create_database(path: Path) -> sqlite3.Connection:
     conn.executemany(
         """INSERT INTO budget_reservations(
                id,job_id,scope_type,scope_id,amount_cny,status,created_at
-           ) VALUES(?,?,'episode','episode',1.5,'reserved',1)""",
+           ) VALUES(?,?,'episode','episode',4,'reserved',1)""",
         [
             ("budget-owner", "job-owner"),
             ("budget-history", "job-history"),
@@ -117,7 +118,7 @@ def _create_database(path: Path) -> sqlite3.Connection:
                operation_id,project_id,episode_id,shot_id,job_id,version_id,
                origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
                amount_cny,status,created_at,updated_at,accepted_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,1.5,'accepted',1,1,1)""",
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,4,'accepted',1,1,1)""",
         [
             (
                 "video-create-owner",
@@ -256,28 +257,73 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
            WHERE id='job-history'"""
     )
     conn.commit()
-    adoptable = worker._commit_video_result_checkpoint_in_transaction(
-        conn,
-        job_id="job-history",
-        version_id="version-history",
-        owner="restart-worker",
-        operation_id="video-create-history",
-        video_path=str(tmp_path / "late-history.mp4"),
-        last_frame_url="https://provider.invalid/last-frame.jpg",
-        cost_cny=1.5,
-        latency_s=30,
-        image_inputs='{"late_provider_result":true}',
+    provider_calls: list[str] = []
+
+    class Permit:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def poll_video_task(task_id: str, **_kwargs) -> dict:
+        provider_calls.append(f"poll:{task_id}")
+        return {
+            "status": "succeeded",
+            "video_url": "https://provider.invalid/late-history.mp4",
+            "last_frame_url": "https://provider.invalid/last-frame.jpg",
+        }
+
+    async def download(url: str, destination: str) -> None:
+        provider_calls.append(f"download:{url}")
+        Path(destination).write_bytes(b"fake-provider-video")
+
+    async def reject_create(*_args, **_kwargs) -> str:
+        raise AssertionError("accepted recovery must not create another provider task")
+
+    from app.media_pipeline import concurrency, stage_state
+
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        worker,
+        "_authority_checks_can_use_worker_thread",
+        lambda _conn=None: False,
+    )
+    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_video_task)
+    monkeypatch.setattr(worker.hiagent, "download", download)
+    monkeypatch.setattr(worker.hiagent, "create_video_task", reject_create)
+    monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
+    monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "reconcile_episode_generation_status",
+        lambda *_args, **_kwargs: None,
+    )
+
+    asyncio.run(
+        worker._run_job("job-history", lease_owner="restart-worker")
     )
 
     history = conn.execute(
         """SELECT status,video_path,cost_cny FROM shot_versions
            WHERE id='version-history'"""
     ).fetchone()
-    assert adoptable is False
+    assert provider_calls == [
+        "poll:provider-task-history",
+        "download:https://provider.invalid/late-history.mp4",
+    ]
     assert dict(history) == {
         "status": "quarantined",
-        "video_path": str(tmp_path / "late-history.mp4"),
-        "cost_cny": 1.5,
+        "video_path": str(
+            worker._video_path("project", 1, 1, 2)
+        ),
+        "cost_cny": 4.0,
     }
     assert conn.execute(
         "SELECT adopted_version_id FROM shots WHERE id='shot'"
@@ -294,5 +340,5 @@ def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
     ).fetchone()
     assert dict(reservation) == {
         "status": "settled",
-        "actual_cost_cny": 1.5,
+        "actual_cost_cny": 4.0,
     }

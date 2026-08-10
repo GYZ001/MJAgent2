@@ -1275,6 +1275,7 @@ _SHOT_NULLABLE_LIST_FIELDS = frozenset({
     "audio_cast", "audio_timeline", "reference_roles", "do_not_repeat", "risk_tags",
     "event_ids", "supporting_action_ids", "action_phase_ids", "visible_entity_ids",
     "offscreen_action_actor_ids", "offscreen_action_target_ids", "audience_state_paths",
+    "action_participant_deliveries",
     "planned_state_in_fact_ids",
     "planned_delta_add_fact_ids", "planned_delta_remove_fact_ids",
     "planned_state_out_fact_ids", "completed_before_action_ids",
@@ -1300,7 +1301,6 @@ _STORYBOARD_VISUAL_STAGING_FIELDS = frozenset({
     "characters_visible",
     "offscreen_action_actor_ids",
     "offscreen_action_target_ids",
-    "action_participant_deliveries",
 })
 
 
@@ -1693,7 +1693,6 @@ def normalize_storyboard_shot_candidate(
                 "visible_entity_ids",
                 "offscreen_action_actor_ids",
                 "offscreen_action_target_ids",
-                "action_participant_deliveries",
             ):
                 if field not in outline_narrative_task:
                     continue
@@ -3282,6 +3281,7 @@ def _narrative_plan_schema_example(
             "action_id": "A-1",
             "actor_ids": ["character-id"],
             "target_ids": ["entity-id"],
+            "participant_deliveries": [],
             "semantic_intent": "该动作在故事中完成什么",
             "precondition_fact_ids": ["F-2"],
             "effects_add": ["F-3"],
@@ -3596,6 +3596,10 @@ def _narrative_plan_prompt_block(scope_id: str) -> str:
         "3. AtomicAction 必须有执行者或作用对象、语义意图、可观察完成条件与唯一阶段 ID；"
         "effects_add/effects_remove 不得重叠。事件引用某动作时，事件的 precondition_fact_ids、effects_add、"
         "effects_remove 必须分别完整覆盖该动作的同名集合，不得只写动作摘要却丢掉状态效果。"
+        "当 action actor/target 不在 owner event.onscreen_entity_ids 中时，必须在该动作的 "
+        "participant_deliveries 中按 action_id+participant_id 绑定专属 NarrativeEvidence.evidence_id，"
+        "并以 audible、visible_effect、visible_reaction 布尔字段至少声明一种观众可感知交付；"
+        "证据必须锚定 owner event 且 perceivable_by 含 audience。"
         "对所有不同 ID 但主体、目标、前置、效果、完成条件高度等价或语义同义的动作，"
         "必须输出 ActionSemanticRelationAudit；功能性重复只有在后一事件因果依赖前一事件，且绑定"
         "新 target_delta、人物状态或可感知证据时才能保留；不得用动作词表判断。\n"
@@ -6082,6 +6086,14 @@ def _storyboard_narrative_contract_block(*, include_outline_windows: bool) -> st
         "visible_entity_ids": ["本镜实际可见且由权威图定义的 actor/target/entity ID"],
         "offscreen_action_actor_ids": ["仅填写本镜绑定动作中明确在画外执行的 actor_id"],
         "offscreen_action_target_ids": ["仅填写本镜绑定动作中明确在画外承受作用的 target_id"],
+        "action_participant_deliveries": [{
+            "action_id": "引用本镜绑定 action_id",
+            "participant_id": "仅引用对应 action 的画外 actor/target ID",
+            "evidence_ids": ["引用本镜 shot_contribution.evidence_ids 中的可感知证据"],
+            "audible": False,
+            "visible_effect": True,
+            "visible_reaction": False,
+        }],
         "capacity_budget": {
             "action_phase_s": 0.0,
             "spoken_and_text_s": 0.0,
@@ -6192,8 +6204,10 @@ def _storyboard_narrative_contract_block(*, include_outline_windows: bool) -> st
         "completed_before_action_phase_ids 必须精确继承前序实际完成账本，并阻止重演。\n"
         "5b. 动作 actor 必须出现在 visible_entity_ids/characters/characters_visible/audio_cast 中，"
         "或作为本动作 actor 明确列入 offscreen_action_actor_ids。动作 target 也必须可见/可听，"
-        "或明确列入 offscreen_action_target_ids；任一画外作用都必须绑定观众可感知证据，"
-        "不得用固定身份名单猜测。\n"
+        "或明确列入 offscreen_action_target_ids；任一画外参与者都必须在 "
+        "action_participant_deliveries 中按 action_id+participant_id 绑定 evidence_ids，"
+        "并结构化声明 audible、visible_effect、visible_reaction 至少一项。证据必须进入本镜 "
+        "shot_contribution 且对 audience 可感知，不得用固定身份名单或动作词表猜测。\n"
         "6. 状态方程是精确集合等式：planned_state_out_fact_ids = "
         "(planned_state_in_fact_ids - planned_delta_remove_fact_ids) ∪ planned_delta_add_fact_ids。"
         "remove 必须是 in 的子集，add/remove 不得重叠；镜内事件的全部 precondition 必须在 in，"
@@ -7542,7 +7556,7 @@ must_keep spine 只是最低覆盖线，不是内容白名单；除 drop_list �
 {narrative_shot_contract}
 硬性约束：
 1. 镜头数由完整覆盖剧本决定且不设上限；20、40、60 镜都合法，禁止为贴合目标时长主动省略剧情。shot_no 从 1 连续递增。大纲 duration_s **默认 5**，仅必要时取 6~10；每镜必须有独立作用。
-2. 每条保留 beat/covers 兼容旧流程，同时必须填写上方叙事任务合同的 shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、capacity_budget、shot_contribution、逐先验 audience_state_paths、事实状态差、动作/阶段完成账本、readability_window_ids 与 boundary。state_in/primary_action/state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast 继续保留。beat 只作为一句话摘要，不得替代结构化任务。
+2. 每条保留 beat/covers 兼容旧流程，同时必须填写上方叙事任务合同的 shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、visible_entity_ids、offscreen_action_actor_ids、offscreen_action_target_ids、action_participant_deliveries、capacity_budget、shot_contribution、逐先验 audience_state_paths、事实状态差、动作/阶段完成账本、readability_window_ids 与 boundary。state_in/primary_action/state_out、continuity_mode、story_event_id、spine_beat_ids、key_line_ids、new_information_ids、duration_s、characters_visible、audio_cast 继续保留。beat 只作为一句话摘要，不得替代结构化任务。
 3. 相邻两镜 state_out -> state_in 与每个观众先验的 audience_state_out_target_id -> audience_state_in_id 都必须精确承接。primary_action_id 非空时必须唯一归属且不同于 completed_before_action_ids；为 null 时仍必须用 shot_contribution 证明新的叙事功能。
 4. 上方主线台词/剧情点/spine 必须分配到 covers，并填写 key_line_ids（KL01..）与 spine_beat_ids（S01..）；drop_list 禁止分配。new_information_ids 只能引用 screenplay.information_ledger 已有 info_id。同一镜必保留口播字数不得超过该镜 duration_s 容量（10s≤{config.MAX_SPOKEN_CHARS_PER_SHOT}字），超限必须拆到相邻镜。
 4b. 同一镜 key_line_ids 只能属于同一说话人；说话人变化就是切镜点。按“甲单人近景说完 → 乙单人反打回应”拆成相邻镜，禁止把问答双方和围观人群同时塞进一个对白镜头。
@@ -9701,7 +9715,7 @@ async def generate_storyboard_next_shot(episode: dict, source_text: str, bible: 
 1. 只输出第 {shot_no} 镜，shot.shot_no 必须等于 {shot_no}。
 2. 本集镜头数不设上限；当前按大纲推进到第 {shot_no}/{expected_total} 镜。本镜必须落实大纲第 {shot_no} 条并产生独立作用，不得停留、复述或发明大纲外内容。{"只有剧情已完整落到尾钩时才可设置 is_final=true，否则必须继续生成" if allow_finish else "剧情尚未铺到计划收尾，is_final 必须为 false"}。duration_s 默认 {PREFERRED_SHOT_DURATION_S}。
 2b. 动作容量必须与视频生成门禁一致：{shot_action_capacity_rule}
-2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。visible_entity_ids 是本镜实际进入构图的身份，必须是大纲同字段的子集；characters/characters_visible 必须与该子集一一对应。绑定动作中未进入构图的 actor/target 分别填入 offscreen_action_actor_ids/offscreen_action_target_ids；可见与画外的并集必须完整覆盖绑定动作参与者。不得改写动作归属，也不得把无关的同场旁观者强塞进画面。
+2c. shot_id、scene_id、event_ids、primary_action_id、supporting_action_ids、action_phase_ids、action_participant_deliveries、capacity_budget、shot_contribution、audience_state_paths、事实状态差、completed_before_action_ids、completed_before_action_phase_ids、reserved_future_event_ids、readability_window_ids 和 narrative_boundary_from_previous 必须从本镜大纲任务原样承接。visible_entity_ids 是本镜实际进入构图的身份，必须是大纲同字段的子集；characters/characters_visible 必须与该子集一一对应。绑定动作中未进入构图的 actor/target 只有在 action_participant_deliveries 已按 action_id+participant_id 绑定本镜可感知 evidence_ids 时，才可分别填入 offscreen_action_actor_ids/offscreen_action_target_ids；可见与有证据的画外分区必须完整覆盖绑定动作参与者。不得改写动作归属，也不得把无关的同场旁观者强塞进画面。
 2d. primary_action_id 可为 null，但 shot_contribution 必须非空；支撑/反应/建立/吸收镜必须明确交付证据、观众状态差、情绪、时空定向或戏剧压力中至少一项，不得借 null 产生无功能空镜。
 3. 从第 2 镜开始，必须明确承接上一镜的 state_out/observed_state_out；不要重演上一镜完整 action_desc。同场景时，first_frame_desc 与 state_in 必须逐字继承上一镜 last_frame_desc，因为实际输入是上一条采用视频的真实尾帧；换场时才按人物谱和场景库建立新的起点。反应切、正反打等剪辑语义不改变这条输入规则。
 3b. audience_state_paths 必须逐一覆盖 narrative_plan 中的全部 audience_prior；从第 2 镜起，每个先验的本镜 audience_state_in_id 必须精确等于上镜 audience_state_out_target_id。边界合同也必须记录同样的逐先验 handoff。

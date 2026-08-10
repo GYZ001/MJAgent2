@@ -279,6 +279,18 @@ class IRCoverageGroup(BaseModel):
         return normalized
 
 
+class IRActionParticipantDelivery(BaseModel):
+    participant_key: str
+    observable_claim: str
+    audible: bool = False
+    visible_effect: bool = False
+    visible_reaction: bool = False
+
+    @property
+    def is_perceivable(self) -> bool:
+        return self.audible or self.visible_effect or self.visible_reaction
+
+
 class IRSceneUnit(BaseModel):
     kind: Literal["action", "dialogue"]
     text: str
@@ -289,6 +301,9 @@ class IRSceneUnit(BaseModel):
     # Exact frozen identity keys physically present in this unit.  Dialogue
     # references and people who can perceive a line are separate relations.
     onscreen_entity_keys: list[str] = Field(default_factory=list)
+    participant_deliveries: list[IRActionParticipantDelivery] = Field(
+        default_factory=list
+    )
     resulting_state: str = ""
     speaker_key: str | None = None
     function: str = "statement"
@@ -311,7 +326,7 @@ class IRSceneUnit(BaseModel):
 
     @field_validator(
         "source_segment_ids", "actor_keys", "target_keys",
-        "onscreen_entity_keys", mode="before",
+        "onscreen_entity_keys", "participant_deliveries", mode="before",
     )
     @classmethod
     def _normalize_source_ids(cls, value: Any) -> list[Any]:
@@ -373,6 +388,9 @@ class IREvent(BaseModel):
     actor_keys: list[str] = Field(default_factory=list)
     target_keys: list[str] = Field(default_factory=list)
     onscreen_entity_keys: list[str] = Field(default_factory=list)
+    participant_deliveries: list[IRActionParticipantDelivery] = Field(
+        default_factory=list
+    )
     causal_parent_keys: list[str] = Field(default_factory=list)
     precondition_state: str = ""
     resulting_state: str = ""
@@ -395,7 +413,7 @@ class IREvent(BaseModel):
 
     @field_validator(
         "source_segment_ids", "actor_keys", "target_keys", "onscreen_entity_keys",
-        "causal_parent_keys", "action_phases", "perceivable_by",
+        "participant_deliveries", "causal_parent_keys", "action_phases", "perceivable_by",
         "information", mode="before",
     )
     @classmethod
@@ -650,7 +668,7 @@ def normalize_screenplay_ir_payload(
             continue
         for field in (
             "source_segment_ids", "actor_keys", "target_keys", "onscreen_entity_keys",
-            "causal_parent_keys", "action_phases", "perceivable_by",
+            "participant_deliveries", "causal_parent_keys", "action_phases", "perceivable_by",
             "information",
         ):
             before = event.get(field)
@@ -988,10 +1006,20 @@ def _rewrite_ir_identity_key(
         for unit in scene.units:
             if unit.speaker_key == old_key:
                 unit.speaker_key = new_key
+            unit.actor_keys = replace(unit.actor_keys)
+            unit.target_keys = replace(unit.target_keys)
+            unit.onscreen_entity_keys = replace(unit.onscreen_entity_keys)
+            for delivery in unit.participant_deliveries:
+                if delivery.participant_key == old_key:
+                    delivery.participant_key = new_key
     for event in value.events:
         event.actor_keys = replace(event.actor_keys)
         event.target_keys = replace(event.target_keys)
+        event.onscreen_entity_keys = replace(event.onscreen_entity_keys)
         event.perceivable_by = replace(event.perceivable_by)
+        for delivery in event.participant_deliveries:
+            if delivery.participant_key == old_key:
+                delivery.participant_key = new_key
     for beat in value.beats:
         if beat.who == old_key:
             beat.who = new_key
@@ -1422,11 +1450,13 @@ def screenplay_ir_prompt_contract() -> str:
       {"kind":"action","text":"可拍动作","event_key":"ev1",
        "actor_keys":["person_a"],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
+       "participant_deliveries":[],
        "resulting_state":"该动作完成后新成立的局势，禁止复述 text",
        "source_segment_ids":["SRC0001"]},
       {"kind":"dialogue","text":"改编台词","event_key":"ev1",
        "actor_keys":[],"target_keys":[],
        "onscreen_entity_keys":["person_a"],
+       "participant_deliveries":[],
        "resulting_state":"该话轮交付后人物/信息/决策发生的变化，禁止复述 text",
        "source_segment_ids":["SRC0001"],
        "speaker_key":"person_a","function":"statement",
@@ -2443,6 +2473,47 @@ def compile_screenplay_ir(
                 if typed_visual_unit_contract
                 else unit.onscreen_entity_keys or explicit
             ))
+            if typed_visual_unit_contract:
+                relation_keys = {*explicit, *targets}
+                delivery_keys: set[str] = set()
+                delivery_errors: list[str] = []
+                for delivery in unit.participant_deliveries:
+                    participant_key = delivery.participant_key.strip()
+                    if participant_key in delivery_keys:
+                        delivery_errors.append(
+                            f"{participant_key} 存在重复参与者交付合同"
+                        )
+                        continue
+                    delivery_keys.add(participant_key)
+                    if participant_key not in relation_keys:
+                        delivery_errors.append(
+                            f"{participant_key} 不是本 unit 的 actor/target/speaker"
+                        )
+                    if participant_key in onscreen:
+                        delivery_errors.append(
+                            f"{participant_key} 已入画，不得声明为画外参与者交付"
+                        )
+                    if not delivery.observable_claim.strip():
+                        delivery_errors.append(
+                            f"{participant_key} 缺少可感知 evidence claim"
+                        )
+                    if not delivery.is_perceivable:
+                        delivery_errors.append(
+                            f"{participant_key} 未声明可听、可见影响或可见反应"
+                        )
+                missing_deliveries = (
+                    relation_keys - set(onscreen) - delivery_keys
+                )
+                if missing_deliveries:
+                    delivery_errors.append(
+                        "未入画参与者缺少结构化交付合同："
+                        f"{sorted(missing_deliveries)}"
+                    )
+                if delivery_errors:
+                    raise ScreenplayIRFidelityError(
+                        f"IR v1.5 {scene.key}.{event_key} 动作参与者交付失败："
+                        + "；".join(delivery_errors)
+                    )
             event_actors = explicit_actor_keys_by_event[(scene.key, event_key)]
             event_actors.extend(
                 key for key in explicit
@@ -2458,6 +2529,38 @@ def compile_screenplay_ir(
                 key for key in onscreen
                 if key not in event_onscreen
             )
+        def merge_participant_deliveries(
+            existing: list[IRActionParticipantDelivery],
+            additions: list[IRActionParticipantDelivery],
+        ) -> list[IRActionParticipantDelivery]:
+            merged = [item.model_copy(deep=True) for item in existing]
+            by_participant = {
+                item.participant_key: item
+                for item in merged
+            }
+            for addition in additions:
+                current = by_participant.get(addition.participant_key)
+                if current is None:
+                    current = addition.model_copy(deep=True)
+                    merged.append(current)
+                    by_participant[current.participant_key] = current
+                    continue
+                current.audible = current.audible or addition.audible
+                current.visible_effect = (
+                    current.visible_effect or addition.visible_effect
+                )
+                current.visible_reaction = (
+                    current.visible_reaction or addition.visible_reaction
+                )
+                current.observable_claim = "；".join(dict.fromkeys(filter(
+                    None,
+                    [
+                        current.observable_claim.strip(),
+                        addition.observable_claim.strip(),
+                    ],
+                )))
+            return merged
+
         derived_by_key: dict[str, IREvent] = {}
         for unit_index, ((scene, unit), segment_index) in enumerate(
             zip(flat_units, assigned_indices, strict=True),
@@ -2545,6 +2648,10 @@ def compile_screenplay_ir(
                     *existing.onscreen_entity_keys,
                     *onscreen_entity_keys,
                 ]))
+                existing.participant_deliveries = merge_participant_deliveries(
+                    existing.participant_deliveries,
+                    unit.participant_deliveries,
+                )
                 if not screenplay_beat_fields_repeat(
                     existing.adapted_statement,
                     adapted_statement,
@@ -2564,6 +2671,10 @@ def compile_screenplay_ir(
                 actor_keys=actor_keys,
                 target_keys=target_keys,
                 onscreen_entity_keys=onscreen_entity_keys,
+                participant_deliveries=[
+                    delivery.model_copy(deep=True)
+                    for delivery in unit.participant_deliveries
+                ],
                 character_emotion="",
                 decision_required=not contextual_actor,
                 decision_reason=(
@@ -3075,6 +3186,10 @@ def compile_screenplay_ir(
             *event.target_keys,
             *event.onscreen_entity_keys,
             *(
+                delivery.participant_key
+                for delivery in event.participant_deliveries
+            ),
+            *(
                 key
                 for key in event.perceivable_by
                 if key != "audience"
@@ -3095,6 +3210,48 @@ def compile_screenplay_ir(
             raise ValueError(
                 f"event {event.key}.onscreen_entity_keys 含仅允许画外的身份："
                 f"{invalid_onscreen_keys}"
+            )
+        relation_keys = {*event.actor_keys, *event.target_keys}
+        delivery_keys: set[str] = set()
+        for delivery in event.participant_deliveries:
+            participant_key = delivery.participant_key.strip()
+            if participant_key in delivery_keys:
+                raise ValueError(
+                    f"event {event.key} 对 {participant_key} 重复声明参与者交付"
+                )
+            delivery_keys.add(participant_key)
+            if participant_key not in relation_keys:
+                raise ValueError(
+                    f"event {event.key} 的参与者交付 {participant_key} "
+                    "不属于 actor/target"
+                )
+            if participant_key in event.onscreen_entity_keys:
+                raise ValueError(
+                    f"event {event.key} 的参与者交付 {participant_key} 已入画"
+                )
+            if not delivery.observable_claim.strip() or not delivery.is_perceivable:
+                raise ValueError(
+                    f"event {event.key} 的参与者交付 {participant_key} "
+                    "缺少结构化可感知证据"
+                )
+        if (
+            typed_visual_unit_contract
+            and "onscreen_entity_keys" in event.model_fields_set
+        ):
+            offscreen_relation_keys = (
+                relation_keys - set(event.onscreen_entity_keys)
+            )
+        else:
+            offscreen_relation_keys = {
+                key
+                for key in relation_keys
+                if identity_by_key[key].visual_policy == "offscreen_only"
+            }
+        missing_deliveries = offscreen_relation_keys - delivery_keys
+        if missing_deliveries:
+            raise ValueError(
+                f"event {event.key} 未入画 actor/target 缺少结构化参与者交付："
+                f"{sorted(missing_deliveries)}"
             )
         unknown_sources = set(event.source_segment_ids) - expected_segment_ids
         if unknown_sources:
@@ -3539,6 +3696,34 @@ def compile_screenplay_ir(
             identity_id(token) for token in event.onscreen_entity_keys
             if str(token).strip() != "audience"
         ]
+        participant_delivery_rows: list[dict[str, Any]] = []
+        participant_evidence_rows: list[dict[str, Any]] = []
+        for delivery_position, delivery in enumerate(
+            event.participant_deliveries,
+            start=1,
+        ):
+            participant_id = identity_id(delivery.participant_key)
+            participant_evidence_id = (
+                f"{evidence_id}-PD{delivery_position}"
+            )
+            participant_delivery_rows.append({
+                "action_id": action_id,
+                "participant_id": participant_id,
+                "evidence_ids": [participant_evidence_id],
+                "audible": delivery.audible,
+                "visible_effect": delivery.visible_effect,
+                "visible_reaction": delivery.visible_reaction,
+            })
+            participant_evidence_rows.append({
+                "evidence_id": participant_evidence_id,
+                "anchor": {"type": "event", "id": event_id},
+                "observable_claim": delivery.observable_claim,
+                "perceivable_by": ["audience"],
+                "supports_proposition_ids": [adapted_prop_id],
+                "planned_salience": event.salience,
+                "planned_duration_s": event.readability_s,
+                "competing_attention_ids": [],
+            })
         subject_id = (actor_ids or target_ids or [initial_subject])[0]
         state_facts.append({
             "fact_id": fact_out_id,
@@ -3572,6 +3757,7 @@ def compile_screenplay_ir(
             "action_id": action_id,
             "actor_ids": actor_ids,
             "target_ids": target_ids,
+            "participant_deliveries": participant_delivery_rows,
             "semantic_intent": event.action_intent,
             "precondition_fact_ids": [fact_in_id],
             "effects_add": [fact_out_id],
@@ -3617,6 +3803,7 @@ def compile_screenplay_ir(
             "planned_duration_s": event.readability_s,
             "competing_attention_ids": [],
         })
+        narrative_evidence.extend(participant_evidence_rows)
         event_evidence_ids[event.key] = evidence_id
 
         parents = [

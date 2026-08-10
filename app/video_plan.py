@@ -1533,6 +1533,9 @@ def _shot_planner_payload(row: Any) -> dict[str, Any]:
         "visible_entity_ids": contract.get("visible_entity_ids") or [],
         "offscreen_action_actor_ids": contract.get("offscreen_action_actor_ids") or [],
         "offscreen_action_target_ids": contract.get("offscreen_action_target_ids") or [],
+        "action_participant_deliveries": (
+            contract.get("action_participant_deliveries") or []
+        ),
         "event_ids": contract.get("event_ids") or [],
         "boundary_from_previous": contract.get("narrative_boundary_from_previous"),
     }

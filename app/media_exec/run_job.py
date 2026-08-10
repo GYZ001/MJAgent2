@@ -479,6 +479,44 @@ def _commit_provider_acceptance_in_transaction(
     )
     if claimed.rowcount != 1:
         raise LeaseLost(f"provider acceptance lost lease: {job_id} / {owner}")
+    scope = conn.execute(
+        """SELECT j.project_id,j.episode_id,j.shot_id,j.version_id,
+                  COALESCE(br.amount_cny,j.reserved_cost_cny,0) AS amount_cny
+             FROM jobs j
+             LEFT JOIN budget_reservations br ON br.job_id=j.id
+            WHERE j.id=? AND j.version_id=?""",
+        (job_id, version_id),
+    ).fetchone()
+    if (
+        scope is not None
+        and scope["project_id"]
+        and scope["episode_id"]
+        and scope["shot_id"]
+        and scope["version_id"]
+    ):
+        conn.execute(
+            """INSERT OR IGNORE INTO provider_video_budget_claims(
+                   operation_id,project_id,episode_id,shot_id,job_id,version_id,
+                   origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+                   amount_cny,status,created_at,updated_at,accepted_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)""",
+            (
+                operation_id,
+                scope["project_id"],
+                scope["episode_id"],
+                scope["shot_id"],
+                job_id,
+                version_id,
+                scope["episode_id"],
+                scope["shot_id"],
+                job_id,
+                version_id,
+                max(0.0, float(scope["amount_cny"] or 0)),
+                accepted_at,
+                stamp,
+                accepted_at,
+            ),
+        )
     conn.execute(
         """UPDATE shot_versions
               SET provider_task_id=?,status='running',error=NULL
@@ -657,6 +695,7 @@ def _commit_provider_terminal_failure_in_transaction(
     owner: str,
     operation_id: str,
     message: str,
+    reason_code: str,
     failure,
 ) -> float:
     """Settle an accepted provider task that reached an explicit failed terminal."""
@@ -699,7 +738,7 @@ def _commit_provider_terminal_failure_in_transaction(
               AND cancellation_requested=0 AND provider_poll_required=1""",
         (
             message,
-            failure.reason_code,
+            reason_code,
             message,
             failure.category.value,
             failure.kind,
@@ -741,6 +780,7 @@ async def _commit_provider_terminal_failure(
     owner: str,
     operation_id: str,
     message: str,
+    reason_code: str,
     failure,
 ) -> float:
     def operation(write_conn) -> float:
@@ -751,6 +791,7 @@ async def _commit_provider_terminal_failure(
             owner=owner,
             operation_id=operation_id,
             message=message,
+            reason_code=reason_code,
             failure=failure,
         )
 
@@ -4095,26 +4136,11 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                 failure = hiagent.ProviderFailure.from_provider_payload(
                     result.get("failure")
                 )
-                terminal_message = (
-                    f"{provider_label} 任务失败：{error_text}"
-                )
-                await _commit_provider_terminal_failure(
-                    conn,
-                    job_id=job_id,
-                    version_id=version["id"],
-                    owner=owner,
-                    operation_id=provider_operation_id,
-                    message=terminal_message,
+                raise ProviderError(
+                    f"{provider_label} 任务失败：{error_text}",
+                    raw=error_text,
                     failure=failure,
                 )
-                mark_media_job_state(
-                    _row_value(job, "run_id"),
-                    _row_value(job, "step_run_id"),
-                    "failed",
-                    terminal_message,
-                )
-                reconcile_episode_generation_status(job["episode_id"])
-                return
             break
 
         _assert_job_lease(job_id, owner)
@@ -4478,17 +4504,6 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             "SELECT provider_poll_required FROM jobs WHERE id=?",
             (job_id,),
         ).fetchone()
-        if (
-            task_id
-            and poll_state is not None
-            and bool(poll_state["provider_poll_required"])
-            and _defer_provider_poll(
-                job_id,
-                task_id,
-                lease_owner=owner,
-            )
-        ):
-            return
         guidance = (
             _video_model_rejection_guidance(meta, exc)
             if isinstance(exc, ProviderError)
@@ -4504,6 +4519,24 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             f"{guidance[1]}（{guidance[0]} · {record.error_id}）"
             if guidance else record.public
         )
+        provider_poll_pending = bool(
+            task_id
+            and poll_state is not None
+            and poll_state["provider_poll_required"]
+        )
+        if (
+            provider_poll_pending
+            and (
+                not isinstance(exc, ProviderError)
+                or bool(provider_failure and provider_failure.retryable)
+            )
+            and _defer_provider_poll(
+                job_id,
+                task_id,
+                lease_owner=owner,
+            )
+        ):
+            return
         # 仅结构化 retryable 故障自动重排；重试耗尽后转人工，不改变原始类别。
         if isinstance(exc, ProviderError) and _schedule_job_retry(
             job_id, exc, lease_owner=owner
@@ -4515,6 +4548,35 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             and provider_failure.disposition
             is hiagent.ProviderFailureDisposition.EXTERNAL_TERMINAL
         )
+        if provider_poll_pending and external_terminal:
+            await _commit_provider_terminal_failure(
+                conn,
+                job_id=job_id,
+                version_id=version["id"],
+                owner=owner,
+                operation_id=provider_operation_id,
+                message=public,
+                reason_code=reason_code or provider_failure.reason_code,
+                failure=provider_failure,
+            )
+            if (
+                provider_failure.kind
+                != hiagent.ProviderFailureKind.PROMPT_PROVIDER_REJECTED.value
+            ):
+                conn.execute(
+                    """UPDATE jobs SET provider_create_state='model_rejected'
+                        WHERE id=? AND status='failed'""",
+                    (job_id,),
+                )
+                conn.commit()
+            mark_media_job_state(
+                _row_value(job, "run_id"),
+                _row_value(job, "step_run_id"),
+                "failed",
+                public,
+            )
+            reconcile_episode_generation_status(job["episode_id"])
+            return
         final_status = (
             "waiting_human"
             if provider_failure and not external_terminal
@@ -4570,7 +4632,16 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                     )
             conn.commit()
             _set_version(version["id"], status=final_status, error=public)
-            media_scheduler.settle_budget(job_id, 0.0, success=False)
+            if provider_poll_pending:
+                conn.execute(
+                    """UPDATE budget_reservations
+                          SET status='reserved'
+                        WHERE job_id=? AND status='running'""",
+                    (job_id,),
+                )
+                conn.commit()
+            else:
+                media_scheduler.settle_budget(job_id, 0.0, success=False)
             reconcile_episode_generation_status(job["episode_id"])
 
 

@@ -1671,9 +1671,11 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
             ORDER BY j.shot_id,
               CASE
                 WHEN j.video_slot_active=1 THEN 0
+                WHEN j.provider_create_state='accepted'
+                     AND v.provider_task_id IS NOT NULL
+                     AND v.provider_task_id!='' THEN 1
                 WHEN j.provider_result_adoptable=1
-                     AND j.cancellation_requested=0 AND j.abandoned=0 THEN 1
-                WHEN v.provider_task_id IS NOT NULL AND v.provider_task_id!='' THEN 2
+                     AND j.cancellation_requested=0 AND j.abandoned=0 THEN 2
                 WHEN j.lease_owner IS NOT NULL AND j.lease_owner!='' THEN 3
                 ELSE 4
               END,
