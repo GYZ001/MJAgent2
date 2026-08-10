@@ -20,3 +20,4 @@ logs/
 /_*
 /.playwright-cli/
 /output/
+/.dbg/
