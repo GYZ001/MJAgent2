@@ -2110,7 +2110,14 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
     )
     assert round_trip == shard
     scene_14 = next(scene for scene in shard.scenes if scene.key == "bp-sc014")
-    assignment_line = scene_14.units[4]
+    assignment_line = next(
+        unit
+        for unit in scene_14.units
+        if (
+            unit.kind == "dialogue"
+            and unit.source_segment_ids == ["SRC0057"]
+        )
+    )
     assert assignment_line.target_keys == [
         "person_e79ecc6793f5",
         "person_32ce878a56e2",
@@ -2127,7 +2134,11 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 
     wrong_youth = "person_b9cd0397a07f"
     meng_hao = "person_b67de643afe6"
-    for unit in scene_14.units[2:]:
+    for unit in (
+        unit
+        for unit in scene_14.units
+        if set(unit.source_segment_ids) <= {"SRC0056", "SRC0057"}
+    ):
         assert wrong_youth not in {
             *unit.actor_keys,
             *unit.target_keys,
@@ -2139,7 +2150,14 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
         )
 
     scene_15 = next(scene for scene in shard.scenes if scene.key == "bp-sc015")
-    location_answer = scene_15.units[2]
+    location_answer = next(
+        unit
+        for unit in scene_15.units
+        if (
+            unit.kind == "dialogue"
+            and unit.source_segment_ids == ["SRC0059"]
+        )
+    )
     assert location_answer.speaker_key == "person_46e7e8b742ed"
     assert location_answer.onscreen_entity_keys == [meng_hao]
     assert [
