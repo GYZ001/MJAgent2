@@ -5064,6 +5064,7 @@ async def _generate_screenplay_scene_sharded_baseline(
         SCREENPLAY_SHARD_PLAN_VERSION,
         blueprint_content_hash,
         build_frozen_identity_registry,
+        build_screenplay_scene_input_contract_set,
         build_screenplay_scene_shard_plans,
         generate_screenplay_envelope,
         generate_screenplay_scene_shards,
@@ -5227,6 +5228,12 @@ async def _generate_screenplay_scene_sharded_baseline(
         source_text=source_text,
         identity_registry_hash=identity_registry_hash,
     )
+    scene_input_contracts = build_screenplay_scene_input_contract_set(
+        plans=plans,
+        blueprint=narrative_blueprint,
+        source_text=source_text,
+        identity_registry=identity_registry,
+    )
     plan_payload = {
         "contract_version": SCREENPLAY_SHARD_PLAN_VERSION,
         "blueprint_hash": blueprint_hash,
@@ -5299,6 +5306,7 @@ async def _generate_screenplay_scene_sharded_baseline(
                 identity_registry=identity_registry,
                 identities=identities,
                 plans=plans,
+                scene_input_contracts=scene_input_contracts,
                 blueprint_artifact_id=blueprint_artifact_id,
                 identity_artifact_id=identity_artifact_id,
                 progress=update_shard_progress,
@@ -5326,6 +5334,7 @@ async def _generate_screenplay_scene_sharded_baseline(
             identities=identities,
             plans=plans,
             shards=shards,
+            scene_input_contracts=scene_input_contracts,
             blueprint=narrative_blueprint,
             source_text=source_text,
         )

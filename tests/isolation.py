@@ -41,8 +41,8 @@ def _sqlite_path(database: object) -> Path | None:
 class AccessAudit:
     """Record forbidden access even when application code catches the error."""
 
-    def __init__(self, *, protected_database: Path) -> None:
-        self.protected_database = protected_database.expanduser().resolve()
+    def __init__(self, *, sandbox: Path) -> None:
+        self.sandbox = sandbox.expanduser().resolve()
         self.violations: list[str] = []
 
     def _reject(self, resource: str) -> None:
@@ -64,8 +64,8 @@ class AccessAudit:
         **kwargs: Any,
     ) -> sqlite3.Connection:
         target = _sqlite_path(database)
-        if target == self.protected_database:
-            self._reject(f"production database connection to {target}")
+        if target is not None and not target.is_relative_to(self.sandbox):
+            self._reject(f"persistent database outside test sandbox: {target}")
         return delegate(database, *args, **kwargs)
 
     def assert_clean(self) -> None:
@@ -76,8 +76,8 @@ class AccessAudit:
 class IsolationSession:
     """Install and restore process-wide transport guards for one pytest run."""
 
-    def __init__(self, *, protected_database: Path) -> None:
-        self.audit = AccessAudit(protected_database=protected_database)
+    def __init__(self, *, sandbox: Path) -> None:
+        self.audit = AccessAudit(sandbox=sandbox)
         self._socket_type = socket.socket
         self._create_connection = socket.create_connection
         self._getaddrinfo = socket.getaddrinfo

@@ -12,8 +12,19 @@ from pathlib import Path
 from app.atomic_io import atomic_write_text
 
 ROOT = Path(__file__).resolve().parent.parent
-PROJECTS_DIR = ROOT / "projects"
-DATA_DIR = ROOT / "data"
+TEST_PROFILE = os.environ.get("MANJU_TEST_PROFILE", "").strip().lower()
+_test_sandbox = os.environ.get("MANJU_TEST_SANDBOX", "").strip()
+if TEST_PROFILE == "isolated" and not _test_sandbox:
+    raise RuntimeError(
+        "MANJU_TEST_PROFILE=isolated requires MANJU_TEST_SANDBOX"
+    )
+RUNTIME_ROOT = (
+    Path(_test_sandbox).expanduser().resolve()
+    if TEST_PROFILE == "isolated"
+    else ROOT
+)
+PROJECTS_DIR = RUNTIME_ROOT / "projects"
+DATA_DIR = RUNTIME_ROOT / "data"
 DB_PATH = DATA_DIR / "manju.db"
 
 # 可通过前端管理的 API Key 列表
@@ -23,7 +34,9 @@ _env_lock = threading.Lock()
 
 
 def _load_env() -> None:
-    env_file = ROOT / ".env"
+    if TEST_PROFILE == "isolated":
+        return
+    env_file = RUNTIME_ROOT / ".env"
     if not env_file.exists():
         return
     for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -385,7 +398,7 @@ def save_keys_to_env(keys: dict[str, str]) -> list[str]:
     if not to_write:
         return updated
 
-    env_file = ROOT / ".env"
+    env_file = RUNTIME_ROOT / ".env"
     with _env_lock:
         # 读取现有 .env 内容
         existing_lines: list[str] = []

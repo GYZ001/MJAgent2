@@ -5,7 +5,7 @@
   set MANJU_GOLDEN_LIVE=1
   set MANJU_GOLDEN_EPISODE_ID=ep_23517af4b5a8   # 可选，默认按标题解析
   .\\.venv\\Scripts\\python.exe scripts/run_golden_storyboard.py
-  .\\.venv\\Scripts\\python.exe -m pytest tests/test_golden_storyboard_e2e.py -m golden -s
+  .\\.venv\\Scripts\\python.exe -m pytest tests/test_golden_storyboard_e2e.py -m golden --live-integration -s
 
 验收（PRD §18.3）：
 - Supervisor 跑通后执行显式人工确认
@@ -27,6 +27,7 @@ def _live_enabled() -> bool:
 
 
 @pytest.mark.golden
+@pytest.mark.live_integration
 @pytest.mark.skipif(not _live_enabled(), reason="需 MANJU_GOLDEN_LIVE=1 + 真实 LLM 密钥")
 def test_golden_yunluo_ep1_manual_confirm_live():
     from scripts.run_golden_storyboard import run_golden

@@ -8,6 +8,8 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
+from app import db
+from app.harness import model_gateway
 from app.narrative_blueprint import NarrativeBlueprint, derive_blueprint_scene_plans
 from app.evidence import repository as evidence_repository
 from app.harness.types import EvidenceArtifact
@@ -38,6 +40,13 @@ from app.source_excerpt import index_source_segments
 
 
 SOURCE = "甲推门进入。\n\n乙接过钥匙并回答。"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "screenplay-scene-shards.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
 
 
 def _blueprint(*, split_domain: bool = True) -> NarrativeBlueprint:
@@ -140,6 +149,71 @@ def _envelope(blueprint: NarrativeBlueprint) -> ScreenplayEnvelopeIR:
         blueprint_hash=blueprint_content_hash(blueprint),
         identity_registry_hash="identity-hash",
     )
+
+
+def _participant_case(
+    *,
+    shared_identity: bool = False,
+) -> tuple[
+    NarrativeBlueprint,
+    list,
+    list[dict],
+    list[IRIdentity],
+    ScreenplaySceneShardIR,
+]:
+    blueprint = _blueprint(split_domain=False)
+    first_participants = ["甲"]
+    second_participants = ["乙"]
+    if shared_identity:
+        first_participants.append("见证人")
+        second_participants.append("见证人")
+    blueprint.nodes[0].participants = first_participants
+    blueprint.nodes[1].participants = second_participants
+    derive_blueprint_scene_plans(blueprint)
+    registry = [
+        {
+            "identity_key": "person_a",
+            "authority_id": "bible:甲",
+            "canonical_name": "甲",
+            "source_labels": ["甲"],
+        },
+        {
+            "identity_key": "person_b",
+            "authority_id": "bible:乙",
+            "canonical_name": "乙",
+            "source_labels": ["乙"],
+        },
+    ]
+    if shared_identity:
+        registry.append({
+            "identity_key": "person_shared",
+            "authority_id": "bible:见证人",
+            "canonical_name": "见证人",
+            "source_labels": ["见证人"],
+        })
+    identities = [
+        IRIdentity(
+            key=item["identity_key"],
+            display_name=item["canonical_name"],
+            authority_id=item["authority_id"],
+            source_names=item["source_labels"],
+            kind="named_character",
+            visual_policy="canonical",
+            asset_requirement="required",
+            role_type="named_character",
+        )
+        for item in registry
+    ]
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    assert len(plans) == 1
+    shard = _shard(plans[0], blueprint)
+    for index, scene in enumerate(shard.scenes, start=1):
+        scene.units[0].event_key = f"local-event-{index}"
+    return blueprint, plans, registry, identities, shard
 
 
 def test_scene_shard_grouping_is_deterministic_and_respects_domains() -> None:
@@ -767,3 +841,108 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
     assert "甲推门进入。" not in second_prompt
+
+
+def test_generation_and_semantic_retry_reject_cross_scene_frozen_identity(
+    monkeypatch,
+) -> None:
+    blueprint, plans, registry, identities, shard = _participant_case()
+    first_scene = shard.scenes[0]
+    first_scene.character_keys = ["person_b"]
+    first_unit = first_scene.units[0]
+    first_unit.actor_keys = ["person_b"]
+    first_unit.target_keys = ["person_b"]
+    first_unit.onscreen_entity_keys = ["person_b"]
+    prompts: list[str] = []
+    semantic_attempts: list[int] = []
+
+    async def local_model_response(messages, **kwargs):
+        prompts.append(messages[0]["content"])
+        semantic_attempts.append(int(kwargs["call_meta"]["semantic_attempt"]))
+        return shard.model_dump_json()
+
+    monkeypatch.setattr(model_gateway, "chat", local_model_response)
+
+    with pytest.raises(ScreenplaySceneShardError, match="逐场参与者合同"):
+        asyncio.run(generate_screenplay_scene_shards(
+            episode={"id": "ep-cross-scene-participant", "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=registry,
+            identities=identities,
+            plans=plans,
+        ))
+
+    assert semantic_attempts == [0, 1]
+    assert "逐场参与者合同" in prompts[1]
+    assert evidence_repository.latest_artifact(
+        "screenplay_scene_shard",
+        "episode",
+        "ep-cross-scene-participant",
+    ) is None
+
+
+def test_merge_rejects_frozen_identity_owned_only_by_another_scene() -> None:
+    blueprint, plans, _registry, identities, shard = _participant_case()
+    shard.scenes[0].units[0].actor_keys = ["person_b"]
+    shard.scenes[0].units[0].onscreen_entity_keys = ["person_b"]
+
+    with pytest.raises(ScreenplaySceneMergeError, match="逐场参与者合同"):
+        merge_screenplay_scene_shards(
+            envelope=_envelope(blueprint),
+            identities=identities,
+            plans=plans,
+            shards=[shard],
+            blueprint=blueprint,
+            source_text=SOURCE,
+        )
+
+
+def test_scene_contract_allows_identity_explicitly_shared_by_both_scenes() -> None:
+    blueprint, plans, _registry, identities, shard = _participant_case(
+        shared_identity=True,
+    )
+    for scene in shard.scenes:
+        scene.character_keys = ["person_shared"]
+        scene.units[0].actor_keys = ["person_shared"]
+        scene.units[0].target_keys = ["person_shared"]
+        scene.units[0].onscreen_entity_keys = ["person_shared"]
+
+    merged = merge_screenplay_scene_shards(
+        envelope=_envelope(blueprint),
+        identities=identities,
+        plans=plans,
+        shards=[shard],
+        blueprint=blueprint,
+        source_text=SOURCE,
+    )
+
+    assert [scene.character_keys for scene in merged.scenes] == [
+        ["person_shared"],
+        ["person_shared"],
+    ]
+    assert [
+        scene.units[0].actor_keys for scene in merged.scenes
+    ] == [["person_shared"], ["person_shared"]]
+
+
+def test_normalization_preserves_unbound_target_for_hard_gate() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    shard = _shard(plan, blueprint)
+    shard.scenes[0].units[0].target_keys = ["unbound-person"]
+
+    normalized = normalize_screenplay_scene_shard(
+        shard,
+        episode_no=1,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        identity_registry=[],
+        identity_keys={"narrator"},
+    )
+
+    assert normalized.scenes[0].units[0].target_keys == ["unbound-person"]

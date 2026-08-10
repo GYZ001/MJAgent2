@@ -44,6 +44,7 @@ def pytest_configure(config: pytest.Config) -> None:
     else:
         _SANDBOX = Path(tempfile.mkdtemp(prefix="manju-pytest-")).resolve()
         _SANDBOX_OWNED = True
+    config.option.basetemp = str(_SANDBOX / "pytest-tmp")
 
     os.environ["MANJU_TEST_PROFILE"] = "isolated"
     os.environ["HIAGENT_API_KEY"] = ""
@@ -58,7 +59,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # Configure the process before test module collection imports application code.
     from app import config as app_config
 
-    app_config.ROOT = _SANDBOX
+    app_config.RUNTIME_ROOT = _SANDBOX
     app_config.PROJECTS_DIR = _SANDBOX / "projects"
     app_config.DATA_DIR = _SANDBOX / "data"
     app_config.DB_PATH = app_config.DATA_DIR / "manju.db"
@@ -77,7 +78,7 @@ def pytest_configure(config: pytest.Config) -> None:
     db.DATA_DIR = app_config.DATA_DIR
     db.DB_PATH = app_config.DB_PATH
     _ISOLATION_SESSION = IsolationSession(
-        protected_database=ROOT / "data" / "manju.db",
+        sandbox=_SANDBOX,
     )
 
 

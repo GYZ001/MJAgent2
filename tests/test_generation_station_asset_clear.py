@@ -587,6 +587,103 @@ def test_settled_claim_clear_keeps_project_used_budget(
     ).fetchone()[:] == ("settled", "p", None, None)
 
 
+def test_confirmed_technical_resubmission_closes_old_liability_and_can_clear(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from app import monitoring, system_api, worker
+
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET kind='video',status='waiting_human',
+                  provider_failure_category='technical',
+                  provider_failure_kind='provider_task_not_found',
+                  provider_failure_disposition='manual_review',
+                  provider_failure_retryable=0,
+                  reason_code='VIDEO_PROVIDER_TASK_NOT_FOUND'
+            WHERE id='j-provider'"""
+    )
+    conn.execute(
+        "UPDATE shot_versions SET status='waiting_human' WHERE id='v-provider'"
+    )
+    conn.execute(
+        """INSERT INTO episode_video_budget_authorities(
+               episode_id,baseline_cny,cap_cny,source,authorized_at,updated_at
+           ) VALUES('e',0,20,'test',1,1)"""
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts.config, "PROJECTS_DIR", tmp_path / "projects")
+
+    retried = system_api.retry_job(
+        "j-provider",
+        {"allow_new_submission": True},
+    )
+    new_operation_id = retried["job"]["provider_operation_id"]
+    claims_after_retry = conn.execute(
+        """SELECT operation_id,status,closure_reason
+             FROM provider_video_budget_claims
+            ORDER BY created_at,operation_id"""
+    ).fetchall()
+
+    assert retried["retryability"]["action"] == (
+        "new_submission_after_technical_failure"
+    )
+    assert [dict(row) for row in claims_after_retry] == [
+        {
+            "operation_id": "op-provider",
+            "status": "closed_liability",
+            "closure_reason": "technical_failure_resubmission_confirmed",
+        },
+        {
+            "operation_id": new_operation_id,
+            "status": "reserved",
+            "closure_reason": None,
+        },
+    ]
+    assert completion_grant.project_video_budget_snapshot(
+        "p",
+        conn=conn,
+    )["used_cny"] == 8
+
+    cleared = artifacts.clear_shot_artifacts("s")
+
+    assert cleared["videos"] == 1
+    final_claims = conn.execute(
+        """SELECT operation_id,status,job_id,version_id
+             FROM provider_video_budget_claims
+            ORDER BY created_at,operation_id"""
+    ).fetchall()
+    assert [dict(row) for row in final_claims] == [
+        {
+            "operation_id": "op-provider",
+            "status": "closed_liability",
+            "job_id": None,
+            "version_id": None,
+        },
+        {
+            "operation_id": new_operation_id,
+            "status": "released",
+            "job_id": None,
+            "version_id": None,
+        },
+    ]
+    assert completion_grant.project_video_budget_snapshot(
+        "p",
+        conn=conn,
+    )["used_cny"] == 4
+
+
 def test_resource_clear_allows_unsubmitted_reservation(
     tmp_path,
     monkeypatch,

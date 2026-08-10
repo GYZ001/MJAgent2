@@ -146,6 +146,7 @@ class ProviderFailureKind(str, Enum):
     EXECUTION_FAILED = "provider_execution_failed"
     TASK_NOT_FOUND = "provider_task_not_found"
     OUTPUT_MISSING = "provider_output_missing"
+    MALFORMED_RESPONSE = "malformed_response"
     PROVIDER_REJECTED = "provider_rejected"
     PROMPT_PROVIDER_REJECTED = "prompt_provider_rejected"
 
@@ -394,7 +395,33 @@ async def _prepare_image_data_urls(values: list[str]) -> tuple[list[str], dict[s
     return prepared, stats
 
 
+def _structured_failure_from_http_body(body: str) -> ProviderFailure | None:
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error_payload = payload.get("error")
+    failure_payload = (
+        error_payload.get("failure")
+        if isinstance(error_payload, dict)
+        else payload.get("failure")
+    )
+    if not isinstance(failure_payload, dict):
+        return None
+    return ProviderFailure.from_provider_payload(failure_payload)
+
+
 def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KEY") -> ProviderError:
+    structured_failure = _structured_failure_from_http_body(body)
+    if structured_failure is not None:
+        return ProviderError(
+            f"上游请求失败（HTTP {status}）：{body[:300]}",
+            raw=body,
+            delivery_state="responded",
+            failure=structured_failure,
+        )
     if status in (401, 403):
         return ProviderError(
             f"鉴权失败，请检查 .env 中的 {key_name}（HTTP {status}）：{body[:300]}",
@@ -1842,7 +1869,29 @@ async def poll_video_task(task_id: str, *, call_meta: dict | None = None) -> dic
                           request_json={"method": "GET", "url": f"{base_url}/contents/generations/tasks/{task_id}"},
                           response_json={"status_code": resp.status_code, "body": resp.text})
         raise err
-    data = resp.json()
+    try:
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise TypeError("expected a JSON object")
+    except (TypeError, ValueError) as exc:
+        err = ProviderError(
+            f"视频任务状态响应不是合法 JSON 对象：{exc}",
+            retryable=True,
+            raw=resp.text,
+            failure_kind=ProviderFailureKind.MALFORMED_RESPONSE,
+            delivery_state="responded",
+        )
+        merged_meta = _merge_call_meta(call_meta)
+        log_provider_call(
+            "video_poll", model, "FAILED", 200, latency, error=str(err),
+            meta=merged_meta,
+            request_json={
+                "method": "GET",
+                "url": f"{base_url}/contents/generations/tasks/{task_id}",
+            },
+            response_json={"status_code": 200, "body": resp.text},
+        )
+        raise err from exc
     status = data.get("status", "")
     error_obj = data.get("error") if isinstance(data.get("error"), dict) else {}
     failure = (
