@@ -34,6 +34,7 @@ from app.screenplay_scene_shards import (
     ScreenplaySceneShardIR,
     UnresolvedParticipant,
     blueprint_content_hash,
+    build_screenplay_scene_shard_repair_schema,
     build_frozen_identity_registry,
     build_screenplay_scene_input_contract_set,
     build_screenplay_scene_input_contracts,
@@ -53,6 +54,11 @@ ERR_20260810_REPLAY = (
     Path(__file__).parent
     / "fixtures"
     / "screenplay_scene_shard_err_20260810_2e8f0a.json"
+)
+ERR_20260810_B66DDA_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_scene_shard_err_20260810_b66dda.json"
 )
 
 
@@ -955,6 +961,197 @@ def test_err_20260810_provider_recovery_rejects_original_response(
     )
 
 
+def _unit_delivery_contracts(schema: dict) -> dict[tuple[str, int], dict]:
+    return {
+        (item["scene_key"], item["unit_index"]): item
+        for item in schema["x-unit-delivery-contracts"]
+    }
+
+
+def _b66dda_shard(response: dict) -> ScreenplaySceneShardIR:
+    payload = deepcopy(response)
+    for scene in payload["scenes"]:
+        if len(str(scene.get("story_function") or "").strip()) < 6:
+            scene["story_function"] = "推进本场事件：" + scene["summary"]
+    return ScreenplaySceneShardIR.model_validate(payload)
+
+
+def _unit_delivery_array_schema(
+    schema: dict,
+    scene_index: int,
+    unit_index: int,
+) -> dict:
+    scene_constraint = schema["properties"]["scenes"]["prefixItems"][
+        scene_index
+    ]["allOf"][1]
+    unit_constraint = scene_constraint["properties"]["units"]["prefixItems"][
+        unit_index
+    ]["allOf"][1]
+    return unit_constraint["properties"]["participant_deliveries"]
+
+
+def test_repair_schema_derives_relations_visibility_and_evidence_per_unit() -> None:
+    replay = json.loads(ERR_20260810_B66DDA_REPLAY.read_text(encoding="utf-8"))
+    shard = _b66dda_shard(
+        replay["provider_responses"][0]["response"]
+    )
+    unit = shard.scenes[1].units[3]
+    unit.kind = "action"
+    unit.actor_keys = ["actor_offscreen"]
+    unit.target_keys = ["target_without_channel", "target_onscreen"]
+    unit.speaker_key = None
+    unit.onscreen_entity_keys = ["target_onscreen"]
+    unit.participant_deliveries = [
+        IRActionParticipantDelivery(
+            participant_key="actor_offscreen",
+            observable_claim="画外动作在画面内留下可见影响",
+            visible_effect=True,
+        ),
+        IRActionParticipantDelivery(
+            participant_key="target_without_channel",
+            observable_claim="只有主张，没有 unit 可感知通道",
+        ),
+        IRActionParticipantDelivery(
+            participant_key="target_onscreen",
+            observable_claim="已入画参与者不应再进入 delivery",
+            visible_reaction=True,
+        ),
+        IRActionParticipantDelivery(
+            participant_key="bystander",
+            observable_claim="旁听者不属于本 unit 关系",
+            audible=True,
+        ),
+    ]
+
+    schema = build_screenplay_scene_shard_repair_schema(shard)
+    contract = _unit_delivery_contracts(schema)[("bp-sc014", 3)]
+    delivery_schema = _unit_delivery_array_schema(schema, 1, 3)
+
+    assert contract["relation_participant_keys"] == [
+        "actor_offscreen",
+        "target_without_channel",
+        "target_onscreen",
+    ]
+    assert contract["onscreen_entity_keys"] == ["target_onscreen"]
+    assert contract["required_deliveries"] == [
+        {
+            "participant_key": "actor_offscreen",
+            "perception_channels": ["visible_effect"],
+        },
+        {
+            "participant_key": "target_without_channel",
+            "perception_channels": [],
+        },
+    ]
+    assert contract["evidence_gaps"] == ["target_without_channel"]
+    assert delivery_schema["minItems"] == 2
+    assert delivery_schema["maxItems"] == 2
+    assert [
+        item["properties"]["participant_key"]["const"]
+        for item in delivery_schema["prefixItems"]
+    ] == ["actor_offscreen", "target_without_channel"]
+    assert delivery_schema["prefixItems"][0]["properties"][
+        "visible_effect"
+    ] == {"const": True}
+    assert delivery_schema["prefixItems"][0]["properties"]["audible"] == {
+        "const": False,
+    }
+    assert delivery_schema["prefixItems"][1]["not"] == {}
+
+
+def test_repair_schema_allows_only_a_genuine_empty_delivery_set() -> None:
+    replay = json.loads(ERR_20260810_B66DDA_REPLAY.read_text(encoding="utf-8"))
+    shard = _b66dda_shard(
+        replay["provider_responses"][0]["response"]
+    )
+    unit = shard.scenes[1].units[0]
+    unit.actor_keys = ["person_b67de643afe6"]
+    unit.target_keys = []
+    unit.onscreen_entity_keys = ["person_b67de643afe6"]
+    unit.participant_deliveries = []
+
+    schema = build_screenplay_scene_shard_repair_schema(shard)
+    contract = _unit_delivery_contracts(schema)[("bp-sc014", 0)]
+    delivery_schema = _unit_delivery_array_schema(schema, 1, 0)
+
+    assert contract["required_deliveries"] == []
+    assert contract["evidence_gaps"] == []
+    assert delivery_schema["prefixItems"] == []
+    assert delivery_schema["minItems"] == 0
+    assert delivery_schema["maxItems"] == 0
+
+
+def test_repair_schema_accepts_audible_offscreen_speaker_evidence() -> None:
+    replay = json.loads(ERR_20260810_B66DDA_REPLAY.read_text(encoding="utf-8"))
+    shard = _b66dda_shard(
+        replay["provider_responses"][0]["response"]
+    )
+    unit = shard.scenes[2].units[2]
+    unit.actor_keys = []
+    unit.target_keys = []
+    unit.speaker_key = "offscreen_speaker"
+    unit.onscreen_entity_keys = []
+    unit.participant_deliveries = [
+        IRActionParticipantDelivery(
+            participant_key="offscreen_speaker",
+            observable_claim="画外说话人的原文对白可被听见",
+            audible=True,
+        )
+    ]
+
+    schema = build_screenplay_scene_shard_repair_schema(shard)
+    contract = _unit_delivery_contracts(schema)[("bp-sc015", 2)]
+    delivery_schema = _unit_delivery_array_schema(schema, 2, 2)
+
+    assert contract["required_deliveries"] == [{
+        "participant_key": "offscreen_speaker",
+        "perception_channels": ["audible"],
+    }]
+    assert contract["evidence_gaps"] == []
+    assert delivery_schema["prefixItems"][0]["properties"]["audible"] == {
+        "const": True,
+    }
+
+
+def test_err_20260810_b66dda_replays_60895_and_60897_without_runtime_access() -> None:
+    replay = json.loads(ERR_20260810_B66DDA_REPLAY.read_text(encoding="utf-8"))
+
+    assert replay["error_id"] == "ERR-20260810-b66dda"
+    assert [
+        item["provider_call_id"] for item in replay["provider_responses"]
+    ] == [60895, 60897]
+    assert [
+        item["semantic_attempt"] for item in replay["provider_responses"]
+    ] == [0, 1]
+
+    for provider_response in replay["provider_responses"]:
+        shard = _b66dda_shard(
+            provider_response["response"]
+        )
+        schema = build_screenplay_scene_shard_repair_schema(shard)
+        contracts = _unit_delivery_contracts(schema)
+
+        for scene_key, unit_index in (
+            ("bp-sc014", 5),
+            ("bp-sc014", 6),
+            ("bp-sc015", 1),
+        ):
+            contract = contracts[(scene_key, unit_index)]
+            assert contract["required_deliveries"] == []
+            scene = next(item for item in shard.scenes if item.key == scene_key)
+            assert scene.units[unit_index].participant_deliveries
+
+        final_answer = contracts[("bp-sc015", 2)]
+        if provider_response["provider_call_id"] == 60895:
+            assert final_answer["required_deliveries"] == [{
+                "participant_key": "person_e79ecc6793f5",
+                "perception_channels": ["audible"],
+            }]
+        else:
+            assert final_answer["required_deliveries"] == []
+        assert shard.scenes[2].units[2].participant_deliveries
+
+
 @pytest.mark.parametrize(
     "channel",
     ["audible", "visible_effect", "visible_reaction"],
@@ -1204,6 +1401,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     repair_contexts: dict[str, dict] = {}
     operation_ids: dict[str, str] = {}
     output_schemas: dict[str, dict] = {}
+    repair_schema_builders: dict[str, object] = {}
     scene_input_contracts = _contracts(plans, blueprint)
 
     async def fake_structured(messages, **kwargs):
@@ -1213,6 +1411,8 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         operation_ids[prompt_key] = kwargs["operation_id"]
         if kwargs.get("output_schema"):
             output_schemas[prompt_key] = kwargs["output_schema"]
+        if kwargs.get("repair_schema"):
+            repair_schema_builders[prompt_key] = kwargs["repair_schema"]
         if kwargs.get("repair_context"):
             repair_contexts[prompt_key] = json.loads(kwargs["repair_context"])
         if meta["stage_key"] == "screenplay_envelope":
@@ -1277,6 +1477,14 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert delivery_contract["evidence_schema"] == output_schemas[
         "screenplay_scene_shards:SS001"
     ]["$defs"]["IRActionParticipantDelivery"]
+    repair_schema_builder = repair_schema_builders[
+        "screenplay_scene_shards:SS001"
+    ]
+    assert callable(repair_schema_builder)
+    repair_schema = repair_schema_builder(_shard(plans[0], blueprint))
+    assert repair_schema["x-schema-purpose"] == (
+        "candidate-bound-semantic-repair"
+    )
     assert operation_ids["screenplay_scene_shards:SS001"].startswith(
         "screenplay.scene-shard:screenplay-scene-shard.v4:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"

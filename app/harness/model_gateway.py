@@ -289,6 +289,7 @@ async def chat_structured(
     call_meta: dict[str, Any] | None = None,
     repair_context: str = "",
     output_schema: dict[str, Any] | None = None,
+    repair_schema: Callable[[T], dict[str, Any]] | None = None,
     normalize_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_attempt: Callable[[dict[str, Any]], Any] | None = None,
 ) -> T:
@@ -469,6 +470,13 @@ async def chat_structured(
                 f"{operation_id} 业务校验失败：" + "；".join(semantic_errors[:10])
             )
         semantic_attempt += 1
+        semantic_schema = (
+            repair_schema(parsed)
+            if repair_schema is not None
+            else structured_schema
+        )
+        if not isinstance(semantic_schema, dict):
+            raise TypeError("repair_schema must return a JSON Schema object")
         current_messages = [
             {
                 "role": "user",
@@ -478,7 +486,7 @@ async def chat_structured(
                     + "\n- ".join(semantic_errors[:20])
                     + ("\n最小修复上下文：\n" + repair_context if repair_context else "")
                     + "\n输出 Schema：\n"
-                    + json.dumps(structured_schema, ensure_ascii=False)
+                    + json.dumps(semantic_schema, ensure_ascii=False)
                     + "\n当前候选：\n"
                     + json.dumps(
                         parsed.model_dump(mode="json")

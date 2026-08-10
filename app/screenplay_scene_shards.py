@@ -209,6 +209,183 @@ class ScreenplaySceneShardIR(BaseModel):
     identity_registry_hash: str = ""
     source_ownership_hash: str = ""
 
+
+_PARTICIPANT_PERCEPTION_CHANNELS = (
+    "audible",
+    "visible_effect",
+    "visible_reaction",
+)
+
+
+def _unit_relation_participant_keys(
+    unit: ScreenplaySceneShardUnit,
+) -> list[str]:
+    values = [*unit.actor_keys, *unit.target_keys]
+    if unit.kind == "dialogue" and unit.speaker_key:
+        values.append(unit.speaker_key)
+    return [
+        key
+        for key in dict.fromkeys(
+            str(value or "").strip() for value in values
+        )
+        if key
+    ]
+
+
+def _unit_delivery_evidence_channels(
+    unit: ScreenplaySceneShardUnit,
+    participant_key: str,
+) -> list[str]:
+    channels: list[str] = []
+    for delivery in unit.participant_deliveries:
+        if delivery.participant_key.strip() != participant_key:
+            continue
+        for channel in _PARTICIPANT_PERCEPTION_CHANNELS:
+            if getattr(delivery, channel) and channel not in channels:
+                channels.append(channel)
+    return channels
+
+
+def _participant_delivery_repair_schema(
+    participant_key: str,
+    perception_channels: list[str],
+) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "participant_key": {"const": participant_key},
+        "observable_claim": {"type": "string", "minLength": 1},
+    }
+    properties.update({
+        channel: {"const": channel in perception_channels}
+        for channel in _PARTICIPANT_PERCEPTION_CHANNELS
+    })
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "required": [
+            "participant_key",
+            "observable_claim",
+            *_PARTICIPANT_PERCEPTION_CHANNELS,
+        ],
+        "additionalProperties": False,
+        "x-perception-channels": list(perception_channels),
+    }
+    if not perception_channels:
+        # Keep the required participant visible while forbidding invented
+        # channels. The semantic gap must be repaired in the unit binding.
+        schema["not"] = {}
+        schema["x-evidence-gap"] = True
+    return schema
+
+
+def build_screenplay_scene_shard_repair_schema(
+    shard: ScreenplaySceneShardIR,
+) -> dict[str, Any]:
+    """Build positional unit delivery constraints from a failed candidate."""
+    schema = deepcopy(ScreenplaySceneShardIR.model_json_schema())
+    scene_schemas: list[dict[str, Any]] = []
+    unit_contracts: list[dict[str, Any]] = []
+
+    for scene in shard.scenes:
+        unit_schemas: list[dict[str, Any]] = []
+        for unit_index, unit in enumerate(scene.units):
+            relation_keys = _unit_relation_participant_keys(unit)
+            onscreen_keys = list(dict.fromkeys(
+                str(value or "").strip()
+                for value in unit.onscreen_entity_keys
+                if str(value or "").strip()
+            ))
+            onscreen_set = set(onscreen_keys)
+            offscreen_keys = [
+                key for key in relation_keys if key not in onscreen_set
+            ]
+            required_deliveries: list[dict[str, Any]] = []
+            item_schemas: list[dict[str, Any]] = []
+            evidence_gaps: list[str] = []
+            for participant_key in offscreen_keys:
+                channels = _unit_delivery_evidence_channels(
+                    unit,
+                    participant_key,
+                )
+                required_deliveries.append({
+                    "participant_key": participant_key,
+                    "perception_channels": channels,
+                })
+                item_schemas.append(_participant_delivery_repair_schema(
+                    participant_key,
+                    channels,
+                ))
+                if not channels:
+                    evidence_gaps.append(participant_key)
+
+            delivery_schema = {
+                "type": "array",
+                "prefixItems": item_schemas,
+                "items": False,
+                "minItems": len(offscreen_keys),
+                "maxItems": len(offscreen_keys),
+            }
+            unit_schemas.append({
+                "allOf": [
+                    {"$ref": "#/$defs/ScreenplaySceneShardUnit"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "event_key": {"const": unit.event_key},
+                            "source_segment_ids": {
+                                "const": list(unit.source_segment_ids),
+                            },
+                            "participant_deliveries": delivery_schema,
+                        },
+                        "required": [
+                            "event_key",
+                            "source_segment_ids",
+                            "participant_deliveries",
+                        ],
+                    },
+                ],
+            })
+            unit_contracts.append({
+                "scene_key": scene.key,
+                "unit_index": unit_index,
+                "event_key": unit.event_key,
+                "relation_participant_keys": relation_keys,
+                "onscreen_entity_keys": onscreen_keys,
+                "required_deliveries": required_deliveries,
+                "evidence_gaps": evidence_gaps,
+            })
+
+        scene_schemas.append({
+            "allOf": [
+                {"$ref": "#/$defs/ScreenplaySceneShardScene"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "key": {"const": scene.key},
+                        "units": {
+                            "type": "array",
+                            "prefixItems": unit_schemas,
+                            "items": False,
+                            "minItems": len(unit_schemas),
+                            "maxItems": len(unit_schemas),
+                        },
+                    },
+                    "required": ["key", "units"],
+                },
+            ],
+        })
+
+    schema["properties"]["scenes"] = {
+        "type": "array",
+        "prefixItems": scene_schemas,
+        "items": False,
+        "minItems": len(scene_schemas),
+        "maxItems": len(scene_schemas),
+    }
+    schema["x-schema-purpose"] = "candidate-bound-semantic-repair"
+    schema["x-unit-delivery-contracts"] = unit_contracts
+    return schema
+
+
 class ScreenplaySceneShardError(ValueError):
     def __init__(self, shard_id: str, errors: list[str]):
         self.shard_id = shard_id
@@ -1922,6 +2099,7 @@ async def generate_screenplay_scene_shards(
                         ],
                     }, ensure_ascii=False, separators=(",", ":")),
                     output_schema=output_schema,
+                    repair_schema=build_screenplay_scene_shard_repair_schema,
                     normalize_payload=normalize_payload,
                     on_attempt=attempts.append,
                 )
