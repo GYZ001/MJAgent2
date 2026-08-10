@@ -355,7 +355,8 @@ def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
             return None
 
         async def get(self, url, **_kwargs):
-            assert url.endswith("/v1/videos/generations/provider-task")
+            assert minimax_h3.base_url()
+            assert url == f"{minimax_h3.base_url()}/v1/videos/generations/provider-task"
             return _Response(200, {
                 "status": "succeeded",
                 "files": [{
@@ -386,6 +387,117 @@ def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
         "failure": None,
     }
 
+
+@pytest.mark.parametrize(
+    ("status_code", "payload", "expected_failure"),
+    [
+        pytest.param(
+            422,
+            {
+                "error": {
+                    "message": "request rejected",
+                    "failure": {
+                        "category": "model_rejection",
+                        "kind": "provider_rejected",
+                        "retryable": True,
+                    },
+                },
+            },
+            {
+                "category": "model_rejection",
+                "kind": "provider_rejected",
+                "disposition": "external_terminal",
+                "retryable": False,
+            },
+            id="explicit-model-rejection",
+        ),
+        pytest.param(
+            409,
+            {
+                "error": {
+                    "message": "provider execution unavailable",
+                    "failure": {
+                        "category": "technical",
+                        "kind": "provider_execution_failed",
+                        "retryable": True,
+                    },
+                },
+            },
+            {
+                "category": "technical",
+                "kind": "provider_execution_failed",
+                "disposition": "automatic_retry",
+                "retryable": True,
+            },
+            id="technical-failure",
+        ),
+    ],
+)
+def test_minimax_h3_poll_non_200_preserves_typed_failure(
+    monkeypatch,
+    status_code: int,
+    payload: dict,
+    expected_failure: dict,
+) -> None:
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, **_kwargs):
+            return _Response(status_code, payload)
+
+    monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(minimax_h3.poll_video_task("minimax_h3:provider-task"))
+
+    assert caught.value.failure.to_payload() == expected_failure
+
+
+@pytest.mark.parametrize(
+    "json_result",
+    [
+        pytest.param(ValueError("invalid JSON"), id="invalid-json"),
+        pytest.param([], id="non-object-json"),
+    ],
+)
+def test_minimax_h3_poll_malformed_response_is_typed_technical_failure(
+    monkeypatch,
+    json_result,
+) -> None:
+    class Response:
+        status_code = 200
+        text = "malformed response"
+
+        def json(self):
+            if isinstance(json_result, Exception):
+                raise json_result
+            return json_result
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(minimax_h3.poll_video_task("minimax_h3:provider-task"))
+
+    assert caught.value.failure.to_payload() == {
+        "category": "technical",
+        "kind": "malformed_response",
+        "disposition": "automatic_retry",
+        "retryable": True,
+    }
 
 @pytest.mark.parametrize(
     ("payload", "expected_kind", "expected_error"),

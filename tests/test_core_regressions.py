@@ -881,8 +881,18 @@ def test_video_derivatives_are_removed_when_visual_basis_changes(tmp_path, monke
           id TEXT, episode_id TEXT, shot_no INTEGER,
           adopted_version_id TEXT, mode_plan TEXT
         );
-        CREATE TABLE shot_versions(id TEXT, shot_id TEXT, video_path TEXT);
-        CREATE TABLE jobs(shot_id TEXT, kind TEXT);
+        CREATE TABLE shot_versions(
+          id TEXT, shot_id TEXT, video_path TEXT,
+          provider_task_id TEXT, status TEXT, cost_cny REAL
+        );
+        CREATE TABLE jobs(
+          id TEXT PRIMARY KEY, shot_id TEXT, version_id TEXT, kind TEXT,
+          status TEXT, cancellation_requested INTEGER DEFAULT 0,
+          abandoned INTEGER DEFAULT 0,
+          provider_non_cancellable INTEGER DEFAULT 0,
+          provider_operation_id TEXT, provider_create_state TEXT,
+          provider_failure_disposition TEXT, created_at REAL
+        );
         INSERT INTO episodes VALUES('e1','p1',1);
         INSERT INTO shots VALUES('s1','e1',1,'v1','{}');
         """

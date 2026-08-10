@@ -48,6 +48,13 @@ def test_pytest_does_not_inherit_provider_credentials() -> None:
     assert config.ZHIPU_API_KEY == ""
 
 
+def test_pytest_injects_minimax_mock_base_url_without_credentials() -> None:
+    assert os.environ["MINIMAX_H3_API_KEY"] == ""
+    assert config.MINIMAX_H3_API_KEY == ""
+    assert os.environ["MINIMAX_H3_BASE_URL"] == config.MINIMAX_H3_BASE_URL
+    assert config.MINIMAX_H3_BASE_URL
+
+
 def test_isolated_profile_requires_an_explicit_sandbox() -> None:
     env = os.environ.copy()
     env["MANJU_TEST_PROFILE"] = "isolated"

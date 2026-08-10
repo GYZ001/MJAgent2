@@ -16,6 +16,7 @@ _LIVE_INTEGRATION = False
 _ISOLATION_SESSION: IsolationSession | None = None
 _SANDBOX: Path | None = None
 _SANDBOX_OWNED = False
+_UNROUTABLE_PROVIDER_BASE_URL = "http://pytest-deny-network.invalid"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -55,7 +56,7 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ["DEEPSEEK_API_KEY"] = ""
     os.environ["ZHIPU_API_KEY"] = ""
     os.environ["MINIMAX_H3_API_KEY"] = ""
-    os.environ["MINIMAX_H3_BASE_URL"] = ""
+    os.environ["MINIMAX_H3_BASE_URL"] = _UNROUTABLE_PROVIDER_BASE_URL
 
     # Configure the process before test module collection imports application code.
     from app import config as app_config
@@ -70,7 +71,7 @@ def pytest_configure(config: pytest.Config) -> None:
     app_config.DEEPSEEK_API_KEY = ""
     app_config.ZHIPU_API_KEY = ""
     app_config.MINIMAX_H3_API_KEY = ""
-    app_config.MINIMAX_H3_BASE_URL = ""
+    app_config.MINIMAX_H3_BASE_URL = _UNROUTABLE_PROVIDER_BASE_URL
     app_config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     app_config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 

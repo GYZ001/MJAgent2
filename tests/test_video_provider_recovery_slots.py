@@ -156,6 +156,15 @@ def test_startup_migration_keeps_every_accepted_task_pollable(
 ) -> None:
     database = tmp_path / "accepted-duplicate-migration.db"
     conn = _create_database(database)
+    before = conn.execute(
+        """SELECT id,video_slot_active,provider_poll_required,
+                  provider_result_adoptable
+             FROM jobs ORDER BY id"""
+    ).fetchall()
+    assert [tuple(row) for row in before] == [
+        ("job-history", 0, 0, 1),
+        ("job-owner", 0, 0, 1),
+    ]
     conn.close()
     monkeypatch.setattr(db, "DB_PATH", database)
     monkeypatch.setattr(db, "DATA_DIR", tmp_path)
@@ -194,6 +203,85 @@ def test_startup_migration_keeps_every_accepted_task_pollable(
         ("job-history", "reserved", None),
         ("job-owner", "reserved", None),
     ]
+
+
+def test_restarts_never_promote_provider_only_history_to_active_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "provider-only-history-restarts.db"
+    conn = _create_database(database)
+    conn.execute(
+        """UPDATE jobs
+              SET status='succeeded',video_slot_active=0,
+                  provider_create_state='not_started',
+                  provider_non_cancellable=0,provider_poll_required=0,
+                  provider_result_adoptable=0
+            WHERE id='job-owner'"""
+    )
+    conn.execute(
+        """UPDATE shot_versions
+              SET status='succeeded',provider_task_id=NULL,
+                  video_path='authoritative.mp4',video_slot_active=0
+            WHERE id='version-owner'"""
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET video_slot_active=0,provider_poll_required=1,
+                  provider_result_adoptable=0
+            WHERE id='job-history'"""
+    )
+    conn.execute(
+        """UPDATE shot_versions SET video_slot_active=0
+            WHERE id='version-history'"""
+    )
+    conn.execute(
+        """UPDATE shots SET adopted_version_id='version-owner'
+            WHERE id='shot'"""
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    snapshots: list[dict[str, int | str | None]] = []
+
+    for _restart in range(2):
+        monkeypatch.setattr(db, "_local", threading.local())
+        db.init_db(reconcile_interrupted=True)
+        restarted = db.get_conn()
+        history = restarted.execute(
+            """SELECT status,video_slot_active,provider_poll_required,
+                      provider_result_adoptable,cancellation_requested,abandoned
+                 FROM jobs WHERE id='job-history'"""
+        ).fetchone()
+        adopted_version_id = restarted.execute(
+            "SELECT adopted_version_id FROM shots WHERE id='shot'"
+        ).fetchone()["adopted_version_id"]
+        version_slot = restarted.execute(
+            """SELECT video_slot_active FROM shot_versions
+                WHERE id='version-history'"""
+        ).fetchone()["video_slot_active"]
+        snapshots.append(
+            {
+                **dict(history),
+                "version_slot_active": version_slot,
+                "adopted_version_id": adopted_version_id,
+            }
+        )
+        restarted.close()
+
+    expected = {
+        "status": "waiting_provider",
+        "video_slot_active": 0,
+        "provider_poll_required": 1,
+        "provider_result_adoptable": 0,
+        "cancellation_requested": 0,
+        "abandoned": 0,
+        "version_slot_active": 0,
+        "adopted_version_id": "version-owner",
+    }
+    assert snapshots == [expected, expected]
 
 
 def test_restart_polls_both_accepted_tasks_and_quarantines_late_result(
