@@ -1,0 +1,1256 @@
+{
+  "error_id": "ERR-20260810-b66dda",
+  "case_id": "episode-1-ss004-bp-sc014-015",
+  "provider_responses": [
+    {
+      "provider_call_id": 60895,
+      "operation_id": "screenplay.scene-shard:screenplay-scene-shard.v4:screenplay-scene-input.v4:ep_711b29204aa9:SS004:16518756baf2aadae1ccf91bd1c139625f121af71dda7bf0e033190096f5b160:8343e89411a57ce55e4d44c76727d7b437bbdeffd62e177cada421be94fb574a:34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253:cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f:692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6",
+      "semantic_attempt": 0,
+      "response_sha256": "e2d1f3c187c316233c64497341bc994314c8c87830f293b71742b590ffeda2d4",
+      "response": {
+        "contract_version": "screenplay-scene-shard.v4",
+        "episode_no": 1,
+        "shard_id": "SS004",
+        "scene_plan_keys": [
+          "bp-sc013",
+          "bp-sc014",
+          "bp-sc015"
+        ],
+        "scenes": [
+          {
+            "key": "bp-sc013",
+            "scene_heading": "【场13】入夜 / 修仙宗门外门半山腰青石空地",
+            "story_function": "bridge",
+            "character_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_224fd998b1e7",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2",
+              "person_46e7e8b742ed",
+              "person_8ff1cb1a5861"
+            ],
+            "summary": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+            "previous_scene_exit_state": "女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+            "opening_image": "从大青山上空转至修仙宗门外门半山腰青石空地",
+            "agency_contracts": [],
+            "entry_state": "孟浩因承受不住飞行冲击陷入昏厥，被许师姐带往修仙宗门",
+            "exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+            "context_requirements": [
+              "从大青山上空转至修仙宗门外门半山腰青石空地",
+              "孟浩苏醒后确认所处新环境"
+            ],
+            "units": [
+              {
+                "kind": "action",
+                "text": "孟浩睁开眼睛，发现自己身处半山腰的青石空地上，四周山峦起伏云雾缭绕，环绕着精美的阁楼，环境绝非凡尘满眼陌生",
+                "event_key": "E013001",
+                "source_segment_ids": [
+                  "SRC0049"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "孟浩从昏厥中苏醒，确认身处陌生的修仙宗门区域"
+              },
+              {
+                "kind": "action",
+                "text": "王有材、大青山被困少年甲、大青山被困少年乙均已苏醒，正浑身颤抖惊恐地望着前方背对着四人的许师姐",
+                "event_key": "E013002",
+                "source_segment_ids": [
+                  "SRC0050"
+                ],
+                "actor_keys": [
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "target_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2",
+                  "person_224fd998b1e7"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "被带来的四人全部苏醒，均对眼前的许师姐感到恐惧"
+              },
+              {
+                "kind": "action",
+                "text": "许师姐前方站着两名二十岁左右的绿袍执事，二人双眼凹陷瞳孔发绿，望之令人生畏",
+                "event_key": "E013003",
+                "source_segment_ids": [
+                  "SRC0051"
+                ],
+                "actor_keys": [],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_224fd998b1e7"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "两名值守的绿袍执事出现在许师姐面前"
+              },
+              {
+                "kind": "dialogue",
+                "text": "许师姐好手段，出门一次竟带回了四个拥有资质的小娃。",
+                "event_key": "E013004",
+                "source_segment_ids": [
+                  "SRC0052"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_224fd998b1e7",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2",
+                  "person_8ff1cb1a5861"
+                ],
+                "participant_deliveries": [],
+                "speaker_key": "person_46e7e8b742ed",
+                "function": "statement",
+                "source_text": "许师姐好手段，出门一次竟带回了四个拥有资质的小娃。"
+              },
+              {
+                "kind": "dialogue",
+                "text": "将他们带去杂役处。",
+                "event_key": "E013005",
+                "source_segment_ids": [
+                  "SRC0053"
+                ],
+                "actor_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861"
+                ],
+                "onscreen_entity_keys": [
+                  "person_224fd998b1e7",
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "speaker_key": "person_224fd998b1e7",
+                "function": "instruction",
+                "source_text": "将他们带去杂役处。"
+              },
+              {
+                "kind": "action",
+                "text": "许师姐神情冷漠，不看孟浩四人一眼，迈步间化作一道长虹没入山峦之间消失不见",
+                "event_key": "E013006",
+                "source_segment_ids": [
+                  "SRC0053"
+                ],
+                "actor_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_224fd998b1e7",
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "许师姐离开，孟浩四人留在原地由两名绿袍执事接管"
+              }
+            ]
+          },
+          {
+            "key": "bp-sc014",
+            "scene_heading": "【场14】入夜 / 修仙宗门外门半山腰青石空地",
+            "story_function": "turn",
+            "character_keys": [
+              "person_b67de643afe6",
+              "person_46e7e8b742ed",
+              "person_8ff1cb1a5861",
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "summary": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，想到做杂役的收益生出期待，随后绿袍执事安排王有材与大青山被困少年乙前往南区杂役处",
+            "previous_scene_exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+            "opening_image": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+            "agency_contracts": [
+              {
+                "node_key": "S003-S002-S001-N016",
+                "actor_key": "person_46e7e8b742ed",
+                "agency_mode": "voluntary",
+                "narrative_attribution": "voluntary_choice",
+                "constraint_fact_key": ""
+              }
+            ],
+            "entry_state": "许师姐离开，孟浩四人留在原地由两名绿袍执事接管",
+            "exit_state": "王有材二人被指定去向，心生慌乱",
+            "context_requirements": [
+              "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+              "绿袍执事对话发生在宗门空地，孟浩确认自身安全后开始思考当下处境的收益",
+              "孟浩过往的穷困处境让他对赚钱的机会格外敏感",
+              "只有抵达宗门后才能进行杂役岗位分配",
+              "宗门职责要求"
+            ],
+            "units": [
+              {
+                "kind": "action",
+                "text": "孟浩恢复心神，怔怔看着许师姐消失的地方，眼中露出前所未有的神采，内心沸腾",
+                "event_key": "E014001",
+                "source_segment_ids": [
+                  "SRC0054"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6",
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "孟浩从震惊中平复，意识到自己身处修仙宗门，命运出现转机"
+              },
+              {
+                "kind": "dialogue",
+                "text": "杂役？这是要给仙人打工，应该不少赚吧。",
+                "event_key": "E014002",
+                "source_segment_ids": [
+                  "SRC0055"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "speaker_key": "person_b67de643afe6",
+                "function": "internal_thought",
+                "source_text": "杂役？这是要给仙人打工，应该不少赚吧。"
+              },
+              {
+                "kind": "action",
+                "text": "孟浩确认对方没有害命之意，对未来生出期待",
+                "event_key": "E014003",
+                "source_segment_ids": [
+                  "SRC0055"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "孟浩不再恐慌，对在宗门做杂役充满期待"
+              },
+              {
+                "kind": "dialogue",
+                "text": "许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。",
+                "event_key": "E014004",
+                "source_segment_ids": [
+                  "SRC0056"
+                ],
+                "actor_keys": [
+                  "person_8ff1cb1a5861"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_b67de643afe6",
+                    "observable_claim": "孟浩在旁听到绿袍执事乙的感慨",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_e79ecc6793f5",
+                    "observable_claim": "王有材在旁听到绿袍执事乙的感慨",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_b9cd0397a07f",
+                    "observable_claim": "大青山被困少年甲在旁听到绿袍执事乙的感慨",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_32ce878a56e2",
+                    "observable_claim": "大青山被困少年乙在旁听到绿袍执事乙的感慨",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  }
+                ],
+                "speaker_key": "person_8ff1cb1a5861",
+                "function": "statement",
+                "source_text": "许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。"
+              },
+              {
+                "kind": "action",
+                "text": "绿袍执事乙说完后神色高高在上，看向孟浩四人",
+                "event_key": "E014005",
+                "source_segment_ids": [
+                  "SRC0056"
+                ],
+                "actor_keys": [
+                  "person_8ff1cb1a5861"
+                ],
+                "target_keys": [
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "绿袍执事准备开始分配四人的去向"
+              },
+              {
+                "kind": "dialogue",
+                "text": "你，还有你，跟我走，去南区杂役处。",
+                "event_key": "E014006",
+                "source_segment_ids": [
+                  "SRC0057"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_b67de643afe6",
+                    "observable_claim": "孟浩在旁听到绿袍执事甲的分配指令",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_b9cd0397a07f",
+                    "observable_claim": "大青山被困少年甲在旁听到绿袍执事甲的分配指令",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_8ff1cb1a5861",
+                    "observable_claim": "绿袍执事乙在旁听到绿袍执事甲的分配指令",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  }
+                ],
+                "speaker_key": "person_46e7e8b742ed",
+                "function": "instruction",
+                "source_text": "你，还有你，跟我走，去南区杂役处。"
+              },
+              {
+                "kind": "action",
+                "text": "绿袍执事甲抬手指向王有材和他身旁的大青山被困少年乙",
+                "event_key": "E014007",
+                "source_segment_ids": [
+                  "SRC0057"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_b67de643afe6",
+                    "observable_claim": "孟浩看到绿袍执事甲指向王有材和大青山被困少年乙",
+                    "audible": false,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_b9cd0397a07f",
+                    "observable_claim": "大青山被困少年甲看到绿袍执事甲指向王有材和大青山被困少年乙",
+                    "audible": false,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_8ff1cb1a5861",
+                    "observable_claim": "绿袍执事乙看到绿袍执事甲指向王有材和大青山被困少年乙",
+                    "audible": false,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  }
+                ],
+                "resulting_state": "王有材和大青山被困少年乙被指定前往南区杂役处，二人面露慌乱"
+              }
+            ]
+          },
+          {
+            "key": "bp-sc015",
+            "scene_heading": "【场15】入夜 / 修仙宗门外门半山腰青石空地",
+            "story_function": "reaction",
+            "character_keys": [
+              "person_e79ecc6793f5",
+              "person_46e7e8b742ed",
+              "person_b67de643afe6"
+            ],
+            "summary": "王有材慌乱询问所在地，绿袍执事告知此处是靠山宗，孟浩对宗门生出更深好奇",
+            "previous_scene_exit_state": "王有材二人被指定去向，心生慌乱",
+            "opening_image": "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+            "agency_contracts": [
+              {
+                "node_key": "S003-S002-S001-N017",
+                "actor_key": "person_e79ecc6793f5",
+                "agency_mode": "reluctant",
+                "narrative_attribution": "voluntary_choice",
+                "constraint_fact_key": ""
+              }
+            ],
+            "entry_state": "王有材和大青山被困少年乙被指定前往南区杂役处，王有材心生恐慌",
+            "exit_state": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+            "context_requirements": [
+              "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+              "孟浩和王有材一同被带至宗门，在场听到对话",
+              "对陌生环境的恐惧"
+            ],
+            "units": [
+              {
+                "kind": "action",
+                "text": "王有材被绿袍执事甲指着，浑身哆嗦，满脸恐慌地抬头看向对方",
+                "event_key": "E015001",
+                "source_segment_ids": [
+                  "SRC0058"
+                ],
+                "actor_keys": [
+                  "person_e79ecc6793f5"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "onscreen_entity_keys": [
+                  "person_e79ecc6793f5",
+                  "person_46e7e8b742ed"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "王有材因恐慌主动开口询问所在地"
+              },
+              {
+                "kind": "dialogue",
+                "text": "这……这里是什么地方？",
+                "event_key": "E015002",
+                "source_segment_ids": [
+                  "SRC0058"
+                ],
+                "actor_keys": [
+                  "person_e79ecc6793f5"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "onscreen_entity_keys": [
+                  "person_e79ecc6793f5",
+                  "person_46e7e8b742ed"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_b67de643afe6",
+                    "observable_claim": "孟浩听到王有材的询问",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  }
+                ],
+                "speaker_key": "person_e79ecc6793f5",
+                "function": "question",
+                "source_text": "这……这里是什么地方？"
+              },
+              {
+                "kind": "dialogue",
+                "text": "靠山宗。",
+                "event_key": "E015003",
+                "source_segment_ids": [
+                  "SRC0059"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_e79ecc6793f5"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_e79ecc6793f5",
+                    "observable_claim": "王有材听到绿袍执事甲的答复",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_b67de643afe6",
+                    "observable_claim": "孟浩听到绿袍执事甲的答复，得知宗门名称为靠山宗",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": true
+                  }
+                ],
+                "speaker_key": "person_46e7e8b742ed",
+                "function": "answer",
+                "source_text": "靠山宗。"
+              },
+              {
+                "kind": "action",
+                "text": "孟浩得知宗门名为靠山宗，对其生出更深的好奇",
+                "event_key": "E015004",
+                "source_segment_ids": [
+                  "SRC0059"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "众人知晓所在宗门为靠山宗，孟浩对未来的宗门生活更加好奇"
+              }
+            ]
+          }
+        ],
+        "consumed_source_ids": [
+          "SRC0049",
+          "SRC0050",
+          "SRC0051",
+          "SRC0052",
+          "SRC0053",
+          "SRC0054",
+          "SRC0055",
+          "SRC0056",
+          "SRC0057",
+          "SRC0058",
+          "SRC0059"
+        ],
+        "unresolved_participants": [],
+        "source_hash": "16518756baf2aadae1ccf91bd1c139625f121af71dda7bf0e033190096f5b160",
+        "boundary_hash": "8343e89411a57ce55e4d44c76727d7b437bbdeffd62e177cada421be94fb574a",
+        "blueprint_hash": "34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253",
+        "identity_registry_hash": "cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f",
+        "source_ownership_hash": "692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6"
+      }
+    },
+    {
+      "provider_call_id": 60897,
+      "operation_id": "screenplay.scene-shard:screenplay-scene-shard.v4:screenplay-scene-input.v4:ep_711b29204aa9:SS004:16518756baf2aadae1ccf91bd1c139625f121af71dda7bf0e033190096f5b160:8343e89411a57ce55e4d44c76727d7b437bbdeffd62e177cada421be94fb574a:34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253:cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f:692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6",
+      "semantic_attempt": 1,
+      "response_sha256": "be76d851675390c435b09dd89e6a9d06add782bf38bfa29edafaabcf4a00b63c",
+      "response": {
+        "contract_version": "screenplay-scene-shard.v4",
+        "episode_no": 1,
+        "shard_id": "SS004",
+        "scene_plan_keys": [
+          "bp-sc013",
+          "bp-sc014",
+          "bp-sc015"
+        ],
+        "scenes": [
+          {
+            "key": "bp-sc013",
+            "scene_heading": "【场13】入夜 / 修仙宗门外门半山腰青石空地",
+            "story_function": "bridge",
+            "character_keys": [
+              "person_b67de643afe6",
+              "person_e79ecc6793f5",
+              "person_224fd998b1e7",
+              "person_b9cd0397a07f",
+              "person_32ce878a56e2",
+              "person_46e7e8b742ed",
+              "person_8ff1cb1a5861"
+            ],
+            "summary": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+            "conflict": "",
+            "turn": "",
+            "source_basis": "",
+            "previous_scene_exit_state": "女子甩出绿风卷走四人升空飞行，孟浩意识到遇到了仙人，承受不住飞行冲击昏了过去",
+            "opening_image": "从大青山上空转至修仙宗门外门半山腰青石空地",
+            "agency_contracts": [],
+            "entry_state": "孟浩因承受不住飞行冲击陷入昏厥，被许师姐带往修仙宗门",
+            "exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+            "context_requirements": [
+              "从大青山上空转至修仙宗门外门半山腰青石空地",
+              "孟浩苏醒后确认所处新环境"
+            ],
+            "units": [
+              {
+                "kind": "action",
+                "text": "孟浩睁开眼睛，发现自己身处半山腰的青石空地上，四周山峦起伏云雾缭绕，环绕着精美的阁楼，环境绝非凡尘满眼陌生",
+                "event_key": "E013001",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0049"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "孟浩从昏厥中苏醒，确认身处陌生的修仙宗门区域",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              },
+              {
+                "kind": "action",
+                "text": "王有材、大青山被困少年甲、大青山被困少年乙均已苏醒，正浑身颤抖惊恐地望着前方背对着四人的许师姐",
+                "event_key": "E013002",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0050"
+                ],
+                "actor_keys": [
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "target_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2",
+                  "person_224fd998b1e7"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "被带来的四人全部苏醒，均对眼前的许师姐感到恐惧",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              },
+              {
+                "kind": "action",
+                "text": "许师姐前方站着两名二十岁左右的绿袍执事，二人双眼凹陷瞳孔发绿，望之令人生畏",
+                "event_key": "E013003",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0051"
+                ],
+                "actor_keys": [],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_224fd998b1e7"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "两名值守的绿袍执事出现在许师姐面前",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              },
+              {
+                "kind": "dialogue",
+                "text": "许师姐好手段，出门一次竟带回了四个拥有资质的小娃。",
+                "event_key": "E013004",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0052"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_224fd998b1e7",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2",
+                  "person_8ff1cb1a5861"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "",
+                "speaker_key": "person_46e7e8b742ed",
+                "function": "statement",
+                "source_text": "许师姐好手段，出门一次竟带回了四个拥有资质的小娃。",
+                "chain_key": ""
+              },
+              {
+                "kind": "dialogue",
+                "text": "将他们带去杂役处。",
+                "event_key": "E013005",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0053"
+                ],
+                "actor_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861"
+                ],
+                "onscreen_entity_keys": [
+                  "person_224fd998b1e7",
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "",
+                "speaker_key": "person_224fd998b1e7",
+                "function": "instruction",
+                "source_text": "将他们带去杂役处。",
+                "chain_key": ""
+              },
+              {
+                "kind": "action",
+                "text": "许师姐神情冷漠，不看孟浩四人一眼，迈步间化作一道长虹没入山峦之间消失不见",
+                "event_key": "E013006",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0053"
+                ],
+                "actor_keys": [
+                  "person_224fd998b1e7"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_224fd998b1e7",
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_b9cd0397a07f",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "许师姐离开，孟浩四人留在原地由两名绿袍执事接管",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              }
+            ]
+          },
+          {
+            "key": "bp-sc014",
+            "scene_heading": "【场14】入夜 / 修仙宗门外门半山腰青石空地",
+            "story_function": "推进本场事件：绿袍执事乙感慨许师姐的修为与飞行法宝，孟浩确认没有生命危险，得知要做杂役后反而生出期待，觉得给仙人打工应该能赚不少钱；绿袍执事点出王有材和大青山被困少年乙，安排二人前往南区杂役处",
+            "character_keys": [
+              "person_b67de643afe6",
+              "person_46e7e8b742ed",
+              "person_8ff1cb1a5861",
+              "person_e79ecc6793f5",
+              "person_32ce878a56e2"
+            ],
+            "summary": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，想到做杂役的收益生出期待，随后绿袍执事安排王有材与大青山被困少年乙前往南区杂役处",
+            "conflict": "",
+            "turn": "",
+            "source_basis": "",
+            "previous_scene_exit_state": "孟浩苏醒在云雾缭绕的宗门青石空地，许师姐将四人交给两名绿袍男子后离去",
+            "opening_image": "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+            "agency_contracts": [
+              {
+                "node_key": "S003-S002-S001-N016",
+                "actor_key": "person_46e7e8b742ed",
+                "agency_mode": "voluntary",
+                "narrative_attribution": "voluntary_choice",
+                "constraint_fact_key": ""
+              }
+            ],
+            "entry_state": "许师姐离开，孟浩四人留在原地由两名绿袍执事接管",
+            "exit_state": "王有材二人被指定去向，心生慌乱",
+            "context_requirements": [
+              "绿袍执事私下感慨许师姐的实力，孟浩从震惊中平复，务实的性格让他立刻想到做杂役的收益，生出新的期待",
+              "绿袍执事对话发生在宗门空地，孟浩确认自身安全后开始思考当下处境的收益",
+              "孟浩过往的穷困处境让他对赚钱的机会格外敏感",
+              "只有抵达宗门后才能进行杂役岗位分配",
+              "宗门职责要求"
+            ],
+            "units": [
+              {
+                "kind": "action",
+                "text": "孟浩恢复心神，怔怔看着许师姐消失的地方，眼中露出前所未有的神采，内心沸腾",
+                "event_key": "E014001",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0054"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6",
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "孟浩从震惊中平复，意识到自己身处修仙宗门，命运出现转机",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              },
+              {
+                "kind": "dialogue",
+                "text": "杂役？这是要给仙人打工，应该不少赚吧。",
+                "event_key": "E014002",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0055"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "",
+                "speaker_key": "person_b67de643afe6",
+                "function": "internal_thought",
+                "source_text": "杂役？这是要给仙人打工，应该不少赚吧。",
+                "chain_key": ""
+              },
+              {
+                "kind": "action",
+                "text": "孟浩确认对方没有害命之意，对未来生出期待",
+                "event_key": "E014003",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0055"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "孟浩不再恐慌，对在宗门做杂役充满期待",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              },
+              {
+                "kind": "dialogue",
+                "text": "许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。",
+                "event_key": "E014004",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0056"
+                ],
+                "actor_keys": [
+                  "person_8ff1cb1a5861"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "",
+                "speaker_key": "person_8ff1cb1a5861",
+                "function": "statement",
+                "source_text": "许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。",
+                "chain_key": ""
+              },
+              {
+                "kind": "action",
+                "text": "绿袍执事乙说完后神色高高在上，看向孟浩四人",
+                "event_key": "E014005",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0056"
+                ],
+                "actor_keys": [
+                  "person_8ff1cb1a5861"
+                ],
+                "target_keys": [
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_8ff1cb1a5861",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "绿袍执事准备开始分配四人的去向",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              },
+              {
+                "kind": "dialogue",
+                "text": "你，还有你，跟我走，去南区杂役处。",
+                "event_key": "E014006",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0057"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_8ff1cb1a5861",
+                    "observable_claim": "绿袍执事乙在旁听到绿袍执事甲的分配指令",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  }
+                ],
+                "resulting_state": "",
+                "speaker_key": "person_46e7e8b742ed",
+                "function": "instruction",
+                "source_text": "你，还有你，跟我走，去南区杂役处。",
+                "chain_key": ""
+              },
+              {
+                "kind": "action",
+                "text": "绿袍执事甲抬手指向王有材和他身旁的大青山被困少年乙",
+                "event_key": "E014007",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0057"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_e79ecc6793f5",
+                  "person_32ce878a56e2"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_8ff1cb1a5861",
+                    "observable_claim": "绿袍执事乙看到绿袍执事甲指向王有材和大青山被困少年乙",
+                    "audible": false,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  }
+                ],
+                "resulting_state": "王有材和大青山被困少年乙被指定前往南区杂役处，二人面露慌乱",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              }
+            ]
+          },
+          {
+            "key": "bp-sc015",
+            "scene_heading": "【场15】入夜 / 修仙宗门外门半山腰青石空地",
+            "story_function": "reaction",
+            "character_keys": [
+              "person_e79ecc6793f5",
+              "person_46e7e8b742ed",
+              "person_b67de643afe6"
+            ],
+            "summary": "王有材慌乱询问所在地，绿袍执事告知此处是靠山宗，孟浩对宗门生出更深好奇",
+            "conflict": "",
+            "turn": "",
+            "source_basis": "",
+            "previous_scene_exit_state": "王有材二人被指定去向，心生慌乱",
+            "opening_image": "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+            "agency_contracts": [
+              {
+                "node_key": "S003-S002-S001-N017",
+                "actor_key": "person_e79ecc6793f5",
+                "agency_mode": "reluctant",
+                "narrative_attribution": "voluntary_choice",
+                "constraint_fact_key": ""
+              }
+            ],
+            "entry_state": "王有材和大青山被困少年乙被指定前往南区杂役处，王有材心生恐慌",
+            "exit_state": "众人得知所在宗门名称，孟浩对靠山宗生出更深好奇",
+            "context_requirements": [
+              "王有材浑身哆嗦，满脸恐慌抬头看向绿袍执事",
+              "孟浩和王有材一同被带至宗门，在场听到对话",
+              "对陌生环境的恐惧"
+            ],
+            "units": [
+              {
+                "kind": "action",
+                "text": "王有材被绿袍执事甲指着，浑身哆嗦，满脸恐慌地抬头看向对方",
+                "event_key": "E015001",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0058"
+                ],
+                "actor_keys": [
+                  "person_e79ecc6793f5"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "onscreen_entity_keys": [
+                  "person_e79ecc6793f5",
+                  "person_46e7e8b742ed"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "王有材因恐慌主动开口询问所在地",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              },
+              {
+                "kind": "dialogue",
+                "text": "这……这里是什么地方？",
+                "event_key": "E015002",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0058"
+                ],
+                "actor_keys": [
+                  "person_e79ecc6793f5"
+                ],
+                "target_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "onscreen_entity_keys": [
+                  "person_e79ecc6793f5",
+                  "person_46e7e8b742ed",
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_b67de643afe6",
+                    "observable_claim": "孟浩听到王有材的询问",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  }
+                ],
+                "resulting_state": "",
+                "speaker_key": "person_e79ecc6793f5",
+                "function": "question",
+                "source_text": "这……这里是什么地方？",
+                "chain_key": ""
+              },
+              {
+                "kind": "dialogue",
+                "text": "靠山宗。",
+                "event_key": "E015003",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0059"
+                ],
+                "actor_keys": [
+                  "person_46e7e8b742ed"
+                ],
+                "target_keys": [
+                  "person_e79ecc6793f5"
+                ],
+                "onscreen_entity_keys": [
+                  "person_46e7e8b742ed",
+                  "person_b67de643afe6",
+                  "person_e79ecc6793f5"
+                ],
+                "participant_deliveries": [
+                  {
+                    "participant_key": "person_e79ecc6793f5",
+                    "observable_claim": "王有材听到绿袍执事甲的答复",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": false
+                  },
+                  {
+                    "participant_key": "person_b67de643afe6",
+                    "observable_claim": "孟浩听到绿袍执事甲的答复，得知宗门名称为靠山宗",
+                    "audible": true,
+                    "visible_effect": false,
+                    "visible_reaction": true
+                  }
+                ],
+                "resulting_state": "",
+                "speaker_key": "person_46e7e8b742ed",
+                "function": "answer",
+                "source_text": "靠山宗。",
+                "chain_key": ""
+              },
+              {
+                "kind": "action",
+                "text": "孟浩得知宗门名为靠山宗，对其生出更深的好奇",
+                "event_key": "E015004",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "source_segment_ids": [
+                  "SRC0059"
+                ],
+                "actor_keys": [
+                  "person_b67de643afe6"
+                ],
+                "target_keys": [],
+                "onscreen_entity_keys": [
+                  "person_b67de643afe6"
+                ],
+                "participant_deliveries": [],
+                "resulting_state": "众人知晓所在宗门为靠山宗，孟浩对未来的宗门生活更加好奇",
+                "speaker_key": null,
+                "function": "statement",
+                "source_text": "",
+                "chain_key": ""
+              }
+            ]
+          }
+        ],
+        "consumed_source_ids": [
+          "SRC0049",
+          "SRC0050",
+          "SRC0051",
+          "SRC0052",
+          "SRC0053",
+          "SRC0054",
+          "SRC0055",
+          "SRC0056",
+          "SRC0057",
+          "SRC0058",
+          "SRC0059"
+        ],
+        "unresolved_participants": [],
+        "source_hash": "16518756baf2aadae1ccf91bd1c139625f121af71dda7bf0e033190096f5b160",
+        "boundary_hash": "8343e89411a57ce55e4d44c76727d7b437bbdeffd62e177cada421be94fb574a",
+        "blueprint_hash": "34fb37e4ef1e38a2ceca7ce61e6362e467b1ab8988b4f46c0f0369caac62d253",
+        "identity_registry_hash": "cefe6693182283e343e7abbe59938eb0b04fd3a351b1527184215f1bc6c4de1f",
+        "source_ownership_hash": "692b41e33d827e3e37ceabacecc8be1bd1b77827ee4dd4085d52dfad6c0bd5b6"
+      }
+    }
+  ]
+}

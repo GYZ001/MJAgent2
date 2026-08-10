@@ -154,6 +154,46 @@ def test_structured_runner_semantic_retry_has_independent_budget(monkeypatch) ->
     assert [meta["semantic_attempt"] for meta in metas] == [0, 1]
 
 
+def test_structured_runner_builds_repair_schema_from_failed_candidate(
+    monkeypatch,
+) -> None:
+    prompts: list[str] = []
+    repair_candidates: list[int] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return '{"value":-1}' if len(prompts) == 1 else '{"value":2}'
+
+    def build_repair_schema(value: _Payload) -> dict:
+        repair_candidates.append(value.value)
+        return {
+            "type": "object",
+            "x-schema-phase": "semantic-repair",
+            "x-failed-value": value.value,
+        }
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "original"}],
+        model_type=_Payload,
+        validate=lambda value: [] if value.value > 0 else ["value 必须为正数"],
+        operation_id="test.dynamic-semantic-schema:v1:abc",
+        max_tokens=128,
+        semantic_retry_limit=1,
+        output_schema={
+            "type": "object",
+            "x-schema-phase": "initial-output",
+        },
+        repair_schema=build_repair_schema,
+    ))
+
+    assert result.value == 2
+    assert repair_candidates == [-1]
+    assert '"x-schema-phase": "semantic-repair"' in prompts[1]
+    assert '"x-failed-value": -1' in prompts[1]
+    assert '"x-schema-phase": "initial-output"' not in prompts[1]
+
+
 def test_structured_runner_does_not_accept_malformed_http_200(monkeypatch) -> None:
     async def fake_chat(*_args, **_kwargs):
         return "HTTP 200 but no task object"
