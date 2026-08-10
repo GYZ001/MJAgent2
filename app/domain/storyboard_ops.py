@@ -1822,6 +1822,23 @@ def recover_storyboard_tasks() -> int:
             parent = None
         recorder = None
         try:
+            if row["storyboard_outline_json"]:
+                from app.production.screenplay_authority import (
+                    resolve_downstream_screenplay,
+                )
+                from app.storyboard_authority import (
+                    resolve_storyboard_outline_authority,
+                )
+
+                screenplay_context = resolve_downstream_screenplay(
+                    episode_id,
+                    conn=conn,
+                )
+                if screenplay_context.narrative_authority_required:
+                    resolve_storyboard_outline_authority(
+                        episode_id,
+                        conn=conn,
+                    )
             recorder = _new_storyboard_recorder(
                 episode_id, resume=True,
                 requested_by="system", trigger_type="resume",
@@ -2970,6 +2987,14 @@ async def clear_storyboard_projection(episode_id: str) -> dict:
                    WHERE id=?""",
                 (episode_id,),
             )
+            from app.storyboard_authority import (
+                clear_storyboard_outline_authority,
+            )
+
+            clear_storyboard_outline_authority(
+                episode_id,
+                conn=conn,
+            )
             from app.narrative_review import invalidate_episode_narrative_review
 
             invalidate_episode_narrative_review(
@@ -3197,6 +3222,14 @@ async def clear_storyboard(episode_id: str):
                    screenplay_publish_fence=0
                WHERE id=?""",
             (episode_id,),
+        )
+        from app.storyboard_authority import (
+            clear_storyboard_outline_authority,
+        )
+
+        clear_storyboard_outline_authority(
+            episode_id,
+            conn=conn,
         )
         if "storyboard_control_json" in {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(episodes)").fetchall()

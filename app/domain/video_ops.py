@@ -986,9 +986,19 @@ def _confirm_episode_core_impl(
     screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
     screenplay = screenplay_context.screenplay
     narrative_authority = screenplay_context.narrative_authority_required
+    outline_authority = None
+    if narrative_authority:
+        from app.storyboard_authority import (
+            resolve_storyboard_outline_authority,
+        )
+
+        outline_authority = resolve_storyboard_outline_authority(
+            episode_id,
+            conn=conn,
+        )
     compact_target = (
-        int(ep["target_duration_s"] or 0)
-        if narrative_authority
+        outline_authority.authoritative_duration_s
+        if outline_authority is not None
         else _compact_episode_target(ep["target_duration_s"])
     )
     shots_rows = conn.execute("SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no", (episode_id,)).fetchall()
@@ -1018,6 +1028,15 @@ def _confirm_episode_core_impl(
     # 用户可操作的质量建议，也不应污染确认后的 storyboard_warning。
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
     shots = board.shots
+    if outline_authority is not None:
+        from app.storyboard_authority import (
+            assert_storyboard_matches_outline_authority,
+        )
+
+        assert_storyboard_matches_outline_authority(
+            outline_authority,
+            board,
+        )
     if narrative_authority:
         from app.production.certificate import (
             verify_current_storyboard_completion_authority,

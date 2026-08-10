@@ -17,6 +17,7 @@ from app.production.revision import (
     mark_baseline_generated,
     set_published_artifact,
 )
+from app.schemas import StoryboardOutline, StoryboardOutlineShot
 from tests.test_narrative_publish_gate import (
     _artifact,
     _install_global_calibration,
@@ -43,6 +44,23 @@ async def _published_authority_case(monkeypatch) -> dict:
         shot.prompt_contract_version = PROMPT_CONTRACT_VERSION
     screenplay_artifact, _shot_artifacts = _persist_review_projection(
         screenplay, board,
+    )
+    outline = StoryboardOutline(
+        episode_no=board.episode_no,
+        shots=[
+            StoryboardOutlineShot.model_validate({
+                key: value
+                for key, value in shot.model_dump(mode="json").items()
+                if key in StoryboardOutlineShot.model_fields
+            })
+            for shot in board.shots
+        ],
+    )
+    from app.storyboard_authority import persist_storyboard_outline_authority
+
+    persist_storyboard_outline_authority(
+        "episode-generic",
+        outline,
     )
     _install_passing_review_model(monkeypatch)
     _observations, _report, review_artifact_ids = await run_blind_audience_review(

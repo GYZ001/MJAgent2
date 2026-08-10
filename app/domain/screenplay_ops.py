@@ -477,6 +477,9 @@ def update_episode_target_duration(
 
     cursor = conn.execute(
         "UPDATE episodes SET target_duration_s=?, "
+        "planning_target_duration_s=?, "
+        "planning_duration_source='episode_target_duration_editor', "
+        "target_duration_authority='planning_estimate', "
         "screenplay_constraint_version=screenplay_constraint_version+1, "
         "screenplay_snapshot_version=screenplay_snapshot_version+1 "
         "WHERE id=? AND screenplay_publish_fence=0 "
@@ -485,7 +488,7 @@ def update_episode_target_duration(
         "AND COALESCE(screenplay_json,'')='' "
         "AND COALESCE(screenplay_artifact_id,'')='' "
         "AND NOT EXISTS(SELECT 1 FROM shots WHERE episode_id=?)",
-        (target, episode_id, episode_id),
+        (target, target, episode_id, episode_id),
     )
     conn.commit()
     if cursor.rowcount != 1:
@@ -944,7 +947,15 @@ async def _screenplay_task(
         )
         compact_target = _storyboard_target_for_source(ep_data.get("target_duration_s"), len(source_text))
         if compact_target != ep_data.get("target_duration_s"):
-            conn.execute("UPDATE episodes SET target_duration_s=? WHERE id=?", (compact_target, episode_id))
+            conn.execute(
+                """UPDATE episodes
+                      SET target_duration_s=?,
+                          planning_target_duration_s=?,
+                          planning_duration_source='screenplay_source_capacity_estimate',
+                          target_duration_authority='planning_estimate'
+                    WHERE id=?""",
+                (compact_target, compact_target, episode_id),
+            )
             conn.commit()
             ep_data["target_duration_s"] = compact_target
         prev = conn.execute(
@@ -2249,6 +2260,14 @@ async def delete_screenplay(episode_id: str):
                 {expected_owner},
                 "changed_during_delete",
             )
+        from app.storyboard_authority import (
+            clear_storyboard_outline_authority,
+        )
+
+        clear_storyboard_outline_authority(
+            episode_id,
+            conn=conn,
+        )
         conn.commit()
     except StateConflict:
         if conn.in_transaction:

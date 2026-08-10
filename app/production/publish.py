@@ -236,6 +236,14 @@ def publish_screenplay(
                     WHERE id=?""",
                 (episode_id,),
             )
+            from app.storyboard_authority import (
+                clear_storyboard_outline_authority,
+            )
+
+            clear_storyboard_outline_authority(
+                episode_id,
+                conn=conn,
+            )
 
         conn.execute(
             "UPDATE artifacts SET status='approved', trust_level='T2' WHERE id=?",
