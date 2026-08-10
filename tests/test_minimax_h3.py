@@ -383,6 +383,54 @@ def test_minimax_h3_poll_maps_result_and_provider_prefix(monkeypatch) -> None:
         "video_url": "http://192.168.31.232:8181/v1/outputs?filename=result.mp4",
         "last_frame_url": "",
         "error": "",
+        "failure": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_kind", "expected_error"),
+    [
+        pytest.param(
+            {"status": "not_found", "files": [], "errors": []},
+            "provider_task_not_found",
+            "MiniMaxH3 队列和历史中均找不到该任务",
+            id="provider-task-not-found",
+        ),
+        pytest.param(
+            {"status": "succeeded", "files": [], "errors": []},
+            "provider_output_missing",
+            "MiniMaxH3 任务成功但未返回 MP4 文件",
+            id="succeeded-without-mp4",
+        ),
+    ],
+)
+def test_minimax_h3_poll_preserves_technical_failure_contract(
+    monkeypatch,
+    payload: dict,
+    expected_kind: str,
+    expected_error: str,
+) -> None:
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, **_kwargs):
+            return _Response(200, payload)
+
+    monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    result = asyncio.run(minimax_h3.poll_video_task("minimax_h3:provider-task"))
+
+    assert result["status"] == "failed"
+    assert result["error"] == expected_error
+    assert result["failure"] == {
+        "category": "technical",
+        "kind": expected_kind,
+        "disposition": "manual_review",
+        "retryable": False,
     }
 
 

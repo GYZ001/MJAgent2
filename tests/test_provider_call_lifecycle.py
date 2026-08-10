@@ -1000,6 +1000,74 @@ def test_video_poll_network_error_is_retryable(monkeypatch) -> None:
     assert calls[0][0][:3] == ("video_poll", "video-model", "FAILED")
 
 
+@pytest.mark.parametrize(
+    ("error_payload", "expected_failure"),
+    [
+        pytest.param(
+            {"message": "provider worker exited"},
+            {
+                "category": "technical",
+                "kind": "provider_execution_failed",
+                "disposition": "manual_review",
+                "retryable": False,
+            },
+            id="generic-provider-failure",
+        ),
+        pytest.param(
+            {
+                "message": "provider explicitly rejected the input",
+                "failure": {
+                    "category": "model_rejection",
+                    "kind": "provider_rejected",
+                    "retryable": False,
+                },
+            },
+            {
+                "category": "model_rejection",
+                "kind": "provider_rejected",
+                "disposition": "external_terminal",
+                "retryable": False,
+            },
+            id="explicit-model-rejection",
+        ),
+    ],
+)
+def test_video_poll_uses_structured_failure_evidence_only(
+    monkeypatch,
+    error_payload: dict,
+    expected_failure: dict,
+) -> None:
+    class Response:
+        status_code = 200
+        text = "provider response"
+
+        def json(self):
+            return {"status": "failed", "error": error_payload}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, *, headers):
+            return Response()
+
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(
+        hiagent, "_model_connection",
+        lambda *_args: ("https://provider.invalid", {"x": "y"}),
+    )
+    monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model")
+    monkeypatch.setattr(hiagent, "log_provider_call", lambda *_args, **_kwargs: None)
+
+    result = asyncio.run(hiagent.poll_video_task("task-1"))
+
+    assert result["status"] == "failed"
+    assert result["failure"] == expected_failure
+
+
 def test_media_download_retries_transient_connect_timeout(monkeypatch) -> None:
     calls = 0
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import json
 import uuid
 
 import pytest
@@ -24,6 +25,7 @@ from app.screenplay_scene_shards import (
     UnresolvedParticipant,
     blueprint_content_hash,
     build_frozen_identity_registry,
+    build_screenplay_scene_input_contracts,
     build_screenplay_scene_shard_plans,
     generate_screenplay_envelope,
     generate_screenplay_scene_shards,
@@ -157,6 +159,84 @@ def test_scene_shard_grouping_is_deterministic_and_respects_domains() -> None:
     assert [item.scene_plan_keys for item in first] == [["bp-sc001"], ["bp-sc002"]]
 
 
+def test_scene_input_contracts_align_source_and_frozen_participants_per_scene() -> None:
+    blueprint = _blueprint(split_domain=False)
+    blueprint.nodes[0].participants = ["甲"]
+    blueprint.nodes[1].participants = ["乙"]
+    derive_blueprint_scene_plans(blueprint)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    assert plan.scene_plan_keys == ["bp-sc001", "bp-sc002"]
+    registry = [
+        {
+            "identity_key": "person_a",
+            "authority_id": "bible:甲",
+            "canonical_name": "甲",
+            "source_labels": ["甲"],
+        },
+        {
+            "identity_key": "person_b",
+            "authority_id": "bible:乙",
+            "canonical_name": "乙",
+            "source_labels": ["乙"],
+        },
+    ]
+
+    contracts = build_screenplay_scene_input_contracts(
+        plan=plan,
+        scene_plans=blueprint.scene_plans,
+        source_by_id={
+            segment.segment_id: segment.text
+            for segment in index_source_segments(SOURCE)
+        },
+        identity_registry=registry,
+    )
+
+    assert [contract.scene_plan_key for contract in contracts] == [
+        "bp-sc001",
+        "bp-sc002",
+    ]
+    assert contracts[0].source_segment_ids == ["SRC0001"]
+    assert contracts[0].source_segments[0].model_dump() == {
+        "source_segment_id": "SRC0001",
+        "text": "甲推门进入。",
+    }
+    assert contracts[0].participant_bindings[0].model_dump() == {
+        "blueprint_key": "甲",
+        "identity_key": "person_a",
+    }
+    assert contracts[1].source_segment_ids == ["SRC0002"]
+    assert contracts[1].participant_bindings[0].identity_key == "person_b"
+
+
+def test_scene_input_contract_rejects_unfrozen_blueprint_participant() -> None:
+    blueprint = _blueprint(split_domain=False)
+    blueprint.nodes[0].participants = ["未冻结来客"]
+    derive_blueprint_scene_plans(blueprint)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="bp-sc001 Blueprint participant 未冻结：未冻结来客",
+    ):
+        build_screenplay_scene_input_contracts(
+            plan=plan,
+            scene_plans=blueprint.scene_plans,
+            source_by_id={
+                segment.segment_id: segment.text
+                for segment in index_source_segments(SOURCE)
+            },
+            identity_registry=[],
+        )
+
+
 def test_frozen_functional_identity_has_a_visible_contextual_anchor() -> None:
     identities, _registry, _registry_hash = build_frozen_identity_registry(
         Bible(characters=[], world=World(visual_style_canonical="测试")),
@@ -266,12 +346,21 @@ def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
         identity_registry_hash="identity-hash",
     )
     shard = _shard(plans[0], blueprint)
-    shard.scenes[0].units[0].source_segment_ids = ["SRC9999"]
+    shard.scenes[0].units[0].source_segment_ids = ["SRC0002"]
     shard.unresolved_participants = [UnresolvedParticipant(
         source_label="陌生人",
         source_segment_ids=["SRC0001"],
         scene_key="bp-sc001",
     )]
+    normalize_screenplay_scene_shard(
+        shard,
+        episode_no=1,
+        plan=plans[0],
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        identity_registry=[],
+        identity_keys={"narrator"},
+    )
+    assert shard.scenes[0].units[0].source_segment_ids == ["SRC0002"]
     errors = validate_screenplay_scene_shard(
         shard,
         plan=plans[0],
@@ -279,7 +368,34 @@ def test_scene_shard_rejects_source_boundary_and_unresolved_identity() -> None:
         identity_keys={"narrator"},
     )
     assert any("来源越界" in error for error in errors)
+    assert any("规划归属：bp-sc002" in error for error in errors)
     assert any("未冻结参与者" in error for error in errors)
+
+
+def test_scene_shard_rejects_unit_without_source_when_scene_coverage_is_complete() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    shard = _shard(plan, blueprint)
+    source_less = shard.scenes[0].units[0].model_copy(deep=True)
+    source_less.event_key = "source-less-event"
+    source_less.source_segment_ids = []
+    shard.scenes[0].units.append(source_less)
+
+    errors = validate_screenplay_scene_shard(
+        shard,
+        plan=plan,
+        scene_plans={item.key: item for item in blueprint.scene_plans},
+        identity_keys={"narrator"},
+    )
+
+    assert any(
+        "units[1] 必须声明 source_segment_ids" in error
+        for error in errors
+    )
 
 
 def test_scene_shard_normalizes_program_fields_and_identity_relations() -> None:
@@ -453,6 +569,33 @@ def test_merge_fails_closed_on_boundary_hash_or_missing_source() -> None:
     assert "未覆盖非标题 SRC" in str(caught.value)
 
 
+def test_merge_rejects_source_less_unit_when_other_units_cover_all_sources() -> None:
+    blueprint = _blueprint(split_domain=True)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )
+    shards = [_shard(plan, blueprint) for plan in plans]
+    source_less = shards[0].scenes[0].units[0].model_copy(deep=True)
+    source_less.event_key = "source-less-event"
+    source_less.source_segment_ids = []
+    shards[0].scenes[0].units.append(source_less)
+
+    with pytest.raises(
+        ScreenplaySceneMergeError,
+        match=r"bp-sc001\.units\[1\] 必须声明 source_segment_ids",
+    ):
+        merge_screenplay_scene_shards(
+            envelope=_envelope(blueprint),
+            identities=_identities(),
+            plans=plans,
+            shards=shards,
+            blueprint=blueprint,
+            source_text=SOURCE,
+        )
+
+
 def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     blueprint = _blueprint(split_domain=True)
     plan = build_screenplay_scene_shard_plans(
@@ -561,10 +704,16 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         identity_registry_hash="identity-hash",
     )
     prompts: dict[str, str] = {}
+    repair_contexts: dict[str, dict] = {}
+    operation_ids: dict[str, str] = {}
 
     async def fake_structured(messages, **kwargs):
         meta = kwargs["call_meta"]
-        prompts[str(meta["stage_key"] + ":" + meta.get("shard_id", ""))] = messages[0]["content"]
+        prompt_key = str(meta["stage_key"] + ":" + meta.get("shard_id", ""))
+        prompts[prompt_key] = messages[0]["content"]
+        operation_ids[prompt_key] = kwargs["operation_id"]
+        if kwargs.get("repair_context"):
+            repair_contexts[prompt_key] = json.loads(kwargs["repair_context"])
         if meta["stage_key"] == "screenplay_envelope":
             return _envelope(blueprint)
         plan = next(item for item in plans if item.shard_id == meta["shard_id"])
@@ -598,6 +747,22 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert "绝不能把单个 scene、unit、数组或解释文字作为根输出" in first_prompt
     assert "dialogue.text 与 dialogue.source_text 必须填写同一段逐字原文对白" in first_prompt
     assert "禁止生成 unresolved_* 占位 ID" in first_prompt
+    assert "逐场输入合同（来源正文不得跨 scene_plan_key 使用）" in first_prompt
+    assert '"contract_version":"screenplay-scene-input.v1"' in first_prompt
+    assert "owned_source" not in repair_contexts["screenplay_scene_shards:SS001"]
+    first_contracts = repair_contexts[
+        "screenplay_scene_shards:SS001"
+    ]["scene_input_contracts"]
+    assert first_contracts[0]["scene_plan_key"] == "bp-sc001"
+    assert first_contracts[0]["source_segment_ids"] == ["SRC0001"]
+    assert first_contracts[0]["source_segments"] == [{
+        "source_segment_id": "SRC0001",
+        "text": "甲推门进入。",
+    }]
+    assert operation_ids["screenplay_scene_shards:SS001"].startswith(
+        "screenplay.scene-shard:screenplay-scene-shard.v2:"
+        "screenplay-scene-input.v1:"
+    )
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt

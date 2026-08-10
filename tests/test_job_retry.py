@@ -42,7 +42,14 @@ def test_retryable_error_requeues_job(monkeypatch) -> None:
     async def run() -> bool:
         # 把退避压到 0，避免测试真的等 30s
         monkeypatch.setattr(config, "VIDEO_JOB_RETRY_BASE_DELAY", 0.0)
-        scheduled = worker._schedule_job_retry("j1", ProviderError("调用超时（31379ms）", retryable=True))
+        scheduled = worker._schedule_job_retry(
+            "j1",
+            ProviderError(
+                "调用超时（31379ms）",
+                retryable=True,
+                failure_kind="upstream_unavailable",
+            ),
+        )
         # 让 _requeue_after 协程跑完
         await asyncio.sleep(0)
         await asyncio.gather(*list(worker._retry_tasks))
@@ -51,10 +58,19 @@ def test_retryable_error_requeues_job(monkeypatch) -> None:
     scheduled = asyncio.run(run())
     assert scheduled is True
     assert requeued == ["j1"]
-    row = conn.execute("SELECT status, error, retry_count, next_retry_at FROM jobs WHERE id='j1'").fetchone()
+    row = conn.execute(
+        """SELECT status,error,retry_count,next_retry_at,
+                  provider_failure_category,provider_failure_kind,
+                  provider_failure_disposition,provider_failure_retryable
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
     assert row["status"] == "queued"
     assert row["retry_count"] == 1 and row["next_retry_at"] is not None
     assert "自动排队" in row["error"]
+    assert row["provider_failure_category"] == "technical"
+    assert row["provider_failure_kind"] == "upstream_unavailable"
+    assert row["provider_failure_disposition"] == "automatic_retry"
+    assert row["provider_failure_retryable"] == 1
 
 
 def test_non_retryable_error_not_requeued(monkeypatch) -> None:

@@ -41,6 +41,7 @@ from app.source_excerpt import index_source_segments, structural_front_matter_id
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
 SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v2"
 SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v1"
+SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v1"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v1"
 
 
@@ -119,6 +120,27 @@ class ScreenplaySceneShardPlan(BaseModel):
     boundary_hash: str
     blueprint_hash: str
     identity_registry_hash: str
+
+
+class ScreenplaySceneSourceSegment(BaseModel):
+    source_segment_id: str
+    text: str
+
+
+class ScreenplaySceneParticipantBinding(BaseModel):
+    blueprint_key: str
+    identity_key: str
+
+
+class ScreenplaySceneInputContract(BaseModel):
+    contract_version: Literal["screenplay-scene-input.v1"] = (
+        SCREENPLAY_SCENE_INPUT_VERSION
+    )
+    scene_plan_key: str
+    node_keys: list[str]
+    source_segment_ids: list[str]
+    source_segments: list[ScreenplaySceneSourceSegment]
+    participant_bindings: list[ScreenplaySceneParticipantBinding]
 
 
 class UnresolvedParticipant(BaseModel):
@@ -261,6 +283,28 @@ def build_frozen_identity_registry(
     return identities, projected, registry_hash
 
 
+def _identity_aliases(
+    identity_registry: list[dict[str, Any]],
+    *,
+    identity_keys: set[str] | None = None,
+) -> dict[str, str]:
+    aliases = {key: key for key in (identity_keys or set())}
+    for item in identity_registry:
+        identity_key = str(item.get("identity_key") or "").strip()
+        if not identity_key:
+            continue
+        for value in (
+            identity_key,
+            item.get("authority_id"),
+            item.get("canonical_name"),
+            *(item.get("source_labels") or []),
+        ):
+            label = str(value or "").strip()
+            if label:
+                aliases[label] = identity_key
+    return aliases
+
+
 def _scene_estimate(
     scene_plan: BlueprintScenePlan,
     source_by_id: dict[str, str],
@@ -360,6 +404,81 @@ def build_screenplay_scene_shard_plans(
     return plans
 
 
+def build_screenplay_scene_input_contracts(
+    *,
+    plan: ScreenplaySceneShardPlan,
+    scene_plans: list[BlueprintScenePlan],
+    source_by_id: dict[str, str],
+    identity_registry: list[dict[str, Any]],
+) -> list[ScreenplaySceneInputContract]:
+    """Bind scene-owned source text and Blueprint participants before writing."""
+    errors: list[str] = []
+    scene_keys = [scene_plan.key for scene_plan in scene_plans]
+    if scene_keys != plan.scene_plan_keys:
+        errors.append(
+            "逐场输入合同与 shard plan 场次不一致："
+            f"expected={plan.scene_plan_keys}, actual={scene_keys}"
+        )
+
+    projected_source_ids = list(dict.fromkeys(
+        source_id
+        for scene_plan in scene_plans
+        for source_id in scene_plan.source_segment_ids
+    ))
+    if projected_source_ids != plan.source_segment_ids:
+        errors.append(
+            "逐场输入合同的 SRC 并集与 shard plan 不一致："
+            f"expected={plan.source_segment_ids}, actual={projected_source_ids}"
+        )
+
+    aliases = _identity_aliases(identity_registry)
+    contracts: list[ScreenplaySceneInputContract] = []
+    for scene_plan in scene_plans:
+        missing_source_ids = [
+            source_id
+            for source_id in scene_plan.source_segment_ids
+            if source_id not in source_by_id
+        ]
+        if missing_source_ids:
+            errors.append(
+                f"{scene_plan.key} 输入合同缺少来源正文："
+                + ",".join(missing_source_ids)
+            )
+        unresolved_participants = [
+            participant
+            for participant in scene_plan.participant_keys
+            if participant not in aliases
+        ]
+        if unresolved_participants:
+            errors.append(
+                f"{scene_plan.key} Blueprint participant 未冻结："
+                + ",".join(unresolved_participants)
+            )
+        contracts.append(ScreenplaySceneInputContract(
+            scene_plan_key=scene_plan.key,
+            node_keys=list(scene_plan.node_keys),
+            source_segment_ids=list(scene_plan.source_segment_ids),
+            source_segments=[
+                ScreenplaySceneSourceSegment(
+                    source_segment_id=source_id,
+                    text=source_by_id[source_id],
+                )
+                for source_id in scene_plan.source_segment_ids
+                if source_id in source_by_id
+            ],
+            participant_bindings=[
+                ScreenplaySceneParticipantBinding(
+                    blueprint_key=participant,
+                    identity_key=aliases.get(participant, ""),
+                )
+                for participant in scene_plan.participant_keys
+            ],
+        ))
+    if errors:
+        raise ScreenplaySceneShardError(plan.shard_id, errors)
+    return contracts
+
+
 _GENERIC_STORY_FUNCTION_LABELS = {
     "setup",
     "development",
@@ -434,19 +553,10 @@ def normalize_screenplay_scene_shard(
     shard.blueprint_hash = plan.blueprint_hash
     shard.identity_registry_hash = plan.identity_registry_hash
 
-    aliases = {key: key for key in identity_keys}
-    for item in identity_registry:
-        identity_key = str(item.get("identity_key") or "").strip()
-        if not identity_key:
-            continue
-        for value in (
-            identity_key,
-            item.get("canonical_name"),
-            *(item.get("source_labels") or []),
-        ):
-            label = str(value or "").strip()
-            if label:
-                aliases[label] = identity_key
+    aliases = _identity_aliases(
+        identity_registry,
+        identity_keys=identity_keys,
+    )
 
     def normalize_refs(values: list[str]) -> list[str]:
         normalized: list[str] = []
@@ -527,6 +637,12 @@ def validate_screenplay_scene_shard(
     actual_consumed: list[str] = []
     event_owner: dict[str, str] = {}
     chain_owner: dict[str, str] = {}
+    source_scene_owners: dict[str, list[str]] = {}
+    for expected_scene in scene_plans.values():
+        for source_id in expected_scene.source_segment_ids:
+            owners = source_scene_owners.setdefault(source_id, [])
+            if expected_scene.key not in owners:
+                owners.append(expected_scene.key)
     for scene in shard.scenes:
         expected_scene = scene_plans.get(scene.key)
         if expected_scene is None:
@@ -539,12 +655,23 @@ def validate_screenplay_scene_shard(
                 f"{scene.key}.story_function 必须完整说明本场戏剧功能，"
                 f"至少 {SCENE_STORY_FUNCTION_MIN_CHARS} 个字符"
             )
-        allowed = set(expected_scene.source_segment_ids)
+        owned_source_ids = set(expected_scene.source_segment_ids)
         for unit_index, unit in enumerate(scene.units):
+            if not unit.source_segment_ids:
+                errors.append(
+                    f"{scene.key}.units[{unit_index}] "
+                    "必须声明 source_segment_ids"
+                )
             for source_id in unit.source_segment_ids:
-                if source_id not in allowed:
+                if source_id not in owned_source_ids:
+                    planned_owners = source_scene_owners.get(source_id, [])
+                    owner_note = (
+                        "（规划归属：" + ",".join(planned_owners) + "）"
+                        if planned_owners else "（未出现在 Blueprint scene plans）"
+                    )
                     errors.append(
-                        f"{scene.key}.units[{unit_index}] 来源越界：{source_id}"
+                        f"{scene.key}.units[{unit_index}] 来源越界："
+                        f"{source_id}{owner_note}"
                     )
                 elif source_id not in actual_consumed:
                     actual_consumed.append(source_id)
@@ -947,17 +1074,15 @@ def _scene_shard_prompt(
     plan: ScreenplaySceneShardPlan,
     blueprint_scene_plans: list[BlueprintScenePlan],
     blueprint_nodes: list[dict[str, Any]],
-    source_by_id: dict[str, str],
+    scene_input_contracts: list[ScreenplaySceneInputContract],
     identity_registry: list[dict[str, Any]],
 ) -> str:
-    source_projection = {
-        source_id: source_by_id[source_id]
-        for source_id in plan.source_segment_ids
-        if source_id in source_by_id
-    }
     return (
         "任务：只写指定 Blueprint 场次的紧凑语义 IR。场 key、heading、顺序和来源所有权"
         "均由程序拥有，不得改名、跨场挪 SRC 或输出整集 metadata/experience/events/beats/coverage。"
+        "逐场输入合同已把每段来源正文和参与者冻结身份绑定到唯一 scene_plan_key；"
+        "每个 unit.source_segment_ids 必须非空且属于当前 scene 的 source_segment_ids，"
+        "参与者字段必须使用当前 scene participant_bindings 中的 identity_key。"
         "每个非标题来源必须由至少一个 action/dialogue unit 消费。dialogue.text 与 "
         "dialogue.source_text 必须填写同一段逐字原文对白，不得把剧情摘要、转述或扩写写进 "
         "text；表演和动作另写 action unit。speaker_key 只能逐字引用冻结 identity_key。"
@@ -985,8 +1110,15 @@ def _scene_shard_prompt(
         + json.dumps(blueprint_nodes, ensure_ascii=False, separators=(",", ":"))
         + "\n冻结 identity registry：\n"
         + json.dumps(identity_registry, ensure_ascii=False, separators=(",", ":"))
-        + "\n本 shard owned SRC：\n"
-        + json.dumps(source_projection, ensure_ascii=False, separators=(",", ":"))
+        + "\n逐场输入合同（来源正文不得跨 scene_plan_key 使用）：\n"
+        + json.dumps(
+            [
+                contract.model_dump(mode="json")
+                for contract in scene_input_contracts
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         + "\n只输出 Schema 对象：\n"
         + json.dumps(ScreenplaySceneShardIR.model_json_schema(), ensure_ascii=False)
         + f"\n固定字段：episode_no={episode_no}, shard_id={plan.shard_id},"
@@ -1087,6 +1219,12 @@ async def generate_screenplay_scene_shards(
             node_key for scene_plan in selected_scene_plans
             for node_key in scene_plan.node_keys
         }
+        scene_input_contracts = build_screenplay_scene_input_contracts(
+            plan=plan,
+            scene_plans=selected_scene_plans,
+            source_by_id=source_by_id,
+            identity_registry=identity_registry,
+        )
         prompt = _scene_shard_prompt(
             episode_no=int(episode["episode_no"]),
             plan=plan,
@@ -1095,11 +1233,12 @@ async def generate_screenplay_scene_shards(
                 node.model_dump(mode="json")
                 for node in blueprint.nodes if node.key in selected_node_keys
             ],
-            source_by_id=source_by_id,
+            scene_input_contracts=scene_input_contracts,
             identity_registry=identity_registry,
         )
         operation_id = (
             f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
+            f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
             f"{episode_id}:{plan.shard_id}:{plan.source_hash}:"
             f"{plan.boundary_hash}:{plan.blueprint_hash}:"
             f"{plan.identity_registry_hash}"
@@ -1194,11 +1333,11 @@ async def generate_screenplay_scene_shards(
                             ],
                             "root_must_not_be": "single_scene_or_unit",
                         },
-                        "owned_source": {
-                            source_id: source_by_id.get(source_id, "")
-                            for source_id in plan.source_segment_ids
-                        },
-                        "allowed_identities": [
+                        "scene_input_contracts": [
+                            contract.model_dump(mode="json")
+                            for contract in scene_input_contracts
+                        ],
+                        "identity_registry": [
                             {
                                 "identity_key": item.get("identity_key"),
                                 "canonical_name": item.get("canonical_name"),
@@ -1207,8 +1346,10 @@ async def generate_screenplay_scene_shards(
                             for item in identity_registry
                         ],
                         "final_gate_contract": [
-                            "all non-title owned SRC must be consumed",
-                            "all identity relations must use allowed identity_key",
+                            "each unit must declare non-empty source_segment_ids",
+                            "each unit source_segment_ids must belong to its scene input contract",
+                            "all non-title scene-owned SRC must be consumed",
+                            "all identity relations must use frozen identity_key",
                             "dialogue text must equal exact source_text",
                             "unresolved placeholders are forbidden in relation fields",
                         ],

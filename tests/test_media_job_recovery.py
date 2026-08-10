@@ -671,6 +671,114 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
     ).fetchone()["status"] == "waiting_human"
 
 
+def test_run_job_persists_technical_provider_failure_for_manual_handling(
+    monkeypatch,
+) -> None:
+    from app.media_pipeline import concurrency, stage_state
+
+    conn = _conn()
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p1','P',1)")
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('e1','p1',1,'generating',1)"""
+    )
+    conn.execute(
+        """INSERT INTO shots(id,episode_id,shot_no,duration_s)
+           VALUES('s1','e1',1,5)"""
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,
+               provider_task_id,image_inputs,created_at
+           ) VALUES(
+               'v1','s1',1,'prompt','idem','running',
+               'minimax_h3:missing-task','{}',1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               lease_owner,lease_expires_at,provider_operation_id,
+               provider_create_state,provider_non_cancellable,
+               provider_submitted_at,created_at,updated_at
+           ) VALUES(
+               'j1','video','s1','v1','e1','p1','running',
+               'worker-1',9999999999,'video-create-v1',
+               'accepted',1,1,1,1
+           )"""
+    )
+    conn.commit()
+
+    class Permit:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class ErrorRecord:
+        error_id = "ERR-test"
+        public = "供应商技术失败（LLM · ERR-test）"
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def no_fence(*_args, **_kwargs) -> None:
+        return None
+
+    async def poll_missing_task(*_args, **_kwargs) -> dict:
+        return {
+            "status": "failed",
+            "video_url": "",
+            "last_frame_url": "",
+            "error": "MiniMaxH3 队列和历史中均找不到该任务",
+            "failure": {
+                "category": "technical",
+                "kind": "provider_task_not_found",
+                "disposition": "manual_review",
+                "retryable": False,
+            },
+        }
+
+    monkeypatch.setattr(worker, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(worker, "_assert_review_dependency_fence_async", no_fence)
+    monkeypatch.setattr(worker, "_assert_job_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker.hiagent, "poll_video_task", poll_missing_task)
+    monkeypatch.setattr(concurrency, "semaphore_for", lambda _resource: Permit())
+    monkeypatch.setattr(concurrency, "report_congestion", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(concurrency, "report_healthy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(stage_state, "set_pipeline_stage", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker.errors, "log_error", lambda *_args, **_kwargs: ErrorRecord())
+    monkeypatch.setattr(worker.media_scheduler, "renew_lease", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(worker.media_scheduler, "settle_budget", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "mark_media_job_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker, "reconcile_episode_generation_status", lambda *_args, **_kwargs: None,
+    )
+
+    asyncio.run(worker._run_job("j1", lease_owner="worker-1"))
+
+    job = conn.execute(
+        """SELECT status,provider_create_state,provider_failure_category,
+                  provider_failure_kind,provider_failure_disposition,
+                  provider_failure_retryable,reason_code
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    assert dict(job) == {
+        "status": "waiting_human",
+        "provider_create_state": "accepted",
+        "provider_failure_category": "technical",
+        "provider_failure_kind": "provider_task_not_found",
+        "provider_failure_disposition": "manual_review",
+        "provider_failure_retryable": 0,
+        "reason_code": "VIDEO_PROVIDER_TASK_NOT_FOUND",
+    }
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='v1'"
+    ).fetchone()["status"] == "waiting_human"
+
+
 def test_paid_provider_attempts_count_distinct_operations() -> None:
     conn = _conn()
     conn.executemany(
