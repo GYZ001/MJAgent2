@@ -246,12 +246,135 @@ def _unit_delivery_evidence_channels(
     return channels
 
 
+def _scene_canonical_identity_keys(
+    contract: ScreenplaySceneInputContract,
+) -> list[str]:
+    return [
+        key
+        for key in dict.fromkeys(
+            binding.identity_key.strip()
+            for binding in contract.participant_bindings
+        )
+        if key
+    ]
+
+
+def _canonical_identity_array_schema(
+    canonical_keys: list[str],
+    *,
+    values: list[str] | None = None,
+) -> dict[str, Any]:
+    if not canonical_keys:
+        return {
+            "type": "array",
+            "items": False,
+            "minItems": 0,
+            "maxItems": 0,
+        }
+    schema: dict[str, Any] = {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": list(canonical_keys),
+        },
+        "uniqueItems": True,
+        "minItems": 0,
+        "maxItems": len(canonical_keys),
+    }
+    if values is None:
+        return schema
+    candidate_keys = [
+        key
+        for key in dict.fromkeys(
+            str(value or "").strip() for value in values
+        )
+        if key
+    ]
+    canonical_set = set(canonical_keys)
+    bound_candidate_keys = [
+        key for key in candidate_keys if key in canonical_set
+    ]
+    schema["minItems"] = len(bound_candidate_keys)
+    schema["maxItems"] = min(len(candidate_keys), len(canonical_keys))
+    if bound_candidate_keys:
+        schema["allOf"] = [
+            {
+                "contains": {"const": key},
+                "minContains": 1,
+                "maxContains": 1,
+            }
+            for key in bound_candidate_keys
+        ]
+    return schema
+
+
+def _canonical_speaker_schema(
+    canonical_keys: list[str],
+    *,
+    value: str | None | object,
+) -> dict[str, Any]:
+    if value is None:
+        return {"type": "null"}
+    canonical_schema = {
+        "type": "string",
+        "enum": list(canonical_keys),
+    }
+    if value is _UNBOUND_SCHEMA_VALUE:
+        return {
+            "anyOf": [
+                canonical_schema,
+                {"type": "null"},
+            ],
+        }
+    if str(value).strip() in canonical_keys:
+        canonical_schema["enum"] = [str(value).strip()]
+    return canonical_schema
+
+
+_UNBOUND_SCHEMA_VALUE = object()
+
+
+def _initial_participant_delivery_schema(
+    canonical_keys: list[str],
+) -> dict[str, Any]:
+    if not canonical_keys:
+        return {
+            "type": "array",
+            "items": False,
+            "minItems": 0,
+            "maxItems": 0,
+        }
+    return {
+        "type": "array",
+        "items": {
+            "allOf": [
+                {"$ref": "#/$defs/IRActionParticipantDelivery"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "participant_key": {
+                            "type": "string",
+                            "enum": list(canonical_keys),
+                        },
+                    },
+                    "required": ["participant_key"],
+                },
+            ],
+        },
+        "minItems": 0,
+        "maxItems": len(canonical_keys),
+    }
+
+
 def _participant_delivery_repair_schema(
     participant_key: str,
     perception_channels: list[str],
 ) -> dict[str, Any]:
     properties: dict[str, Any] = {
-        "participant_key": {"const": participant_key},
+        "participant_key": {
+            "type": "string",
+            "enum": [participant_key],
+        },
         "observable_claim": {"type": "string", "minLength": 1},
     }
     properties.update({
@@ -278,81 +401,160 @@ def _participant_delivery_repair_schema(
 
 
 def build_screenplay_scene_shard_repair_schema(
-    shard: ScreenplaySceneShardIR,
+    shard: ScreenplaySceneShardIR | None = None,
+    *,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
 ) -> dict[str, Any]:
-    """Build positional unit delivery constraints from a failed candidate."""
+    """Build one contract-bound schema for initial and semantic attempts."""
     schema = deepcopy(ScreenplaySceneShardIR.model_json_schema())
     scene_schemas: list[dict[str, Any]] = []
     unit_contracts: list[dict[str, Any]] = []
+    candidate_scenes = {
+        scene.key: scene
+        for scene in (shard.scenes if shard is not None else [])
+    }
 
-    for scene in shard.scenes:
-        unit_schemas: list[dict[str, Any]] = []
-        for unit_index, unit in enumerate(scene.units):
-            relation_keys = _unit_relation_participant_keys(unit)
-            onscreen_keys = list(dict.fromkeys(
-                str(value or "").strip()
-                for value in unit.onscreen_entity_keys
-                if str(value or "").strip()
-            ))
-            onscreen_set = set(onscreen_keys)
-            offscreen_keys = [
-                key for key in relation_keys if key not in onscreen_set
-            ]
-            required_deliveries: list[dict[str, Any]] = []
-            item_schemas: list[dict[str, Any]] = []
-            evidence_gaps: list[str] = []
-            for participant_key in offscreen_keys:
-                channels = _unit_delivery_evidence_channels(
-                    unit,
-                    participant_key,
-                )
-                required_deliveries.append({
-                    "participant_key": participant_key,
-                    "perception_channels": channels,
-                })
-                item_schemas.append(_participant_delivery_repair_schema(
-                    participant_key,
-                    channels,
-                ))
-                if not channels:
-                    evidence_gaps.append(participant_key)
-
-            delivery_schema = {
-                "type": "array",
-                "prefixItems": item_schemas,
-                "items": False,
-                "minItems": len(offscreen_keys),
-                "maxItems": len(offscreen_keys),
-            }
-            unit_schemas.append({
+    for contract in scene_input_contracts:
+        scene_key = contract.scene_plan_key
+        canonical_keys = _scene_canonical_identity_keys(contract)
+        canonical_set = set(canonical_keys)
+        initial_unit_constraint = {
+            "type": "object",
+            "properties": {
+                "actor_keys": _canonical_identity_array_schema(
+                    canonical_keys,
+                ),
+                "target_keys": _canonical_identity_array_schema(
+                    canonical_keys,
+                ),
+                "onscreen_entity_keys": _canonical_identity_array_schema(
+                    canonical_keys,
+                ),
+                "speaker_key": _canonical_speaker_schema(
+                    canonical_keys,
+                    value=_UNBOUND_SCHEMA_VALUE,
+                ),
+                "participant_deliveries": (
+                    _initial_participant_delivery_schema(canonical_keys)
+                ),
+            },
+            "required": [
+                "actor_keys",
+                "target_keys",
+                "onscreen_entity_keys",
+                "speaker_key",
+                "participant_deliveries",
+            ],
+        }
+        candidate_scene = candidate_scenes.get(scene_key)
+        units_schema: dict[str, Any] = {
+            "type": "array",
+            "items": {
                 "allOf": [
                     {"$ref": "#/$defs/ScreenplaySceneShardUnit"},
-                    {
-                        "type": "object",
-                        "properties": {
-                            "event_key": {"const": unit.event_key},
-                            "source_segment_ids": {
-                                "const": list(unit.source_segment_ids),
-                            },
-                            "participant_deliveries": delivery_schema,
-                        },
-                        "required": [
-                            "event_key",
-                            "source_segment_ids",
-                            "participant_deliveries",
-                        ],
-                    },
+                    initial_unit_constraint,
                 ],
-            })
-            unit_contracts.append({
-                "scene_key": scene.key,
-                "unit_index": unit_index,
-                "event_key": unit.event_key,
-                "relation_participant_keys": relation_keys,
-                "onscreen_entity_keys": onscreen_keys,
-                "required_deliveries": required_deliveries,
-                "evidence_gaps": evidence_gaps,
-            })
+            },
+        }
+        if candidate_scene is not None:
+            unit_schemas: list[dict[str, Any]] = []
+            for unit_index, unit in enumerate(candidate_scene.units):
+                relation_keys = [
+                    key
+                    for key in _unit_relation_participant_keys(unit)
+                    if key in canonical_set
+                ]
+                onscreen_keys = [
+                    key
+                    for key in dict.fromkeys(
+                        str(value or "").strip()
+                        for value in unit.onscreen_entity_keys
+                    )
+                    if key in canonical_set
+                ]
+                onscreen_set = set(onscreen_keys)
+                offscreen_keys = [
+                    key for key in relation_keys if key not in onscreen_set
+                ]
+                required_deliveries: list[dict[str, Any]] = []
+                item_schemas: list[dict[str, Any]] = []
+                evidence_gaps: list[str] = []
+                for participant_key in offscreen_keys:
+                    channels = _unit_delivery_evidence_channels(
+                        unit,
+                        participant_key,
+                    )
+                    required_deliveries.append({
+                        "participant_key": participant_key,
+                        "perception_channels": channels,
+                    })
+                    item_schemas.append(
+                        _participant_delivery_repair_schema(
+                            participant_key,
+                            channels,
+                        )
+                    )
+                    if not channels:
+                        evidence_gaps.append(participant_key)
+
+                unit_constraint = deepcopy(initial_unit_constraint)
+                unit_constraint["properties"].update({
+                    "event_key": {"const": unit.event_key},
+                    "source_segment_ids": {
+                        "const": list(unit.source_segment_ids),
+                    },
+                    "actor_keys": _canonical_identity_array_schema(
+                        canonical_keys,
+                        values=unit.actor_keys,
+                    ),
+                    "target_keys": _canonical_identity_array_schema(
+                        canonical_keys,
+                        values=unit.target_keys,
+                    ),
+                    "onscreen_entity_keys": _canonical_identity_array_schema(
+                        canonical_keys,
+                        values=unit.onscreen_entity_keys,
+                    ),
+                    "speaker_key": _canonical_speaker_schema(
+                        canonical_keys,
+                        value=unit.speaker_key,
+                    ),
+                    "participant_deliveries": {
+                        "type": "array",
+                        "prefixItems": item_schemas,
+                        "items": False,
+                        "minItems": len(offscreen_keys),
+                        "maxItems": len(offscreen_keys),
+                    },
+                })
+                unit_constraint["required"] = [
+                    *unit_constraint["required"],
+                    "event_key",
+                    "source_segment_ids",
+                ]
+                unit_schemas.append({
+                    "allOf": [
+                        {"$ref": "#/$defs/ScreenplaySceneShardUnit"},
+                        unit_constraint,
+                    ],
+                })
+                unit_contracts.append({
+                    "scene_key": scene_key,
+                    "unit_index": unit_index,
+                    "event_key": unit.event_key,
+                    "canonical_identity_keys": canonical_keys,
+                    "relation_participant_keys": relation_keys,
+                    "onscreen_entity_keys": onscreen_keys,
+                    "required_deliveries": required_deliveries,
+                    "evidence_gaps": evidence_gaps,
+                })
+            units_schema = {
+                "type": "array",
+                "prefixItems": unit_schemas,
+                "items": False,
+                "minItems": len(unit_schemas),
+                "maxItems": len(unit_schemas),
+            }
 
         scene_schemas.append({
             "allOf": [
@@ -360,14 +562,8 @@ def build_screenplay_scene_shard_repair_schema(
                 {
                     "type": "object",
                     "properties": {
-                        "key": {"const": scene.key},
-                        "units": {
-                            "type": "array",
-                            "prefixItems": unit_schemas,
-                            "items": False,
-                            "minItems": len(unit_schemas),
-                            "maxItems": len(unit_schemas),
-                        },
+                        "key": {"const": scene_key},
+                        "units": units_schema,
                     },
                     "required": ["key", "units"],
                 },
@@ -381,7 +577,16 @@ def build_screenplay_scene_shard_repair_schema(
         "minItems": len(scene_schemas),
         "maxItems": len(scene_schemas),
     }
-    schema["x-schema-purpose"] = "candidate-bound-semantic-repair"
+    schema["x-schema-purpose"] = "scene-contract-bound"
+    schema["x-scene-identity-contracts"] = [
+        {
+            "scene_key": contract.scene_plan_key,
+            "canonical_identity_keys": (
+                _scene_canonical_identity_keys(contract)
+            ),
+        }
+        for contract in scene_input_contracts
+    ]
     schema["x-unit-delivery-contracts"] = unit_contracts
     return schema
 
@@ -1954,7 +2159,9 @@ async def generate_screenplay_scene_shards(
                 for source_id in contract.source_segment_ids
             }
             repair_contracts.append(payload)
-        output_schema = ScreenplaySceneShardIR.model_json_schema()
+        output_schema = build_screenplay_scene_shard_repair_schema(
+            scene_input_contracts=plan_scene_input_contracts,
+        )
         prompt = _scene_shard_prompt(
             episode_no=int(episode["episode_no"]),
             plan=plan,
@@ -1999,6 +2206,14 @@ async def generate_screenplay_scene_shards(
                 scene_input_contracts=plan_scene_input_contracts,
                 identity_keys=identity_keys,
                 front_matter_ids=front_matter_ids,
+            )
+
+        def repair_schema(
+            value: ScreenplaySceneShardIR,
+        ) -> dict[str, Any]:
+            return build_screenplay_scene_shard_repair_schema(
+                value,
+                scene_input_contracts=plan_scene_input_contracts,
             )
 
         attempts: list[dict[str, Any]] = []
@@ -2082,7 +2297,7 @@ async def generate_screenplay_scene_shards(
                         ],
                     }, ensure_ascii=False, separators=(",", ":")),
                     output_schema=output_schema,
-                    repair_schema=build_screenplay_scene_shard_repair_schema,
+                    repair_schema=repair_schema,
                     normalize_payload=normalize_payload,
                     on_attempt=attempts.append,
                 )
