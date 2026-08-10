@@ -5,6 +5,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -112,3 +113,57 @@ def test_transport_guard_allows_sandbox_and_memory_databases(
         session.audit.assert_clean()
     finally:
         session.restore()
+
+
+def test_caught_access_violation_still_fails_pytest_session(
+    tmp_path: Path,
+) -> None:
+    child_sandbox = tmp_path / "child-sandbox"
+    child_sandbox.mkdir()
+    probe = tmp_path / "test_caught_access_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import os
+            import socket
+            import sqlite3
+
+
+            def test_application_cannot_swallow_isolation_violations():
+                for action in (
+                    lambda: socket.create_connection(("provider.invalid", 443)),
+                    lambda: sqlite3.connect(os.environ["PRODUCTION_DB_PROBE"]),
+                ):
+                    try:
+                        action()
+                    except RuntimeError:
+                        pass
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["MANJU_TEST_SANDBOX"] = str(child_sandbox)
+    env["PRODUCTION_DB_PROBE"] = str(ROOT / "data" / "manju.db")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "tests.conftest",
+            str(probe),
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == pytest.ExitCode.TESTS_FAILED
+    assert "TEST ISOLATION VIOLATIONS" in result.stdout
+    assert "external network" in result.stdout
+    assert "persistent database outside test sandbox" in result.stdout
