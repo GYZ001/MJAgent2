@@ -1777,7 +1777,9 @@ export interface Episode {
   screenplay_state?: ScreenplayState | null;
   screenplay_production?: {
     revision_id?: string;
-    operation: "baseline" | "finalize" | "complete";
+    operation: "none" | "baseline" | "baseline_rebuild" | "finalize" | "complete";
+    mode?: "none" | "baseline" | "baseline_rebuild" | "finalize" | "complete";
+    mode_label?: string;
     phase: string;
     phase_label?: string;
     stage_index?: number;

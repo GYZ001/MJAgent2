@@ -10,6 +10,7 @@ type ScreenplayNoticeInput = {
   screenplay_error?: string | null
   screenplay_production?: {
     task_active?: boolean
+    can_resume_baseline?: boolean
     can_resume_repair?: boolean
     phase_label?: string
     stage_stop_reason?: 'paused' | 'blocked' | 'failed' | ''
@@ -54,7 +55,10 @@ export function screenplayTaskNotice(
   if (episode.screenplay_production?.task_active) return null
 
   if (episode.screenplay_status === 'failed') {
-    if (episode.screenplay_production?.can_resume_repair) {
+    if (
+      episode.screenplay_production?.can_resume_repair
+      || episode.screenplay_production?.can_resume_baseline
+    ) {
       return {
         severity: 'warning',
         message: resumableScreenplayMessage(
@@ -68,7 +72,7 @@ export function screenplayTaskNotice(
 
   if (episode.screenplay_status === 'repairing') {
     const production = episode.screenplay_production
-    if (production?.can_resume_repair) {
+    if (production?.can_resume_repair || production?.can_resume_baseline) {
       return {
         severity: 'warning',
         message: resumableScreenplayMessage(production, message),

@@ -270,6 +270,16 @@ def _screenplay_checkpoint_compatibility(
             sorted(artifact_ids),
         ).fetchall()
     } if artifact_ids else {}
+    recovered_shards = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id,type,scope_type,scope_id,status,contract_version,"
+            "content_json,content_hash,parent_artifact_ids_json,model_snapshot_json "
+            "FROM artifacts WHERE scope_type='episode' AND scope_id=? "
+            "AND type='screenplay_scene_shard' AND status='validated'",
+            (episode_id,),
+        ).fetchall()
+    ]
 
     def base_artifact(
         artifact_id: str,
@@ -355,25 +365,51 @@ def _screenplay_checkpoint_compatibility(
     validated_shards: list[dict[str, Any]] = []
     for item in shard_rows:
         artifact_id = str(item.get("normalized_artifact_id") or "")
-        row = artifacts.get(artifact_id)
-        compatible = False
-        if authority_compatible and row is not None:
-            compatible, _reason = screenplay_scene_shard_artifact_compatibility(
-                row,
-                expected_blueprint_hash=blueprint_hash,
-                expected_identity_registry_hash=identity_hash,
-                expected_generation_scaffold_hash=str(
-                    item.get("generation_scaffold_hash") or ""
-                ),
-            )
+        candidates = []
+        if artifacts.get(artifact_id) is not None:
+            candidates.append(artifacts[artifact_id])
+        candidates.extend(
+            row for row in recovered_shards
+            if str(row.get("id") or "") != artifact_id
+        )
+        for row in candidates:
+            compatible = False
             content = _artifact_json(row)
-            compatible = bool(
-                compatible
-                and content is not None
-                and _artifact_hash_is_valid(row, content)
-            )
-        if compatible:
-            validated_shards.append(dict(item))
+            if authority_compatible and content is not None:
+                compatible, _reason = screenplay_scene_shard_artifact_compatibility(
+                    row,
+                    expected_blueprint_hash=blueprint_hash,
+                    expected_identity_registry_hash=identity_hash,
+                    expected_generation_scaffold_hash=str(
+                        item.get("generation_scaffold_hash") or ""
+                    ),
+                )
+                compatible = bool(
+                    compatible
+                    and _artifact_hash_is_valid(row, content)
+                    and (
+                        artifact_id == str(row.get("id") or "")
+                        or (
+                            all(str(item.get(key) or "") for key in (
+                                "shard_id", "source_hash", "boundary_hash",
+                                "generation_scaffold_hash",
+                            ))
+                            and all(
+                                str(item.get(key) or "") == str(content.get(key) or "")
+                                for key in (
+                                    "shard_id", "source_hash", "boundary_hash",
+                                    "generation_scaffold_hash",
+                                )
+                            )
+                        )
+                    )
+                )
+            if compatible:
+                recovered = dict(item)
+                recovered["normalized_artifact_id"] = str(row["id"])
+                recovered["status"] = "validated"
+                validated_shards.append(recovered)
+                break
     if validated_shards:
         reusable["shards"] = validated_shards
 
@@ -409,7 +445,18 @@ def _screenplay_checkpoint_compatibility(
     def shard_is_validated(item: dict[str, Any]) -> bool:
         artifact_id = str(item.get("normalized_artifact_id") or "")
         return any(
-            str(candidate.get("normalized_artifact_id") or "") == artifact_id
+            (
+                artifact_id
+                and str(candidate.get("normalized_artifact_id") or "")
+                == artifact_id
+            )
+            or all(
+                str(item.get(key) or "") == str(candidate.get(key) or "")
+                for key in (
+                    "shard_id", "source_hash", "boundary_hash",
+                    "generation_scaffold_hash",
+                )
+            )
             for candidate in validated_shards
         )
 
@@ -589,10 +636,34 @@ def resolve_screenplay_resume_eligibility(
         )
     current_contract = get_contract("screenplay").version
     if not rev.baseline_done:
+        episode = db.execute(
+            "SELECT screenplay_status,active_screenplay_run_id "
+            "FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        interrupted_baseline = bool(
+            episode
+            and episode["active_screenplay_run_id"]
+            and episode["screenplay_status"] in {
+                "queued", "running", "repairing",
+            }
+        )
         metadata_incompatible = bool(
             rev.contract_version
             and rev.contract_version != current_contract
         )
+        if not interrupted_baseline:
+            return ScreenplayResumeEligibility(
+                mode="none",
+                label="无可恢复剧本",
+                revision_id=rev.id,
+                revision_action="none",
+                working_artifact_id=None,
+                working_compatible=False,
+                reusable_checkpoint=reusable,
+                reason_code="BASELINE_NOT_STARTED",
+                reason="active revision 尚未生成可复用 checkpoint",
+            )
         return ScreenplayResumeEligibility(
             mode="baseline_rebuild" if metadata_incompatible else "baseline",
             label=(
