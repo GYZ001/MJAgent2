@@ -195,6 +195,106 @@ def can_admit_video_submit(
     return True, None
 
 
+def claim_video_submit_slot(
+    *,
+    job_id: str,
+    lease_owner: str,
+    episode_id: str,
+    project_id: str,
+    version_id: str,
+    operation_id: str,
+    amount_cny: float,
+    is_auto_retake: bool,
+    conn=None,
+) -> tuple[bool, str | None]:
+    """Atomically claim inflight capacity and the payable provider budget.
+
+    The advisory scheduler check deliberately remains cheap.  This is the
+    authoritative submit-side fence: SQLite's write lock serializes concurrent
+    workers before any of them can make a provider create call.
+    """
+    from app.completion_grant import reserve_provider_video_budget
+    from app.media_pipeline.concurrency import channel_limit
+
+    db = conn or get_conn()
+    if db.in_transaction:
+        raise RuntimeError("video inflight claim requires a clean transaction boundary")
+
+    def count(where: str = "", args: tuple[Any, ...] = ()) -> int:
+        return int(db.execute(
+            """SELECT COUNT(*) AS c FROM jobs
+                 WHERE kind='video'
+                   AND status IN ('running','waiting_provider')
+                   AND provider_non_cancellable=1
+                   AND cancellation_requested=0 AND abandoned=0"""
+            + where,
+            args,
+        ).fetchone()["c"])
+
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        owned = db.execute(
+            """SELECT provider_non_cancellable,provider_create_state
+                 FROM jobs
+                WHERE id=? AND episode_id=? AND project_id=? AND version_id=?
+                  AND kind='video' AND status='running' AND lease_owner=?
+                  AND cancellation_requested=0 AND abandoned=0""",
+            (job_id, episode_id, project_id, version_id, lease_owner),
+        ).fetchone()
+        if owned is None:
+            raise ValueError("视频提交槽位 claim 已失去 job lease 或 scope")
+        if bool(owned["provider_non_cancellable"]):
+            db.commit()
+            return True, None
+
+        limits = (
+            (count(), channel_limit(S.RESOURCE_VIDEO_INFLIGHT), "全局上游视频槽位已满"),
+            (count(" AND project_id=?", (project_id,)), project_inflight_cap(), "项目上游视频槽位已满"),
+            (count(" AND episode_id=?", (episode_id,)), episode_inflight_cap(), "本集上游视频槽位已满"),
+        )
+        for current, cap, reason in limits:
+            if current >= cap:
+                db.rollback()
+                return False, reason
+
+        if is_auto_retake and episode_first_pass_incomplete(episode_id, conn=db):
+            retake_cap = max(
+                1,
+                int(episode_inflight_cap() * first_pass_retake_slot_fraction()),
+            )
+            if count_inflight_auto_retakes(episode_id, conn=db) >= retake_cap:
+                db.rollback()
+                return False, "首轮未覆盖完成，自动重抽槽位已满"
+
+        if reserve_provider_video_budget(
+            episode_id=episode_id,
+            job_id=job_id,
+            version_id=version_id,
+            operation_id=operation_id,
+            amount_cny=amount_cny,
+            conn=db,
+        ) is not True:
+            db.rollback()
+            return False, "VIDEO_BUDGET_NOT_AUTHORIZED"
+        marked = db.execute(
+            """UPDATE jobs
+                  SET provider_non_cancellable=1,updated_at=?
+                WHERE id=? AND status='running' AND lease_owner=?
+                  AND provider_create_state='submitting'
+                  AND provider_non_cancellable=0
+                  AND cancellation_requested=0 AND abandoned=0""",
+            (now(), job_id, lease_owner),
+        )
+        if marked.rowcount != 1:
+            raise ValueError("视频提交槽位 claim 发生 lease/CAS 冲突")
+        db.commit()
+        return True, None
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+
+
 def is_true_video_ready(meta: dict[str, Any], *, continuity_ok: bool) -> bool:
     """真正可提交 Seedance 的就绪条件（PRD §4.1）。"""
     if meta.get("video_input_manifest_frozen"):

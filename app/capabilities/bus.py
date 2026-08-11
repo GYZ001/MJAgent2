@@ -6,6 +6,8 @@ M0 提供可测试合同；领域 handler 未接入前，执行会返回明确�
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import json
 import uuid
 from typing import Any
 
@@ -27,6 +29,33 @@ from app.capabilities.schemas import (
 _request_approval_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "request_approval_token", default=None
 )
+
+_STRICT_IDEMPOTENCY_COMMANDS = frozenset({
+    "video.generate_episode",
+    "video.generate_shot",
+    "video.complete_episode",
+    "video.complete_project",
+    "delivery.create_package",
+})
+
+
+def canonical_command_request_fingerprint(
+    name: str,
+    payload: dict[str, Any],
+) -> str:
+    canonical = {
+        key: payload[key]
+        for key in sorted(payload)
+        if key not in {"approval_token", "idempotency_key", "request_id"}
+    }
+    raw = json.dumps(
+        {"command": name, "args": canonical},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def set_request_approval_token(token: str | None) -> None:
@@ -117,7 +146,7 @@ class CommandBus:
     def _run_pipeline(self, name, raw_args, *, session_id, outcome_resolver) -> CommandResult:
         spec = self.registry.get_command(name)
         args = self._inject_approval(self._parse_input(spec, raw_args))
-        if spec.idempotency == IdempotencyPolicy.REQUIRED and not args.idempotency_key:
+        if name in _STRICT_IDEMPOTENCY_COMMANDS and not args.idempotency_key:
             return CommandResult(
                 status=CommandStatus.REJECTED,
                 summary="该命令必须提供稳定的 idempotency_key",
@@ -126,8 +155,12 @@ class CommandBus:
             )
         payload = args.model_dump(mode="json")
         idem_key = self._resolve_idempotency_key(spec, args)
+        request_fingerprint = canonical_command_request_fingerprint(name, payload)
         if idem_key:
-            cached = idem_store.lookup(idem_key)
+            cached = idem_store.lookup(
+                idem_key,
+                request_fingerprint=request_fingerprint,
+            )
             if cached is not None:
                 return cached
 
@@ -137,8 +170,14 @@ class CommandBus:
             return gated
 
         claimed = False
+        claim_token = uuid.uuid4().hex
         if idem_key:
-            raced = idem_store.claim(idem_key, command=name)
+            raced = idem_store.claim(
+                idem_key,
+                command=name,
+                request_fingerprint=request_fingerprint,
+                claim_token=claim_token,
+            )
             if raced is not None:
                 return raced
             claimed = True
@@ -158,19 +197,33 @@ class CommandBus:
 
             if idem_key:
                 if result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}:
-                    idem_store.store(idem_key, command=name, result=result)
+                    idem_store.store(
+                        idem_key,
+                        command=name,
+                        request_fingerprint=request_fingerprint,
+                        claim_token=claim_token,
+                        result=result,
+                    )
                 elif claimed:
-                    idem_store.release_if_running(idem_key)
+                    idem_store.release_if_running(
+                        idem_key,
+                        request_fingerprint=request_fingerprint,
+                        claim_token=claim_token,
+                    )
             return result
         except Exception:
             if claimed and idem_key:
-                idem_store.release_if_running(idem_key)
+                idem_store.release_if_running(
+                    idem_key,
+                    request_fingerprint=request_fingerprint,
+                    claim_token=claim_token,
+                )
             raise
 
     async def _run_pipeline_async(self, name, raw_args, *, session_id, outcome_resolver) -> CommandResult:
         spec = self.registry.get_command(name)
         args = self._inject_approval(self._parse_input(spec, raw_args))
-        if spec.idempotency == IdempotencyPolicy.REQUIRED and not args.idempotency_key:
+        if name in _STRICT_IDEMPOTENCY_COMMANDS and not args.idempotency_key:
             return CommandResult(
                 status=CommandStatus.REJECTED,
                 summary="该命令必须提供稳定的 idempotency_key",
@@ -179,8 +232,12 @@ class CommandBus:
             )
         payload = args.model_dump(mode="json")
         idem_key = self._resolve_idempotency_key(spec, args)
+        request_fingerprint = canonical_command_request_fingerprint(name, payload)
         if idem_key:
-            cached = idem_store.lookup(idem_key)
+            cached = idem_store.lookup(
+                idem_key,
+                request_fingerprint=request_fingerprint,
+            )
             if cached is not None:
                 return cached
 
@@ -190,8 +247,14 @@ class CommandBus:
             return gated
 
         claimed = False
+        claim_token = uuid.uuid4().hex
         if idem_key:
-            raced = idem_store.claim(idem_key, command=name)
+            raced = idem_store.claim(
+                idem_key,
+                command=name,
+                request_fingerprint=request_fingerprint,
+                claim_token=claim_token,
+            )
             if raced is not None:
                 return raced
             claimed = True
@@ -211,13 +274,27 @@ class CommandBus:
 
             if idem_key:
                 if result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}:
-                    idem_store.store(idem_key, command=name, result=result)
+                    idem_store.store(
+                        idem_key,
+                        command=name,
+                        request_fingerprint=request_fingerprint,
+                        claim_token=claim_token,
+                        result=result,
+                    )
                 elif claimed:
-                    idem_store.release_if_running(idem_key)
+                    idem_store.release_if_running(
+                        idem_key,
+                        request_fingerprint=request_fingerprint,
+                        claim_token=claim_token,
+                    )
             return result
         except Exception:
             if claimed and idem_key:
-                idem_store.release_if_running(idem_key)
+                idem_store.release_if_running(
+                    idem_key,
+                    request_fingerprint=request_fingerprint,
+                    claim_token=claim_token,
+                )
             raise
 
     def _gate(
@@ -359,7 +436,6 @@ class CommandBus:
         if spec.idempotency == IdempotencyPolicy.NONE:
             return None
         return idem_store.make_key(spec.name, args.idempotency_key)
-
 
 _BUS = CommandBus()
 

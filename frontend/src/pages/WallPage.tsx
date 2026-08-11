@@ -1433,9 +1433,6 @@ function VideoPreviewWorkspace({ shot, episodeNo, episodeStatus, context, genera
       setWizard(null)
       await onRefresh()
     } catch (error) {
-      // #region debug-point B-C:shot-generation-error
-      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:runGeneration.error', msg: '[DEBUG] Shot generation API failed', data: { shotId: shot.id, shotNo: shot.shot_no, errorName: error instanceof Error ? error.name : typeof error, errorMessage: error instanceof Error ? error.message : String(error) }, ts: Date.now() }) }).catch(() => {})
-      // #endregion
       onToast(error instanceof Error ? error.message : String(error), undefined, true)
     } finally {
       setGenerating(false)

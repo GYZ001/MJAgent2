@@ -13,10 +13,17 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
 
     approved_cost = float(video_generate_episode(args).estimated_cost_cny or 0)
     if approved_cost > 0:
+        from app.capabilities.bus import canonical_command_request_fingerprint
+
         authorize_episode_video_budget_increment(
             args.episode_id,
             approved_cost,
             source="capability:video.generate_episode",
+            operation_id=f"video.generate_episode:{args.idempotency_key}",
+            request_fingerprint=canonical_command_request_fingerprint(
+                "video.generate_episode",
+                args.model_dump(mode="json"),
+            ),
         )
     outcome = await call_guarded(
         api._generate_episode_core,
@@ -100,10 +107,17 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
             "SELECT episode_id FROM shots WHERE id=?", (args.shot_id,),
         ).fetchone()
         if shot:
+            from app.capabilities.bus import canonical_command_request_fingerprint
+
             authorize_episode_video_budget_increment(
                 str(shot["episode_id"]),
                 approved_cost,
                 source="capability:video.generate_shot",
+                operation_id=f"video.generate_shot:{args.idempotency_key}",
+                request_fingerprint=canonical_command_request_fingerprint(
+                    "video.generate_shot",
+                    args.model_dump(mode="json"),
+                ),
             )
 
     body = {

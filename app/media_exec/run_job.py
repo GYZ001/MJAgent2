@@ -22,6 +22,50 @@ class ProviderCreateUnresolved(RuntimeError):
     """The provider may have accepted create, but no durable task handle exists."""
 
 
+class VideoInflightAdmissionDeferred(RuntimeError):
+    """The atomic submit-side inflight claim found no capacity."""
+
+
+def _release_pre_call_video_claim(
+    conn,
+    *,
+    job_id: str,
+    owner: str,
+    operation_id: str,
+) -> None:
+    """Release a slot/budget claim only while provider create is provably unsent."""
+    if conn.in_transaction:
+        conn.rollback()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        released_job = conn.execute(
+            """UPDATE jobs
+                  SET provider_non_cancellable=0,
+                      provider_create_state='not_started',updated_at=?
+                WHERE id=? AND provider_create_state='submitting'
+                  AND provider_non_cancellable=1
+                  AND status='running' AND lease_owner=?
+                  AND cancellation_requested=0""",
+            (now(), job_id, owner),
+        )
+        if released_job.rowcount != 1:
+            raise LeaseLost(f"video pre-call claim lost ownership: {job_id}")
+        released_at = now()
+        released_budget = conn.execute(
+            """UPDATE provider_video_budget_claims
+                  SET status='released',updated_at=?,released_at=?
+                WHERE operation_id=? AND job_id=? AND status='reserved'""",
+            (released_at, released_at, operation_id, job_id),
+        )
+        if released_budget.rowcount != 1:
+            raise LeaseLost(f"video pre-call budget claim lost ownership: {job_id}")
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def _provider_create_outcome_unknown(exc: ProviderError) -> bool:
     """Fail closed unless the provider response makes replay safety explicit."""
     delivery_state = str(getattr(exc, "delivery_state", "unknown") or "unknown")
@@ -3885,34 +3929,28 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                             actual_mode=actual_mode,
                             write_point="provider_non_cancellable",
                         )
-                        from app.completion_grant import reserve_provider_video_budget
+                        from app.media_pipeline.scheduler import claim_video_submit_slot
 
-                        budget_claimed = reserve_provider_video_budget(
-                            episode_id=str(job["episode_id"]),
+                        slot_claimed, slot_reason = claim_video_submit_slot(
                             job_id=job_id,
+                            lease_owner=owner,
+                            episode_id=str(job["episode_id"]),
+                            project_id=str(job["project_id"]),
                             version_id=str(version["id"]),
                             operation_id=provider_operation_id,
                             amount_cny=shot_cost_cny(int(shot["duration_s"] or 0)),
+                            is_auto_retake=int(meta.get("auto_retake_count") or 0) > 0,
                             conn=conn,
                         )
-                        if budget_claimed is not True:
+                        if not slot_claimed and slot_reason == "VIDEO_BUDGET_NOT_AUTHORIZED":
                             raise VideoBudgetAuthorizationError(
                                 "本集缺少有效的视频费用授权，或本次供应商视频调用将超过"
                                 "用户已批准的费用上限；任务已在付费调用前暂停"
                             )
-                        marked = conn.execute(
-                            """UPDATE jobs
-                               SET provider_non_cancellable=1, updated_at=?
-                               WHERE id=? AND status='running' AND lease_owner=?
-                                 AND cancellation_requested=0""",
-                            (now(), job_id, owner),
-                        )
-                        if marked.rowcount != 1:
-                            conn.rollback()
-                            raise LeaseLost(
-                                f"video submit cancelled before provider call: {job_id}"
+                        if not slot_claimed:
+                            raise VideoInflightAdmissionDeferred(
+                                slot_reason or "等待视频槽位"
                             )
-                        conn.commit()
                         try:
                             try:
                                 await _assert_video_provider_submission_authority_async(
@@ -3926,17 +3964,12 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                 # The provider has not been called yet. Undo the
                                 # short cancellation lock so recovery never
                                 # mistakes this fenced job for accepted paid work.
-                                conn.execute(
-                                    """UPDATE jobs
-                                          SET provider_non_cancellable=0,
-                                              provider_create_state='not_started',
-                                              updated_at=?
-                                        WHERE id=? AND provider_create_state='submitting'
-                                          AND status='running' AND lease_owner=?
-                                          AND cancellation_requested=0""",
-                                    (now(), job_id, owner),
+                                _release_pre_call_video_claim(
+                                    conn,
+                                    job_id=job_id,
+                                    owner=owner,
+                                    operation_id=provider_operation_id,
                                 )
-                                conn.commit()
                                 raise
                             task_id = await hiagent.create_video_task(
                                 prompt_text,
@@ -4347,6 +4380,30 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
             media_scheduler.settle_budget(job_id, cost, success=True)
             reconcile_episode_generation_status(job["episode_id"])
     except LeaseLost:
+        return
+    except VideoInflightAdmissionDeferred as exc:
+        message = str(exc)
+        changed = conn.execute(
+            """UPDATE jobs
+                  SET status='queued',error=?,reason_code='EPISODE_VIDEO_INFLIGHT_FULL',
+                      reason_text=?,provider_non_cancellable=0,
+                      provider_create_state='not_started',
+                      lease_owner=NULL,lease_expires_at=NULL,next_retry_at=?,updated_at=?
+                WHERE id=? AND status='running' AND lease_owner=?
+                  AND provider_non_cancellable=0""",
+            (message, message, now() + 20.0, now(), job_id, owner),
+        )
+        if changed.rowcount != 1:
+            conn.rollback()
+            return
+        conn.execute(
+            "UPDATE budget_reservations SET status='reserved' WHERE job_id=? AND status='running'",
+            (job_id,),
+        )
+        conn.commit()
+        task = asyncio.get_running_loop().create_task(_requeue_after(job_id, 20.0))
+        _retry_tasks.add(task)
+        task.add_done_callback(_retry_tasks.discard)
         return
     except VideoBudgetAuthorizationError as exc:
         message = str(exc)

@@ -66,6 +66,21 @@ def verify_current_storyboard_release_authority(
     ):
         raise ValueError("当前分镜 Artifact 不是本集已批准发布权威")
 
+    from app.evidence import repository as evidence_repository
+
+    artifact_record = evidence_repository.get_artifact(published_id, conn=db)
+    if artifact_record is None:
+        raise ValueError("当前分镜 Artifact 已不存在")
+    try:
+        actual_artifact_hash = evidence_repository.content_hash(
+            artifact_record.get("content"),
+            artifact_record.get("file_path"),
+        )
+    except OSError as exc:
+        raise ValueError("当前分镜 Artifact 文件证据已缺失或不可读") from exc
+    if actual_artifact_hash != str(artifact["content_hash"] or ""):
+        raise ValueError("当前分镜 Artifact 实际内容与存储哈希不一致")
+
     from app.production.certificate import verify_completion_certificate
 
     certificate = verify_completion_certificate(

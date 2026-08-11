@@ -892,6 +892,8 @@ def authorize_episode_video_budget_increment(
     increment_cny: float,
     *,
     source: str,
+    operation_id: str | None = None,
+    request_fingerprint: str | None = None,
     conn=None,
 ) -> float:
     """Add one explicitly approved payable-video amount to the episode cap."""
@@ -900,10 +902,39 @@ def authorize_episode_video_budget_increment(
         raise ValueError("视频授权额度必须是非负有限数")
     db = conn or get_conn()
     ensure_video_budget_authority_tables(db)
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS video_budget_authorization_receipts(
+               operation_id TEXT PRIMARY KEY,
+               episode_id TEXT NOT NULL,
+               request_fingerprint TEXT NOT NULL,
+               increment_cny REAL NOT NULL,
+               cap_after_cny REAL NOT NULL,
+               source TEXT NOT NULL,
+               created_at REAL NOT NULL
+           )"""
+    )
+    if bool(operation_id) != bool(request_fingerprint):
+        raise ValueError("预算授权 receipt 必须同时提供 operation_id 与 request_fingerprint")
     owns_transaction = not db.in_transaction
     if owns_transaction:
         db.execute("BEGIN IMMEDIATE")
     try:
+        if operation_id:
+            receipt = db.execute(
+                """SELECT episode_id,request_fingerprint,increment_cny,cap_after_cny
+                     FROM video_budget_authorization_receipts WHERE operation_id=?""",
+                (operation_id,),
+            ).fetchone()
+            if receipt:
+                if (
+                    str(receipt["episode_id"]) != episode_id
+                    or str(receipt["request_fingerprint"]) != request_fingerprint
+                    or abs(float(receipt["increment_cny"]) - amount) > 1e-9
+                ):
+                    raise ValueError("预算授权 idempotency_key 已绑定不同请求")
+                if owns_transaction:
+                    db.commit()
+                return round(float(receipt["cap_after_cny"]), 6)
         current = db.execute(
             "SELECT baseline_cny,cap_cny FROM episode_video_budget_authorities WHERE episode_id=?",
             (episode_id,),
@@ -930,6 +961,22 @@ def authorize_episode_video_budget_increment(
                    authorized_at=excluded.authorized_at,updated_at=excluded.updated_at""",
             (episode_id, baseline, cap, source, stamp, stamp),
         )
+        if operation_id:
+            db.execute(
+                """INSERT INTO video_budget_authorization_receipts(
+                       operation_id,episode_id,request_fingerprint,increment_cny,
+                       cap_after_cny,source,created_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    operation_id,
+                    episode_id,
+                    request_fingerprint,
+                    amount,
+                    cap,
+                    source,
+                    stamp,
+                ),
+            )
         if owns_transaction:
             db.commit()
         return round(cap, 6)
