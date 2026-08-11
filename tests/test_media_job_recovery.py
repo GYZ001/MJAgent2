@@ -542,8 +542,21 @@ def test_restarted_submitting_job_never_calls_provider_create(monkeypatch) -> No
     }
 
 
+@pytest.mark.parametrize(
+    "provider_failure",
+    [
+        pytest.param(("responded", "http-409", False, False), id="http-409"),
+        pytest.param(("responded", "http-429", False, False), id="http-429"),
+        pytest.param(("responded", "http-500", False, False), id="http-5xx"),
+        pytest.param(("unknown", "malformed-2xx", False, False), id="malformed-2xx"),
+        pytest.param(("unknown", "read-timeout", False, False), id="read-timeout"),
+        pytest.param(("unknown", "write-timeout", False, False), id="write-timeout"),
+        pytest.param(("not_sent", "connect-timeout", True, False), id="connect-timeout"),
+        pytest.param(("responded", "typed-reject", False, True), id="typed-not-accepted"),
+    ],
+)
 def test_create_response_without_task_id_waits_for_human_and_never_replays(
-    monkeypatch,
+    monkeypatch, provider_failure: tuple[str, str, bool, bool],
 ) -> None:
     from app import completion_grant
     from app.media_pipeline import scheduler, stage_state
@@ -586,6 +599,7 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
     )
     conn.commit()
     create_calls: list[str] = []
+    _, _, replay_safe, create_not_accepted = provider_failure
     async def no_sleep(_delay: float) -> None:
         return None
 
@@ -602,12 +616,14 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
 
     async def create_without_handle(*_args, **_kwargs) -> str:
         create_calls.append("create")
+        delivery_state, label, replay_safe, create_not_accepted = provider_failure
         raise worker.ProviderError(
-            "HTTP 202 response missing task id",
+            label,
             retryable=False,
-            delivery_state="unknown",
-            replay_safe=False,
-            requires_explicit_retry=True,
+            delivery_state=delivery_state,
+            replay_safe=replay_safe,
+            requires_explicit_retry=not replay_safe,
+            create_not_accepted=create_not_accepted,
         )
 
     class Permit:
@@ -660,16 +676,27 @@ def test_create_response_without_task_id_waits_for_human_and_never_replays(
                   provider_non_cancellable
              FROM jobs WHERE id='j1'"""
     ).fetchone()
+    claim_status = conn.execute(
+        """SELECT status FROM provider_video_budget_claims
+           WHERE operation_id='video-create-v1'"""
+    ).fetchone()["status"]
+
+    create_unknown = not replay_safe and not create_not_accepted
+    if not create_unknown:
+        assert job["status"] != "waiting_human"
+        assert job["provider_create_state"] == "not_started"
+        assert job["provider_non_cancellable"] == 0
+        assert claim_status == "released"
+        assert create_calls == ["create"]
+        return
+
     assert dict(job) == {
         "status": "waiting_human",
         "reason_code": "VIDEO_PROVIDER_CREATE_UNRESOLVED",
         "provider_create_state": "unknown",
         "provider_non_cancellable": 1,
     }, create_calls
-    assert conn.execute(
-        """SELECT status FROM provider_video_budget_claims
-           WHERE operation_id='video-create-v1'"""
-    ).fetchone()["status"] == "reserved"
+    assert claim_status == "reserved"
 
     conn.execute(
         """UPDATE jobs

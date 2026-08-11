@@ -1229,7 +1229,8 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
     ``adopted_version_id``。操作幂等，不删除用户文件。
     """
     fallback_rows = conn.execute(
-        """SELECT v.id,s.episode_id
+        """SELECT v.id,s.episode_id,
+                  CASE WHEN s.adopted_version_id=v.id THEN 1 ELSE 0 END AS was_adopted
              FROM shot_versions v
              LEFT JOIN shots s ON s.id=v.shot_id
             WHERE json_valid(v.image_inputs)
@@ -1258,7 +1259,9 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
     from app.artifacts import invalidate_episode_delivery_authority
 
     for episode_id in sorted({
-        str(row["episode_id"]) for row in fallback_rows if row["episode_id"]
+        str(row["episode_id"])
+        for row in fallback_rows
+        if row["episode_id"] and bool(row["was_adopted"])
     }):
         invalidate_episode_delivery_authority(conn, episode_id)
     return int(cursor.rowcount)

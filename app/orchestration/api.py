@@ -1236,7 +1236,7 @@ def download_delivery_archive(package_id: str):
     ).fetchone()
     if not row:
         raise HTTPException(404, "交付包不存在")
-    _current_delivery_download_manifest(conn, row)
+    manifest = _current_delivery_download_manifest(conn, row)
     archive = Path(str(row["package_path"]) + ".zip").resolve()
     if not archive.is_file():
         raise HTTPException(404, "交付压缩包不存在")
@@ -1245,6 +1245,17 @@ def download_delivery_archive(package_id: str):
     package_path = Path(str(row["package_path"])).resolve()
     if not _archive_matches_directory(archive, package_path):
         raise HTTPException(409, "交付压缩包与已审核目录不一致")
+    for item in manifest.get("files") or []:
+        relative = str(item.get("path") or "").strip()
+        candidate = (package_path / relative).resolve()
+        if (
+            not relative
+            or not candidate.is_relative_to(package_path)
+            or not candidate.is_file()
+            or candidate.stat().st_size != int(item.get("size_bytes") or -1)
+            or _sha256(candidate) != str(item.get("sha256") or "")
+        ):
+            raise HTTPException(409, "交付压缩包文件与已审核 manifest 不一致")
     evaluation = conn.execute(
         """SELECT evidence_json FROM evaluations
            WHERE artifact_id=? AND evaluator_type='human'

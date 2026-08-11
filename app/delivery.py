@@ -39,6 +39,7 @@ def _ensure_delivery_operation_receipts(conn) -> None:
                abandoned_workspace_path TEXT NOT NULL DEFAULT '',
                abandoned_promotion_phase TEXT NOT NULL DEFAULT '',
                interrupted_at REAL,
+               recovery_fenced_owner TEXT NOT NULL DEFAULT '',
                updated_at REAL NOT NULL
            )"""
     )
@@ -64,6 +65,10 @@ def _ensure_delivery_operation_receipts(conn) -> None:
     if "interrupted_at" not in columns:
         conn.execute(
             "ALTER TABLE delivery_operation_receipts ADD COLUMN interrupted_at REAL"
+        )
+    if "recovery_fenced_owner" not in columns:
+        conn.execute(
+            "ALTER TABLE delivery_operation_receipts ADD COLUMN recovery_fenced_owner TEXT NOT NULL DEFAULT ''"
         )
 
 
@@ -106,12 +111,15 @@ def claim_delivery_package_operation(
                       SET lease_owner=?,lease_expires_at=?,status='running',
                           abandoned_workspace_path=workspace_path,
                           abandoned_promotion_phase=promotion_phase,
-                          workspace_path='',promotion_phase='claimed',updated_at=?
+                          workspace_path='',promotion_phase='claimed',
+                          recovery_fenced_owner=CASE WHEN interrupted_at IS NOT NULL THEN ? ELSE '' END,
+                          interrupted_at=NULL,updated_at=?
                     WHERE package_id=? AND request_fingerprint=?
                       AND (status!='running' OR lease_expires_at<=?)""",
                 (
                     owner,
                     stamp + _DELIVERY_OPERATION_LEASE_S,
+                    owner,
                     stamp,
                     package_id,
                     request_fingerprint,
@@ -818,6 +826,16 @@ def build_delivery_package(
         archive_path = Path(str(package_path) + ".zip")
         archive_recovered = False
         if not _archive_matches_directory(archive_path, package_path):
+            if existing["status"] != "waiting_human":
+                raise ValueError("已审核或历史交付包字节不可变，压缩包损坏后禁止自动重写")
+            if not operation_lease_owner:
+                raise ValueError("等待审核交付包缺少原 operation owner，禁止自动重写压缩包")
+            _assert_delivery_operation_owner(
+                conn,
+                package_id=package_id,
+                request_fingerprint=str(operation_request_fingerprint),
+                lease_owner=operation_lease_owner,
+            )
             archive_path = atomic_zip_directory(package_path, archive_path)
             archive_recovered = True
         return {
@@ -977,7 +995,7 @@ def build_delivery_package(
     if operation_lease_owner:
         receipt_row = conn.execute(
             """SELECT workspace_path,promotion_phase,abandoned_workspace_path,
-                      abandoned_promotion_phase,interrupted_at
+                      abandoned_promotion_phase,recovery_fenced_owner
                  FROM delivery_operation_receipts
                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
                  AND status='running'""",
@@ -1014,7 +1032,10 @@ def build_delivery_package(
     if operation_lease_owner and receipt_row is not None:
         abandoned_workspace = str(receipt_row["abandoned_workspace_path"] or "")
         abandoned_phase = str(receipt_row["abandoned_promotion_phase"] or "")
-        startup_fenced = bool(receipt_row["interrupted_at"])
+        startup_fenced = (
+            str(receipt_row["recovery_fenced_owner"] or "")
+            == str(operation_lease_owner or "")
+        )
     if startup_fenced and abandoned_phase in {
         "ready", "directory_promoted", "promoted",
     }:

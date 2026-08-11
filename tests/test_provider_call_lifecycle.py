@@ -6,7 +6,7 @@ import sqlite3
 import httpx
 import pytest
 
-from app import db, hiagent, system_api, video_modes
+from app import db, hiagent, system_api, video_modes, worker
 
 
 class _Response:
@@ -20,6 +20,35 @@ class _Response:
 class _Client:
     async def post(self, url, *, json, headers):
         return _Response()
+
+
+@pytest.mark.parametrize(
+    ("delivery_state", "replay_safe", "create_not_accepted", "unknown"),
+    [
+        pytest.param("responded", False, False, True, id="http-409"),
+        pytest.param("responded", False, False, True, id="http-429"),
+        pytest.param("responded", False, False, True, id="http-5xx"),
+        pytest.param("unknown", False, False, True, id="malformed-2xx"),
+        pytest.param("unknown", False, False, True, id="read-timeout"),
+        pytest.param("unknown", False, False, True, id="write-timeout"),
+        pytest.param("not_sent", True, False, False, id="connect-or-pool-timeout"),
+        pytest.param("responded", False, True, False, id="explicit-not-accepted"),
+    ],
+)
+def test_video_create_replay_safety_is_explicit_only(
+    delivery_state: str,
+    replay_safe: bool,
+    create_not_accepted: bool,
+    unknown: bool,
+) -> None:
+    error = hiagent.ProviderError(
+        "provider create test",
+        delivery_state=delivery_state,
+        replay_safe=replay_safe,
+        create_not_accepted=create_not_accepted,
+    )
+
+    assert worker._provider_create_outcome_unknown(error) is unknown
 
 
 def test_screenplay_baseline_uses_dedicated_long_read_timeout(monkeypatch) -> None:

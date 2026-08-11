@@ -224,12 +224,14 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     )
     draft_manifest = Path(draft["package_path"], "manifest.json").read_bytes()
     draft_hash = repository.get_artifact(draft["artifact_id"])["content_hash"]
-    Path(draft["archive_path"]).unlink()
-    archive_recovered = delivery.build_delivery_package(
-        "e", package_id="delivery_crash_window", operation_started_at=42,
-    )
-    assert archive_recovered["archive_recovered"] is True
-    assert Path(archive_recovered["archive_path"]).is_file()
+    draft_archive = Path(draft["archive_path"])
+    draft_archive_bytes = draft_archive.read_bytes()
+    draft_archive.unlink()
+    with pytest.raises(ValueError, match="缺少原 operation owner"):
+        delivery.build_delivery_package(
+            "e", package_id="delivery_crash_window", operation_started_at=42,
+        )
+    draft_archive.write_bytes(draft_archive_bytes)
     tracked_shot = next(
         item for item in draft["manifest"]["files"] if item["role"] == "shot_video"
     )
@@ -239,7 +241,13 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
         delivery.build_delivery_package(
             "e", package_id="delivery_crash_window", operation_started_at=42,
         )
+    # A matching re-packed ZIP is not sufficient: draft downloads remain
+    # bound to every file hash in the persisted manifest.
+    delivery.atomic_zip_directory(Path(draft["package_path"]), Path(draft["archive_path"]))
+    with pytest.raises(Exception, match="manifest"):
+        orchestration_api.download_delivery_archive(draft["package_id"])
     tracked_path.write_bytes(video.read_bytes())
+    delivery.atomic_zip_directory(Path(draft["package_path"]), Path(draft["archive_path"]))
     # Simulate a hard exit after the immutable artifact commit but before the
     # delivery_packages pointer commit.  The stable operation must reconstruct
     # the pointer without changing evidence or duplicating its file evaluation.
@@ -459,6 +467,91 @@ def test_delivery_route_forwards_idempotency_metadata(monkeypatch) -> None:
             "request_id": "request-1",
         },
     }
+
+
+def test_delivery_restart_fences_lease_only_for_recovery_owner(
+    tmp_path, monkeypatch,
+) -> None:
+    database = tmp_path / "delivery-restart.db"
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db(reconcile_interrupted=False)
+    conn = db.get_conn()
+    owner, recovered = delivery.claim_delivery_package_operation(
+        package_id="delivery_restart",
+        episode_id="e",
+        request_fingerprint="fp",
+        conn=conn,
+    )
+    assert owner and recovered is None
+    workspace = tmp_path / f".{owner}.tmp"
+    conn.execute(
+        """UPDATE delivery_operation_receipts
+              SET workspace_path=?,promotion_phase='directory_promoted'
+            WHERE package_id='delivery_restart'""",
+        (str(workspace),),
+    )
+    conn.commit()
+    lease_before = conn.execute(
+        "SELECT lease_expires_at FROM delivery_operation_receipts"
+    ).fetchone()[0]
+
+    # A secondary/non-owner initialization must not steal a live operation.
+    db.init_db(reconcile_interrupted=False)
+    assert conn.execute(
+        "SELECT lease_expires_at FROM delivery_operation_receipts"
+    ).fetchone()[0] == lease_before
+    with pytest.raises(ValueError, match="正在执行"):
+        delivery.claim_delivery_package_operation(
+            package_id="delivery_restart",
+            episode_id="e",
+            request_fingerprint="fp",
+            allow_interrupted_takeover=True,
+            conn=conn,
+        )
+
+    # The runtime-recovery owner proves the old process is gone, fences its
+    # lease, and the new owner preserves abandoned path/phase evidence while
+    # receiving a fresh workspace binding.
+    db.init_db(reconcile_interrupted=True)
+    next_owner, recovered = delivery.claim_delivery_package_operation(
+        package_id="delivery_restart",
+        episode_id="e",
+        request_fingerprint="fp",
+        allow_interrupted_takeover=True,
+        conn=conn,
+    )
+    assert next_owner and next_owner != owner and recovered is None
+    row = conn.execute(
+        "SELECT * FROM delivery_operation_receipts WHERE package_id='delivery_restart'"
+    ).fetchone()
+    assert row["workspace_path"] == ""
+    assert row["promotion_phase"] == "claimed"
+    assert row["abandoned_workspace_path"] == str(workspace)
+    assert row["abandoned_promotion_phase"] == "directory_promoted"
+    assert row["interrupted_at"] is None
+    assert row["recovery_fenced_owner"] == next_owner
+
+    # The startup proof is one-shot. A later natural lease expiry in the same
+    # process must not let a third owner treat owner B as a dead process.
+    conn.execute(
+        "UPDATE delivery_operation_receipts SET lease_expires_at=0 WHERE package_id='delivery_restart'"
+    )
+    conn.commit()
+    third_owner, _ = delivery.claim_delivery_package_operation(
+        package_id="delivery_restart",
+        episode_id="e",
+        request_fingerprint="fp",
+        conn=conn,
+    )
+    third = conn.execute(
+        "SELECT recovery_fenced_owner,interrupted_at FROM delivery_operation_receipts"
+    ).fetchone()
+    assert third_owner and third_owner != next_owner
+    assert third["recovery_fenced_owner"] == ""
+    assert third["interrupted_at"] is None
+    conn.close()
+    db._local.conn = None
 
 
 def test_delivery_recovery_isolates_spawn_failure_and_continues(monkeypatch) -> None:
