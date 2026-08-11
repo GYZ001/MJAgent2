@@ -544,6 +544,40 @@ def test_current_screenplay_artifact_plan_null_needs_rebuild() -> None:
     _assert_artifact_needs_rebuild(artifact["id"])
 
 
+def test_current_screenplay_artifact_empty_parent_lineage_needs_rebuild() -> None:
+    case = _source_projection_case()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[],
+        contract_version="4.0.0",
+    ))
+
+    _assert_artifact_needs_rebuild(artifact["id"])
+
+
+def test_current_screenplay_artifact_complete_lineage_loads() -> None:
+    case = _source_projection_case()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[case["merged_artifact_id"]],
+        contract_version="4.0.0",
+    ))
+
+    restored = load_screenplay_from_artifact(artifact["id"])
+
+    assert restored.narrative_plan is not None
+
+
 def test_current_screenplay_artifact_missing_parent_needs_rebuild() -> None:
     case = _source_projection_case()
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
@@ -2045,7 +2079,7 @@ async def test_blind_review_rejects_supplied_screenplay_drift_before_model_use()
         )
 
 
-def test_historical_contract_plan_null_needs_rebuild() -> None:
+def test_unbound_historical_contract_plan_null_loads_as_legacy_display() -> None:
     screenplay = _screenplay()
     screenplay.narrative_plan = None
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
@@ -2057,6 +2091,46 @@ def test_historical_contract_plan_null_needs_rebuild() -> None:
         content=screenplay_artifact_payload(screenplay),
         contract_version="screenplay-legacy-published.v1",
     ))
+
+    restored = load_screenplay_from_artifact(artifact["id"])
+
+    assert restored.narrative_plan is None
+
+
+def test_published_historical_contract_plan_null_needs_rebuild() -> None:
+    screenplay = _screenplay()
+    screenplay.narrative_plan = None
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="episode-generic",
+        status="validated",
+        trust_level="T2",
+        content=screenplay_artifact_payload(screenplay),
+        contract_version="screenplay-legacy-published.v1",
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,created_at) VALUES(?,?,?)",
+        ("project-legacy-bound", "Legacy bound", db.now()),
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,screenplay_json,
+               screenplay_artifact_id,published_screenplay_artifact_id,created_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            "episode-generic",
+            "project-legacy-bound",
+            1,
+            "Legacy bound",
+            screenplay.model_dump_json(),
+            artifact["id"],
+            artifact["id"],
+            db.now(),
+        ),
+    )
+    conn.commit()
 
     _assert_artifact_needs_rebuild(artifact["id"])
 
