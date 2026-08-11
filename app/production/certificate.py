@@ -281,6 +281,7 @@ def _validate_narrative_certificate_authority(
     rows: list[Any],
     contract_version: str,
     qa_profile_version: str,
+    require_current_qa_profile: bool,
     conn=None,
 ) -> bool:
     screenplay = _narrative_screenplay_for_artifact(
@@ -302,7 +303,10 @@ def _validate_narrative_certificate_authority(
     artifact_contract = str(artifact.get("contract_version") or "")
     if not contract_version or contract_version != artifact_contract:
         raise ValueError("叙事完成凭证必须精确匹配当前 Artifact contract_version")
-    if qa_profile_version != _CURRENT_QA_PROFILE[kind]:
+    if (
+        require_current_qa_profile
+        and qa_profile_version != _CURRENT_QA_PROFILE[kind]
+    ):
         raise ValueError("叙事完成凭证的 qa_profile_version 与当前运行契约不匹配")
 
     if kind == "screenplay":
@@ -399,6 +403,7 @@ def issue_completion_certificate(
         rows=rows,
         contract_version=contract_version,
         qa_profile_version=qa_profile_version,
+        require_current_qa_profile=True,
         conn=db,
     )
     if narrative_authority:
@@ -609,6 +614,7 @@ def verify_completion_certificate(
         rows=rows,
         contract_version=cert.contract_version,
         qa_profile_version=cert.qa_profile_version,
+        require_current_qa_profile=False,
         conn=conn,
     )
     if narrative_authority:

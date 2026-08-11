@@ -2315,7 +2315,10 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
         raise HTTPException(409, "下游任务尚未终止，未启动剧本 Repair")
 
     contract_version = get_contract("screenplay").version
-    from app.production.screenplay_authority import screenplay_authority_fingerprint
+    from app.production.screenplay_authority import (
+        SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_authority_fingerprint,
+    )
 
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
@@ -2336,10 +2339,10 @@ async def repair_screenplay_draft(episode_id: str, body: dict | None = Body(None
             source_text=source_text,
             bible=bible,
             contract_version=contract_version,
-            qa_profile_version="screenplay-qa-gate-2",
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         ),
         contract_version=contract_version,
-        qa_profile_version="screenplay-qa-gate-2",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     revision = mark_baseline_generated(
@@ -3269,7 +3272,10 @@ async def edit_screenplay(episode_id: str, body: dict):
         )
 
         contract_version = str(qa_episode["screenplay_contract_version"])
-        from app.production.screenplay_authority import screenplay_authority_fingerprint
+        from app.production.screenplay_authority import (
+            SCREENPLAY_QA_PROFILE_VERSION,
+            screenplay_authority_fingerprint,
+        )
 
         revision = ensure_production_revision(
             episode_id=episode_id,
@@ -3280,10 +3286,10 @@ async def edit_screenplay(episode_id: str, body: dict):
                 source_text=source_text,
                 bible=bible,
                 contract_version=contract_version,
-                qa_profile_version="screenplay-qa-gate-2",
+                qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
             ),
             contract_version=contract_version,
-            qa_profile_version="screenplay-qa-gate-2",
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
             resume=False,
         )
         candidate = evidence_repository.create_artifact(
@@ -3349,7 +3355,7 @@ async def edit_screenplay(episode_id: str, body: dict):
             evaluation_ids=[evaluation_id] if evaluation_id else [],
             input_fingerprint=revision.input_fingerprint,
             contract_version=contract_version,
-            qa_profile_version="screenplay-qa-gate-2",
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
             clear_downstream=True,
         )
         return {

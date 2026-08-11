@@ -490,13 +490,25 @@ def _screenplay_checkpoint_compatibility(
             parent_ids = set(json.loads(row.get("parent_artifact_ids_json") or "[]"))
             snapshot = json.loads(row.get("model_snapshot_json") or "{}")
             ScreenplayGenerationIR.model_validate(content)
+            validated_shard_ids = {
+                str(item.get("normalized_artifact_id") or "")
+                for item in validated_shards
+                if str(item.get("normalized_artifact_id") or "")
+            }
+            expected_parent_ids = {
+                blueprint_id,
+                identity_id,
+                envelope_id,
+                *validated_shard_ids,
+            }
             merged_valid = (
                 content.get("format_version") == IR_VERSION
                 and snapshot.get("blueprint_hash") == blueprint_hash
                 and snapshot.get("identity_registry_hash") == identity_hash
-                and {
-                    blueprint_id, identity_id, envelope_id,
-                } <= parent_ids
+                and bool(shard_rows)
+                and len(validated_shards) == len(shard_rows)
+                and len(validated_shard_ids) == len(shard_rows)
+                and parent_ids == expected_parent_ids
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             merged_valid = False
@@ -1453,7 +1465,8 @@ def recover_screenplay_working_authority(
     expected_working_artifact_id: str,
     expected_working_hash: str,
     expected_replacement_hash: str,
-    source_authority_artifact_id: str,
+    trusted_merged_ir_artifact_id: str,
+    revalidation_evaluation_id: str,
     input_fingerprint: str,
     contract_version: str,
     qa_profile_version: str,
@@ -1467,6 +1480,13 @@ def recover_screenplay_working_authority(
     late worker cannot restore a poisoned candidate.
     """
     ensure_production_revisions_table()
+    from app.harness.contracts import get_contract
+    from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
+
+    if qa_profile_version != SCREENPLAY_QA_PROFILE_VERSION:
+        raise ValueError("screenplay recovery 只能绑定当前 QA profile")
+    if contract_version != get_contract("screenplay").version:
+        raise ValueError("screenplay recovery 只能绑定当前 Document contract")
     conn = get_conn()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1510,7 +1530,8 @@ def recover_screenplay_working_authority(
             raise RuntimeError("screenplay recovery working hash CAS 冲突")
         replacement = conn.execute(
             "SELECT id,type,scope_type,scope_id,status,contract_version,"
-            "content_hash,parent_artifact_ids_json FROM artifacts WHERE id=?",
+            "content_json,content_hash,parent_artifact_ids_json "
+            "FROM artifacts WHERE id=?",
             (artifact_id,),
         ).fetchone()
         if (
@@ -1524,6 +1545,14 @@ def recover_screenplay_working_authority(
             != expected_replacement_hash
         ):
             raise ValueError("screenplay recovery replacement Artifact 合同不兼容")
+        replacement_content = _artifact_json(dict(replacement))
+        if (
+            replacement_content is None
+            or not _artifact_hash_is_valid(
+                dict(replacement), replacement_content
+            )
+        ):
+            raise ValueError("screenplay recovery replacement 内容哈希失效")
         try:
             replacement_parents = {
                 str(value)
@@ -1534,12 +1563,61 @@ def recover_screenplay_working_authority(
             }
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("screenplay recovery replacement lineage 无效") from exc
+        trusted_merged_id = str(trusted_merged_ir_artifact_id or "")
+        eligible_merged_id = str(
+            current_eligibility.reusable_checkpoint.get(
+                "merged_ir_artifact_id"
+            ) or ""
+        )
         if artifact_id != expected_working_artifact_id:
-            if artifact_id != source_authority_artifact_id and (
-                not source_authority_artifact_id
-                or replacement_parents != {source_authority_artifact_id}
+            if (
+                not trusted_merged_id
+                or trusted_merged_id != eligible_merged_id
+                or replacement_parents != {trusted_merged_id}
             ):
                 raise ValueError("screenplay recovery replacement 不来自可信上游")
+        evaluation = conn.execute(
+            "SELECT artifact_id,evaluator_name,evaluator_version,status,"
+            "hard_gate_passed,runtime_blocking,issues_json,evidence_json "
+            "FROM evaluations WHERE id=?",
+            (revalidation_evaluation_id,),
+        ).fetchone()
+        if evaluation is None:
+            raise ValueError("screenplay recovery 缺少持久化 gate-3 复验证据")
+        try:
+            evaluation_evidence = json.loads(
+                evaluation["evidence_json"] or "{}"
+            )
+            evaluation_issues = json.loads(
+                evaluation["issues_json"] or "[]"
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("screenplay recovery 复验证据不可解析") from exc
+        blocking_evaluation_issue = any(
+            isinstance(issue, dict)
+            and (
+                bool(issue.get("must_fix"))
+                or bool((issue.get("evidence") or {}).get("must_fix"))
+                or bool((issue.get("evidence") or {}).get("runtime_blocking"))
+            )
+            for issue in evaluation_issues
+        )
+        if (
+            evaluation["artifact_id"] != artifact_id
+            or evaluation["evaluator_name"] != "screenplay_production_qa"
+            or evaluation["evaluator_version"] != qa_profile_version
+            or evaluation["status"] in {"failed", "error"}
+            or not bool(evaluation["hard_gate_passed"])
+            or bool(evaluation["runtime_blocking"])
+            or blocking_evaluation_issue
+            or not isinstance(evaluation_evidence, dict)
+            or str(evaluation_evidence.get("artifact_hash") or "")
+            != expected_replacement_hash
+            or str(
+                evaluation_evidence.get("authority_input_fingerprint") or ""
+            ) != input_fingerprint
+        ):
+            raise ValueError("screenplay recovery gate-3 复验证据不成立")
         old_checkpoint_json = str(row["checkpoint_json"] or "{}")
         stamp = now()
         new_revision_id = new_id("rev")
@@ -1568,7 +1646,7 @@ def recover_screenplay_working_authority(
                 new_revision_id,
                 row["episode_id"],
                 row["kind"],
-                row["baseline_artifact_id"],
+                artifact_id,
                 artifact_id,
                 input_fingerprint,
                 contract_version,
@@ -1579,12 +1657,10 @@ def recover_screenplay_working_authority(
             ),
         )
         episode_cursor = conn.execute(
-            "UPDATE episodes SET working_screenplay_artifact_id=?,"
-            "screenplay_production_revision_id=? WHERE id=? "
+            "UPDATE episodes SET working_screenplay_artifact_id=? WHERE id=? "
             "AND COALESCE(working_screenplay_artifact_id,'')=?",
             (
                 artifact_id,
-                new_revision_id,
                 row["episode_id"],
                 expected_working_artifact_id,
             ),

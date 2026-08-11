@@ -2909,6 +2909,353 @@ def _checkpoint_after_baseline_generation(
     return {**previous, **latest}
 
 
+def _artifact_descends_from(
+    artifact_id: str,
+    ancestor_artifact_id: str,
+) -> bool:
+    """Check immutable Artifact ancestry without accepting a label match."""
+    if not artifact_id or not ancestor_artifact_id:
+        return False
+    if artifact_id == ancestor_artifact_id:
+        return True
+    pending = [artifact_id]
+    seen: set[str] = set()
+    while pending:
+        current_id = pending.pop()
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        artifact = evidence_repository.get_artifact(current_id)
+        if artifact is None:
+            continue
+        for parent_id in artifact.get("parent_artifact_ids") or []:
+            parent = str(parent_id or "")
+            if parent == ancestor_artifact_id:
+                return True
+            if parent and parent not in seen:
+                pending.append(parent)
+    return False
+
+
+def _screenplay_recovery_hard_issues(
+    script: EpisodeScreenplay,
+    *,
+    artifact_id: str,
+    artifact_hash: str,
+    bible: Bible,
+    source_text: str,
+    episode: dict[str, Any],
+) -> list[Issue]:
+    issues, _evaluation = run_screenplay_qa(
+        script,
+        bible=bible,
+        source_text=source_text,
+        episode=episode,
+        artifact_id=artifact_id,
+        artifact_hash=artifact_hash,
+    )
+    return non_waivable_screenplay_issues(issues)
+
+
+def _revalidate_or_rebuild_resume_working(
+    *,
+    episode_id: str,
+    episode: dict[str, Any],
+    source_text: str,
+    bible: Bible,
+    revision,
+    entry_eligibility,
+    input_fingerprint: str,
+    contract_version: str,
+    run_id: str | None,
+):
+    """Migrate an old QA profile without trusting its mutable repair descendant."""
+    from app.portraits import (
+        apply_screenplay_character_resolutions,
+        normalize_screenplay_voice_ids,
+    )
+    from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
+    from app.production.revision import resolve_screenplay_resume_eligibility
+    from app.screenplay_ir import ScreenplayGenerationIR, compile_screenplay_ir
+    from app.screenplay_scene_shards import SCREENPLAY_MERGED_IR_VERSION
+    from app.validators import normalize_screenplay_candidate
+
+    if entry_eligibility.reason_code != "WORKING_REVALIDATION_REQUIRED":
+        return revision
+    if (
+        entry_eligibility.revision_id != revision.id
+        or entry_eligibility.working_artifact_id != revision.working_artifact_id
+        or not revision.working_artifact_id
+    ):
+        raise RuntimeError("screenplay recovery entry eligibility 已漂移")
+
+    # Re-resolve immediately before reading the authority.  The final write
+    # repeats this check under BEGIN IMMEDIATE, closing the TOCTOU window.
+    current_eligibility = resolve_screenplay_resume_eligibility(episode_id)
+    if (
+        current_eligibility.reason_code != "WORKING_REVALIDATION_REQUIRED"
+        or current_eligibility.revision_id != revision.id
+        or current_eligibility.working_artifact_id != revision.working_artifact_id
+    ):
+        raise RuntimeError("screenplay recovery eligibility 已变化")
+
+    old_working_id = str(revision.working_artifact_id)
+    old_working_artifact = evidence_repository.get_artifact(old_working_id)
+    if old_working_artifact is None:
+        raise RuntimeError("screenplay recovery working Artifact 不存在")
+    old_working_hash = str(old_working_artifact.get("content_hash") or "")
+    working_script = load_screenplay_from_artifact(old_working_id)
+    qa_episode = {
+        **episode,
+        "screenplay_contract_version": contract_version,
+    }
+    working_hard_issues = _screenplay_recovery_hard_issues(
+        working_script,
+        artifact_id=old_working_id,
+        artifact_hash=old_working_hash,
+        bible=bible,
+        source_text=source_text,
+        episode=qa_episode,
+    )
+
+    action = "working_revalidated"
+    source_authority_id = old_working_id
+    replacement_artifact = old_working_artifact
+    merged_ir_id = str(
+        current_eligibility.reusable_checkpoint.get(
+            "merged_ir_artifact_id"
+        ) or ""
+    )
+    if working_hard_issues:
+        action = "working_rebuilt"
+        if merged_ir_id:
+            merged_artifact = evidence_repository.get_artifact(merged_ir_id)
+            trusted_parent_ids = {
+                str(current_eligibility.reusable_checkpoint.get(key) or "")
+                for key in (
+                    "blueprint_artifact_id",
+                    "identity_artifact_id",
+                    "envelope_artifact_id",
+                )
+                if str(current_eligibility.reusable_checkpoint.get(key) or "")
+            }
+            if (
+                merged_artifact is None
+                or merged_artifact.get("type")
+                != "screenplay_generation_ir_merged"
+                or merged_artifact.get("scope_type") != "episode"
+                or merged_artifact.get("scope_id") != episode_id
+                or merged_artifact.get("status") != "validated"
+                or merged_artifact.get("trust_level") != "T1"
+                or str(merged_artifact.get("contract_version") or "")
+                != SCREENPLAY_MERGED_IR_VERSION
+                or not trusted_parent_ids
+                or not trusted_parent_ids.issubset({
+                    str(value)
+                    for value in merged_artifact.get("parent_artifact_ids") or []
+                })
+                or str(merged_artifact.get("content_hash") or "")
+                != evidence_repository.content_hash(
+                    merged_artifact.get("content")
+                )
+            ):
+                raise RuntimeError("screenplay recovery merged IR 权威复验失败")
+            merged_ir = ScreenplayGenerationIR.model_validate(
+                merged_artifact.get("content") or {}
+            )
+            compiler_audit: list[dict[str, Any]] = []
+            rebuilt_script = compile_screenplay_ir(
+                merged_ir,
+                episode=qa_episode,
+                source_text=source_text,
+                bible=bible,
+                audit=compiler_audit,
+            )
+            apply_screenplay_character_resolutions(
+                rebuilt_script,
+                episode.get("character_resolutions") or [],
+            )
+            normalize_screenplay_voice_ids(rebuilt_script, bible)
+            _normalize_screenplay_narrative_graph(
+                rebuilt_script,
+                authorized_source_chapters=episode.get(
+                    "authorized_source_chapters"
+                ),
+            )
+            rebuilt_script = normalize_screenplay_candidate(
+                rebuilt_script,
+                source_text=source_text,
+            )
+            rebuilt_payload = screenplay_artifact_payload(rebuilt_script)
+            rebuilt_hash = evidence_repository.content_hash(rebuilt_payload)
+            rebuilt_hard_issues = _screenplay_recovery_hard_issues(
+                rebuilt_script,
+                artifact_id=merged_ir_id,
+                artifact_hash=rebuilt_hash,
+                bible=bible,
+                source_text=source_text,
+                episode=qa_episode,
+            )
+            if rebuilt_hard_issues:
+                raise ScreenplayNarrativeGateError(
+                    "validated merged IR 按当前编译器重建后仍未通过确定性门禁："
+                    + "；".join(
+                        issue.message for issue in rebuilt_hard_issues[:5]
+                    )
+                )
+
+            # A clean immutable Baseline may be reused only when it is an
+            # ancestor and canonically identical to the trusted recompile.
+            baseline_id = str(revision.baseline_artifact_id or "")
+            baseline_artifact = (
+                evidence_repository.get_artifact(baseline_id)
+                if baseline_id
+                and _artifact_descends_from(old_working_id, baseline_id)
+                else None
+            )
+            if (
+                baseline_artifact is not None
+                and baseline_artifact.get("type") == "screenplay_document"
+                and baseline_artifact.get("scope_id") == episode_id
+                and baseline_artifact.get("status")
+                in {"candidate", "validated", "approved"}
+                and str(baseline_artifact.get("contract_version") or "")
+                == contract_version
+                and str(baseline_artifact.get("content_hash") or "")
+                == rebuilt_hash
+                and {
+                    str(value)
+                    for value in baseline_artifact.get(
+                        "parent_artifact_ids"
+                    ) or []
+                    if str(value)
+                } == {merged_ir_id}
+            ):
+                replacement_artifact = baseline_artifact
+                source_authority_id = merged_ir_id
+            else:
+                replacement_artifact = evidence_repository.create_artifact(
+                    EvidenceArtifact(
+                        type="screenplay_document",
+                        scope_type="episode",
+                        scope_id=episode_id,
+                        status="candidate",
+                        trust_level="T1",
+                        content=rebuilt_payload,
+                        parent_artifact_ids=[merged_ir_id],
+                        contract_version=contract_version,
+                        model_snapshot={
+                            "recovery_contract": "screenplay-working-recovery.v1",
+                            "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
+                            "compiler_audit_count": len(compiler_audit),
+                            "source_revision_id": revision.id,
+                        },
+                    )
+                )
+                source_authority_id = merged_ir_id
+        else:
+            raise RuntimeError(
+                "screenplay recovery 的旧 working 未通过当前门禁，且缺少"
+                "resolver 认可的 validated merged IR"
+            )
+
+    replacement_id = str(replacement_artifact.get("id") or "")
+    replacement_hash = str(replacement_artifact.get("content_hash") or "")
+    replacement_script = load_screenplay_from_artifact(replacement_id)
+    revalidation_issues, revalidation_evaluation = run_screenplay_qa(
+        replacement_script,
+        bible=bible,
+        source_text=source_text,
+        episode=qa_episode,
+        artifact_id=replacement_id,
+        artifact_hash=replacement_hash,
+    )
+    if non_waivable_screenplay_issues(revalidation_issues):
+        raise ScreenplayNarrativeGateError(
+            "screenplay recovery replacement 未通过持久化 gate-3 复验"
+        )
+    revalidation_row = evidence_repository.create_evaluation(
+        replacement_id,
+        revalidation_evaluation,
+    )
+    revalidation_evaluation_id = _eval_id_from_create(revalidation_row)
+    if not revalidation_evaluation_id:
+        raise RuntimeError("screenplay recovery gate-3 复验证据未持久化")
+    old_checkpoint = dict(revision.checkpoint_json or {})
+    recovery_history = list(old_checkpoint.get("recovery_history") or [])
+    recovery_history.append({
+        "action": action,
+        "source_revision_id": revision.id,
+        "old_working_artifact_id": old_working_id,
+        "replacement_artifact_id": replacement_id,
+        "source_authority_artifact_id": source_authority_id,
+        "merged_ir_artifact_id": merged_ir_id or None,
+        "old_first_evaluation_id": revision.first_evaluation_id,
+        "old_issue_strategy_history": dict(
+            old_checkpoint.get("issue_strategy_history") or {}
+        ),
+        "old_patch_artifact_ids": list(
+            old_checkpoint.get("patch_artifact_ids") or []
+        ),
+        "from_qa_profile_version": revision.qa_profile_version,
+        "to_qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
+    })
+    recovery_checkpoint = {
+        **old_checkpoint,
+        "phase": "STRUCTURE_VALIDATION",
+        "planner_version": SCREENPLAY_REPAIR_PLANNER_VERSION,
+        "working_artifact_id": replacement_id,
+        "source_revision_id": revision.id,
+        "recovery_history": recovery_history,
+        "issue_strategy_history": {},
+        "patch_artifact_ids": [],
+        "open_issue_ids": [],
+        "last_issue_fingerprints": [],
+        "cleared_fingerprints": [],
+        "quality_issue_count": 0,
+        "gate_retry_exhausted": False,
+        "yield_reason": "qa_profile_revalidated",
+    }
+    recovered_revision = recover_screenplay_working_authority(
+        revision.id,
+        replacement_id,
+        expected_working_artifact_id=old_working_id,
+        expected_working_hash=old_working_hash,
+        expected_replacement_hash=replacement_hash,
+        trusted_merged_ir_artifact_id=(
+            merged_ir_id if replacement_id != old_working_id else ""
+        ),
+        revalidation_evaluation_id=revalidation_evaluation_id,
+        input_fingerprint=input_fingerprint,
+        contract_version=contract_version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+        checkpoint=recovery_checkpoint,
+    )
+    if run_id:
+        evidence_repository.append_event(
+            run_id,
+            (
+                "SCREENPLAY_WORKING_AUTHORITY_REBUILT"
+                if action == "working_rebuilt"
+                else "SCREENPLAY_WORKING_AUTHORITY_REVALIDATED"
+            ),
+            "warning" if action == "working_rebuilt" else "info",
+            (
+                "旧门禁工作稿未通过当前校验，已从可信不可变上游重建"
+                if action == "working_rebuilt"
+                else "旧门禁工作稿已通过当前校验并绑定到新 revision"
+            ),
+            payload={
+                "old_revision_id": revision.id,
+                "new_revision_id": recovered_revision.id,
+                "old_working_artifact_id": old_working_id,
+                "working_artifact_id": replacement_id,
+                "source_authority_artifact_id": source_authority_id,
+            },
+        )
+    return recovered_revision
+
+
 async def run_screenplay_production(
     *,
     episode_id: str,
@@ -2936,7 +3283,10 @@ async def run_screenplay_production(
         except ValueError:
             episode["authorized_source_chapters"] = {}
     contract = get_contract("screenplay")
-    from app.production.screenplay_authority import screenplay_authority_fingerprint
+    from app.production.screenplay_authority import (
+        SCREENPLAY_QA_PROFILE_VERSION,
+        screenplay_authority_fingerprint,
+    )
 
     input_fp = screenplay_authority_fingerprint(
         episode_id,
@@ -2944,7 +3294,7 @@ async def run_screenplay_production(
         source_text=source_text,
         bible=bible,
         contract_version=contract.version,
-        qa_profile_version="screenplay-qa-gate-2",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
     )
 
     from app.production.revision import (
@@ -2960,14 +3310,33 @@ async def run_screenplay_production(
         raise RuntimeError(
             f"screenplay worker 恢复资格不可执行: {entry_eligibility.reason_code}"
         )
+    needs_working_revalidation = bool(
+        resume
+        and entry_eligibility.reason_code == "WORKING_REVALIDATION_REQUIRED"
+    )
     rev = ensure_production_revision(
         episode_id=episode_id,
         kind="screenplay",
-        input_fingerprint=input_fp,
+        input_fingerprint="" if needs_working_revalidation else input_fp,
         contract_version=contract.version,
-        qa_profile_version="screenplay-qa-gate-2",
+        qa_profile_version=(
+            "" if needs_working_revalidation
+            else SCREENPLAY_QA_PROFILE_VERSION
+        ),
         resume=resume,
     )
+    if needs_working_revalidation:
+        rev = _revalidate_or_rebuild_resume_working(
+            episode_id=episode_id,
+            episode=episode,
+            source_text=source_text,
+            bible=bible,
+            revision=rev,
+            entry_eligibility=entry_eligibility,
+            input_fingerprint=input_fp,
+            contract_version=contract.version,
+            run_id=run_id,
+        )
     if (
         not rev.input_fingerprint
         or not rev.contract_version
@@ -2977,7 +3346,7 @@ async def run_screenplay_production(
             rev.id,
             input_fingerprint=input_fp,
             contract_version=contract.version,
-            qa_profile_version="screenplay-qa-gate-2",
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         )
     # 签发 Production Grant
     if not rev.grant_id:
@@ -3225,7 +3594,7 @@ async def run_screenplay_production(
             source_text=source_text,
             bible=None,
             contract_version=contract.version,
-            qa_profile_version="screenplay-qa-gate-2",
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         )
         if latest_input_fp != rev.input_fingerprint:
             input_fp = latest_input_fp
@@ -3635,8 +4004,13 @@ async def run_screenplay_production(
         strategy_history.setdefault(issue.fingerprint, []).append(strategy_key)
         attempts_this_activation += 1
 
-        if rev.grant_id:
-            assert_grant_allows(rev.grant_id, command="screenplay.patch", episode_id=episode_id)
+        if not rev.grant_id:
+            raise RuntimeError("screenplay.patch 缺少当前 revision 的 Production Grant")
+        assert_grant_allows(
+            rev.grant_id,
+            command="screenplay.patch",
+            episode_id=episode_id,
+        )
 
         if run_id:
             evidence_repository.append_event(
