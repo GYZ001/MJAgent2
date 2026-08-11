@@ -16,7 +16,7 @@ def test_resume_storyboard_keeps_checkpoint_and_links_parent_run(tmp_path, monke
     db.init_db()
     conn = db.get_conn()
     conn.execute(
-        "INSERT INTO projects(id, name, status, created_at) VALUES('p1', 'P', 'planned', 1)"
+        "INSERT INTO projects(id, name, status, bible_artifact_id, created_at) VALUES('p1', 'P', 'planned', 'bible-1', 1)"
     )
     screenplay_json = EpisodeScreenplay(
         episode_no=1,
@@ -145,7 +145,7 @@ def test_resume_storyboard_reports_checkpoint_only_progress(
     db.init_db()
     conn = db.get_conn()
     conn.execute(
-        "INSERT INTO projects(id, name, status, created_at) VALUES('p1', 'P', 'planned', 1)"
+        "INSERT INTO projects(id, name, status, bible_artifact_id, created_at) VALUES('p1', 'P', 'planned', 'bible-1', 1)"
     )
     screenplay_json = EpisodeScreenplay(
         episode_no=1,
@@ -156,7 +156,8 @@ def test_resume_storyboard_reports_checkpoint_only_progress(
         """INSERT INTO episodes(
                id, project_id, episode_no, title, source_chapters, target_duration_s,
                screenplay_json, screenplay_status, status, created_at
-           ) VALUES('e1', 'p1', 1, 'E', '[1]', 50, ?, 'ready', 'scripted', 1)""",
+               ,screenplay_artifact_id
+           ) VALUES('e1', 'p1', 1, 'E', '[1]', 50, ?, 'ready', 'scripted', 1, 'screenplay-1')""",
         (screenplay_json,),
     )
     conn.commit()
@@ -167,6 +168,10 @@ def test_resume_storyboard_reports_checkpoint_only_progress(
             validated_prefix_end=validated_prefix_end,
             next_shot_no=next_shot_no,
             expected_total=expected_total,
+            input_versions={
+                "screenplay_artifact_id": "screenplay-1",
+                "bible_artifact_id": "bible-1",
+            },
         )
     )
 

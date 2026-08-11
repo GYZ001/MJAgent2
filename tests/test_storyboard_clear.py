@@ -22,7 +22,7 @@ def _db(tmp_path, monkeypatch):
     conn = db.get_conn()
     stamp = db.now()
     conn.execute(
-        "INSERT INTO projects(id,name,status,created_at) VALUES('p1','demo','ready',?)",
+        "INSERT INTO projects(id,name,status,bible_artifact_id,created_at) VALUES('p1','demo','ready','art_bible',?)",
         (stamp,),
     )
     conn.execute(
@@ -311,6 +311,10 @@ def test_product_clear_supports_zero_prefix_paused_checkpoint() -> None:
         outcome="PAUSED_BY_USER",
         validated_prefix_end=0,
         next_shot_no=1,
+        input_versions={
+            "screenplay_artifact_id": "art_screenplay",
+            "bible_artifact_id": "art_bible",
+        },
     )
     conn.execute(
         """UPDATE artifacts

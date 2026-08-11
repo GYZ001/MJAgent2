@@ -506,6 +506,17 @@ def invalidate_episode_final(episode_id: str) -> bool:
 
 def invalidate_episode_delivery_authority(conn, episode_id: str) -> int:
     """Retire current delivery pointers in the same DB transaction as adoption."""
+    tables = {
+        str(row["name"])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('delivery_packages','artifacts','episodes')"
+        ).fetchall()
+    }
+    # Legacy/minimal projections used by migrations and deterministic media
+    # selection may not carry delivery tables yet. There is no delivery
+    # authority to retire in that schema.
+    if "delivery_packages" not in tables:
+        return 0
     package_rows = conn.execute(
         """SELECT id,artifact_id FROM delivery_packages
             WHERE episode_id=? AND status IN ('waiting_human','approved','approved_with_risk')""",
@@ -517,18 +528,23 @@ def invalidate_episode_delivery_authority(conn, episode_id: str) -> int:
             WHERE episode_id=? AND status IN ('waiting_human','approved','approved_with_risk')""",
         (episode_id,),
     )
-    if artifact_ids:
+    if artifact_ids and "artifacts" in tables:
         marks = ",".join("?" for _ in artifact_ids)
         conn.execute(
             f"UPDATE artifacts SET status='superseded' WHERE id IN ({marks})",
             artifact_ids,
         )
-    conn.execute(
-        """UPDATE episodes
-              SET delivery_artifact_id=NULL,delivery_status='not_ready'
-            WHERE id=?""",
-        (episode_id,),
-    )
+    if "episodes" in tables:
+        episode_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(episodes)")
+        }
+        if {"delivery_artifact_id", "delivery_status"}.issubset(episode_columns):
+            conn.execute(
+                """UPDATE episodes
+                      SET delivery_artifact_id=NULL,delivery_status='not_ready'
+                    WHERE id=?""",
+                (episode_id,),
+            )
     return len(package_rows)
 
 

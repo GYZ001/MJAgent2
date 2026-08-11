@@ -1165,6 +1165,16 @@ def _delivery_file(package_id: str, filename: str) -> Path:
     ).fetchone()
     if not row:
         raise HTTPException(404, "交付包不存在")
+    current = conn.execute(
+        "SELECT delivery_artifact_id FROM episodes WHERE id=?",
+        (row["episode_id"],),
+    ).fetchone()
+    if (
+        row["status"] not in {"waiting_human", "approved"}
+        or current is None
+        or current["delivery_artifact_id"] != row["artifact_id"]
+    ):
+        raise HTTPException(409, "交付包已不是当前可下载权威")
     path = Path(row["package_path"]).resolve()
     target = (path / filename).resolve()
     if path not in target.parents or not target.is_file():
@@ -1202,6 +1212,16 @@ def download_delivery_archive(package_id: str):
     ).fetchone()
     if not row:
         raise HTTPException(404, "交付包不存在")
+    current = conn.execute(
+        "SELECT delivery_artifact_id FROM episodes WHERE id=?",
+        (row["episode_id"],),
+    ).fetchone()
+    if (
+        row["status"] not in {"waiting_human", "approved"}
+        or current is None
+        or current["delivery_artifact_id"] != row["artifact_id"]
+    ):
+        raise HTTPException(409, "交付包已不是当前可下载权威")
     archive = Path(str(row["package_path"]) + ".zip").resolve()
     if not archive.is_file():
         raise HTTPException(404, "交付压缩包不存在")
