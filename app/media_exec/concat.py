@@ -23,6 +23,72 @@ def _media_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _publish_concat_output(
+    conn,
+    *,
+    episode_id: str,
+    candidate_path: Path,
+    final_path: Path,
+    report: dict[str, Any],
+    release_authority: dict[str, Any],
+    video_delivery_manifest: dict[str, Any],
+) -> None:
+    """Serialize adoption changes with final video/report/stale publication."""
+    from app.atomic_io import atomic_write_text
+    from app.downstream_authority import (
+        current_adopted_video_delivery_manifest,
+        verify_current_storyboard_release_authority,
+    )
+
+    if conn.in_transaction:
+        conn.commit()
+    owner = new_id("concatpub")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS episode_video_publish_leases(
+                   episode_id TEXT PRIMARY KEY,owner TEXT NOT NULL,
+                   video_manifest_hash TEXT NOT NULL,status TEXT NOT NULL,updated_at REAL NOT NULL
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO episode_video_publish_leases(
+                   episode_id,owner,video_manifest_hash,status,updated_at
+               ) VALUES(?,?,?,'publishing',?)
+               ON CONFLICT(episode_id) DO UPDATE SET owner=excluded.owner,
+                   video_manifest_hash=excluded.video_manifest_hash,
+                   status='publishing',updated_at=excluded.updated_at""",
+            (episode_id, owner, video_delivery_manifest["manifest_hash"], now()),
+        )
+        if verify_current_storyboard_release_authority(
+            episode_id, conn=conn,
+        ) != release_authority:
+            raise ValueError("合片发布前分镜权威发生漂移")
+        if current_adopted_video_delivery_manifest(
+            episode_id, conn=conn,
+        ) != video_delivery_manifest:
+            raise ValueError("合片发布前已采纳视频发生漂移")
+        report["final_video_sha256"] = _media_sha256(candidate_path)
+        atomic_copy(candidate_path, final_path)
+        atomic_write_text(
+            _edit_report_path(final_path),
+            json.dumps(report, ensure_ascii=False, indent=2),
+        )
+        final_path.with_suffix(".stale").unlink(missing_ok=True)
+        updated = conn.execute(
+            """UPDATE episode_video_publish_leases SET status='published',updated_at=?
+                 WHERE episode_id=? AND owner=? AND status='publishing'""",
+            (now(), episode_id, owner),
+        )
+        if updated.rowcount != 1:
+            raise ValueError("合片 publish owner CAS 冲突")
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def _probe_concat_media(path: str | Path) -> dict[str, Any]:
     media_path = Path(path)
     if not media_path.is_file() or media_path.stat().st_size <= 0:
@@ -458,7 +524,6 @@ def concatenate_episode(episode_id: str) -> dict:
     if final_edit_enabled:
         final_edit_started_at = time.perf_counter()
         try:
-            from app.atomic_io import atomic_write_text
             from app.final_edit import render_episode_final_edit
 
             with tempfile.TemporaryDirectory() as edit_td:
@@ -490,24 +555,15 @@ def concatenate_episode(episode_id: str) -> dict:
                     expected_duration_s=float(edit_report["total_duration_s"]),
                     decode_timeout_s=concat_timeout_s,
                 )
-                if verify_current_storyboard_release_authority(
-                    episode_id,
-                    conn=conn,
-                ) != release_authority:
-                    raise ValueError("合片期间分镜发布权威发生漂移，已拒绝覆盖成片")
-                if current_adopted_video_delivery_manifest(
-                    episode_id,
-                    conn=conn,
-                ) != video_delivery_manifest:
-                    raise ValueError("合片期间已采纳视频发生漂移，已拒绝覆盖成片")
-                edit_report["final_video_sha256"] = _media_sha256(edited_video)
-                atomic_copy(edited_video, final_path)
-            final_path.with_suffix(".stale").unlink(missing_ok=True)
-            report_path = _edit_report_path(final_path)
-            atomic_write_text(
-                report_path,
-                json.dumps(edit_report, ensure_ascii=False, indent=2),
-            )
+                _publish_concat_output(
+                    conn,
+                    episode_id=episode_id,
+                    candidate_path=edited_video,
+                    final_path=final_path,
+                    report=edit_report,
+                    release_authority=release_authority,
+                    video_delivery_manifest=video_delivery_manifest,
+                )
             return {
                 "video_url": _versioned_final_url(final_path),
                 "total_duration_s": round(validated_duration_s, 1),
@@ -603,20 +659,10 @@ def concatenate_episode(episode_id: str) -> dict:
             expected_duration_s=measured_total_dur,
             decode_timeout_s=concat_timeout_s,
         )
-        if verify_current_storyboard_release_authority(
-            episode_id,
-            conn=conn,
-        ) != release_authority:
-            raise ValueError("合片期间分镜发布权威发生漂移，已拒绝覆盖成片")
-        if current_adopted_video_delivery_manifest(
-            episode_id,
-            conn=conn,
-        ) != video_delivery_manifest:
-            raise ValueError("合片期间已采纳视频发生漂移，已拒绝覆盖成片")
-        atomic_copy(silent_video, final_path)
-        # 新成片已经原子替换成功，此时才清除“待更新”标记。合成失败时旧成片和
-        # 标记都会保留，状态轮询不会把正在观看的成品入口移除。
-        final_path.with_suffix(".stale").unlink(missing_ok=True)
+        publish_candidate = final_path.with_name(
+            f".{final_path.name}.{new_id('candidate')}.tmp"
+        )
+        atomic_copy(silent_video, publish_candidate)
 
     fallback_edit_report = {
         "ok": False,
@@ -637,14 +683,19 @@ def concatenate_episode(episode_id: str) -> dict:
         },
         "video_delivery_manifest": video_delivery_manifest,
         "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
-        "final_video_sha256": _media_sha256(final_path),
     }
-    from app.atomic_io import atomic_write_text
-
-    atomic_write_text(
-        _edit_report_path(final_path),
-        json.dumps(fallback_edit_report, ensure_ascii=False, indent=2),
-    )
+    try:
+        _publish_concat_output(
+            conn,
+            episode_id=episode_id,
+            candidate_path=publish_candidate,
+            final_path=final_path,
+            report=fallback_edit_report,
+            release_authority=release_authority,
+            video_delivery_manifest=video_delivery_manifest,
+        )
+    finally:
+        publish_candidate.unlink(missing_ok=True)
     return {
         # 文件已经在上方原子覆盖；版本参数确保前端把它作为新的媒体资源加载。
         "video_url": _versioned_final_url(final_path),

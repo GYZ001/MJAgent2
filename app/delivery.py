@@ -34,9 +34,22 @@ def _ensure_delivery_operation_receipts(conn) -> None:
                lease_expires_at REAL NOT NULL,
                status TEXT NOT NULL,
                result_json TEXT NOT NULL DEFAULT '{}',
+               workspace_path TEXT NOT NULL DEFAULT '',
+               promotion_phase TEXT NOT NULL DEFAULT 'claimed',
                updated_at REAL NOT NULL
            )"""
     )
+    columns = {str(row[1]) for row in conn.execute(
+        "PRAGMA table_info(delivery_operation_receipts)"
+    )}
+    if "workspace_path" not in columns:
+        conn.execute(
+            "ALTER TABLE delivery_operation_receipts ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''"
+        )
+    if "promotion_phase" not in columns:
+        conn.execute(
+            "ALTER TABLE delivery_operation_receipts ADD COLUMN promotion_phase TEXT NOT NULL DEFAULT 'claimed'"
+        )
 
 
 def claim_delivery_package_operation(
@@ -129,6 +142,33 @@ def _assert_delivery_operation_owner(
     ).fetchone()
     if row is None:
         raise ValueError("交付 operation lease 已失效")
+
+
+def _renew_delivery_operation_owner(
+    conn,
+    *,
+    package_id: str,
+    request_fingerprint: str,
+    lease_owner: str,
+) -> None:
+    stamp = time.time()
+    updated = conn.execute(
+        """UPDATE delivery_operation_receipts
+              SET lease_expires_at=?,updated_at=?
+            WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+              AND status='running'""",
+        (
+            stamp + _DELIVERY_OPERATION_LEASE_S,
+            stamp,
+            package_id,
+            request_fingerprint,
+            lease_owner,
+        ),
+    )
+    if updated.rowcount != 1:
+        conn.rollback()
+        raise ValueError("交付 operation owner 已被接管")
+    conn.commit()
 
 
 def finish_delivery_package_operation(
@@ -777,19 +817,29 @@ def build_delivery_package(
             "quality_report": quality_report,
             "archive_recovered": archive_recovered,
         }
-    # A delivery snapshot is a production output, not an editor preview.  The
-    # mutable episode projection is only accepted for genuinely legacy,
-    # plan-null episodes; modern episodes must be re-resolved through their
-    # consumed immutable screenplay authority before bytes are written.
-    from app.production.screenplay_authority import resolve_downstream_screenplay
-
-    screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
-    package_dir = (delivery_root / package_id).resolve()
-    if not package_dir.is_relative_to(delivery_root):
-        raise ValueError("非法的 package_id")
-    # A directory without its database pointer is an uncommitted crash remnant.
-    # Rebuilding the same operation id is safe and avoids exposing a half package.
-    if package_dir.exists():
+    orphan_package_dir = (delivery_root / package_id).resolve()
+    orphan_archive = Path(str(orphan_package_dir) + ".zip")
+    orphan_artifact_id = f"art_delivery_{package_id.removeprefix('delivery_')}"
+    orphan_artifact = repository.get_artifact(orphan_artifact_id)
+    if orphan_package_dir.is_dir() and orphan_artifact is not None:
+        try:
+            orphan_manifest = json.loads(
+                (orphan_package_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            orphan_quality = json.loads(
+                (orphan_package_dir / "quality-report.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("交付崩溃恢复目录已损坏") from exc
+        if (
+            orphan_manifest.get("storyboard_release_authority") != release_authority
+            or orphan_manifest.get("video_delivery_manifest") != video_delivery_manifest
+            or not _archive_matches_directory(orphan_archive, orphan_package_dir)
+            or repository.content_hash(
+                orphan_artifact.get("content"), orphan_artifact.get("file_path"),
+            ) != orphan_artifact.get("content_hash")
+        ):
+            raise ValueError("交付崩溃恢复证据与当前权威不一致")
         if operation_lease_owner:
             _assert_delivery_operation_owner(
                 conn,
@@ -797,6 +847,98 @@ def build_delivery_package(
                 request_fingerprint=str(operation_request_fingerprint),
                 lease_owner=operation_lease_owner,
             )
+        conn.execute(
+            """INSERT INTO delivery_packages(
+                   id,episode_id,artifact_id,status,package_path,manifest_json,
+                   quality_report_json,known_issues,created_at
+               ) VALUES(?,?,?,'waiting_human',?,?,?,'',?)""",
+            (
+                package_id,
+                episode_id,
+                orphan_artifact_id,
+                str(orphan_package_dir),
+                json.dumps(orphan_manifest, ensure_ascii=False),
+                json.dumps(orphan_quality, ensure_ascii=False),
+                operation_started_at,
+            ),
+        )
+        conn.execute(
+            """UPDATE episodes SET delivery_artifact_id=?,delivery_status='waiting_human'
+                 WHERE id=?""",
+            (orphan_artifact_id, episode_id),
+        )
+        conn.commit()
+        return {
+            "package_id": package_id,
+            "artifact_id": orphan_artifact_id,
+            "trust_level": orphan_artifact.get("trust_level", "T3"),
+            "status": "waiting_human",
+            "package_path": str(orphan_package_dir),
+            "archive_path": str(orphan_archive),
+            "manifest": orphan_manifest,
+            "quality_report": orphan_quality,
+            "archive_recovered": True,
+        }
+    # A delivery snapshot is a production output, not an editor preview.  The
+    # mutable episode projection is only accepted for genuinely legacy,
+    # plan-null episodes; modern episodes must be re-resolved through their
+    # consumed immutable screenplay authority before bytes are written.
+    from app.production.screenplay_authority import resolve_downstream_screenplay
+
+    screenplay_context = resolve_downstream_screenplay(episode_id, conn=conn)
+    final_package_dir = (delivery_root / package_id).resolve()
+    if not final_package_dir.is_relative_to(delivery_root):
+        raise ValueError("非法的 package_id")
+    owner_suffix = operation_lease_owner or uuid.uuid4().hex
+    package_dir = (delivery_root / f".{package_id}.{owner_suffix}.tmp").resolve()
+    receipt_row = None
+    if operation_lease_owner:
+        receipt_row = conn.execute(
+            """SELECT workspace_path,promotion_phase FROM delivery_operation_receipts
+               WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                 AND status='running'""",
+            (package_id, operation_request_fingerprint, operation_lease_owner),
+        ).fetchone()
+        if receipt_row is None:
+            raise ValueError("交付 operation workspace owner 已失效")
+        bound_workspace = str(receipt_row["workspace_path"] or "")
+        if bound_workspace:
+            package_dir = Path(bound_workspace).resolve()
+        else:
+            conn.execute(
+                """UPDATE delivery_operation_receipts
+                      SET workspace_path=?,promotion_phase='building',updated_at=?
+                    WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                      AND status='running'""",
+                (
+                    str(package_dir), time.time(), package_id,
+                    operation_request_fingerprint, operation_lease_owner,
+                ),
+            )
+            conn.commit()
+    if not package_dir.is_relative_to(delivery_root):
+        raise ValueError("非法的交付操作目录")
+    # Each lease owner writes only its own private directory.  A recovery owner
+    # never deletes or mutates another owner's live workspace or final target.
+    if operation_lease_owner and receipt_row is not None and str(
+        receipt_row["promotion_phase"] or ""
+    ) in {"ready", "directory_promoted", "promoted"}:
+        # The exact receipt proves these are this operation's uncommitted crash
+        # remnants. No Artifact/DB package exists at this point (handled above).
+        if final_package_dir.exists():
+            shutil.rmtree(final_package_dir)
+        Path(str(final_package_dir) + ".zip").unlink(missing_ok=True)
+        if package_dir.exists():
+            shutil.rmtree(package_dir)
+        Path(str(package_dir) + ".zip").unlink(missing_ok=True)
+        conn.execute(
+            """UPDATE delivery_operation_receipts
+                  SET promotion_phase='building',updated_at=?
+                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?""",
+            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
+        )
+        conn.commit()
+    elif package_dir.exists():
         shutil.rmtree(package_dir)
     archive_candidate = Path(str(package_dir) + ".zip")
     if archive_candidate.exists():
@@ -941,6 +1083,13 @@ def build_delivery_package(
     )
     _write_json(package_dir / "manifest.json", manifest)
     _assert_no_delivery_secrets(package_dir)
+    if operation_lease_owner:
+        _renew_delivery_operation_owner(
+            conn,
+            package_id=package_id,
+            request_fingerprint=str(operation_request_fingerprint),
+            lease_owner=operation_lease_owner,
+        )
     from app.downstream_authority import verify_current_storyboard_release_authority
 
     if verify_current_storyboard_release_authority(
@@ -956,7 +1105,22 @@ def build_delivery_package(
     ) != video_delivery_manifest:
         raise ValueError("交付构建期间已采纳视频发生漂移，已拒绝发布交付包")
     # 先完成客户可下载的文件，再提交数据库指针；ZIP 失败不能留下“已批准但不可下载”的记录。
-    archive_path = atomic_zip_directory(package_dir, archive_candidate)
+    archive_path = Path(atomic_zip_directory(package_dir, archive_candidate))
+
+    if operation_lease_owner:
+        _renew_delivery_operation_owner(
+            conn,
+            package_id=package_id,
+            request_fingerprint=str(operation_request_fingerprint),
+            lease_owner=operation_lease_owner,
+        )
+    if final_package_dir.exists() or Path(str(final_package_dir) + ".zip").exists():
+        raise ValueError("交付最终目录已存在，拒绝删除或覆盖另一 owner 产物")
+    package_dir.rename(final_package_dir)
+    final_archive_path = Path(str(final_package_dir) + ".zip")
+    archive_path.rename(final_archive_path)
+    package_dir = final_package_dir
+    archive_path = final_archive_path
 
     parent_ids = [artifact["id"] for artifact in readiness["source_artifacts"]]
     parent_ids.extend(item["artifact_id"] for item in readiness["videos"] if item.get("artifact_id"))
