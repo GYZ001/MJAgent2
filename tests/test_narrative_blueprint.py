@@ -312,6 +312,18 @@ def test_run_64a2e395d6df_candidate_replays_picture_partition() -> None:
         annotation.node_key
         for annotation in blueprint.source_audit_annotations
     } == audit_keys
+    audit_source_ids = {
+        source_id
+        for node in blueprint.nodes
+        if node.key in audit_keys
+        for source_id in node.source_segment_ids
+    }
+    assert audit_source_ids == {"SRC0060", "SRC0061", "SRC0062"}
+    assert audit_source_ids.isdisjoint({
+        source_id
+        for plan in blueprint.scene_plans
+        for source_id in plan.source_segment_ids
+    })
     assert set(fixture["raw_patch_projection"]["replacement_node_keys"]) <= {
         node.key
         for node in blueprint.nodes
