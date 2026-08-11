@@ -37,7 +37,9 @@ from app.harness.types import EvidenceArtifact
 from app.identity_authority import (
     IdentityAuthorityConflictError,
     normalize_character_resolution,
+    normalize_character_resolutions,
 )
+from app.orchestration.state_machine import StateConflict
 from app.ingest import chapter_is_stub, chapter_titles_match
 from app.refs import (
     PRODUCTION_APPEARANCE_MAX_CHARS,
@@ -58,10 +60,10 @@ STAGED_INITIAL_EP_START = 2_147_483_647  # 候选包不得命中任何真实集�
 CAST_DISCOVERY_SOURCE_BUDGET = 18000
 CAST_DISCOVERY_FUTURE_CONTEXT_BUDGET = 8000
 CHARACTER_CARD_MAX_TOKENS = 4096
-IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v6"
+IDENTITY_DISCOVERY_CONTRACT_VERSION = "screenplay-identity-discovery.v7"
 FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v6"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
-    "screenplay-identity-structural-coverage.v2"
+    "screenplay-identity-structural-coverage.v3"
 )
 
 
@@ -1483,6 +1485,9 @@ def _identity_resolution(
         "evidence": str(item.get("evidence") or "").strip()[:80],
         "future_evidence": str(item.get("future_evidence") or "").strip()[:120],
         "identity_group": str(item.get("identity_group") or "").strip()[:96],
+        "identity_scope_fingerprint": str(
+            item.get("identity_scope_fingerprint") or ""
+        ).strip(),
         "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
     })
 
@@ -2777,90 +2782,140 @@ def merge_screenplay_character_resolutions(
     因此稳定复用已有权威；只有更高优先级的真名证据可整组升级。
     同组出现两个不同真名时证据自相矛盾，必须失败，不做猜测归并。
     """
-    merged: list[dict] = []
     priority = {
         "functional_extra": 0,
         "functional_identity": 1,
         "future_identity": 2,
     }
-    group_authorities: dict[str, dict] = {}
+    normalized_existing = normalize_character_resolutions(existing)
+    normalized_incoming = normalize_character_resolutions(incoming)
 
-    def bind_to_group_authority(candidate: dict, authority: dict) -> dict:
-        return normalize_character_resolution({
+    # A group token is scoped to one discovery input.  A fresh owned-source
+    # discovery retires functional rows carrying the same bare token from an
+    # older or unscoped epoch instead of guessing that F1 still means the same
+    # person after the source changed.
+    incoming_scopes_by_group: dict[str, set[str]] = {}
+    for item in normalized_incoming:
+        group = str(item.get("identity_group") or "").strip()
+        scope = str(item.get("identity_scope_fingerprint") or "").strip()
+        if group and scope and str(item.get("resolution") or "") != "future_identity":
+            incoming_scopes_by_group.setdefault(group, set()).add(scope)
+    normalized_existing = [
+        item
+        for item in normalized_existing
+        if not (
+            str(item.get("resolution") or "") != "future_identity"
+            and str(item.get("identity_group") or "").strip()
+            in incoming_scopes_by_group
+            and str(item.get("identity_scope_fingerprint") or "").strip()
+            not in incoming_scopes_by_group[
+                str(item.get("identity_group") or "").strip()
+            ]
+        )
+    ]
+
+    def group_key(item: dict) -> tuple[str, str] | None:
+        group = str(item.get("identity_group") or "").strip()
+        if not group:
+            return None
+        return (
+            str(item.get("identity_scope_fingerprint") or "").strip(),
+            group,
+        )
+
+    existing_by_group: dict[tuple[str, str], list[dict]] = {}
+    incoming_by_group: dict[tuple[str, str], list[dict]] = {}
+    for item in normalized_existing:
+        if (key := group_key(item)) is not None:
+            existing_by_group.setdefault(key, []).append(item)
+    for item in normalized_incoming:
+        if (key := group_key(item)) is not None:
+            incoming_by_group.setdefault(key, []).append(item)
+
+    def top_authorities(items: list[dict]) -> tuple[int, dict[tuple[str, str], dict]]:
+        top_priority = max(
+            (priority.get(str(item.get("resolution") or ""), 0) for item in items),
+            default=-1,
+        )
+        choices = {
+            (item["canonical_name"], item["authority_id"]): item
+            for item in items
+            if priority.get(str(item.get("resolution") or ""), 0) == top_priority
+        }
+        return top_priority, choices
+
+    group_authorities: dict[tuple[str, str], dict] = {}
+    for key in set(existing_by_group) | set(incoming_by_group):
+        existing_priority, existing_choices = top_authorities(
+            existing_by_group.get(key, [])
+        )
+        incoming_priority, incoming_choices = top_authorities(
+            incoming_by_group.get(key, [])
+        )
+        authority = None
+        if len(existing_choices) == 1:
+            authority = next(iter(existing_choices.values()))
+            if incoming_priority > existing_priority:
+                authority = (
+                    next(iter(incoming_choices.values()))
+                    if len(incoming_choices) == 1
+                    else None
+                )
+            elif (
+                incoming_priority == existing_priority == priority["future_identity"]
+                and incoming_choices
+                and set(incoming_choices) != set(existing_choices)
+            ):
+                authority = None
+        elif len(existing_choices) > 1:
+            # Legacy divergent rows are repairable only when the current
+            # owned-source pass supplies one unambiguous authority at equal or
+            # higher strength.  Array order is never an authority signal.
+            if incoming_priority >= existing_priority and len(incoming_choices) == 1:
+                authority = next(iter(incoming_choices.values()))
+        elif len(incoming_choices) == 1:
+            authority = next(iter(incoming_choices.values()))
+        if authority is None:
+            scope, group = key
+            names = sorted({
+                item["canonical_name"]
+                for item in [
+                    *existing_by_group.get(key, []),
+                    *incoming_by_group.get(key, []),
+                ]
+            })
+            raise IdentityAuthorityConflictError([{
+                "reason": "identity_group_authority_ambiguous",
+                "identity_group": group,
+                "identity_scope_fingerprint": scope,
+                "canonical_names": names,
+                "message": (
+                    f"identity_group={group} 缺少唯一可验证权威：{names}"
+                ),
+            }])
+        group_authorities[key] = authority
+
+    def bind_to_group_authority(candidate: dict) -> dict:
+        key = group_key(candidate)
+        authority = group_authorities.get(key) if key is not None else None
+        if authority is None:
+            return candidate
+        rebound = {
             **candidate,
             "canonical_name": authority["canonical_name"],
             "resolution": authority["resolution"],
             "authority_id": authority["authority_id"],
-            "source_instance_key": authority["source_instance_key"],
-        })
+        }
+        # source_instance_key is an occurrence scope, not an identity-group
+        # alias.  Preserve it byte-for-byte and never synthesize one.
+        if "source_instance_key" not in candidate:
+            rebound.pop("source_instance_key", None)
+        return normalize_character_resolution(rebound)
 
-    for item in [*(existing or []), *(incoming or [])]:
-        if not isinstance(item, dict):
-            continue
-        source_label = str(item.get("source_label") or "").strip()
-        canonical_name = str(item.get("canonical_name") or "").strip()
-        if not source_label or not canonical_name:
-            continue
-        candidate = normalize_character_resolution({
-            **item,
-            "source_label": source_label,
-            "canonical_name": canonical_name,
-        })
-        identity_group = str(candidate.get("identity_group") or "").strip()
-        if identity_group:
-            authority = group_authorities.get(identity_group)
-            if authority is None:
-                authority = {
-                    "canonical_name": candidate["canonical_name"],
-                    "resolution": str(candidate.get("resolution") or ""),
-                    "authority_id": candidate["authority_id"],
-                    "source_instance_key": (
-                        str(candidate.get("source_instance_key") or "").strip()
-                        or candidate["authority_id"]
-                    ),
-                }
-                group_authorities[identity_group] = authority
-                candidate = bind_to_group_authority(candidate, authority)
-            else:
-                authority_priority = priority.get(authority["resolution"], 0)
-                candidate_priority = priority.get(
-                    str(candidate.get("resolution") or ""), 0,
-                )
-                if (
-                    candidate_priority == authority_priority == priority["future_identity"]
-                    and candidate["canonical_name"] != authority["canonical_name"]
-                ):
-                    raise IdentityAuthorityConflictError([{
-                        "reason": "identity_group_multiple_named_identities",
-                        "identity_group": identity_group,
-                        "canonical_names": sorted({
-                            candidate["canonical_name"],
-                            authority["canonical_name"],
-                        }),
-                        "message": (
-                            f"identity_group={identity_group} 同时声明了多个真名："
-                            f"{sorted({candidate['canonical_name'], authority['canonical_name']})}"
-                        ),
-                    }])
-                if candidate_priority > authority_priority:
-                    authority = {
-                        "canonical_name": candidate["canonical_name"],
-                        "resolution": str(candidate.get("resolution") or ""),
-                        "authority_id": candidate["authority_id"],
-                        "source_instance_key": (
-                            str(candidate.get("source_instance_key") or "").strip()
-                            or candidate["authority_id"]
-                        ),
-                    }
-                    group_authorities[identity_group] = authority
-                    merged = [
-                        bind_to_group_authority(current, authority)
-                        if str(current.get("identity_group") or "").strip()
-                        == identity_group
-                        else current
-                        for current in merged
-                    ]
-                candidate = bind_to_group_authority(candidate, authority)
+    merged: list[dict] = []
+    for candidate in [*normalized_existing, *normalized_incoming]:
+        candidate = bind_to_group_authority(candidate)
+        source_label = str(candidate.get("source_label") or "").strip()
         source_instance_key = str(
             candidate.get("source_instance_key") or ""
         ).strip()
@@ -2907,11 +2962,8 @@ def load_screenplay_character_resolutions(conn, episode_id: str) -> list[dict]:
         payload = json.loads(row["screenplay_character_resolutions"] or "[]")
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
-    # Loading is also the compatibility boundary for rows written before
-    # identity-group authority reuse was enforced.  Canonicalize them in memory
-    # immediately; the next normal persistence pass rewrites the durable value.
     return (
-        merge_screenplay_character_resolutions([], payload)
+        normalize_character_resolutions(payload)
         if isinstance(payload, list)
         else []
     )
@@ -2923,8 +2975,52 @@ def persist_screenplay_character_resolutions(
     resolutions: list[dict] | None,
     *,
     retire_legacy_future_identity: bool = False,
+    expected_active_run_id: str | None = None,
+    expected_revision_id: str | None = None,
 ) -> list[dict]:
-    current = load_screenplay_character_resolutions(conn, episode_id)
+    columns = "screenplay_character_resolutions"
+    if expected_active_run_id is not None:
+        columns += ", active_screenplay_run_id"
+    row = conn.execute(
+        f"SELECT {columns} FROM episodes WHERE id=?",  # noqa: S608 - fixed columns
+        (episode_id,),
+    ).fetchone()
+    if row is None:
+        raise StateConflict("episode", episode_id, {episode_id}, "missing")
+    old_json = str(row["screenplay_character_resolutions"] or "[]")
+    try:
+        old_payload = json.loads(old_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        old_payload = []
+    current = (
+        normalize_character_resolutions(old_payload)
+        if isinstance(old_payload, list)
+        else []
+    )
+    if expected_active_run_id is not None:
+        actual_owner = str(row["active_screenplay_run_id"] or "")
+        if actual_owner != expected_active_run_id:
+            raise StateConflict(
+                "screenplay_resolution_owner",
+                episode_id,
+                {expected_active_run_id},
+                actual_owner,
+            )
+    if expected_revision_id is not None:
+        revision_row = conn.execute(
+            "SELECT id FROM production_revisions "
+            "WHERE episode_id=? AND kind='screenplay' AND status='active' "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (episode_id,),
+        ).fetchone()
+        actual_revision = str(revision_row["id"] or "") if revision_row else ""
+        if actual_revision != expected_revision_id:
+            raise StateConflict(
+                "screenplay_resolution_revision",
+                episode_id,
+                {expected_revision_id},
+                actual_revision,
+            )
     if retire_legacy_future_identity:
         current = [
             item for item in current
@@ -2936,10 +3032,34 @@ def persist_screenplay_character_resolutions(
         ]
     merged = merge_screenplay_character_resolutions(current, resolutions)
     if _has_column(conn, "episodes", "screenplay_character_resolutions"):
-        conn.execute(
-            "UPDATE episodes SET screenplay_character_resolutions=? WHERE id=?",
-            (json.dumps(merged, ensure_ascii=False), episode_id),
+        clauses = ["id=?", "screenplay_character_resolutions=?"]
+        params: list[object] = [
+            json.dumps(merged, ensure_ascii=False),
+            episode_id,
+            old_json,
+        ]
+        if expected_active_run_id is not None:
+            clauses.append("COALESCE(active_screenplay_run_id, '')=?")
+            params.append(expected_active_run_id)
+        if expected_revision_id is not None:
+            clauses.append(
+                "?=(SELECT id FROM production_revisions "
+                "WHERE episode_id=episodes.id AND kind='screenplay' "
+                "AND status='active' ORDER BY updated_at DESC LIMIT 1)"
+            )
+            params.append(expected_revision_id)
+        cursor = conn.execute(
+            "UPDATE episodes SET screenplay_character_resolutions=? WHERE "
+            + " AND ".join(clauses),
+            params,
         )
+        if cursor.rowcount != 1:
+            raise StateConflict(
+                "screenplay_resolution_cas",
+                episode_id,
+                {expected_active_run_id or "unchanged-owner-and-value"},
+                "stale-owner-revision-or-value",
+            )
         conn.commit()
     return merged
 
@@ -2994,6 +3114,22 @@ async def ensure_cards_for_text(
             scope_id=str(episode_row["id"]) if episode_row else None,
         )
     )
+    identity_scope_fingerprint = evidence_repository.content_hash({
+        "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "episode_no": episode_no,
+        "source_text": source_text,
+    })
+    candidates = [
+        {
+            **item,
+            "identity_scope_fingerprint": str(
+                item.get("identity_scope_fingerprint")
+                or identity_scope_fingerprint
+            ),
+        }
+        for item in candidates
+        if isinstance(item, dict)
+    ]
     if write_guard:
         write_guard()
     known = {c.name for c in bible.characters}
@@ -3126,6 +3262,10 @@ async def ensure_structural_identity_coverage(
     source_text: str,
     bible: Bible,
     structural_evidence: list[dict],
+    *,
+    write_guard: Callable[[], None] | None = None,
+    expected_active_run_id: str | None = None,
+    expected_revision_id: str | None = None,
 ) -> dict:
     """Materialize only identity gaps evidenced by a validated Blueprint/IR.
 
@@ -3154,6 +3294,10 @@ async def ensure_structural_identity_coverage(
             continue
         if (
             payload.get("mode") == "structural_coverage"
+            and payload.get("contract_version")
+            == IDENTITY_DISCOVERY_CONTRACT_VERSION
+            and payload.get("policy_version")
+            == STRUCTURAL_IDENTITY_COVERAGE_VERSION
             and payload.get("structural_evidence_hash") == structural_hash
             and isinstance(payload.get("candidates"), list)
         ):
@@ -3168,7 +3312,12 @@ async def ensure_structural_identity_coverage(
                 "warnings": [],
                 "reused": True,
             }
-        if isinstance(payload.get("candidates"), list):
+        if (
+            payload.get("mode") != "structural_coverage"
+            and payload.get("contract_version")
+            == IDENTITY_DISCOVERY_CONTRACT_VERSION
+            and isinstance(payload.get("candidates"), list)
+        ):
             base_candidates = [
                 dict(item) for item in payload["candidates"]
                 if isinstance(item, dict)
@@ -3182,6 +3331,8 @@ async def ensure_structural_identity_coverage(
         bible=bible,
         episode_no=episode_no,
     )
+    if write_guard:
+        write_guard()
     base_keys = {
         (
             str(item.get("source_label") or "").strip(),
@@ -3258,11 +3409,16 @@ async def ensure_structural_identity_coverage(
         bible,
         generate_portraits=False,
         _precomputed_candidates=additions,
+        write_guard=write_guard,
     )
+    if write_guard:
+        write_guard()
     persisted = persist_screenplay_character_resolutions(
         conn,
         episode_id,
         result.get("resolutions") or [],
+        expected_active_run_id=expected_active_run_id,
+        expected_revision_id=expected_revision_id,
     )
     result["resolutions"] = persisted
     trace = None

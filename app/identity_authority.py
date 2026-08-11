@@ -85,9 +85,16 @@ def authority_id_for_resolution(value: dict[str, Any]) -> str:
 
     source_label = str(value.get("source_label") or "").strip()
     identity_group = str(value.get("identity_group") or "").strip()
+    identity_scope_fingerprint = str(
+        value.get("identity_scope_fingerprint") or ""
+    ).strip()
     seed = {
         "canonical_name": canonical_name,
         "identity_group": identity_group or f"source:{source_label}",
+        # current-1:F1 and similar model-local group tokens are only meaningful
+        # inside one discovery input.  Never let the same token from a changed
+        # source epoch silently reuse the old authority.
+        "identity_scope_fingerprint": identity_scope_fingerprint,
     }
     digest = hashlib.sha256(
         json.dumps(
@@ -114,6 +121,13 @@ def normalize_character_resolution(
     normalized["identity_group"] = str(
         normalized.get("identity_group") or ""
     ).strip()
+    identity_scope_fingerprint = str(
+        normalized.get("identity_scope_fingerprint") or ""
+    ).strip()
+    if identity_scope_fingerprint:
+        normalized["identity_scope_fingerprint"] = identity_scope_fingerprint
+    else:
+        normalized.pop("identity_scope_fingerprint", None)
     source_instance_key = str(
         normalized.get("source_instance_key") or ""
     ).strip()
