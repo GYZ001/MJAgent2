@@ -15,10 +15,24 @@ async def concatenate(args: I.EpisodeScopedInput) -> CommandResult:
         args.model_dump(mode="json"),
     )
     try:
+        from app.downstream_authority import (
+            current_adopted_video_delivery_manifest,
+            verify_current_storyboard_release_authority,
+        )
+
+        conn = worker.get_conn()
+        release_authority = verify_current_storyboard_release_authority(
+            args.episode_id, conn=conn,
+        )
+        video_delivery_manifest = current_adopted_video_delivery_manifest(
+            args.episode_id, conn=conn,
+        )
         claim_token, replay = worker.claim_concat_operation(
             idempotency_key=args.idempotency_key or "",
             request_fingerprint=request_fingerprint,
             episode_id=args.episode_id,
+            release_authority=release_authority,
+            video_delivery_manifest=video_delivery_manifest,
         )
     except worker.ConcatOperationConflict as exc:
         return failed(str(exc), error_code="idempotency_request_mismatch")
@@ -28,6 +42,8 @@ async def concatenate(args: I.EpisodeScopedInput) -> CommandResult:
             data={"idempotency_in_progress": True},
             resource_uris=[f"manju://episodes/{args.episode_id}/delivery"],
         )
+    except ValueError as exc:
+        return failed(str(exc), error_code="invalid_state")
     if replay is not None:
         return succeeded(
             "本集已按镜号顺序拼接成片",
@@ -42,6 +58,8 @@ async def concatenate(args: I.EpisodeScopedInput) -> CommandResult:
         operation_idempotency_key=args.idempotency_key,
         operation_request_fingerprint=request_fingerprint,
         operation_claim_token=claim_token,
+        operation_release_authority=release_authority,
+        operation_video_delivery_manifest=video_delivery_manifest,
     )
     if isinstance(outcome, CommandResult):
         worker.release_concat_operation(

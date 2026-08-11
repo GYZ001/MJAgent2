@@ -943,6 +943,8 @@ def test_video_create_persists_exact_request_and_rejects_operation_drift(
 
     assert caught.value.failure_kind == "idempotency_request_mismatch"
     assert caught.value.requires_explicit_retry is True
+    assert caught.value.create_not_accepted is False
+    assert caught.value.delivery_state == "unknown"
 
     monkeypatch.setattr(hiagent, "active_model", lambda *_args: "video-model-new")
     with pytest.raises(
@@ -956,6 +958,34 @@ def test_video_create_persists_exact_request_and_rejects_operation_drift(
         ))
 
     assert len(posts) == 1
+
+
+def test_video_create_local_preflight_is_explicitly_not_accepted(monkeypatch) -> None:
+    posts = 0
+
+    class ForbiddenClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            nonlocal posts
+            posts += 1
+            raise AssertionError("local preflight must run before provider POST")
+
+    monkeypatch.setattr(hiagent.httpx, "AsyncClient", lambda **_kwargs: ForbiddenClient())
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(hiagent.create_video_task(
+            "prompt",
+            image_urls=[("data:image/png;base64,WA==", "invalid-role")],
+        ))
+
+    assert caught.value.delivery_state == "not_sent"
+    assert caught.value.replay_safe is True
+    assert caught.value.create_not_accepted is True
+    assert posts == 0
 
 
 def test_image_generation_sends_stable_idempotency_key(monkeypatch) -> None:

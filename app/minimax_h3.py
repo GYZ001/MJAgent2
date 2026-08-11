@@ -780,7 +780,7 @@ async def create_video_task(
             int((time.time() - started) * 1000),
             error=str(exc),
         )
-        raise
+        raise exc
 
 
 def is_task_id(task_id: str) -> bool:

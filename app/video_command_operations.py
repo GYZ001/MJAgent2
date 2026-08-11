@@ -303,3 +303,32 @@ def finish_video_command_operation(
         conn.rollback()
         raise VideoCommandOperationConflict("视频命令 receipt 已被不同请求占用")
     conn.commit()
+
+
+def fail_video_command_operation(
+    *,
+    command: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    claim_token: str,
+) -> None:
+    """Release a known-failed handler owner without erasing durable bindings."""
+    conn = get_conn()
+    _ensure_table(conn)
+    updated = conn.execute(
+        """UPDATE video_command_operation_receipts
+              SET status='failed',lease_expires_at=0,updated_at=?
+            WHERE operation_key=? AND command=? AND request_fingerprint=?
+              AND claim_token=? AND status='running'""",
+        (
+            time.time(),
+            f"{command}:{str(idempotency_key or '').strip()}",
+            command,
+            request_fingerprint,
+            claim_token,
+        ),
+    )
+    if updated.rowcount != 1:
+        conn.rollback()
+        raise VideoCommandOperationConflict("视频命令失败 receipt owner 已失效")
+    conn.commit()

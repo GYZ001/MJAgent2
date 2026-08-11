@@ -3076,6 +3076,35 @@ async def _complete_episode_core(
             "message": "本集补齐状态刚刚发生变化，请刷新后重试",
             "action": "refresh",
         })
+    completion_result = {
+        "status": "accepted",
+        "run_id": recorder.run_id,
+        "goal": "complete_episode_video",
+        "completion_grant_id": grant_id,
+        "resource_uri": f"manju://runs/{recorder.run_id}",
+        "poll_url": f"/api/episodes/{episode_id}/video-completion",
+        "message": "全片补齐任务已启动，可在生成台查看进度",
+    }
+    operation_fingerprint = str(body.get("operation_request_fingerprint") or "")
+    operation_claim_token = str(body.get("operation_claim_token") or "")
+    operation_command = str(body.get("operation_command") or "")
+    if operation_fingerprint and operation_claim_token and operation_command:
+        from app.video_command_operations import bind_video_command_operation
+
+        bind_video_command_operation(
+            command=operation_command,
+            idempotency_key=str(body.get("idempotency_key") or ""),
+            request_fingerprint=operation_fingerprint,
+            claim_token=operation_claim_token,
+            binding={
+                "operation_complete": True,
+                "run_id": recorder.run_id,
+                "completion_grant_id": grant_id,
+                "result": completion_result,
+            },
+            conn=conn,
+            merge=True,
+        )
     conn.commit()
 
     completion_coro = _recorded_video_completion_task(
@@ -3116,6 +3145,19 @@ async def _complete_episode_core(
                WHERE id=? AND active_video_run_id=?""",
             (previous_mode, ep["status"], episode_id, recorder.run_id),
         )
+        if operation_fingerprint and operation_claim_token and operation_command:
+            conn.execute(
+                """UPDATE video_command_operation_receipts
+                      SET binding_json='{}',updated_at=?
+                    WHERE operation_key=? AND request_fingerprint=?
+                      AND claim_token=? AND status='running'""",
+                (
+                    now(),
+                    f"{operation_command}:{str(body.get('idempotency_key') or '').strip()}",
+                    operation_fingerprint,
+                    operation_claim_token,
+                ),
+            )
         conn.commit()
         raise HTTPException(503, {
             "code": "VIDEO_COMPLETION_START_FAILED",
@@ -3124,15 +3166,7 @@ async def _complete_episode_core(
             "completion_grant_id": grant_id,
             "run_id": recorder.run_id,
         }) from exc
-    return {
-        "status": "accepted",
-        "run_id": recorder.run_id,
-        "goal": "complete_episode_video",
-        "completion_grant_id": grant_id,
-        "resource_uri": f"manju://runs/{recorder.run_id}",
-        "poll_url": f"/api/episodes/{episode_id}/video-completion",
-        "message": "全片补齐任务已启动，可在生成台查看进度",
-    }
+    return completion_result
 
 
 def _video_completion_user_contract(
@@ -3961,7 +3995,7 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                     },
                 )
 
-    return {
+    project_result = {
         "status": "accepted",
         "project_id": project_id,
         "global_budget_cap_cny": global_cap,
@@ -3980,6 +4014,28 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
             item["episode_id"] for item in plan if item.get("status") == "failed_to_schedule"
         ],
     }
+    operation_fingerprint = str(body.get("operation_request_fingerprint") or "")
+    operation_claim_token = str(body.get("operation_claim_token") or "")
+    operation_command = str(body.get("operation_command") or "")
+    if operation_fingerprint and operation_claim_token and operation_command:
+        from app.video_command_operations import bind_video_command_operation
+
+        bind_video_command_operation(
+            command=operation_command,
+            idempotency_key=str(body.get("idempotency_key") or ""),
+            request_fingerprint=operation_fingerprint,
+            claim_token=operation_claim_token,
+            binding={
+                "operation_complete": True,
+                "project_queue_run_id": project_queue_run_id,
+                "started": started,
+                "result": project_result,
+            },
+            conn=conn,
+            merge=True,
+        )
+        conn.commit()
+    return project_result
 
 
 def _project_video_spent(project_id: str, *, conn=None) -> float:

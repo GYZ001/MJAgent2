@@ -648,7 +648,7 @@ def current_storyboard_release_manifest(
     ).fetchone()
     artifact_valid = bool(
         artifact is not None
-        and artifact["type"] == "storyboard"
+        and artifact["type"] in {"storyboard", "storyboard_document"}
         and artifact["scope_type"] == "episode"
         and artifact["scope_id"] == episode_id
         and artifact["status"]

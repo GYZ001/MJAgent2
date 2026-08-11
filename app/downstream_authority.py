@@ -158,7 +158,7 @@ def verify_current_storyboard_release_authority(
     ).fetchone()
     if (
         artifact is None
-        or str(artifact["type"] or "") != "storyboard"
+        or str(artifact["type"] or "") not in {"storyboard", "storyboard_document"}
         or str(artifact["scope_type"] or "") != "episode"
         or str(artifact["scope_id"] or "") != episode_id
         or str(artifact["status"] or "") != "approved"

@@ -86,6 +86,40 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
 
 async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
     from app import api
+    from app.capabilities.bus import canonical_command_request_fingerprint
+    from app.video_command_operations import (
+        VideoCommandOperationConflict,
+        VideoCommandOperationInProgress,
+        claim_video_command_operation,
+        fail_video_command_operation,
+        finish_video_command_operation,
+    )
+
+    command = "video.complete_episode"
+    request_fingerprint = canonical_command_request_fingerprint(
+        command, args.model_dump(mode="json"),
+    )
+    try:
+        operation_owner, recovered = claim_video_command_operation(
+            command=command,
+            idempotency_key=str(args.idempotency_key or ""),
+            request_fingerprint=request_fingerprint,
+            scope_type="episode",
+            scope_id=args.episode_id,
+        )
+    except VideoCommandOperationConflict as exc:
+        return failed(str(exc), error_code="idempotency_request_mismatch")
+    except VideoCommandOperationInProgress as exc:
+        return succeeded(str(exc), data={"idempotency_in_progress": True})
+    if recovered is not None:
+        return succeeded(
+            "已恢复原全片视频补齐运行",
+            data=recovered,
+            resource_uris=[
+                f"manju://episodes/{args.episode_id}/storyboard",
+                recovered.get("resource_uri") or f"manju://runs/{recovered.get('run_id')}",
+            ],
+        )
 
     body = {
         "mode": args.mode,
@@ -100,10 +134,26 @@ async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
         "qualification_version": args.qualification_version,
         "idempotency_key": args.idempotency_key,
         "request_id": args.request_id,
+        "operation_request_fingerprint": request_fingerprint,
+        "operation_claim_token": operation_owner,
+        "operation_command": command,
     }
     outcome = await call_guarded(api._complete_episode_core, args.episode_id, body)
     if isinstance(outcome, CommandResult):
+        fail_video_command_operation(
+            command=command,
+            idempotency_key=str(args.idempotency_key or ""),
+            request_fingerprint=request_fingerprint,
+            claim_token=str(operation_owner or ""),
+        )
         return outcome
+    finish_video_command_operation(
+        command=command,
+        idempotency_key=str(args.idempotency_key or ""),
+        request_fingerprint=request_fingerprint,
+        claim_token=str(operation_owner or ""),
+        result=outcome,
+    )
     return succeeded(
         "已启动全片视频补齐 Supervisor",
         data=outcome,
@@ -116,6 +166,37 @@ async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
 
 async def complete_project(args: I.VideoCompleteProjectInput) -> CommandResult:
     from app import api
+    from app.capabilities.bus import canonical_command_request_fingerprint
+    from app.video_command_operations import (
+        VideoCommandOperationConflict,
+        VideoCommandOperationInProgress,
+        claim_video_command_operation,
+        fail_video_command_operation,
+        finish_video_command_operation,
+    )
+
+    command = "video.complete_project"
+    request_fingerprint = canonical_command_request_fingerprint(
+        command, args.model_dump(mode="json"),
+    )
+    try:
+        operation_owner, recovered = claim_video_command_operation(
+            command=command,
+            idempotency_key=str(args.idempotency_key or ""),
+            request_fingerprint=request_fingerprint,
+            scope_type="project",
+            scope_id=args.project_id,
+        )
+    except VideoCommandOperationConflict as exc:
+        return failed(str(exc), error_code="idempotency_request_mismatch")
+    except VideoCommandOperationInProgress as exc:
+        return succeeded(str(exc), data={"idempotency_in_progress": True})
+    if recovered is not None:
+        return succeeded(
+            "已恢复原跨集补齐编排",
+            data=recovered,
+            resource_uris=[f"manju://projects/{args.project_id}"],
+        )
 
     body = {
         "episode_ids": args.episode_ids,
@@ -126,10 +207,26 @@ async def complete_project(args: I.VideoCompleteProjectInput) -> CommandResult:
         "allow_storyboard_edit": args.allow_storyboard_edit,
         "idempotency_key": args.idempotency_key,
         "request_id": args.request_id,
+        "operation_request_fingerprint": request_fingerprint,
+        "operation_claim_token": operation_owner,
+        "operation_command": command,
     }
     outcome = await call_guarded(api._complete_project_videos_core, args.project_id, body)
     if isinstance(outcome, CommandResult):
+        fail_video_command_operation(
+            command=command,
+            idempotency_key=str(args.idempotency_key or ""),
+            request_fingerprint=request_fingerprint,
+            claim_token=str(operation_owner or ""),
+        )
         return outcome
+    finish_video_command_operation(
+        command=command,
+        idempotency_key=str(args.idempotency_key or ""),
+        request_fingerprint=request_fingerprint,
+        claim_token=str(operation_owner or ""),
+        result=outcome,
+    )
     started = outcome.get("started") or []
     return succeeded(
         f"已启动跨集补齐编排（立即启动 {len(started)} 集）",

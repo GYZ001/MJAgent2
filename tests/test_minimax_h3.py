@@ -316,6 +316,56 @@ def test_minimax_h3_checkpoint_rejects_changed_request_for_same_operation(
 
     assert exc.value.retryable is False
     assert "请求内容发生变化" in str(exc.value)
+    assert exc.value.create_not_accepted is False
+    assert exc.value.delivery_state == "unknown"
+
+
+@pytest.mark.parametrize("failure_stage", ["materialize", "upload"])
+def test_minimax_h3_pre_create_failures_release_video_create_claim(
+    monkeypatch, failure_stage: str,
+) -> None:
+    generation_posts = 0
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **_kwargs):
+            nonlocal generation_posts
+            if url.endswith("/v1/videos/generations"):
+                generation_posts += 1
+            raise AssertionError("provider create POST must not be reached")
+
+    async def materialize(_value, *, media_kind, index):
+        if failure_stage == "materialize":
+            raise hiagent.ProviderError("input download/decode failed")
+        return f"{media_kind}_{index}.jpg", b"jpeg", "image/jpeg"
+
+    async def upload(_client, _item):
+        raise hiagent.ProviderError("upload rejected")
+
+    monkeypatch.setattr(minimax_h3.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(minimax_h3, "_materialize_input", materialize)
+    if failure_stage == "upload":
+        monkeypatch.setattr(minimax_h3, "_upload_file", upload)
+    monkeypatch.setattr(minimax_h3, "latest_provider_request_json", lambda *_args: None)
+    monkeypatch.setattr(minimax_h3, "start_provider_call", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(minimax_h3, "finish_provider_call", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(hiagent.ProviderError) as caught:
+        asyncio.run(minimax_h3.create_video_task(
+            "prompt",
+            image_urls=[(_image_data_url(), "first_frame")],
+            call_meta={"operation_id": "video-create-preflight"},
+        ))
+
+    assert caught.value.delivery_state == "not_sent"
+    assert caught.value.replay_safe is True
+    assert caught.value.create_not_accepted is True
+    assert generation_posts == 0
 
 
 def test_provider_request_checkpoint_preserves_exact_long_payload(
