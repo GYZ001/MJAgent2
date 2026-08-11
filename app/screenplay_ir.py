@@ -25,7 +25,11 @@ from app.identity_authority import (
     identity_authority_registry,
     model_identity_authority_prompt_rule,
 )
-from app.narrative_blueprint import BlueprintSourceAuditAnnotation
+from app.narrative_blueprint import (
+    BlueprintSourceAuditAnnotation,
+    BlueprintSourceSemantics,
+    _normalize_source_segment_id,
+)
 from app.schemas import (
     ActionAgency,
     Bible,
@@ -65,6 +69,14 @@ IR_LOCAL_SOURCE_WINDOW = 12
 _DIALOGUE_FUNCTIONS = {
     "trigger", "announcement", "question", "response", "decision", "statement",
 }
+_AUDIT_SOURCE_SEMANTICS = BlueprintSourceSemantics(
+    narrative_layer="paratext",
+    event_priority="connective",
+    render_policy="exclude_from_spine",
+    disposition="audit_only",
+    projection_policy="audit_only",
+)
+_SourceSemanticIdentity = tuple[str, str, str, str, str, str]
 
 
 class ScreenplayIRIdentityConflictError(ValueError):
@@ -406,6 +418,20 @@ def screenplay_ir_missing_event_semantic_paths(value: object) -> list[str]:
     return missing
 
 
+def _canonical_source_semantic_identity(
+    source_id: object,
+    semantics: BlueprintSourceSemantics,
+) -> _SourceSemanticIdentity:
+    return (
+        _normalize_source_segment_id(source_id),
+        semantics.narrative_layer,
+        semantics.event_priority,
+        semantics.render_policy,
+        semantics.disposition,
+        semantics.projection_policy,
+    )
+
+
 def screenplay_ir_source_audit_contract_errors(
     value: object,
 ) -> list[str]:
@@ -427,7 +453,7 @@ def screenplay_ir_source_audit_contract_errors(
         ]
 
     errors: list[str] = []
-    annotation_source_ids: list[str] = []
+    annotation_identities: list[_SourceSemanticIdentity] = []
     annotation_node_keys: list[str] = []
     required_annotation_fields = set(
         BlueprintSourceAuditAnnotation.model_fields
@@ -456,10 +482,26 @@ def screenplay_ir_source_audit_contract_errors(
                 f"source_audit_annotations[{index}] 缺少节点或来源"
             )
             continue
-        annotation_node_keys.append(node_key)
-        annotation_source_ids.extend(str(source_id) for source_id in source_ids)
+        try:
+            typed_annotation = BlueprintSourceAuditAnnotation.model_validate(
+                annotation
+            )
+        except ValueError:
+            errors.append(
+                "[IR_SOURCE_AUDIT_SEMANTIC_CONFLICT] "
+                f"source_audit_annotations[{index}] 违反 audit 语义合同"
+            )
+            continue
+        annotation_node_keys.append(typed_annotation.node_key.strip())
+        annotation_identities.extend(
+            _canonical_source_semantic_identity(
+                source_id,
+                _AUDIT_SOURCE_SEMANTICS,
+            )
+            for source_id in typed_annotation.source_segment_ids
+        )
 
-    coverage_source_ids: list[str] = []
+    coverage_identities: list[_SourceSemanticIdentity] = []
     for group in value.get("coverage") or []:
         if isinstance(group, BaseModel):
             group = group.model_dump(mode="json")
@@ -468,45 +510,70 @@ def screenplay_ir_source_audit_contract_errors(
             or group.get("projection_policy") == "audit_only"
         ):
             continue
-        coverage_source_ids.extend(
-            str(source_id)
-            for source_id in group.get("source_segment_ids") or []
+        try:
+            typed_group = IRCoverageGroup.model_validate(group)
+        except ValueError:
+            errors.append(
+                "[IR_SOURCE_AUDIT_SEMANTIC_CONFLICT] "
+                "coverage 违反 audit 语义合同"
+            )
+            continue
+        coverage_identities.extend(
+            _canonical_source_semantic_identity(
+                source_id,
+                _AUDIT_SOURCE_SEMANTICS,
+            )
+            for source_id in typed_group.source_segment_ids
         )
     source_semantics = value.get("source_semantics")
-    semantic_source_ids = [
-        str(source_id)
-        for source_id, semantics in (
-            source_semantics.items()
-            if isinstance(source_semantics, dict)
-            else ()
-        )
-        if isinstance(semantics, dict)
-        and (
+    semantic_identities: list[_SourceSemanticIdentity] = []
+    for source_id, semantics in (
+        source_semantics.items()
+        if isinstance(source_semantics, dict)
+        else ()
+    ):
+        if not isinstance(semantics, dict) or not (
             semantics.get("disposition") == "audit_only"
             or semantics.get("projection_policy") == "audit_only"
+        ):
+            continue
+        try:
+            typed_semantics = BlueprintSourceSemantics.model_validate(
+                semantics
+            )
+        except ValueError:
+            errors.append(
+                "[IR_SOURCE_AUDIT_SEMANTIC_CONFLICT] "
+                f"source_semantics[{source_id}] 违反来源语义合同"
+            )
+            continue
+        semantic_identities.append(
+            _canonical_source_semantic_identity(
+                source_id,
+                typed_semantics,
+            )
         )
-    ]
     for label, identities in (
         ("annotation node", annotation_node_keys),
-        ("annotation source", annotation_source_ids),
-        ("coverage audit source", coverage_source_ids),
-        ("semantic audit source", semantic_source_ids),
+        ("annotation source", annotation_identities),
+        ("coverage audit source", coverage_identities),
+        ("semantic audit source", semantic_identities),
     ):
         if len(identities) != len(set(identities)):
             errors.append(
                 f"[IR_SOURCE_AUDIT_DUPLICATE] {label} 含重复 identity"
             )
     if (
-        annotation_source_ids != coverage_source_ids
-        or annotation_source_ids != semantic_source_ids
+        set(annotation_identities) != set(coverage_identities)
+        or set(annotation_identities) != set(semantic_identities)
     ):
         errors.append(
             "[IR_SOURCE_AUDIT_COVERAGE_MISMATCH] "
             "source_audit_annotations、coverage 与 source_semantics "
             "必须完整一致："
-            f"annotations={annotation_source_ids}, "
-            f"coverage={coverage_source_ids}, "
-            f"semantics={semantic_source_ids}"
+            f"annotations={annotation_identities}, "
+            f"coverage={coverage_identities}, "
+            f"semantics={semantic_identities}"
         )
     return list(dict.fromkeys(errors))
 
@@ -2309,24 +2376,31 @@ def compile_screenplay_ir(
     )
     segments = {item.segment_id: item for item in segments_list}
     audit_only_source_ids = {
-        source_id
+        _normalize_source_segment_id(source_id)
         for group in value.coverage
         if group.disposition == "audit_only"
         for source_id in group.source_segment_ids
     }
-    annotated_audit_source_ids = [
-        source_id
+    annotated_audit_identities = {
+        _canonical_source_semantic_identity(
+            source_id,
+            _AUDIT_SOURCE_SEMANTICS,
+        )
         for annotation in value.source_audit_annotations
         for source_id in annotation.source_segment_ids
-    ]
+    }
+    coverage_audit_identities = {
+        _canonical_source_semantic_identity(
+            source_id,
+            _AUDIT_SOURCE_SEMANTICS,
+        )
+        for group in value.coverage
+        if group.disposition == "audit_only"
+        for source_id in group.source_segment_ids
+    }
     if (
         value.source_audit_annotations
-        and annotated_audit_source_ids
-        != [
-            segment.segment_id
-            for segment in segments_list
-            if segment.segment_id in audit_only_source_ids
-        ]
+        and annotated_audit_identities != coverage_audit_identities
     ):
         raise ValueError(
             "source_audit_annotations 与 audit-only coverage 不一致"
@@ -2343,7 +2417,8 @@ def compile_screenplay_ir(
             for scene in value.scenes
             for unit in scene.units
             if audit_only_source_ids.intersection(
-                unit.source_segment_ids
+                _normalize_source_segment_id(source_id)
+                for source_id in unit.source_segment_ids
             )
         ]
         if leaked_audit_units:

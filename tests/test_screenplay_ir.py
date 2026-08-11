@@ -2478,6 +2478,42 @@ def _participant_delivery_complete_ir_payload(version: str) -> dict:
     return payload
 
 
+def _source_audit_annotation(node_key: str, source_id: str) -> dict:
+    return {
+        "node_key": node_key,
+        "source_segment_ids": [source_id],
+        "narrative_layer": "paratext",
+        "render_policy": "exclude_from_spine",
+        "disposition": "audit_only",
+        "projection_policy": "audit_only",
+    }
+
+
+def _audit_only_ir_payload(*source_ids: str) -> dict:
+    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
+    audit_sources = set(source_ids)
+    for coverage in payload["coverage"]:
+        if audit_sources.intersection(coverage["source_segment_ids"]):
+            coverage.update({
+                "disposition": "audit_only",
+                "projection_policy": "audit_only",
+                "beat_keys": [],
+            })
+    for source_id in source_ids:
+        payload["source_semantics"][source_id].update({
+            "narrative_layer": "paratext",
+            "event_priority": "connective",
+            "render_policy": "exclude_from_spine",
+            "disposition": "audit_only",
+            "projection_policy": "audit_only",
+        })
+    payload["source_audit_annotations"] = [
+        _source_audit_annotation(f"audit-node-{index}", source_id)
+        for index, source_id in enumerate(source_ids, start=1)
+    ]
+    return payload
+
+
 def _persist_recoverable_ir(
     *,
     episode_id: str,
@@ -2573,6 +2609,97 @@ def test_current_ir_requires_explicit_complete_source_audit_contract() -> None:
     duplicate["source_audit_annotations"] = [annotation, annotation]
     with pytest.raises(ValidationError, match="IR_SOURCE_AUDIT_DUPLICATE"):
         ScreenplayGenerationIR.model_validate(duplicate)
+
+
+def test_source_audit_contract_uses_canonical_identity_order() -> None:
+    payload = _audit_only_ir_payload("SRC0002", "SRC0003")
+    payload["source_semantics"] = {
+        source_id: dict(reversed(list(semantics.items())))
+        for source_id, semantics in reversed(
+            list(payload["source_semantics"].items())
+        )
+    }
+    payload["source_audit_annotations"] = [
+        dict(reversed(list(annotation.items())))
+        for annotation in reversed(payload["source_audit_annotations"])
+    ]
+
+    validated = ScreenplayGenerationIR.model_validate(payload)
+
+    assert {
+        source_id
+        for annotation in validated.source_audit_annotations
+        for source_id in annotation.source_segment_ids
+    } == {"SRC0002", "SRC0003"}
+
+
+def test_compiler_uses_source_audit_canonical_identity_order() -> None:
+    payload = _audit_only_ir_payload("SRC0002", "SRC0003")
+    payload["source_audit_annotations"].reverse()
+    audit_source_ids = {"SRC0002", "SRC0003"}
+    payload["scenes"] = [
+        scene
+        for scene in payload["scenes"]
+        if not audit_source_ids.intersection(
+            source_id
+            for unit in scene["units"]
+            for source_id in unit.get("source_segment_ids", [])
+        )
+    ]
+    ir = ScreenplayGenerationIR.model_validate(payload)
+
+    compiled = compile_screenplay_ir(
+        ir,
+        episode={
+            "id": "ep-audit-order",
+            "episode_no": 1,
+            "title": "雨夜敲门",
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    assert {
+        item.source_segment_id
+        for item in compiled.source_coverage
+        if item.disposition == "audit_only"
+    } == audit_source_ids
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error_code"),
+    [
+        pytest.param(
+            lambda payload: payload["source_audit_annotations"].append(
+                _source_audit_annotation("audit-node-duplicate", "SRC2")
+            ),
+            "IR_SOURCE_AUDIT_DUPLICATE",
+            id="duplicate-canonical-source",
+        ),
+        pytest.param(
+            lambda payload: payload["source_semantics"]["SRC0002"].update({
+                "narrative_layer": "story",
+            }),
+            "IR_SOURCE_AUDIT_SEMANTIC_CONFLICT",
+            id="semantic-conflict",
+        ),
+        pytest.param(
+            lambda payload: payload["source_audit_annotations"].pop(),
+            "IR_SOURCE_AUDIT_COVERAGE_MISMATCH",
+            id="missing-audit-source",
+        ),
+    ],
+)
+def test_source_audit_contract_rejects_invalid_canonical_identity(
+    mutate,
+    error_code: str,
+) -> None:
+    payload = _audit_only_ir_payload("SRC0002", "SRC0003")
+    mutate(payload)
+
+    with pytest.raises(ValidationError, match=error_code):
+        ScreenplayGenerationIR.model_validate(payload)
 
 
 def test_recovery_accepts_legal_current_ir_artifact() -> None:
