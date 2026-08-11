@@ -2498,6 +2498,7 @@ def _audit_only_ir_payload(*source_ids: str) -> dict:
                 "disposition": "audit_only",
                 "projection_policy": "audit_only",
                 "beat_keys": [],
+                "reason": "旁文本仅保留来源审计，不进入剧情投影",
             })
     for source_id in source_ids:
         payload["source_semantics"][source_id].update({
@@ -2637,6 +2638,9 @@ def test_compiler_uses_source_audit_canonical_identity_order() -> None:
     payload = _audit_only_ir_payload("SRC0002", "SRC0003")
     payload["source_audit_annotations"].reverse()
     audit_source_ids = {"SRC0002", "SRC0003"}
+    for scene_index, scene in enumerate(payload["scenes"], start=1):
+        for unit in scene["units"]:
+            unit["source_segment_ids"] = [f"SRC{scene_index:04d}"]
     payload["scenes"] = [
         scene
         for scene in payload["scenes"]
@@ -2646,7 +2650,13 @@ def test_compiler_uses_source_audit_canonical_identity_order() -> None:
             for source_id in unit.get("source_segment_ids", [])
         )
     ]
+    payload["identities"] = [
+        identity
+        for identity in payload["identities"]
+        if identity["key"] == "g"
+    ]
     ir = ScreenplayGenerationIR.model_validate(payload)
+    ir.format_version = "screenplay-generation-ir.v1.4"
 
     compiled = compile_screenplay_ir(
         ir,
