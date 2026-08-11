@@ -1467,6 +1467,8 @@ def recover_screenplay_working_authority(
     *,
     expected_working_artifact_id: str,
     expected_working_hash: str,
+    expected_checkpoint_hash: str,
+    expected_first_evaluation_id: str | None,
     expected_replacement_hash: str,
     trusted_merged_ir_artifact_id: str,
     revalidation_evaluation_id: str,
@@ -1519,6 +1521,11 @@ def recover_screenplay_working_authority(
             or current_eligibility.revision_id != revision_id
             or current_eligibility.working_artifact_id
             != expected_working_artifact_id
+            or _structured_hash(
+                json.loads(row["checkpoint_json"] or "{}")
+            ) != expected_checkpoint_hash
+            or str(row["first_evaluation_id"] or "")
+            != str(expected_first_evaluation_id or "")
         ):
             raise RuntimeError("screenplay recovery eligibility/working CAS 冲突")
         current_artifact = conn.execute(
@@ -1580,8 +1587,9 @@ def recover_screenplay_working_authority(
             ):
                 raise ValueError("screenplay recovery replacement 不来自可信上游")
         evaluation = conn.execute(
-            "SELECT artifact_id,evaluator_name,evaluator_version,status,"
-            "hard_gate_passed,runtime_blocking,issues_json,evidence_json "
+            "SELECT artifact_id,evaluator_type,evaluator_name,evaluator_version,"
+            "evaluation_role,score_status,status,hard_gate_passed,"
+            "runtime_blocking,issues_json,evidence_json "
             "FROM evaluations WHERE id=?",
             (revalidation_evaluation_id,),
         ).fetchone()
@@ -1607,8 +1615,11 @@ def recover_screenplay_working_authority(
         )
         if (
             evaluation["artifact_id"] != artifact_id
+            or evaluation["evaluator_type"] != "deterministic"
             or evaluation["evaluator_name"] != "screenplay_production_qa"
             or evaluation["evaluator_version"] != qa_profile_version
+            or evaluation["evaluation_role"] != "score_only"
+            or evaluation["score_status"] != "scored"
             or evaluation["status"] in {"failed", "error"}
             or not bool(evaluation["hard_gate_passed"])
             or bool(evaluation["runtime_blocking"])
@@ -1616,6 +1627,10 @@ def recover_screenplay_working_authority(
             or not isinstance(evaluation_evidence, dict)
             or str(evaluation_evidence.get("artifact_hash") or "")
             != expected_replacement_hash
+            or str(evaluation_evidence.get("artifact_id") or "")
+            != artifact_id
+            or str(evaluation_evidence.get("qa_profile_version") or "")
+            != qa_profile_version
             or str(
                 evaluation_evidence.get("authority_input_fingerprint") or ""
             ) != input_fingerprint

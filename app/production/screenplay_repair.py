@@ -543,6 +543,7 @@ def run_screenplay_qa(
         evidence={
             "artifact_id": artifact_id,
             "artifact_hash": artifact_hash,
+            "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
             "authority_input_fingerprint": authority_input_fingerprint,
             "blocker_count": blocker_count(issues),
             "must_fix_count": must_fix_count(issues),
@@ -3012,7 +3013,8 @@ def _reusable_recovery_evaluation(
 
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id,status,hard_gate_passed,runtime_blocking,issues_json,"
+        "SELECT id,evaluator_type,evaluation_role,score_status,status,"
+        "hard_gate_passed,runtime_blocking,issues_json,"
         "evidence_json FROM evaluations WHERE artifact_id=? "
         "AND evaluator_name='screenplay_production_qa' "
         "AND evaluator_version=? ORDER BY created_at DESC",
@@ -3025,10 +3027,16 @@ def _reusable_recovery_evaluation(
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if (
-            row["status"] in {"failed", "error"}
+            row["evaluator_type"] != "deterministic"
+            or row["evaluation_role"] != "score_only"
+            or row["score_status"] != "scored"
+            or row["status"] in {"failed", "error"}
             or not bool(row["hard_gate_passed"])
             or bool(row["runtime_blocking"])
             or str(evidence.get("artifact_hash") or "") != artifact_hash
+            or str(evidence.get("artifact_id") or "") != artifact_id
+            or str(evidence.get("qa_profile_version") or "")
+            != SCREENPLAY_QA_PROFILE_VERSION
             or str(evidence.get("authority_input_fingerprint") or "")
             != input_fingerprint
             or any(
@@ -3357,6 +3365,15 @@ def _revalidate_or_rebuild_resume_working(
         replacement_id,
         expected_working_artifact_id=old_working_id,
         expected_working_hash=old_working_hash,
+        expected_checkpoint_hash=hashlib.sha256(
+            json.dumps(
+                old_checkpoint,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        expected_first_evaluation_id=revision.first_evaluation_id,
         expected_replacement_hash=replacement_hash,
         trusted_merged_ir_artifact_id=(
             merged_ir_id if replacement_id != old_working_id else ""

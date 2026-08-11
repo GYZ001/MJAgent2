@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 import pytest
 
@@ -21,7 +22,7 @@ from app.production.revision import (
 )
 from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
 from app.production.structured_issues import structured_issue
-from app.schemas import Bible, VoiceCanonical, World
+from app.schemas import Bible, World
 from app.screenplay_ir import IR_COMPILER_VERSION, IR_VERSION
 from app.screenplay_scene_shards import (
     SCREENPLAY_ENVELOPE_VERSION,
@@ -101,7 +102,14 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
     blueprint_value = NarrativeBlueprint(episode_no=1, nodes=[])
     blueprint_hash = blueprint_content_hash(blueprint_value)
     identities: list[dict] = []
-    identity_hash = repository.content_hash(identities)
+    identity_hash = hashlib.sha256(
+        json.dumps(
+            identities,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     blueprint = repository.create_artifact(EvidenceArtifact(
         type="screenplay_narrative_blueprint",
         scope_type="episode",
@@ -330,13 +338,15 @@ def _install_gate3_qa(monkeypatch, *, input_fingerprint: str = "gate3-input"):
             evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
             status="failed" if polluted else "passed",
             hard_gate_passed=not polluted,
-            evaluation_role="runtime_gate",
+            evaluation_role="runtime_gate" if polluted else "score_only",
+            score_status="scored",
             runtime_blocking=polluted,
             score=0 if polluted else 100,
             issues=issues,
             evidence={
                 "artifact_id": kwargs.get("artifact_id"),
                 "artifact_hash": artifact_hash,
+                "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
                 "authority_input_fingerprint": input_fingerprint,
             },
         )
@@ -398,8 +408,13 @@ def test_real_run_polluted_working_rebuilds_from_four_shard_merged_ir(
     )
 
     assert recovered.id != seeded["revision"].id
-    assert recovered.working_artifact_id == seeded["baseline"]["id"]
-    assert recovered.baseline_artifact_id == seeded["baseline"]["id"]
+    assert recovered.working_artifact_id != seeded["working"]["id"]
+    assert recovered.baseline_artifact_id == recovered.working_artifact_id
+    replacement = repository.get_artifact(recovered.working_artifact_id)
+    assert replacement is not None
+    assert replacement["parent_artifact_ids"] == [seeded["merged"]["id"]]
+    assert replacement["model_snapshot"]["compiler_version"] == IR_COMPILER_VERSION
+    assert replacement["model_snapshot"]["source_merged_content_hash"] == seeded["merged"]["content_hash"]
     assert recovered.qa_profile_version == SCREENPLAY_QA_PROFILE_VERSION
     assert recovered.first_evaluation_id is None
     assert recovered.checkpoint_json["issue_strategy_history"] == {}
@@ -416,7 +431,7 @@ def test_real_run_polluted_working_rebuilds_from_four_shard_merged_ir(
         ("ep_run_2eb",),
     ).fetchone()
     assert tuple(episode_row) == (
-        "published-art", "published-cert", "published-rev", seeded["baseline"]["id"],
+        "published-art", "published-cert", "published-rev", recovered.working_artifact_id,
     )
     assert resolve_screenplay_resume_eligibility("ep_run_2eb").reason_code == "WORKING_COMPATIBLE"
     with pytest.raises(RuntimeError, match="不再 active"):
@@ -490,10 +505,11 @@ def test_dynamic_shard_parent_set_must_match_exactly(tamper: str) -> None:
     assert "merged_ir_artifact_id" not in eligibility.reusable_checkpoint
 
 
-@pytest.mark.parametrize("tamper", ["hash", "lineage", "fingerprint"])
+@pytest.mark.parametrize(
+    "tamper", ["hash", "lineage", "fingerprint", "role", "evaluator"],
+)
 def test_recovery_rejects_untrusted_replacement_or_evaluation(tamper: str) -> None:
     seeded = _seed_recovery(polluted_working=False)
-    eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
     replacement = seeded["working"]
     if tamper == "lineage":
         replacement = repository.create_artifact(EvidenceArtifact(
@@ -509,16 +525,23 @@ def test_recovery_rejects_untrusted_replacement_or_evaluation(tamper: str) -> No
     evaluation = repository.create_evaluation(
         replacement["id"],
         Evaluation(
-            evaluator_type="deterministic",
+            evaluator_type=(
+                "model" if tamper == "evaluator" else "deterministic"
+            ),
             evaluator_name="screenplay_production_qa",
             evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
             status="passed",
             hard_gate_passed=True,
-            evaluation_role="runtime_gate",
+            evaluation_role=(
+                "runtime_gate" if tamper == "role" else "score_only"
+            ),
+            score_status="scored",
             runtime_blocking=False,
             issues=[],
             evidence={
+                "artifact_id": replacement["id"],
                 "artifact_hash": replacement["content_hash"],
+                "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
                 "authority_input_fingerprint": (
                     "wrong-input" if tamper == "fingerprint" else "gate3-input"
                 ),
@@ -531,6 +554,15 @@ def test_recovery_rejects_untrusted_replacement_or_evaluation(tamper: str) -> No
             replacement["id"],
             expected_working_artifact_id=seeded["working"]["id"],
             expected_working_hash=seeded["working"]["content_hash"],
+            expected_checkpoint_hash=hashlib.sha256(
+                json.dumps(
+                    seeded["revision"].checkpoint_json,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            expected_first_evaluation_id=seeded["revision"].first_evaluation_id,
             expected_replacement_hash=(
                 "wrong-hash" if tamper == "hash" else replacement["content_hash"]
             ),
@@ -556,11 +588,14 @@ def test_episode_pointer_cas_conflict_rolls_back_revision_switch() -> None:
             evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
             status="passed",
             hard_gate_passed=True,
-            evaluation_role="runtime_gate",
+            evaluation_role="score_only",
+            score_status="scored",
             runtime_blocking=False,
             issues=[],
             evidence={
+                "artifact_id": seeded["working"]["id"],
                 "artifact_hash": seeded["working"]["content_hash"],
+                "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
                 "authority_input_fingerprint": "gate3-input",
             },
         ),
@@ -577,6 +612,15 @@ def test_episode_pointer_cas_conflict_rolls_back_revision_switch() -> None:
             seeded["working"]["id"],
             expected_working_artifact_id=seeded["working"]["id"],
             expected_working_hash=seeded["working"]["content_hash"],
+            expected_checkpoint_hash=hashlib.sha256(
+                json.dumps(
+                    seeded["revision"].checkpoint_json,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            expected_first_evaluation_id=seeded["revision"].first_evaluation_id,
             expected_replacement_hash=seeded["working"]["content_hash"],
             trusted_merged_ir_artifact_id="",
             revalidation_evaluation_id=evaluation["id"],
@@ -596,3 +640,148 @@ def test_episode_pointer_cas_conflict_rolls_back_revision_switch() -> None:
     assert conn.execute(
         "SELECT screenplay_error FROM episodes WHERE id=?", ("ep_run_2eb",)
     ).fetchone()["screenplay_error"] == "connection-usable"
+
+
+def test_checkpoint_cas_conflict_rejects_stale_recovery_snapshot() -> None:
+    seeded = _seed_recovery(polluted_working=False)
+    evaluation = repository.create_evaluation(
+        seeded["working"]["id"],
+        Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="score_only",
+            score_status="scored",
+            runtime_blocking=False,
+            issues=[],
+            evidence={
+                "artifact_id": seeded["working"]["id"],
+                "artifact_hash": seeded["working"]["content_hash"],
+                "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
+                "authority_input_fingerprint": "gate3-input",
+            },
+        ),
+    )
+    with pytest.raises(RuntimeError, match="eligibility/working CAS"):
+        recover_screenplay_working_authority(
+            seeded["revision"].id,
+            seeded["working"]["id"],
+            expected_working_artifact_id=seeded["working"]["id"],
+            expected_working_hash=seeded["working"]["content_hash"],
+            expected_checkpoint_hash="stale-checkpoint",
+            expected_first_evaluation_id=seeded["revision"].first_evaluation_id,
+            expected_replacement_hash=seeded["working"]["content_hash"],
+            trusted_merged_ir_artifact_id="",
+            revalidation_evaluation_id=evaluation["id"],
+            input_fingerprint="gate3-input",
+            contract_version=get_contract("screenplay").version,
+            qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+            checkpoint={"phase": "STRUCTURE_VALIDATION"},
+        )
+    assert get_production_revision(seeded["revision"].id).status == "active"
+
+
+def test_pre_cas_failure_retry_reuses_recovery_document_and_evaluation(
+    monkeypatch,
+) -> None:
+    from app.observability.tracing import bind_trace
+    from app.production import screenplay_repair
+    from app.production.revision import (
+        recover_screenplay_working_authority as real_recover,
+    )
+
+    seeded = _seed_recovery(polluted_working=True)
+    input_fingerprint = _install_gate3_qa(monkeypatch)
+    monkeypatch.setattr(
+        "app.screenplay_ir.compile_screenplay_ir",
+        lambda *_args, **_kwargs: seeded["clean"].model_copy(deep=True),
+    )
+    eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="ep_run_2eb",
+        input_fingerprint=input_fingerprint,
+    )
+    step_id = repository.create_step(run_id, "screenplay.recovery")
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=? WHERE id=?",
+        (run_id, "ep_run_2eb"),
+    )
+    conn.commit()
+
+    def fail_after_durable_evidence(*_args, **_kwargs):
+        raise RuntimeError("simulated owner/CAS failure")
+
+    monkeypatch.setattr(
+        screenplay_repair,
+        "recover_screenplay_working_authority",
+        fail_after_durable_evidence,
+    )
+    with bind_trace(run_id, step_id):
+        with pytest.raises(RuntimeError, match="simulated owner/CAS failure"):
+            screenplay_repair._revalidate_or_rebuild_resume_working(
+                episode_id="ep_run_2eb",
+                episode=_episode(),
+                source_text="月光落在空旷山谷。",
+                bible=Bible(
+                    characters=[],
+                    world=World(visual_style_canonical="水墨"),
+                ),
+                revision=seeded["revision"],
+                entry_eligibility=eligibility,
+                input_fingerprint=input_fingerprint,
+                contract_version=get_contract("screenplay").version,
+                run_id=None,
+            )
+    recovery_rows = conn.execute(
+        "SELECT id,created_by_step_run_id FROM artifacts "
+        "WHERE type='screenplay_document' AND scope_id=? "
+        "AND model_snapshot_json LIKE '%screenplay-working-recovery.v1%'",
+        ("ep_run_2eb",),
+    ).fetchall()
+    assert len(recovery_rows) == 1
+    assert recovery_rows[0]["created_by_step_run_id"] == step_id
+    evaluation_rows = conn.execute(
+        "SELECT id,step_run_id FROM evaluations WHERE artifact_id=? "
+        "AND evaluator_version=?",
+        (recovery_rows[0]["id"], SCREENPLAY_QA_PROFILE_VERSION),
+    ).fetchall()
+    assert len(evaluation_rows) == 1
+    assert evaluation_rows[0]["step_run_id"] == step_id
+
+    monkeypatch.setattr(
+        screenplay_repair,
+        "recover_screenplay_working_authority",
+        real_recover,
+    )
+    with bind_trace(run_id, step_id):
+        recovered = screenplay_repair._revalidate_or_rebuild_resume_working(
+            episode_id="ep_run_2eb",
+            episode=_episode(),
+            source_text="月光落在空旷山谷。",
+            bible=Bible(
+                characters=[],
+                world=World(visual_style_canonical="水墨"),
+            ),
+            revision=seeded["revision"],
+            entry_eligibility=eligibility,
+            input_fingerprint=input_fingerprint,
+            contract_version=get_contract("screenplay").version,
+            run_id=None,
+        )
+    assert recovered.working_artifact_id == recovery_rows[0]["id"]
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM artifacts WHERE type='screenplay_document' "
+        "AND scope_id=? AND model_snapshot_json LIKE "
+        "'%screenplay-working-recovery.v1%'",
+        ("ep_run_2eb",),
+    ).fetchone()["c"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM evaluations WHERE artifact_id=? "
+        "AND evaluator_version=?",
+        (recovery_rows[0]["id"], SCREENPLAY_QA_PROFILE_VERSION),
+    ).fetchone()["c"] == 1
