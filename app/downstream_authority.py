@@ -20,7 +20,8 @@ def current_adopted_video_delivery_manifest(
     db = conn or get_conn()
     rows = db.execute(
         """SELECT s.id AS shot_id,s.shot_no,s.adopted_version_id,
-                  v.status AS version_status,v.video_path,v.artifact_id,v.playback_rate
+                  v.status AS version_status,v.video_path,v.artifact_id,v.playback_rate,
+                  v.technical_validation_json
              FROM shots s
              LEFT JOIN shot_versions v ON v.id=s.adopted_version_id
             WHERE s.episode_id=? ORDER BY s.shot_no""",
@@ -45,10 +46,37 @@ def current_adopted_video_delivery_manifest(
         from app.evidence import repository as evidence_repository
 
         artifact = evidence_repository.get_artifact(str(row["artifact_id"]), conn=db)
-        if artifact is None or artifact["status"] in {
-            "stale", "rejected", "superseded", "needs_revision",
-        }:
+        if (
+            artifact is None
+            or artifact.get("type") != "shot_video"
+            or artifact.get("scope_type") != "shot"
+            or artifact.get("scope_id") != str(row["shot_id"])
+            or artifact.get("status") != "approved"
+            or artifact.get("contract_version") != "video-2.0.0"
+            or Path(str(artifact.get("file_path") or "")).resolve() != path.resolve()
+            or not isinstance(artifact.get("content"), dict)
+            or str(artifact["content"].get("version_id") or "")
+            != str(row["adopted_version_id"])
+        ):
             raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 已失效")
+        try:
+            technical = json.loads(row["technical_validation_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"镜 {row['shot_no']} 的视频技术门禁证据损坏") from exc
+        technical_evaluation = db.execute(
+            """SELECT status,hard_gate_passed FROM evaluations
+                 WHERE artifact_id=? AND evaluator_type='file'
+                   AND evaluator_name='video_technical_validator'
+                 ORDER BY created_at DESC LIMIT 1""",
+            (row["artifact_id"],),
+        ).fetchone()
+        if (
+            technical.get("passed") is not True
+            or technical_evaluation is None
+            or technical_evaluation["status"] != "passed"
+            or int(technical_evaluation["hard_gate_passed"] or 0) != 1
+        ):
+            raise ValueError(f"镜 {row['shot_no']} 的视频技术门禁未通过")
         try:
             actual_artifact_hash = evidence_repository.content_hash(
                 artifact.get("content"),

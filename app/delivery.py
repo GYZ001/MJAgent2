@@ -913,7 +913,9 @@ def build_delivery_package(
                     lease_owner=operation_lease_owner,
                 )
             current_orphan_artifact = conn.execute(
-                "SELECT content_json,file_path,content_hash FROM artifacts WHERE id=?",
+                """SELECT type,scope_type,scope_id,status,contract_version,
+                          content_json,file_path,content_hash,parent_artifact_ids_json
+                     FROM artifacts WHERE id=?""",
                 (orphan_artifact_id,),
             ).fetchone()
             if current_orphan_artifact is None:
@@ -924,6 +926,43 @@ def build_delivery_package(
                 )
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ValueError("交付崩溃恢复 Artifact 内容损坏") from exc
+            expected_orphan_content = {
+                "package_id": package_id,
+                "manifest": orphan_manifest,
+                "quality_report": orphan_quality,
+            }
+            expected_parents = {
+                str(item["id"])
+                for item in readiness["source_artifacts"]
+            }
+            expected_parents.update(
+                str(item["artifact_id"])
+                for item in readiness["videos"]
+                if item.get("artifact_id")
+            )
+            try:
+                actual_parents = {
+                    str(item) for item in json.loads(
+                        current_orphan_artifact["parent_artifact_ids_json"] or "[]"
+                    )
+                }
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("交付崩溃恢复 Artifact 父血缘损坏") from exc
+            expected_manifest_path = (orphan_package_dir / "manifest.json").resolve()
+            actual_manifest_path = Path(
+                str(current_orphan_artifact["file_path"] or "")
+            ).resolve()
+            if (
+                current_orphan_artifact["type"] != "delivery_package"
+                or current_orphan_artifact["scope_type"] != "episode"
+                or current_orphan_artifact["scope_id"] != episode_id
+                or current_orphan_artifact["status"] != "validated"
+                or current_orphan_artifact["contract_version"] != "delivery-1.0.0"
+                or current_orphan_content != expected_orphan_content
+                or actual_manifest_path != expected_manifest_path
+                or actual_parents != expected_parents
+            ):
+                raise ValueError("交付崩溃恢复 Artifact 合同、范围或血缘不兼容")
             if repository.content_hash(
                 current_orphan_content, current_orphan_artifact["file_path"],
             ) != current_orphan_artifact["content_hash"]:

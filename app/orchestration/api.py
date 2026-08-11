@@ -1170,6 +1170,21 @@ def _current_delivery_download_manifest(conn, row) -> dict:
         or current["delivery_artifact_id"] != row["artifact_id"]
     ):
         raise HTTPException(409, "交付包已不是当前可下载权威")
+    artifact = conn.execute(
+        """SELECT type,scope_type,scope_id,status FROM artifacts WHERE id=?""",
+        (row["artifact_id"],),
+    ).fetchone()
+    expected_artifact_status = (
+        "approved" if row["status"] == "approved" else "validated"
+    )
+    if (
+        artifact is None
+        or artifact["type"] != "delivery_package"
+        or artifact["scope_type"] != "episode"
+        or artifact["scope_id"] != row["episode_id"]
+        or artifact["status"] != expected_artifact_status
+    ):
+        raise HTTPException(409, "交付包 Artifact 已失效或范围不匹配")
     try:
         manifest = json.loads(row["manifest_json"] or "{}")
     except json.JSONDecodeError as exc:
