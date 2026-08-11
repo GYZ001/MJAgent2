@@ -162,6 +162,12 @@
           "usage": "visible"
         },
         {
+          "identity_key": "孟浩",
+          "source_segment_ids": ["SRC0055"],
+          "source_unit_keys": ["SRC0055:unit:001"],
+          "usage": "voice"
+        },
+        {
           "identity_key": "绿袍执事乙",
           "source_segment_ids": ["SRC0056"],
           "usage": "voice"

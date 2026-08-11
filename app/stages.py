@@ -104,6 +104,7 @@ from app.source_excerpt import (
     render_indexed_source,
     structural_front_matter_ids,
 )
+from app.source_facts import source_segment_facts
 from app.spoken_contract import onscreen_text_for_capacity
 from app.screenplay_ir import (
     IR_COMPILER_VERSION,
@@ -3907,7 +3908,8 @@ async def _repair_narrative_blueprint(
             "禁止拆分、合并、新增、删除或重排 timeline node；"
             "delete_node_keys 必须为空。"
             "允许修正时间关系、转场、状态事实引用、决定、行为自主性和"
-            " released_constraints_for。每个 replacement node 必须显式保留或修正"
+            " released_constraints_for、participant_evidence。每个 replacement node "
+            "必须显式保留或修正"
             "除上述 canonical authority 字段外的创作与分场字段。"
             "每个 replacement 必须保持修复前 projection_policy；audit_only "
             "节点与来源只能保留在来源审计，不得改成 story 或放入 scene。"
@@ -3923,6 +3925,10 @@ async def _repair_narrative_blueprint(
             "不能解除威胁。若 setup_missing 涉及原文明确写出的既有关系或人物，"
             "禁止删除、弱化该来源事实；必须在当前节点或更早节点增加可见/可听的"
             "身份与关系建立内容，同节点先建立再引用也有效。\n\n"
+            "若硬门禁是 voice_identity_missing/ambiguous/conflict，只能在保持完整"
+            "node、source_segment_ids 顺序和来源语义的前提下，修正"
+            "participant_evidence：每个 dialogue source unit 恰有一个 usage=voice，"
+            "并用 source_unit_keys 精确引用；不得删除、拆分、合并或重排节点来规避。\n\n"
             "硬门禁：\n"
             + "\n".join(f"- {error}" for error in errors)
             + "\n\n相关节点及前后文：\n"
@@ -4277,6 +4283,11 @@ async def _semantic_review_narrative_blueprint(
             "可形成画面状态变化的故事语义；paratext 必须只做来源审计并使用"
             " connective+exclude_from_spine。不得按 SRC 编号、章节位置、人物是否"
             "为空或文本关键词判断，只能依据该段在叙事中的语义职责。\n"
+            "8. 每个 projection=picture 的 dialogue source unit 是否恰有一个"
+            " usage=voice participant evidence，并通过 source_unit_keys 精确绑定；"
+            "missing、多个 identity 或重复/冲突 claim 必须分别输出"
+            " voice_identity_missing、voice_identity_ambiguous、"
+            "voice_identity_conflict，不得拖到 SceneInput。\n"
             "连续剧可继承前序集已经建立的人物和关系；原文在当前节点明确揭示的"
             "既有关系，只要该节点先以可见/可听内容建立再引用，也不属于"
             " setup_missing。不得要求删除原文明确写出的关系来修复 setup。\n"
@@ -4797,6 +4808,13 @@ async def _generate_sharded_narrative_blueprint(
             {
                 "source_segment_id": segment.segment_id,
                 "text": segment.text,
+                "source_facts": [
+                    fact.model_dump(mode="json")
+                    for fact in source_segment_facts(
+                        segment.segment_id,
+                        segment.text,
+                    )
+                ],
             }
             for segment in shard_segments
         ]
@@ -4880,6 +4898,12 @@ async def _generate_sharded_narrative_blueprint(
                     "作者互动、说明等仅需完整来源审计且不应成片的旁文本使用"
                     " paratext+connective+exclude_from_spine。不得根据 SRC 编号、所在"
                     "位置、characters 是否为空或自由文本词表分类。"
+                    "每个 story 节点拥有的 source_facts 中，projection=dialogue 的"
+                    "每个单元必须在 participant_evidence 中恰有一条 usage=voice "
+                    "证据，source_unit_keys 精确引用该 source_unit_key；不得从多个"
+                    " visible participant、文本称谓或 decision actor 猜说话人。"
+                    "同一 identity 可分别声明 visible 与 voice；action 单元和无对白"
+                    "环境动作不要求 voice。"
                     "只输出 JSON，不要解释。\n\n"
                     f"上次校验错误：{json.dumps(errors, ensure_ascii=False)}\n"
                     f"人物上下文：{json.dumps(bible_context, ensure_ascii=False, separators=(',', ':'))}\n"

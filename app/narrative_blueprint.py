@@ -765,13 +765,7 @@ def blueprint_patch_schema(
                     "const": semantics.render_policy,
                 },
             },
-            "required": [
-                "key",
-                "narrative_layer",
-                "event_priority",
-                "render_policy",
-                "source_segment_ids",
-            ],
+            "required": list(NarrativeNode.model_fields),
         }
         alternatives.append({
             "type": "object",

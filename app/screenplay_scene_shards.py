@@ -1223,6 +1223,8 @@ def _identity_aliases(
         for value in (
             identity_key,
             item.get("authority_id"),
+            item.get("identity_group"),
+            item.get("source_instance_key"),
             item.get("canonical_name"),
             *(item.get("source_labels") or []),
         ):

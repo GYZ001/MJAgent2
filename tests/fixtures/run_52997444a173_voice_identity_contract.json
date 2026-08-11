@@ -1,0 +1,74 @@
+{
+  "run_id": "run_52997444a173",
+  "candidate_artifact_id": "art_ec09b29263e4",
+  "identity_artifact_id": "art_88bc_isomorphic",
+  "fixture_kind": "production-isomorphic-no-production-data",
+  "expected_scene_shard_id": "SS004",
+  "source_count": 62,
+  "source_overrides": {
+    "SRC0052": "“第一句保持原样。”众人停下脚步。",
+    "SRC0053": "“第二句也保持原样。”风声掠过空地。",
+    "SRC0056": "“最后一句仍由同一身份说出。”队伍继续前行。",
+    "SRC0060": "来源审计说明一。",
+    "SRC0061": "来源审计说明二。",
+    "SRC0062": "来源审计说明三。"
+  },
+  "blueprint_identity_reference": "episode:traveler",
+  "old_participant_evidence": [
+    {
+      "identity_key": "episode:traveler",
+      "source_segment_ids": ["SRC0052", "SRC0053", "SRC0056"],
+      "usage": "visible"
+    }
+  ],
+  "repaired_participant_evidence": [
+    {
+      "identity_key": "episode:traveler",
+      "source_segment_ids": ["SRC0052", "SRC0053", "SRC0056"],
+      "usage": "visible"
+    },
+    {
+      "identity_key": "episode:traveler",
+      "source_segment_ids": ["SRC0052"],
+      "source_unit_keys": ["SRC0052:unit:001"],
+      "usage": "voice"
+    },
+    {
+      "identity_key": "episode:traveler",
+      "source_segment_ids": ["SRC0053"],
+      "source_unit_keys": ["SRC0053:unit:001"],
+      "usage": "voice"
+    },
+    {
+      "identity_key": "episode:traveler",
+      "source_segment_ids": ["SRC0056"],
+      "source_unit_keys": ["SRC0056:unit:001"],
+      "usage": "voice"
+    }
+  ],
+  "identity_registry": [
+    {
+      "identity_key": "person_traveler",
+      "authority_id": "functional:traveler",
+      "canonical_name": "同行少年",
+      "identity_group": "episode:traveler",
+      "source_labels": ["同行少年", "少年甲", "少年乙"]
+    }
+  ],
+  "conflicting_resolutions": [
+    {
+      "source_label": "少年甲",
+      "canonical_name": "少年甲",
+      "resolution": "functional_identity",
+      "identity_group": "episode:traveler",
+      "authority_id": "functional:youth-a"
+    },
+    {
+      "source_label": "少年乙",
+      "canonical_name": "少年乙",
+      "resolution": "functional_identity",
+      "identity_group": "episode:traveler",
+      "authority_id": "functional:youth-b"
+    }
+  ]
+}
