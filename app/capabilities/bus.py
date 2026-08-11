@@ -35,7 +35,9 @@ _STRICT_IDEMPOTENCY_COMMANDS = frozenset({
     "video.generate_shot",
     "video.complete_episode",
     "video.complete_project",
+    "delivery.concatenate",
     "delivery.create_package",
+    "delivery.review",
 })
 
 

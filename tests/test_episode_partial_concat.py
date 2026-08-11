@@ -4,8 +4,49 @@ import subprocess
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 from app import api, artifacts, db, worker
 from app.video_playback import normalize_playback_rate
+
+
+@pytest.fixture(autouse=True)
+def _published_authority_for_concat_mechanics(monkeypatch):
+    from app import downstream_authority
+
+    monkeypatch.setattr(
+        downstream_authority,
+        "verify_current_storyboard_release_authority",
+        lambda episode_id, conn=None: {
+            "published_storyboard_artifact_id": f"storyboard:{episode_id}",
+            "release_qualification_hash": "release-current",
+        },
+    )
+
+    def video_manifest(episode_id, conn=None):
+        rows = (conn or worker.get_conn()).execute(
+            """SELECT s.id,s.shot_no,s.adopted_version_id,v.playback_rate,v.video_path
+                 FROM shots s LEFT JOIN shot_versions v ON v.id=s.adopted_version_id
+                WHERE s.episode_id=? ORDER BY s.shot_no""",
+            (episode_id,),
+        ).fetchall()
+        items = [
+            {
+                "shot_id": row["id"],
+                "shot_no": row["shot_no"],
+                "adopted_version_id": row["adopted_version_id"],
+                "playback_rate": float(row["playback_rate"] or 1),
+                "video_path": row["video_path"],
+            }
+            for row in rows
+        ]
+        return {"manifest_hash": json.dumps(items, sort_keys=True), "items": items}
+
+    monkeypatch.setattr(
+        downstream_authority,
+        "current_adopted_video_delivery_manifest",
+        video_manifest,
+    )
 
 
 def _probe_result(duration_s: float) -> SimpleNamespace:
@@ -99,7 +140,7 @@ def test_partial_episode_is_ready_when_any_real_video_exists_but_ffmpeg_is_still
         raise AssertionError("缺少 ffmpeg 时不得把首个片段冒充最终成片")
 
 
-def test_concat_uses_completed_real_videos_while_other_shots_are_still_generating(
+def test_concat_refuses_partial_output_while_other_shots_are_still_generating(
     tmp_path, monkeypatch,
 ) -> None:
     from app.evidence import media as media_evidence
@@ -152,15 +193,8 @@ def test_concat_uses_completed_real_videos_while_other_shots_are_still_generatin
     assert status["generation_active"] is True
     assert status["active_shot_nos"] == [2]
 
-    result = worker.concatenate_episode("e")
-
-    assert result["shots"] == 1
-    assert result["partial"] is True
-    assert result["included_shot_nos"] == [1]
-    assert result["skipped_shot_nos"] == [2]
-    assert result["final_edit"]["mode"] == "draft_concat"
-    assert result["final_edit"]["skipped_final_edit"] is True
-    assert result["final_edit"]["decision_reason"] == "partial_timeline_fast_preview"
+    with pytest.raises(ValueError, match="禁止生成部分成片"):
+        worker.concatenate_episode("e")
     assert conn.execute("SELECT COUNT(*) FROM shot_versions").fetchone()[0] == 2
 
 
@@ -216,7 +250,7 @@ def test_full_episode_with_real_transition_still_uses_final_edit(tmp_path, monke
     assert (project_root / "p" / "episodes" / "1" / "final" / "episode.mp4").read_bytes() == b"edited-final"
 
 
-def test_episode_without_adoption_selects_existing_model_videos_before_mix(tmp_path, monkeypatch) -> None:
+def test_episode_without_adoption_never_force_adopts_candidates_before_mix(tmp_path, monkeypatch) -> None:
     from app.evidence import media as media_evidence
 
     conn = _database()
@@ -252,14 +286,11 @@ def test_episode_without_adoption_selects_existing_model_videos_before_mix(tmp_p
     assert status["ready"] is True
     assert status["shots_ready"] == 3
 
-    result = worker.concatenate_episode("e")
-
-    assert result["shots"] == 3
-    assert result["shots_skipped"] == 0
-    assert result["fallback_shots_created"] == 0
+    with pytest.raises(ValueError, match="禁止生成部分成片"):
+        worker.concatenate_episode("e")
     assert conn.execute(
         "SELECT COUNT(*) FROM shots WHERE episode_id='e' AND adopted_version_id IS NOT NULL"
-    ).fetchone()[0] == 3
+    ).fetchone()[0] == 0
 
 
 def test_concat_refuses_only_when_no_real_video_exists_and_never_creates_image_fallback(
@@ -277,8 +308,7 @@ def test_concat_refuses_only_when_no_real_video_exists_and_never_creates_image_f
     try:
         worker.concatenate_episode("e")
     except ValueError as exc:
-        assert "真实模型视频" in str(exc)
-        assert "不会使用静态图片" in str(exc)
+        assert "禁止生成部分成片" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("缺少真实模型视频时不得创建图片兜底")
 

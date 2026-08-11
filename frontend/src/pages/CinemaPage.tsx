@@ -314,6 +314,7 @@ export default function CinemaPage() {
         decision,
         reason: reason.trim(),
         accepted_risk: decision === 'approve_with_risk' ? acceptedRisk.trim() : undefined,
+        idempotency_key: `delivery-review:${ep.id}:${selectedPackage.id}:${decision}`,
       })
       toast(decision === 'reject'
         ? '交付候选已拒绝'
@@ -336,7 +337,11 @@ export default function CinemaPage() {
     mixTimer.start()
     setMixBusy(true)
     try {
-      const result = (await api.post(`/episodes/${ep.id}/concatenate`)) as MixResult
+      const concatKey = persistentDeliveryOperationKey(`concat:${ep.id}`)
+      const result = (await api.post(`/episodes/${ep.id}/concatenate`, {
+        idempotency_key: concatKey,
+      })) as MixResult
+      localStorage.removeItem(deliveryOperationStorageKey(`concat:${ep.id}`))
       if (result.ffmpeg_missing) {
         mixTimer.clear()
         toast(result.note || '服务端缺少视频合成组件，当前仅返回首个片段，不能视为最终成片', true)

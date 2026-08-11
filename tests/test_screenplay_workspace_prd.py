@@ -929,10 +929,7 @@ def test_script_and_status_project_authoritative_stale_screenplay_without_resume
     assert caught.value.detail["code"] == "ARTIFACT_NEEDS_REBUILD"
 
 
-@pytest.mark.parametrize("view", [None, "board"])
-def test_authoritative_stale_screenplay_fails_closed_for_consuming_views(
-    view,
-) -> None:
+def test_authoritative_stale_screenplay_fails_closed_for_full_consuming_view() -> None:
     _seed_episode(with_artifact=False)
     legacy = _legacy_screenplay_payload()
     _bind_stale_screenplay_artifact(
@@ -942,10 +939,27 @@ def test_authoritative_stale_screenplay_fails_closed_for_consuming_views(
     )
 
     with pytest.raises(app_errors.ArtifactNeedsRebuildError) as caught:
-        api.episode_detail("e1", view=view)
+        api.episode_detail("e1", view=None)
 
     assert caught.value.code == "ARTIFACT_NEEDS_REBUILD"
     assert caught.value.artifact_id == "art-stale-screenplay"
+
+
+def test_authoritative_stale_screenplay_board_status_routes_to_rebuild() -> None:
+    _seed_episode(with_artifact=False)
+    legacy = _legacy_screenplay_payload()
+    _bind_stale_screenplay_artifact(
+        _valid_script().model_dump(mode="json"),
+        legacy,
+        stale_reason="legacy contract invalid",
+    )
+
+    detail = api.episode_detail("e1", view="board")
+
+    assert detail["screenplay"] is None
+    assert detail["storyboard_status"]["state"] == "no_screenplay"
+    assert detail["storyboard_status"]["recommended_action"] == "go_screenplay"
+    assert "新合同重建" in detail["storyboard_status"]["headline"]
 
 
 def test_stale_screenplay_state_preserves_real_resumable_action(

@@ -37,6 +37,8 @@ def _approved_artifact(kind: str, scope_type: str, scope_id: str, *, file_path: 
 
 
 def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, monkeypatch) -> None:
+    from app import downstream_authority
+
     conn = _conn()
     monkeypatch.setattr(repository, "get_conn", lambda: conn)
     monkeypatch.setattr(delivery, "get_conn", lambda: conn)
@@ -46,6 +48,17 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
         "issues": [],
         "evidence": {"path": path, "duration_s": expected_duration_s},
     })
+    release_authority = {
+        "published_storyboard_artifact_id": "storyboard-current",
+        "storyboard_production_revision_id": "revision-current",
+        "storyboard_completion_certificate_id": "certificate-current",
+        "release_qualification_hash": "qualification-current",
+    }
+    monkeypatch.setattr(
+        downstream_authority,
+        "verify_current_storyboard_release_authority",
+        lambda episode_id, conn=None: release_authority,
+    )
 
     bible_id = _approved_artifact("character_bible", "project", "p")
     screenplay_id = _approved_artifact("episode_screenplay", "episode", "e")
@@ -70,6 +83,15 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
         "INSERT INTO episodes(id,project_id,episode_no,title,source_chapters,screenplay_json,screenplay_artifact_id,storyboard_artifact_id,status,created_at) "
         "VALUES('e','p',1,'E','[1]','{}',?,?,'done',0)", (screenplay_id, storyboard_id),
     )
+    release_authority["published_storyboard_artifact_id"] = storyboard_id
+    conn.execute(
+        """UPDATE episodes
+              SET published_storyboard_artifact_id=?,
+                  storyboard_production_revision_id='revision-current',
+                  storyboard_completion_certificate_id='certificate-current'
+            WHERE id='e'""",
+        (storyboard_id,),
+    )
     conn.execute(
         "INSERT INTO shots(id,episode_id,shot_no,duration_s,shot_size,camera_move,scene_setting,characters,action_desc,dialogues,transition,adopted_version_id,storyboard_artifact_id) "
         "VALUES('s','e',1,5,'中景','固定','夜，庭院','[]','角色抬头','[]','硬切','v',?)", (storyboard_id,),
@@ -81,6 +103,18 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
         (str(video), technical, video_artifact_id),
     )
     conn.commit()
+    video_manifest = downstream_authority.current_adopted_video_delivery_manifest(
+        "e",
+        conn=conn,
+    )
+    (final_video.parent / "episode.edit-report.json").write_text(
+        json.dumps({
+            "ok": True,
+            "video_delivery_manifest_hash": video_manifest["manifest_hash"],
+            "video_delivery_manifest": video_manifest,
+        }),
+        encoding="utf-8",
+    )
 
     readiness = delivery.delivery_readiness("e")
     assert readiness["ready"] is True and readiness["evidence_coverage"] == 1

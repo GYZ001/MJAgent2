@@ -3960,10 +3960,10 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                     actual_mode=actual_mode,
                                     write_point="provider_create",
                                 )
-                            except VideoPlanStaleFence:
-                                # The provider has not been called yet. Undo the
-                                # short cancellation lock so recovery never
-                                # mistakes this fenced job for accepted paid work.
+                            except BaseException:
+                                # Provider create has not started. Every fence,
+                                # cancellation and local failure must atomically
+                                # release both the slot and payable budget claim.
                                 _release_pre_call_video_claim(
                                     conn,
                                     job_id=job_id,
@@ -3971,6 +3971,9 @@ async def _run_job(job_id: str, *, lease_owner: str | None = None) -> None:
                                     operation_id=provider_operation_id,
                                 )
                                 raise
+                            # From this line onward the transport may have sent
+                            # the request. Unknown outcomes retain the durable
+                            # claim and require explicit reconciliation.
                             task_id = await hiagent.create_video_task(
                                 prompt_text,
                                 image_urls=image_inputs,

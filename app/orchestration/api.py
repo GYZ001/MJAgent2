@@ -1201,6 +1201,8 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
             "decision": body.get("decision"),
             "reason": body.get("reason"),
             "accepted_risk": body.get("accepted_risk"),
+            "idempotency_key": body.get("idempotency_key"),
+            "request_id": body.get("request_id"),
         },
     )
     if routed is not None:
@@ -1211,7 +1213,13 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
         raise HTTPException(404, "剧集不存在")
     payload = dict(body)
     # 批准产出的新快照 id 一律服务端生成，禁止客户端注入路径。
-    payload["approved_package_id"] = new_id("delivery")
+    idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    if not idempotency_key:
+        raise HTTPException(422, "交付审批必须提供稳定的 idempotency_key")
+    approval_digest = hashlib.sha256(
+        f"{episode_id}\0delivery.review\0{idempotency_key}".encode("utf-8")
+    ).hexdigest()[:24]
+    payload["approved_package_id"] = f"delivery_{approval_digest}"
     if payload.get("package_id"):
         try:
             payload["package_id"] = validate_package_id(str(payload["package_id"]))

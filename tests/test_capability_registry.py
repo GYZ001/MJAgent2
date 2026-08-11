@@ -178,6 +178,34 @@ async def test_bus_idempotency_suppresses_duplicate_success() -> None:
     assert waiting1.data["approval_id"] != waiting2.data["approval_id"]
 
 
+@pytest.mark.asyncio
+async def test_bus_idempotency_rejects_same_key_for_different_payload() -> None:
+    bus = get_command_bus()
+    first = await bus.execute_async(
+        "project.delete",
+        {"project_id": "proj_x", "idempotency_key": "scope-bound", "dry_run": True},
+    )
+    mismatch = await bus.execute_async(
+        "project.delete",
+        {"project_id": "proj_other", "idempotency_key": "scope-bound", "dry_run": True},
+    )
+
+    assert first.status == CommandStatus.SUCCEEDED
+    assert mismatch.status == CommandStatus.REJECTED
+    assert mismatch.error_code == "idempotency_request_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_paid_video_and_delivery_commands_require_idempotency_key() -> None:
+    bus = get_command_bus()
+
+    video = await bus.execute_async("video.complete_episode", {"episode_id": "ep_x"})
+    delivery = await bus.execute_async("delivery.create_package", {"episode_id": "ep_x"})
+
+    assert video.status == delivery.status == CommandStatus.REJECTED
+    assert video.error_code == delivery.error_code == "idempotency_key_required"
+
+
 def test_domain_preflight_reads_project_state() -> None:
     from app.capabilities.preflight import project_delete
     from app.capabilities.inputs import ProjectDeleteInput

@@ -687,6 +687,7 @@ def current_storyboard_release_manifest(
         verify_current_storyboard_completion_authority(
             episode=episode,
             current_storyboard_content=board.model_dump(mode="json"),
+            conn=db,
         )
     from app.storyboard_authority import (
         OUTLINE_AUTHORITY_VERSION,

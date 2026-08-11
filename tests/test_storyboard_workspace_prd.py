@@ -21,7 +21,60 @@ from app.storyboard_supervisor import (
     load_latest_checkpoint,
     save_checkpoint,
 )
-from app.domain.storyboard_ops import _recorded_storyboard_task, _storyboard_task
+from app.domain.storyboard_ops import (
+    _recorded_storyboard_task,
+    _storyboard_has_persisted_work,
+    _storyboard_task,
+)
+
+
+def test_legacy_unbound_storyboard_checkpoint_is_not_resumable(storyboard_db):
+    storyboard_db.execute("DELETE FROM shots WHERE episode_id='e1'")
+    storyboard_db.execute(
+        """UPDATE episodes SET storyboard_artifact_id=NULL,
+                  working_storyboard_artifact_id=NULL,
+                  published_storyboard_artifact_id=NULL,
+                  storyboard_production_revision_id=NULL,
+                  storyboard_completion_certificate_id=NULL
+            WHERE id='e1'"""
+    )
+    storyboard_db.execute(
+        "UPDATE projects SET bible_artifact_id='bible-current' WHERE id='p1'"
+    )
+    storyboard_db.commit()
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_HUMAN",
+        input_versions={},
+    ))
+
+    assert _storyboard_has_persisted_work("e1") is False
+
+
+def test_storyboard_checkpoint_requires_current_screenplay_and_bible(storyboard_db):
+    storyboard_db.execute("DELETE FROM shots WHERE episode_id='e1'")
+    storyboard_db.execute(
+        """UPDATE episodes SET storyboard_artifact_id=NULL,
+                  working_storyboard_artifact_id=NULL,
+                  published_storyboard_artifact_id=NULL,
+                  storyboard_production_revision_id=NULL,
+                  storyboard_completion_certificate_id=NULL
+            WHERE id='e1'"""
+    )
+    storyboard_db.execute(
+        "UPDATE projects SET bible_artifact_id='bible-current' WHERE id='p1'"
+    )
+    storyboard_db.commit()
+    save_checkpoint(SupervisorCheckpoint(
+        episode_id="e1",
+        phase="WAITING_HUMAN",
+        input_versions={
+            "screenplay_artifact_id": "screenplay-v1",
+            "bible_artifact_id": "bible-current",
+        },
+    ))
+
+    assert _storyboard_has_persisted_work("e1") is True
 
 
 @pytest.fixture()

@@ -1983,10 +1983,15 @@ def _shot_by_no(episode_id: str, shot_no: int):
 async def generate_episode(episode_id: str, body: dict | None = None):
     """先生成并校验整集三模式计划，再按素材依赖 DAG 安全入队。"""
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route("video.generate_episode", {"episode_id": episode_id})
+    payload = dict(body) if isinstance(body, dict) else {}
+    routed = await ui_route("video.generate_episode", {
+        "episode_id": episode_id,
+        "idempotency_key": payload.get("idempotency_key"),
+        "request_id": payload.get("request_id"),
+    })
     if routed is not None:
         return routed
-    return await _generate_episode_core(episode_id, body or {})
+    return await _generate_episode_core(episode_id, payload)
 
 
 def _adopt_reused_completed_version(
@@ -3863,10 +3868,15 @@ def mix_status(episode_id: str):
 
 
 @router.post("/episodes/{episode_id}/concatenate")
-async def concatenate(episode_id: str):
+async def concatenate(episode_id: str, body: dict | None = None):
     """把本集所有已采用的视频片段按镜号顺序拼接成一个 MP4。"""
     from app.capabilities.dispatch import ui_route
-    routed = await ui_route("delivery.concatenate", {"episode_id": episode_id})
+    payload = dict(body) if isinstance(body, dict) else {}
+    routed = await ui_route("delivery.concatenate", {
+        "episode_id": episode_id,
+        "idempotency_key": payload.get("idempotency_key"),
+        "request_id": payload.get("request_id"),
+    })
     if routed is not None:
         return routed
     _episode_or_404(episode_id)

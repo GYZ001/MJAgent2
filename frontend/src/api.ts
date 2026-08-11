@@ -210,8 +210,10 @@ export const api = {
     request("POST", path, undefined, { form }),
 
   /* ── 便捷方法 ── */
-  episodeGenerate: (episodeId: string) =>
-    request("POST", `/episodes/${episodeId}/generate`),
+  episodeGenerate: (episodeId: string, idempotencyKey: string) =>
+    request("POST", `/episodes/${episodeId}/generate`, {
+      idempotency_key: idempotencyKey,
+    }),
   createVideoGenerationPlan: (
     episodeId: string,
     force = false,

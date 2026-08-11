@@ -651,6 +651,7 @@ def verify_current_storyboard_completion_authority(
     *,
     episode: Any,
     current_storyboard_content: dict[str, Any],
+    conn=None,
 ) -> CompletionCertificate:
     """Verify the consumed certificate that authorizes downstream work.
 
@@ -661,9 +662,10 @@ def verify_current_storyboard_completion_authority(
     data = dict(episode)
     from app.production.screenplay_authority import resolve_downstream_screenplay
 
+    db = conn or get_conn()
     screenplay_context = resolve_downstream_screenplay(
         str(data.get("id") or ""),
-        conn=get_conn(),
+        conn=db,
     )
     if not screenplay_context.narrative_authority_required:
         raise ValueError("当前剧集不使用叙事权威凭证")
@@ -681,10 +683,11 @@ def verify_current_storyboard_completion_authority(
         expected_artifact_id=artifact_id,
         expected_production_revision_id=revision_id,
         allow_consumed=True,
+        conn=db,
     )
     if cert.consumed_at is None:
         raise ValueError("当前叙事完成凭证尚未被原子发布消费")
-    artifact = evidence_repository.get_artifact(artifact_id)
+    artifact = evidence_repository.get_artifact(artifact_id, conn=db)
     from app.narrative import storyboard_authority_projection
 
     if (

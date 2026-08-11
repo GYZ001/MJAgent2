@@ -62,6 +62,8 @@ async def review(args: I.DeliveryReviewInput) -> CommandResult:
         "reason": args.reason,
         "accepted_risk": args.accepted_risk,
         "decided_by": "agent",
+        "idempotency_key": args.idempotency_key,
+        "request_id": args.request_id,
     }
     outcome = await call_guarded(orch_api.decide_delivery, args.episode_id, body=body)
     if isinstance(outcome, CommandResult):
