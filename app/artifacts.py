@@ -906,6 +906,7 @@ def stage_shot_artifact_cleanup(
             WHERE id=?""",
         (shot_id,),
     )
+    invalidate_episode_delivery_authority(conn, shot["episode_id"])
     outbox_id = new_id("cleanup")
     payload = {
         "files": _stage_cleanup_entries(files, "file"),
@@ -1012,6 +1013,7 @@ def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
         conn.execute("DELETE FROM shot_audio WHERE episode_id=?", (episode_id,))
     conn.execute("DELETE FROM shots WHERE episode_id=?", (episode_id,))
     conn.execute("DELETE FROM jobs WHERE episode_id=?", (episode_id,))
+    invalidate_episode_delivery_authority(conn, episode_id)
 
     outbox_id = new_id("cleanup")
     payload = {

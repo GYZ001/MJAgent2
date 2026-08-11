@@ -1228,12 +1228,14 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
     这些行仅作历史证据保留：不再是 succeeded 候选，也不再持有
     ``adopted_version_id``。操作幂等，不删除用户文件。
     """
-    fallback_ids = conn.execute(
-        """SELECT id FROM shot_versions
-             WHERE json_valid(image_inputs)
-               AND COALESCE(json_extract(image_inputs,'$.delivery_fallback'),0)=1"""
+    fallback_rows = conn.execute(
+        """SELECT v.id,s.episode_id
+             FROM shot_versions v
+             LEFT JOIN shots s ON s.id=v.shot_id
+            WHERE json_valid(v.image_inputs)
+              AND COALESCE(json_extract(v.image_inputs,'$.delivery_fallback'),0)=1"""
     ).fetchall()
-    ids = [str(row["id"]) for row in fallback_ids]
+    ids = [str(row["id"]) for row in fallback_rows]
     if not ids:
         return 0
     placeholders = ",".join("?" for _ in ids)
@@ -1249,6 +1251,16 @@ def _quarantine_static_delivery_fallbacks(conn: sqlite3.Connection) -> int:
                AND status!='rejected_static_fallback'""",
         ids,
     )
+    # The adopted fallback may already have been snapshotted into a historical
+    # delivery package.  Quarantine the media row and retire that package in
+    # the same startup transaction so a restart cannot leave the stale package
+    # downloadable through an unchanged episode pointer.
+    from app.artifacts import invalidate_episode_delivery_authority
+
+    for episode_id in sorted({
+        str(row["episode_id"]) for row in fallback_rows if row["episode_id"]
+    }):
+        invalidate_episode_delivery_authority(conn, episode_id)
     return int(cursor.rowcount)
 
 
@@ -2267,6 +2279,22 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
                 """UPDATE video_command_operation_receipts
                       SET lease_expires_at=0
                     WHERE status='running'"""
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            # Only the process holding the runtime recovery lock may fence the
+            # previous process's delivery leases.  Preserve workspace/phase;
+            # the subsequent owner records them as abandoned evidence and
+            # rebuilds in a distinct owner directory.
+            from app.delivery import _ensure_delivery_operation_receipts
+
+            _ensure_delivery_operation_receipts(conn)
+            conn.execute(
+                """UPDATE delivery_operation_receipts
+                      SET lease_expires_at=0,interrupted_at=?,updated_at=?
+                    WHERE status='running'""",
+                (now(), now()),
             )
         except sqlite3.OperationalError:
             pass

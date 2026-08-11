@@ -1158,13 +1158,8 @@ def list_delivery_packages(episode_id: str):
     ).fetchall()]
 
 
-def _delivery_file(package_id: str, filename: str) -> Path:
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "交付包不存在")
+def _current_delivery_download_manifest(conn, row) -> dict:
+    """Revalidate a package against live release authority on every download."""
     current = conn.execute(
         "SELECT delivery_artifact_id FROM episodes WHERE id=?",
         (row["episode_id"],),
@@ -1175,14 +1170,43 @@ def _delivery_file(package_id: str, filename: str) -> Path:
         or current["delivery_artifact_id"] != row["artifact_id"]
     ):
         raise HTTPException(409, "交付包已不是当前可下载权威")
-    path = Path(row["package_path"]).resolve()
-    target = (path / filename).resolve()
-    if path not in target.parents or not target.is_file():
-        raise HTTPException(404, "交付文件不存在")
     try:
         manifest = json.loads(row["manifest_json"] or "{}")
     except json.JSONDecodeError as exc:
         raise HTTPException(409, "交付 manifest 已损坏") from exc
+    from app.downstream_authority import (
+        current_adopted_video_delivery_manifest,
+        verify_current_storyboard_release_authority,
+    )
+
+    try:
+        release_authority = verify_current_storyboard_release_authority(
+            row["episode_id"], conn=conn,
+        )
+        video_manifest = current_adopted_video_delivery_manifest(
+            row["episode_id"], conn=conn,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, f"交付包发布权威已失效：{exc}") from exc
+    if manifest.get("storyboard_release_authority") != release_authority:
+        raise HTTPException(409, "交付包绑定的分镜发布权威已漂移")
+    if manifest.get("video_delivery_manifest") != video_manifest:
+        raise HTTPException(409, "交付包绑定的已采纳视频已漂移")
+    return manifest
+
+
+def _delivery_file(package_id: str, filename: str) -> Path:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "交付包不存在")
+    manifest = _current_delivery_download_manifest(conn, row)
+    path = Path(row["package_path"]).resolve()
+    target = (path / filename).resolve()
+    if path not in target.parents or not target.is_file():
+        raise HTTPException(404, "交付文件不存在")
     item = next(
         (entry for entry in manifest.get("files") or [] if entry.get("path") == filename),
         None,
@@ -1212,16 +1236,7 @@ def download_delivery_archive(package_id: str):
     ).fetchone()
     if not row:
         raise HTTPException(404, "交付包不存在")
-    current = conn.execute(
-        "SELECT delivery_artifact_id FROM episodes WHERE id=?",
-        (row["episode_id"],),
-    ).fetchone()
-    if (
-        row["status"] not in {"waiting_human", "approved"}
-        or current is None
-        or current["delivery_artifact_id"] != row["artifact_id"]
-    ):
-        raise HTTPException(409, "交付包已不是当前可下载权威")
+    _current_delivery_download_manifest(conn, row)
     archive = Path(str(row["package_path"]) + ".zip").resolve()
     if not archive.is_file():
         raise HTTPException(404, "交付压缩包不存在")

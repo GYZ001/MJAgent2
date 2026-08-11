@@ -36,6 +36,9 @@ def _ensure_delivery_operation_receipts(conn) -> None:
                result_json TEXT NOT NULL DEFAULT '{}',
                workspace_path TEXT NOT NULL DEFAULT '',
                promotion_phase TEXT NOT NULL DEFAULT 'claimed',
+               abandoned_workspace_path TEXT NOT NULL DEFAULT '',
+               abandoned_promotion_phase TEXT NOT NULL DEFAULT '',
+               interrupted_at REAL,
                updated_at REAL NOT NULL
            )"""
     )
@@ -49,6 +52,18 @@ def _ensure_delivery_operation_receipts(conn) -> None:
     if "promotion_phase" not in columns:
         conn.execute(
             "ALTER TABLE delivery_operation_receipts ADD COLUMN promotion_phase TEXT NOT NULL DEFAULT 'claimed'"
+        )
+    if "abandoned_workspace_path" not in columns:
+        conn.execute(
+            "ALTER TABLE delivery_operation_receipts ADD COLUMN abandoned_workspace_path TEXT NOT NULL DEFAULT ''"
+        )
+    if "abandoned_promotion_phase" not in columns:
+        conn.execute(
+            "ALTER TABLE delivery_operation_receipts ADD COLUMN abandoned_promotion_phase TEXT NOT NULL DEFAULT ''"
+        )
+    if "interrupted_at" not in columns:
+        conn.execute(
+            "ALTER TABLE delivery_operation_receipts ADD COLUMN interrupted_at REAL"
         )
 
 
@@ -83,15 +98,17 @@ def claim_delivery_package_operation(
             if (
                 row["status"] == "running"
                 and float(row["lease_expires_at"] or 0) > stamp
-                and not allow_interrupted_takeover
             ):
                 db.commit()
                 raise ValueError("相同交付操作正在执行中")
             updated = db.execute(
                 """UPDATE delivery_operation_receipts
-                      SET lease_owner=?,lease_expires_at=?,status='running',updated_at=?
+                      SET lease_owner=?,lease_expires_at=?,status='running',
+                          abandoned_workspace_path=workspace_path,
+                          abandoned_promotion_phase=promotion_phase,
+                          workspace_path='',promotion_phase='claimed',updated_at=?
                     WHERE package_id=? AND request_fingerprint=?
-                      AND (status!='running' OR lease_expires_at<=? OR ?)""",
+                      AND (status!='running' OR lease_expires_at<=?)""",
                 (
                     owner,
                     stamp + _DELIVERY_OPERATION_LEASE_S,
@@ -99,7 +116,6 @@ def claim_delivery_package_operation(
                     package_id,
                     request_fingerprint,
                     stamp,
-                    int(allow_interrupted_takeover),
                 ),
             )
             if updated.rowcount != 1:
@@ -960,7 +976,9 @@ def build_delivery_package(
     receipt_row = None
     if operation_lease_owner:
         receipt_row = conn.execute(
-            """SELECT workspace_path,promotion_phase FROM delivery_operation_receipts
+            """SELECT workspace_path,promotion_phase,abandoned_workspace_path,
+                      abandoned_promotion_phase,interrupted_at
+                 FROM delivery_operation_receipts
                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
                  AND status='running'""",
             (package_id, operation_request_fingerprint, operation_lease_owner),
@@ -971,7 +989,7 @@ def build_delivery_package(
         if bound_workspace:
             package_dir = Path(bound_workspace).resolve()
         else:
-            conn.execute(
+            updated = conn.execute(
                 """UPDATE delivery_operation_receipts
                       SET workspace_path=?,promotion_phase='building',updated_at=?
                     WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
@@ -981,30 +999,36 @@ def build_delivery_package(
                     operation_request_fingerprint, operation_lease_owner,
                 ),
             )
+            if updated.rowcount != 1:
+                raise ValueError("交付 operation workspace owner 已被接管")
             conn.commit()
     if not package_dir.is_relative_to(delivery_root):
         raise ValueError("非法的交付操作目录")
-    # Each lease owner writes only its own private directory.  A recovery owner
-    # never deletes or mutates another owner's live workspace or final target.
-    if operation_lease_owner and receipt_row is not None and str(
-        receipt_row["promotion_phase"] or ""
-    ) in {"ready", "directory_promoted", "promoted"}:
-        # The exact receipt proves these are this operation's uncommitted crash
-        # remnants. No Artifact/DB package exists at this point (handled above).
+    # A startup-fenced takeover retains the previous owner's workspace/phase
+    # as evidence.  Only that proof permits removal of exact crash remnants;
+    # natural lease expiry alone is insufficient because the old thread may
+    # still be alive.  The new owner always builds in its own directory.
+    abandoned_workspace = ""
+    abandoned_phase = ""
+    startup_fenced = False
+    if operation_lease_owner and receipt_row is not None:
+        abandoned_workspace = str(receipt_row["abandoned_workspace_path"] or "")
+        abandoned_phase = str(receipt_row["abandoned_promotion_phase"] or "")
+        startup_fenced = bool(receipt_row["interrupted_at"])
+    if startup_fenced and abandoned_phase in {
+        "ready", "directory_promoted", "promoted",
+    }:
+        abandoned_path = Path(abandoned_workspace).resolve() if abandoned_workspace else None
+        if abandoned_path is not None and not abandoned_path.is_relative_to(delivery_root):
+            raise ValueError("交付恢复遗留目录超出当前剧集目录")
         if final_package_dir.exists():
             shutil.rmtree(final_package_dir)
         Path(str(final_package_dir) + ".zip").unlink(missing_ok=True)
-        if package_dir.exists():
-            shutil.rmtree(package_dir)
-        Path(str(package_dir) + ".zip").unlink(missing_ok=True)
-        conn.execute(
-            """UPDATE delivery_operation_receipts
-                  SET promotion_phase='building',updated_at=?
-                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?""",
-            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
-        )
-        conn.commit()
-    elif package_dir.exists():
+        if abandoned_path is not None and abandoned_path.exists():
+            shutil.rmtree(abandoned_path)
+        if abandoned_path is not None:
+            Path(str(abandoned_path) + ".zip").unlink(missing_ok=True)
+    if package_dir.exists():
         shutil.rmtree(package_dir)
     archive_candidate = Path(str(package_dir) + ".zip")
     if archive_candidate.exists():
@@ -1180,36 +1204,42 @@ def build_delivery_package(
             request_fingerprint=str(operation_request_fingerprint),
             lease_owner=operation_lease_owner,
         )
-        conn.execute(
+        updated = conn.execute(
             """UPDATE delivery_operation_receipts
                   SET promotion_phase='ready',updated_at=?
                 WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
                   AND status='running'""",
             (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
         )
+        if updated.rowcount != 1:
+            raise ValueError("交付 operation owner 在 ready 前已被接管")
         conn.commit()
     if final_package_dir.exists() or Path(str(final_package_dir) + ".zip").exists():
         raise ValueError("交付最终目录已存在，拒绝删除或覆盖另一 owner 产物")
     package_dir.rename(final_package_dir)
     if operation_lease_owner:
-        conn.execute(
+        updated = conn.execute(
             """UPDATE delivery_operation_receipts
                   SET promotion_phase='directory_promoted',updated_at=?
                 WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
                   AND status='running'""",
             (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
         )
+        if updated.rowcount != 1:
+            raise ValueError("交付 operation owner 在目录发布后已被接管")
         conn.commit()
     final_archive_path = Path(str(final_package_dir) + ".zip")
     archive_path.rename(final_archive_path)
     if operation_lease_owner:
-        conn.execute(
+        updated = conn.execute(
             """UPDATE delivery_operation_receipts
                   SET promotion_phase='promoted',updated_at=?
                 WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
                   AND status='running'""",
             (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
         )
+        if updated.rowcount != 1:
+            raise ValueError("交付 operation owner 在压缩包发布后已被接管")
         conn.commit()
     package_dir = final_package_dir
     archive_path = final_archive_path
