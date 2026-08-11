@@ -326,6 +326,38 @@ def _raw_screenplay_payload(content: object) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else content
 
 
+def _historical_screenplay_artifact_is_bound(
+    art: dict[str, Any],
+) -> bool:
+    artifact_id = str(art.get("id") or "")
+    if not artifact_id:
+        return False
+    conn = evidence_repository.get_conn()
+    revision = conn.execute(
+        """SELECT 1 FROM production_revisions
+            WHERE ? IN (
+                baseline_artifact_id,
+                working_artifact_id,
+                published_artifact_id
+            )
+            LIMIT 1""",
+        (artifact_id,),
+    ).fetchone()
+    if revision is not None:
+        return True
+    episode = conn.execute(
+        """SELECT 1 FROM episodes
+            WHERE ? IN (
+                screenplay_artifact_id,
+                working_screenplay_artifact_id,
+                published_screenplay_artifact_id
+            )
+            LIMIT 1""",
+        (artifact_id,),
+    ).fetchone()
+    return episode is not None
+
+
 def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
     from app.screenplay_ir import (
         IR_VERSION,
@@ -450,6 +482,15 @@ def _assert_screenplay_artifact_contract(
 ) -> None:
     plan = _raw_narrative_plan(content)
     if plan is None:
+        from app.harness.contracts import get_contract
+
+        artifact_contract = str(art.get("contract_version") or "")
+        current_contract = get_contract("screenplay").version
+        if (
+            artifact_contract != current_contract
+            and _historical_screenplay_artifact_is_bound(art)
+        ):
+            return
         raise ArtifactNeedsRebuildError(
             artifact_id=str(art.get("id") or ""),
             artifact_type=str(art.get("type") or "screenplay_document"),

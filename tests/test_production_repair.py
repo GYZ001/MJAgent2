@@ -96,10 +96,6 @@ def _minimal_script(**overrides) -> EpisodeScreenplay:
     return EpisodeScreenplay(**data)
 
 
-def _recovery_narrative_plan() -> NarrativeContinuityPlan:
-    return NarrativeContinuityPlan(scope_id="ep_p")
-
-
 def test_post_baseline_checkpoint_keeps_live_recovered_shard_progress() -> None:
     from types import SimpleNamespace
     from app.production import screenplay_repair
@@ -313,7 +309,6 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
-    script.narrative_plan = _recovery_narrative_plan()
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1244,7 +1239,6 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
-    script.narrative_plan = _recovery_narrative_plan()
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1305,11 +1299,7 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
         },
         source_text="原文",
         bible=Bible(
-            characters=[Character(
-                name="甲",
-                role="主角",
-                appearance_canonical="测试场地中的稳定主角形象",
-            )],
+            characters=[],
             world=World(visual_style_canonical="测试画风"),
         ),
         resume=True,
@@ -1337,7 +1327,6 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
-    script.narrative_plan = _recovery_narrative_plan()
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1428,7 +1417,7 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
     assert planned > 0
     completed = screenplay_repair.get_production_revision(revision.id)
     assert completed is not None
-    assert completed.working_artifact_id
+    assert completed.working_artifact_id == artifact["id"]
     assert completed.checkpoint_json["phase"] == "WAITING_HUMAN"
 
 
@@ -1503,7 +1492,6 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
-    script.narrative_plan = _recovery_narrative_plan()
     script.scene_outline[0].characters.append("青衣人")
     script.full_script_text += "\n青衣人：此路不通。"
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
@@ -1576,7 +1564,6 @@ async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
-    script.narrative_plan = _recovery_narrative_plan()
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
