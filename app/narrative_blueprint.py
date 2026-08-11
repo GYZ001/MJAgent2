@@ -2416,6 +2416,7 @@ def blueprint_prompt_contract() -> dict[str, Any]:
             "source_scene_owners",
             "source_semantics.disposition",
             "source_semantics.projection_policy",
+            "source_audit_annotations",
             "scene_derivations",
         ],
         "source_ownership": {

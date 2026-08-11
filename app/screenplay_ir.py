@@ -2220,7 +2220,7 @@ def compile_screenplay_ir(
         )
     if strict_unit_ownership:
         leaked_audit_units = [
-            unit.key
+            unit.unit_key or unit.event_key
             for scene in value.scenes
             for unit in scene.units
             if audit_only_source_ids.intersection(

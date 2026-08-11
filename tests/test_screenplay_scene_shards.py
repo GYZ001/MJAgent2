@@ -1093,6 +1093,17 @@ def test_midstream_audit_only_source_never_enters_creative_or_picture_projection
     )
 
     assert "SRC0002" not in blueprint.source_scene_owners
+    assert [
+        annotation.model_dump(mode="json")
+        for annotation in blueprint.source_audit_annotations
+    ] == [{
+        "node_key": "author-audit",
+        "source_segment_ids": ["SRC0002"],
+        "narrative_layer": "paratext",
+        "render_policy": "exclude_from_spine",
+        "disposition": "audit_only",
+        "projection_policy": "audit_only",
+    }]
     assert all(
         "SRC0002" not in slot.source_segment_ids
         for plan in plans
@@ -1126,6 +1137,10 @@ def test_midstream_audit_only_source_never_enters_creative_or_picture_projection
     )
     assert audit.disposition == "audit_only"
     assert audit.beat_ids == []
+    assert all(
+        "SRC0002" not in event.source_segment_ids
+        for event in merged.events
+    )
     assert all(
         "SRC0002" not in beat.source_segment_ids
         for beat in screenplay.plot_spine.spine_beats
@@ -1255,6 +1270,16 @@ def test_run_e65d871ad2a0_sc16_projects_fifteen_story_scenes() -> None:
         if item.disposition == "audit_only"
     }
     assert audit_source_ids == {"SRC0060", "SRC0061", "SRC0062"}
+    assert {
+        source_id
+        for annotation in blueprint.source_audit_annotations
+        for source_id in annotation.source_segment_ids
+    } == audit_source_ids
+    assert {
+        source_id
+        for annotation in merged.source_audit_annotations
+        for source_id in annotation.source_segment_ids
+    } == audit_source_ids
     assert projection_report["excluded_source_segment_ids"] == []
     assert audit_source_ids.isdisjoint({
         source_id
@@ -1266,6 +1291,11 @@ def test_run_e65d871ad2a0_sc16_projects_fifteen_story_scenes() -> None:
         for action in projected.narrative_plan.atomic_actions
         for source_id in action.action_agency.source_segment_ids
     })
+    assert all(
+        all(source_id not in requirement for source_id in audit_source_ids)
+        for scene in projected.scene_outline
+        for requirement in scene.context_requirements
+    )
     story_authority_identity_keys = {
         identity_key
         for event in merged.events
