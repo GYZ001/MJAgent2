@@ -148,7 +148,9 @@ def test_failed_working_baseline_can_be_deleted_before_any_version_is_published(
     conn.commit()
 
     before = screenplay_production_state("e1")
-    assert before["can_resume_repair"] is True
+    assert before["operation"] == "baseline_rebuild"
+    assert before["can_resume_repair"] is False
+    assert before["can_resume_baseline"] is True
     assert conn.execute(
         "SELECT screenplay_json FROM episodes WHERE id='e1'"
     ).fetchone()["screenplay_json"] is None

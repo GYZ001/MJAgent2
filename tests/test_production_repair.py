@@ -1,10 +1,15 @@
 """Production Repair 不变量与局部 Patch 测试。"""
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from app import db, errors
+from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
 from app.production.certificate import (
     issue_completion_certificate,
     verify_completion_certificate,
@@ -37,6 +42,16 @@ from app.schemas import (
     ScriptScene,
     VoiceCanonical,
     World,
+)
+from app.screenplay_ir import IR_VERSION, ScreenplayGenerationIR
+from app.screenplay_scene_shards import (
+    SCREENPLAY_ENVELOPE_VERSION,
+    SCREENPLAY_MERGED_IR_VERSION,
+    SCREENPLAY_SCENE_SHARD_VERSION,
+    ScreenplayEnvelopeExperience,
+    ScreenplayEnvelopeIR,
+    ScreenplayEnvelopeMetadata,
+    blueprint_content_hash,
 )
 
 
@@ -121,6 +136,121 @@ def _recovery_narrative_plan() -> NarrativeContinuityPlan:
             },
         }],
     })
+
+
+def _test_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
+    from app.evidence import repository as evidence_repository
+    from app.production.patch import screenplay_artifact_payload
+
+    blueprint_value = NarrativeBlueprint(episode_no=1, nodes=[])
+    blueprint_hash = blueprint_content_hash(blueprint_value)
+    identities: list[dict] = []
+    identity_hash = _test_hash(identities)
+    blueprint = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content=blueprint_value.model_dump(mode="json"),
+        contract_version=BLUEPRINT_VERSION,
+    ))
+    identity = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_identity_registry",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content={
+            "contract_version": "screenplay-identity-registry.v1",
+            "identity_registry_hash": identity_hash,
+            "identities": identities,
+        },
+        parent_artifact_ids=[blueprint["id"]],
+        contract_version="screenplay-identity-registry.v1",
+    ))
+    envelope_value = ScreenplayEnvelopeIR(
+        episode_no=1,
+        metadata=ScreenplayEnvelopeMetadata(),
+        experience=ScreenplayEnvelopeExperience(),
+        blueprint_hash=blueprint_hash,
+        identity_registry_hash=identity_hash,
+    )
+    envelope = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_envelope",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content=envelope_value.model_dump(mode="json"),
+        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        contract_version=SCREENPLAY_ENVELOPE_VERSION,
+    ))
+    shard = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content={
+            "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+            "episode_no": 1,
+            "shard_id": "SS-test",
+            "scene_plan_keys": [],
+            "scenes": [],
+            "consumed_source_ids": [],
+            "unresolved_participants": [],
+            "blueprint_hash": blueprint_hash,
+            "identity_registry_hash": identity_hash,
+            "source_ownership_hash": "ownership",
+            "identity_scaffold_hash": "identity",
+            "generation_scaffold_hash": "generation",
+        },
+        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+    ))
+    merged_value = ScreenplayGenerationIR(
+        format_version=IR_VERSION,
+        episode_no=1,
+        source_semantics={},
+    ).model_dump(mode="json")
+    merged = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir_merged",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="validated",
+        trust_level="T1",
+        content=merged_value,
+        parent_artifact_ids=[
+            blueprint["id"], identity["id"], envelope["id"], shard["id"],
+        ],
+        contract_version=SCREENPLAY_MERGED_IR_VERSION,
+        model_snapshot={
+            "blueprint_hash": blueprint_hash,
+            "identity_registry_hash": identity_hash,
+        },
+    ))
+    return evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(script),
+        parent_artifact_ids=[merged["id"]],
+        contract_version=get_contract("screenplay").version,
+    ))
 
 
 def test_post_baseline_checkpoint_keeps_live_recovered_shard_progress() -> None:
@@ -338,14 +468,7 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
     script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_current_working_artifact(script)
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -1270,14 +1393,7 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
     script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_current_working_artifact(script)
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -1365,14 +1481,7 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
     script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_current_working_artifact(script)
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -1473,14 +1582,7 @@ async def test_invalid_modern_narrative_graph_enters_patch_loop(monkeypatch):
         stakes="失败将失去资格",
         narrative_plan=NarrativeContinuityPlan(scope_id="ep_p"),
     )
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_current_working_artifact(script)
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -1534,14 +1636,7 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
     script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
     script.scene_outline[0].characters.append("青衣人")
     script.full_script_text += "\n青衣人：此路不通。"
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_current_working_artifact(script)
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -1606,14 +1701,7 @@ async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
     script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_p",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_current_working_artifact(script)
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -1678,10 +1766,13 @@ async def test_recorded_repair_resume_skips_character_discovery_model_call(monke
         kind="screenplay",
         resume=False,
     )
+    script = _minimal_script(stakes="失败将失去资格")
+    script.narrative_plan = _recovery_narrative_plan()
+    working = _create_current_working_artifact(script)
     mark_baseline_generated(
         revision.id,
-        baseline_artifact_id="artifact-baseline",
-        working_artifact_id="artifact-working",
+        baseline_artifact_id=working["id"],
+        working_artifact_id=working["id"],
     )
 
     async def forbidden_discovery(*_args, **_kwargs):
