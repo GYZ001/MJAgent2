@@ -19,6 +19,7 @@ from app.narrative_blueprint import (
     NarrativeBlueprintPatch,
     NarrativeBlueprintShard,
     apply_narrative_blueprint_patch,
+    blueprint_patch_schema,
     blueprint_semantic_issue_is_resolved,
     blueprint_semantic_review_schema,
     derive_blueprint_scene_plans,
@@ -27,7 +28,9 @@ from app.narrative_blueprint import (
     recover_complete_blueprint_prefix,
     validate_and_apply_blueprint_scene_contract,
     validate_blueprint_semantic_review,
+    validate_blueprint_scene_partition,
     validate_narrative_blueprint,
+    validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
 
@@ -45,6 +48,15 @@ def _reviewer_drift_fixture() -> dict:
         Path(__file__).parent
         / "fixtures"
         / "blueprint_reviewer_node_key_drift.json"
+    )
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _partition_replay_fixture() -> dict:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "run_64a2e395d6df_blueprint_partition.json"
     )
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
@@ -165,6 +177,195 @@ def test_valid_blueprint_derives_scenes_without_model_scene_grouping() -> None:
         and relation.target_scene_plan_key == "bp-sc004"
         and relation.reference_key == "F001"
         for relation in blueprint.scene_derivations
+    )
+
+
+def test_picture_partition_preserves_mixed_node_order_and_audit_coverage() -> None:
+    source = "\n\n".join(["剧情一", "来源审计", "剧情二"])
+    nodes = []
+    for index, (key, story) in enumerate([
+        ("story-before", True),
+        ("audit-middle", False),
+        ("story-after", True),
+    ], start=1):
+        nodes.append({
+            "key": key,
+            "source_segment_ids": [f"SRC{index:04d}"],
+            "summary": key,
+            "narrative_layer": "story" if story else "paratext",
+            "event_priority": "causal" if story else "connective",
+            "render_policy": "standalone" if story else "exclude_from_spine",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start" if index == 1 else "continuous",
+            "location_key": "room",
+            "location_label": "房间",
+            "action_logic": key,
+        })
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": nodes,
+    })
+
+    assert validate_narrative_blueprint(blueprint, source) == []
+    plans = derive_blueprint_scene_plans(blueprint)
+
+    assert [
+        node_key for plan in plans for node_key in plan.node_keys
+    ] == ["story-before", "story-after"]
+    assert [
+        annotation.model_dump(mode="json")
+        for annotation in blueprint.source_audit_annotations
+    ] == [{
+        "node_key": "audit-middle",
+        "source_segment_ids": ["SRC0002"],
+        "narrative_layer": "paratext",
+        "render_policy": "exclude_from_spine",
+        "disposition": "audit_only",
+        "projection_policy": "audit_only",
+    }]
+
+
+def test_partition_gate_rejects_picture_omission_duplicate_and_audit_leak() -> None:
+    blueprint = _blueprint()
+    audit = blueprint.nodes[1].model_copy(deep=True)
+    audit.key = "audit-middle"
+    audit.source_segment_ids = ["SRC0002"]
+    audit.narrative_layer = "paratext"
+    audit.event_priority = "connective"
+    audit.render_policy = "exclude_from_spine"
+    audit.participants = []
+    audit.participant_evidence = []
+    audit.state_requirements = []
+    audit.state_changes = []
+    audit.decision = None
+    blueprint.nodes.insert(1, audit)
+    plans = derive_blueprint_scene_plans(blueprint)
+
+    omitted = [plan.model_copy(deep=True) for plan in plans]
+    omitted[0].node_keys = []
+    duplicated = [plan.model_copy(deep=True) for plan in plans]
+    duplicated[0].node_keys.append(duplicated[0].node_keys[0])
+    leaked = [plan.model_copy(deep=True) for plan in plans]
+    leaked[0].node_keys.append("audit-middle")
+
+    assert any(
+        "SCENE_PARTITION_INVALID" in error
+        for error in validate_blueprint_scene_partition(blueprint, omitted)
+    )
+    assert any(
+        "SCENE_PARTITION_INVALID" in error
+        for error in validate_blueprint_scene_partition(blueprint, duplicated)
+    )
+    assert any(
+        "AUDIT_NODE_IN_SCENE" in error
+        for error in validate_blueprint_scene_partition(blueprint, leaked)
+    )
+
+
+def test_run_64a2e395d6df_candidate_replays_picture_partition() -> None:
+    fixture = _partition_replay_fixture()
+    projection = fixture["candidate_projection"]
+    scene_starts = {
+        group[0] for group in projection["scene_node_keys"]
+    }
+    audit_keys = set(projection["audit_node_keys"])
+    nodes = []
+    for index, (key, source_ids) in enumerate(
+        projection["node_sources"].items(),
+    ):
+        story = key not in audit_keys
+        nodes.append({
+            "key": key,
+            "source_segment_ids": source_ids,
+            "summary": f"{key} timeline node",
+            "narrative_layer": "story" if story else "paratext",
+            "event_priority": "causal" if story else "connective",
+            "render_policy": "standalone" if story else "exclude_from_spine",
+            "temporal_domain_key": "episode-present",
+            "time_label": "当下",
+            "time_relation": "episode_start" if index == 0 else "continuous",
+            "location_key": "episode-location",
+            "location_label": "当前地点",
+            "scene_boundary_before": key in scene_starts and index > 0,
+            "dramatic_load": 1,
+            "action_logic": f"{key} source-backed action",
+        })
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": nodes,
+    })
+    source = "\n\n".join(
+        f"授权来源段 {index}"
+        for index in range(1, fixture["source_segment_count"] + 1)
+    )
+
+    assert validate_narrative_blueprint(blueprint, source) == []
+    assert len(blueprint.nodes) == 21
+    assert len(blueprint.scene_plans) == len(
+        projection["scene_node_keys"]
+    )
+    assert [
+        plan.node_keys for plan in blueprint.scene_plans
+    ] == projection["scene_node_keys"]
+    assert {
+        annotation.node_key
+        for annotation in blueprint.source_audit_annotations
+    } == audit_keys
+    assert set(fixture["raw_patch_projection"]["replacement_node_keys"]) <= {
+        node.key
+        for node in blueprint.nodes
+        if node.source_semantics().projection_policy == "picture"
+    }
+
+
+def test_reviewer_and_repair_schemas_bind_projection_authority() -> None:
+    blueprint = _blueprint()
+    review_schema = blueprint_semantic_review_schema(
+        ["n1", "n2"],
+        ["SRC0001", "SRC0002"],
+    )
+    issue_properties = review_schema["$defs"][
+        "BlueprintSemanticIssue"
+    ]["properties"]
+    assert issue_properties["source_segment_ids"]["items"]["enum"] == [
+        "SRC0001", "SRC0002",
+    ]
+
+    schema = blueprint_patch_schema(blueprint, ["n1", "n2"])
+    alternatives = schema["properties"]["replacements"]["items"]["oneOf"]
+    by_key = {
+        alternative["properties"]["node_key"]["const"]: alternative
+        for alternative in alternatives
+    }
+    assert by_key["n1"]["properties"]["node"]["allOf"][1][
+        "properties"
+    ]["narrative_layer"]["const"] == "story"
+
+    audit_node = blueprint.nodes[1].model_copy(deep=True)
+    audit_node.narrative_layer = "paratext"
+    audit_node.event_priority = "connective"
+    audit_node.render_policy = "exclude_from_spine"
+    audit_node.participants = []
+    audit_node.participant_evidence = []
+    audit_node.state_requirements = []
+    audit_node.state_changes = []
+    audit_node.decision = None
+    blueprint.nodes[1] = audit_node
+    invalid = audit_node.model_copy(deep=True)
+    invalid.narrative_layer = "story"
+    invalid.event_priority = "causal"
+    invalid.render_policy = "standalone"
+    patch = NarrativeBlueprintPatch.model_validate({
+        "replacements": [{"node_key": "n2", "node": invalid}],
+    })
+
+    assert any(
+        "PROJECTION_POLICY_CHANGE" in error
+        for error in validate_narrative_blueprint_patch_projection(
+            patch,
+            blueprint,
+        )
     )
 
 

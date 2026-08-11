@@ -1,0 +1,58 @@
+{
+  "run_id": "run_64a2e395d6df",
+  "candidate_artifact_id": "art_0f139b776f65",
+  "raw_patch_artifact_id": "art_cff18900ac21",
+  "source_segment_count": 62,
+  "candidate_projection": {
+    "node_sources": {
+      "S001-N001": ["SRC0001", "SRC0002"],
+      "S001-N002": ["SRC0003", "SRC0004", "SRC0005"],
+      "S001-N003": ["SRC0006", "SRC0007", "SRC0008", "SRC0009", "SRC0010", "SRC0011"],
+      "S001-N004": ["SRC0012", "SRC0013", "SRC0014"],
+      "S001-N005": ["SRC0015", "SRC0016", "SRC0017", "SRC0018"],
+      "S001-N006": ["SRC0019", "SRC0020", "SRC0021", "SRC0022"],
+      "S001-N007": ["SRC0023", "SRC0024", "SRC0025", "SRC0026"],
+      "S001-N008": ["SRC0027", "SRC0028"],
+      "S002-S001-N009": ["SRC0029"],
+      "S002-S001-N010": ["SRC0030", "SRC0031", "SRC0032", "SRC0033", "SRC0034"],
+      "S002-S001-N011": ["SRC0035", "SRC0036"],
+      "S002-S001-N012": ["SRC0037", "SRC0038", "SRC0039", "SRC0040"],
+      "S002-S001-N013": ["SRC0041", "SRC0042", "SRC0043", "SRC0044", "SRC0045"],
+      "S002-S001-N014": ["SRC0046", "SRC0047", "SRC0048"],
+      "S002-S001-N015": ["SRC0049", "SRC0050", "SRC0051"],
+      "S002-S001-N016": ["SRC0052", "SRC0053"],
+      "S002-S001-N017": ["SRC0054", "SRC0055"],
+      "S002-S001-N018": ["SRC0056"],
+      "S003-N019": ["SRC0057"],
+      "S003-N020": ["SRC0058", "SRC0059"],
+      "S003-N021": ["SRC0060", "SRC0061", "SRC0062"]
+    },
+    "audit_node_keys": ["S003-N021"],
+    "scene_node_keys": [
+      ["S001-N001"],
+      ["S001-N002"],
+      ["S001-N003"],
+      ["S001-N004"],
+      ["S001-N005"],
+      ["S001-N006"],
+      ["S001-N007"],
+      ["S001-N008"],
+      ["S002-S001-N009", "S002-S001-N010", "S002-S001-N011"],
+      ["S002-S001-N012"],
+      ["S002-S001-N013"],
+      ["S002-S001-N014"],
+      ["S002-S001-N015", "S002-S001-N016", "S002-S001-N017"],
+      ["S002-S001-N018", "S003-N019", "S003-N020"]
+    ]
+  },
+  "raw_patch_projection": {
+    "outcome": "validated",
+    "round": 2,
+    "replacement_node_keys": [
+      "S002-S001-N015",
+      "S002-S001-N016",
+      "S002-S001-N018"
+    ],
+    "replacement_projection_policies": ["picture", "picture", "picture"]
+  }
+}
