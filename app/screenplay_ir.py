@@ -459,16 +459,19 @@ def screenplay_ir_source_audit_contract_errors(
         annotation_node_keys.append(node_key)
         annotation_source_ids.extend(str(source_id) for source_id in source_ids)
 
-    coverage_source_ids = [
-        str(source_id)
-        for group in value.get("coverage") or []
-        if isinstance(group, dict)
-        and (
+    coverage_source_ids: list[str] = []
+    for group in value.get("coverage") or []:
+        if isinstance(group, BaseModel):
+            group = group.model_dump(mode="json")
+        if not isinstance(group, dict) or not (
             group.get("disposition") == "audit_only"
             or group.get("projection_policy") == "audit_only"
+        ):
+            continue
+        coverage_source_ids.extend(
+            str(source_id)
+            for source_id in group.get("source_segment_ids") or []
         )
-        for source_id in group.get("source_segment_ids") or []
-    ]
     source_semantics = value.get("source_semantics")
     semantic_source_ids = [
         str(source_id)
@@ -500,7 +503,10 @@ def screenplay_ir_source_audit_contract_errors(
         errors.append(
             "[IR_SOURCE_AUDIT_COVERAGE_MISMATCH] "
             "source_audit_annotations、coverage 与 source_semantics "
-            "必须完整一致"
+            "必须完整一致："
+            f"annotations={annotation_source_ids}, "
+            f"coverage={coverage_source_ids}, "
+            f"semantics={semantic_source_ids}"
         )
     return list(dict.fromkeys(errors))
 

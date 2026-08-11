@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from app import db, stages
 from app import errors as app_errors
@@ -2526,6 +2528,46 @@ def test_current_ir_serialization_declares_participant_delivery_contract() -> No
         "participant_deliveries" in event
         for event in serialized["events"]
     )
+    assert serialized["source_audit_annotations"] == []
+
+
+def test_current_ir_requires_explicit_complete_source_audit_contract() -> None:
+    missing = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
+    missing.pop("source_audit_annotations")
+    with pytest.raises(ValidationError, match="IR_SOURCE_AUDIT_FIELD_MISSING"):
+        ScreenplayGenerationIR.model_validate(missing)
+
+    mismatch = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
+    mismatch["coverage"][-1].update({
+        "disposition": "audit_only",
+        "projection_policy": "audit_only",
+        "beat_keys": [],
+    })
+    mismatch["source_semantics"]["SRC0003"].update({
+        "narrative_layer": "paratext",
+        "event_priority": "connective",
+        "render_policy": "exclude_from_spine",
+        "disposition": "audit_only",
+        "projection_policy": "audit_only",
+    })
+    with pytest.raises(
+        ValidationError,
+        match="IR_SOURCE_AUDIT_COVERAGE_MISMATCH",
+    ):
+        ScreenplayGenerationIR.model_validate(mismatch)
+
+    duplicate = deepcopy(mismatch)
+    annotation = {
+        "node_key": "audit-node",
+        "source_segment_ids": ["SRC0003"],
+        "narrative_layer": "paratext",
+        "render_policy": "exclude_from_spine",
+        "disposition": "audit_only",
+        "projection_policy": "audit_only",
+    }
+    duplicate["source_audit_annotations"] = [annotation, annotation]
+    with pytest.raises(ValidationError, match="IR_SOURCE_AUDIT_DUPLICATE"):
+        ScreenplayGenerationIR.model_validate(duplicate)
 
 
 def test_recovery_accepts_legal_current_ir_artifact() -> None:

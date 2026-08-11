@@ -119,6 +119,11 @@ RUN_E65D871AD2A0_FIXTURE = (
     / "fixtures"
     / "run_e65d871ad2a0_sc16_paratext.json"
 )
+RUN_64A2E395D6DF_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "run_64a2e395d6df_blueprint_partition.json"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1320,6 +1325,165 @@ def test_run_e65d871ad2a0_sc16_projects_fifteen_story_scenes() -> None:
         identity.identity_id
         for identity in projected.narrative_plan.identity_contracts
     }.issubset(story_authority_identity_keys)
+
+
+def test_run_64a_fixture_projects_only_picture_sources_end_to_end() -> None:
+    fixture = json.loads(
+        RUN_64A2E395D6DF_FIXTURE.read_text(encoding="utf-8")
+    )
+    projection = fixture["candidate_projection"]
+    audit_node_keys = set(projection["audit_node_keys"])
+    scene_by_node = {
+        node_key: scene_index
+        for scene_index, node_keys in enumerate(
+            projection["scene_node_keys"],
+            start=1,
+        )
+        for node_key in node_keys
+    }
+    scene_start_keys = {
+        node_keys[0] for node_keys in projection["scene_node_keys"]
+    }
+    nodes = [
+        _semantic_node(
+            key=node_key,
+            source_segment_ids=source_ids,
+            summary=f"{node_key} 环境状态推进",
+            location_key=(
+                "source-audit"
+                if node_key in audit_node_keys
+                else f"story-location-{scene_by_node[node_key]}"
+            ),
+            location_label=(
+                "来源审计"
+                if node_key in audit_node_keys
+                else f"剧情环境 {scene_by_node[node_key]}"
+            ),
+            story=node_key not in audit_node_keys,
+            first=index == 0,
+        )
+        for index, (node_key, source_ids) in enumerate(
+            projection["node_sources"].items()
+        )
+    ]
+    for node in nodes:
+        node["scene_boundary_before"] = node["key"] in scene_start_keys
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": nodes,
+    })
+    derive_blueprint_scene_plans(blueprint)
+    source = "\n\n".join(
+        f"环境状态推进 {index}"
+        for index in range(1, fixture["source_segment_count"] + 1)
+    )
+    identities, registry, registry_hash = build_frozen_identity_registry(
+        Bible(
+            characters=[],
+            world=World(visual_style_canonical="写实环境"),
+        ),
+        [],
+    )
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source,
+        identity_registry_hash=registry_hash,
+    )
+    contracts = build_screenplay_scene_input_contract_set(
+        plans=plans,
+        blueprint=blueprint,
+        source_text=source,
+        identity_registry=registry,
+    )
+    shards = [
+        compile_screenplay_scene_shard_draft(
+            _creative_shard(plan, blueprint, contracts[plan.shard_id]),
+            episode_no=1,
+            plan=plan,
+            scene_plans={
+                scene.key: scene for scene in blueprint.scene_plans
+            },
+            scene_input_contracts=contracts[plan.shard_id],
+        )
+        for plan in plans
+    ]
+    merged = merge_screenplay_scene_shards(
+        envelope=ScreenplayEnvelopeIR(
+            episode_no=1,
+            metadata=ScreenplayEnvelopeMetadata(title="run64 回归"),
+            experience=ScreenplayEnvelopeExperience(
+                director_objective="完整交付剧情环境",
+                satisfaction_criteria="旁文本只保留审计",
+            ),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            identity_registry_hash=registry_hash,
+        ),
+        identities=identities,
+        plans=plans,
+        shards=shards,
+        scene_input_contracts=contracts,
+        blueprint=blueprint,
+        source_text=source,
+    )
+    screenplay = compile_screenplay_ir(
+        merged,
+        episode={"id": "ep-run64", "episode_no": 1, "title": "run64 回归"},
+        source_text=source,
+        bible=Bible(
+            characters=[],
+            world=World(visual_style_canonical="写实环境"),
+        ),
+    )
+    projected, _report = picture_screenplay_projection(screenplay)
+
+    audit_source_ids = {"SRC0060", "SRC0061", "SRC0062"}
+    assert [plan.node_keys for plan in blueprint.scene_plans] == projection[
+        "scene_node_keys"
+    ]
+    assert "S003-N020" in {node.key for node in blueprint.nodes}
+    assert any(
+        "S003-N020" in plan.node_keys for plan in blueprint.scene_plans
+    )
+    assert {
+        item.source_segment_id
+        for item in screenplay.source_coverage
+        if item.disposition == "audit_only"
+    } == audit_source_ids
+    picture_contract = {
+        "events": [
+            event.model_dump(mode="json")
+            for event in projected.narrative_plan.events
+        ],
+        "beats": [
+            beat.model_dump(mode="json")
+            for beat in projected.plot_spine.spine_beats
+        ],
+        "context_requirements": [
+            requirement
+            for scene in projected.scene_outline
+            for requirement in scene.context_requirements
+        ],
+        "scene_outline": [
+            scene.model_dump(mode="json")
+            for scene in projected.scene_outline
+        ],
+        "identity_contracts": [
+            identity.model_dump(mode="json")
+            for identity in projected.narrative_plan.identity_contracts
+        ],
+    }
+    serialized_picture = json.dumps(
+        picture_contract,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert all(
+        source_id not in serialized_picture for source_id in audit_source_ids
+    )
+    assert any(
+        {"SRC0058", "SRC0059"}.intersection(event.source_segment_ids)
+        for event in projected.narrative_plan.events
+    )
 
 
 def test_scene_shard_schema_requires_explicit_participant_deliveries() -> None:
