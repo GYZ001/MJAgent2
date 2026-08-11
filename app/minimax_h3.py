@@ -539,6 +539,9 @@ def _load_request_checkpoint(
             "MiniMaxH3 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
             "请为新的生成意图创建新的 operation_id",
             retryable=False,
+            delivery_state="not_sent",
+            replay_safe=True,
+            create_not_accepted=True,
         )
     provider_request = saved.get("provider_request")
     if not isinstance(provider_request, dict):
@@ -628,6 +631,7 @@ async def create_video_task(
         )
     started = time.time()
     status_code: int | None = None
+    create_request_started = False
     try:
         timeout = httpx.Timeout(connect=10, read=config.TIMEOUT_VIDEO_CREATE, write=180, pool=10)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -702,6 +706,7 @@ async def create_video_task(
                     preserve_exact=True,
                 )
 
+            create_request_started = True
             response = await client.post(
                 f"{base_url()}/v1/videos/generations",
                 headers={
@@ -735,9 +740,8 @@ async def create_video_task(
             )
             return task_id
     except httpx.RequestError as exc:
-        not_sent = isinstance(
-            exc,
-            (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError),
+        not_sent = (not create_request_started) or isinstance(
+            exc, (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError),
         )
         error = ProviderError(
             f"MiniMaxH3 创建任务网络异常：{type(exc).__name__}: {exc}",
@@ -746,6 +750,7 @@ async def create_video_task(
             delivery_state="not_sent" if not_sent else "unknown",
             replay_safe=not_sent,
             requires_explicit_retry=not not_sent,
+            create_not_accepted=not create_request_started,
         )
         finish_provider_call(
             call_id,
@@ -756,6 +761,19 @@ async def create_video_task(
         )
         raise error from exc
     except ProviderError as exc:
+        if not create_request_started and not exc.create_not_accepted:
+            exc = ProviderError(
+                str(exc),
+                retryable=exc.retryable,
+                raw=exc.raw,
+                timeout_phase=exc.timeout_phase,
+                failure_kind=exc.failure_kind,
+                delivery_state="not_sent",
+                replay_safe=True,
+                requires_explicit_retry=False,
+                create_not_accepted=True,
+                failure=exc.failure,
+            )
         finish_provider_call(
             call_id,
             "FAILED",

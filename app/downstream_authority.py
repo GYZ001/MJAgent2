@@ -51,7 +51,10 @@ def current_adopted_video_delivery_manifest(
             or artifact.get("type") != "shot_video"
             or artifact.get("scope_type") != "shot"
             or artifact.get("scope_id") != str(row["shot_id"])
-            or artifact.get("status") != "approved"
+            # Automatic best-candidate adoption retains a validated T3
+            # Artifact; human adoption promotes it to approved. Both are
+            # authoritative only with the exact technical gate below.
+            or artifact.get("status") not in {"validated", "approved"}
             or artifact.get("contract_version") != "video-2.0.0"
             or Path(str(artifact.get("file_path") or "")).resolve() != path.resolve()
             or not isinstance(artifact.get("content"), dict)

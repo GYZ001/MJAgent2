@@ -1800,24 +1800,33 @@ async def create_video_task(
     call_meta: dict | None = None,
 ) -> str:
     """创建 Seedance 任务；图片角色与 reference_video 角色在本地先做互斥校验。"""
+    def reject_before_create(message: str, **kwargs: Any) -> ProviderError:
+        return ProviderError(
+            message,
+            delivery_state="not_sent",
+            replay_safe=True,
+            create_not_accepted=True,
+            **kwargs,
+        )
+
     image_roles = [str(role) for _url, role in (image_urls or [])]
     video_roles = [str(role) for _url, role in (video_urls or [])]
     valid_image_roles = {"first_frame", "last_frame", "reference_image"}
     if any(role not in valid_image_roles for role in image_roles):
-        raise ProviderError(f"非法视频图片输入角色：{image_roles}")
+        raise reject_before_create(f"非法视频图片输入角色：{image_roles}")
     if any(role != "reference_video" for role in video_roles):
-        raise ProviderError(f"非法视频输入角色：{video_roles}")
+        raise reject_before_create(f"非法视频输入角色：{video_roles}")
     if video_roles and image_roles:
-        raise ProviderError("reference_video 不能与 reference_image/first_frame/last_frame 混用")
+        raise reject_before_create("reference_video 不能与 reference_image/first_frame/last_frame 混用")
     if "reference_image" in image_roles and (
         "first_frame" in image_roles or "last_frame" in image_roles
     ):
-        raise ProviderError("reference_image 不能与 first_frame/last_frame 混用")
+        raise reject_before_create("reference_image 不能与 first_frame/last_frame 混用")
     if "last_frame" in image_roles and "first_frame" not in image_roles:
-        raise ProviderError("last_frame 不能脱离 first_frame 单独提交")
+        raise reject_before_create("last_frame 不能脱离 first_frame 单独提交")
     for url, _role in video_urls or []:
         if str(url).startswith("data:") or not str(url).startswith(("http://", "https://")):
-            raise ProviderError("reference_video 必须是供应商可访问的 http(s) Web URL")
+            raise reject_before_create("reference_video 必须是供应商可访问的 http(s) Web URL")
 
     if active_provider("video") == "minimax_h3":
         from app import minimax_h3
@@ -1849,11 +1858,10 @@ async def create_video_task(
         "video_create", operation_id,
     )
     if saved_request is not None and saved_request != payload:
-        raise ProviderError(
+        raise reject_before_create(
             "Seedance 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
             "请保留原任务等待供应商结果确认，或通过页面明确创建新的生成尝试",
             failure_kind="idempotency_request_mismatch",
-            delivery_state="unknown",
             requires_explicit_retry=True,
         )
     call_meta = {**(call_meta or {}), "operation_id": operation_id}

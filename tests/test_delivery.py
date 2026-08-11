@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from app import artifacts, db, delivery, task_registry
+from app import artifacts, db, delivery, downstream_authority, task_registry
 from app.evidence import repository
+from app.evidence import media as media_evidence
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.orchestration import api as orchestration_api
 
@@ -27,10 +28,17 @@ def _conn() -> sqlite3.Connection:
 def _approved_artifact(kind: str, scope_type: str, scope_id: str, *, file_path: str | None = None) -> str:
     artifact = repository.create_artifact(EvidenceArtifact(
         type=kind, scope_type=scope_type, scope_id=scope_id,
-        content={"kind": kind}, file_path=file_path, status="validated", trust_level="T2",
+        content={
+            "kind": kind,
+            **({"version_id": "v"} if kind == "shot_video" else {}),
+        },
+        file_path=file_path, status="validated", trust_level="T2",
+        contract_version="video-2.0.0" if kind == "shot_video" else "1.0.0",
     ))
     artifact = repository.commit_artifact(None, artifact["id"], [Evaluation(
-        evaluator_type="deterministic", evaluator_name="test", evaluator_version="1",
+        evaluator_type="file" if kind == "shot_video" else "deterministic",
+        evaluator_name="video_technical_validator" if kind == "shot_video" else "test",
+        evaluator_version="1",
         status="passed", hard_gate_passed=True, score=100,
     )])
     return artifact["id"]
@@ -348,6 +356,44 @@ def test_delivery_package_id_rejects_path_traversal() -> None:
         delivery.validate_package_id("../../etc/passwd")
     with pytest.raises(ValueError, match="非法的 package_id"):
         delivery.validate_package_id("delivery_../escape")
+
+
+def test_auto_adopted_validated_video_is_current_delivery_authority(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = _conn()
+    monkeypatch.setattr(repository, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_evidence, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_evidence.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    monkeypatch.setattr(artifacts, "invalidate_episode_final", lambda _episode_id: False)
+    conn.execute("INSERT INTO projects(id,name,created_at) VALUES('p','P',0)")
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,status,created_at) "
+        "VALUES('e','p',1,'confirmed',0)"
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s','e',1,5)"
+    )
+    video = tmp_path / "auto.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"auto-video")
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,video_path,qa_json,created_at
+           ) VALUES('v-auto','s',1,'prompt','idem','succeeded',?,'{}',0)""",
+        (str(video),),
+    )
+    conn.commit()
+
+    artifact = media_evidence.record_video_candidate("v-auto")
+    assert artifact["status"] == "validated"
+    assert media_evidence.select_best_video_candidate("s")["version_id"] == "v-auto"
+    manifest = downstream_authority.current_adopted_video_delivery_manifest(
+        "e", conn=conn,
+    )
+
+    assert manifest["items"][0]["artifact_id"] == artifact["id"]
+    assert manifest["items"][0]["adopted_version_id"] == "v-auto"
 
 
 @pytest.mark.parametrize(

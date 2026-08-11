@@ -85,6 +85,28 @@ def _database(shot_nos: tuple[int, ...] = (1, 2, 3)) -> sqlite3.Connection:
     return conn
 
 
+def _seed_current_delivery(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_json,content_hash,contract_version,created_at
+           ) VALUES('delivery-art','delivery_package','episode','e',1,'approved','T5',
+                    '{}','hash','delivery-1.0.0',0)"""
+    )
+    conn.execute(
+        """INSERT INTO delivery_packages(
+               id,episode_id,artifact_id,status,package_path,manifest_json,
+               quality_report_json,known_issues,created_at
+           ) VALUES('delivery-pkg','e','delivery-art','approved','/tmp/delivery-pkg',
+                    '{}','{}','',0)"""
+    )
+    conn.execute(
+        """UPDATE episodes
+              SET delivery_artifact_id='delivery-art',delivery_status='approved'
+            WHERE id='e'"""
+    )
+
+
 def _version(conn: sqlite3.Connection, *, shot_no: int, path: Path, adopted: bool) -> None:
     version_id = f"v{shot_no}"
     conn.execute(
@@ -369,6 +391,7 @@ def test_legacy_image_fallback_cannot_outrank_or_grade_over_real_video(
 
 def test_database_startup_quarantines_legacy_static_fallback_without_deleting_it() -> None:
     conn = _database((1,))
+    _seed_current_delivery(conn)
     conn.execute(
         """INSERT INTO shot_versions(
                id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
@@ -393,6 +416,52 @@ def test_database_startup_quarantines_legacy_static_fallback_without_deleting_it
     assert conn.execute(
         "SELECT COUNT(*) FROM shot_versions WHERE id='fallback-v1'"
     ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT status FROM delivery_packages WHERE id='delivery-pkg'"
+    ).fetchone()[0] == "superseded"
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id='delivery-art'"
+    ).fetchone()[0] == "superseded"
+    assert conn.execute(
+        "SELECT delivery_artifact_id FROM episodes WHERE id='e'"
+    ).fetchone()[0] is None
+
+
+def test_database_startup_keeps_delivery_when_fallback_is_only_history() -> None:
+    conn = _database((1,))
+    _seed_current_delivery(conn)
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
+           ) VALUES('fallback-history','s1',1,'fallback','fallback-key','succeeded',?,0)""",
+        ('{"delivery_fallback":true}',),
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,image_inputs,created_at
+           ) VALUES('real-v1','s1',2,'real','real-key','succeeded','{}',0)"""
+    )
+    conn.execute("UPDATE shots SET adopted_version_id='real-v1' WHERE id='s1'")
+    conn.commit()
+
+    assert db._quarantine_static_delivery_fallbacks(conn) == 1
+    conn.commit()
+
+    assert conn.execute(
+        "SELECT status FROM shot_versions WHERE id='fallback-history'"
+    ).fetchone()[0] == "rejected_static_fallback"
+    assert conn.execute(
+        "SELECT adopted_version_id FROM shots WHERE id='s1'"
+    ).fetchone()[0] == "real-v1"
+    assert conn.execute(
+        "SELECT status FROM delivery_packages WHERE id='delivery-pkg'"
+    ).fetchone()[0] == "approved"
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id='delivery-art'"
+    ).fetchone()[0] == "approved"
+    assert conn.execute(
+        "SELECT delivery_artifact_id FROM episodes WHERE id='e'"
+    ).fetchone()[0] == "delivery-art"
 
 
 def test_outdated_final_video_is_preserved_and_remains_visible(tmp_path, monkeypatch) -> None:

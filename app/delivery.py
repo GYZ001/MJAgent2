@@ -112,13 +112,15 @@ def claim_delivery_package_operation(
                           abandoned_workspace_path=workspace_path,
                           abandoned_promotion_phase=promotion_phase,
                           workspace_path='',promotion_phase='claimed',
-                          recovery_fenced_owner=CASE WHEN interrupted_at IS NOT NULL THEN ? ELSE '' END,
+                          recovery_fenced_owner=CASE
+                              WHEN interrupted_at IS NOT NULL OR ? THEN ? ELSE '' END,
                           interrupted_at=NULL,updated_at=?
                     WHERE package_id=? AND request_fingerprint=?
                       AND (status!='running' OR lease_expires_at<=?)""",
                 (
                     owner,
                     stamp + _DELIVERY_OPERATION_LEASE_S,
+                    int(str(row["status"] or "") == "failed"),
                     owner,
                     stamp,
                     package_id,
