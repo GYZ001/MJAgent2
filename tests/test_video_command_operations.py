@@ -99,3 +99,88 @@ def test_paid_operation_live_owner_cannot_be_reexecuted(monkeypatch) -> None:
             scope_id="episode-1",
         )
 
+
+def test_episode_receipt_freezes_selection_and_skips_bound_failed_jobs(monkeypatch) -> None:
+    conn = _conn()
+    monkeypatch.setattr(operations, "get_conn", lambda: conn)
+    owner, _ = operations.claim_video_command_operation(
+        command="video.generate_episode",
+        idempotency_key="episode-batch",
+        request_fingerprint="episode-fp",
+        scope_type="episode",
+        scope_id="episode-1",
+    )
+    assert owner
+    operations.bind_video_command_operation(
+        command="video.generate_episode",
+        idempotency_key="episode-batch",
+        request_fingerprint="episode-fp",
+        claim_token=owner,
+        binding={
+            "plan_id": "plan-1",
+            "plan_revision": 7,
+            "selected_shot_ids": ["s1", "s2", "s3"],
+            "enqueued": [],
+        },
+        conn=conn,
+        merge=True,
+    )
+    operations.bind_video_command_operation(
+        command="video.generate_episode",
+        idempotency_key="episode-batch",
+        request_fingerprint="episode-fp",
+        claim_token=owner,
+        binding={
+            "append_enqueued": {
+                "shot_id": "s1",
+                "version_id": "v1",
+                "job_id": "j1",
+                "task_accepted": True,
+            },
+        },
+        conn=conn,
+        merge=True,
+    )
+    conn.commit()
+
+    # A crash occurs after s1 is durable; its later failed/stale status is not
+    # consulted by receipt recovery. The new owner gets the frozen set and exact
+    # IDs, and only s2/s3 remain eligible for enqueue.
+    conn.execute(
+        "UPDATE video_command_operation_receipts SET lease_expires_at=0"
+    )
+    conn.commit()
+    replacement_owner, recovered = operations.claim_video_command_operation(
+        command="video.generate_episode",
+        idempotency_key="episode-batch",
+        request_fingerprint="episode-fp",
+        scope_type="episode",
+        scope_id="episode-1",
+    )
+    assert replacement_owner and recovered is None
+    binding = operations.read_video_command_operation_binding(
+        command="video.generate_episode",
+        idempotency_key="episode-batch",
+        request_fingerprint="episode-fp",
+    )
+    assert binding["selected_shot_ids"] == ["s1", "s2", "s3"]
+    assert binding["enqueued"] == [{
+        "shot_id": "s1",
+        "version_id": "v1",
+        "job_id": "j1",
+        "task_accepted": True,
+    }]
+    assert [shot for shot in binding["selected_shot_ids"] if shot not in {
+        item["shot_id"] for item in binding["enqueued"]
+    }] == ["s2", "s3"]
+
+    with pytest.raises(operations.VideoCommandOperationConflict):
+        operations.bind_video_command_operation(
+            command="video.generate_episode",
+            idempotency_key="episode-batch",
+            request_fingerprint="episode-fp",
+            claim_token=owner,
+            binding={"append_enqueued": {"shot_id": "s2", "job_id": "late-old"}},
+            conn=conn,
+            merge=True,
+        )

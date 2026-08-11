@@ -831,9 +831,23 @@ def build_delivery_package(
             )
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("交付崩溃恢复目录已损坏") from exc
+        orphan_files_valid = True
+        for item in orphan_manifest.get("files") or []:
+            candidate = (
+                orphan_package_dir / str(item.get("path") or "")
+            ).resolve()
+            if (
+                orphan_package_dir not in candidate.parents
+                or not candidate.is_file()
+                or candidate.stat().st_size != int(item.get("size_bytes") or -1)
+                or _sha256(candidate) != str(item.get("sha256") or "")
+            ):
+                orphan_files_valid = False
+                break
         if (
             orphan_manifest.get("storyboard_release_authority") != release_authority
             or orphan_manifest.get("video_delivery_manifest") != video_delivery_manifest
+            or not orphan_files_valid
             or not _archive_matches_directory(orphan_archive, orphan_package_dir)
             or repository.content_hash(
                 orphan_artifact.get("content"), orphan_artifact.get("file_path"),
@@ -1114,11 +1128,37 @@ def build_delivery_package(
             request_fingerprint=str(operation_request_fingerprint),
             lease_owner=operation_lease_owner,
         )
+        conn.execute(
+            """UPDATE delivery_operation_receipts
+                  SET promotion_phase='ready',updated_at=?
+                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                  AND status='running'""",
+            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
+        )
+        conn.commit()
     if final_package_dir.exists() or Path(str(final_package_dir) + ".zip").exists():
         raise ValueError("交付最终目录已存在，拒绝删除或覆盖另一 owner 产物")
     package_dir.rename(final_package_dir)
+    if operation_lease_owner:
+        conn.execute(
+            """UPDATE delivery_operation_receipts
+                  SET promotion_phase='directory_promoted',updated_at=?
+                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                  AND status='running'""",
+            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
+        )
+        conn.commit()
     final_archive_path = Path(str(final_package_dir) + ".zip")
     archive_path.rename(final_archive_path)
+    if operation_lease_owner:
+        conn.execute(
+            """UPDATE delivery_operation_receipts
+                  SET promotion_phase='promoted',updated_at=?
+                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                  AND status='running'""",
+            (time.time(), package_id, operation_request_fingerprint, operation_lease_owner),
+        )
+        conn.commit()
     package_dir = final_package_dir
     archive_path = final_archive_path
 
