@@ -15,6 +15,7 @@ from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.main import app
+from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
 from app.schemas import (
     AtomicAction,
     NarrativeContinuityPlan,
@@ -82,14 +83,18 @@ def _use_passing_manual_publish_qa(monkeypatch) -> None:
             ).fetchone()
             assert revision is not None
             evidence["authority_input_fingerprint"] = revision["input_fingerprint"]
+            evidence["artifact_id"] = artifact_id
+            evidence["artifact_hash"] = kwargs.get("artifact_hash")
+            evidence["qa_profile_version"] = SCREENPLAY_QA_PROFILE_VERSION
         return [], Evaluation(
             evaluator_type="deterministic",
             evaluator_name="screenplay_production_qa",
-            evaluator_version="screenplay-qa-gate-2",
+            evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
             status="passed",
             hard_gate_passed=True,
-            evaluation_role="runtime_gate",
-            runtime_blocking=True,
+            evaluation_role="score_only",
+            score_status="scored",
+            runtime_blocking=False,
             score=100,
             evidence=evidence,
         )
@@ -672,7 +677,7 @@ def test_runtime_blocking_manual_draft_routes_to_repair_without_publish(
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
-        evaluator_version="screenplay-qa-gate-2",
+        evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
         status="failed",
         hard_gate_passed=False,
         evaluation_role="runtime_gate",

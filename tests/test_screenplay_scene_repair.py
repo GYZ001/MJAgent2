@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import db
+from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.production.revision import (
     ensure_production_revision,
@@ -18,6 +19,7 @@ from app.production.screenplay_document import (
     document_to_screenplay,
     screenplay_to_document,
 )
+from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
 from app.production.structured_issues import (
     enrich_issues,
     issues_from_validator_messages,
@@ -1016,6 +1018,8 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
     revision = ensure_production_revision(
         episode_id="ep_scene",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _script()
@@ -1131,6 +1135,8 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
     revision = ensure_production_revision(
         episode_id="ep_scene",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _script(story_function="建立公开测验冲突并推动萧炎退场")
