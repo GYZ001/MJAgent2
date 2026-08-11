@@ -523,7 +523,11 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         artifact_id = str(item.get("normalized_artifact_id") or "")
         artifact_row = artifact_rows.get(artifact_id)
         referenced_artifact_exists = False
-        if item.get("status") == "validated" and artifact_row is not None:
+        if (
+            item.get("status") == "validated"
+            and artifact_row is not None
+            and expected_scaffold_hash
+        ):
             referenced_artifact_exists, _reason = (
                 screenplay_scene_shard_artifact_compatibility(
                     artifact_row,

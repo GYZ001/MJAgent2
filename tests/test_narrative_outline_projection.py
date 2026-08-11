@@ -32,6 +32,7 @@ from app.schemas import (
     StoryboardOutline,
     StoryboardOutlineShot,
     TargetDelta,
+    TextProvenance,
     VoiceCanonical,
 )
 from app.validators import (
@@ -77,6 +78,14 @@ def _set_action_participant_deliveries(
 ) -> AtomicAction:
     payload = action.model_dump(mode="json")
     payload["participant_deliveries"] = deliveries
+    provenance = action.text_provenance.model_dump(mode="json")
+    provenance["identity_keys"] = list(dict.fromkeys([
+        *payload["actor_ids"],
+        *payload["target_ids"],
+    ]))
+    payload["text_provenance"] = TextProvenance.model_validate(
+        provenance
+    ).model_dump(mode="json")
     contracted = AtomicAction.model_validate(payload)
     index = screenplay.narrative_plan.atomic_actions.index(action)
     screenplay.narrative_plan.atomic_actions[index] = contracted

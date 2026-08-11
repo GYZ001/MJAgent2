@@ -24,6 +24,7 @@ from app.production.revision import (
     set_published_artifact,
 )
 from app.screenplay_scene_shards import (
+    SCREENPLAY_SCENE_SHARD_VERSION,
     ScreenplaySceneShardOwnershipLost,
     _assert_episode_owner,
 )
@@ -47,6 +48,33 @@ def _db(tmp_path, monkeypatch):
     )
     conn.commit()
     yield
+
+
+def _v8_shard_content(
+    *,
+    shard_id: str,
+    generation_scaffold_hash: str,
+    source_hash: str = "",
+    boundary_hash: str = "",
+    blueprint_hash: str = "",
+    identity_registry_hash: str = "",
+) -> dict:
+    return {
+        "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+        "episode_no": 1,
+        "shard_id": shard_id,
+        "scene_plan_keys": [],
+        "scenes": [],
+        "consumed_source_ids": [],
+        "unresolved_participants": [],
+        "source_hash": source_hash,
+        "boundary_hash": boundary_hash,
+        "blueprint_hash": blueprint_hash,
+        "identity_registry_hash": identity_registry_hash,
+        "source_ownership_hash": "ownership",
+        "identity_scaffold_hash": f"identity:{shard_id}",
+        "generation_scaffold_hash": generation_scaffold_hash,
+    }
 
 
 def test_production_state_resumes_post_baseline_stages() -> None:
@@ -162,7 +190,11 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
         scope_id="e1",
         status="validated",
         trust_level="T1",
-        content={"shard": "SS001"},
+        content=_v8_shard_content(
+            shard_id="SS001",
+            generation_scaffold_hash="generation:SS001",
+        ),
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
     save_checkpoint(revision.id, {
         "phase": "SCENE_SHARD_GENERATION",
@@ -175,6 +207,7 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
                 "shard_id": "SS001",
                 "status": "validated",
                 "normalized_artifact_id": shard["id"],
+                "generation_scaffold_hash": "generation:SS001",
             },
             {"shard_id": "SS002", "status": "failed"},
             {"shard_id": "SS003", "status": "pending"},
@@ -235,13 +268,15 @@ def test_production_state_reconciles_recovered_shard_artifact() -> None:
         scope_id="e1",
         status="validated",
         trust_level="T1",
-        content={
-            "shard_id": "SS006",
-            "source_hash": "source-6",
-            "boundary_hash": "boundary-6",
-            "blueprint_hash": "blueprint-v1",
-            "identity_registry_hash": "identity-v1",
-        },
+        content=_v8_shard_content(
+            shard_id="SS006",
+            generation_scaffold_hash="generation:SS006",
+            source_hash="source-6",
+            boundary_hash="boundary-6",
+            blueprint_hash="blueprint-v1",
+            identity_registry_hash="identity-v1",
+        ),
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
     assert repository.get_artifact(shard["id"]) is not None
     save_checkpoint(revision.id, {
@@ -253,6 +288,7 @@ def test_production_state_reconciles_recovered_shard_artifact() -> None:
             "status": "failed",
             "source_hash": "source-6",
             "boundary_hash": "boundary-6",
+            "generation_scaffold_hash": "generation:SS006",
         }],
     })
 
@@ -264,6 +300,44 @@ def test_production_state_reconciles_recovered_shard_artifact() -> None:
         "running": 0,
         "failed": 0,
     }
+
+
+def test_production_state_rejects_legacy_shard_as_resumable() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    shard = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content={
+            **_v8_shard_content(
+                shard_id="SS007",
+                generation_scaffold_hash="generation:SS007",
+            ),
+            "contract_version": "screenplay-scene-shard.v7",
+        },
+        contract_version="screenplay-scene-shard.v7",
+    ))
+    save_checkpoint(revision.id, {
+        "phase": "SCENE_SHARD_GENERATION",
+        "shards": [{
+            "shard_id": "SS007",
+            "status": "validated",
+            "normalized_artifact_id": shard["id"],
+            "generation_scaffold_hash": "generation:SS007",
+        }],
+    })
+
+    state = screenplay_production_state("e1")
+
+    assert state["can_resume_baseline"] is False
+    assert state["has_resumable_baseline"] is False
+    assert state["shard_progress"]["validated"] == 0
 
 
 def test_resume_route_has_a_distinct_capability() -> None:
@@ -283,6 +357,33 @@ def test_screenplay_generation_preflight_sizes_source_without_side_effects() -> 
     )
     conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
     conn.commit()
+    repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=_v8_shard_content(
+            shard_id="SS001",
+            generation_scaffold_hash="generation:SS001",
+        ),
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+    ))
+    repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content={
+            **_v8_shard_content(
+                shard_id="SS002",
+                generation_scaffold_hash="generation:SS002",
+            ),
+            "contract_version": "screenplay-scene-shard.v3",
+        },
+        contract_version="screenplay-scene-shard.v3",
+    ))
 
     result = api._screenplay_generation_preflight("e1")
 
@@ -290,6 +391,9 @@ def test_screenplay_generation_preflight_sizes_source_without_side_effects() -> 
     assert result["input"]["source_segment_count"] >= 1
     assert result["input"]["estimated_blueprint_shards"] >= 1
     assert result["input"]["estimated_scene_writing_shards"] >= 1
+    assert result["reusable_validated_artifacts"][
+        "screenplay_scene_shard"
+    ] == 1
     assert conn.execute("SELECT COUNT(*) AS c FROM workflow_runs").fetchone()["c"] == 0
 
 

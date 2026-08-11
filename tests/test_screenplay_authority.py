@@ -848,6 +848,54 @@ def test_legacy_screenplay_artifact_without_participant_deliveries_needs_rebuild
     assert "participant_deliveries" in row["stale_reason"]
 
 
+@pytest.mark.parametrize(
+    ("collection", "field"),
+    [
+        ("narrative_plan.events", "narrative_layer"),
+        ("source_coverage", "projection_policy"),
+    ],
+)
+def test_current_screenplay_artifact_requires_explicit_semantics(
+    collection: str,
+    field: str,
+) -> None:
+    payload = screenplay_artifact_payload(_screenplay())
+    if collection == "source_coverage":
+        payload["source_coverage"] = [{
+            "source_segment_id": "SRC0001",
+            "disposition": "audit_only",
+            "projection_policy": "audit_only",
+            "beat_ids": [],
+        }]
+    target = payload
+    for part in collection.split("."):
+        target = target[part]
+    target[0].pop(field)
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="episode-generic",
+        status="candidate",
+        trust_level="T1",
+        content=payload,
+        contract_version="4.0.0",
+    ))
+
+    with pytest.raises(
+        ValueError,
+        match="ARTIFACT_NEEDS_REBUILD",
+    ) as caught:
+        load_screenplay_from_artifact(artifact["id"])
+
+    assert getattr(caught.value, "code", None) == "ARTIFACT_NEEDS_REBUILD"
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert field in row["stale_reason"]
+
+
 def test_current_screenplay_artifact_with_participant_deliveries_loads() -> None:
     screenplay = _screenplay()
     payload = screenplay_artifact_payload(screenplay)

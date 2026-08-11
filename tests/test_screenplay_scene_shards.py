@@ -1241,25 +1241,55 @@ def test_run_e65d871ad2a0_sc16_projects_fifteen_story_scenes() -> None:
             world=World(visual_style_canonical="写实环境"),
         ),
     )
+    projected, projection_report = picture_screenplay_projection(screenplay)
 
     assert fixture["run_id"] == "run_e65d871ad2a0"
     assert len(blueprint.scene_plans) == fixture["expected_story_scene_count"]
-    assert len(screenplay.scene_outline) == 15
+    assert len(projected.scene_outline) == fixture["expected_story_scene_count"]
     assert {item.source_segment_id for item in screenplay.source_coverage} == {
         f"SRC{index:04d}" for index in range(1, 63)
     }
-    assert {
+    audit_source_ids = {
         item.source_segment_id
         for item in screenplay.source_coverage
         if item.disposition == "audit_only"
-    } == {"SRC0060", "SRC0061", "SRC0062"}
-    assert not identities
-    forbidden_names = {"旁白", "孟浩", "Q版人物"}
-    assert forbidden_names.isdisjoint({
-        character
-        for scene in screenplay.scene_outline
-        for character in scene.characters
+    }
+    assert audit_source_ids == {"SRC0060", "SRC0061", "SRC0062"}
+    assert projection_report["excluded_source_segment_ids"] == []
+    assert audit_source_ids.isdisjoint({
+        source_id
+        for beat in projected.plot_spine.spine_beats
+        for source_id in beat.source_segment_ids
     })
+    assert audit_source_ids.isdisjoint({
+        source_id
+        for action in projected.narrative_plan.atomic_actions
+        for source_id in action.action_agency.source_segment_ids
+    })
+    story_authority_identity_keys = {
+        identity_key
+        for event in merged.events
+        if event.narrative_layer == "story"
+        for identity_key in (
+            *event.actor_keys,
+            *event.target_keys,
+            *event.onscreen_entity_keys,
+        )
+    }
+    picture_identity_keys = {
+        identity_key
+        for event in projected.narrative_plan.events
+        for identity_key in event.onscreen_entity_ids
+    } | {
+        identity_key
+        for action in projected.narrative_plan.atomic_actions
+        for identity_key in (*action.actor_ids, *action.target_ids)
+    }
+    assert picture_identity_keys.issubset(story_authority_identity_keys)
+    assert {
+        identity.identity_id
+        for identity in projected.narrative_plan.identity_contracts
+    }.issubset(story_authority_identity_keys)
 
 
 def test_scene_shard_schema_requires_explicit_participant_deliveries() -> None:

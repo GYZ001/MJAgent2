@@ -717,16 +717,13 @@ def test_narrative_scene_pack_hydrates_authority_without_per_shot_model_fields()
         shot.last_frame_desc,
     ))
     assert "观察者" in visual_prose
-    assert any(
-        "观察者" in error
-        for error in stages.validate_storyboard_visual_identity_contract(
-            Storyboard(episode_no=1, shots=[shot]),
-            outline,
-            bible,
-            screenplay,
-            episode_id="e1",
-        )
-    )
+    assert stages.validate_storyboard_visual_identity_contract(
+        Storyboard(episode_no=1, shots=[shot]),
+        outline,
+        bible,
+        screenplay,
+        episode_id="e1",
+    ) == []
 
 
 def test_scene_pack_expands_short_owned_dialogue_to_auditable_source_context() -> None:

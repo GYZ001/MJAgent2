@@ -1,3 +1,6 @@
+import pytest
+
+from app.errors import ArtifactNeedsRebuildError
 from app.narrative_priority import (
     merge_outline_delivery_beats,
     picture_screenplay_projection,
@@ -21,7 +24,7 @@ from app.schemas import (
 )
 
 
-def test_legacy_terminal_non_story_scene_is_kept_as_source_context() -> None:
+def test_legacy_terminal_non_story_scene_requires_rebuild() -> None:
     screenplay = EpisodeScreenplay(
         episode_no=3,
         id="episode-3",
@@ -142,15 +145,11 @@ def test_legacy_terminal_non_story_scene_is_kept_as_source_context() -> None:
         ),
     )
 
-    projected, report = picture_screenplay_projection(screenplay)
-
-    assert report["excluded_event_ids"] == ["E2"]
-    assert [event.event_id for event in projected.narrative_plan.events] == ["E1"]
-    assert [beat.beat_id for beat in projected.plot_spine.spine_beats] == ["S01"]
-    assert projected.plot_spine.must_keep_ending == "剧情状态完成"
-    assert projected.source_coverage[1].disposition == "audit_only"
-    assert projected.source_coverage[1].projection_policy == "audit_only"
-    assert projected.source_coverage[1].beat_ids == []
+    with pytest.raises(
+        ArtifactNeedsRebuildError,
+        match="ARTIFACT_NEEDS_REBUILD",
+    ):
+        picture_screenplay_projection(screenplay)
 
 
 def test_adjacent_structured_tasks_merge_without_losing_delivery_ids() -> None:
