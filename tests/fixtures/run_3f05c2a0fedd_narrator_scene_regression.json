@@ -40,5 +40,12 @@
       "target": {"kind": "scene", "id": "SC01"},
       "value": ["旁白"]
     }
+  },
+  "sc03_parser_regression": {
+    "scene_id": "SC03",
+    "known_speaker": "孟浩",
+    "action_prose": "各种细碎的念头在他脑海里走马灯似的转：会不会有贵人赏识他的才学，会不会有哪家小姐不在意他贫寒中意于他，又或者年复一年考到白发苍苍还在科举场上蹉跎。",
+    "authoritative_dialogue": "孟浩：又落榜了……",
+    "invalid_unknown_dialogue": "青衣人：“此路不通。”"
   }
 }

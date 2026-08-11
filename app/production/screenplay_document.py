@@ -1316,6 +1316,25 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
 _VISUAL_NARRATION_SPEAKER_PREFIXES = (
     "银幕", "屏幕", "画面", "投影", "字幕", "电视画面", "手机画面",
 )
+_EXPLICIT_SPOKEN_QUOTE_PAIRS = (
+    ("“", "”"), ("「", "」"), ("『", "』"), ('"', '"'),
+)
+
+
+def _has_explicit_spoken_quotes(value: str) -> bool:
+    """Unknown identities need an unambiguous dialogue carrier.
+
+    A colon alone is also ordinary Chinese prose punctuation.  Known speakers
+    and source-authoritative chain lines are already structurally bound; an
+    otherwise unknown prefix is treated as a speaker only when the payload is
+    explicitly quoted as speech, so it can reach the typed identity gate
+    without promoting action narration into a character.
+    """
+    text = (value or "").strip()
+    return any(
+        text.startswith(opening) and text.endswith(closing)
+        for opening, closing in _EXPLICIT_SPOKEN_QUOTE_PAIRS
+    )
 
 
 def _parse_full_script_scenes(
@@ -1387,15 +1406,23 @@ def _parse_full_script_scenes(
                 scenes[current]["order"].append(
                     ("action", len(scenes[current]["actions"]) - 1)
                 )
-            else:
-                # Preserve genuinely unknown named speakers so the existing
-                # character-consistency gate can reject them.
+            elif _has_explicit_spoken_quotes(spoken_line):
+                # Preserve explicitly formatted unknown dialogue so the typed
+                # identity gate can reject an undeclared speaker.
                 scenes[current]["turns"].append({
                     "speaker": raw_speaker,
                     "line": spoken_line,
                 })
                 scenes[current]["order"].append(
                     ("dialogue", len(scenes[current]["turns"]) - 1)
+                )
+            else:
+                # Ordinary Chinese prose also uses a colon.  With no known
+                # speaker and no authoritative chain-line match, it remains an
+                # action instead of manufacturing a voice/visual identity.
+                scenes[current]["actions"].append(line)
+                scenes[current]["order"].append(
+                    ("action", len(scenes[current]["actions"]) - 1)
                 )
         else:
             scenes[current]["actions"].append(line)

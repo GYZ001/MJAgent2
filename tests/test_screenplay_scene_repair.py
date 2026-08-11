@@ -657,6 +657,127 @@ def test_empty_dialogue_scene_id_explicitly_allows_semantic_fallback() -> None:
     assert _scene_character_errors(script) == []
 
 
+def _run_3f05c2a0fedd_sc03_parser_script() -> tuple[EpisodeScreenplay, dict]:
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/run_3f05c2a0fedd_narrator_scene_regression.json"
+        ).read_text(encoding="utf-8"),
+    )
+    regression = fixture["sc03_parser_regression"]
+    script = _run_3f05c2a0fedd_environment_script()
+    base = script.scene_outline[0]
+    script.scene_outline = [
+        base.model_copy(update={
+            "scene_no": 1,
+            "scene_heading": "【场1】四月黄昏 / 大青山高空",
+        }),
+        base.model_copy(update={
+            "scene_no": 2,
+            "scene_heading": "【场2】四月黄昏 / 大青山山顶",
+        }),
+        base.model_copy(update={
+            "scene_no": 3,
+            "scene_heading": "【场3】四月黄昏 / 大青山山顶",
+            "characters": ["孟浩"],
+            "story_function": "孟浩回想科举落榜后的生计困境",
+            "summary": "孟浩面对连续落榜的现实，心中的迷茫与生计压力不断加深。",
+        }),
+    ]
+    script.full_script_text = (
+        "【场1】四月黄昏 / 大青山高空\n群山在暮色中延伸。\n"
+        "【场2】四月黄昏 / 大青山山顶\n山风掠过岩石。\n"
+        f'【场3】四月黄昏 / 大青山山顶\n{regression["action_prose"]}\n'
+        f'{regression["authoritative_dialogue"]}'
+    )
+    script.dialogue_chains = [KeyDialogueChain(
+        chain_id="DC3",
+        scene_id="SC03",
+        topic="孟浩落榜后的迷茫",
+        turns=[KeyDialogueTurn(
+            speaker="孟浩",
+            line="又落榜了……",
+            source_text="又落榜了……",
+        )],
+    )]
+    script.voice_bible = [VoiceCanonical(
+        speaker_id="孟浩",
+        voice_canonical="清瘦书生的稳定声线",
+        role_type="named_character",
+    )]
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": script.id,
+        "identity_contracts": [{
+            "identity_id": "person-menghao",
+            "display_name": "孟浩",
+            "kind": "named_character",
+            "visual_policy": "canonical",
+            "visual_canonical": "青色文士长衫的清瘦书生",
+            "asset_requirement": "required",
+            "voice_ids": ["孟浩"],
+        }],
+        "scene_contracts": [
+            {"scene_id": "SC01"},
+            {"scene_id": "SC02"},
+            {"scene_id": "SC03"},
+        ],
+    })
+    return script, regression
+
+
+def test_run_3f05c2a0fedd_sc03_action_colon_does_not_create_speaker() -> None:
+    from app.production.screenplay_document import rederive_projections
+
+    script, regression = _run_3f05c2a0fedd_sc03_parser_script()
+
+    document = rederive_projections(screenplay_to_document(script))
+    scene = document.scene_blocks[2]
+
+    assert regression["action_prose"] in [item.text for item in scene.action_blocks]
+    assert [turn.speaker for turn in scene.dialogue_turns] == ["孟浩"]
+    assert _scene_character_errors(script) == []
+
+
+def test_known_speaker_chinese_colon_remains_dialogue() -> None:
+    from app.production.screenplay_document import rederive_projections
+
+    script, _regression = _run_3f05c2a0fedd_sc03_parser_script()
+
+    document = rederive_projections(screenplay_to_document(script))
+
+    assert [
+        (turn.speaker, turn.line)
+        for turn in document.scene_blocks[2].dialogue_turns
+    ] == [("孟浩", "又落榜了……")]
+
+
+def test_explicit_unknown_dialogue_reaches_typed_identity_failure() -> None:
+    from app.production.screenplay_document import rederive_projections
+
+    script, regression = _run_3f05c2a0fedd_sc03_parser_script()
+    script.full_script_text += f'\n{regression["invalid_unknown_dialogue"]}'
+
+    document = rederive_projections(screenplay_to_document(script))
+    speakers = [turn.speaker for turn in document.scene_blocks[2].dialogue_turns]
+
+    assert speakers == ["孟浩", "青衣人"]
+    errors = _scene_character_errors(script)
+    assert any("缺少结构化权威" in error and "青衣人" in error for error in errors)
+
+
+def test_unowned_action_prose_colon_remains_action() -> None:
+    from app.production.screenplay_document import _parse_full_script_scenes
+
+    _script, regression = _run_3f05c2a0fedd_sc03_parser_script()
+    parsed = _parse_full_script_scenes(
+        f'【场3】四月黄昏 / 大青山山顶\n{regression["action_prose"]}',
+        known_speakers={"孟浩": "孟浩"},
+    )
+
+    assert parsed[3]["turns"] == []
+    assert parsed[3]["actions"] == [regression["action_prose"]]
+
+
 def test_legal_offscreen_voice_stays_out_of_scene_characters() -> None:
     script = _run_3f05c2a0fedd_environment_script()
     script.narrative_plan = NarrativeContinuityPlan.model_validate({
