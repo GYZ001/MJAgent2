@@ -1481,8 +1481,10 @@ def test_run_64a_fixture_projects_only_picture_sources_end_to_end() -> None:
         source_id not in serialized_picture for source_id in audit_source_ids
     )
     assert any(
-        {"SRC0058", "SRC0059"}.intersection(event.source_segment_ids)
-        for event in projected.narrative_plan.events
+        {"SRC0058", "SRC0059"}.intersection(
+            action.action_agency.source_segment_ids
+        )
+        for action in projected.narrative_plan.atomic_actions
     )
 
 

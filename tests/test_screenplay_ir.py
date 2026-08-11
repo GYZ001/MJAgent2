@@ -2595,6 +2595,30 @@ def test_recovery_accepts_legal_current_ir_artifact() -> None:
     assert tuple(row) == ("candidate", None)
 
 
+def test_recovery_marks_current_ir_without_source_audit_contract_stale() -> None:
+    episode_id = "ep-ir-contract-v3-audit-missing"
+    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
+    payload.pop("source_audit_annotations")
+    run_id, step_id, artifact = _persist_recoverable_ir(
+        episode_id=episode_id,
+        input_fingerprint="ir-contract-v3-audit-missing",
+        contract_version=stages.IR_VERSION,
+        payload=payload,
+    )
+
+    with bind_trace(run_id, step_id):
+        recovered = stages._recover_screenplay_ir_candidate(episode_id)
+
+    assert recovered is None
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert "ARTIFACT_NEEDS_REBUILD" in row["stale_reason"]
+    assert "source_audit_annotations" in row["stale_reason"]
+
+
 def test_recovery_marks_structurally_complete_legacy_ir_for_rebuild() -> None:
     episode_id = "ep-ir-contract-v1-complete"
     run_id, step_id, artifact = _persist_recoverable_ir(
