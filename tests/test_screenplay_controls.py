@@ -37,6 +37,7 @@ from app.screenplay_scene_shards import (
     ScreenplaySceneShardOwnershipLost,
     _assert_episode_owner,
     blueprint_content_hash,
+    persist_identity_registry,
 )
 from app.screenplay_ir import IR_VERSION, ScreenplayGenerationIR
 from tests.test_narrative_continuity import _screenplay
@@ -503,6 +504,32 @@ def test_baseline_rebuild_records_identity_only_as_reused_input() -> None:
         assert key not in checkpoint
 
 
+def test_reused_identity_is_rebound_to_the_new_blueprint_artifact() -> None:
+    authority = _current_checkpoint_artifacts()
+    blueprint_value = NarrativeBlueprint(episode_no=1, nodes=[])
+    new_blueprint = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=blueprint_value.model_dump(mode="json"),
+        contract_version=BLUEPRINT_VERSION,
+    ))
+
+    rebound_id = persist_identity_registry(
+        episode_id="e1",
+        identity_registry=[],
+        identity_registry_hash=str(authority["identity_hash"]),
+        parent_artifact_ids=[new_blueprint["id"]],
+    )
+
+    assert rebound_id != authority["identity"]["id"]
+    rebound = repository.get_artifact(rebound_id)
+    assert rebound is not None
+    assert rebound["parent_artifact_ids"] == [new_blueprint["id"]]
+
+
 def test_production_state_distinguishes_technical_failure_from_pause() -> None:
     revision = ensure_production_revision(
         episode_id="e1",
@@ -956,24 +983,24 @@ def test_screenplay_generation_preflight_sizes_source_without_side_effects() -> 
         kind="screenplay",
         resume=False,
     )
+    authority = _current_checkpoint_artifacts()
+    current_shard = _current_shard_artifact(
+        authority,
+        shard_id="SS001",
+        generation_scaffold_hash="generation:SS001",
+    )
     save_checkpoint(revision.id, {
-        "blueprint_hash": "blueprint-v1",
-        "identity_registry_hash": "identity-v1",
+        "blueprint_artifact_id": authority["blueprint"]["id"],
+        "identity_artifact_id": authority["identity"]["id"],
+        "blueprint_hash": authority["blueprint_hash"],
+        "identity_registry_hash": authority["identity_hash"],
+        "shards": [{
+            "shard_id": "SS001",
+            "status": "validated",
+            "normalized_artifact_id": current_shard["id"],
+            "generation_scaffold_hash": "generation:SS001",
+        }],
     })
-    repository.create_artifact(EvidenceArtifact(
-        type="screenplay_scene_shard",
-        scope_type="episode",
-        scope_id="e1",
-        status="validated",
-        trust_level="T1",
-        content=_v8_shard_content(
-            shard_id="SS001",
-            generation_scaffold_hash="generation:SS001",
-            blueprint_hash="blueprint-v1",
-            identity_registry_hash="identity-v1",
-        ),
-        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
-    ))
     repository.create_artifact(EvidenceArtifact(
         type="screenplay_scene_shard",
         scope_type="episode",
@@ -1652,7 +1679,7 @@ def test_recovery_rebases_obsolete_contract_revision(monkeypatch) -> None:
         "FROM episodes WHERE id='e1'",
     ).fetchone()
     assert episode["screenplay_status"] == "queued"
-    assert episode["screenplay_error"].startswith("重建当前合同首版已排队")
+    assert episode["screenplay_error"].startswith("按新合同重建剧本已排队")
     assert episode["active_screenplay_run_id"] == "run-current-contract"
     revisions = conn.execute(
         "SELECT id,status,baseline_generation_count FROM production_revisions "
@@ -1734,7 +1761,7 @@ def test_recovery_rebases_legacy_working_artifact(
         "FROM episodes WHERE id='e1'",
     ).fetchone()
     assert episode["screenplay_status"] == "queued"
-    assert episode["screenplay_error"].startswith("重建当前合同首版已排队")
+    assert episode["screenplay_error"].startswith("按新合同重建剧本已排队")
     assert episode["active_screenplay_run_id"] == "run-rebuilt"
     stale = conn.execute(
         "SELECT status,stale_reason FROM artifacts WHERE id=?",
