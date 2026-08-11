@@ -28,6 +28,8 @@ from app.schemas import (
     Bible,
     EpisodeScreenplay,
     IdentityContractEvidence,
+    KeyDialogueChain,
+    KeyDialogueTurn,
     NarrativeContinuityPlan,
     NarrativeEvent,
     NarrativeIdentityContract,
@@ -75,6 +77,20 @@ def _script(story_function: str = "升级") -> EpisodeScreenplay:
         obstacle="测验结果与围观者嘲讽构成双重压力",
         stakes="失败将令萧炎失去家族中的最后尊严",
         key_lines=["测验员：斗之力，三段！"],
+        dialogue_chains=[
+            KeyDialogueChain(
+                chain_id="DC1",
+                topic="公开测验结果并改变萧炎处境",
+                turns=[
+                    KeyDialogueTurn(
+                        speaker="测验员",
+                        line="斗之力，三段！",
+                        function="announcement",
+                        source_text="斗之力，三段！",
+                    ),
+                ],
+            ),
+        ],
         key_plot_points=["测验结果公开，萧炎遭到嘲讽"],
         scene_outline=[ScriptScene(
             scene_no=1,
