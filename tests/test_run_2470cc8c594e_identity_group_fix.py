@@ -473,6 +473,16 @@ def test_structural_coverage_reuses_only_current_contract_cache(
             json.dumps(payload, ensure_ascii=False), 2.0,
         ),
     )
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? "
+        "WHERE id='ep_711b29204aa9'",
+        (json.dumps([{
+            "source_label": "虎头虎脑的少年",
+            "canonical_name": "虎头虎脑的少年",
+            "resolution": "functional_identity",
+            "identity_group": "current-1:F1",
+        }], ensure_ascii=False),),
+    )
     conn.commit()
     monkeypatch.setattr(portraits, "get_conn", lambda: conn)
 
@@ -491,6 +501,68 @@ def test_structural_coverage_reuses_only_current_contract_cache(
 
     assert result["reused"] is True
     assert result["candidates"] == cached_candidates
+
+
+def test_structural_cache_surviving_resolution_reset_is_rematerialized(
+    monkeypatch,
+) -> None:
+    conn = _coverage_cache_conn()
+    source_text = "虎头虎脑的少年站在山门前。"
+    evidence = [{
+        "identity_key": "大青山被困少年1",
+        "source_segment_ids": ["SRC0001"],
+        "usage": "visible",
+        "node_key": "S001-N001",
+    }]
+    cached_alias = [{
+        "name": "大青山被困少年1",
+        "source_label": "大青山被困少年1",
+        "identity_kind": "functional",
+        "identity_group": "current-1:F1",
+    }]
+    payload = _structural_cache_payload(
+        source_text,
+        evidence,
+        contract_version=portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        policy_version=portraits.STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        candidates=cached_alias,
+    )
+    conn.execute(
+        "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?)",
+        (
+            "art-current", "episode", "ep_711b29204aa9",
+            "screenplay_identity_discovery", "validated",
+            json.dumps(payload, ensure_ascii=False), 2.0,
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(portraits, "get_conn", lambda: conn)
+    calls = 0
+
+    async def fake_audit(candidates, **_kwargs):
+        nonlocal calls
+        calls += 1
+        assert candidates == []
+        return []
+
+    monkeypatch.setattr(
+        portraits,
+        "audit_identity_coverage_from_structural_evidence",
+        fake_audit,
+    )
+    monkeypatch.setattr(
+        portraits.evidence_repository,
+        "create_artifact",
+        lambda *_args, **_kwargs: {"id": "art-new"},
+    )
+
+    result = asyncio.run(portraits.ensure_structural_identity_coverage(
+        "proj", "ep_711b29204aa9", 1, source_text,
+        _empty_bible(), evidence,
+    ))
+
+    assert calls == 1
+    assert "reused" not in result
 
 
 def test_stale_structural_cache_is_neither_reused_nor_used_as_base(

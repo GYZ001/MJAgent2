@@ -605,6 +605,12 @@ def test_current_screenplay_artifact_complete_lineage_loads() -> None:
     ))
 
     restored = load_screenplay_from_artifact(artifact["id"])
+    assert_screenplay_matches_validated_v6_source(
+        episode_id=case["episode_id"],
+        artifact=evidence_repository.get_artifact(artifact["id"]),
+        screenplay=restored,
+        conn=conn,
+    )
 
     assert restored.narrative_plan is not None
 
@@ -2084,6 +2090,92 @@ def test_legacy_contract_fingerprint_ignores_composed_projection_fields() -> Non
 
     assert "bible_projection_hash" not in before
     assert after == before
+
+
+def test_legacy_nonempty_resolution_certificate_keeps_raw_v1_fingerprint() -> None:
+    _published_case()
+    conn = db.get_conn()
+    legacy_rows = [{
+        "source_label": "青衣人",
+        "canonical_name": "青衣人",
+        "resolution": "functional_identity",
+        "identity_group": "current-1:F1",
+    }]
+    raw = json.dumps(legacy_rows, ensure_ascii=False, separators=(",", ":"))
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? "
+        "WHERE id='episode-generic'",
+        (raw,),
+    )
+    conn.commit()
+
+    material = screenplay_authority_material(
+        "episode-generic",
+        contract_version="3.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    before = screenplay_authority_fingerprint(
+        "episode-generic",
+        contract_version="3.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+    from app.portraits import load_screenplay_character_resolutions
+
+    normalized = load_screenplay_character_resolutions(conn, "episode-generic")
+    after = screenplay_authority_fingerprint(
+        "episode-generic",
+        contract_version="3.0.0",
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
+    )
+
+    assert material["character_resolutions"] == legacy_rows
+    assert normalized[0]["authority_id"].startswith("functional:")
+    assert before == after
+
+
+def test_recovery_compile_receives_normalized_resolution_projection(
+    monkeypatch,
+) -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    raw_rows = [{
+        "source_label": "旧称谓",
+        "canonical_name": "旧称谓",
+        "resolution": "functional_identity",
+        "identity_group": "current-1:F1",
+    }]
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions=? WHERE id=?",
+        (json.dumps(raw_rows, ensure_ascii=False), case["episode_id"]),
+    )
+    conn.commit()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[case["merged_artifact_id"]],
+        contract_version="4.0.0",
+    ))
+    captured: dict = {}
+
+    def capture_compile(_merged_ir, *, episode, source_text, bible):
+        captured["episode"] = episode
+        return case["compiled"].model_copy(deep=True)
+
+    monkeypatch.setattr(
+        "app.screenplay_ir.compile_screenplay_ir",
+        capture_compile,
+    )
+
+    restored = load_screenplay_from_artifact(artifact["id"])
+
+    assert restored.id == case["compiled"].id
+    assert captured["episode"]["character_resolutions"][0]["authority_id"].startswith(
+        "functional:"
+    )
 
 
 @pytest.mark.parametrize("extra_drift", [False, True])

@@ -3342,17 +3342,39 @@ async def ensure_structural_identity_coverage(
             and payload.get("structural_evidence_hash") == structural_hash
             and isinstance(payload.get("candidates"), list)
         ):
-            return {
-                "checked": 0,
-                "candidates": payload["candidates"],
-                "added": [],
-                "resolutions": load_screenplay_character_resolutions(
-                    conn, episode_id
-                ),
-                "errors": [],
-                "warnings": [],
-                "reused": True,
+            cached_resolutions = load_screenplay_character_resolutions(
+                conn, episode_id
+            )
+            materialized_keys = {
+                (
+                    str(item.get("source_label") or "").strip(),
+                    str(item.get("identity_group") or "").strip(),
+                )
+                for item in cached_resolutions
+                if isinstance(item, dict)
             }
+            required_keys = {
+                (
+                    str(item.get("source_label") or "").strip(),
+                    str(item.get("identity_group") or "").strip(),
+                )
+                for item in payload["candidates"]
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("source_label") or "").strip()
+                    and str(item.get("identity_group") or "").strip()
+                )
+            }
+            if required_keys <= materialized_keys:
+                return {
+                    "checked": 0,
+                    "candidates": payload["candidates"],
+                    "added": [],
+                    "resolutions": cached_resolutions,
+                    "errors": [],
+                    "warnings": [],
+                    "reused": True,
+                }
         if (
             payload.get("mode") != "structural_coverage"
             and payload.get("contract_version")

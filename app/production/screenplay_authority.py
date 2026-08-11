@@ -449,8 +449,6 @@ def screenplay_authority_material(
             _episode_value(episode, "screenplay_constraint_version", 0) or 0
         ),
     }
-    from app.portraits import load_screenplay_character_resolutions
-
     material = {
         "authority_contract": "screenplay-source-authority.v1",
         "episode_id": episode_id,
@@ -459,8 +457,11 @@ def screenplay_authority_material(
         "source_text_sha256": hashlib.sha256(exact_source.encode("utf-8")).hexdigest(),
         "bible_artifact_id": str(bible_artifact_id or ""),
         "bible_content_hash": bible_hash,
-        "character_resolutions": load_screenplay_character_resolutions(
-            db, episode_id
+        # v1 is an immutable certificate serialization.  Keep the exact
+        # historical rows here; runtime normalization belongs only to compile /
+        # recovery boundaries and must not invalidate an issued fingerprint.
+        "character_resolutions": _decode_list(
+            _episode_value(episode, "screenplay_character_resolutions", "[]")
         ),
         "adaptation_constraints": constraints,
         "contract_version": str(contract_version or ""),
