@@ -468,6 +468,55 @@ def _source_projection_case() -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "semantic_level",
+    ["source", "unit"],
+)
+def test_current_screenplay_artifact_requires_complete_ir_semantics(
+    semantic_level: str,
+) -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    merged = evidence_repository.get_artifact(
+        case["merged_artifact_id"],
+        conn=conn,
+    )
+    assert merged is not None
+    content = deepcopy(merged["content"])
+    if semantic_level == "source":
+        source_id = next(iter(content["source_semantics"]))
+        content["source_semantics"][source_id].pop("projection_policy")
+    else:
+        content["scenes"][0]["units"][0].pop("render_policy")
+    conn.execute(
+        "UPDATE artifacts SET content_json=?,content_hash=? WHERE id=?",
+        (
+            json.dumps(content, ensure_ascii=False),
+            evidence_repository.content_hash(content),
+            merged["id"],
+        ),
+    )
+    conn.commit()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[merged["id"]],
+        contract_version="4.0.0",
+    ))
+
+    with pytest.raises(
+        ValueError,
+        match="ARTIFACT_NEEDS_REBUILD",
+    ) as caught:
+        load_screenplay_from_artifact(artifact["id"])
+
+    assert getattr(caught.value, "code", None) == "ARTIFACT_NEEDS_REBUILD"
+
+
 def _drift_to_contextual_actor(screenplay):
     drifted = screenplay.model_copy(deep=True)
     plan = drifted.narrative_plan

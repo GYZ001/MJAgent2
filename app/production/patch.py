@@ -356,12 +356,14 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
         if parent.get("type") != "screenplay_generation_ir_merged":
             continue
         content = parent.get("content")
-        if (
-            str(parent.get("contract_version") or "")
-            != SCREENPLAY_MERGED_IR_VERSION
-            or not isinstance(content, dict)
-            or str(content.get("format_version") or "") != IR_VERSION
-        ):
+        if str(parent.get("contract_version") or "") != SCREENPLAY_MERGED_IR_VERSION:
+            gaps.append(f"{artifact_id}:contract_version")
+            continue
+        if not isinstance(content, dict):
+            gaps.append(f"{artifact_id}:content")
+            continue
+        if str(content.get("format_version") or "") != IR_VERSION:
+            gaps.append(f"{artifact_id}:format_version")
             continue
         gaps.extend(
             f"{artifact_id}:{path}"
