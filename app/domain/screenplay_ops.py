@@ -1812,13 +1812,10 @@ def _screenplay_generation_preflight(episode_id: str):
                )""",
         (episode_id,),
     ).fetchall()
-    from app.screenplay_scene_shards import (
-        screenplay_scene_shard_artifact_compatibility,
-    )
     from app.production.revision import (
         get_active_production_revision,
         get_production_revision,
-        screenplay_scene_shard_expected_hashes,
+        resolve_screenplay_resume_eligibility,
     )
 
     revision_id = str(ep.get("screenplay_production_revision_id") or "")
@@ -1827,20 +1824,24 @@ def _screenplay_generation_preflight(episode_id: str):
         if revision_id
         else get_active_production_revision(episode_id, "screenplay")
     )
-    expected_blueprint_hash, expected_identity_registry_hash = (
-        screenplay_scene_shard_expected_hashes(revision)
+    eligibility = resolve_screenplay_resume_eligibility(
+        episode_id,
+        revision=revision,
+        conn=conn,
     )
+    reusable_shard_ids = {
+        str(item.get("normalized_artifact_id") or "")
+        for item in eligibility.reusable_checkpoint.get("shards") or []
+        if isinstance(item, dict)
+    }
     reusable_counts: dict[str, int] = {}
     for reusable_row in reusable_rows:
         row = dict(reusable_row)
-        if row["type"] == "screenplay_scene_shard":
-            compatible, _reason = screenplay_scene_shard_artifact_compatibility(
-                row,
-                expected_blueprint_hash=expected_blueprint_hash,
-                expected_identity_registry_hash=expected_identity_registry_hash,
-            )
-            if not compatible:
-                continue
+        if (
+            row["type"] == "screenplay_scene_shard"
+            and str(row["id"]) not in reusable_shard_ids
+        ):
+            continue
         artifact_type = str(row["type"])
         reusable_counts[artifact_type] = (
             reusable_counts.get(artifact_type, 0) + 1

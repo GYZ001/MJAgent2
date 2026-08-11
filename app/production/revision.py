@@ -547,7 +547,7 @@ def resolve_screenplay_resume_eligibility(
     """Resolve one executable recovery mode from persisted structured evidence."""
     from app.errors import ArtifactNeedsRebuildError
     from app.harness.contracts import get_contract
-    from app.production.patch import load_screenplay_from_artifact
+    from app.production.patch import screenplay_from_artifact_record
 
     db = conn or get_conn()
     rev = revision or _row_to_revision(db.execute(
@@ -624,7 +624,8 @@ def resolve_screenplay_resume_eligibility(
     if rev.baseline_done and working_id:
         row = db.execute(
             "SELECT id,type,scope_type,scope_id,status,contract_version,"
-            "content_json,content_hash FROM artifacts WHERE id=?",
+            "content_json,content_hash,parent_artifact_ids_json "
+            "FROM artifacts WHERE id=?",
             (working_id,),
         ).fetchone()
         artifact = dict(row) if row else None
@@ -644,7 +645,13 @@ def resolve_screenplay_resume_eligibility(
             )
         if not known_incompatibility:
             try:
-                load_screenplay_from_artifact(working_id)
+                screenplay_from_artifact_record({
+                    **artifact,
+                    "content": content,
+                    "parent_artifact_ids": list(
+                        _artifact_parent_ids(artifact) or set()
+                    ),
+                })
             except ArtifactNeedsRebuildError as exc:
                 known_incompatibility = True
                 incompatibility_reason = str(exc)

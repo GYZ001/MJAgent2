@@ -336,8 +336,8 @@ def test_unknown_working_validation_error_fails_closed(monkeypatch) -> None:
         working_artifact_id=working["id"],
     )
     monkeypatch.setattr(
-        "app.production.patch.load_screenplay_from_artifact",
-        lambda _artifact_id: (_ for _ in ()).throw(RuntimeError("validator unavailable")),
+        "app.production.patch.screenplay_from_artifact_record",
+        lambda _artifact: (_ for _ in ()).throw(RuntimeError("validator unavailable")),
     )
 
     eligibility = resolve_screenplay_resume_eligibility("e1")
@@ -458,6 +458,8 @@ def test_baseline_rebuild_records_identity_only_as_reused_input() -> None:
         trust_level="T1",
         content=ScreenplayEnvelopeIR(
             episode_no=1,
+            metadata=ScreenplayEnvelopeMetadata(),
+            experience=ScreenplayEnvelopeExperience(),
             blueprint_hash=str(authority["blueprint_hash"]),
             identity_registry_hash=str(authority["identity_hash"]),
         ).model_dump(mode="json"),
@@ -615,7 +617,9 @@ def test_production_state_does_not_count_deleted_checkpoint_artifacts() -> None:
 
     state = screenplay_production_state("e1")
 
-    assert state["can_resume_baseline"] is False
+    assert state["operation"] == "baseline_rebuild"
+    assert state["mode_label"] == "按新合同重建剧本"
+    assert state["can_resume_baseline"] is True
     assert state["has_resumable_baseline"] is False
     assert state["shard_progress"] == {
         "total": 1,
@@ -698,7 +702,8 @@ def test_production_state_rejects_legacy_shard_as_resumable() -> None:
 
     state = screenplay_production_state("e1")
 
-    assert state["can_resume_baseline"] is False
+    assert state["operation"] == "baseline_rebuild"
+    assert state["can_resume_baseline"] is True
     assert state["has_resumable_baseline"] is False
     assert state["shard_progress"]["validated"] == 0
 
@@ -748,7 +753,8 @@ def test_production_state_rejects_shard_authority_hash_mismatch(
     state = screenplay_production_state("e1")
 
     assert state["has_resumable_baseline"] is False
-    assert state["can_resume_baseline"] is False
+    assert state["operation"] == "baseline_rebuild"
+    assert state["can_resume_baseline"] is True
     assert state["shard_progress"]["validated"] == 0
 
 
@@ -785,7 +791,8 @@ def test_production_state_requires_expected_shard_authority_hashes() -> None:
     state = screenplay_production_state("e1")
 
     assert state["has_resumable_baseline"] is False
-    assert state["can_resume_baseline"] is False
+    assert state["operation"] == "baseline_rebuild"
+    assert state["can_resume_baseline"] is True
     assert state["shard_progress"]["validated"] == 0
 
 
