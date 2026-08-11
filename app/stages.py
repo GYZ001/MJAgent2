@@ -5412,11 +5412,36 @@ async def _generate_screenplay_scene_sharded_baseline(
                 list(episode.get("character_resolutions") or []),
             )
         )
+        from app.production.revision import get_active_production_revision
+
+        active_revision = get_active_production_revision(
+            episode_id,
+            "screenplay",
+        )
+        reused_identity = (
+            (active_revision.checkpoint_json or {})
+            .get("reused_inputs", {})
+            .get("identity_registry", {})
+            if active_revision is not None
+            else {}
+        )
+        reused_identity_id = str(
+            reused_identity.get("artifact_id") or ""
+        )
+        reused_identity_hash = str(
+            reused_identity.get("identity_registry_hash") or ""
+        )
+        identity_parents = [blueprint_artifact_id]
+        if (
+            reused_identity_id
+            and reused_identity_hash == registry_hash_value
+        ):
+            identity_parents.append(reused_identity_id)
         artifact_id_value = persist_identity_registry(
             episode_id=episode_id,
             identity_registry=registry_value,
             identity_registry_hash=registry_hash_value,
-            parent_artifact_ids=[blueprint_artifact_id],
+            parent_artifact_ids=identity_parents,
         )
         return (
             identities_value,

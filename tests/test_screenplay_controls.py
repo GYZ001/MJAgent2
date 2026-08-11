@@ -521,13 +521,19 @@ def test_reused_identity_is_rebound_to_the_new_blueprint_artifact() -> None:
         episode_id="e1",
         identity_registry=[],
         identity_registry_hash=str(authority["identity_hash"]),
-        parent_artifact_ids=[new_blueprint["id"]],
+        parent_artifact_ids=[
+            new_blueprint["id"],
+            authority["identity"]["id"],
+        ],
     )
 
     assert rebound_id != authority["identity"]["id"]
     rebound = repository.get_artifact(rebound_id)
     assert rebound is not None
-    assert rebound["parent_artifact_ids"] == [new_blueprint["id"]]
+    assert rebound["parent_artifact_ids"] == [
+        new_blueprint["id"],
+        authority["identity"]["id"],
+    ]
 
 
 def test_production_state_distinguishes_technical_failure_from_pause() -> None:

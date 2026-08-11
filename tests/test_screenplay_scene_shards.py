@@ -2022,9 +2022,45 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         identity_registry_hash="identity-hash",
     )
     episode_id = "ep-scene-shard-cache-test"
+    blueprint_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content=blueprint.model_dump(mode="json"),
+        contract_version=blueprint.format_version,
+    ))
+    identity_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_identity_registry",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content={
+            "contract_version": "screenplay-identity-registry.v1",
+            "identity_registry_hash": "identity-hash",
+            "identities": [],
+        },
+        parent_artifact_ids=[blueprint_artifact["id"]],
+        contract_version="screenplay-identity-registry.v1",
+    ))
     cached_ids: list[str] = []
     for plan in plans:
         shard = _shard(plan, blueprint)
+        raw = evidence_repository.create_artifact(EvidenceArtifact(
+            type="screenplay_scene_shard_raw",
+            scope_type="episode",
+            scope_id=episode_id,
+            status="candidate",
+            trust_level="T0",
+            content={"shard_id": plan.shard_id, "attempts": []},
+            parent_artifact_ids=[
+                blueprint_artifact["id"],
+                identity_artifact["id"],
+            ],
+            contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+        ))
         artifact = evidence_repository.create_artifact(EvidenceArtifact(
             type="screenplay_scene_shard",
             scope_type="episode",
@@ -2032,6 +2068,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
             status="validated",
             trust_level="T1",
             content=shard.model_dump(mode="json"),
+            parent_artifact_ids=[raw["id"]],
             contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
         ))
         cached_ids.append(str(artifact["id"]))
@@ -2052,6 +2089,8 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         identities=_identities(),
         plans=plans,
         scene_input_contracts=scene_input_contracts,
+        blueprint_artifact_id=blueprint_artifact["id"],
+        identity_artifact_id=identity_artifact["id"],
     ))
     assert len(shards) == len(plans)
     assert artifact_ids == cached_ids

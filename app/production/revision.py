@@ -440,6 +440,14 @@ def _screenplay_checkpoint_compatibility(
                 )
                 compatible = bool(
                     compatible
+                    and all(
+                        not str(item.get(key) or "")
+                        or str(item.get(key) or "") == str(content.get(key) or "")
+                        for key in (
+                            "shard_id", "source_hash", "boundary_hash",
+                            "generation_scaffold_hash",
+                        )
+                    )
                     and (
                         artifact_id == str(row.get("id") or "")
                         or (
