@@ -572,30 +572,80 @@ def _two_scene_dialogue_binding_script(*, scene_id: str) -> EpisodeScreenplay:
     return script
 
 
+def _add_two_scene_dialogue_authority(script: EpisodeScreenplay) -> None:
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_scene",
+        "identity_contracts": [
+            {
+                "identity_id": "person-menghao",
+                "display_name": "孟浩",
+                "kind": "named_character",
+                "visual_policy": "canonical",
+                "visual_canonical": "青色文士长衫的清瘦书生",
+                "asset_requirement": "required",
+            },
+            {
+                "identity_id": "person-wangyoucai",
+                "display_name": "王有材",
+                "kind": "named_character",
+                "visual_policy": "canonical",
+                "visual_canonical": "布衣少年",
+                "asset_requirement": "required",
+                "voice_ids": ["王有材"],
+            },
+        ],
+        "scene_contracts": [
+            {"scene_id": "SC01"},
+            {"scene_id": "SC02"},
+        ],
+    })
+    script.voice_bible = [VoiceCanonical(
+        speaker_id="王有材",
+        voice_canonical="急促紧张的少年声线",
+        role_type="named_character",
+    )]
+
+
 def test_dialogue_scene_id_wins_when_prose_semantics_conflict() -> None:
-    document = screenplay_to_document(
-        _two_scene_dialogue_binding_script(scene_id="SC02"),
-    )
+    script = _two_scene_dialogue_binding_script(scene_id="SC02")
+    _add_two_scene_dialogue_authority(script)
+    document = screenplay_to_document(script)
 
     result = document_to_screenplay(document)
 
     assert "王有材：救命啊！" not in result.full_script_text.split("【场2】")[0]
     assert "【场2】日 / 山洞\n山洞深处传来回声。\n王有材：救命啊！" in result.full_script_text
+    # The stale prose occurrence under SC01 is not a second authority claim.
+    assert _scene_character_errors(script) == []
 
 
 def test_invalid_dialogue_scene_id_fails_typed_instead_of_guessing() -> None:
     from app.production.screenplay_document import DialogueSceneBindingError
+    from app.validators import validate_screenplay
 
-    document = screenplay_to_document(
-        _two_scene_dialogue_binding_script(scene_id="SC99"),
-    )
+    script = _two_scene_dialogue_binding_script(scene_id="SC99")
+    _add_two_scene_dialogue_authority(script)
+    document = screenplay_to_document(script)
 
     with pytest.raises(DialogueSceneBindingError, match="SC99"):
         document_to_screenplay(document)
+    errors = validate_screenplay(
+        script,
+        Bible(characters=[], world=World(visual_style_canonical="国风")),
+        expected_beats=2,
+        episode_no=1,
+        require_dialogue_chains=False,
+        validate_narrative=False,
+    )
+    assert any(
+        error.startswith("[DIALOGUE_SCENE_BINDING_INVALID]") and "SC99" in error
+        for error in errors
+    )
 
 
 def test_empty_dialogue_scene_id_explicitly_allows_semantic_fallback() -> None:
     script = _two_scene_dialogue_binding_script(scene_id="")
+    _add_two_scene_dialogue_authority(script)
     script.full_script_text = (
         "【场1】日 / 山顶\n孟浩独自坐在山顶。\n"
         "【场2】日 / 山洞\n山洞里的求救声在石壁间回荡。"
@@ -604,6 +654,7 @@ def test_empty_dialogue_scene_id_explicitly_allows_semantic_fallback() -> None:
     result = document_to_screenplay(screenplay_to_document(script))
 
     assert "王有材：救命啊！" in result.full_script_text.split("【场2】")[1]
+    assert _scene_character_errors(script) == []
 
 
 def test_legal_offscreen_voice_stays_out_of_scene_characters() -> None:
