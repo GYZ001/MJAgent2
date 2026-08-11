@@ -169,6 +169,80 @@ async def test_project_receipt_recovers_exact_first_episode_after_process_loss(
 
 
 @pytest.mark.asyncio
+async def test_project_receipt_resumes_prepared_first_episode_before_success(
+    project_db,
+    monkeypatch,
+) -> None:
+    _owner, body = _claim_project()
+    body["episode_ids"] = ["e1"]
+    exact_result = {
+        "status": "accepted",
+        "run_id": "prepared-run-e1",
+        "completion_grant_id": "prepared-grant-e1",
+    }
+    starts = 0
+
+    async def crash_before_child_spawn(_episode_id: str, child_body: dict) -> dict:
+        nonlocal starts
+        starts += 1
+        operations.bind_video_command_operation(
+            command=str(child_body["operation_command"]),
+            idempotency_key=str(child_body["idempotency_key"]),
+            request_fingerprint=str(child_body["operation_request_fingerprint"]),
+            claim_token=str(child_body["operation_claim_token"]),
+            binding={
+                "phase": "durable_run_installed",
+                "run_id": exact_result["run_id"],
+                "result": exact_result,
+                "spawn": {
+                    "episode_id": "e1",
+                    "project_id": "p",
+                    "grant_id": exact_result["completion_grant_id"],
+                },
+            },
+            conn=project_db,
+            merge=True,
+        )
+        project_db.commit()
+        raise _ProcessCrash()
+
+    monkeypatch.setattr(api, "_complete_episode_core", crash_before_child_spawn)
+    monkeypatch.setattr(api.task_registry, "active", lambda *_args: False)
+    with pytest.raises(_ProcessCrash):
+        await api._complete_project_videos_core("p", body)
+
+    _expire_receipts(project_db)
+    replacement_owner, replacement_body = _claim_project()
+    replacement_body.update(body)
+    replacement_body["operation_claim_token"] = replacement_owner
+    resumed: list[dict] = []
+
+    def resume_prepared(episode_id: str, child_body: dict, prepared: dict) -> dict:
+        assert episode_id == "e1"
+        assert child_body["budget_cap_cny"] == 40.0
+        assert prepared["_resume_prepared"] is True
+        resumed.append(prepared)
+        return dict(prepared["result"])
+
+    monkeypatch.setattr(
+        api,
+        "_resume_prepared_complete_episode_operation",
+        resume_prepared,
+    )
+    result = await api._complete_project_videos_core("p", replacement_body)
+
+    assert starts == 1
+    assert len(resumed) == 1
+    assert result["started"][0]["run_id"] == "prepared-run-e1"
+    child_receipt = project_db.execute(
+        """SELECT status,result_json FROM video_command_operation_receipts
+           WHERE operation_key='video.complete_episode:project-op:episode:e1'"""
+    ).fetchone()
+    assert child_receipt["status"] == "succeeded"
+    assert json.loads(child_receipt["result_json"]) == exact_result
+
+
+@pytest.mark.asyncio
 async def test_project_receipt_reuses_exact_queue_run_after_spawn_process_loss(
     project_db,
     monkeypatch,

@@ -207,17 +207,15 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
     installed_before_crash: bool,
 ) -> None:
     """No second workflow may appear around create/install/receipt crash windows."""
-    from app import completion_grant
-    from app.domain import common as domain_common
-    from app.domain import video_ops
+    from app import api, completion_grant
     from app.orchestration.engine import fingerprint
 
     conn = _full_conn()
     monkeypatch.setattr(operations, "get_conn", lambda: conn)
-    monkeypatch.setattr(video_ops, "get_conn", lambda: conn)
-    monkeypatch.setattr(domain_common, "get_conn", lambda: conn)
-    monkeypatch.setattr(video_ops, "_assert_storyboard_generation_gate", lambda *_: None)
-    monkeypatch.setattr(video_ops.task_registry, "active", lambda *_: False)
+    monkeypatch.setattr(api, "get_conn", lambda: conn)
+    monkeypatch.setattr(api, "_review_assert_positive_action", lambda *_: {})
+    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_: None)
+    monkeypatch.setattr(api.task_registry, "active", lambda *_: False)
     spawned: list[str] = []
 
     def fake_spawn(_kind, key, coro, *, project_id=None):
@@ -226,7 +224,7 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
         coro.close()
         return object()
 
-    monkeypatch.setattr(video_ops.task_registry, "spawn", fake_spawn)
+    monkeypatch.setattr(api.task_registry, "spawn", fake_spawn)
     grant = SimpleNamespace(
         grant_id="grant-exact",
         budget_cap_cny=100.0,
@@ -276,7 +274,7 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
     )
     conn.commit()
 
-    result = await video_ops._complete_episode_core(
+    result = await api._complete_episode_core(
         "ep-1",
         {
             "mode": "fresh",
@@ -298,6 +296,85 @@ async def test_completion_reuses_exact_run_across_pre_binding_crash(
     ).fetchone()
     assert receipt["status"] == "running"
     assert json.loads(receipt["binding_json"])["operation_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_caught_spawn_failure_is_exact_terminal_failure(monkeypatch) -> None:
+    from app import api, completion_grant
+    import app.evidence.repository as evidence_repository
+    import app.orchestration.engine as orchestration_engine
+    import app.orchestration.state_machine as state_machine
+
+    conn = _full_conn()
+    for module in (
+        operations,
+        api,
+        evidence_repository,
+        orchestration_engine,
+        state_machine,
+    ):
+        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    monkeypatch.setattr(api, "_review_assert_positive_action", lambda *_: {})
+    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_: None)
+    monkeypatch.setattr(api.task_registry, "active", lambda *_: False)
+    monkeypatch.setattr(
+        api.task_registry,
+        "spawn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("spawn rejected")),
+    )
+    grant = SimpleNamespace(
+        grant_id="grant-failed",
+        budget_cap_cny=100.0,
+        wall_clock_cap_s=3600.0,
+        max_fallback_shots=0,
+    )
+    monkeypatch.setattr(
+        completion_grant,
+        "issue_video_completion_grant",
+        lambda **_kwargs: (grant, None),
+    )
+    owner, _ = operations.claim_video_command_operation(
+        command="video.complete_episode",
+        idempotency_key="failed-op",
+        request_fingerprint="fp-failed-core",
+        scope_type="episode",
+        scope_id="ep-1",
+    )
+
+    with pytest.raises(Exception) as failed:
+        await api._complete_episode_core(
+            "ep-1",
+            {
+                "mode": "fresh",
+                "idempotency_key": "failed-op",
+                "operation_request_fingerprint": "fp-failed-core",
+                "operation_claim_token": owner,
+                "operation_command": "video.complete_episode",
+            },
+        )
+    assert getattr(failed.value, "status_code", None) == 503
+    operations.fail_video_command_operation(
+        command="video.complete_episode",
+        idempotency_key="failed-op",
+        request_fingerprint="fp-failed-core",
+        claim_token=owner,
+    )
+    with pytest.raises(operations.VideoCommandOperationFailed):
+        operations.claim_video_command_operation(
+            command="video.complete_episode",
+            idempotency_key="failed-op",
+            request_fingerprint="fp-failed-core",
+            scope_type="episode",
+            scope_id="ep-1",
+        )
+    new_owner, new_result = operations.claim_video_command_operation(
+        command="video.complete_episode",
+        idempotency_key="new-intent",
+        request_fingerprint="fp-new-intent",
+        scope_type="episode",
+        scope_id="ep-1",
+    )
+    assert new_owner and new_result is None
 
 
 class _PollInput(StandardCommandInput):
