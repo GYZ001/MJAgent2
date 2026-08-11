@@ -215,6 +215,7 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
         resume=False,
     )
     script = _script()
+    script.narrative_plan = NarrativeContinuityPlan(scope_id="ep_scene")
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -283,6 +284,10 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
         lambda *_args, **_kwargs: "authority-test",
     )
     monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", fake_qa)
+    monkeypatch.setattr(
+        "app.portraits.screenplay_unknown_identity_errors",
+        lambda *_args, **_kwargs: [],
+    )
     monkeypatch.setattr("app.stages.generate_screenplay_baseline", forbidden_baseline)
     monkeypatch.setattr(screenplay_repair, "_llm_field_patch", semantic_scene_repair)
     monkeypatch.setattr(
@@ -333,6 +338,7 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
         resume=False,
     )
     script = _script(story_function="建立公开测验冲突并推动萧炎退场")
+    script.narrative_plan = NarrativeContinuityPlan(scope_id="ep_scene")
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -369,6 +375,10 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
         screenplay_repair,
         "run_screenplay_qa",
         lambda *_args, **_kwargs: ([issue], evaluation),
+    )
+    monkeypatch.setattr(
+        "app.portraits.screenplay_unknown_identity_errors",
+        lambda *_args, **_kwargs: [],
     )
     async def no_semantic_candidate(*_args, **_kwargs):
         return []
