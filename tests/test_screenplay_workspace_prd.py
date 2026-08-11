@@ -15,7 +15,12 @@ from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.main import app
-from app.schemas import AtomicAction, NarrativeContinuityPlan
+from app.schemas import (
+    AtomicAction,
+    NarrativeContinuityPlan,
+    NarrativeIdentityContract,
+    VoiceCanonical,
+)
 from tests.conftest import SessionTestClient
 from tests.test_narrative_continuity import _screenplay
 from tests.test_screenplay_edit_save import _seed_episode, _valid_script
@@ -40,7 +45,59 @@ def client():
 
 
 def _manual_publish_narrative_plan() -> NarrativeContinuityPlan:
-    return NarrativeContinuityPlan(scope_id="e1")
+    return NarrativeContinuityPlan.model_validate({
+        "scope_id": "e1",
+        "propositions": [{
+            "proposition_id": "P-identity-gu-yan",
+            "semantic_identity_key": "identity-gu-yan",
+            "canonical_statement": "谷言是本集持续可见且发言的命名角色。",
+            "narrative_domain": "adapted_story",
+            "entity_ids": ["character-gu-yan"],
+        }],
+        "identity_contracts": [NarrativeIdentityContract(
+            identity_id="character-gu-yan",
+            display_name="谷言",
+            kind="named_character",
+            visual_policy="canonical",
+            visual_canonical="黑发青年，深色外套，神情专注",
+            asset_requirement="required",
+            voice_ids=["谷言"],
+            evidence={
+                "proposition_ids": ["P-identity-gu-yan"],
+                "rationale": "剧本场景和对白持续由该命名角色承担。",
+            },
+        ).model_dump(mode="json")],
+    })
+
+
+def _use_passing_manual_publish_qa(monkeypatch) -> None:
+    def passing_qa(*_args, **kwargs):
+        evidence = {}
+        artifact_id = kwargs.get("artifact_id")
+        if artifact_id:
+            revision = db.get_conn().execute(
+                "SELECT input_fingerprint FROM production_revisions "
+                "WHERE working_artifact_id=?",
+                (artifact_id,),
+            ).fetchone()
+            assert revision is not None
+            evidence["authority_input_fingerprint"] = revision["input_fingerprint"]
+        return [], Evaluation(
+            evaluator_type="deterministic",
+            evaluator_name="screenplay_production_qa",
+            evaluator_version="screenplay-qa-gate-2",
+            status="passed",
+            hard_gate_passed=True,
+            evaluation_role="runtime_gate",
+            runtime_blocking=True,
+            score=100,
+            evidence=evidence,
+        )
+
+    monkeypatch.setattr(
+        "app.production.screenplay_repair.run_screenplay_qa",
+        passing_qa,
+    )
 
 
 def test_noop_publish_keeps_artifact_and_downstream() -> None:
@@ -381,9 +438,11 @@ def test_qa_failed_manual_draft_never_publishes() -> None:
 def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanup(
     monkeypatch,
 ) -> None:
+    _use_passing_manual_publish_qa(monkeypatch)
     _seed_episode(with_artifact=True)
     first = _valid_script()
     first.narrative_plan = _manual_publish_narrative_plan()
+    first.voice_bible = [VoiceCanonical(speaker_id="谷言", voice_canonical="稳定男声")]
     first.logline += "（首个正式发布版）"
     first.full_script_text += "\n门外再次响起更重的敲门声。\n谷言把钥匙收进掌心。"
     with enter_handler():
@@ -449,6 +508,8 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
         fail_consumption,
     )
     second = _valid_script()
+    second.narrative_plan = _manual_publish_narrative_plan()
+    second.voice_bible = [VoiceCanonical(speaker_id="谷言", voice_canonical="稳定男声")]
     second.logline += "（不应发布的新版本）"
     second.full_script_text += "\n门外再次响起更重的敲门声。\n谷言没有收下钥匙。"
     with enter_handler(), pytest.raises(
@@ -520,9 +581,11 @@ def test_publish_preserves_files_when_immediate_cleanup_does_not_run(
     from app import artifacts
     from app.evidence import repository
 
+    _use_passing_manual_publish_qa(monkeypatch)
     _seed_episode(with_artifact=True)
     first = _valid_script()
     first.narrative_plan = _manual_publish_narrative_plan()
+    first.voice_bible = [VoiceCanonical(speaker_id="谷言", voice_canonical="稳定男声")]
     first.logline += "（第一版）"
     first.full_script_text += "\n门外再次响起更重的敲门声。\n谷言把钥匙收进口袋。"
     with enter_handler():
@@ -558,6 +621,8 @@ def test_publish_preserves_files_when_immediate_cleanup_does_not_run(
     real_flush = artifacts.flush_media_cleanup_outbox
     monkeypatch.setattr(artifacts, "flush_media_cleanup_outbox", lambda _id: False)
     second = _valid_script()
+    second.narrative_plan = _manual_publish_narrative_plan()
+    second.voice_bible = [VoiceCanonical(speaker_id="谷言", voice_canonical="稳定男声")]
     second.logline += "（第二版）"
     second.full_script_text += "\n门外再次响起更重的敲门声。\n谷言没有收下钥匙。"
     with enter_handler():

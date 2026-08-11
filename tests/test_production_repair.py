@@ -35,6 +35,7 @@ from app.schemas import (
     PlotSpine,
     PlotSpineBeat,
     ScriptScene,
+    VoiceCanonical,
     World,
 )
 
@@ -97,7 +98,29 @@ def _minimal_script(**overrides) -> EpisodeScreenplay:
 
 
 def _recovery_narrative_plan() -> NarrativeContinuityPlan:
-    return NarrativeContinuityPlan(scope_id="ep_p")
+    return NarrativeContinuityPlan.model_validate({
+        "scope_id": "ep_p",
+        "propositions": [{
+            "proposition_id": "P-identity-jia",
+            "semantic_identity_key": "identity-jia",
+            "canonical_statement": "甲是本集持续可见且发言的主角。",
+            "narrative_domain": "adapted_story",
+            "entity_ids": ["character-jia"],
+        }],
+        "identity_contracts": [{
+            "identity_id": "character-jia",
+            "display_name": "甲",
+            "kind": "named_character",
+            "visual_policy": "canonical",
+            "visual_canonical": "测试场地中的稳定主角形象",
+            "asset_requirement": "required",
+            "voice_ids": ["甲"],
+            "evidence": {
+                "proposition_ids": ["P-identity-jia"],
+                "rationale": "剧本场景和对白持续由该命名角色承担。",
+            },
+        }],
+    })
 
 
 def test_post_baseline_checkpoint_keeps_live_recovered_shard_progress() -> None:
@@ -314,6 +337,7 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
     )
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
+    script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1245,6 +1269,7 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
     )
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
+    script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1305,16 +1330,21 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
         },
         source_text="原文",
         bible=Bible(
-            characters=[],
+            characters=[Character(
+                name="甲",
+                role="主角",
+                appearance_canonical="测试场地中的稳定主角形象",
+            )],
             world=World(visual_style_canonical="测试画风"),
         ),
         resume=True,
     )
 
     assert result.title == script.title
-    assert published == [artifact["id"]]
     resumed = screenplay_repair.get_production_revision(revision.id)
     assert resumed is not None
+    assert published == [resumed.working_artifact_id]
+    assert resumed.working_artifact_id != artifact["id"]
     assert resumed.baseline_generation_count == 1
     assert resumed.checkpoint_json["phase"] == "SUCCEEDED"
 
@@ -1334,6 +1364,7 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
     )
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
+    script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1424,7 +1455,7 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
     assert planned > 0
     completed = screenplay_repair.get_production_revision(revision.id)
     assert completed is not None
-    assert completed.working_artifact_id == artifact["id"]
+    assert completed.working_artifact_id
     assert completed.checkpoint_json["phase"] == "WAITING_HUMAN"
 
 
@@ -1500,6 +1531,7 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
     )
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
+    script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
     script.scene_outline[0].characters.append("青衣人")
     script.full_script_text += "\n青衣人：此路不通。"
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
@@ -1573,6 +1605,7 @@ async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
     )
     script = _minimal_script(stakes="失败将失去资格")
     script.narrative_plan = _recovery_narrative_plan()
+    script.voice_bible = [VoiceCanonical(speaker_id="甲", voice_canonical="稳定男声")]
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
