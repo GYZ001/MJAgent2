@@ -2957,6 +2957,97 @@ def _screenplay_recovery_hard_issues(
     return non_waivable_screenplay_issues(issues)
 
 
+def _reusable_recovery_document(
+    *,
+    episode_id: str,
+    content_hash: str,
+    merged_ir_artifact_id: str,
+    merged_content_hash: str,
+    contract_version: str,
+) -> dict[str, Any] | None:
+    """Reuse only an exact deterministic recovery output after a CAS retry."""
+    from app.screenplay_ir import IR_COMPILER_VERSION, IR_VERSION
+    from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM artifacts WHERE type='screenplay_document' "
+        "AND scope_type='episode' AND scope_id=? AND content_hash=? "
+        "AND contract_version=? AND status IN ('candidate','validated','approved') "
+        "ORDER BY created_at DESC",
+        (episode_id, content_hash, contract_version),
+    ).fetchall()
+    for row in rows:
+        artifact = evidence_repository.get_artifact(str(row["id"]), conn=conn)
+        if artifact is None:
+            continue
+        snapshot = artifact.get("model_snapshot") or {}
+        if (
+            {str(value) for value in artifact.get("parent_artifact_ids") or []}
+            != {merged_ir_artifact_id}
+            or snapshot.get("recovery_contract")
+            != "screenplay-working-recovery.v1"
+            or snapshot.get("qa_profile_version")
+            != SCREENPLAY_QA_PROFILE_VERSION
+            or snapshot.get("compiler_version") != IR_COMPILER_VERSION
+            or snapshot.get("generation_contract") != IR_VERSION
+            or snapshot.get("source_merged_content_hash")
+            != merged_content_hash
+            or evidence_repository.content_hash(artifact.get("content"))
+            != content_hash
+        ):
+            continue
+        return artifact
+    return None
+
+
+def _reusable_recovery_evaluation(
+    *,
+    artifact_id: str,
+    artifact_hash: str,
+    input_fingerprint: str,
+) -> dict[str, Any] | None:
+    """Find the exact gate proof already committed before a failed CAS."""
+    from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id,status,hard_gate_passed,runtime_blocking,issues_json,"
+        "evidence_json FROM evaluations WHERE artifact_id=? "
+        "AND evaluator_name='screenplay_production_qa' "
+        "AND evaluator_version=? ORDER BY created_at DESC",
+        (artifact_id, SCREENPLAY_QA_PROFILE_VERSION),
+    ).fetchall()
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence_json"] or "{}")
+            issues = json.loads(row["issues_json"] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            row["status"] in {"failed", "error"}
+            or not bool(row["hard_gate_passed"])
+            or bool(row["runtime_blocking"])
+            or str(evidence.get("artifact_hash") or "") != artifact_hash
+            or str(evidence.get("authority_input_fingerprint") or "")
+            != input_fingerprint
+            or any(
+                isinstance(issue, dict)
+                and (
+                    bool(issue.get("must_fix"))
+                    or bool((issue.get("evidence") or {}).get("must_fix"))
+                    or bool(
+                        (issue.get("evidence") or {}).get("runtime_blocking")
+                    )
+                )
+                for issue in issues
+            )
+        ):
+            continue
+        return {"id": str(row["id"])}
+    return None
+
+
 def _revalidate_or_rebuild_resume_working(
     *,
     episode_id: str,
@@ -2976,7 +3067,12 @@ def _revalidate_or_rebuild_resume_working(
     )
     from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
     from app.production.revision import resolve_screenplay_resume_eligibility
-    from app.screenplay_ir import ScreenplayGenerationIR, compile_screenplay_ir
+    from app.screenplay_ir import (
+        IR_COMPILER_VERSION,
+        IR_VERSION,
+        ScreenplayGenerationIR,
+        compile_screenplay_ir,
+    )
     from app.screenplay_scene_shards import SCREENPLAY_MERGED_IR_VERSION
     from app.validators import normalize_screenplay_candidate
 
@@ -3039,6 +3135,14 @@ def _revalidate_or_rebuild_resume_working(
                 )
                 if str(current_eligibility.reusable_checkpoint.get(key) or "")
             }
+            trusted_parent_ids.update(
+                str(item.get("normalized_artifact_id") or "")
+                for item in (
+                    current_eligibility.reusable_checkpoint.get("shards") or []
+                )
+                if isinstance(item, dict)
+                and str(item.get("normalized_artifact_id") or "")
+            )
             if (
                 merged_artifact is None
                 or merged_artifact.get("type")
@@ -3050,10 +3154,10 @@ def _revalidate_or_rebuild_resume_working(
                 or str(merged_artifact.get("contract_version") or "")
                 != SCREENPLAY_MERGED_IR_VERSION
                 or not trusted_parent_ids
-                or not trusted_parent_ids.issubset({
+                or trusted_parent_ids != {
                     str(value)
                     for value in merged_artifact.get("parent_artifact_ids") or []
-                })
+                }
                 or str(merged_artifact.get("content_hash") or "")
                 != evidence_repository.content_hash(
                     merged_artifact.get("content")
@@ -3123,6 +3227,11 @@ def _revalidate_or_rebuild_resume_working(
                 == contract_version
                 and str(baseline_artifact.get("content_hash") or "")
                 == rebuilt_hash
+                and str(
+                    (baseline_artifact.get("model_snapshot") or {}).get(
+                        "compiler_version"
+                    ) or ""
+                ) == IR_COMPILER_VERSION
                 and {
                     str(value)
                     for value in baseline_artifact.get(
@@ -3134,24 +3243,42 @@ def _revalidate_or_rebuild_resume_working(
                 replacement_artifact = baseline_artifact
                 source_authority_id = merged_ir_id
             else:
-                replacement_artifact = evidence_repository.create_artifact(
-                    EvidenceArtifact(
-                        type="screenplay_document",
-                        scope_type="episode",
-                        scope_id=episode_id,
-                        status="candidate",
-                        trust_level="T1",
-                        content=rebuilt_payload,
-                        parent_artifact_ids=[merged_ir_id],
-                        contract_version=contract_version,
-                        model_snapshot={
-                            "recovery_contract": "screenplay-working-recovery.v1",
-                            "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
-                            "compiler_audit_count": len(compiler_audit),
-                            "source_revision_id": revision.id,
-                        },
-                    )
+                replacement_artifact = _reusable_recovery_document(
+                    episode_id=episode_id,
+                    content_hash=rebuilt_hash,
+                    merged_ir_artifact_id=merged_ir_id,
+                    merged_content_hash=str(
+                        merged_artifact.get("content_hash") or ""
+                    ),
+                    contract_version=contract_version,
                 )
+                if replacement_artifact is None:
+                    from app.observability.tracing import current_trace
+
+                    replacement_artifact = evidence_repository.create_artifact(
+                        EvidenceArtifact(
+                            type="screenplay_document",
+                            scope_type="episode",
+                            scope_id=episode_id,
+                            status="candidate",
+                            trust_level="T1",
+                            content=rebuilt_payload,
+                            parent_artifact_ids=[merged_ir_id],
+                            contract_version=contract_version,
+                            model_snapshot={
+                                "recovery_contract": "screenplay-working-recovery.v1",
+                                "qa_profile_version": SCREENPLAY_QA_PROFILE_VERSION,
+                                "compiler_version": IR_COMPILER_VERSION,
+                                "generation_contract": IR_VERSION,
+                                "source_merged_content_hash": str(
+                                    merged_artifact.get("content_hash") or ""
+                                ),
+                                "compiler_audit_count": len(compiler_audit),
+                                "source_revision_id": revision.id,
+                            },
+                        ),
+                        step_run_id=current_trace().step_run_id,
+                    )
                 source_authority_id = merged_ir_id
         else:
             raise RuntimeError(
@@ -3174,10 +3301,19 @@ def _revalidate_or_rebuild_resume_working(
         raise ScreenplayNarrativeGateError(
             "screenplay recovery replacement 未通过持久化 gate-3 复验"
         )
-    revalidation_row = evidence_repository.create_evaluation(
-        replacement_id,
-        revalidation_evaluation,
+    revalidation_row = _reusable_recovery_evaluation(
+        artifact_id=replacement_id,
+        artifact_hash=replacement_hash,
+        input_fingerprint=input_fingerprint,
     )
+    if revalidation_row is None:
+        from app.observability.tracing import current_trace
+
+        revalidation_row = evidence_repository.create_evaluation(
+            replacement_id,
+            revalidation_evaluation,
+            step_run_id=current_trace().step_run_id,
+        )
     revalidation_evaluation_id = _eval_id_from_create(revalidation_row)
     if not revalidation_evaluation_id:
         raise RuntimeError("screenplay recovery gate-3 复验证据未持久化")
