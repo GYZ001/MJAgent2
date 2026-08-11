@@ -21,6 +21,7 @@ from app.production.revision import (
     ProductionRevisionOwnershipLost,
     ensure_production_revision,
     mark_baseline_generated,
+    rebase_screenplay_revision_for_resume,
     resolve_screenplay_resume_eligibility,
     save_checkpoint,
     screenplay_production_state,
@@ -133,6 +134,16 @@ def _current_checkpoint_artifacts() -> dict[str, object]:
         blueprint_hash=blueprint_hash,
         identity_registry_hash=identity_hash,
     )
+    envelope_raw = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_envelope_raw",
+        scope_type="episode",
+        scope_id="e1",
+        status="candidate",
+        trust_level="T0",
+        content={"attempts": []},
+        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        contract_version=SCREENPLAY_ENVELOPE_VERSION,
+    ))
     envelope = repository.create_artifact(EvidenceArtifact(
         type="screenplay_envelope",
         scope_type="episode",
@@ -140,7 +151,7 @@ def _current_checkpoint_artifacts() -> dict[str, object]:
         status="validated",
         trust_level="T1",
         content=envelope_value.model_dump(mode="json"),
-        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        parent_artifact_ids=[envelope_raw["id"]],
         contract_version=SCREENPLAY_ENVELOPE_VERSION,
     ))
     return {
@@ -152,26 +163,57 @@ def _current_checkpoint_artifacts() -> dict[str, object]:
     }
 
 
-def _current_working_artifact():
-    authority = _current_checkpoint_artifacts()
-    shard = repository.create_artifact(EvidenceArtifact(
-        type="screenplay_scene_shard",
+def _current_shard_artifact(
+    authority: dict[str, object],
+    *,
+    shard_id: str,
+    generation_scaffold_hash: str,
+    source_hash: str = "",
+    boundary_hash: str = "",
+):
+    raw = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard_raw",
         scope_type="episode",
         scope_id="e1",
-        status="validated",
-        trust_level="T1",
-        content=_v8_shard_content(
-            shard_id="SS-working",
-            generation_scaffold_hash="generation:working",
-            blueprint_hash=str(authority["blueprint_hash"]),
-            identity_registry_hash=str(authority["identity_hash"]),
-        ),
+        status="candidate",
+        trust_level="T0",
+        content={
+            "shard_id": shard_id,
+            "attempts": [],
+            "generation_scaffold_hash": generation_scaffold_hash,
+        },
         parent_artifact_ids=[
             authority["blueprint"]["id"],
             authority["identity"]["id"],
         ],
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
+    return repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=_v8_shard_content(
+            shard_id=shard_id,
+            generation_scaffold_hash=generation_scaffold_hash,
+            source_hash=source_hash,
+            boundary_hash=boundary_hash,
+            blueprint_hash=str(authority["blueprint_hash"]),
+            identity_registry_hash=str(authority["identity_hash"]),
+        ),
+        parent_artifact_ids=[raw["id"]],
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+    ))
+
+
+def _current_working_artifact():
+    authority = _current_checkpoint_artifacts()
+    shard = _current_shard_artifact(
+        authority,
+        shard_id="SS-working",
+        generation_scaffold_hash="generation:working",
+    )
     merged_value = ScreenplayGenerationIR(
         format_version=IR_VERSION,
         episode_no=1,
@@ -305,7 +347,40 @@ def test_unknown_working_validation_error_fails_closed(monkeypatch) -> None:
     assert eligibility.resumable is False
 
 
-def test_old_pre_document_contracts_do_not_count_but_identity_can_resume() -> None:
+def test_resume_eligibility_is_strictly_read_only() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    authority = _current_checkpoint_artifacts()
+    save_checkpoint(revision.id, {
+        "phase": "ENVELOPE_GENERATION",
+        "blueprint_artifact_id": authority["blueprint"]["id"],
+        "identity_artifact_id": authority["identity"]["id"],
+        "envelope_artifact_id": authority["envelope"]["id"],
+        "blueprint_hash": authority["blueprint_hash"],
+        "identity_registry_hash": authority["identity_hash"],
+    })
+    conn = db.get_conn()
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        eligibility = resolve_screenplay_resume_eligibility("e1", conn=conn)
+    finally:
+        conn.set_trace_callback(None)
+
+    assert eligibility.mode == "baseline"
+    writes = [
+        statement for statement in statements
+        if statement.lstrip().upper().startswith((
+            "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "COMMIT",
+        ))
+    ]
+    assert writes == []
+
+
+def test_mixed_old_checkpoint_requires_rebuild_and_keeps_identity_as_input() -> None:
     revision = ensure_production_revision(
         episode_id="e1",
         kind="screenplay",
@@ -360,10 +435,70 @@ def test_old_pre_document_contracts_do_not_count_but_identity_can_resume() -> No
 
     eligibility = resolve_screenplay_resume_eligibility("e1")
 
-    assert eligibility.mode == "baseline"
+    assert eligibility.mode == "baseline_rebuild"
+    assert eligibility.revision_action == "rebase"
+    assert eligibility.reason_code == "MIXED_CHECKPOINT_REQUIRES_REBUILD"
     assert eligibility.reusable_checkpoint["identity_artifact_id"] == identity["id"]
     assert "blueprint_artifact_id" not in eligibility.reusable_checkpoint
     assert "merged_ir_artifact_id" not in eligibility.reusable_checkpoint
+
+
+def test_baseline_rebuild_records_identity_only_as_reused_input() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    authority = _current_checkpoint_artifacts()
+    old_envelope = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_envelope",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=ScreenplayEnvelopeIR(
+            episode_no=1,
+            blueprint_hash=str(authority["blueprint_hash"]),
+            identity_registry_hash=str(authority["identity_hash"]),
+        ).model_dump(mode="json"),
+        parent_artifact_ids=[
+            authority["blueprint"]["id"],
+            authority["identity"]["id"],
+        ],
+        contract_version=SCREENPLAY_ENVELOPE_VERSION,
+    ))
+    save_checkpoint(revision.id, {
+        "phase": "ENVELOPE_GENERATION",
+        "blueprint_artifact_id": authority["blueprint"]["id"],
+        "identity_artifact_id": authority["identity"]["id"],
+        "envelope_artifact_id": old_envelope["id"],
+        "blueprint_hash": authority["blueprint_hash"],
+        "identity_registry_hash": authority["identity_hash"],
+    })
+    eligibility = resolve_screenplay_resume_eligibility("e1")
+    conn = db.get_conn()
+    conn.execute("BEGIN IMMEDIATE")
+    rebuilt = rebase_screenplay_revision_for_resume(
+        eligibility,
+        conn=conn,
+    )
+    conn.commit()
+
+    checkpoint = rebuilt.checkpoint_json
+    assert checkpoint["resume_mode"] == "baseline_rebuild"
+    assert checkpoint["phase"] == "BLUEPRINT_GENERATION"
+    assert checkpoint["reused_inputs"]["identity_registry"] == {
+        "artifact_id": authority["identity"]["id"],
+        "identity_registry_hash": authority["identity_hash"],
+    }
+    for key in (
+        "blueprint_artifact_id",
+        "identity_artifact_id",
+        "envelope_artifact_id",
+        "shards",
+        "merged_ir_artifact_id",
+    ):
+        assert key not in checkpoint
 
 
 def test_production_state_distinguishes_technical_failure_from_pause() -> None:
@@ -423,24 +558,11 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
         resume=False,
     )
     authority = _current_checkpoint_artifacts()
-    shard = repository.create_artifact(EvidenceArtifact(
-        type="screenplay_scene_shard",
-        scope_type="episode",
-        scope_id="e1",
-        status="validated",
-        trust_level="T1",
-        content=_v8_shard_content(
-            shard_id="SS001",
-            generation_scaffold_hash="generation:SS001",
-            blueprint_hash=str(authority["blueprint_hash"]),
-            identity_registry_hash=str(authority["identity_hash"]),
-        ),
-        parent_artifact_ids=[
-            authority["blueprint"]["id"],
-            authority["identity"]["id"],
-        ],
-        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
-    ))
+    shard = _current_shard_artifact(
+        authority,
+        shard_id="SS001",
+        generation_scaffold_hash="generation:SS001",
+    )
     save_checkpoint(revision.id, {
         "phase": "SCENE_SHARD_GENERATION",
         "blueprint_artifact_id": authority["blueprint"]["id"],
@@ -510,26 +632,13 @@ def test_production_state_reconciles_recovered_shard_artifact() -> None:
         resume=False,
     )
     authority = _current_checkpoint_artifacts()
-    shard = repository.create_artifact(EvidenceArtifact(
-        type="screenplay_scene_shard",
-        scope_type="episode",
-        scope_id="e1",
-        status="validated",
-        trust_level="T1",
-        content=_v8_shard_content(
-            shard_id="SS006",
-            generation_scaffold_hash="generation:SS006",
-            source_hash="source-6",
-            boundary_hash="boundary-6",
-            blueprint_hash=str(authority["blueprint_hash"]),
-            identity_registry_hash=str(authority["identity_hash"]),
-        ),
-        parent_artifact_ids=[
-            authority["blueprint"]["id"],
-            authority["identity"]["id"],
-        ],
-        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
-    ))
+    shard = _current_shard_artifact(
+        authority,
+        shard_id="SS006",
+        generation_scaffold_hash="generation:SS006",
+        source_hash="source-6",
+        boundary_hash="boundary-6",
+    )
     assert repository.get_artifact(shard["id"]) is not None
     save_checkpoint(revision.id, {
         "phase": "STRUCTURE_VALIDATION",
@@ -748,6 +857,60 @@ async def test_resume_rebases_stale_working_once_and_deduplicates(
         (old_artifact["id"],),
     ).fetchone()
     assert stale["status"] == "stale"
+
+
+def test_rebase_transition_rolls_back_when_task_registration_fails(
+    monkeypatch,
+) -> None:
+    old_revision, old_artifact = _incompatible_working_revision()
+    eligibility = resolve_screenplay_resume_eligibility("e1")
+    conn = db.get_conn()
+
+    class Recorder:
+        run_id = "run-registration-failed"
+        cancelled = False
+
+        def cancel(self, _message: str) -> None:
+            self.cancelled = True
+
+    recorder = Recorder()
+
+    def fail_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(task_registry, "spawn", fail_spawn)
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        api._spawn_screenplay_activation(
+            "e1",
+            recorder,
+            project_id="p1",
+            status="queued",
+            message=eligibility.label,
+            resume_eligibility=eligibility,
+        )
+
+    revisions = conn.execute(
+        "SELECT id,status FROM production_revisions "
+        "WHERE episode_id='e1' ORDER BY created_at",
+    ).fetchall()
+    assert [(row["id"], row["status"]) for row in revisions] == [
+        (old_revision.id, "active"),
+    ]
+    assert conn.execute(
+        "SELECT status FROM artifacts WHERE id=?",
+        (old_artifact["id"],),
+    ).fetchone()["status"] == "candidate"
+    episode = conn.execute(
+        "SELECT screenplay_status,active_screenplay_run_id,"
+        "working_screenplay_artifact_id FROM episodes WHERE id='e1'",
+    ).fetchone()
+    assert dict(episode) == {
+        "screenplay_status": "pending",
+        "active_screenplay_run_id": None,
+        "working_screenplay_artifact_id": old_artifact["id"],
+    }
+    assert recorder.cancelled is True
 
 
 @pytest.mark.asyncio

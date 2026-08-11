@@ -22,6 +22,9 @@ import { paginateItems, paginateManuscript, paginateSpine } from './scriptReader
 
 type EditorSection = 'spine' | 'body' | 'scenes' | 'evidence'
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+type ScreenplayProduction = NonNullable<
+  NonNullable<ReturnType<typeof useScriptEpisode>['data']>['screenplay_production']
+>
 
 type ActionPreview = {
   kind: 'screenplay' | 'screenplay-save'
@@ -68,6 +71,15 @@ const SCREENPLAY_IDENTITY_ERROR_CODES = new Set([
   'screenplay_character_discovery_failed',
   'screenplay_character_identity_unresolved',
 ])
+
+export function screenplayResumeActionLabel(
+  production: ScreenplayProduction | null | undefined,
+): string {
+  if (production?.mode_label) return production.mode_label
+  return production?.can_resume_baseline
+    ? '继续首版场次生成'
+    : '继续完整剧本校验'
+}
 
 function StructuredListActions({
   index,
@@ -563,12 +575,14 @@ export default function ScriptPage() {
         return <button className="btn ghost danger" disabled={busy}
           aria-label={busy ? '停止剧本任务，暂不可用：正在处理上一项操作' : '停止剧本任务'}
           title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止剧本任务</button>
-      case 'resume_screenplay':
+      case 'resume_screenplay': {
+        const resumeLabel = screenplayResumeActionLabel(ep.screenplay_production)
         return <button className="btn primary" disabled={busy}
-          aria-label={busy ? '继续剧本流程，暂不可用：正在处理上一项操作' : '继续剧本流程'}
+          aria-label={busy ? `${resumeLabel}，暂不可用：正在处理上一项操作` : resumeLabel}
           title={busy ? '正在处理上一项操作' : undefined} onClick={resumeRepair}>
-          {canResumeBaseline ? '继续首版场次生成' : '继续完整剧本校验'}
+          {resumeLabel}
         </button>
+      }
       case 'generate_storyboard':
       case 'resume_storyboard':
       case 'view_storyboard':

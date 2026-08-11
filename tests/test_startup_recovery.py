@@ -65,6 +65,9 @@ def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monke
                screenplay_started_at,screenplay_updated_at,created_at
            ) VALUES('e1','p1',1,'Episode','failed','上次失败',10,11,1)"""
     )
+    conn.execute(
+        "UPDATE episodes SET screenplay_status='repairing' WHERE id='e1'"
+    )
     conn.commit()
     parent = _paused_run("screenplay", "episode", "e1")
     conn.execute(
@@ -89,10 +92,18 @@ def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monke
         coro.close()
         raise RuntimeError("event loop unavailable")
 
+    seen: dict[str, object] = {}
+    original_activation = api._spawn_screenplay_activation
+
+    def capture_activation(*args, **kwargs):
+        seen["eligibility"] = kwargs.get("resume_eligibility")
+        return original_activation(*args, **kwargs)
+
     monkeypatch.setattr(task_registry, "active", lambda *_args: False)
     monkeypatch.setattr(task_registry, "spawn", fail_spawn)
     monkeypatch.setattr(api, "_new_screenplay_recorder", lambda *args, **kwargs: recorder)
     monkeypatch.setattr(api, "_recorded_screenplay_task", lambda *args, **kwargs: pending_task())
+    monkeypatch.setattr(api, "_spawn_screenplay_activation", capture_activation)
 
     with pytest.raises(HTTPException) as failed:
         orchestration_api._restart_screenplay_run(parent, "resume")
@@ -104,12 +115,14 @@ def test_screenplay_resume_spawn_failure_restores_previous_state(tmp_path, monke
         "FROM episodes WHERE id='e1'"
     ).fetchone()
     assert dict(row) == {
-        "screenplay_status": "failed",
+        "screenplay_status": "repairing",
         "screenplay_error": "上次失败",
         "screenplay_started_at": 10,
         "screenplay_updated_at": 11,
     }
     assert recorder.cancel_message == "任务未能启动，剧集状态已回滚"
+    assert seen["eligibility"].mode == "baseline"
+    assert seen["eligibility"].revision_action == "none"
 
 
 def test_reference_spawn_failures_restore_project_state(tmp_path, monkeypatch) -> None:
