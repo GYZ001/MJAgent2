@@ -95,6 +95,18 @@ function newId(prefix: string) {
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
 }
 
+const completionOperationStorageKey = (episodeId: string) =>
+  `manju:video-completion-operation:${episodeId}`
+
+export function persistentCompletionOperationKey(episodeId: string): string {
+  const storageKey = completionOperationStorageKey(episodeId)
+  const existing = localStorage.getItem(storageKey)
+  if (existing) return existing
+  const created = newId(`video-complete:${episodeId}`)
+  localStorage.setItem(storageKey, created)
+  return created
+}
+
 export function reviewWallPositionKey(
   projectId: string | null,
   episodeId: string | null,
@@ -722,6 +734,16 @@ export default function WallPage() {
         ? context.upstream.blockers.join('；') || '当前生成资格未通过'
         : ''
   const supervisorTaskRunning = ep?.video_supervisor?.task_running === true
+  useEffect(() => {
+    if (
+      ep?.id
+      && ep.video_supervisor?.finished_at
+      && ep.video_supervisor.task_running !== true
+      && !ep.active_video_run_id
+    ) {
+      localStorage.removeItem(completionOperationStorageKey(ep.id))
+    }
+  }, [ep?.active_video_run_id, ep?.id, ep?.video_supervisor?.finished_at, ep?.video_supervisor?.task_running])
   const generatingCount = shots.filter(shotHasActiveGeneration).length
   const pausedGenerationCount = shots.filter(shotHasPausedGeneration).length
   const hasCurrentGeneration = episodeGenerationIsActive(
@@ -798,7 +820,7 @@ export default function WallPage() {
           quickGenerationEstimate,
           ep?.video_budget?.required_completion_cap_cny,
           videoPlan?.critical_path_latency_ms,
-          newId(`video-complete:${ep!.id}`),
+          persistentCompletionOperationKey(ep!.id),
         ),
       ) as {
         run_id?: string

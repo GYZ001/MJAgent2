@@ -368,6 +368,12 @@ def concatenate_episode(episode_id: str) -> dict:
             "当前分镜仍有镜头未采纳通过技术校验的真实视频，禁止生成部分成片："
             + ", ".join(str(no) for no in missing_model_shot_nos)
         )
+    from app.downstream_authority import current_adopted_video_delivery_manifest
+
+    video_delivery_manifest = current_adopted_video_delivery_manifest(
+        episode_id,
+        conn=conn,
+    )
     pieces = _adopted_video_paths(episode_id)
     if not pieces:
         raise ValueError(
@@ -427,6 +433,7 @@ def concatenate_episode(episode_id: str) -> dict:
         "fallback_shots_reused": 0,
         "playback_rates": {str(no): rate for no, _path, rate in piece_specs},
         "storyboard_release_authority": release_authority,
+        "video_delivery_manifest": video_delivery_manifest,
     }
 
     # final-edit 是质量增强层，不是交付门禁。任何字体/滤镜/转场失败都回退到
@@ -463,6 +470,10 @@ def concatenate_episode(episode_id: str) -> dict:
                     "missing_model_shot_nos": missing_model_shot_nos,
                 }
                 edit_report["mode"] = "final_edit"
+                edit_report["video_delivery_manifest"] = video_delivery_manifest
+                edit_report["video_delivery_manifest_hash"] = video_delivery_manifest[
+                    "manifest_hash"
+                ]
                 edit_report["decision_reason"] = final_edit_reason
                 edit_report["elapsed_s"] = round(time.perf_counter() - final_edit_started_at, 3)
                 validated_duration_s = _validate_concat_output(
@@ -475,6 +486,11 @@ def concatenate_episode(episode_id: str) -> dict:
                     conn=conn,
                 ) != release_authority:
                     raise ValueError("合片期间分镜发布权威发生漂移，已拒绝覆盖成片")
+                if current_adopted_video_delivery_manifest(
+                    episode_id,
+                    conn=conn,
+                ) != video_delivery_manifest:
+                    raise ValueError("合片期间已采纳视频发生漂移，已拒绝覆盖成片")
                 atomic_copy(edited_video, final_path)
             final_path.with_suffix(".stale").unlink(missing_ok=True)
             report_path = _edit_report_path(final_path)
@@ -582,6 +598,11 @@ def concatenate_episode(episode_id: str) -> dict:
             conn=conn,
         ) != release_authority:
             raise ValueError("合片期间分镜发布权威发生漂移，已拒绝覆盖成片")
+        if current_adopted_video_delivery_manifest(
+            episode_id,
+            conn=conn,
+        ) != video_delivery_manifest:
+            raise ValueError("合片期间已采纳视频发生漂移，已拒绝覆盖成片")
         atomic_copy(silent_video, final_path)
         # 新成片已经原子替换成功，此时才清除“待更新”标记。合成失败时旧成片和
         # 标记都会保留，状态轮询不会把正在观看的成品入口移除。
@@ -604,6 +625,8 @@ def concatenate_episode(episode_id: str) -> dict:
             "skipped_shot_nos": skipped_shot_nos,
             "missing_model_shot_nos": missing_model_shot_nos,
         },
+        "video_delivery_manifest": video_delivery_manifest,
+        "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
     }
     from app.atomic_io import atomic_write_text
 

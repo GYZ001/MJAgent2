@@ -13,6 +13,11 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
 
     approved_cost = float(video_generate_episode(args).estimated_cost_cny or 0)
     if approved_cost > 0:
+        if not args.idempotency_key:
+            return failed(
+                "付费视频命令必须提供稳定的 idempotency_key",
+                error_code="idempotency_key_required",
+            )
         from app.capabilities.bus import canonical_command_request_fingerprint
 
         authorize_episode_video_budget_increment(
@@ -101,6 +106,11 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
 
     approved_cost = float(video_generate_shot(args).estimated_cost_cny or 0)
     if approved_cost > 0:
+        if not args.idempotency_key:
+            return failed(
+                "付费视频命令必须提供稳定的 idempotency_key",
+                error_code="idempotency_key_required",
+            )
         from app.db import get_conn
 
         shot = get_conn().execute(

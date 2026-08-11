@@ -1,11 +1,79 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
+import json
+from pathlib import Path
 
 from app.db import get_conn
 
 
 _CONFIRMED_EPISODE_STATUSES = frozenset({"confirmed", "generating", "done", "mixed"})
+
+
+def current_adopted_video_delivery_manifest(
+    episode_id: str,
+    *,
+    conn=None,
+) -> dict[str, Any]:
+    """Return a content-addressed snapshot of every adopted video."""
+    db = conn or get_conn()
+    rows = db.execute(
+        """SELECT s.id AS shot_id,s.shot_no,s.adopted_version_id,
+                  v.status AS version_status,v.video_path,v.artifact_id,v.playback_rate
+             FROM shots s
+             LEFT JOIN shot_versions v ON v.id=s.adopted_version_id
+            WHERE s.episode_id=? ORDER BY s.shot_no""",
+        (episode_id,),
+    ).fetchall()
+    if not rows:
+        raise ValueError("本集没有可交付镜头")
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        path = Path(str(row["video_path"] or ""))
+        if (
+            not row["adopted_version_id"]
+            or row["version_status"] != "succeeded"
+            or not path.is_file()
+            or not row["artifact_id"]
+        ):
+            raise ValueError(f"镜 {row['shot_no']} 缺少已采纳的有效视频权威")
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        from app.evidence import repository as evidence_repository
+
+        artifact = evidence_repository.get_artifact(str(row["artifact_id"]), conn=db)
+        if artifact is None or artifact["status"] in {
+            "stale", "rejected", "superseded", "needs_revision",
+        }:
+            raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 已失效")
+        try:
+            actual_artifact_hash = evidence_repository.content_hash(
+                artifact.get("content"),
+                artifact.get("file_path"),
+            )
+        except OSError as exc:
+            raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 文件证据缺失") from exc
+        if actual_artifact_hash != str(artifact.get("content_hash") or ""):
+            raise ValueError(f"镜 {row['shot_no']} 的视频 Artifact 实际内容已漂移")
+        items.append({
+            "shot_id": str(row["shot_id"]),
+            "shot_no": int(row["shot_no"]),
+            "adopted_version_id": str(row["adopted_version_id"]),
+            "artifact_id": str(row["artifact_id"]),
+            "artifact_hash": actual_artifact_hash,
+            "file_sha256": digest.hexdigest(),
+            "playback_rate": float(row["playback_rate"] or 1.0),
+        })
+    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "manifest_version": "adopted-video-delivery.v1",
+        "episode_id": episode_id,
+        "items": items,
+        "manifest_hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
 
 
 def verify_current_storyboard_release_authority(

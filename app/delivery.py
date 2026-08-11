@@ -5,6 +5,8 @@ import hashlib
 import json
 import re
 import shutil
+import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,138 @@ from app.orchestration.engine import fingerprint
 
 # 仅允许 new_id("delivery") / 测试稳定 id 形态，禁止路径分隔与穿越。
 _PACKAGE_ID_RE = re.compile(r"^delivery_[A-Za-z0-9_-]+$")
+_DELIVERY_OPERATION_LEASE_S = 4 * 60 * 60
+
+
+def _ensure_delivery_operation_receipts(conn) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS delivery_operation_receipts(
+               package_id TEXT PRIMARY KEY,
+               episode_id TEXT NOT NULL,
+               request_fingerprint TEXT NOT NULL,
+               lease_owner TEXT NOT NULL,
+               lease_expires_at REAL NOT NULL,
+               status TEXT NOT NULL,
+               result_json TEXT NOT NULL DEFAULT '{}',
+               updated_at REAL NOT NULL
+           )"""
+    )
+
+
+def claim_delivery_package_operation(
+    *,
+    package_id: str,
+    episode_id: str,
+    request_fingerprint: str,
+    conn=None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    db = conn or get_conn()
+    owner = uuid.uuid4().hex
+    stamp = time.time()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        _ensure_delivery_operation_receipts(db)
+        row = db.execute(
+            "SELECT * FROM delivery_operation_receipts WHERE package_id=?",
+            (package_id,),
+        ).fetchone()
+        if row:
+            if (
+                str(row["episode_id"]) != episode_id
+                or str(row["request_fingerprint"]) != request_fingerprint
+            ):
+                raise ValueError("交付 operation id 已绑定不同请求")
+            if row["status"] == "succeeded":
+                result = json.loads(row["result_json"] or "{}")
+                db.commit()
+                return None, result
+            if row["status"] == "running" and float(row["lease_expires_at"] or 0) > stamp:
+                db.commit()
+                raise ValueError("相同交付操作正在执行中")
+            updated = db.execute(
+                """UPDATE delivery_operation_receipts
+                      SET lease_owner=?,lease_expires_at=?,status='running',updated_at=?
+                    WHERE package_id=? AND request_fingerprint=?
+                      AND (status!='running' OR lease_expires_at<=?)""",
+                (
+                    owner,
+                    stamp + _DELIVERY_OPERATION_LEASE_S,
+                    stamp,
+                    package_id,
+                    request_fingerprint,
+                    stamp,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("交付 operation lease CAS 冲突")
+        else:
+            db.execute(
+                """INSERT INTO delivery_operation_receipts(
+                       package_id,episode_id,request_fingerprint,lease_owner,
+                       lease_expires_at,status,result_json,updated_at
+                   ) VALUES(?,?,?,?,?,'running','{}',?)""",
+                (
+                    package_id,
+                    episode_id,
+                    request_fingerprint,
+                    owner,
+                    stamp + _DELIVERY_OPERATION_LEASE_S,
+                    stamp,
+                ),
+            )
+        db.commit()
+        return owner, None
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+
+
+def _assert_delivery_operation_owner(
+    conn,
+    *,
+    package_id: str,
+    request_fingerprint: str,
+    lease_owner: str,
+) -> None:
+    row = conn.execute(
+        """SELECT 1 FROM delivery_operation_receipts
+            WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+              AND status='running' AND lease_expires_at>?""",
+        (package_id, request_fingerprint, lease_owner, time.time()),
+    ).fetchone()
+    if row is None:
+        raise ValueError("交付 operation lease 已失效")
+
+
+def finish_delivery_package_operation(
+    *,
+    package_id: str,
+    request_fingerprint: str,
+    lease_owner: str,
+    result: dict[str, Any],
+    succeeded: bool,
+    conn=None,
+) -> None:
+    db = conn or get_conn()
+    cursor = db.execute(
+        """UPDATE delivery_operation_receipts
+              SET status=?,result_json=?,lease_expires_at=0,updated_at=?
+            WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+              AND status='running'""",
+        (
+            "succeeded" if succeeded else "failed",
+            json.dumps(result, ensure_ascii=False, default=str),
+            time.time(),
+            package_id,
+            request_fingerprint,
+            lease_owner,
+        ),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        raise ValueError("交付 operation 完成 CAS 冲突")
+    db.commit()
 
 
 def validate_package_id(package_id: str) -> str:
@@ -213,6 +347,23 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         "分镜已确认，并绑定当前已发布 revision、已消费凭证与 release qualification",
         storyboard_release_authority or {"error": storyboard_release_error},
     )
+    video_delivery_manifest: dict[str, Any] | None = None
+    video_manifest_error: str | None = None
+    try:
+        from app.downstream_authority import current_adopted_video_delivery_manifest
+
+        video_delivery_manifest = current_adopted_video_delivery_manifest(
+            episode_id,
+            conn=conn,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        video_manifest_error = str(exc)
+    check(
+        "adopted_video_manifest",
+        video_delivery_manifest is not None,
+        "每镜采用关系、视频 Artifact、文件哈希和倍速已形成内容寻址快照",
+        video_delivery_manifest or {"error": video_manifest_error},
+    )
 
     source_chapters, source_chapter_evidence = _authorized_source_chapters(conn, ep)
     source_chapters_valid = bool(source_chapter_evidence["authorized_indices"]) and not any((
@@ -278,6 +429,26 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
                 final_edit_report = loaded_report
         except (OSError, ValueError, TypeError):
             final_edit_report = None
+    final_manifest_hash = (
+        str(final_edit_report.get("video_delivery_manifest_hash") or "")
+        if isinstance(final_edit_report, dict)
+        else ""
+    )
+    check(
+        "final_video_manifest_binding",
+        bool(
+            video_delivery_manifest
+            and final_manifest_hash == video_delivery_manifest["manifest_hash"]
+        ),
+        "整集成片精确绑定当前已采纳视频 manifest",
+        {
+            "expected": (
+                video_delivery_manifest.get("manifest_hash")
+                if video_delivery_manifest else None
+            ),
+            "actual": final_manifest_hash or None,
+        },
+    )
     check(
         "final_video",
         final_valid and not final_outdated,
@@ -387,6 +558,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         "videos": video_items,
         "final_edit_report": final_edit_report,
         "storyboard_release_authority": storyboard_release_authority,
+        "video_delivery_manifest": video_delivery_manifest,
     }
 
 
@@ -410,6 +582,8 @@ def build_delivery_package(
     reason: str = "",
     accepted_risk: str | None = None,
     operation_started_at: float | None = None,
+    operation_request_fingerprint: str | None = None,
+    operation_lease_owner: str | None = None,
 ) -> dict[str, Any]:
     readiness = delivery_readiness(episode_id)
     gate_findings = list(readiness["blockers"])
@@ -420,6 +594,7 @@ def build_delivery_package(
         )
         raise ValueError(f"交付硬门禁未通过：{summary}")
     release_authority = dict(readiness["storyboard_release_authority"] or {})
+    video_delivery_manifest = dict(readiness["video_delivery_manifest"] or {})
     if decision not in {None, "approve", "approve_with_risk"}:
         raise ValueError("decision 必须为 approve 或 approve_with_risk")
     if decision == "approve_with_risk" and not (accepted_risk or "").strip():
@@ -431,6 +606,15 @@ def build_delivery_package(
         package_id = validate_package_id(package_id)
     else:
         package_id = validate_package_id(new_id("delivery"))
+    if bool(operation_request_fingerprint) != bool(operation_lease_owner):
+        raise ValueError("交付构建 operation lease 参数不完整")
+    if operation_lease_owner:
+        _assert_delivery_operation_owner(
+            conn,
+            package_id=package_id,
+            request_fingerprint=str(operation_request_fingerprint),
+            lease_owner=operation_lease_owner,
+        )
     operation_started_at = operation_started_at or now()
     delivery_root = (
         config.PROJECTS_DIR / ep["project_id"] / "episodes" / str(ep["episode_no"]) / "delivery"
@@ -517,6 +701,13 @@ def build_delivery_package(
     # A directory without its database pointer is an uncommitted crash remnant.
     # Rebuilding the same operation id is safe and avoids exposing a half package.
     if package_dir.exists():
+        if operation_lease_owner:
+            _assert_delivery_operation_owner(
+                conn,
+                package_id=package_id,
+                request_fingerprint=str(operation_request_fingerprint),
+                lease_owner=operation_lease_owner,
+            )
         shutil.rmtree(package_dir)
     archive_candidate = Path(str(package_dir) + ".zip")
     if archive_candidate.exists():
@@ -590,6 +781,7 @@ def build_delivery_package(
         "created_at": operation_started_at,
         "source_artifacts": readiness["source_artifacts"],
         "storyboard_release_authority": release_authority,
+        "video_delivery_manifest": video_delivery_manifest,
         "source_chapters": readiness["source_chapters"],
         "files": files,
         "reproducibility": {
@@ -667,6 +859,13 @@ def build_delivery_package(
         conn=conn,
     ) != release_authority:
         raise ValueError("交付构建期间分镜发布权威发生漂移，已拒绝发布交付包")
+    from app.downstream_authority import current_adopted_video_delivery_manifest
+
+    if current_adopted_video_delivery_manifest(
+        episode_id,
+        conn=conn,
+    ) != video_delivery_manifest:
+        raise ValueError("交付构建期间已采纳视频发生漂移，已拒绝发布交付包")
     # 先完成客户可下载的文件，再提交数据库指针；ZIP 失败不能留下“已批准但不可下载”的记录。
     archive_path = atomic_zip_directory(package_dir, archive_candidate)
 
@@ -699,6 +898,18 @@ def build_delivery_package(
         conn=conn,
     ) != release_authority:
         raise ValueError("交付发布前分镜发布权威发生漂移，已拒绝写入交付指针")
+    if current_adopted_video_delivery_manifest(
+        episode_id,
+        conn=conn,
+    ) != video_delivery_manifest:
+        raise ValueError("交付发布前已采纳视频发生漂移，已拒绝写入交付指针")
+    if operation_lease_owner:
+        _assert_delivery_operation_owner(
+            conn,
+            package_id=package_id,
+            request_fingerprint=str(operation_request_fingerprint),
+            lease_owner=operation_lease_owner,
+        )
     file_eval = Evaluation(
         evaluator_type="file",
         evaluator_name="delivery_manifest_validator",

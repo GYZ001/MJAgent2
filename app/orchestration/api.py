@@ -1054,7 +1054,39 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
             f"{episode_id}\0{idempotency_key}".encode("utf-8")
         ).hexdigest()[:24]
         payload["package_id"] = f"delivery_{digest}"
+    operation_request_fingerprint = fingerprint(
+        episode_id,
+        {
+            key: payload[key]
+            for key in sorted(payload)
+            if key not in {"request_id", "operation_started_at", "package_id"}
+        },
+    )
+    from app.delivery import (
+        claim_delivery_package_operation,
+        finish_delivery_package_operation,
+    )
+
+    operation_lease_owner, recovered_result = claim_delivery_package_operation(
+        package_id=payload["package_id"],
+        episode_id=episode_id,
+        request_fingerprint=operation_request_fingerprint,
+    )
+    if recovered_result is not None:
+        return recovered_result
+    assert operation_lease_owner is not None
     payload.setdefault("operation_started_at", now())
+    def mark_operation_failed(exc: Exception) -> None:
+        try:
+            finish_delivery_package_operation(
+                package_id=payload["package_id"],
+                request_fingerprint=operation_request_fingerprint,
+                lease_owner=operation_lease_owner,
+                result={"error": str(exc)},
+                succeeded=False,
+            )
+        except ValueError:
+            pass
     if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
         raise HTTPException(404, "剧集不存在")
     recorder = WorkflowRecorder.create(
@@ -1083,6 +1115,8 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
                 reason=str(payload.get("reason") or ""),
                 accepted_risk=payload.get("accepted_risk"),
                 operation_started_at=payload["operation_started_at"],
+                operation_request_fingerprint=operation_request_fingerprint,
+                operation_lease_owner=operation_lease_owner,
             )
 
         _, result = await recorder.step(
@@ -1091,15 +1125,26 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
             context_manifest={"immutable_snapshot": True},
         )
         recorder.succeed("交付快照已生成")
-        return {**result, "run_id": recorder.run_id}
+        response = {**result, "run_id": recorder.run_id}
+        finish_delivery_package_operation(
+            package_id=payload["package_id"],
+            request_fingerprint=operation_request_fingerprint,
+            lease_owner=operation_lease_owner,
+            result=response,
+            succeeded=True,
+        )
+        return response
     except KeyError as exc:
         recorder.fail(exc)
+        mark_operation_failed(exc)
         raise HTTPException(404, "剧集不存在") from exc
     except ValueError as exc:
         recorder.fail(exc)
+        mark_operation_failed(exc)
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         recorder.fail(exc)
+        mark_operation_failed(exc)
         raise
 
 
