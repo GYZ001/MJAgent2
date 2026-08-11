@@ -2045,68 +2045,20 @@ async def test_blind_review_rejects_supplied_screenplay_drift_before_model_use()
         )
 
 
-def test_modern_published_plan_null_can_resolve_without_narrative_downgrade() -> None:
+def test_historical_contract_plan_null_needs_rebuild() -> None:
     screenplay = _screenplay()
     screenplay.narrative_plan = None
-    artifact, _shot_artifacts = _persist_review_projection(screenplay, _board())
-    contract_version = "screenplay-legacy-published.v1"
-    conn = db.get_conn()
-    conn.execute(
-        "UPDATE artifacts SET contract_version=? WHERE id=?",
-        (contract_version, artifact["id"]),
-    )
-    conn.commit()
-    input_fingerprint = screenplay_authority_fingerprint(
-        "episode-generic",
-        contract_version=contract_version,
-        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
-    )
-    revision = ensure_production_revision(
-        episode_id="episode-generic",
-        kind="screenplay",
-        input_fingerprint=input_fingerprint,
-        contract_version=contract_version,
-        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
-        resume=False,
-    )
-    mark_baseline_generated(
-        revision.id,
-        baseline_artifact_id=artifact["id"],
-        working_artifact_id=artifact["id"],
-    )
-    qa_gate = evidence_repository.create_evaluation(
-        artifact["id"],
-        Evaluation(
-            evaluator_type="deterministic",
-            evaluator_name="screenplay_production_qa",
-            evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
-            status="passed",
-            hard_gate_passed=True,
-            evaluation_role="runtime_gate",
-            runtime_blocking=True,
-            score=100,
-            evidence={"authority_input_fingerprint": input_fingerprint},
-        ),
-    )
-    publish_screenplay(
-        episode_id="episode-generic",
-        revision_id=revision.id,
-        artifact_id=artifact["id"],
-        artifact_hash=artifact["content_hash"],
-        evaluation_ids=[qa_gate["id"]],
-        input_fingerprint=input_fingerprint,
-        contract_version=contract_version,
-        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
-        clear_downstream=False,
-    )
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="episode-generic",
+        status="validated",
+        trust_level="T2",
+        content=screenplay_artifact_payload(screenplay),
+        contract_version="screenplay-legacy-published.v1",
+    ))
 
-    resolved = resolve_current_screenplay_authority(
-        "episode-generic",
-        require_narrative=False,
-    )
-    assert resolved.screenplay.narrative_plan is None
-    with pytest.raises(ValueError, match="缺少叙事权威合同"):
-        resolve_current_screenplay_authority("episode-generic", require_narrative=True)
+    _assert_artifact_needs_rebuild(artifact["id"])
 
 
 def test_common_readiness_rejects_modern_projection_plan_downgrade() -> None:
