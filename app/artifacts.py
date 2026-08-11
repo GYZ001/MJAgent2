@@ -180,6 +180,11 @@ def _purge_shots(
 
 def _rollback_episodes(conn, ep_ids: set[str]) -> None:
     for ep_id in ep_ids:
+        # Media invalidation and delivery-authority retirement are one state
+        # transition.  Keeping an approved package current after its adopted
+        # source bytes were cleared would let the download API serve a stale
+        # release even though the episode itself has been rolled back.
+        invalidate_episode_delivery_authority(conn, ep_id)
         ep = conn.execute(
             "SELECT project_id, episode_no FROM episodes WHERE id=?", (ep_id,)).fetchone()
         if ep:
@@ -281,12 +286,17 @@ def delete_video_version(version_id: str) -> str | None:
         return None
     _assert_provider_clear_scope(conn, version_ids=[version_id])
     shot_id = v["shot_id"]
+    shot = conn.execute(
+        "SELECT episode_id,adopted_version_id FROM shots WHERE id=?", (shot_id,)
+    ).fetchone()
+    was_adopted = bool(shot and str(shot["adopted_version_id"] or "") == version_id)
     _delete_version_files(v["video_path"])
     conn.execute("DELETE FROM shot_versions WHERE id=?", (version_id,))
     conn.execute("DELETE FROM jobs WHERE version_id=?", (version_id,))
     conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=? AND adopted_version_id=?", (shot_id, version_id))
-    shot = conn.execute("SELECT episode_id FROM shots WHERE id=?", (shot_id,)).fetchone()
     if shot:
+        if was_adopted:
+            invalidate_episode_delivery_authority(conn, shot["episode_id"])
         ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)).fetchone()
         if ep:
             _invalidate_final_video(ep["project_id"], ep["episode_no"])
@@ -308,6 +318,7 @@ def purge_shot_videos(shot_id: str) -> int:
     conn.execute("DELETE FROM shot_versions WHERE shot_id=?", (shot_id,))
     conn.execute("DELETE FROM jobs WHERE shot_id=? AND kind='video'", (shot_id,))
     conn.execute("UPDATE shots SET adopted_version_id=NULL WHERE id=?", (shot_id,))
+    invalidate_episode_delivery_authority(conn, shot["episode_id"])
     ep = conn.execute("SELECT project_id, episode_no FROM episodes WHERE id=?", (shot["episode_id"],)).fetchone()
     if ep:
         _invalidate_final_video(ep["project_id"], ep["episode_no"])

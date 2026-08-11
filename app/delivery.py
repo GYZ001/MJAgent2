@@ -16,7 +16,7 @@ from app.atomic_io import atomic_copy, atomic_write_text, atomic_zip_directory
 from app.db import get_conn, new_id, now, rows_to_dicts
 from app.evidence import repository
 from app.evidence.media import grade_shot_video, validate_video_file
-from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+from app.harness.types import Evaluation, Issue, IssueSeverity
 from app.orchestration.engine import fingerprint
 
 # 仅允许 new_id("delivery") / 测试稳定 id 形态，禁止路径分隔与穿越。
@@ -724,10 +724,8 @@ def build_delivery_package(
         raise ValueError(f"交付硬门禁未通过：{summary}")
     release_authority = dict(readiness["storyboard_release_authority"] or {})
     video_delivery_manifest = dict(readiness["video_delivery_manifest"] or {})
-    if decision not in {None, "approve", "approve_with_risk"}:
-        raise ValueError("decision 必须为 approve 或 approve_with_risk")
-    if decision == "approve_with_risk" and not (accepted_risk or "").strip():
-        raise ValueError("带风险批准必须填写 accepted_risk")
+    if decision is not None:
+        raise ValueError("交付批准必须对已落盘的精确草稿执行，禁止构建时直达 T5")
     conn = get_conn()
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     project = conn.execute("SELECT * FROM projects WHERE id=?", (ep["project_id"],)).fetchone()
@@ -854,34 +852,88 @@ def build_delivery_package(
             ) != orphan_artifact.get("content_hash")
         ):
             raise ValueError("交付崩溃恢复证据与当前权威不一致")
-        if operation_lease_owner:
-            _assert_delivery_operation_owner(
-                conn,
-                package_id=package_id,
-                request_fingerprint=str(operation_request_fingerprint),
-                lease_owner=operation_lease_owner,
+        # This branch recovers production artifacts left by an older process
+        # that committed the immutable files/artifact before the package row.
+        # Serialize the final authority checks with adoption and operation
+        # takeover.  Otherwise a new adopted video could commit after the
+        # checks above and the orphan would be resurrected as current.
+        if conn.in_transaction:
+            conn.commit()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            from app import downstream_authority
+
+            if downstream_authority.verify_current_storyboard_release_authority(
+                episode_id, conn=conn,
+            ) != release_authority:
+                raise ValueError("交付崩溃恢复时分镜发布权威发生漂移")
+            if downstream_authority.current_adopted_video_delivery_manifest(
+                episode_id, conn=conn,
+            ) != video_delivery_manifest:
+                raise ValueError("交付崩溃恢复时已采纳视频发生漂移")
+            if operation_lease_owner:
+                _assert_delivery_operation_owner(
+                    conn,
+                    package_id=package_id,
+                    request_fingerprint=str(operation_request_fingerprint),
+                    lease_owner=operation_lease_owner,
+                )
+            current_orphan_artifact = conn.execute(
+                "SELECT content_json,file_path,content_hash FROM artifacts WHERE id=?",
+                (orphan_artifact_id,),
+            ).fetchone()
+            if current_orphan_artifact is None:
+                raise ValueError("交付崩溃恢复 Artifact 已被撤销")
+            try:
+                current_orphan_content = json.loads(
+                    current_orphan_artifact["content_json"] or "null"
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("交付崩溃恢复 Artifact 内容损坏") from exc
+            if repository.content_hash(
+                current_orphan_content, current_orphan_artifact["file_path"],
+            ) != current_orphan_artifact["content_hash"]:
+                raise ValueError("交付崩溃恢复 Artifact 实际内容已漂移")
+            conn.execute(
+                """INSERT INTO delivery_packages(
+                       id,episode_id,artifact_id,status,package_path,manifest_json,
+                       quality_report_json,known_issues,created_at
+                   ) VALUES(?,?,?,'waiting_human',?,?,?,'',?)""",
+                (
+                    package_id,
+                    episode_id,
+                    orphan_artifact_id,
+                    str(orphan_package_dir),
+                    json.dumps(orphan_manifest, ensure_ascii=False),
+                    json.dumps(orphan_quality, ensure_ascii=False),
+                    operation_started_at,
+                ),
             )
-        conn.execute(
-            """INSERT INTO delivery_packages(
-                   id,episode_id,artifact_id,status,package_path,manifest_json,
-                   quality_report_json,known_issues,created_at
-               ) VALUES(?,?,?,'waiting_human',?,?,?,'',?)""",
-            (
-                package_id,
-                episode_id,
-                orphan_artifact_id,
-                str(orphan_package_dir),
-                json.dumps(orphan_manifest, ensure_ascii=False),
-                json.dumps(orphan_quality, ensure_ascii=False),
-                operation_started_at,
-            ),
-        )
-        conn.execute(
-            """UPDATE episodes SET delivery_artifact_id=?,delivery_status='waiting_human'
-                 WHERE id=?""",
-            (orphan_artifact_id, episode_id),
-        )
-        conn.commit()
+            cursor = conn.execute(
+                """UPDATE episodes
+                      SET delivery_artifact_id=?,delivery_status='waiting_human'
+                    WHERE id=?
+                      AND storyboard_artifact_id=?
+                      AND published_storyboard_artifact_id=?
+                      AND storyboard_production_revision_id=?
+                      AND storyboard_completion_certificate_id=?
+                      AND status IN ('confirmed','generating','done','mixed')""",
+                (
+                    orphan_artifact_id,
+                    episode_id,
+                    release_authority["published_storyboard_artifact_id"],
+                    release_authority["published_storyboard_artifact_id"],
+                    release_authority["storyboard_production_revision_id"],
+                    release_authority["storyboard_completion_certificate_id"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("交付崩溃恢复发生分镜权威 CAS 冲突")
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
         return {
             "package_id": package_id,
             "artifact_id": orphan_artifact_id,
@@ -1169,40 +1221,11 @@ def build_delivery_package(
         "package_id": package_id, "manifest": manifest, "quality_report": quality_report,
     }
     artifact = repository.get_artifact(artifact_id)
-    if artifact and artifact["content_hash"] != repository.content_hash(
+    expected_artifact_hash = repository.content_hash(
         artifact_content, str(package_dir / "manifest.json")
-    ):
+    )
+    if artifact and artifact["content_hash"] != expected_artifact_hash:
         raise ValueError("同一交付操作的恢复输入已变化，已停止覆盖原证据")
-    if not artifact:
-        artifact = repository.create_artifact(EvidenceArtifact(
-            id=artifact_id,
-            type="delivery_package",
-            scope_type="episode",
-            scope_id=episode_id,
-            status="validated",
-            trust_level="T3",
-            content=artifact_content,
-            file_path=str(package_dir / "manifest.json"),
-            parent_artifact_ids=parent_ids,
-            contract_version="delivery-1.0.0",
-        ))
-    if verify_current_storyboard_release_authority(
-        episode_id,
-        conn=conn,
-    ) != release_authority:
-        raise ValueError("交付发布前分镜发布权威发生漂移，已拒绝写入交付指针")
-    if current_adopted_video_delivery_manifest(
-        episode_id,
-        conn=conn,
-    ) != video_delivery_manifest:
-        raise ValueError("交付发布前已采纳视频发生漂移，已拒绝写入交付指针")
-    if operation_lease_owner:
-        _assert_delivery_operation_owner(
-            conn,
-            package_id=package_id,
-            request_fingerprint=str(operation_request_fingerprint),
-            lease_owner=operation_lease_owner,
-        )
     file_eval = Evaluation(
         evaluator_type="file",
         evaluator_name="delivery_manifest_validator",
@@ -1212,88 +1235,119 @@ def build_delivery_package(
         score=100,
         evidence={"file_count": len(files), "checks": readiness["checks"]},
     )
-    status = "waiting_human"
-    approved_at = None
-    if decision:
-        human_eval = Evaluation(
-            evaluator_type="human",
-            evaluator_name=decided_by or "delivery_reviewer",
-            evaluator_version="1.0.0",
-            status="warning" if decision == "approve_with_risk" else "passed",
-            hard_gate_passed=True,
-            score=100,
-            issues=[Issue(
-                code="RISK_ACCEPTED",
-                severity=IssueSeverity.WARNING,
-                subject=artifact["id"],
-                message=accepted_risk or reason or "人工带风险批准",
-            )] if decision == "approve_with_risk" else [],
-            evidence={"decision": decision, "reason": reason, "accepted_risk": accepted_risk},
-        )
-        if artifact["status"] != "approved":
-            artifact = repository.commit_artifact(None, artifact["id"], [file_eval, human_eval])
-        conn.execute(
-            """INSERT INTO gate_decisions(
-                   id, artifact_id, gate_key, decision, decided_by, reason, accepted_risk, created_at
-               ) SELECT ?,?,?,?,?,?,?,?
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM gate_decisions WHERE artifact_id=? AND gate_key='delivery'
-                 )""",
-            (
-                new_id("gate"), artifact["id"], "delivery", decision, decided_by or "user",
-                reason, accepted_risk, now(), artifact["id"],
-            ),
-        )
-        status = "approved"
-        approved_at = now()
-    else:
+    if conn.in_transaction:
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if verify_current_storyboard_release_authority(
+            episode_id, conn=conn,
+        ) != release_authority:
+            raise ValueError("交付发布前分镜发布权威发生漂移")
+        if current_adopted_video_delivery_manifest(
+            episode_id, conn=conn,
+        ) != video_delivery_manifest:
+            raise ValueError("交付发布前已采纳视频发生漂移")
+        if operation_lease_owner:
+            _assert_delivery_operation_owner(
+                conn,
+                package_id=package_id,
+                request_fingerprint=str(operation_request_fingerprint),
+                lease_owner=operation_lease_owner,
+            )
+        artifact_row = conn.execute(
+            "SELECT * FROM artifacts WHERE id=?", (artifact_id,),
+        ).fetchone()
+        if artifact_row is None:
+            version = conn.execute(
+                """SELECT COALESCE(MAX(version),0)+1 AS n FROM artifacts
+                   WHERE type='delivery_package' AND scope_type='episode' AND scope_id=?""",
+                (episode_id,),
+            ).fetchone()["n"]
+            conn.execute(
+                """INSERT INTO artifacts(
+                       id,type,scope_type,scope_id,version,status,trust_level,
+                       content_json,file_path,content_hash,parent_artifact_ids_json,
+                       contract_version,created_at
+                   ) VALUES(?,'delivery_package','episode',?,?,'validated','T3',?,?,?,?,?,?)""",
+                (
+                    artifact_id,
+                    episode_id,
+                    version,
+                    json.dumps(artifact_content, ensure_ascii=False),
+                    str(package_dir / "manifest.json"),
+                    expected_artifact_hash,
+                    json.dumps(parent_ids, ensure_ascii=False),
+                    "delivery-1.0.0",
+                    now(),
+                ),
+            )
+        elif str(artifact_row["content_hash"] or "") != expected_artifact_hash:
+            raise ValueError("交付 Artifact CAS 内容冲突")
         existing_file_eval = conn.execute(
-            "SELECT 1 FROM evaluations WHERE artifact_id=? AND evaluator_name='delivery_manifest_validator'",
-            (artifact["id"],),
+            """SELECT 1 FROM evaluations
+               WHERE artifact_id=? AND evaluator_name='delivery_manifest_validator'""",
+            (artifact_id,),
         ).fetchone()
         if not existing_file_eval:
-            repository.create_evaluation(artifact["id"], file_eval)
-    conn.execute(
-        """INSERT INTO delivery_packages(
-               id, episode_id, artifact_id, status, package_path, manifest_json,
-               quality_report_json, known_issues, created_at, approved_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        (
-            package_id, episode_id, artifact["id"], status, str(package_dir),
-            json.dumps(manifest, ensure_ascii=False), json.dumps(quality_report, ensure_ascii=False),
-            "\n".join(known_lines), operation_started_at, approved_at,
-        ),
-    )
-    cursor = conn.execute(
-        """UPDATE episodes
-              SET delivery_artifact_id=?, delivery_status=?
-            WHERE id=?
-              AND storyboard_artifact_id=?
-              AND published_storyboard_artifact_id=?
-              AND storyboard_production_revision_id=?
-              AND storyboard_completion_certificate_id=?
-              AND status IN ('confirmed','generating','done','mixed')""",
-        (
-            artifact["id"],
-            status,
-            episode_id,
-            release_authority["published_storyboard_artifact_id"],
-            release_authority["published_storyboard_artifact_id"],
-            release_authority["storyboard_production_revision_id"],
-            release_authority["storyboard_completion_certificate_id"],
-        ),
-    )
-    if cursor.rowcount != 1:
-        conn.rollback()
-        raise ValueError("交付发布发生分镜权威 CAS 冲突，未更新交付指针")
-    conn.commit()
+            conn.execute(
+                """INSERT INTO evaluations(
+                       id,artifact_id,evaluator_type,evaluator_name,evaluator_version,
+                       status,hard_gate_passed,evaluation_role,score_status,runtime_blocking,
+                       retry_eligible,score,dimension_scores_json,issues_json,evidence_json,
+                       confidence,recovered,created_at
+                   ) VALUES(?,?, 'file',?,?,'passed',1,'runtime_gate','scored',1,0,100,
+                            '{}','[]',?,1,0,?)""",
+                (
+                    new_id("eval"), artifact_id, file_eval.evaluator_name,
+                    file_eval.evaluator_version,
+                    json.dumps(file_eval.evidence, ensure_ascii=False, sort_keys=True),
+                    now(),
+                ),
+            )
+        conn.execute(
+            """INSERT INTO delivery_packages(
+                   id,episode_id,artifact_id,status,package_path,manifest_json,
+                   quality_report_json,known_issues,created_at,approved_at
+               ) VALUES(?,?,?,'waiting_human',?,?,?, ?,?,NULL)""",
+            (
+                package_id, episode_id, artifact_id, str(package_dir),
+                json.dumps(manifest, ensure_ascii=False),
+                json.dumps(quality_report, ensure_ascii=False),
+                "\n".join(known_lines), operation_started_at,
+            ),
+        )
+        cursor = conn.execute(
+            """UPDATE episodes
+                  SET delivery_artifact_id=?,delivery_status='waiting_human'
+                WHERE id=?
+                  AND storyboard_artifact_id=?
+                  AND published_storyboard_artifact_id=?
+                  AND storyboard_production_revision_id=?
+                  AND storyboard_completion_certificate_id=?
+                  AND status IN ('confirmed','generating','done','mixed')""",
+            (
+                artifact_id,
+                episode_id,
+                release_authority["published_storyboard_artifact_id"],
+                release_authority["published_storyboard_artifact_id"],
+                release_authority["storyboard_production_revision_id"],
+                release_authority["storyboard_completion_certificate_id"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("交付发布发生分镜权威 CAS 冲突")
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     return {
         "package_id": package_id,
-        "artifact_id": artifact["id"],
-        "trust_level": artifact["trust_level"],
-        "status": status,
+        "artifact_id": artifact_id,
+        "trust_level": "T3",
+        "status": "waiting_human",
         "package_path": str(package_dir),
-        "archive_path": archive_path,
+        "archive_path": str(archive_path),
         "manifest": manifest,
         "quality_report": quality_report,
     }

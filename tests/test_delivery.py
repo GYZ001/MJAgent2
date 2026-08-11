@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app import db, delivery, task_registry
+from app import artifacts, db, delivery, task_registry
 from app.evidence import repository
 from app.harness.types import Evaluation, EvidenceArtifact
 from app.orchestration import api as orchestration_api
@@ -314,6 +314,25 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     assert feedback["revision_run_id"]
     assert repository.get_artifact(package["artifact_id"])["content_hash"] == artifact_before["content_hash"]
     assert any(item["evaluator_name"] == "customer_feedback" for item in repository.get_evaluations(package["artifact_id"]))
+
+    # Deleting the adopted source is an authority revocation, not merely a
+    # missing-media marker.  The historical package remains auditable but is
+    # no longer current or downloadable.
+    monkeypatch.setattr(artifacts, "get_conn", lambda: conn)
+    assert artifacts.delete_video_version("v") == "s"
+    revoked = conn.execute(
+        "SELECT delivery_artifact_id,delivery_status FROM episodes WHERE id='e'"
+    ).fetchone()
+    assert revoked["delivery_artifact_id"] is None
+    assert revoked["delivery_status"] == "not_ready"
+    assert conn.execute(
+        "SELECT status FROM delivery_packages WHERE id=?", (package["package_id"],)
+    ).fetchone()["status"] == "superseded"
+    assert repository.get_artifact(package["artifact_id"])["status"] == "superseded"
+    with pytest.raises(Exception, match="已不是当前可下载权威"):
+        orchestration_api.download_delivery_archive(package["package_id"])
+    with pytest.raises(Exception, match="已不是当前可下载权威"):
+        orchestration_api.download_delivery_report(package["package_id"])
 
 
 def test_delivery_package_id_rejects_path_traversal() -> None:
