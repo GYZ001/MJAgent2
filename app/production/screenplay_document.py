@@ -27,6 +27,30 @@ from app.schemas import (
 )
 
 
+class DialogueSceneBindingError(ValueError):
+    """A structured dialogue chain names a scene absent from the document."""
+
+
+def _declared_dialogue_scene(
+    scene_blocks: list[SceneBlockNode],
+    chain: KeyDialogueChain,
+) -> SceneBlockNode | None:
+    """Resolve an explicit scene binding; only an empty binding may fall back."""
+    scene_id = (chain.scene_id or "").strip()
+    if not scene_id:
+        return None
+    block = next(
+        (item for item in scene_blocks if item.scene_id == scene_id),
+        None,
+    )
+    if block is None:
+        raise DialogueSceneBindingError(
+            f"dialogue_chain {chain.chain_id or '<unknown>'} 引用不存在的 "
+            f"scene_id={scene_id}；仅 scene_id 为空时允许语义回退",
+        )
+    return block
+
+
 class DialogueTurnNode(BaseModel):
     turn_id: str
     chain_id: str = ""
@@ -434,6 +458,7 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
     # Bind body dialogue to authoritative turns first. Punctuation differences
     # are harmless; speaker + spoken text must still match.
     for chain_index, chain in enumerate(doc.dialogue_chains):
+        declared_block = _declared_dialogue_scene(doc.scene_blocks, chain)
         for turn_index, turn in enumerate(chain.turns or []):
             speaker = _dialogue_identity(turn.speaker)
             line = _dialogue_identity(turn.line)
@@ -455,6 +480,15 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
             if found is None:
                 continue
             block, node = found
+            if declared_block is not None and block is not declared_block:
+                block.dialogue_turns.remove(node)
+                block.body_order = [
+                    item for item in block.body_order if item != node.turn_id
+                ]
+                declared_block.dialogue_turns.append(node)
+                if declared_block.body_order:
+                    declared_block.body_order.append(node.turn_id)
+                block = declared_block
             previous_turn_id = node.turn_id
             node.turn_id = f"{chain.chain_id}-T{turn_index + 1}"
             block.body_order = [
@@ -470,6 +504,7 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
     # A chain turn missing from the body is a projection gap, not new creative
     # content. Insert it beside the nearest matched sibling from the same chain.
     for chain_index, chain in enumerate(doc.dialogue_chains):
+        declared_block = _declared_dialogue_scene(doc.scene_blocks, chain)
         turns = list(chain.turns or [])
         for turn_index, turn in enumerate(turns):
             key = (chain_index, turn_index)
@@ -498,10 +533,8 @@ def _sync_dialogue_chains_into_scenes(doc: ScreenplayDocument) -> None:
                 block, sibling = following
                 insert_at = _node_index(block.dialogue_turns, sibling)
             else:
-                block = _best_scene_for_unmatched_chain_turn(
-                    doc.scene_blocks,
-                    chain,
-                    turn,
+                block = declared_block or _best_scene_for_unmatched_chain_turn(
+                    doc.scene_blocks, chain, turn,
                 )
                 insert_at = len(block.dialogue_turns)
             node = DialogueTurnNode(
@@ -1209,11 +1242,10 @@ def _build_scene_blocks(script: EpisodeScreenplay) -> list[SceneBlockNode]:
         # the closest scene instead of distributing unrelated chains by index.
         if script.dialogue_chains and all(not b.dialogue_turns for b in blocks):
             for chain in script.dialogue_chains:
+                declared_block = _declared_dialogue_scene(blocks, chain)
                 for idx, turn in enumerate(chain.turns, start=1):
-                    block = _best_scene_for_unmatched_chain_turn(
-                        blocks,
-                        chain,
-                        turn,
+                    block = declared_block or _best_scene_for_unmatched_chain_turn(
+                        blocks, chain, turn,
                     )
                     block.dialogue_turns.append(DialogueTurnNode(
                         turn_id=f"{chain.chain_id}-T{idx}",

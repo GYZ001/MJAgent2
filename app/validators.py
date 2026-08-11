@@ -2627,13 +2627,28 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             for speaker in spoken_by_scene.get(i, set())
             if speaker not in nonvisual_voice_ids
         }
+        required_visible_names = {
+            *expected_visible_by_scene.get(i, set()),
+            *(
+                visible_identity_names.get(speaker, speaker)
+                for speaker in visible_spoken
+            ),
+        }
         requires_visible_character = (
             not narrative_authority
-            or bool(visible_spoken)
-            or bool(expected_visible_by_scene.get(i))
+            or bool(required_visible_names)
         )
         if not scene.characters and requires_visible_character:
             errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
+        elif required_visible_names:
+            missing_visible = sorted(
+                required_visible_names - set(scene.characters),
+            )
+            if missing_visible:
+                errors.append(
+                    f"{tag}.characters 缺少结构化权威要求的"
+                    f"可见参与者：{missing_visible}"
+                )
         invalid_nonvisual = [
             name for name in scene.characters if name in nonvisual_voice_ids
         ]

@@ -427,7 +427,7 @@ def test_narrative_scene_with_typed_visible_participant_requires_characters() ->
     assert ".characters 不能为空" in errors[0]
 
 
-def test_real_dialogue_speaker_requires_visible_character_listing() -> None:
+def test_structured_dialogue_speaker_requires_character_without_full_text_line() -> None:
     script = _run_3f05c2a0fedd_environment_script()
     script.narrative_plan = NarrativeContinuityPlan.model_validate({
         "scope_id": script.id,
@@ -442,7 +442,55 @@ def test_real_dialogue_speaker_requires_visible_character_listing() -> None:
         }],
         "scene_contracts": [{"scene_id": "SC01"}],
     })
-    script.full_script_text += "\n孟浩：又落榜了……"
+    script.voice_bible = [VoiceCanonical(
+        speaker_id="孟浩",
+        voice_canonical="清瘦书生的稳定声线",
+        role_type="named_character",
+    )]
+    script.dialogue_chains = [KeyDialogueChain(
+        chain_id="DC1",
+        scene_id="SC01",
+        topic="孟浩再次落榜",
+        turns=[KeyDialogueTurn(
+            speaker="孟浩",
+            line="又落榜了……",
+            source_text="又落榜了……",
+        )],
+    )]
+
+    errors = _scene_character_errors(script)
+
+    assert len(errors) == 1
+    assert ".characters 不能为空" in errors[0]
+
+
+def test_atomic_action_actor_requires_character_without_state_or_pov() -> None:
+    script = _run_3f05c2a0fedd_environment_script()
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": script.id,
+        "identity_contracts": [{
+            "identity_id": "person-menghao",
+            "display_name": "孟浩",
+            "kind": "named_character",
+            "visual_policy": "canonical",
+            "visual_canonical": "青色文士长衫的清瘦书生",
+            "asset_requirement": "required",
+        }],
+        "atomic_actions": [{
+            "action_id": "A-1",
+            "actor_ids": ["person-menghao"],
+            "semantic_intent": "孟浩抬头看向远山",
+            "completion_condition": "孟浩的视线停在远山",
+        }],
+        "events": [{
+            "event_id": "E2",
+            "action_ids": ["A-1"],
+        }],
+        "scene_contracts": [{
+            "scene_id": "SC01",
+            "turn_event_ids": ["E2"],
+        }],
+    })
 
     errors = _scene_character_errors(script)
 
@@ -469,12 +517,43 @@ def test_legal_offscreen_voice_stays_out_of_scene_characters() -> None:
         voice_canonical="遥远、沉闷且带空间混响",
         role_type="offscreen_speaker",
     )]
-    script.full_script_text += "\n井下回声：别下来。"
+    script.dialogue_chains = [KeyDialogueChain(
+        chain_id="DC1",
+        scene_id="SC01",
+        topic="井下的警告",
+        turns=[KeyDialogueTurn(
+            speaker="井下回声",
+            line="别下来。",
+            source_text="别下来。",
+        )],
+    )]
 
     assert _scene_character_errors(script) == []
     script.scene_outline[0].characters = ["井下回声"]
     errors = _scene_character_errors(script)
     assert any("仅声音/离屏身份" in error for error in errors)
+
+
+def test_legal_structured_narrator_speaks_without_visible_character() -> None:
+    script = _run_3f05c2a0fedd_environment_script()
+    script.voice_bible = [VoiceCanonical(
+        speaker_id="旁白",
+        voice_canonical="沉稳克制的叙事声线",
+        role_type="narrator",
+    )]
+    script.dialogue_chains = [KeyDialogueChain(
+        chain_id="DC1",
+        scene_id="SC01",
+        topic="结构化时代介绍",
+        turns=[KeyDialogueTurn(
+            speaker="旁白",
+            line="这是一个修仙者存在的世界。",
+            source_text="这是一个修仙者存在的世界。",
+        )],
+    )]
+
+    assert script.scene_outline[0].characters == []
+    assert _scene_character_errors(script) == []
 
 
 @pytest.mark.asyncio
