@@ -15,7 +15,7 @@ from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.main import app
-from app.schemas import AtomicAction
+from app.schemas import AtomicAction, NarrativeContinuityPlan
 from tests.conftest import SessionTestClient
 from tests.test_narrative_continuity import _screenplay
 from tests.test_screenplay_edit_save import _seed_episode, _valid_script
@@ -37,6 +37,10 @@ def isolated_db(tmp_path, monkeypatch):
 def client():
     with TestClient(app) as raw:
         yield SessionTestClient(raw)
+
+
+def _manual_publish_narrative_plan() -> NarrativeContinuityPlan:
+    return NarrativeContinuityPlan(scope_id="e1")
 
 
 def test_noop_publish_keeps_artifact_and_downstream() -> None:
@@ -379,6 +383,7 @@ def test_manual_publish_consume_failure_rolls_back_authority_before_fence_cleanu
 ) -> None:
     _seed_episode(with_artifact=True)
     first = _valid_script()
+    first.narrative_plan = _manual_publish_narrative_plan()
     first.logline += "（首个正式发布版）"
     first.full_script_text += "\n门外再次响起更重的敲门声。\n谷言把钥匙收进掌心。"
     with enter_handler():
@@ -517,6 +522,7 @@ def test_publish_preserves_files_when_immediate_cleanup_does_not_run(
 
     _seed_episode(with_artifact=True)
     first = _valid_script()
+    first.narrative_plan = _manual_publish_narrative_plan()
     first.logline += "（第一版）"
     first.full_script_text += "\n门外再次响起更重的敲门声。\n谷言把钥匙收进口袋。"
     with enter_handler():

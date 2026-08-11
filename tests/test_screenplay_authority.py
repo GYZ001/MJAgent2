@@ -43,6 +43,29 @@ MERGED_IR_ARTIFACT_FIXTURE = (
 )
 
 
+def _bind_fixture_ir_identities(ir) -> list[Character]:
+    characters: list[Character] = []
+    for identity in ir.identities:
+        if identity.key == "narrator":
+            continue
+        identity.authority_id = f"bible:{identity.display_name}"
+        identity.kind = "named_character"
+        identity.role_type = "named_character"
+        identity.visual_policy = "canonical"
+        identity.asset_requirement = "required"
+        identity.visual_canonical = (
+            identity.visual_canonical or f"{identity.display_name}的稳定外形"
+        )
+        characters.append(Character(
+            name=identity.display_name,
+            role="角色",
+            appearance_canonical=identity.visual_canonical,
+            personality="稳定",
+            speech_style="自然",
+        ))
+    return characters
+
+
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "screenplay-authority.db")
@@ -326,25 +349,7 @@ def _source_projection_case(
         for source_id in source_ids
     )
 
-    characters: list[Character] = []
-    for identity in ir.identities:
-        if identity.key == "narrator":
-            continue
-        identity.authority_id = f"bible:{identity.display_name}"
-        identity.kind = "named_character"
-        identity.role_type = "named_character"
-        identity.visual_policy = "canonical"
-        identity.asset_requirement = "required"
-        identity.visual_canonical = (
-            identity.visual_canonical or f"{identity.display_name}的稳定外形"
-        )
-        characters.append(Character(
-            name=identity.display_name,
-            role="角色",
-            appearance_canonical=identity.visual_canonical,
-            personality="稳定",
-            speech_style="自然",
-        ))
+    characters = _bind_fixture_ir_identities(ir)
     world = World(visual_style_canonical="统一动画电影风格")
     conn = db.get_conn()
     if reuse_episode:
@@ -531,7 +536,7 @@ def test_current_screenplay_artifact_requires_complete_ir_semantics(
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
-        scope_id=case["episode_id"],
+        scope_id="episode-generic",
         status="candidate",
         trust_level="T1",
         content=screenplay_artifact_payload(case["compiled"]),
@@ -564,7 +569,7 @@ def test_current_screenplay_artifact_plan_null_needs_rebuild() -> None:
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
-        scope_id=case["episode_id"],
+        scope_id="episode-generic",
         status="candidate",
         trust_level="T1",
         content=payload,
@@ -1042,7 +1047,7 @@ def test_legacy_screenplay_artifact_without_participant_deliveries_needs_rebuild
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
-        scope_id=case["episode_id"],
+        scope_id="episode-generic",
         status="candidate",
         trust_level="T1",
         content=payload,
@@ -1091,7 +1096,7 @@ def test_current_screenplay_artifact_requires_explicit_semantics(
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
-        scope_id=case["episode_id"],
+        scope_id="episode-generic",
         status="candidate",
         trust_level="T1",
         content=payload,
@@ -1123,7 +1128,7 @@ def test_current_screenplay_artifact_with_participant_deliveries_loads() -> None
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
-        scope_id="episode-generic",
+        scope_id=case["episode_id"],
         status="candidate",
         trust_level="T1",
         content=payload,
@@ -1263,6 +1268,15 @@ def test_identity_normalization_failure_preserves_published_resolver(
 
 
 def _seed_test_bible_authority() -> tuple[dict, dict]:
+    from app.screenplay_ir import ScreenplayGenerationIR
+
+    fixture = json.loads(MERGED_IR_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
+    fixture_ir = ScreenplayGenerationIR.model_validate(fixture["content"])
+    fixture_characters = [
+        character.model_dump(mode="json")
+        for character in _bind_fixture_ir_identities(fixture_ir)
+        if character.name != "Hero"
+    ]
     bible = {
         "world": {
             "visual_style_canonical": "统一国风动画电影画风与自然光影",
@@ -1276,7 +1290,7 @@ def _seed_test_bible_authority() -> tuple[dict, dict]:
             "personality": "沉稳",
             "speech_style": "简洁",
             "relationships": [],
-        }],
+        }, *fixture_characters],
         "scenes": [],
     }
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
