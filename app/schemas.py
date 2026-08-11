@@ -232,10 +232,31 @@ class SourceCoverageDecision(BaseModel):
     """One explicit disposition for a deterministically indexed source segment."""
 
     source_segment_id: str
-    disposition: Literal["deliver", "merge", "context", "duplicate"]
+    disposition: Literal[
+        "deliver", "merge", "context", "duplicate", "audit_only",
+    ]
+    projection_policy: Literal[
+        "picture", "context_only", "audit_only",
+    ] = "picture"
     beat_ids: list[str] = Field(default_factory=list)
     duplicate_of: str | None = None
     reason: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_projection_policy(cls, value: object) -> object:
+        if not isinstance(value, dict) or "projection_policy" in value:
+            return value
+        normalized = dict(value)
+        disposition = str(normalized.get("disposition") or "")
+        normalized["projection_policy"] = (
+            "picture"
+            if disposition in {"deliver", "merge"}
+            else "audit_only"
+            if disposition == "audit_only"
+            else "context_only"
+        )
+        return normalized
 
     @model_validator(mode="after")
     def _validate_disposition(self) -> "SourceCoverageDecision":
@@ -245,8 +266,25 @@ class SourceCoverageDecision(BaseModel):
             raise ValueError("deliver/merge 必须绑定至少一个 beat_id")
         if self.disposition == "duplicate" and not (self.duplicate_of or "").strip():
             raise ValueError("duplicate 必须指向 duplicate_of")
-        if self.disposition in {"context", "duplicate"} and len(self.reason.strip()) < 4:
-            raise ValueError("context/duplicate 必须说明保留方式或重复依据")
+        if (
+            self.disposition in {"context", "duplicate", "audit_only"}
+            and len(self.reason.strip()) < 4
+        ):
+            raise ValueError(
+                "context/duplicate/audit_only 必须说明保留方式或重复依据"
+            )
+        expected_projection = (
+            "picture"
+            if self.disposition in {"deliver", "merge"}
+            else "audit_only"
+            if self.disposition == "audit_only"
+            else "context_only"
+        )
+        if self.projection_policy != expected_projection:
+            raise ValueError(
+                f"{self.disposition} 必须使用 "
+                f"projection_policy={expected_projection}"
+            )
         return self
 
 
@@ -1160,7 +1198,9 @@ def normalize_screenplay_json_shape(obj: dict) -> tuple[dict, list[str]]:
     if isinstance(coverage, list):
         normalized_coverage: list[object] = []
         coverage_changed = False
-        allowed_dispositions = {"deliver", "merge", "context", "duplicate"}
+        allowed_dispositions = {
+            "deliver", "merge", "context", "duplicate", "audit_only",
+        }
         merged_list_pattern = re.compile(
             r"^(?P<disposition>[a-z]+)\s*[,，;；]\s*"
             r"(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*"

@@ -55,8 +55,8 @@ from app.source_excerpt import (
 from app.spoken_contract import content_char_count
 
 
-IR_VERSION = "screenplay-generation-ir.v2"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v3"
+IR_VERSION = "screenplay-generation-ir.v3"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v4"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -358,6 +358,14 @@ def screenplay_ir_missing_event_semantic_paths(value: object) -> list[str]:
         for field in required:
             if field not in event:
                 missing.append(f"events[{event_index}].{field}")
+    for coverage_index, coverage in enumerate(value.get("coverage") or []):
+        if (
+            isinstance(coverage, dict)
+            and "projection_policy" not in coverage
+        ):
+            missing.append(
+                f"coverage[{coverage_index}].projection_policy"
+            )
     return missing
 
 
@@ -449,7 +457,12 @@ class IRBeat(BaseModel):
 
 class IRCoverageGroup(BaseModel):
     source_segment_ids: list[str] = Field(default_factory=list)
-    disposition: Literal["deliver", "merge", "context", "duplicate"] = "context"
+    disposition: Literal[
+        "deliver", "merge", "context", "duplicate", "audit_only",
+    ] = "context"
+    projection_policy: Literal[
+        "picture", "context_only", "audit_only",
+    ] = "context_only"
     beat_keys: list[str] = Field(default_factory=list)
     duplicate_of: str | None = None
     reason: str = ""
@@ -481,7 +494,7 @@ class IRCoverageGroup(BaseModel):
             or ""
         ).strip().lower()
         if raw_disposition not in {
-            "deliver", "merge", "context", "duplicate",
+            "deliver", "merge", "context", "duplicate", "audit_only",
         }:
             if normalized.get("duplicate_of"):
                 raw_disposition = "duplicate"
@@ -494,7 +507,35 @@ class IRCoverageGroup(BaseModel):
                 # story-word or role-name whitelist.
                 raw_disposition = "context"
         normalized["disposition"] = raw_disposition
+        normalized.setdefault(
+            "projection_policy",
+            (
+                "picture"
+                if raw_disposition in {"deliver", "merge"}
+                else "audit_only"
+                if raw_disposition == "audit_only"
+                else "context_only"
+            ),
+        )
         return normalized
+
+    @model_validator(mode="after")
+    def _validate_projection_policy(self) -> IRCoverageGroup:
+        expected = (
+            "picture"
+            if self.disposition in {"deliver", "merge"}
+            else "audit_only"
+            if self.disposition == "audit_only"
+            else "context_only"
+        )
+        if self.projection_policy != expected:
+            raise ValueError(
+                f"{self.disposition} coverage 必须使用 "
+                f"projection_policy={expected}"
+            )
+        if self.disposition == "audit_only" and self.beat_keys:
+            raise ValueError("audit_only coverage 不得绑定 beat_keys")
+        return self
 
 
 class IRActionParticipantDelivery(BaseModel):
@@ -2105,6 +2146,18 @@ def compile_screenplay_ir(
         else index_source_segments(source_text)
     )
     segments = {item.segment_id: item for item in segments_list}
+    audit_only_source_ids = {
+        source_id
+        for group in value.coverage
+        if group.disposition == "audit_only"
+        for source_id in group.source_segment_ids
+    }
+    unknown_audit_sources = audit_only_source_ids - set(segments)
+    if unknown_audit_sources:
+        raise ValueError(
+            "audit-only coverage 引用了不存在的来源段："
+            + "、".join(sorted(unknown_audit_sources))
+        )
     if strict_unit_ownership:
         multi_location_scenes = [
             scene.key
@@ -2146,7 +2199,10 @@ def compile_screenplay_ir(
         )
         dramatic_segments = [
             segment for segment in segments_list
-            if segment.segment_id not in front_matter_ids
+            if (
+                segment.segment_id not in front_matter_ids
+                and segment.segment_id not in audit_only_source_ids
+            )
         ]
         expected_source_ids = {
             segment.segment_id for segment in dramatic_segments
@@ -2305,8 +2361,7 @@ def compile_screenplay_ir(
                         "IR source_ownership_hash 与结构化 owner 合同不一致"
                     )
                 missing_owner_contract = (
-                    expected_source_ids
-                    - set(value.source_scene_owners)
+                    expected_source_ids - set(value.source_scene_owners)
                 )
                 if missing_owner_contract:
                     raise ScreenplayIRFidelityError(
@@ -3186,21 +3241,22 @@ def compile_screenplay_ir(
             )
     if excluded_event_keys:
         excluded_ids = list(dict.fromkeys(excluded_source_ids))
-        covered_as_context = {
+        covered_as_audit = {
             source_id
             for group in value.coverage
-            if group.disposition == "context"
+            if group.disposition == "audit_only"
             for source_id in group.source_segment_ids
         }
-        missing_context_ids = [
+        missing_audit_ids = [
             source_id
             for source_id in excluded_ids
-            if source_id not in covered_as_context
+            if source_id not in covered_as_audit
         ]
-        if missing_context_ids:
+        if missing_audit_ids:
             value.coverage.append(IRCoverageGroup(
-                source_segment_ids=missing_context_ids,
-                disposition="context",
+                source_segment_ids=missing_audit_ids,
+                disposition="audit_only",
+                projection_policy="audit_only",
                 reason=(
                     "来源内容属于非剧情旁文本，保留来源审计，"
                     "不进入成片叙事 spine"
@@ -3606,7 +3662,9 @@ def compile_screenplay_ir(
             previous_beat_keys = list(group.beat_keys)
             group.beat_keys = (
                 []
-                if group.disposition in {"context", "duplicate"}
+                if group.disposition in {
+                    "context", "duplicate", "audit_only",
+                }
                 else [
                     beat.key
                     for beat in value.beats
@@ -3638,6 +3696,7 @@ def compile_screenplay_ir(
                 ]
                 if not owning_beat_keys:
                     disposition = "context"
+                    group.projection_policy = "context_only"
             reason = group.reason
             if disposition == "context":
                 reason = retain_as_scene_context(
@@ -3647,6 +3706,7 @@ def compile_screenplay_ir(
             coverage_rows.append(SourceCoverageDecision(
                 source_segment_id=segment_id,
                 disposition=disposition,
+                projection_policy=group.projection_policy,
                 beat_ids=[beat_ids[key] for key in owning_beat_keys],
                 duplicate_of=group.duplicate_of,
                 reason=reason,
@@ -3675,6 +3735,7 @@ def compile_screenplay_ir(
             coverage_rows.append(SourceCoverageDecision(
                 source_segment_id=segment_id,
                 disposition="merge" if len(owning_beats) > 1 else "deliver",
+                projection_policy="picture",
                 beat_ids=[beat_ids[beat.key] for beat in owning_beats],
                 duplicate_of=None,
                 reason="由已声明该来源段的主线节拍确定性补全覆盖回链",
@@ -3698,6 +3759,7 @@ def compile_screenplay_ir(
             coverage_rows.append(SourceCoverageDecision(
                 source_segment_id=segment_id,
                 disposition="merge",
+                projection_policy="picture",
                 beat_ids=[beat_ids[key] for key in related_beats],
                 duplicate_of=None,
                 reason="该来源段已进入事件语义，确定性合并到对应主线节拍",
@@ -3707,6 +3769,7 @@ def compile_screenplay_ir(
         coverage_rows.append(SourceCoverageDecision(
             source_segment_id=segment_id,
             disposition="context",
+            projection_policy="context_only",
             beat_ids=[],
             duplicate_of=None,
             reason=retain_as_scene_context(segment_id),

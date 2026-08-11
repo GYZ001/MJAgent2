@@ -2162,7 +2162,7 @@ def validate_screenplay_source_coverage(
     if not script.source_coverage:
         return [
             "source_coverage 为空；每个 SRC* 原文段必须明确标记为 "
-            "deliver/merge/context/duplicate，禁止静默删戏"
+            "deliver/merge/context/duplicate/audit_only，禁止静默删戏"
         ]
     expected = {segment.segment_id for segment in segments}
     segments_by_id = {segment.segment_id: segment for segment in segments}
@@ -2208,6 +2208,11 @@ def validate_screenplay_source_coverage(
         reason = (
             decision.get("reason", "") if isinstance(decision, dict) else decision.reason
         )
+        projection_policy = (
+            decision.get("projection_policy")
+            if isinstance(decision, dict)
+            else decision.projection_policy
+        )
         if disposition in {"deliver", "merge"}:
             if not raw_beat_ids:
                 errors.append(
@@ -2226,6 +2231,22 @@ def validate_screenplay_source_coverage(
                 f"[SOURCE_CONTEXT_UNLOCATED] source_coverage[{index}] {segment_id} "
                 "标记为 context 时必须说明它在场景、关系、因果或环境中的具体保留位置"
             )
+        if disposition == "audit_only":
+            if raw_beat_ids:
+                errors.append(
+                    f"[SOURCE_AUDIT_ONLY_BEAT_FORBIDDEN] source_coverage[{index}] "
+                    f"{segment_id} 不得绑定 beat_ids"
+                )
+            if projection_policy != "audit_only":
+                errors.append(
+                    f"[SOURCE_AUDIT_ONLY_PROJECTION_INVALID] "
+                    f"source_coverage[{index}] {segment_id} 必须明确排除画面投影"
+                )
+            if len(str(reason or "").strip()) < 8:
+                errors.append(
+                    f"[SOURCE_AUDIT_ONLY_REASON_MISSING] source_coverage[{index}] "
+                    f"{segment_id} 必须说明完整来源审计的保留方式"
+                )
         if (
             disposition == "duplicate"
             and duplicate_of not in expected
@@ -2261,7 +2282,8 @@ def validate_screenplay_source_coverage(
         extra = f"（另有 {len(missing) - 20} 段）" if len(missing) > 20 else ""
         errors.append(
             f"source_coverage 漏掉 {len(missing)} 个原文段：{shown}{extra}；"
-            "必须交付、合并、作为上下文保留，或给出可核验的重复指向"
+            "必须交付、合并、作为上下文保留、仅审计保留，"
+            "或给出可核验的重复指向"
         )
     return errors
 

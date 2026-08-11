@@ -135,7 +135,7 @@ SYSTEM_PREFIX = (
 )
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
-SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.3.0"
+SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.4.0"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
@@ -3891,7 +3891,11 @@ async def _repair_narrative_blueprint(
             "若错误节点是局部修复曾产生的重复/虚构节点，可写入 delete_node_keys；"
             "但必须先把其真实来源交付归还正确节点，删除后任何 SRC 缺失都会被拒绝。"
             "允许修正时间关系、转场、状态事实引用、决定、行为自主性和"
-            " released_constraints_for。不得修改未列出的节点。原文没有的同谋、"
+            " released_constraints_for。每个 replacement node 必须显式保留或修正"
+            " narrative_layer/event_priority/render_policy；可演故事只能使用"
+            " story+causal+standalone，仅保留来源审计的旁文本只能使用"
+            " paratext+connective+exclude_from_spine，禁止省略后由程序猜测。"
+            "不得修改未列出的节点。原文没有的同谋、"
             "关系、满房、行程或人物动机默认禁止；若为修复原文自身的明确逻辑矛盾"
             "确有必要，必须设 adaptation_kind=logic_bridge，并用 bridge_rationale"
             "说明为何不改变核心事件与结果。已有住宿、车辆、关系等持久事实必须"
@@ -4228,6 +4232,10 @@ async def _semantic_review_narrative_blueprint(
             "5. 威胁、武器、醉酒或失去行动能力是否被错误改写为自主选择，约束解除"
             "是否真实发生；\n"
             "6. 后文引用的视觉事实是否此前真正给观众看见。\n"
+            "7. 每个节点的三元叙事语义是否与来源职责一致：story 必须是可表演、"
+            "可形成画面状态变化的故事语义；paratext 必须只做来源审计并使用"
+            " connective+exclude_from_spine。不得按 SRC 编号、章节位置、人物是否"
+            "为空或文本关键词判断，只能依据该段在叙事中的语义职责。\n"
             "连续剧可继承前序集已经建立的人物和关系；原文在当前节点明确揭示的"
             "既有关系，只要该节点先以可见/可听内容建立再引用，也不属于"
             " setup_missing。不得要求删除原文明确写出的关系来修复 setup。\n"
@@ -4521,7 +4529,11 @@ def _blueprint_shard_boundary_context(
 ) -> dict[str, Any]:
     active_facts: dict[str, dict[str, Any]] = {}
     participant_locations: dict[str, str] = {}
-    for node in nodes:
+    story_nodes = [
+        node for node in nodes
+        if node.narrative_layer == "story"
+    ]
+    for node in story_nodes:
         for change in node.state_changes:
             for fact_key in change.supersedes_fact_keys:
                 active_facts.pop(fact_key, None)
@@ -4544,7 +4556,7 @@ def _blueprint_shard_boundary_context(
                 "location_label": node.location_label,
                 "participants": node.participants,
             }
-            for node in nodes[-6:]
+            for node in story_nodes[-6:]
         ],
         "active_state_facts": list(active_facts.values())[-40:],
         "participant_locations": participant_locations,
@@ -4683,10 +4695,12 @@ async def _generate_sharded_narrative_blueprint(
              FROM artifacts
             WHERE scope_type='episode' AND scope_id=?
               AND type='screenplay_narrative_blueprint_shard'
+                  AND contract_version=?
               AND prompt_version=? AND status='validated'
             ORDER BY created_at DESC LIMIT 200""",
         (
             str(episode.get("id") or ""),
+                BLUEPRINT_VERSION,
             SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
         ),
     ).fetchall()
@@ -4758,10 +4772,12 @@ async def _generate_sharded_narrative_blueprint(
                  FROM artifacts
                 WHERE scope_type='episode' AND scope_id=?
                   AND type='screenplay_narrative_blueprint_shard'
+                      AND contract_version=?
                   AND prompt_version=? AND status='validated'
                 ORDER BY created_at DESC LIMIT 50""",
             (
                 str(episode.get("id") or ""),
+                    BLUEPRINT_VERSION,
                 SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
             ),
         ).fetchall()
@@ -4809,6 +4825,11 @@ async def _generate_sharded_narrative_blueprint(
                     " episode_start，后续分片根据 boundary_context 延续或明确跳转。"
                     "必须复用 boundary_context 中仍有效的 fact_key、人物位置和时间域；"
                     "新 node/fact key 只需在本分片内唯一，程序会加命名空间。"
+                    "每个节点必须显式输出 narrative_layer/event_priority/render_policy。"
+                    "可表演且形成画面状态变化的故事事件使用 story+causal+standalone；"
+                    "作者互动、说明等仅需完整来源审计且不应成片的旁文本使用"
+                    " paratext+connective+exclude_from_spine。不得根据 SRC 编号、所在"
+                    "位置、characters 是否为空或自由文本词表分类。"
                     "只输出 JSON，不要解释。\n\n"
                     f"上次校验错误：{json.dumps(errors, ensure_ascii=False)}\n"
                     f"人物上下文：{json.dumps(bible_context, ensure_ascii=False, separators=(',', ':'))}\n"
@@ -4978,11 +4999,13 @@ async def _generate_screenplay_narrative_blueprint(
                 WHERE a.scope_type='episode' AND a.scope_id=?
                   AND a.type='screenplay_narrative_blueprint'
                   AND a.status='validated'
+                  AND a.contract_version=?
                   AND a.prompt_version=?
                   AND wr.input_fingerprint=?
                 ORDER BY a.created_at DESC LIMIT 10""",
             (
                 str(episode.get("id") or ""),
+                BLUEPRINT_VERSION,
                 SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                 str(current_run["input_fingerprint"] or ""),
             ),
@@ -5063,6 +5086,11 @@ async def _generate_screenplay_narrative_blueprint(
 硬规则：
 1. 按原文顺序覆盖每个非标题 SRC。单节点最多绑定
    {BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE} 个连续 SRC，不得用大节点掩盖事件。
+1a. 每个节点必须显式输出 narrative_layer/event_priority/render_policy。
+   可表演且形成画面状态变化的故事语义只能使用 story+causal+standalone；
+   仅保留完整来源审计、不进入成片的旁文本只能使用
+   paratext+connective+exclude_from_spine。不得按 SRC 编号、章节位置、
+   characters 是否为空或文本关键词分类。
 2. temporal_domain_key 表示同一连续时间域；回忆必须明确 flashback_enter、
    flashback_continue、flashback_exit。次日、当晚、数日后和蒙太奇必须使用正确
    time_relation，并提供观众可见/可听的 transition_cue。
@@ -5285,6 +5313,8 @@ async def _generate_screenplay_scene_sharded_baseline(
     }
     structural_identity_evidence: list[dict[str, Any]] = []
     for node in narrative_blueprint.nodes:
+        if node.narrative_layer == "paratext":
+            continue
         evidence_by_key = {
             item.identity_key: item
             for item in node.participant_evidence

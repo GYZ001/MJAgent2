@@ -33,6 +33,7 @@ from app.identity_authority import identity_authority_registry
 from app.narrative_blueprint import (
     BlueprintSceneDerivation,
     BlueprintScenePlan,
+    BlueprintSourceSemantics,
     NarrativeNode,
     NarrativeBlueprint,
     derive_blueprint_scene_plans,
@@ -42,6 +43,7 @@ from app.renderability import SCENE_STORY_FUNCTION_MIN_CHARS
 from app.schemas import ActionAgency, Bible, TextProvenance
 from app.screenplay_ir import (
     IRActionParticipantDelivery,
+    IRCoverageGroup,
     IRExperience,
     IRIdentity,
     IRMetadata,
@@ -54,11 +56,11 @@ from app.source_excerpt import index_source_segments, structural_front_matter_id
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v7"
-SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v3"
-SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v7"
-SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v4"
-SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v6"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v8"
+SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v4"
+SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v8"
+SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v5"
+SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v7"
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
@@ -139,11 +141,11 @@ class ScreenplaySceneUnitSlotPlan(BaseModel):
     unit_order: int = Field(ge=1)
     scene_unit_order: int = Field(ge=1)
     kind: Literal["action", "dialogue"]
-    narrative_layer: Literal["story", "paratext"] = "story"
-    event_priority: Literal["causal", "supporting", "connective"] = "causal"
+    narrative_layer: Literal["story", "paratext"]
+    event_priority: Literal["causal", "supporting", "connective"]
     render_policy: Literal[
         "standalone", "merge_adjacent", "exclude_from_spine",
-    ] = "standalone"
+    ]
     source_segment_ids: list[str] = Field(min_length=1)
     source_text: str = ""
 
@@ -193,7 +195,7 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
 class ScreenplaySceneShardPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard-plan.v3"] = SCREENPLAY_SHARD_PLAN_VERSION
+    contract_version: Literal["screenplay-scene-shard-plan.v4"] = SCREENPLAY_SHARD_PLAN_VERSION
     shard_id: str
     scene_plan_keys: list[str]
     source_segment_ids: list[str]
@@ -246,7 +248,7 @@ class ScreenplaySceneActionEvidence(BaseModel):
 
 
 class ScreenplayActionParticipantDeliveryContract(BaseModel):
-    contract_version: Literal["screenplay-generation-ir.v2"] = IR_VERSION
+    contract_version: Literal["screenplay-generation-ir.v3"] = IR_VERSION
     evidence_schema: dict[str, Any] = Field(
         default_factory=IRActionParticipantDelivery.model_json_schema,
     )
@@ -259,12 +261,13 @@ class ScreenplayActionParticipantDeliveryContract(BaseModel):
 class ScreenplaySceneInputContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-input.v7"] = (
+    contract_version: Literal["screenplay-scene-input.v8"] = (
         SCREENPLAY_SCENE_INPUT_VERSION
     )
     scene_plan_key: str
     node_keys: list[str]
     source_segment_ids: list[str]
+    source_semantics: dict[str, BlueprintSourceSemantics]
     source_segments: list[ScreenplaySceneSourceSegment]
     participant_bindings: list[ScreenplaySceneParticipantBinding]
     source_scene_owners: dict[str, str]
@@ -320,7 +323,7 @@ class ScreenplaySceneShardCreativeUnit(BaseModel):
 class ScreenplaySceneShardCreativeIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-creative.v4"] = (
+    contract_version: Literal["screenplay-scene-creative.v5"] = (
         SCREENPLAY_SCENE_CREATIVE_VERSION
     )
     slots: dict[str, ScreenplaySceneShardCreativeUnit]
@@ -341,7 +344,7 @@ class ScreenplaySceneShardScene(IRScene):
 class ScreenplaySceneShardIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard.v7"] = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v8"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
@@ -371,6 +374,10 @@ def _contract_identity_scaffold_hash(
         "contract_version": SCREENPLAY_SCENE_INPUT_VERSION,
         "scene_plan_key": contract.scene_plan_key,
         "source_segment_ids": contract.source_segment_ids,
+        "source_semantics": {
+            source_id: semantics.model_dump(mode="json")
+            for source_id, semantics in contract.source_semantics.items()
+        },
         "participant_bindings": [
             binding.model_dump(mode="json")
             for binding in contract.participant_bindings
@@ -976,6 +983,10 @@ def blueprint_content_hash(blueprint: NarrativeBlueprint) -> str:
 def _source_ownership_hash(blueprint: NarrativeBlueprint) -> str:
     return _hash({
         "source_scene_owners": blueprint.source_scene_owners,
+        "source_semantics": {
+            source_id: semantics.model_dump(mode="json")
+            for source_id, semantics in blueprint.source_semantics.items()
+        },
         "scene_derivations": [
             relation.model_dump(mode="json")
             for relation in blueprint.scene_derivations
@@ -1170,6 +1181,16 @@ def _build_group_unit_slots(
     for scene_plan in group:
         scene_unit_order = 0
         for source_id in scene_plan.source_segment_ids:
+            semantics = scene_plan.source_semantics.get(source_id)
+            if semantics is None:
+                raise ValueError(
+                    f"{scene_plan.key} 缺少 {source_id} 的显式来源语义"
+                )
+            if semantics.projection_policy != "picture":
+                raise ValueError(
+                    f"{scene_plan.key} 不得为 {source_id} 的 "
+                    f"{semantics.projection_policy} 投影生成创作 slot"
+                )
             for source_part_order, (kind, source_part) in enumerate(
                 _source_creative_parts(
                     source_by_id.get(source_id, "")
@@ -1190,6 +1211,9 @@ def _build_group_unit_slots(
                     unit_order=unit_order,
                     scene_unit_order=scene_unit_order,
                     kind=kind,
+                    narrative_layer=semantics.narrative_layer,
+                    event_priority=semantics.event_priority,
+                    render_policy=semantics.render_policy,
                     source_segment_ids=[source_id],
                     source_text=(
                         source_part if kind == "dialogue" else ""
@@ -1524,6 +1548,10 @@ def build_screenplay_scene_input_contracts(
             scene_plan_key=scene_plan.key,
             node_keys=list(scene_plan.node_keys),
             source_segment_ids=owned_source_ids,
+            source_semantics={
+                source_id: scene_plan.source_semantics[source_id]
+                for source_id in owned_source_ids
+            },
             source_segments=[
                 ScreenplaySceneSourceSegment(
                     source_segment_id=source_id,
@@ -1753,6 +1781,14 @@ def _validate_scene_input_contracts(
             errors.append(
                 f"{scene_key} 逐场参与者合同 source_segment_ids "
                 "与唯一 owner 投影不一致"
+            )
+        expected_source_semantics = {
+            source_id: expected_scene.source_semantics[source_id]
+            for source_id in expected_source_ids
+        }
+        if contract.source_semantics != expected_source_semantics:
+            errors.append(
+                f"{scene_key} 逐场来源语义与 Blueprint 不一致"
             )
         contract_source_ids = [
             segment.source_segment_id
@@ -2321,9 +2357,50 @@ def merge_screenplay_scene_shards(
     if [scene.key for scene in merged_scenes] != expected_scenes:
         errors.append("合并后 scene 顺序与 Blueprint 不一致")
     required_ids = [segment.segment_id for segment in segments]
-    missing = [source_id for source_id in required_ids if source_id not in consumed]
+    picture_source_ids = [
+        source_id
+        for source_id in required_ids
+        if (
+            blueprint.source_semantics.get(source_id) is not None
+            and blueprint.source_semantics[source_id].projection_policy
+            == "picture"
+        )
+    ]
+    audit_only_source_ids = [
+        source_id
+        for source_id in required_ids
+        if (
+            blueprint.source_semantics.get(source_id) is not None
+            and blueprint.source_semantics[source_id].projection_policy
+            == "audit_only"
+        )
+    ]
+    missing_semantics = [
+        source_id
+        for source_id in required_ids
+        if source_id not in blueprint.source_semantics
+    ]
+    if missing_semantics:
+        errors.append(
+            "Blueprint 来源语义漏掉 SRC：" + ",".join(missing_semantics)
+        )
+    missing = [
+        source_id
+        for source_id in picture_source_ids
+        if source_id not in consumed
+    ]
     if missing:
-        errors.append("合并 IR 未覆盖非标题 SRC：" + ",".join(missing))
+        errors.append("合并 IR 未覆盖 picture SRC：" + ",".join(missing))
+    leaked_audit_sources = [
+        source_id
+        for source_id in audit_only_source_ids
+        if source_id in consumed
+    ]
+    if leaked_audit_sources:
+        errors.append(
+            "audit-only SRC 不得进入创作 unit："
+            + ",".join(leaked_audit_sources)
+        )
     source_order = {source_id: index for index, source_id in enumerate(required_ids)}
     first_owned = []
     already: set[str] = set()
@@ -2358,6 +2435,15 @@ def merge_screenplay_scene_shards(
         episode_no=envelope.episode_no,
         metadata=envelope.metadata.to_ir(),
         identities=identities,
+        coverage=[
+            IRCoverageGroup(
+                source_segment_ids=[source_id],
+                disposition="audit_only",
+                projection_policy="audit_only",
+                reason="来源旁文本仅保留完整审计，不参与画面投影",
+            )
+            for source_id in audit_only_source_ids
+        ],
         scenes=merged_scenes,
         experience=envelope.experience.to_ir(),
         source_scene_owners=dict(blueprint.source_scene_owners),

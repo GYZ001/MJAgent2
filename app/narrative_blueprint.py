@@ -26,7 +26,7 @@ from app.source_excerpt import (
 )
 
 
-BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v3"
+BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v4"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 
 
@@ -185,10 +185,47 @@ class NarrativeParticipantEvidence(BaseModel):
         return [_normalize_source_segment_id(item) for item in values]
 
 
+class BlueprintSourceSemantics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    narrative_layer: Literal["story", "paratext"]
+    event_priority: Literal["causal", "connective"]
+    render_policy: Literal["standalone", "exclude_from_spine"]
+    disposition: Literal["deliver", "audit_only"]
+    projection_policy: Literal["picture", "audit_only"]
+
+    @model_validator(mode="after")
+    def _validate_projection(self) -> BlueprintSourceSemantics:
+        expected = (
+            ("causal", "standalone", "deliver", "picture")
+            if self.narrative_layer == "story"
+            else (
+                "connective",
+                "exclude_from_spine",
+                "audit_only",
+                "audit_only",
+            )
+        )
+        actual = (
+            self.event_priority,
+            self.render_policy,
+            self.disposition,
+            self.projection_policy,
+        )
+        if actual != expected:
+            raise ValueError(
+                f"{self.narrative_layer} 来源语义必须为 {expected}"
+            )
+        return self
+
+
 class NarrativeNode(BaseModel):
     key: str
     source_segment_ids: list[str]
     summary: str
+    narrative_layer: Literal["story", "paratext"]
+    event_priority: Literal["causal", "connective"]
+    render_policy: Literal["standalone", "exclude_from_spine"]
     temporal_domain_key: str
     time_label: str
     time_relation: Literal[
@@ -245,11 +282,54 @@ class NarrativeNode(BaseModel):
             )
         return normalized
 
+    @model_validator(mode="after")
+    def _validate_narrative_semantics(self) -> NarrativeNode:
+        expected = (
+            ("causal", "standalone")
+            if self.narrative_layer == "story"
+            else ("connective", "exclude_from_spine")
+        )
+        if (self.event_priority, self.render_policy) != expected:
+            raise ValueError(
+                f"{self.narrative_layer} 节点必须使用 "
+                f"event_priority={expected[0]}、render_policy={expected[1]}"
+            )
+        if self.narrative_layer == "paratext" and any((
+            self.participants,
+            self.participant_evidence,
+            self.state_requirements,
+            self.state_changes,
+            self.released_constraints_for,
+            self.decision is not None,
+        )):
+            raise ValueError(
+                "paratext 节点不得承载人物、决定或剧情状态合同"
+            )
+        return self
+
+    def source_semantics(self) -> BlueprintSourceSemantics:
+        return BlueprintSourceSemantics(
+            narrative_layer=self.narrative_layer,
+            event_priority=self.event_priority,
+            render_policy=self.render_policy,
+            disposition=(
+                "deliver"
+                if self.narrative_layer == "story"
+                else "audit_only"
+            ),
+            projection_policy=(
+                "picture"
+                if self.narrative_layer == "story"
+                else "audit_only"
+            ),
+        )
+
 
 class BlueprintScenePlan(BaseModel):
     key: str
     node_keys: list[str]
     source_segment_ids: list[str]
+    source_semantics: dict[str, BlueprintSourceSemantics]
     temporal_domain_key: str
     time_label: str
     location_key: str
@@ -290,27 +370,25 @@ class BlueprintSourceOwnershipError(ValueError):
 
 
 class NarrativeBlueprint(BaseModel):
-    format_version: str = BLUEPRINT_VERSION
+    format_version: Literal["screenplay-narrative-blueprint.v4"] = (
+        BLUEPRINT_VERSION
+    )
     episode_no: int
     nodes: list[NarrativeNode]
     scene_plans: list[BlueprintScenePlan] = Field(default_factory=list)
     source_scene_owners: dict[str, str] = Field(default_factory=dict)
+    source_semantics: dict[str, BlueprintSourceSemantics] = Field(
+        default_factory=dict,
+    )
     scene_derivations: list[BlueprintSceneDerivation] = Field(
         default_factory=list,
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_version(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        normalized = dict(value)
-        normalized["format_version"] = BLUEPRINT_VERSION
-        return normalized
-
 
 class NarrativeBlueprintShard(BaseModel):
-    format_version: str = BLUEPRINT_VERSION
+    format_version: Literal["screenplay-narrative-blueprint.v4"] = (
+        BLUEPRINT_VERSION
+    )
     episode_no: int
     shard_index: int
     source_segment_ids: list[str]
@@ -324,7 +402,6 @@ class NarrativeBlueprintShard(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
-        normalized["format_version"] = BLUEPRINT_VERSION
         normalized["source_segment_ids"] = [
             _normalize_source_segment_id(source_id)
             for source_id in (
@@ -1108,8 +1185,24 @@ def apply_narrative_blueprint_patch(
 def derive_blueprint_scene_plans(
     blueprint: NarrativeBlueprint,
 ) -> list[BlueprintScenePlan]:
-    groups: list[list[NarrativeNode]] = []
+    source_semantics: dict[str, BlueprintSourceSemantics] = {}
     for node in blueprint.nodes:
+        semantics = node.source_semantics()
+        for source_id in node.source_segment_ids:
+            existing = source_semantics.get(source_id)
+            if existing is not None and existing != semantics:
+                raise ValueError(
+                    "[BLUEPRINT_SOURCE_SEMANTIC_CONFLICT] "
+                    f"{source_id} 被赋予互相冲突的叙事语义"
+                )
+            source_semantics[source_id] = semantics
+
+    groups: list[list[NarrativeNode]] = []
+    for node in (
+        item
+        for item in blueprint.nodes
+        if item.narrative_layer == "story"
+    ):
         previous = groups[-1][-1] if groups else None
         current_group = groups[-1] if groups else []
         starts_scene = (
@@ -1150,6 +1243,7 @@ def derive_blueprint_scene_plans(
             key=f"bp-sc{index:03d}",
             node_keys=[node.key for node in nodes],
             source_segment_ids=[],
+            source_semantics={},
             temporal_domain_key=first.temporal_domain_key,
             time_label=first.time_label,
             location_key=first.location_key,
@@ -1217,6 +1311,10 @@ def derive_blueprint_scene_plans(
             for source_id, owner_scene_key in source_scene_owners.items()
             if owner_scene_key == plan.key
         ]
+        plan.source_semantics = {
+            source_id: source_semantics[source_id]
+            for source_id in plan.source_segment_ids
+        }
 
     node_map = {node.key: node for node in blueprint.nodes}
     derivations: list[BlueprintSceneDerivation] = []
@@ -1303,6 +1401,7 @@ def derive_blueprint_scene_plans(
 
     blueprint.scene_plans = plans
     blueprint.source_scene_owners = source_scene_owners
+    blueprint.source_semantics = source_semantics
     blueprint.scene_derivations = derivations
     return plans
 
@@ -1405,6 +1504,19 @@ def validate_narrative_blueprint(
             errors.append(
                 f"[BLUEPRINT_BRIDGE_RATIONALE_MISSING] {node.key} 的"
                 "逻辑补桥没有说明必要性和不改变原文结果的依据"
+            )
+        expected_semantics = (
+            ("causal", "standalone")
+            if node.narrative_layer == "story"
+            else ("connective", "exclude_from_spine")
+        )
+        if (
+            node.event_priority,
+            node.render_policy,
+        ) != expected_semantics:
+            errors.append(
+                f"[BLUEPRINT_NODE_SEMANTICS_INVALID] {node.key} 的"
+                "叙事层、事件优先级与渲染策略不一致"
             )
 
     expected_positions = [
@@ -1999,11 +2111,33 @@ def blueprint_prompt_contract() -> dict[str, Any]:
         "time_relations": list(
             NarrativeNode.model_fields["time_relation"].annotation.__args__
         ),
+        "required_source_semantics": {
+            "fields": [
+                "narrative_layer",
+                "event_priority",
+                "render_policy",
+            ],
+            "story": {
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "meaning": "可表演、可形成画面状态变化的剧情语义",
+            },
+            "paratext": {
+                "event_priority": "connective",
+                "render_policy": "exclude_from_spine",
+                "meaning": (
+                    "仅保留完整来源审计，不生成 scene/event/beat/"
+                    "scene_outline/shot，也不注入剧情上下文"
+                ),
+            },
+        },
         "program_derived": [
             "scene_plans",
             "scene_heading",
             "scene_order",
             "source_scene_owners",
+            "source_semantics.disposition",
+            "source_semantics.projection_policy",
             "scene_derivations",
         ],
         "source_ownership": {

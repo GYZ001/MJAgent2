@@ -629,7 +629,8 @@ def _drop_paratext(
     for decision in screenplay.source_coverage:
         if decision.source_segment_id not in excluded_source_ids:
             continue
-        decision.disposition = "context"
+        decision.disposition = "audit_only"
+        decision.projection_policy = "audit_only"
         decision.beat_ids = []
         decision.duplicate_of = None
         decision.reason = (
