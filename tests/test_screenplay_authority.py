@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from app import api, db, errors as app_errors, storyboard_workspace
+from app import api, db, errors as app_errors, storyboard_workspace, task_registry
 from app.capabilities.direct import enter_handler
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
@@ -113,7 +113,7 @@ def test_invalid_certificate_recommends_resume_only_when_published_revalidation_
 
 
 @pytest.mark.asyncio
-async def test_eligible_published_revalidation_is_executable_by_resume_endpoint(
+async def test_legacy_published_revalidation_rebuilds_current_contract(
     monkeypatch,
 ) -> None:
     _screenplay_value, artifact, _authority = _published_case()
@@ -123,38 +123,33 @@ async def test_eligible_published_revalidation_is_executable_by_resume_endpoint(
     class Recorder:
         run_id = "run-revalidation"
 
-    spawned: dict[str, object] = {}
+        def cancel(self, _message: str) -> None:
+            raise AssertionError("successful revalidation must not cancel")
+
     monkeypatch.setattr(
         api,
         "_new_screenplay_recorder",
         lambda *_args, **_kwargs: Recorder(),
     )
 
-    def capture_spawn(episode_id, recorder, **kwargs):
-        spawned.update({
-            "episode_id": episode_id,
-            "run_id": recorder.run_id,
-            "status": kwargs["status"],
-            "message": kwargs["message"],
-        })
+    def capture_spawn(_kind, _key, coro, *, project_id=None):
+        coro.close()
 
-    monkeypatch.setattr(api, "_spawn_screenplay_activation", capture_spawn)
+    monkeypatch.setattr(task_registry, "spawn", capture_spawn)
 
     with enter_handler():
         result = await api.resume_screenplay("episode-generic", body={})
 
     assert result["status"] == "queued"
     assert result["run_id"] == "run-revalidation"
-    assert result["mode"] == "finalize"
+    assert result["mode"] == "baseline_rebuild"
     assert result["revision_id"]
-    assert spawned["episode_id"] == "episode-generic"
-    assert spawned["status"] == "queued"
     revision = db.get_conn().execute(
-        "SELECT baseline_artifact_id,working_artifact_id "
+        "SELECT baseline_generation_count,baseline_artifact_id,working_artifact_id "
         "FROM production_revisions "
         "WHERE episode_id='episode-generic' AND status='active'"
     ).fetchone()
-    assert tuple(revision) == (artifact["id"], artifact["id"])
+    assert tuple(revision) == (0, None, None)
 
 
 @pytest.mark.parametrize(

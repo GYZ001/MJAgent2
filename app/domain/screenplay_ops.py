@@ -644,10 +644,13 @@ def update_episode_target_duration(
             "message": "本集正在制作中，不能同时修改目标时长；请等待任务结束后重试",
             "active_runs": active_runs,
         })
-    if production.get("can_resume_repair"):
+    if (
+        production.get("can_resume_repair")
+        or production.get("can_resume_baseline")
+    ):
         raise HTTPException(409, {
             "code": "episode_target_duration_locked",
-            "message": "本集已有可续修的剧本工作副本，目标时长已被该约束版本锁定",
+            "message": "本集已有可恢复的剧本生产状态，目标时长已被该约束版本锁定",
         })
 
     conn = get_conn()
@@ -2113,7 +2116,6 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             "deduplicated": True,
         }
     rev = get_active_production_revision(episode_id, "screenplay")
-    production_state = _screenplay_production_state(episode_id)
     if (
         rev is None
         and ep["screenplay_status"] == "ready"
@@ -2121,7 +2123,6 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         and not _screenplay_ready(ep)
     ):
         rev = _prepare_published_screenplay_revalidation(dict(ep))
-        production_state = _screenplay_production_state(episode_id)
     eligibility = resolve_screenplay_resume_eligibility(
         episode_id,
         revision=rev,
@@ -2691,8 +2692,12 @@ async def start_screenplay_all(project_id: str):
             conn.commit()
             row = conn.execute("SELECT * FROM episodes WHERE id=?", (eid,)).fetchone()
         recorder = None
-        production = _screenplay_production_state(eid)
-        is_resume = bool(production.get("can_resume_repair"))
+        from app.production.revision import (
+            resolve_screenplay_resume_eligibility,
+        )
+
+        eligibility = resolve_screenplay_resume_eligibility(eid)
+        is_resume = eligibility.resumable
         try:
             recorder = _new_screenplay_recorder(
                 eid,
@@ -2705,14 +2710,16 @@ async def start_screenplay_all(project_id: str):
                 project_id=project_id,
                 status="queued",
                 message=(
-                    "批量任务已从工作副本继续结构校验、评分与发布"
-                    if is_resume else "批量剧本已排队，等待文本生成槽位"
+                    f"批量任务：{eligibility.label}已排队"
+                    if is_resume
+                    else "批量剧本已排队，等待文本生成槽位"
                 ),
                 expected_active_run_id=(
                     row["active_screenplay_run_id"]
                     if is_resume else None
                 ),
                 clear_unpublished_ir=not is_resume,
+                resume_eligibility=eligibility if is_resume else None,
                 task_factory=lambda eid=eid, recorder=recorder: _screenplay_guarded(
                     eid,
                     recorder,
