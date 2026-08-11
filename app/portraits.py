@@ -35,8 +35,8 @@ from app.errors import ContentGenerationError, code_ref
 from app.harness import model_gateway
 from app.harness.types import EvidenceArtifact
 from app.identity_authority import (
+    IdentityAuthorityConflictError,
     normalize_character_resolution,
-    normalize_character_resolutions,
 )
 from app.ingest import chapter_is_stub, chapter_titles_match
 from app.refs import (
@@ -2769,8 +2769,31 @@ def merge_screenplay_character_resolutions(
     existing: list[dict] | None,
     incoming: list[dict] | None,
 ) -> list[dict]:
-    """合并模型决议：后续真名证据可升级早期路人降级，不反向覆盖。"""
+    """合并模型决议：后续真名证据可升级早期路人降级，不反向覆盖。
+
+    ``identity_group`` 是模型已经做出的同一实体决议。结构审计可能为该
+    实体增加新的稳定句柄（例如“大青山被困少年1”），但这不能因为
+    描述性 canonical_name 变化就签发第二个 authority。同组的功能身份
+    因此稳定复用已有权威；只有更高优先级的真名证据可整组升级。
+    同组出现两个不同真名时证据自相矛盾，必须失败，不做猜测归并。
+    """
     merged: list[dict] = []
+    priority = {
+        "functional_extra": 0,
+        "functional_identity": 1,
+        "future_identity": 2,
+    }
+    group_authorities: dict[str, dict] = {}
+
+    def bind_to_group_authority(candidate: dict, authority: dict) -> dict:
+        return normalize_character_resolution({
+            **candidate,
+            "canonical_name": authority["canonical_name"],
+            "resolution": authority["resolution"],
+            "authority_id": authority["authority_id"],
+            "source_instance_key": authority["source_instance_key"],
+        })
+
     for item in [*(existing or []), *(incoming or [])]:
         if not isinstance(item, dict):
             continue
@@ -2783,6 +2806,61 @@ def merge_screenplay_character_resolutions(
             "source_label": source_label,
             "canonical_name": canonical_name,
         })
+        identity_group = str(candidate.get("identity_group") or "").strip()
+        if identity_group:
+            authority = group_authorities.get(identity_group)
+            if authority is None:
+                authority = {
+                    "canonical_name": candidate["canonical_name"],
+                    "resolution": str(candidate.get("resolution") or ""),
+                    "authority_id": candidate["authority_id"],
+                    "source_instance_key": (
+                        str(candidate.get("source_instance_key") or "").strip()
+                        or candidate["authority_id"]
+                    ),
+                }
+                group_authorities[identity_group] = authority
+                candidate = bind_to_group_authority(candidate, authority)
+            else:
+                authority_priority = priority.get(authority["resolution"], 0)
+                candidate_priority = priority.get(
+                    str(candidate.get("resolution") or ""), 0,
+                )
+                if (
+                    candidate_priority == authority_priority == priority["future_identity"]
+                    and candidate["canonical_name"] != authority["canonical_name"]
+                ):
+                    raise IdentityAuthorityConflictError([{
+                        "reason": "identity_group_multiple_named_identities",
+                        "identity_group": identity_group,
+                        "canonical_names": sorted({
+                            candidate["canonical_name"],
+                            authority["canonical_name"],
+                        }),
+                        "message": (
+                            f"identity_group={identity_group} 同时声明了多个真名："
+                            f"{sorted({candidate['canonical_name'], authority['canonical_name']})}"
+                        ),
+                    }])
+                if candidate_priority > authority_priority:
+                    authority = {
+                        "canonical_name": candidate["canonical_name"],
+                        "resolution": str(candidate.get("resolution") or ""),
+                        "authority_id": candidate["authority_id"],
+                        "source_instance_key": (
+                            str(candidate.get("source_instance_key") or "").strip()
+                            or candidate["authority_id"]
+                        ),
+                    }
+                    group_authorities[identity_group] = authority
+                    merged = [
+                        bind_to_group_authority(current, authority)
+                        if str(current.get("identity_group") or "").strip()
+                        == identity_group
+                        else current
+                        for current in merged
+                    ]
+                candidate = bind_to_group_authority(candidate, authority)
         source_instance_key = str(
             candidate.get("source_instance_key") or ""
         ).strip()
@@ -2801,11 +2879,6 @@ def merge_screenplay_character_resolutions(
         if current is None:
             merged.append(candidate)
             continue
-        priority = {
-            "functional_extra": 0,
-            "functional_identity": 1,
-            "future_identity": 2,
-        }
         current_priority = priority.get(
             str(current.get("resolution") or ""), 0,
         )
@@ -2816,7 +2889,7 @@ def merge_screenplay_character_resolutions(
             merged[current_index] = candidate
         elif (
             candidate_priority == current_priority
-            and current.get("canonical_name") == canonical_name
+            and current.get("canonical_name") == candidate.get("canonical_name")
         ):
             merged[current_index] = {**current, **candidate}
     return merged
@@ -2834,8 +2907,11 @@ def load_screenplay_character_resolutions(conn, episode_id: str) -> list[dict]:
         payload = json.loads(row["screenplay_character_resolutions"] or "[]")
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
+    # Loading is also the compatibility boundary for rows written before
+    # identity-group authority reuse was enforced.  Canonicalize them in memory
+    # immediately; the next normal persistence pass rewrites the durable value.
     return (
-        normalize_character_resolutions(payload)
+        merge_screenplay_character_resolutions([], payload)
         if isinstance(payload, list)
         else []
     )

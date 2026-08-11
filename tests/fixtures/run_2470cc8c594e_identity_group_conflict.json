@@ -1,0 +1,34 @@
+[
+  {
+    "source_label": "白白净净身子较胖",
+    "canonical_name": "白白净净身子较胖",
+    "resolution": "functional_identity",
+    "identity_group": "current-1:F2",
+    "authority_id": "functional:accacf4a96da93d0",
+    "evidence": "本集出场的和王有材一起被困的少年，无明确真名"
+  },
+  {
+    "source_label": "虎头虎脑的少年",
+    "canonical_name": "虎头虎脑的少年",
+    "resolution": "functional_identity",
+    "identity_group": "current-1:F1",
+    "authority_id": "functional:03f2ad2f69f130c5",
+    "evidence": "本集出场的和王有材一起被困的少年，无明确真名"
+  },
+  {
+    "source_label": "大青山被困少年1",
+    "canonical_name": "大青山被困少年1",
+    "resolution": "functional_identity",
+    "identity_group": "current-1:F1",
+    "authority_id": "functional:6dc716c3c43d03bc",
+    "evidence": "结构证据确认与虎头虎脑的少年是同一实体"
+  },
+  {
+    "source_label": "大青山被困少年2",
+    "canonical_name": "大青山被困少年2",
+    "resolution": "functional_identity",
+    "identity_group": "current-1:F2",
+    "authority_id": "functional:badc2259dbe0111f",
+    "evidence": "结构证据确认与白白净净身子较胖的少年是同一实体"
+  }
+]
