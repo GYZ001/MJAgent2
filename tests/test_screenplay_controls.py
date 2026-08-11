@@ -219,6 +219,7 @@ def _current_working_artifact():
         format_version=IR_VERSION,
         episode_no=1,
         source_semantics={},
+        source_audit_annotations=[],
     ).model_dump(mode="json")
     merged = repository.create_artifact(EvidenceArtifact(
         type="screenplay_generation_ir_merged",

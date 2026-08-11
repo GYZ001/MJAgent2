@@ -262,6 +262,7 @@ def _create_working_artifact(
         content={
             "format_version": IR_VERSION,
             "source_scene_owners": {"SRC0001": "SC01"},
+            "source_audit_annotations": [],
             "source_semantics": {
                 "SRC0001": {
                     "narrative_layer": "story",

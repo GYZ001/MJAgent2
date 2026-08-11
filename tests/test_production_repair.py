@@ -224,6 +224,7 @@ def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
         format_version=IR_VERSION,
         episode_no=1,
         source_semantics={},
+        source_audit_annotations=[],
     ).model_dump(mode="json")
     merged = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_generation_ir_merged",
