@@ -123,7 +123,6 @@ from app.screenplay_ir import (
     screenplay_ir_missing_event_semantic_paths,
     screenplay_ir_missing_participant_delivery_paths,
     screenplay_ir_prompt_contract,
-    screenplay_ir_version_key,
 )
 from app.identity_authority import model_identity_authority_prompt_rule
 

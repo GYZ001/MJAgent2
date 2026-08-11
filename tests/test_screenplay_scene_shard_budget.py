@@ -38,6 +38,21 @@ def _fixture() -> dict:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
+def _story_source_semantics(
+    source_segment_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    return {
+        source_id: {
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "disposition": "deliver",
+            "projection_policy": "picture",
+        }
+        for source_id in source_segment_ids
+    }
+
+
 def _plan(case: dict) -> ScreenplaySceneShardPlan:
     hashes = case["hashes"]
     unit_slots: list[ScreenplaySceneUnitSlotPlan] = []
@@ -63,6 +78,9 @@ def _plan(case: dict) -> ScreenplaySceneShardPlan:
                 unit_order=unit_order,
                 scene_unit_order=scene_unit_order,
                 kind="action",
+                narrative_layer="story",
+                event_priority="causal",
+                render_policy="standalone",
                 source_segment_ids=[source_id],
             ))
     return ScreenplaySceneShardPlan(
@@ -164,10 +182,18 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
         episode_no=1,
         nodes=[],
         scene_plans=[
-            BlueprintScenePlan.model_validate(value)
+            BlueprintScenePlan.model_validate({
+                **value,
+                "source_semantics": _story_source_semantics(
+                    value["source_segment_ids"]
+                ),
+            })
             for value in case["scene_plans"]
         ],
         source_scene_owners=case["source_scene_owners"],
+        source_semantics=_story_source_semantics(
+            list(case["source_scene_owners"])
+        ),
     )
     contracts = _contracts(case, plan, blueprint)
     complete_shard = _complete_shard(case, plan)
