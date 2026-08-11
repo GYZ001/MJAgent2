@@ -2537,6 +2537,11 @@ def test_current_ir_requires_explicit_complete_source_audit_contract() -> None:
     with pytest.raises(ValidationError, match="IR_SOURCE_AUDIT_FIELD_MISSING"):
         ScreenplayGenerationIR.model_validate(missing)
 
+    implicit_current = deepcopy(missing)
+    implicit_current.pop("format_version")
+    with pytest.raises(ValidationError, match="IR_SOURCE_AUDIT_FIELD_MISSING"):
+        ScreenplayGenerationIR.model_validate(implicit_current)
+
     mismatch = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
     mismatch["coverage"][-1].update({
         "disposition": "audit_only",

@@ -412,7 +412,7 @@ def screenplay_ir_source_audit_contract_errors(
     """Validate the explicit audit authority carried by the current IR."""
     if not isinstance(value, dict):
         return ["[IR_SOURCE_AUDIT_CONTRACT] payload 必须是对象"]
-    if str(value.get("format_version") or "") != IR_VERSION:
+    if str(value.get("format_version") or IR_VERSION) != IR_VERSION:
         return []
     if "source_audit_annotations" not in value:
         return [
@@ -498,7 +498,7 @@ def screenplay_ir_source_audit_contract_errors(
             )
     if (
         annotation_source_ids != coverage_source_ids
-        or set(annotation_source_ids) != set(semantic_source_ids)
+        or annotation_source_ids != semantic_source_ids
     ):
         errors.append(
             "[IR_SOURCE_AUDIT_COVERAGE_MISMATCH] "
