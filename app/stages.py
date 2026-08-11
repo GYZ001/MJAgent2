@@ -41,6 +41,7 @@ from app.narrative_blueprint import (
     apply_narrative_blueprint_patch,
     blueprint_patch_schema,
     blueprint_semantic_issue_is_resolved,
+    filter_blueprint_semantic_review_voice_issues,
     blueprint_prompt_contract,
     blueprint_semantic_review_schema,
     derive_blueprint_scene_plans,
@@ -104,7 +105,7 @@ from app.source_excerpt import (
     render_indexed_source,
     structural_front_matter_ids,
 )
-from app.source_facts import source_segment_facts
+from app.source_facts import source_facts, source_segment_facts
 from app.spoken_contract import onscreen_text_for_capacity
 from app.screenplay_ir import (
     IR_COMPILER_VERSION,
@@ -3887,6 +3888,16 @@ async def _repair_narrative_blueprint(
         selected_node_keys = [
             str(node["key"]) for node in selected_nodes
         ]
+        selected_source_ids = {
+            str(source_id)
+            for node in selected_nodes
+            for source_id in node["source_segment_ids"]
+        }
+        selected_source_facts = [
+            fact.model_dump(mode="json")
+            for fact in source_facts(source_text)
+            if fact.source_segment_id in selected_source_ids
+        ]
         projection_contract = {
             node.key: node.source_semantics().projection_policy
             for node in blueprint.nodes
@@ -3934,7 +3945,10 @@ async def _repair_narrative_blueprint(
             "若硬门禁是 voice_identity_missing/ambiguous/conflict，只能在保持完整"
             "node、source_segment_ids 顺序和来源语义的前提下，修正"
             "participant_evidence：每个 dialogue source unit 恰有一个 usage=voice，"
-            "并用 source_unit_keys 精确引用；不得删除、拆分、合并或重排节点来规避。\n\n"
+            "并用 source_unit_keys 精确引用；只有下方机器事实中 projection=dialogue "
+            "的 unit 才能要求 voice。projection=action 的正文、章节标题，以及节点的"
+            "summary/action_logic 即使写有‘旁白’或‘介绍’，也不得被提升为 dialogue "
+            "或伪造 voice evidence；不得删除、拆分、合并或重排节点来规避。\n\n"
             "硬门禁：\n"
             + "\n".join(f"- {error}" for error in errors)
             + "\n\n相关节点及前后文：\n"
@@ -3953,6 +3967,12 @@ async def _repair_narrative_blueprint(
                     for segment in source_segments
                     if segment.segment_id in mentioned_source_ids
                 ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n相关来源的机器结构化 units（唯一 voice 判定权威）：\n"
+            + json.dumps(
+                selected_source_facts,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -4267,6 +4287,11 @@ async def _semantic_review_narrative_blueprint(
         source_reference_contract = {
             "contract_version": "blueprint-semantic-source-reference.v1",
             "canonical_source_segment_ids": projected_source_ids,
+            "structured_source_units": [
+                fact.model_dump(mode="json")
+                for fact in source_facts(source_text)
+                if fact.source_segment_id in set(projected_source_ids)
+            ],
         }
         review_schema = blueprint_semantic_review_schema(
             projected_node_keys,
@@ -4293,7 +4318,11 @@ async def _semantic_review_narrative_blueprint(
             " usage=voice participant evidence，并通过 source_unit_keys 精确绑定；"
             "missing、多个 identity 或重复/冲突 claim 必须分别输出"
             " voice_identity_missing、voice_identity_ambiguous、"
-            "voice_identity_conflict，不得拖到 SceneInput。\n"
+            "voice_identity_conflict，不得拖到 SceneInput。dialogue source unit 只以"
+            "本轮来源合同 structured_source_units 中 projection=dialogue 的机器事实"
+            "为准；projection=action 的正文、章节标题及 Blueprint 的 summary/"
+            "action_logic 即使出现‘旁白’‘介绍’等自然语言，也不需要 voice，禁止"
+            "将其提升为 dialogue 或要求伪造旁白 identity。\n"
             "连续剧可继承前序集已经建立的人物和关系；原文在当前节点明确揭示的"
             "既有关系，只要该节点先以可见/可听内容建立再引用，也不属于"
             " setup_missing。不得要求删除原文明确写出的关系来修复 setup。\n"
@@ -4335,6 +4364,7 @@ async def _semantic_review_narrative_blueprint(
         trace = current_trace()
         reviews: list[BlueprintSemanticReview] = []
         review_artifact_ids: list[str] = []
+        dropped_voice_issue_counts: dict[int, int] = {}
         async def run_reviewer(sample_no: int) -> BlueprintSemanticReview:
             def validate_review(candidate_review: BlueprintSemanticReview) -> list[str]:
                 errors = validate_blueprint_semantic_review(
@@ -4405,6 +4435,13 @@ async def _semantic_review_narrative_blueprint(
                     )
                 ),
             )
+            dropped_voice_issue_counts[sample_no] = (
+                filter_blueprint_semantic_review_voice_issues(
+                    review,
+                    blueprint,
+                    source_text,
+                )
+            )
             review.issues = [
                 issue
                 for issue in review.issues
@@ -4451,6 +4488,9 @@ async def _semantic_review_narrative_blueprint(
                     model_snapshot={
                         "review_round": review_round,
                         "review_sample": sample_no,
+                        "dropped_unsupported_voice_issue_count": (
+                            dropped_voice_issue_counts.get(sample_no, 0)
+                        ),
                     },
                 ),
                 step_run_id=trace.step_run_id,
@@ -4474,6 +4514,9 @@ async def _semantic_review_narrative_blueprint(
                         ),
                         "valid_review_sample_count": len(reviews),
                         "unavailable_review_sample_count": 2 - len(reviews),
+                        "dropped_unsupported_voice_issue_count": sum(
+                            dropped_voice_issue_counts.values()
+                        ),
                     },
                     parent_artifact_ids=review_artifact_ids,
                     contract_version=BLUEPRINT_VERSION,
@@ -4527,6 +4570,9 @@ async def _semantic_review_narrative_blueprint(
                         for code, node_keys in sorted(consensus_keys)
                     ],
                     "non_consensus_issue_count": non_consensus_issue_count,
+                    "dropped_unsupported_voice_issue_count": sum(
+                        dropped_voice_issue_counts.values()
+                    ),
                     "review_mode": "targeted" if targeted_review else "full",
                     "review_outcome": (
                         "full_fallback_required"

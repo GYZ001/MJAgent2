@@ -1034,6 +1034,68 @@ def blueprint_semantic_issue_is_resolved(
     )
 
 
+def blueprint_semantic_voice_issue_has_dialogue_authority(
+    issue: BlueprintSemanticIssue,
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> bool:
+    """Require exact deterministic support for reviewer voice findings."""
+    if not issue.code.startswith("voice_identity_"):
+        return True
+    deterministic_issues = [
+        deterministic_issue
+        for deterministic_issue in blueprint_voice_identity_issues(
+            blueprint,
+            source_text,
+        )
+        if deterministic_issue.code == issue.code
+    ]
+    issue_node_keys = set(issue.node_keys)
+    supported_node_keys = {
+        node_key
+        for deterministic_issue in deterministic_issues
+        for node_key in deterministic_issue.node_keys
+    }
+    if (
+        not issue_node_keys
+        or not issue_node_keys.issubset(supported_node_keys)
+    ):
+        return False
+    relevant_deterministic_issues = [
+        deterministic_issue
+        for deterministic_issue in deterministic_issues
+        if issue_node_keys.intersection(deterministic_issue.node_keys)
+    ]
+    supported_source_ids = {
+        source_id
+        for deterministic_issue in relevant_deterministic_issues
+        for source_id in deterministic_issue.source_segment_ids
+    }
+    return bool(issue.source_segment_ids) and set(
+        issue.source_segment_ids
+    ).issubset(supported_source_ids)
+
+
+def filter_blueprint_semantic_review_voice_issues(
+    review: BlueprintSemanticReview,
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> int:
+    """Drop natural-language voice guesses before reviewer consensus."""
+    retained = [
+        issue
+        for issue in review.issues
+        if blueprint_semantic_voice_issue_has_dialogue_authority(
+            issue,
+            blueprint,
+            source_text,
+        )
+    ]
+    removed = len(review.issues) - len(retained)
+    review.issues = retained
+    return removed
+
+
 def blueprint_voice_identity_issues(
     blueprint: NarrativeBlueprint,
     source_text: str,
