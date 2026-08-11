@@ -25,6 +25,7 @@ from app.identity_authority import (
     identity_authority_registry,
     model_identity_authority_prompt_rule,
 )
+from app.narrative_blueprint import BlueprintSourceAuditAnnotation
 from app.schemas import (
     ActionAgency,
     Bible,
@@ -961,6 +962,9 @@ class ScreenplayGenerationIR(BaseModel):
     source_semantics: dict[str, dict[str, str]] = Field(
         default_factory=dict,
     )
+    source_audit_annotations: list[
+        BlueprintSourceAuditAnnotation
+    ] = Field(default_factory=list)
     scene_derivations: list[dict[str, Any]] = Field(default_factory=list)
     source_ownership_hash: str = ""
     legacy_screenplay: EpisodeScreenplay | None = Field(
@@ -2191,6 +2195,23 @@ def compile_screenplay_ir(
         if group.disposition == "audit_only"
         for source_id in group.source_segment_ids
     }
+    annotated_audit_source_ids = [
+        source_id
+        for annotation in value.source_audit_annotations
+        for source_id in annotation.source_segment_ids
+    ]
+    if (
+        value.source_audit_annotations
+        and annotated_audit_source_ids
+        != [
+            segment.segment_id
+            for segment in segments_list
+            if segment.segment_id in audit_only_source_ids
+        ]
+    ):
+        raise ValueError(
+            "source_audit_annotations 与 audit-only coverage 不一致"
+        )
     unknown_audit_sources = audit_only_source_ids - set(segments)
     if unknown_audit_sources:
         raise ValueError(
@@ -2198,6 +2219,19 @@ def compile_screenplay_ir(
             + "、".join(sorted(unknown_audit_sources))
         )
     if strict_unit_ownership:
+        leaked_audit_units = [
+            unit.key
+            for scene in value.scenes
+            for unit in scene.units
+            if audit_only_source_ids.intersection(
+                unit.source_segment_ids
+            )
+        ]
+        if leaked_audit_units:
+            raise ValueError(
+                "audit-only 来源不得进入 scene units："
+                + "、".join(leaked_audit_units)
+            )
         multi_location_scenes = [
             scene.key
             for scene in value.scenes

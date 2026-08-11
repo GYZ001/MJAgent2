@@ -230,7 +230,7 @@ def test_partition_gate_rejects_picture_omission_duplicate_and_audit_leak() -> N
     blueprint = _blueprint()
     audit = blueprint.nodes[1].model_copy(deep=True)
     audit.key = "audit-middle"
-    audit.source_segment_ids = ["SRC0002"]
+    audit.source_segment_ids = ["SRC0099"]
     audit.narrative_layer = "paratext"
     audit.event_priority = "connective"
     audit.render_policy = "exclude_from_spine"

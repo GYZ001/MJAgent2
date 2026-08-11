@@ -39,6 +39,7 @@ from app.narrative_blueprint import (
     NarrativeBlueprintPatch,
     NarrativeBlueprintShard,
     apply_narrative_blueprint_patch,
+    blueprint_patch_schema,
     blueprint_semantic_issue_is_resolved,
     blueprint_prompt_contract,
     blueprint_semantic_review_schema,
@@ -51,6 +52,7 @@ from app.narrative_blueprint import (
     validate_and_apply_blueprint_scene_contract,
     validate_blueprint_semantic_review,
     validate_narrative_blueprint,
+    validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
 from app.schemas import (Bible, CAMERA_MOVES, Dialogue, EMOTIONS, EpisodeScreenplay,
@@ -3869,6 +3871,18 @@ async def _repair_narrative_blueprint(
             blueprint.nodes[index].model_dump(mode="json")
             for index in sorted(selected_indexes)
         ]
+        selected_node_keys = [
+            str(node["key"]) for node in selected_nodes
+        ]
+        projection_contract = {
+            node.key: node.source_semantics().projection_policy
+            for node in blueprint.nodes
+            if node.key in set(selected_node_keys)
+        }
+        patch_schema = blueprint_patch_schema(
+            blueprint,
+            selected_node_keys,
+        )
         node_index = [
             {
                 "key": node.key,
@@ -3895,6 +3909,8 @@ async def _repair_narrative_blueprint(
             " narrative_layer/event_priority/render_policy；可演故事只能使用"
             " story+causal+standalone，仅保留来源审计的旁文本只能使用"
             " paratext+connective+exclude_from_spine，禁止省略后由程序猜测。"
+            "每个 replacement 必须保持修复前 projection_policy；audit_only "
+            "节点与来源只能保留在来源审计，不得改成 story 或放入 scene。"
             "不得修改未列出的节点。原文没有的同谋、"
             "关系、满房、行程或人物动机默认禁止；若为修复原文自身的明确逻辑矛盾"
             "确有必要，必须设 adaptation_kind=logic_bridge，并用 bridge_rationale"
@@ -3936,7 +3952,7 @@ async def _repair_narrative_blueprint(
             )
             + "\n\n输出 Schema：\n"
             + json.dumps(
-                NarrativeBlueprintPatch.model_json_schema(),
+                patch_schema,
                 ensure_ascii=False,
             )
         )
@@ -3987,7 +4003,12 @@ async def _repair_narrative_blueprint(
                 {"role": "user", "content": repair_prompt},
             ],
             model_type=NarrativeBlueprintPatch,
-            validate=None,
+            validate=lambda value: (
+                validate_narrative_blueprint_patch_projection(
+                    value,
+                    blueprint,
+                )
+            ),
             operation_id=(
                 f"screenplay.blueprint.patch:{BLUEPRINT_VERSION}:"
                 f"{repair_input_hash}:{round_no}"
@@ -4009,6 +4030,15 @@ async def _repair_narrative_blueprint(
                 "expected_json": True,
                 "reuse_successful_operation": True,
             },
+            repair_context=json.dumps(
+                {
+                    "replaceable_node_keys": selected_node_keys,
+                    "projection_contract": projection_contract,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            output_schema=patch_schema,
             on_attempt=record_patch_attempt,
         )
         changed = apply_narrative_blueprint_patch(
@@ -4216,8 +4246,19 @@ async def _semantic_review_narrative_blueprint(
                 )
             ],
         }
+        projected_source_ids = list(dict.fromkeys(
+            source_id
+            for node in blueprint.nodes
+            if node.key in set(projected_node_keys)
+            for source_id in node.source_segment_ids
+        ))
+        source_reference_contract = {
+            "contract_version": "blueprint-semantic-source-reference.v1",
+            "canonical_source_segment_ids": projected_source_ids,
+        }
         review_schema = blueprint_semantic_review_schema(
             projected_node_keys,
+            projected_source_ids,
         )
         prompt = (
             "你是漫剧叙事蓝图的独立语义审稿人。只找会导致观众理解错误、"
@@ -4251,6 +4292,12 @@ async def _semantic_review_narrative_blueprint(
             "\n\n本轮节点引用合同：\n"
             + json.dumps(
                 node_reference_contract,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n本轮来源引用合同：\n"
+            + json.dumps(
+                source_reference_contract,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -4326,6 +4373,9 @@ async def _semantic_review_narrative_blueprint(
                 repair_context=json.dumps(
                     {
                         "node_reference_contract": node_reference_contract,
+                        "source_reference_contract": (
+                            source_reference_contract
+                        ),
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),

@@ -344,6 +344,17 @@ class BlueprintScenePlan(BaseModel):
     scene_heading: str
 
 
+class BlueprintSourceAuditAnnotation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_key: str
+    source_segment_ids: list[str]
+    narrative_layer: Literal["paratext"] = "paratext"
+    render_policy: Literal["exclude_from_spine"] = "exclude_from_spine"
+    disposition: Literal["audit_only"] = "audit_only"
+    projection_policy: Literal["audit_only"] = "audit_only"
+
+
 class BlueprintSceneDerivation(BaseModel):
     relation_key: str
     relation_type: str
@@ -379,6 +390,9 @@ class NarrativeBlueprint(BaseModel):
     source_scene_owners: dict[str, str] = Field(default_factory=dict)
     source_semantics: dict[str, BlueprintSourceSemantics] = Field(
         default_factory=dict,
+    )
+    source_audit_annotations: list[BlueprintSourceAuditAnnotation] = Field(
+        default_factory=list,
     )
     scene_derivations: list[BlueprintSceneDerivation] = Field(
         default_factory=list,
@@ -632,6 +646,7 @@ class BlueprintSemanticReview(BaseModel):
 
 def blueprint_semantic_review_schema(
     canonical_node_keys: list[str],
+    canonical_source_segment_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Bind reviewer node references to one ordered Blueprint projection."""
     identities = [str(key).strip() for key in canonical_node_keys]
@@ -679,6 +694,120 @@ def blueprint_semantic_review_schema(
                 },
             ],
         },
+    }
+    if canonical_source_segment_ids is not None:
+        source_ids = [
+            _normalize_source_segment_id(source_id)
+            for source_id in canonical_source_segment_ids
+        ]
+        if (
+            any(not source_id for source_id in source_ids)
+            or len(source_ids) != len(set(source_ids))
+        ):
+            raise ValueError(
+                "canonical source segment identities must be non-empty "
+                "and unique"
+            )
+        issue_schema["properties"]["source_segment_ids"] = {
+            "title": "Canonical Source Segment References",
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": source_ids,
+            },
+        }
+    return schema
+
+
+def blueprint_patch_schema(
+    blueprint: NarrativeBlueprint,
+    replaceable_node_keys: list[str],
+) -> dict[str, Any]:
+    """Bind each replacement to its current projection authority."""
+    node_map = {node.key: node for node in blueprint.nodes}
+    keys = [str(key).strip() for key in replaceable_node_keys]
+    if (
+        not keys
+        or any(not key or key not in node_map for key in keys)
+        or len(keys) != len(set(keys))
+    ):
+        raise ValueError(
+            "replaceable node identities must exist and be unique"
+        )
+
+    schema = NarrativeBlueprintPatch.model_json_schema()
+    alternatives: list[dict[str, Any]] = []
+    for key in keys:
+        node = node_map[key]
+        semantics = node.source_semantics()
+        node_contract = {
+            "type": "object",
+            "properties": {
+                "key": {"const": key},
+                "narrative_layer": {
+                    "const": semantics.narrative_layer,
+                },
+                "event_priority": {
+                    "const": semantics.event_priority,
+                },
+                "render_policy": {
+                    "const": semantics.render_policy,
+                },
+            },
+            "required": [
+                "key",
+                "narrative_layer",
+                "event_priority",
+                "render_policy",
+            ],
+        }
+        alternatives.append({
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "node_key": {"const": key},
+                "node": {
+                    "allOf": [
+                        {"$ref": "#/$defs/NarrativeNode"},
+                        node_contract,
+                    ],
+                },
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "allOf": [
+                            {"$ref": "#/$defs/NarrativeNode"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "narrative_layer": {
+                                        "const": semantics.narrative_layer,
+                                    },
+                                    "event_priority": {
+                                        "const": semantics.event_priority,
+                                    },
+                                    "render_policy": {
+                                        "const": semantics.render_policy,
+                                    },
+                                },
+                                "required": [
+                                    "narrative_layer",
+                                    "event_priority",
+                                    "render_policy",
+                                ],
+                            },
+                        ],
+                    },
+                },
+            },
+            "required": ["node_key"],
+        })
+    schema["properties"]["replacements"]["items"] = {
+        "oneOf": alternatives,
+    }
+    schema["properties"]["delete_node_keys"]["items"] = {
+        "type": "string",
+        "enum": keys,
     }
     return schema
 
@@ -959,6 +1088,68 @@ def normalize_blueprint_source_order(
     return moved
 
 
+def validate_narrative_blueprint_patch_projection(
+    patch: NarrativeBlueprintPatch,
+    blueprint: NarrativeBlueprint,
+) -> list[str]:
+    """Keep repair output inside the pre-repair picture/audit projection."""
+    node_map = {node.key: node for node in blueprint.nodes}
+    source_projection = {
+        source_id: node.source_semantics().projection_policy
+        for node in blueprint.nodes
+        for source_id in node.source_segment_ids
+    }
+    errors: list[str] = []
+    for replacement in patch.replacements:
+        original = node_map.get(replacement.node_key)
+        if original is None:
+            errors.append(
+                "[BLUEPRINT_PATCH_NODE_UNKNOWN] "
+                f"{replacement.node_key} 不在修复窗口"
+            )
+            continue
+        expected_projection = (
+            original.source_semantics().projection_policy
+        )
+        for node in replacement.nodes:
+            actual_projection = node.source_semantics().projection_policy
+            if actual_projection != expected_projection:
+                errors.append(
+                    "[BLUEPRINT_PATCH_PROJECTION_POLICY_CHANGE] "
+                    f"{replacement.node_key} 必须保持 "
+                    f"projection_policy={expected_projection}"
+                )
+            escaped_sources = [
+                source_id
+                for source_id in node.source_segment_ids
+                if (
+                    source_id in source_projection
+                    and source_projection[source_id] != actual_projection
+                )
+            ]
+            if escaped_sources:
+                errors.append(
+                    "[BLUEPRINT_PATCH_SOURCE_PROJECTION_ESCAPE] "
+                    f"{node.key} 的来源投影不一致："
+                    + "、".join(escaped_sources)
+                )
+    deleted_audit_nodes = [
+        node_key
+        for node_key in patch.delete_node_keys
+        if (
+            node_map.get(node_key) is not None
+            and node_map[node_key].source_semantics().projection_policy
+            == "audit_only"
+        )
+    ]
+    if deleted_audit_nodes:
+        errors.append(
+            "[BLUEPRINT_PATCH_AUDIT_DELETE] audit_only 节点不得删除："
+            + "、".join(deleted_audit_nodes)
+        )
+    return list(dict.fromkeys(errors))
+
+
 def apply_narrative_blueprint_patch(
     blueprint: NarrativeBlueprint,
     patch: NarrativeBlueprintPatch,
@@ -1197,12 +1388,13 @@ def derive_blueprint_scene_plans(
                 )
             source_semantics[source_id] = semantics
 
+    picture_nodes = [
+        node
+        for node in blueprint.nodes
+        if node.source_semantics().projection_policy == "picture"
+    ]
     groups: list[list[NarrativeNode]] = []
-    for node in (
-        item
-        for item in blueprint.nodes
-        if item.narrative_layer == "story"
-    ):
+    for node in picture_nodes:
         previous = groups[-1][-1] if groups else None
         current_group = groups[-1] if groups else []
         starts_scene = (
@@ -1402,8 +1594,100 @@ def derive_blueprint_scene_plans(
     blueprint.scene_plans = plans
     blueprint.source_scene_owners = source_scene_owners
     blueprint.source_semantics = source_semantics
+    blueprint.source_audit_annotations = [
+        BlueprintSourceAuditAnnotation(
+            node_key=node.key,
+            source_segment_ids=list(node.source_segment_ids),
+        )
+        for node in blueprint.nodes
+        if node.source_semantics().projection_policy == "audit_only"
+    ]
     blueprint.scene_derivations = derivations
     return plans
+
+
+def validate_blueprint_scene_partition(
+    blueprint: NarrativeBlueprint,
+    plans: list[BlueprintScenePlan] | None = None,
+) -> list[str]:
+    """Validate the exact ordered picture-node partition."""
+    current_plans = blueprint.scene_plans if plans is None else plans
+    picture_node_keys = [
+        node.key
+        for node in blueprint.nodes
+        if node.source_semantics().projection_policy == "picture"
+    ]
+    audit_node_keys = {
+        node.key
+        for node in blueprint.nodes
+        if node.source_semantics().projection_policy == "audit_only"
+    }
+    planned_node_keys = [
+        node_key
+        for plan in current_plans
+        for node_key in plan.node_keys
+    ]
+    errors: list[str] = []
+    leaked_audit_keys = [
+        node_key
+        for node_key in planned_node_keys
+        if node_key in audit_node_keys
+    ]
+    if leaked_audit_keys:
+        errors.append(
+            "[BLUEPRINT_AUDIT_NODE_IN_SCENE] audit_only 节点不得进入 scene plan："
+            + "、".join(leaked_audit_keys)
+        )
+    if planned_node_keys != picture_node_keys:
+        errors.append(
+            "[BLUEPRINT_SCENE_PARTITION_INVALID] picture 节点必须被 scene plans "
+            "精确覆盖并保持相对顺序，禁止重复或遗漏"
+        )
+
+    audit_source_ids = [
+        source_id
+        for node in blueprint.nodes
+        if node.source_semantics().projection_policy == "audit_only"
+        for source_id in node.source_segment_ids
+    ]
+    annotated_source_ids = [
+        source_id
+        for annotation in blueprint.source_audit_annotations
+        for source_id in annotation.source_segment_ids
+    ]
+    annotated_node_keys = [
+        annotation.node_key
+        for annotation in blueprint.source_audit_annotations
+    ]
+    expected_audit_node_keys = [
+        node.key
+        for node in blueprint.nodes
+        if node.source_semantics().projection_policy == "audit_only"
+    ]
+    if (
+        annotated_source_ids != audit_source_ids
+        or annotated_node_keys != expected_audit_node_keys
+    ):
+        errors.append(
+            "[BLUEPRINT_AUDIT_COVERAGE_INVALID] source_audit_annotations "
+            "必须精确覆盖 audit_only timeline nodes 与来源"
+        )
+    picture_source_ids = {
+        source_id
+        for plan in current_plans
+        for source_id in plan.source_segment_ids
+    }
+    leaked_audit_sources = [
+        source_id
+        for source_id in audit_source_ids
+        if source_id in picture_source_ids
+    ]
+    if leaked_audit_sources:
+        errors.append(
+            "[BLUEPRINT_AUDIT_SOURCE_IN_SCENE] audit_only 来源不得进入 scene plan："
+            + "、".join(leaked_audit_sources)
+        )
+    return list(dict.fromkeys(errors))
 
 
 def validate_narrative_blueprint(
@@ -1836,13 +2120,7 @@ def validate_narrative_blueprint(
     except BlueprintSourceOwnershipError as exc:
         errors.extend(exc.errors)
     else:
-        planned_node_keys = [
-            node_key for plan in plans for node_key in plan.node_keys
-        ]
-        if planned_node_keys != node_keys:
-            errors.append(
-                "[BLUEPRINT_SCENE_PARTITION_INVALID] 程序分场未完整保持节点顺序"
-            )
+        errors.extend(validate_blueprint_scene_partition(blueprint, plans))
     return list(dict.fromkeys(errors))
 
 

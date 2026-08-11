@@ -2522,6 +2522,15 @@ def merge_screenplay_scene_shards(
         errors.append(
             "Blueprint 来源语义漏掉 SRC：" + ",".join(missing_semantics)
         )
+    annotated_audit_source_ids = [
+        source_id
+        for annotation in blueprint.source_audit_annotations
+        for source_id in annotation.source_segment_ids
+    ]
+    if annotated_audit_source_ids != audit_only_source_ids:
+        errors.append(
+            "Blueprint source_audit_annotations 未精确覆盖 audit-only SRC"
+        )
     missing = [
         source_id
         for source_id in picture_source_ids
@@ -2580,7 +2589,8 @@ def merge_screenplay_scene_shards(
                 projection_policy="audit_only",
                 reason="来源旁文本仅保留完整审计，不参与画面投影",
             )
-            for source_id in audit_only_source_ids
+            for annotation in blueprint.source_audit_annotations
+            for source_id in annotation.source_segment_ids
         ],
         scenes=merged_scenes,
         experience=envelope.experience.to_ir(),
@@ -2589,6 +2599,9 @@ def merge_screenplay_scene_shards(
             source_id: semantics.model_dump(mode="json")
             for source_id, semantics in blueprint.source_semantics.items()
         },
+        source_audit_annotations=list(
+            blueprint.source_audit_annotations
+        ),
         scene_derivations=[
             relation.model_dump(mode="json")
             for relation in blueprint.scene_derivations
