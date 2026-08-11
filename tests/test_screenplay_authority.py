@@ -517,6 +517,109 @@ def test_current_screenplay_artifact_requires_complete_ir_semantics(
     assert getattr(caught.value, "code", None) == "ARTIFACT_NEEDS_REBUILD"
 
 
+def _assert_artifact_needs_rebuild(artifact_id: str) -> None:
+    with pytest.raises(
+        ValueError,
+        match="ARTIFACT_NEEDS_REBUILD",
+    ) as caught:
+        load_screenplay_from_artifact(artifact_id)
+    assert getattr(caught.value, "code", None) == "ARTIFACT_NEEDS_REBUILD"
+
+
+def test_current_screenplay_artifact_plan_null_needs_rebuild() -> None:
+    case = _source_projection_case()
+    payload = screenplay_artifact_payload(case["compiled"])
+    payload["narrative_plan"] = None
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=payload,
+        parent_artifact_ids=[case["merged_artifact_id"]],
+        contract_version="4.0.0",
+    ))
+
+    _assert_artifact_needs_rebuild(artifact["id"])
+
+
+def test_current_screenplay_artifact_missing_parent_needs_rebuild() -> None:
+    case = _source_projection_case()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=["art-missing-parent"],
+        contract_version="4.0.0",
+    ))
+
+    _assert_artifact_needs_rebuild(artifact["id"])
+
+
+def test_current_screenplay_artifact_missing_shard_needs_rebuild() -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    merged = evidence_repository.get_artifact(case["merged_artifact_id"])
+    assert merged is not None
+    parent_ids = [
+        parent_id
+        for parent_id in merged["parent_artifact_ids"]
+        if (evidence_repository.get_artifact(parent_id) or {}).get("type")
+        != "screenplay_scene_shard"
+    ]
+    conn.execute(
+        "UPDATE artifacts SET parent_artifact_ids_json=? WHERE id=?",
+        (json.dumps(parent_ids), merged["id"]),
+    )
+    conn.commit()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[merged["id"]],
+        contract_version="4.0.0",
+    ))
+
+    _assert_artifact_needs_rebuild(artifact["id"])
+
+
+def test_current_screenplay_artifact_broken_lineage_needs_rebuild() -> None:
+    case = _source_projection_case()
+    merged = evidence_repository.get_artifact(case["merged_artifact_id"])
+    assert merged is not None
+    shard_id = next(
+        parent_id
+        for parent_id in merged["parent_artifact_ids"]
+        if (evidence_repository.get_artifact(parent_id) or {}).get("type")
+        == "screenplay_scene_shard"
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE artifacts SET scope_id='different-episode' WHERE id=?",
+        (shard_id,),
+    )
+    conn.commit()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[merged["id"]],
+        contract_version="4.0.0",
+    ))
+
+    _assert_artifact_needs_rebuild(artifact["id"])
+
+
 def _drift_to_contextual_actor(screenplay):
     drifted = screenplay.model_copy(deep=True)
     plan = drifted.narrative_plan

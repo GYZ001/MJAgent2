@@ -176,6 +176,16 @@ def get_active_production_revision(episode_id: str, kind: Kind) -> ProductionRev
     return _row_to_revision(row)
 
 
+def screenplay_scene_shard_expected_hashes(
+    revision: ProductionRevision | None,
+) -> tuple[str, str]:
+    checkpoint = dict(revision.checkpoint_json or {}) if revision else {}
+    return (
+        str(checkpoint.get("blueprint_hash") or ""),
+        str(checkpoint.get("identity_registry_hash") or ""),
+    )
+
+
 def rebind_input_fingerprint(
     revision_id: str,
     *,
@@ -479,9 +489,11 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         for artifact_id, row in artifact_rows.items()
         if row.get("status") == "validated"
     }
-    checkpoint_blueprint_hash = str(checkpoint.get("blueprint_hash") or "")
-    checkpoint_identity_hash = str(
-        checkpoint.get("identity_registry_hash") or ""
+    (
+        checkpoint_blueprint_hash,
+        checkpoint_identity_hash,
+    ) = screenplay_scene_shard_expected_hashes(
+        rev,
     )
     from app.screenplay_scene_shards import (
         screenplay_scene_shard_artifact_compatibility,
@@ -498,6 +510,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             row = dict(artifact_row)
             compatible, _reason = screenplay_scene_shard_artifact_compatibility(
                 row,
+                expected_blueprint_hash=checkpoint_blueprint_hash,
+                expected_identity_registry_hash=checkpoint_identity_hash,
             )
             if not compatible:
                 continue
@@ -531,6 +545,8 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
             referenced_artifact_exists, _reason = (
                 screenplay_scene_shard_artifact_compatibility(
                     artifact_row,
+                    expected_blueprint_hash=checkpoint_blueprint_hash,
+                    expected_identity_registry_hash=checkpoint_identity_hash,
                     expected_generation_scaffold_hash=expected_scaffold_hash,
                 )
             )

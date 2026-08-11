@@ -1792,13 +1792,29 @@ def _screenplay_generation_preflight(episode_id: str):
     from app.screenplay_scene_shards import (
         screenplay_scene_shard_artifact_compatibility,
     )
+    from app.production.revision import (
+        get_active_production_revision,
+        get_production_revision,
+        screenplay_scene_shard_expected_hashes,
+    )
 
+    revision_id = str(ep.get("screenplay_production_revision_id") or "")
+    revision = (
+        get_production_revision(revision_id)
+        if revision_id
+        else get_active_production_revision(episode_id, "screenplay")
+    )
+    expected_blueprint_hash, expected_identity_registry_hash = (
+        screenplay_scene_shard_expected_hashes(revision)
+    )
     reusable_counts: dict[str, int] = {}
     for reusable_row in reusable_rows:
         row = dict(reusable_row)
         if row["type"] == "screenplay_scene_shard":
             compatible, _reason = screenplay_scene_shard_artifact_compatibility(
                 row,
+                expected_blueprint_hash=expected_blueprint_hash,
+                expected_identity_registry_hash=expected_identity_registry_hash,
             )
             if not compatible:
                 continue

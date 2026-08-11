@@ -331,7 +331,10 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
         IR_VERSION,
         screenplay_ir_missing_event_semantic_paths,
     )
-    from app.screenplay_scene_shards import SCREENPLAY_MERGED_IR_VERSION
+    from app.screenplay_scene_shards import (
+        SCREENPLAY_MERGED_IR_VERSION,
+        SCREENPLAY_SCENE_SHARD_VERSION,
+    )
 
     pending = [
         str(parent_id)
@@ -340,6 +343,7 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
     ]
     seen: set[str] = set()
     gaps: list[str] = []
+    merged_artifacts: list[dict[str, Any]] = []
     while pending:
         artifact_id = pending.pop(0)
         if artifact_id in seen:
@@ -347,6 +351,7 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
         seen.add(artifact_id)
         parent = evidence_repository.get_artifact(artifact_id)
         if parent is None:
+            gaps.append(f"lineage.missing_parent[{artifact_id}]")
             continue
         pending.extend(
             str(parent_id)
@@ -355,7 +360,10 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
         )
         if parent.get("type") != "screenplay_generation_ir_merged":
             continue
+        merged_artifacts.append(parent)
         content = parent.get("content")
+        if parent.get("status") != "validated":
+            gaps.append(f"{artifact_id}:status")
         if str(parent.get("contract_version") or "") != SCREENPLAY_MERGED_IR_VERSION:
             gaps.append(f"{artifact_id}:contract_version")
             continue
@@ -369,7 +377,71 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
             f"{artifact_id}:{path}"
             for path in screenplay_ir_missing_event_semantic_paths(content)
         )
-    return gaps
+        direct_parents = [
+            (
+                str(parent_id),
+                evidence_repository.get_artifact(str(parent_id)),
+            )
+            for parent_id in parent.get("parent_artifact_ids") or []
+            if str(parent_id)
+        ]
+        shard_parents = [
+            candidate
+            for _parent_id, candidate in direct_parents
+            if candidate is not None
+            and candidate.get("type") == "screenplay_scene_shard"
+        ]
+        if not shard_parents:
+            gaps.append(f"{artifact_id}:lineage.screenplay_scene_shard")
+        for parent_id, candidate in direct_parents:
+            if candidate is None:
+                gaps.append(f"lineage.missing_parent[{parent_id}]")
+        for shard in shard_parents:
+            shard_id = str(shard.get("id") or "")
+            if shard.get("status") != "validated":
+                gaps.append(f"{shard_id}:status")
+            if (
+                str(shard.get("contract_version") or "")
+                != SCREENPLAY_SCENE_SHARD_VERSION
+            ):
+                gaps.append(f"{shard_id}:contract_version")
+            shard_content = shard.get("content")
+            if not isinstance(shard_content, dict):
+                gaps.append(f"{shard_id}:content")
+            elif (
+                str(shard_content.get("contract_version") or "")
+                != SCREENPLAY_SCENE_SHARD_VERSION
+            ):
+                gaps.append(f"{shard_id}:content.contract_version")
+            if (
+                str(shard.get("scope_type") or "")
+                != str(art.get("scope_type") or "")
+                or str(shard.get("scope_id") or "")
+                != str(art.get("scope_id") or "")
+            ):
+                gaps.append(f"{shard_id}:lineage.scope")
+        if (
+            str(parent.get("scope_type") or "")
+            != str(art.get("scope_type") or "")
+            or str(parent.get("scope_id") or "")
+            != str(art.get("scope_id") or "")
+        ):
+            gaps.append(f"{artifact_id}:lineage.scope")
+    lineage_types = {
+        "screenplay_scene_shard",
+        "screenplay_generation_ir_merged",
+    }
+    if (
+        art.get("parent_artifact_ids")
+        and not merged_artifacts
+        and any(
+            (evidence_repository.get_artifact(artifact_id) or {}).get("type")
+            in lineage_types
+            for artifact_id in seen
+        )
+    ):
+        gaps.append("lineage.screenplay_generation_ir_merged")
+    return list(dict.fromkeys(gaps))
 
 
 def _assert_screenplay_artifact_contract(
@@ -378,7 +450,11 @@ def _assert_screenplay_artifact_contract(
 ) -> None:
     plan = _raw_narrative_plan(content)
     if plan is None:
-        return
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(art.get("id") or ""),
+            artifact_type=str(art.get("type") or "screenplay_document"),
+            reason="缺少当前发布/恢复要求的 narrative_plan",
+        )
     missing = [
         f"narrative_plan.atomic_actions[{index}].participant_deliveries"
         for index, action in enumerate(plan.get("atomic_actions") or [])

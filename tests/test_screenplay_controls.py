@@ -193,6 +193,8 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
         content=_v8_shard_content(
             shard_id="SS001",
             generation_scaffold_hash="generation:SS001",
+            blueprint_hash="blueprint-v1",
+            identity_registry_hash="identity-v1",
         ),
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
@@ -201,6 +203,8 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
         "blueprint_artifact_id": blueprint["id"],
         "identity_artifact_id": "art-identity",
         "envelope_artifact_id": "art-envelope",
+        "blueprint_hash": "blueprint-v1",
+        "identity_registry_hash": "identity-v1",
         "yield_reason": "user_cancelled",
         "shards": [
             {
@@ -340,6 +344,92 @@ def test_production_state_rejects_legacy_shard_as_resumable() -> None:
     assert state["shard_progress"]["validated"] == 0
 
 
+@pytest.mark.parametrize(
+    ("blueprint_hash", "identity_registry_hash"),
+    [
+        ("blueprint-wrong", "identity-v1"),
+        ("blueprint-v1", "identity-wrong"),
+    ],
+)
+def test_production_state_rejects_shard_authority_hash_mismatch(
+    blueprint_hash: str,
+    identity_registry_hash: str,
+) -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    shard = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=_v8_shard_content(
+            shard_id="SS008",
+            generation_scaffold_hash="generation:SS008",
+            blueprint_hash=blueprint_hash,
+            identity_registry_hash=identity_registry_hash,
+        ),
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+    ))
+    save_checkpoint(revision.id, {
+        "phase": "SCENE_SHARD_GENERATION",
+        "blueprint_hash": "blueprint-v1",
+        "identity_registry_hash": "identity-v1",
+        "shards": [{
+            "shard_id": "SS008",
+            "status": "validated",
+            "normalized_artifact_id": shard["id"],
+            "generation_scaffold_hash": "generation:SS008",
+        }],
+    })
+
+    state = screenplay_production_state("e1")
+
+    assert state["has_resumable_baseline"] is False
+    assert state["can_resume_baseline"] is False
+    assert state["shard_progress"]["validated"] == 0
+
+
+def test_production_state_requires_expected_shard_authority_hashes() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    shard = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=_v8_shard_content(
+            shard_id="SS009",
+            generation_scaffold_hash="generation:SS009",
+            blueprint_hash="blueprint-v1",
+            identity_registry_hash="identity-v1",
+        ),
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+    ))
+    save_checkpoint(revision.id, {
+        "phase": "SCENE_SHARD_GENERATION",
+        "shards": [{
+            "shard_id": "SS009",
+            "status": "validated",
+            "normalized_artifact_id": shard["id"],
+            "generation_scaffold_hash": "generation:SS009",
+        }],
+    })
+
+    state = screenplay_production_state("e1")
+
+    assert state["has_resumable_baseline"] is False
+    assert state["can_resume_baseline"] is False
+    assert state["shard_progress"]["validated"] == 0
+
+
 def test_resume_route_has_a_distinct_capability() -> None:
     ensure_catalog_loaded()
     registry = get_registry()
@@ -357,6 +447,15 @@ def test_screenplay_generation_preflight_sizes_source_without_side_effects() -> 
     )
     conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
     conn.commit()
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    save_checkpoint(revision.id, {
+        "blueprint_hash": "blueprint-v1",
+        "identity_registry_hash": "identity-v1",
+    })
     repository.create_artifact(EvidenceArtifact(
         type="screenplay_scene_shard",
         scope_type="episode",
@@ -366,6 +465,8 @@ def test_screenplay_generation_preflight_sizes_source_without_side_effects() -> 
         content=_v8_shard_content(
             shard_id="SS001",
             generation_scaffold_hash="generation:SS001",
+            blueprint_hash="blueprint-v1",
+            identity_registry_hash="identity-v1",
         ),
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))

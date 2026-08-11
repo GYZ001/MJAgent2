@@ -363,6 +363,8 @@ class ScreenplaySceneShardIR(BaseModel):
 def screenplay_scene_shard_artifact_compatibility(
     artifact: dict[str, Any],
     *,
+    expected_blueprint_hash: str = "",
+    expected_identity_registry_hash: str = "",
     expected_generation_scaffold_hash: str = "",
 ) -> tuple[bool, str]:
     """Validate one persisted shard against the current resumable contract."""
@@ -385,6 +387,15 @@ def screenplay_scene_shard_artifact_compatibility(
         return False, "artifact_content"
     if str(content.get("contract_version") or "") != SCREENPLAY_SCENE_SHARD_VERSION:
         return False, "content_contract_version"
+    if not expected_blueprint_hash or not expected_identity_registry_hash:
+        return False, "expected_authority_hash_missing"
+    if str(content.get("blueprint_hash") or "") != expected_blueprint_hash:
+        return False, "blueprint_hash"
+    if (
+        str(content.get("identity_registry_hash") or "")
+        != expected_identity_registry_hash
+    ):
+        return False, "identity_registry_hash"
     identity_hash = str(content.get("identity_scaffold_hash") or "")
     generation_hash = str(content.get("generation_scaffold_hash") or "")
     if not identity_hash or not generation_hash:
