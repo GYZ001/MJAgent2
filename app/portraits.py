@@ -3054,6 +3054,10 @@ def persist_screenplay_character_resolutions(
             params,
         )
         if cursor.rowcount != 1:
+            # This helper owns the persistence commit.  A failed optimistic
+            # write must not leave the process-global SQLite connection inside
+            # an open transaction or retain a write lock.
+            conn.rollback()
             raise StateConflict(
                 "screenplay_resolution_cas",
                 episode_id,
@@ -3274,8 +3278,10 @@ async def ensure_structural_identity_coverage(
     and the model sees only unresolved typed references plus their owned SRC.
     """
     conn = get_conn()
+    source_hash = evidence_repository.content_hash(source_text)
     structural_hash = evidence_repository.content_hash({
         "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
+        "source_hash": source_hash,
         "structural_evidence": structural_evidence,
     })
     rows = conn.execute(
@@ -3298,6 +3304,7 @@ async def ensure_structural_identity_coverage(
             == IDENTITY_DISCOVERY_CONTRACT_VERSION
             and payload.get("policy_version")
             == STRUCTURAL_IDENTITY_COVERAGE_VERSION
+            and payload.get("source_hash") == source_hash
             and payload.get("structural_evidence_hash") == structural_hash
             and isinstance(payload.get("candidates"), list)
         ):
@@ -3316,6 +3323,7 @@ async def ensure_structural_identity_coverage(
             payload.get("mode") != "structural_coverage"
             and payload.get("contract_version")
             == IDENTITY_DISCOVERY_CONTRACT_VERSION
+            and payload.get("source_hash") == source_hash
             and isinstance(payload.get("candidates"), list)
         ):
             base_candidates = [
@@ -3386,7 +3394,7 @@ async def ensure_structural_identity_coverage(
                     "mode": "structural_coverage",
                     "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                     "candidates": audited,
-                    "source_hash": evidence_repository.content_hash(source_text),
+                    "source_hash": source_hash,
                     "structural_evidence_hash": structural_hash,
                 },
                 parent_artifact_ids=[raw_artifact["id"]],
@@ -3420,6 +3428,8 @@ async def ensure_structural_identity_coverage(
         expected_active_run_id=expected_active_run_id,
         expected_revision_id=expected_revision_id,
     )
+    if write_guard:
+        write_guard()
     result["resolutions"] = persisted
     trace = None
     try:
@@ -3459,7 +3469,7 @@ async def ensure_structural_identity_coverage(
                 "mode": "structural_coverage",
                 "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
                 "candidates": audited,
-                "source_hash": evidence_repository.content_hash(source_text),
+                "source_hash": source_hash,
                 "structural_evidence_hash": structural_hash,
             },
             parent_artifact_ids=[raw_artifact["id"]],

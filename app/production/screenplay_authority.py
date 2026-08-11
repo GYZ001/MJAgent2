@@ -449,6 +449,8 @@ def screenplay_authority_material(
             _episode_value(episode, "screenplay_constraint_version", 0) or 0
         ),
     }
+    from app.portraits import load_screenplay_character_resolutions
+
     material = {
         "authority_contract": "screenplay-source-authority.v1",
         "episode_id": episode_id,
@@ -457,8 +459,8 @@ def screenplay_authority_material(
         "source_text_sha256": hashlib.sha256(exact_source.encode("utf-8")).hexdigest(),
         "bible_artifact_id": str(bible_artifact_id or ""),
         "bible_content_hash": bible_hash,
-        "character_resolutions": _decode_list(
-            _episode_value(episode, "screenplay_character_resolutions", "[]")
+        "character_resolutions": load_screenplay_character_resolutions(
+            db, episode_id
         ),
         "adaptation_constraints": constraints,
         "contract_version": str(contract_version or ""),
@@ -1287,8 +1289,10 @@ def _compile_validated_v6_source_projection(
     bible = Bible.model_validate(bible_projection or {})
     _records, source_text = _source_records(conn, episode)
     episode_input = dict(episode)
-    episode_input["character_resolutions"] = _decode_list(
-        _episode_value(episode, "screenplay_character_resolutions", "[]")
+    from app.portraits import load_screenplay_character_resolutions
+
+    episode_input["character_resolutions"] = (
+        load_screenplay_character_resolutions(conn, episode_id)
     )
     episode_input["authorized_source_chapters"] = (
         screenplay_authorized_source_chapters(episode_id, conn=conn)

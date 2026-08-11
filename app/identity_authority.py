@@ -161,11 +161,20 @@ def identity_authority_registry(
     groups_by_authority: dict[str, set[str]] = {}
     authorities_by_group: dict[str, set[str]] = {}
 
-    def register_group(authority_id: str, identity_group: str) -> None:
+    def register_group(
+        authority_id: str,
+        identity_group: str,
+        identity_scope_fingerprint: str = "",
+    ) -> None:
         if not identity_group:
             return
-        groups_by_authority.setdefault(authority_id, set()).add(identity_group)
-        authorities_by_group.setdefault(identity_group, set()).add(authority_id)
+        scoped_group = (
+            f"{identity_scope_fingerprint}:{identity_group}"
+            if identity_scope_fingerprint
+            else identity_group
+        )
+        groups_by_authority.setdefault(authority_id, set()).add(scoped_group)
+        authorities_by_group.setdefault(scoped_group, set()).add(authority_id)
 
     for character in getattr(bible, "characters", None) or []:
         name = str(getattr(character, "name", "") or "").strip()
@@ -186,7 +195,24 @@ def identity_authority_registry(
     for item in normalize_character_resolutions(resolutions):
         authority_id = item["authority_id"]
         identity_group = str(item.get("identity_group") or "").strip()
-        register_group(authority_id, identity_group)
+        identity_scope_fingerprint = str(
+            item.get("identity_scope_fingerprint") or ""
+        ).strip()
+        if (
+            str(item.get("resolution") or "") == "future_identity"
+            and authority_id.startswith("bible:")
+        ):
+            # A confirmed name is no longer an episode-local functional group.
+            # Its canonical group is the same Bible authority already registered
+            # above, so the former F1 token cannot make one named identity appear
+            # to span two semantic groups.
+            identity_group = authority_id
+            identity_scope_fingerprint = ""
+        register_group(
+            authority_id,
+            identity_group,
+            identity_scope_fingerprint,
+        )
         entry = entries.setdefault(authority_id, {
             "authority_id": authority_id,
             "canonical_name": item["canonical_name"],
@@ -196,7 +222,8 @@ def identity_authority_registry(
                 else "functional"
             ),
             "source_labels": [],
-            "identity_group": item.get("identity_group") or "",
+            "identity_group": identity_group,
+            "identity_scope_fingerprint": identity_scope_fingerprint,
             "source_instance_key": (
                 item.get("source_instance_key")
                 or item.get("identity_group")

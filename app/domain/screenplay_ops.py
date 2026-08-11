@@ -1066,11 +1066,15 @@ async def _screenplay_character_discovery(
     if result.get("errors"):
         raise StageError("新人物发现", list(result["errors"]))
     _assert_screenplay_run_owner(episode_id)
+    from app.observability.tracing import current_trace
+
+    expected_run_id = current_trace().run_id
     result["resolutions"] = persist_screenplay_character_resolutions(
         conn,
         episode_id,
         result.get("resolutions") or [],
         retire_legacy_future_identity=True,
+        expected_active_run_id=expected_run_id,
     )
     for warning in result.get("warnings") or []:
         errors.log_error(

@@ -778,8 +778,13 @@ def test_screenplay_discovery_resolves_appearance_label_from_next_ten_chapters(m
         "reason": "后续章节已确认该称谓的稳定真名",
         "evidence": "绿袍男子拦路呵斥",
         "future_evidence": "绿袍男子摘下斗笠，众人这才认出他正是丁力。",
-        "identity_group": "current-1:绿袍男子",
-        "decision_contract_version": "screenplay-future-identity.v6",
+            "identity_group": "current-1:绿袍男子",
+            "identity_scope_fingerprint": portraits.evidence_repository.content_hash({
+                "contract_version": portraits.IDENTITY_DISCOVERY_CONTRACT_VERSION,
+                "episode_no": 21,
+                "source_text": "绿袍男子拦在萧炎面前，厉声呵斥。",
+            }),
+            "decision_contract_version": "screenplay-future-identity.v6",
         "authority_id": "bible:丁力",
         "authority_version": "screenplay-identity-authority.v1",
     }]

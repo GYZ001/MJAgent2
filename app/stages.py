@@ -5422,6 +5422,7 @@ async def _generate_screenplay_scene_sharded_baseline(
     # frozen authority projection are sent, together with their owned SRC.
     from app.identity_authority import identity_authority_registry
     from app.portraits import ensure_structural_identity_coverage
+    from app.orchestration.state_machine import StateConflict
 
     authorities = identity_authority_registry(
         bible,
@@ -5460,6 +5461,29 @@ async def _generate_screenplay_scene_sharded_baseline(
                 "node_key": node.key,
             })
     if structural_identity_evidence and episode.get("project_id") and episode.get("id"):
+        coverage_trace = current_trace()
+        from app.production.revision import get_active_production_revision
+
+        coverage_revision = get_active_production_revision(
+            str(episode["id"]), "screenplay"
+        )
+
+        def assert_coverage_owner() -> None:
+            owner_row = get_conn().execute(
+                "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+                (str(episode["id"]),),
+            ).fetchone()
+            actual_owner = str(
+                owner_row["active_screenplay_run_id"] or ""
+            ) if owner_row else "missing"
+            if actual_owner != coverage_trace.run_id:
+                raise StateConflict(
+                    "screenplay_resolution_owner",
+                    str(episode["id"]),
+                    {coverage_trace.run_id},
+                    actual_owner,
+                )
+
         coverage = await ensure_structural_identity_coverage(
             str(episode["project_id"]),
             str(episode["id"]),
@@ -5467,6 +5491,11 @@ async def _generate_screenplay_scene_sharded_baseline(
             source_text,
             bible,
             structural_identity_evidence,
+            write_guard=assert_coverage_owner,
+            expected_active_run_id=coverage_trace.run_id,
+            expected_revision_id=(
+                coverage_revision.id if coverage_revision is not None else None
+            ),
         )
         if coverage.get("errors"):
             raise ValueError(

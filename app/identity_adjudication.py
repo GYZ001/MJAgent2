@@ -472,11 +472,30 @@ async def adjudicate_screenplay_ir_identities(
                 (episode_id,),
             ).fetchone()
             if row is not None:
+                expected_run_id = None
+                expected_revision_id = None
+                try:
+                    from app.observability.tracing import current_trace
+                    from app.production.revision import (
+                        get_active_production_revision,
+                    )
+
+                    expected_run_id = current_trace().run_id
+                    active_revision = get_active_production_revision(
+                        episode_id, "screenplay"
+                    )
+                    expected_revision_id = (
+                        active_revision.id if active_revision is not None else None
+                    )
+                except Exception:  # noqa: BLE001 - manual callers have no run owner
+                    pass
                 episode["character_resolutions"] = (
                     persist_screenplay_character_resolutions(
                         conn,
                         episode_id,
                         new_resolutions,
+                        expected_active_run_id=expected_run_id,
+                        expected_revision_id=expected_revision_id,
                     )
                 )
     adjudication_audit = [{
