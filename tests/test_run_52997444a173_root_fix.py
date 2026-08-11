@@ -226,8 +226,9 @@ def test_repair_preserves_timeline_and_compiles_ss004_canonical_speakers() -> No
         for slot in dialogue_slots
     )
     assert {
-        annotation.source_segment_ids[0]
+        source_id
         for annotation in blueprint.source_audit_annotations
+        for source_id in annotation.source_segment_ids
     } == {"SRC0060", "SRC0061", "SRC0062"}
 
 
