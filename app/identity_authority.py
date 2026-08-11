@@ -18,6 +18,17 @@ BACKEND_OWNED_IDENTITY_AUTHORITY_VERSION = (
 )
 
 
+class IdentityAuthorityConflictError(ValueError):
+    def __init__(self, issues: list[dict[str, Any]]):
+        self.issues = list(issues)
+        super().__init__(
+            "；".join(
+                str(issue.get("message") or issue.get("reason") or "")
+                for issue in self.issues
+            )
+        )
+
+
 def backend_owned_identity_authority(
     *,
     identity_key: str,
@@ -133,10 +144,20 @@ def identity_authority_registry(
 ) -> list[dict[str, Any]]:
     """Project Bible and preflight decisions into one exact-reference registry."""
     entries: dict[str, dict[str, Any]] = {}
+    groups_by_authority: dict[str, set[str]] = {}
+    authorities_by_group: dict[str, set[str]] = {}
+
+    def register_group(authority_id: str, identity_group: str) -> None:
+        if not identity_group:
+            return
+        groups_by_authority.setdefault(authority_id, set()).add(identity_group)
+        authorities_by_group.setdefault(identity_group, set()).add(authority_id)
+
     for character in getattr(bible, "characters", None) or []:
         name = str(getattr(character, "name", "") or "").strip()
         if not name:
             continue
+        register_group(f"bible:{name}", f"bible:{name}")
         entries[f"bible:{name}"] = {
             "authority_id": f"bible:{name}",
             "canonical_name": name,
@@ -150,6 +171,8 @@ def identity_authority_registry(
 
     for item in normalize_character_resolutions(resolutions):
         authority_id = item["authority_id"]
+        identity_group = str(item.get("identity_group") or "").strip()
+        register_group(authority_id, identity_group)
         entry = entries.setdefault(authority_id, {
             "authority_id": authority_id,
             "canonical_name": item["canonical_name"],
@@ -180,4 +203,32 @@ def identity_authority_registry(
                 f"authority_id={authority_id} 同时声明了多个 canonical_name："
                 f"{names}"
             )
+    issues = [
+        {
+            "reason": "identity_group_multiple_canonical_identities",
+            "identity_group": identity_group,
+            "authority_ids": sorted(authority_ids),
+            "message": (
+                f"identity_group={identity_group} 对应多个 canonical identity："
+                f"{sorted(authority_ids)}"
+            ),
+        }
+        for identity_group, authority_ids in authorities_by_group.items()
+        if len(authority_ids) > 1
+    ]
+    issues.extend(
+        {
+            "reason": "canonical_identity_multiple_identity_groups",
+            "authority_id": authority_id,
+            "identity_groups": sorted(identity_groups),
+            "message": (
+                f"authority_id={authority_id} 跨多个 identity_group："
+                f"{sorted(identity_groups)}"
+            ),
+        }
+        for authority_id, identity_groups in groups_by_authority.items()
+        if len(identity_groups) > 1
+    )
+    if issues:
+        raise IdentityAuthorityConflictError(issues)
     return list(entries.values())

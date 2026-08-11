@@ -11,7 +11,6 @@ import hashlib
 import json
 import math
 import re
-import unicodedata
 from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, Literal
@@ -53,6 +52,7 @@ from app.screenplay_ir import (
     IR_VERSION,
 )
 from app.source_excerpt import index_source_segments, structural_front_matter_ids
+from app.source_facts import source_segment_facts
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
@@ -147,6 +147,7 @@ class ScreenplaySceneUnitSlotPlan(BaseModel):
         "standalone", "merge_adjacent", "exclude_from_spine",
     ]
     source_segment_ids: list[str] = Field(min_length=1)
+    source_unit_key: str = ""
     source_text: str = ""
 
 
@@ -230,6 +231,7 @@ class ScreenplaySceneActionParticipantEvidence(BaseModel):
 
     identity_key: str
     source_segment_ids: list[str] = Field(default_factory=list)
+    source_unit_keys: list[str] = Field(default_factory=list)
     usage: Literal["visible", "voice", "mentioned", "state_subject"]
     perception_channels: list[
         Literal["audible", "visible_effect", "visible_reaction"]
@@ -670,6 +672,7 @@ def _compile_unit_identity_scaffold(
     source_set = set(source_ids)
     participant_usages: dict[str, set[str]] = {}
     participant_channels: dict[str, list[str]] = {}
+    voice_claims: list[str] = []
     decision_actor_keys: list[str] = []
     source_text_by_id = {
         segment.source_segment_id: segment.text
@@ -684,10 +687,18 @@ def _compile_unit_identity_scaffold(
                 participant.source_segment_ids
             ):
                 continue
+            if (
+                participant.source_unit_keys
+                and slot.source_unit_key
+                not in participant.source_unit_keys
+            ):
+                continue
             participant_usages.setdefault(
                 participant.identity_key,
                 set(),
             ).add(participant.usage)
+            if participant.usage == "voice":
+                voice_claims.append(participant.identity_key)
             channels = participant_channels.setdefault(
                 participant.identity_key,
                 [],
@@ -717,36 +728,17 @@ def _compile_unit_identity_scaffold(
     target_keys: list[str] = []
 
     if slot.kind == "dialogue":
-        identity_labels = {
-            binding.identity_key: binding.blueprint_key
-            for binding in contract.participant_bindings
-        }
-        unmentioned_visible_keys = [
-            identity_key
-            for identity_key in visible_keys
-            if (
-                identity_labels.get(identity_key, "").strip()
-                and identity_labels[identity_key].strip()
-                not in slot.source_text
-            )
-        ]
-        if len(voice_keys) == 1:
-            speaker_key = voice_keys[0]
-        elif len(voice_keys) > 1:
+        if len(voice_claims) == 1 and voice_claims[0]:
+            speaker_key = voice_claims[0]
+        elif len(voice_claims) > 1:
             errors.append(
-                f"{slot.unit_key} 来源含多个 voice identity，"
-                "必须按说话证据拆分 unit"
+                f"{slot.unit_key} dialogue source unit 含多个 voice "
+                "speaker evidence"
             )
-        elif len(decision_actor_keys) == 1:
-            speaker_key = decision_actor_keys[0]
-        elif len(unmentioned_visible_keys) == 1:
-            speaker_key = unmentioned_visible_keys[0]
-        elif len(visible_keys) == 1:
-            speaker_key = visible_keys[0]
         else:
             errors.append(
                 f"{slot.unit_key} dialogue 缺少唯一 speaker "
-                "action evidence"
+                "voice identity evidence"
             )
         if speaker_key:
             actor_keys = [speaker_key]
@@ -1221,7 +1213,9 @@ def _identity_aliases(
     *,
     identity_keys: set[str] | None = None,
 ) -> dict[str, str]:
-    aliases = {key: key for key in (identity_keys or set())}
+    candidates: dict[str, set[str]] = {
+        key: {key} for key in (identity_keys or set())
+    }
     for item in identity_registry:
         identity_key = str(item.get("identity_key") or "").strip()
         if not identity_key:
@@ -1234,8 +1228,26 @@ def _identity_aliases(
         ):
             label = str(value or "").strip()
             if label:
-                aliases[label] = identity_key
-    return aliases
+                candidates.setdefault(label, set()).add(identity_key)
+    conflicts = {
+        reference: sorted(keys)
+        for reference, keys in candidates.items()
+        if len(keys) > 1
+    }
+    if conflicts:
+        raise ScreenplaySceneShardError(
+            "identity-registry",
+            [
+                "typed identity reference 指向多个 canonical identity："
+                f"{reference}={keys}"
+                for reference, keys in sorted(conflicts.items())
+            ],
+        )
+    return {
+        reference: next(iter(keys))
+        for reference, keys in candidates.items()
+        if keys
+    }
 
 
 def _scene_estimate(
@@ -1258,54 +1270,10 @@ def _scene_estimate(
 def _source_creative_parts(
     source_text: str,
 ) -> list[tuple[Literal["action", "dialogue"], str]]:
-    text = str(source_text or "").strip()
-    if not text:
-        return [("action", "")]
-    parts: list[tuple[Literal["action", "dialogue"], str]] = []
-    outside: list[str] = []
-    quoted: list[str] = []
-    quote_open = ""
-
-    def has_content(value: str) -> bool:
-        return any(
-            not (
-                char.isspace()
-                or unicodedata.category(char).startswith("P")
-            )
-            for char in value
-        )
-
-    def flush_outside() -> None:
-        value = "".join(outside).strip()
-        outside.clear()
-        if value and has_content(value):
-            parts.append(("action", value))
-
-    for char in text:
-        category = unicodedata.category(char)
-        quotation_mark = "QUOTATION MARK" in unicodedata.name(char, "")
-        if not quote_open:
-            if category == "Pi" or quotation_mark:
-                flush_outside()
-                quote_open = char
-                quoted.append(char)
-            else:
-                outside.append(char)
-            continue
-        quoted.append(char)
-        if category == "Pf" or (
-            quotation_mark and char == quote_open
-        ):
-            value = "".join(quoted).strip()
-            quoted.clear()
-            quote_open = ""
-            if value:
-                parts.append(("dialogue", value))
-
-    if quoted:
-        outside.extend(quoted)
-    flush_outside()
-    return parts or [("action", text)]
+    return [
+        (fact.projection, fact.text)
+        for fact in source_segment_facts("SOURCE", source_text)
+    ]
 
 
 def _build_group_unit_slots(
@@ -1329,14 +1297,15 @@ def _build_group_unit_slots(
                     f"{scene_plan.key} 不得为 {source_id} 的 "
                     f"{semantics.projection_policy} 投影生成创作 slot"
                 )
-            for source_part_order, (kind, source_part) in enumerate(
-                _source_creative_parts(
-                    source_by_id.get(source_id, "")
-                ),
-                start=1,
+            for fact in source_segment_facts(
+                source_id,
+                source_by_id.get(source_id, ""),
             ):
                 unit_order += 1
                 scene_unit_order += 1
+                source_part_order = fact.unit_order
+                kind = fact.projection
+                source_part = fact.text
                 key_base = (
                     f"{scene_plan.key}:{source_id}:"
                     f"{source_part_order:03d}"
@@ -1353,6 +1322,7 @@ def _build_group_unit_slots(
                     event_priority=semantics.event_priority,
                     render_policy=semantics.render_policy,
                     source_segment_ids=[source_id],
+                    source_unit_key=fact.source_unit_key,
                     source_text=(
                         source_part if kind == "dialogue" else ""
                     ),
@@ -1656,6 +1626,7 @@ def build_screenplay_scene_input_contracts(
                     ScreenplaySceneActionParticipantEvidence(
                         identity_key=identity_key,
                         source_segment_ids=evidence_source_ids,
+                        source_unit_keys=list(evidence.source_unit_keys),
                         usage=evidence.usage,
                         perception_channels=(
                             ["audible"]

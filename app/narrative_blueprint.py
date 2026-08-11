@@ -24,6 +24,7 @@ from app.source_excerpt import (
     index_source_segments,
     structural_front_matter_ids,
 )
+from app.source_facts import SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v4"
@@ -176,6 +177,7 @@ class BlueprintDecision(BaseModel):
 class NarrativeParticipantEvidence(BaseModel):
     identity_key: str
     source_segment_ids: list[str] = Field(default_factory=list)
+    source_unit_keys: list[str] = Field(default_factory=list)
     usage: Literal["visible", "voice", "mentioned", "state_subject"]
 
     @field_validator("source_segment_ids", mode="before")
@@ -629,6 +631,9 @@ class BlueprintSemanticIssue(BaseModel):
         "agency_conflict",
         "setup_missing",
         "identity_or_role_conflict",
+        "voice_identity_missing",
+        "voice_identity_ambiguous",
+        "voice_identity_conflict",
         "ending_payoff_gap",
     ]
     node_keys: list[str]
@@ -1033,6 +1038,129 @@ def blueprint_semantic_issue_is_resolved(
         )
         for node in targets
     )
+
+
+def blueprint_voice_identity_issues(
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> list[BlueprintSemanticIssue]:
+    """Return typed speaker-evidence issues for projected dialogue units."""
+    facts = source_facts(source_text)
+    facts_by_key = {fact.source_unit_key: fact for fact in facts}
+    dialogue_by_source: defaultdict[str, list[SourceFact]] = defaultdict(list)
+    for fact in facts:
+        if fact.projection == "dialogue":
+            dialogue_by_source[fact.source_segment_id].append(fact)
+
+    issues: list[BlueprintSemanticIssue] = []
+    for node in blueprint.nodes:
+        if node.source_semantics().projection_policy != "picture":
+            continue
+        owned_sources = set(node.source_segment_ids)
+        owned_dialogue = [
+            fact
+            for source_id in node.source_segment_ids
+            for fact in dialogue_by_source.get(source_id, [])
+        ]
+        claims: defaultdict[
+            str,
+            list[NarrativeParticipantEvidence],
+        ] = defaultdict(list)
+        for evidence in node.participant_evidence:
+            if evidence.usage != "voice":
+                continue
+            if evidence.source_unit_keys:
+                invalid_keys = [
+                    key
+                    for key in evidence.source_unit_keys
+                    if (
+                        key not in facts_by_key
+                        or facts_by_key[key].projection != "dialogue"
+                        or facts_by_key[key].source_segment_id
+                        not in owned_sources
+                    )
+                ]
+                if invalid_keys:
+                    issues.append(BlueprintSemanticIssue(
+                        code="voice_identity_conflict",
+                        node_keys=[node.key],
+                        source_segment_ids=list(
+                            evidence.source_segment_ids
+                        ),
+                        message=(
+                            f"{evidence.identity_key} 的 voice evidence 引用了"
+                            "非本节点 dialogue source unit："
+                            + "、".join(invalid_keys)
+                        ),
+                        required_resolution=(
+                            "保留节点、来源 ownership 与语义，只把 voice "
+                            "evidence 绑定到本节点实际拥有的 dialogue unit"
+                        ),
+                    ))
+                    continue
+                target_keys = evidence.source_unit_keys
+            else:
+                target_keys = [
+                    fact.source_unit_key
+                    for source_id in evidence.source_segment_ids
+                    for fact in dialogue_by_source.get(source_id, [])
+                    if source_id in owned_sources
+                ]
+            if not target_keys:
+                issues.append(BlueprintSemanticIssue(
+                    code="voice_identity_conflict",
+                    node_keys=[node.key],
+                    source_segment_ids=list(evidence.source_segment_ids),
+                    message=(
+                        f"{evidence.identity_key} 的 voice evidence 没有绑定"
+                        "本节点 dialogue source unit"
+                    ),
+                    required_resolution=(
+                        "保留节点、来源 ownership 与语义，为该 voice evidence "
+                        "填写精确 source_unit_keys"
+                    ),
+                ))
+                continue
+            for key in dict.fromkeys(target_keys):
+                claims[key].append(evidence)
+
+        for fact in owned_dialogue:
+            unit_claims = claims.get(fact.source_unit_key, [])
+            identities = {
+                evidence.identity_key
+                for evidence in unit_claims
+                if evidence.identity_key
+            }
+            if not unit_claims:
+                code = "voice_identity_missing"
+                message = (
+                    f"{fact.source_unit_key} 缺少结构化 voice speaker identity evidence"
+                )
+            elif len(unit_claims) > 1 and len(identities) > 1:
+                code = "voice_identity_ambiguous"
+                message = (
+                    f"{fact.source_unit_key} 同时声明多个 voice identity："
+                    + "、".join(sorted(identities))
+                )
+            elif len(unit_claims) != 1 or len(identities) != 1:
+                code = "voice_identity_conflict"
+                message = (
+                    f"{fact.source_unit_key} 必须恰有一个非空 voice identity evidence"
+                )
+            else:
+                continue
+            issues.append(BlueprintSemanticIssue(
+                code=code,
+                node_keys=[node.key],
+                source_segment_ids=[fact.source_segment_id],
+                message=message,
+                required_resolution=(
+                    "保持完整 node、source ownership、来源顺序和语义三元不变；"
+                    "仅为该 dialogue source unit 提供恰一个 voice evidence，"
+                    "identity_key 使用人物 registry 的 typed reference"
+                ),
+            ))
+    return issues
 
 
 def normalize_blueprint_source_order(
@@ -1716,6 +1844,19 @@ def validate_narrative_blueprint(
 
     if not blueprint.nodes:
         return ["[BLUEPRINT_EMPTY] 叙事蓝图没有任何时间线节点"]
+
+    errors.extend(
+        (
+            f"[BLUEPRINT_{issue.code.upper()}] "
+            f"{'、'.join(issue.node_keys)} "
+            f"{'、'.join(issue.source_segment_ids)}：{issue.message}；"
+            f"必须：{issue.required_resolution}"
+        )
+        for issue in blueprint_voice_identity_issues(
+            blueprint,
+            source_text,
+        )
+    )
 
     node_keys = [node.key for node in blueprint.nodes]
     if len(node_keys) != len(set(node_keys)):
@@ -2437,8 +2578,22 @@ def blueprint_prompt_contract() -> dict[str, Any]:
             ),
         },
         "participant_evidence_required": {
-            "fields": ["identity_key", "source_segment_ids", "usage"],
+            "fields": [
+                "identity_key",
+                "source_segment_ids",
+                "source_unit_keys",
+                "usage",
+            ],
             "usage": ["visible", "voice", "mentioned", "state_subject"],
             "ownership": "source_segment_ids must be owned by the same node",
+            "dialogue_voice_contract": (
+                "every projection=picture SourceFact with "
+                "projection=dialogue has exactly one usage=voice evidence; "
+                "source_unit_keys references its exact source_unit_key"
+            ),
+            "non_dialogue_voice_contract": (
+                "action and non-dialogue environment SourceFacts do not "
+                "require voice evidence"
+            ),
         },
     }
