@@ -187,9 +187,77 @@ def _archive_matches_directory(archive_path: Path, package_path: Path) -> bool:
     }
     try:
         with zipfile.ZipFile(archive_path) as archive:
-            return archive.testzip() is None and set(archive.namelist()) == expected
+            if archive.testzip() is not None or set(archive.namelist()) != expected:
+                return False
+            for relative in expected:
+                source = package_path / relative
+                info = archive.getinfo(relative)
+                if int(info.file_size) != int(source.stat().st_size):
+                    return False
+                digest = hashlib.sha256()
+                with archive.open(relative) as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != _sha256(source):
+                    return False
+            return True
     except (OSError, zipfile.BadZipFile):
         return False
+
+
+def _delivery_approval_snapshot(conn, row, episode_id: str) -> dict[str, Any]:
+    artifact = repository.get_artifact(str(row["artifact_id"]), conn=conn)
+    if artifact is None or artifact["type"] != "delivery_package":
+        raise ValueError("交付草稿证据不存在")
+    if artifact["scope_type"] != "episode" or artifact["scope_id"] != episode_id:
+        raise ValueError("交付草稿证据作用域不匹配")
+    package_dir = Path(str(row["package_path"])).resolve()
+    manifest_path = package_dir / "manifest.json"
+    archive_path = Path(str(package_dir) + ".zip")
+    if not package_dir.is_dir() or not manifest_path.is_file():
+        raise ValueError("交付草稿文件已丢失")
+    try:
+        manifest = json.loads(str(row["manifest_json"] or "{}"))
+        disk_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("交付草稿 manifest 损坏") from exc
+    if not isinstance(manifest, dict) or manifest != disk_manifest:
+        raise ValueError("交付草稿 manifest 与审核快照不一致")
+    if repository.content_hash(
+        artifact.get("content"), artifact.get("file_path"),
+    ) != str(artifact.get("content_hash") or ""):
+        raise ValueError("交付草稿证据内容已被篡改")
+    for item in manifest.get("files") or []:
+        candidate = (package_dir / str(item.get("path") or "")).resolve()
+        if package_dir not in candidate.parents or not candidate.is_file():
+            raise ValueError("交付草稿包含非法或缺失文件")
+        if (
+            _sha256(candidate) != str(item.get("sha256") or "")
+            or candidate.stat().st_size != int(item.get("size_bytes") or -1)
+        ):
+            raise ValueError("交付草稿文件已被篡改")
+    if not _archive_matches_directory(archive_path, package_dir):
+        raise ValueError("交付草稿压缩包与审核快照不一致")
+    from app.downstream_authority import (
+        current_adopted_video_delivery_manifest,
+        verify_current_storyboard_release_authority,
+    )
+
+    if verify_current_storyboard_release_authority(
+        episode_id, conn=conn,
+    ) != manifest.get("storyboard_release_authority"):
+        raise ValueError("交付草稿的分镜发布权威已漂移，请刷新后重建")
+    if current_adopted_video_delivery_manifest(
+        episode_id, conn=conn,
+    ) != manifest.get("video_delivery_manifest"):
+        raise ValueError("交付草稿的已采纳视频已漂移，请刷新后重建")
+    return {
+        "artifact": artifact,
+        "manifest": manifest,
+        "package_dir": package_dir,
+        "manifest_sha256": _sha256(manifest_path),
+        "archive_sha256": _sha256(archive_path),
+    }
 
 
 def _artifact_summary(artifact_id: str | None) -> dict[str, Any] | None:
@@ -1037,6 +1105,7 @@ def approve_delivery(
     approved_package_id: str | None = None,
     operation_started_at: float | None = None,
     package_id: str | None = None,
+    allow_interrupted_takeover: bool = False,
 ) -> dict[str, Any]:
     conn = get_conn()
     if package_id:
@@ -1047,7 +1116,7 @@ def approve_delivery(
         ).fetchone()
         if not row:
             raise ValueError("指定的交付包不存在")
-        if row["status"] not in {"waiting_human", "approving"}:
+        if row["status"] not in {"waiting_human", "approving", "approved"}:
             raise ValueError(f"交付包当前状态为 {row['status']}，不可审核")
     else:
         row = conn.execute(
@@ -1087,134 +1156,164 @@ def approve_delivery(
         conn.commit()
         return {"artifact_id": row["artifact_id"], "decision": decision, "trust_level": "T3", "package_id": row["id"]}
 
-    artifact = repository.get_artifact(str(row["artifact_id"]))
-    if artifact is None or artifact["type"] != "delivery_package":
-        raise ValueError("交付草稿证据不存在")
-    if artifact["scope_type"] != "episode" or artifact["scope_id"] != episode_id:
-        raise ValueError("交付草稿证据作用域不匹配")
-    package_dir = Path(str(row["package_path"])).resolve()
-    manifest_path = package_dir / "manifest.json"
-    if not package_dir.is_dir() or not manifest_path.is_file():
-        raise ValueError("交付草稿文件已丢失")
+    if row["status"] == "waiting_human":
+        artifact = repository.get_artifact(str(row["artifact_id"]), conn=conn)
+        ep = conn.execute(
+            "SELECT delivery_artifact_id,delivery_status FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        if (
+            artifact is None
+            or artifact["status"] != "validated"
+            or ep is None
+            or ep["delivery_artifact_id"] != row["artifact_id"]
+            or ep["delivery_status"] != "waiting_human"
+        ):
+            raise ValueError("交付草稿已不是当前可审批候选")
+    # Reject tampered/stale inputs before creating the durable approval claim.
+    _delivery_approval_snapshot(conn, row, episode_id)
+    approval_fingerprint = fingerprint(
+        episode_id,
+        {
+            "source_package_id": row["id"],
+            "source_artifact_id": row["artifact_id"],
+            "decision": decision,
+            "decided_by": decided_by,
+            "reason": reason,
+            "accepted_risk": accepted_risk,
+        },
+    )
+    receipt_id = "delivery_approval_" + hashlib.sha256(
+        str(row["id"]).encode("utf-8")
+    ).hexdigest()[:24]
+    owner, recovered = claim_delivery_package_operation(
+        package_id=receipt_id,
+        episode_id=episode_id,
+        request_fingerprint=approval_fingerprint,
+        allow_interrupted_takeover=allow_interrupted_takeover,
+        conn=conn,
+    )
+    if recovered is not None:
+        return recovered
+    assert owner is not None
+
+    # Validate before claiming any domain state, then repeat every check inside
+    # the single publish transaction immediately before the T5 write.
     try:
-        manifest = json.loads(str(row["manifest_json"] or "{}"))
-        disk_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("交付草稿 manifest 损坏") from exc
-    if not isinstance(manifest, dict) or manifest != disk_manifest:
-        raise ValueError("交付草稿 manifest 与审核快照不一致")
-    actual_artifact_hash = repository.content_hash(
-        artifact.get("content"), artifact.get("file_path"),
-    )
-    if actual_artifact_hash != str(artifact.get("content_hash") or ""):
-        raise ValueError("交付草稿证据内容已被篡改")
-    for item in manifest.get("files") or []:
-        relative = str(item.get("path") or "")
-        candidate = (package_dir / relative).resolve()
-        if package_dir not in candidate.parents or not candidate.is_file():
-            raise ValueError("交付草稿包含非法或缺失文件")
-        if _sha256(candidate) != str(item.get("sha256") or ""):
-            raise ValueError("交付草稿文件已被篡改")
-    from app.downstream_authority import (
-        current_adopted_video_delivery_manifest,
-        verify_current_storyboard_release_authority,
-    )
-
-    if verify_current_storyboard_release_authority(
-        episode_id, conn=conn,
-    ) != manifest.get("storyboard_release_authority"):
-        raise ValueError("交付草稿的分镜发布权威已漂移，请刷新后重建")
-    if current_adopted_video_delivery_manifest(
-        episode_id, conn=conn,
-    ) != manifest.get("video_delivery_manifest"):
-        raise ValueError("交付草稿的已采纳视频已漂移，请刷新后重建")
-
-    # CAS 领取草稿。批准只在原始不可变字节上追加人工证据，
-    # 绝不从实时输入重建一个内容不同的包。
-    claimed = conn.execute(
-        "UPDATE delivery_packages SET status='approving' WHERE id=? AND status='waiting_human'",
-        (row["id"],),
-    )
-    if claimed.rowcount != 1 and row["status"] != "approving":
-        conn.rollback()
-        raise ValueError("交付草稿已由另一审批任务处理")
-    conn.commit()
-
-    existing_decision = conn.execute(
-        """SELECT * FROM gate_decisions
-           WHERE artifact_id=? AND gate_key='delivery'
-           ORDER BY created_at DESC LIMIT 1""",
-        (row["artifact_id"],),
-    ).fetchone()
-    if existing_decision and str(existing_decision["decision"]) != decision:
-        raise ValueError("交付草稿已绑定不同的人工决定")
-    if artifact["status"] != "approved":
-        human_eval = Evaluation(
-            evaluator_type="human",
-            evaluator_name=decided_by,
-            evaluator_version="1.0.0",
-            status="warning" if decision == "approve_with_risk" else "passed",
-            hard_gate_passed=True,
-            score=100,
-            issues=[Issue(
-                code="RISK_ACCEPTED",
-                severity=IssueSeverity.WARNING,
-                subject=str(row["artifact_id"]),
-                message=accepted_risk or reason,
-            )] if decision == "approve_with_risk" else [],
-            evidence={
-                "decision": decision,
-                "reason": reason,
-                "accepted_risk": accepted_risk,
-                "approved_manifest_hash": hashlib.sha256(
-                    manifest_path.read_bytes()
-                ).hexdigest(),
-                "approved_package_id": str(row["id"]),
-            },
+        conn.execute("BEGIN IMMEDIATE")
+        _assert_delivery_operation_owner(
+            conn,
+            package_id=receipt_id,
+            request_fingerprint=approval_fingerprint,
+            lease_owner=owner,
         )
-        artifact = repository.commit_artifact(None, str(row["artifact_id"]), [human_eval])
-    conn.execute(
-        """INSERT INTO gate_decisions(
-               id,artifact_id,gate_key,decision,decided_by,reason,accepted_risk,created_at
-           ) SELECT ?,?,?,?,?,?,?,?
-             WHERE NOT EXISTS(
-               SELECT 1 FROM gate_decisions
-                WHERE artifact_id=? AND gate_key='delivery'
-             )""",
-        (
-            new_id("gate"), row["artifact_id"], "delivery", decision, decided_by,
-            reason, accepted_risk, now(), row["artifact_id"],
-        ),
-    )
-    updated = conn.execute(
-        """UPDATE delivery_packages SET status='approved',approved_at=?
-             WHERE id=? AND status='approving'""",
-        (now(), row["id"]),
-    )
-    if updated.rowcount != 1:
-        conn.rollback()
-        raise ValueError("交付草稿审批 CAS 冲突")
-    episode_update = conn.execute(
-        """UPDATE episodes SET delivery_artifact_id=?,delivery_status='approved'
-             WHERE id=? AND delivery_artifact_id=?
-               AND delivery_status IN ('waiting_human','approved')""",
-        (row["artifact_id"], episode_id, row["artifact_id"]),
-    )
-    if episode_update.rowcount != 1:
-        conn.rollback()
-        raise ValueError("交付草稿审批时当前指针已漂移")
-    conn.commit()
-    return {
-        "package_id": row["id"],
-        "artifact_id": row["artifact_id"],
-        "trust_level": artifact["trust_level"],
-        "status": "approved",
-        "package_path": str(package_dir),
-        "archive_path": str(package_dir) + ".zip",
-        "manifest": manifest,
-        "decision": decision,
-        "approved_snapshot_preserved": True,
-    }
+        current = conn.execute(
+            "SELECT * FROM delivery_packages WHERE id=? AND episode_id=?",
+            (row["id"], episode_id),
+        ).fetchone()
+        if current is None or current["status"] not in {"waiting_human", "approving"}:
+            raise ValueError("交付草稿审批状态已漂移")
+        snapshot = _delivery_approval_snapshot(conn, current, episode_id)
+        artifact = snapshot["artifact"]
+        if artifact["status"] != "validated":
+            raise ValueError("交付草稿 Artifact 已不是 validated 候选")
+        claimed = conn.execute(
+            """UPDATE delivery_packages SET status='approving'
+                 WHERE id=? AND status IN ('waiting_human','approving')""",
+            (row["id"],),
+        )
+        if claimed.rowcount != 1:
+            raise ValueError("交付草稿审批 CAS 冲突")
+        stamp = now()
+        issues = ([{
+            "code": "RISK_ACCEPTED",
+            "severity": "warning",
+            "subject": str(row["artifact_id"]),
+            "message": accepted_risk or reason,
+            "path": None,
+            "retryable": False,
+            "suggested_fix": None,
+        }] if decision == "approve_with_risk" else [])
+        evidence = {
+            "decision": decision,
+            "reason": reason,
+            "accepted_risk": accepted_risk,
+            "approved_manifest_hash": snapshot["manifest_sha256"],
+            "approved_archive_sha256": snapshot["archive_sha256"],
+            "approved_package_id": str(row["id"]),
+        }
+        conn.execute(
+            """INSERT INTO evaluations(
+                   id,artifact_id,evaluator_type,evaluator_name,evaluator_version,
+                   status,hard_gate_passed,evaluation_role,score_status,runtime_blocking,
+                   retry_eligible,score,dimension_scores_json,issues_json,evidence_json,
+                   confidence,recovered,created_at
+               ) VALUES(?,?,?,?,?,?,1,'runtime_gate','scored',1,0,100,'{}',?,?,1,0,?)""",
+            (
+                new_id("eval"), row["artifact_id"], "human", decided_by, "1.0.0",
+                "warning" if decision == "approve_with_risk" else "passed",
+                json.dumps(issues, ensure_ascii=False),
+                json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+                stamp,
+            ),
+        )
+        updated_artifact = conn.execute(
+            """UPDATE artifacts SET status='approved',trust_level='T5',approved_at=?
+                 WHERE id=? AND status='validated' AND content_hash=?""",
+            (stamp, row["artifact_id"], artifact["content_hash"]),
+        )
+        if updated_artifact.rowcount != 1:
+            raise ValueError("交付草稿 Artifact 批准 CAS 冲突")
+        conn.execute(
+            """INSERT INTO gate_decisions(
+                   id,artifact_id,gate_key,decision,decided_by,reason,accepted_risk,created_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                new_id("gate"), row["artifact_id"], "delivery", decision,
+                decided_by, reason, accepted_risk, stamp,
+            ),
+        )
+        conn.execute(
+            "UPDATE delivery_packages SET status='approved',approved_at=? WHERE id=? AND status='approving'",
+            (stamp, row["id"]),
+        )
+        episode_update = conn.execute(
+            """UPDATE episodes SET delivery_artifact_id=?,delivery_status='approved'
+                 WHERE id=? AND delivery_artifact_id=? AND delivery_status='waiting_human'""",
+            (row["artifact_id"], episode_id, row["artifact_id"]),
+        )
+        if episode_update.rowcount != 1:
+            raise ValueError("交付草稿审批时当前指针已漂移")
+        result = {
+            "package_id": row["id"],
+            "artifact_id": row["artifact_id"],
+            "trust_level": "T5",
+            "status": "approved",
+            "package_path": str(snapshot["package_dir"]),
+            "archive_path": str(snapshot["package_dir"]) + ".zip",
+            "manifest": snapshot["manifest"],
+            "archive_sha256": snapshot["archive_sha256"],
+            "decision": decision,
+            "approved_snapshot_preserved": True,
+        }
+        receipt = conn.execute(
+            """UPDATE delivery_operation_receipts
+                  SET status='succeeded',result_json=?,lease_expires_at=0,updated_at=?
+                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                  AND status='running'""",
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True), stamp,
+                receipt_id, approval_fingerprint, owner,
+            ),
+        )
+        if receipt.rowcount != 1:
+            raise ValueError("交付审批 receipt CAS 冲突")
+        conn.commit()
+        return result
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 def add_customer_feedback(

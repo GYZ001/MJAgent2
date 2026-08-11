@@ -1352,12 +1352,6 @@ async def _resume_delivery_approval(
     recorder.start()
     try:
         async def operation():
-            existing = get_conn().execute(
-                "SELECT id FROM delivery_packages WHERE id=? AND status='approved'",
-                (payload["approved_package_id"],),
-            ).fetchone()
-            if existing:
-                return {"package_id": existing["id"], "already_committed": True}
             return await asyncio.to_thread(
                 approve_delivery,
                 episode_id,
@@ -1368,6 +1362,7 @@ async def _resume_delivery_approval(
                 approved_package_id=payload["approved_package_id"],
                 operation_started_at=payload["operation_started_at"],
                 package_id=payload.get("package_id"),
+                allow_interrupted_takeover=True,
             )
 
         await recorder.step(
