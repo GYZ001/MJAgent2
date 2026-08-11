@@ -680,6 +680,30 @@ def resolve_screenplay_resume_eligibility(
         else:
             incompatibility_reason = "working Artifact 不符合当前类型、状态、合同或内容哈希"
         if not known_incompatibility:
+            from app.production.screenplay_authority import (
+                SCREENPLAY_QA_PROFILE_VERSION,
+            )
+
+            profile_requires_revalidation = (
+                str(rev.qa_profile_version or "")
+                != SCREENPLAY_QA_PROFILE_VERSION
+            )
+            if profile_requires_revalidation:
+                return ScreenplayResumeEligibility(
+                    mode="finalize",
+                    label="按新门禁重验并发布",
+                    revision_id=rev.id,
+                    revision_action="reuse",
+                    working_artifact_id=working_id,
+                    working_compatible=False,
+                    reusable_checkpoint=reusable,
+                    reason_code="WORKING_REVALIDATION_REQUIRED",
+                    reason=(
+                        "working Artifact 的 QA/validator 语义版本已过期；"
+                        "worker 必须先按当前确定性门禁只读重验，失败时只能从"
+                        "可信不可变上游重建"
+                    ),
+                )
             return ScreenplayResumeEligibility(
                 mode="finalize",
                 label="继续校验并发布",
@@ -1420,6 +1444,162 @@ def update_working_artifact(revision_id: str, artifact_id: str, *, expected_hash
     except Exception:  # noqa: BLE001
         pass
     conn.commit()
+
+
+def recover_screenplay_working_authority(
+    revision_id: str,
+    artifact_id: str,
+    *,
+    expected_working_artifact_id: str,
+    expected_working_hash: str,
+    expected_replacement_hash: str,
+    source_authority_artifact_id: str,
+    input_fingerprint: str,
+    contract_version: str,
+    qa_profile_version: str,
+    checkpoint: dict[str, Any],
+) -> ProductionRevision:
+    """Create a new revision bound to a revalidated working authority.
+
+    The old revision and its QA/repair metadata stay immutable audit history.
+    Only a current, typed screenplay document may become the new authority,
+    and the old revision/episode pointers are fenced in one transaction so a
+    late worker cannot restore a poisoned candidate.
+    """
+    ensure_production_revisions_table()
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM production_revisions WHERE id=?",
+            (revision_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("screenplay recovery revision 不存在")
+        _assert_screenplay_write_owner(
+            conn,
+            episode_id=row["episode_id"],
+            kind=row["kind"],
+            revision_id=revision_id,
+        )
+        current_eligibility = resolve_screenplay_resume_eligibility(
+            str(row["episode_id"]),
+            revision=_row_to_revision(row),
+            conn=conn,
+        )
+        if (
+            row["status"] != "active"
+            or str(row["working_artifact_id"] or "")
+            != expected_working_artifact_id
+            or current_eligibility.reason_code
+            != "WORKING_REVALIDATION_REQUIRED"
+            or current_eligibility.revision_id != revision_id
+            or current_eligibility.working_artifact_id
+            != expected_working_artifact_id
+        ):
+            raise RuntimeError("screenplay recovery eligibility/working CAS 冲突")
+        current_artifact = conn.execute(
+            "SELECT content_hash FROM artifacts WHERE id=?",
+            (expected_working_artifact_id,),
+        ).fetchone()
+        if (
+            current_artifact is None
+            or str(current_artifact["content_hash"] or "")
+            != expected_working_hash
+        ):
+            raise RuntimeError("screenplay recovery working hash CAS 冲突")
+        replacement = conn.execute(
+            "SELECT id,type,scope_type,scope_id,status,contract_version,"
+            "content_hash,parent_artifact_ids_json FROM artifacts WHERE id=?",
+            (artifact_id,),
+        ).fetchone()
+        if (
+            replacement is None
+            or replacement["type"] != "screenplay_document"
+            or replacement["scope_type"] != "episode"
+            or replacement["scope_id"] != row["episode_id"]
+            or replacement["status"] not in {"candidate", "validated", "approved"}
+            or str(replacement["contract_version"] or "") != contract_version
+            or str(replacement["content_hash"] or "")
+            != expected_replacement_hash
+        ):
+            raise ValueError("screenplay recovery replacement Artifact 合同不兼容")
+        try:
+            replacement_parents = {
+                str(value)
+                for value in json.loads(
+                    replacement["parent_artifact_ids_json"] or "[]"
+                )
+                if str(value)
+            }
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("screenplay recovery replacement lineage 无效") from exc
+        if artifact_id != expected_working_artifact_id:
+            if artifact_id != source_authority_artifact_id and (
+                not source_authority_artifact_id
+                or replacement_parents != {source_authority_artifact_id}
+            ):
+                raise ValueError("screenplay recovery replacement 不来自可信上游")
+        old_checkpoint_json = str(row["checkpoint_json"] or "{}")
+        stamp = now()
+        new_revision_id = new_id("rev")
+        cursor = conn.execute(
+            "UPDATE production_revisions SET status='superseded',updated_at=? "
+            "WHERE id=? AND status='active' "
+            "AND COALESCE(working_artifact_id,'')=? AND checkpoint_json=?",
+            (
+                stamp,
+                revision_id,
+                expected_working_artifact_id,
+                old_checkpoint_json,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("screenplay recovery revision CAS 冲突")
+        conn.execute(
+            """INSERT INTO production_revisions(
+                id,episode_id,kind,status,baseline_generation_count,
+                first_evaluation_id,baseline_artifact_id,working_artifact_id,
+                published_artifact_id,grant_id,input_fingerprint,
+                contract_version,qa_profile_version,checkpoint_json,
+                created_at,updated_at
+            ) VALUES(?,?,?,'active',1,NULL,?,?,NULL,NULL,?,?,?,?,?,?)""",
+            (
+                new_revision_id,
+                row["episode_id"],
+                row["kind"],
+                row["baseline_artifact_id"],
+                artifact_id,
+                input_fingerprint,
+                contract_version,
+                qa_profile_version,
+                json.dumps(checkpoint, ensure_ascii=False),
+                stamp,
+                stamp,
+            ),
+        )
+        episode_cursor = conn.execute(
+            "UPDATE episodes SET working_screenplay_artifact_id=?,"
+            "screenplay_production_revision_id=? WHERE id=? "
+            "AND COALESCE(working_screenplay_artifact_id,'')=?",
+            (
+                artifact_id,
+                new_revision_id,
+                row["episode_id"],
+                expected_working_artifact_id,
+            ),
+        )
+        if episode_cursor.rowcount != 1:
+            raise RuntimeError("screenplay recovery episode pointer CAS 冲突")
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    revision = get_production_revision(new_revision_id)
+    if revision is None:
+        raise RuntimeError("screenplay recovery 更新后 revision 丢失")
+    return revision
 
 
 def save_checkpoint(revision_id: str, checkpoint: dict[str, Any]) -> None:

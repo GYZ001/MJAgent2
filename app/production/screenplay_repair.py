@@ -35,6 +35,7 @@ from app.production.revision import (
     get_production_revision,
     mark_baseline_generated,
     mark_first_evaluation,
+    recover_screenplay_working_authority,
     rebind_input_fingerprint,
     save_checkpoint,
     update_working_artifact,
@@ -528,7 +529,7 @@ def run_screenplay_qa(
     evaluation = Evaluation(
         evaluator_type="deterministic",
         evaluator_name="screenplay_production_qa",
-        evaluator_version="screenplay-qa-gate-2",
+        evaluator_version=SCREENPLAY_QA_PROFILE_VERSION,
         status=status,
         hard_gate_passed=not runtime_blocking,
         evaluation_role=evaluation_role,

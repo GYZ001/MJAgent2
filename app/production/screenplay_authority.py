@@ -14,7 +14,7 @@ from app.ingest import chapter_is_stub, chapter_titles_match
 from app.schemas import Bible, EpisodeScreenplay
 
 
-SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-2"
+SCREENPLAY_QA_PROFILE_VERSION = "screenplay-qa-gate-3"
 
 
 @lru_cache(maxsize=16)
