@@ -16,6 +16,7 @@ const DELIVERY_STATUS_LABELS: Record<string, string> = {
 
 export type CinemaTab = 'preview' | 'readiness' | 'records'
 const CINEMA_TABS: CinemaTab[] = ['preview', 'readiness', 'records']
+const operationKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`
 
 export const deliveryStatusLabel = (status: string) => DELIVERY_STATUS_LABELS[status] || '处理中'
 
@@ -355,7 +356,9 @@ export default function CinemaPage() {
   const createDeliveryPackage = async () => {
     setDeliveryBusy(true)
     try {
-      await api.post(`/episodes/${ep.id}/delivery/package`, {})
+      await api.post(`/episodes/${ep.id}/delivery/package`, {
+        idempotency_key: operationKey(`delivery-package:${ep.id}`),
+      })
       toast('交付候选已生成，等待人工复验')
       await refreshDelivery()
       setActiveTab('records')

@@ -117,6 +117,13 @@ class CommandBus:
     def _run_pipeline(self, name, raw_args, *, session_id, outcome_resolver) -> CommandResult:
         spec = self.registry.get_command(name)
         args = self._inject_approval(self._parse_input(spec, raw_args))
+        if spec.idempotency == IdempotencyPolicy.REQUIRED and not args.idempotency_key:
+            return CommandResult(
+                status=CommandStatus.REJECTED,
+                summary="该命令必须提供稳定的 idempotency_key",
+                command=name,
+                error_code="idempotency_key_required",
+            )
         payload = args.model_dump(mode="json")
         idem_key = self._resolve_idempotency_key(spec, args)
         if idem_key:
@@ -163,6 +170,13 @@ class CommandBus:
     async def _run_pipeline_async(self, name, raw_args, *, session_id, outcome_resolver) -> CommandResult:
         spec = self.registry.get_command(name)
         args = self._inject_approval(self._parse_input(spec, raw_args))
+        if spec.idempotency == IdempotencyPolicy.REQUIRED and not args.idempotency_key:
+            return CommandResult(
+                status=CommandStatus.REJECTED,
+                summary="该命令必须提供稳定的 idempotency_key",
+                command=name,
+                error_code="idempotency_key_required",
+            )
         payload = args.model_dump(mode="json")
         idem_key = self._resolve_idempotency_key(spec, args)
         if idem_key:
@@ -338,7 +352,7 @@ class CommandBus:
         """仅在显式提供 key 时启用幂等。
 
         禁止按参数自动派生永久键：否则 resume/重跑会误命中陈旧成功结果。
-        REQUIRED 但未传 key 时仍允许执行（UI 单击），只是不缓存。
+        REQUIRED 的缺 key 请求已在执行管线入口 fail closed。
         """
         if not args.idempotency_key:
             return None

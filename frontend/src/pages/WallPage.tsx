@@ -257,6 +257,7 @@ export function episodeCompletionRequest(
   estimatedCostCny = 0,
   requiredCompletionCapCny = 0,
   criticalPathLatencyMs = 0,
+  idempotencyKey?: string,
 ) {
   return {
     mode: 'fresh',
@@ -268,6 +269,7 @@ export function episodeCompletionRequest(
     allow_fallback_adopt: true,
     allow_storyboard_edit: false,
     qualification_version: qualificationVersion,
+    idempotency_key: idempotencyKey,
   }
 }
 
@@ -785,9 +787,6 @@ export default function WallPage() {
   }, [navigateIn])
 
   const startEpisodeGeneration = async () => {
-    // #region debug-point A-E:episode-generation-submit
-    void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'A', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration', msg: '[DEBUG] Episode generation confirmation entered', data: { episodeId: ep?.id, eligible: context?.upstream.eligible_for_production, activeVideoRunId: ep?.active_video_run_id, supervisorPhase: ep?.video_supervisor?.phase, supervisorTaskRunning, generatingCount, generationAction }, ts: Date.now() }) }).catch(() => {})
-    // #endregion
     if (!context?.upstream.eligible_for_production) { showToast(context?.upstream.blockers.join('；') || '分镜尚未确认', undefined, true); return }
     setGenerationSubmitting(true)
     setGenerationOperation('generate')
@@ -799,14 +798,12 @@ export default function WallPage() {
           quickGenerationEstimate,
           ep?.video_budget?.required_completion_cap_cny,
           videoPlan?.critical_path_latency_ms,
+          newId(`video-complete:${ep!.id}`),
         ),
       ) as {
         run_id?: string
         message?: string
       }
-      // #region debug-point B-E:episode-generation-response
-      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration.response', msg: '[DEBUG] Episode generation API returned', data: { episodeId: ep?.id, response }, ts: Date.now() }) }).catch(() => {})
-      // #endregion
       showToast(
         response.message
           || `全片补齐任务已启动${response.run_id ? ` · ${response.run_id}` : ''}；可在下方查看实时状态`,
@@ -814,9 +811,6 @@ export default function WallPage() {
       await loadVideoPlan()
       await refreshAll()
     } catch (reason) {
-      // #region debug-point B-E:episode-generation-error
-      void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'video-generation-noop', runId: 'post-fix', hypothesisId: 'B', location: 'frontend/src/pages/WallPage.tsx:startEpisodeGeneration.error', msg: '[DEBUG] Episode generation API failed', data: { episodeId: ep?.id, errorName: reason instanceof Error ? reason.name : typeof reason, errorMessage: reason instanceof Error ? reason.message : String(reason) }, ts: Date.now() }) }).catch(() => {})
-      // #endregion
       showToast(reason instanceof Error ? reason.message : String(reason), undefined, true)
     } finally {
       setGenerationSubmitting(false)

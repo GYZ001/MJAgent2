@@ -430,6 +430,12 @@ def _storyboard_checkpoint_matches_screenplay(cp, ep: dict) -> bool:
     current = str(ep.get("screenplay_artifact_id") or "")
     bound_bible = str(cp.input_versions.get("bible_artifact_id") or "")
     current_bible = str(ep.get("bible_artifact_id") or "")
+    if not current_bible and ep.get("project_id"):
+        project = get_conn().execute(
+            "SELECT bible_artifact_id FROM projects WHERE id=?",
+            (ep["project_id"],),
+        ).fetchone()
+        current_bible = str(project["bible_artifact_id"] or "") if project else ""
     return bool(
         bound
         and current

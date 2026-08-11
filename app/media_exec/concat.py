@@ -327,6 +327,12 @@ def concatenate_episode(episode_id: str) -> dict:
     ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         raise ValueError("剧集不存在")
+    from app.downstream_authority import verify_current_storyboard_release_authority
+
+    release_authority = verify_current_storyboard_release_authority(
+        episode_id,
+        conn=conn,
+    )
     if not shutil.which("ffmpeg"):
         raise ValueError(
             "服务端未找到视频合成组件 ffmpeg；请安装 ffmpeg 或修正服务启动 PATH 后重试，"
@@ -337,10 +343,6 @@ def concatenate_episode(episode_id: str) -> dict:
             "服务端未找到视频校验组件 ffprobe；无法在替换前校验成片，"
             "本次未生成成片"
         )
-
-    # 恢复/人工合成时，低分但可播放的真实模型候选可以强制择优；确定性图片
-    # 兜底已从候选池排除，绝不能借此获得 adopted_version_id。
-    from app.evidence.media import select_best_video_candidate
 
     missing_model_shot_nos: list[int] = []
     shot_rows = conn.execute(
@@ -360,9 +362,12 @@ def concatenate_episode(episode_id: str) -> dict:
             and adopted["video_path"] and Path(adopted["video_path"]).is_file()
         ):
             continue
-        selected = select_best_video_candidate(shot["id"], force_best=True)
-        if not selected:
-            missing_model_shot_nos.append(int(shot["shot_no"]))
+        missing_model_shot_nos.append(int(shot["shot_no"]))
+    if missing_model_shot_nos:
+        raise ValueError(
+            "当前分镜仍有镜头未采纳通过技术校验的真实视频，禁止生成部分成片："
+            + ", ".join(str(no) for no in missing_model_shot_nos)
+        )
     pieces = _adopted_video_paths(episode_id)
     if not pieces:
         raise ValueError(
@@ -421,6 +426,7 @@ def concatenate_episode(episode_id: str) -> dict:
         "fallback_shots_created": 0,
         "fallback_shots_reused": 0,
         "playback_rates": {str(no): rate for no, _path, rate in piece_specs},
+        "storyboard_release_authority": release_authority,
     }
 
     # final-edit 是质量增强层，不是交付门禁。任何字体/滤镜/转场失败都回退到
@@ -464,6 +470,11 @@ def concatenate_episode(episode_id: str) -> dict:
                     expected_duration_s=float(edit_report["total_duration_s"]),
                     decode_timeout_s=concat_timeout_s,
                 )
+                if verify_current_storyboard_release_authority(
+                    episode_id,
+                    conn=conn,
+                ) != release_authority:
+                    raise ValueError("合片期间分镜发布权威发生漂移，已拒绝覆盖成片")
                 atomic_copy(edited_video, final_path)
             final_path.with_suffix(".stale").unlink(missing_ok=True)
             report_path = _edit_report_path(final_path)
@@ -566,6 +577,11 @@ def concatenate_episode(episode_id: str) -> dict:
             expected_duration_s=measured_total_dur,
             decode_timeout_s=concat_timeout_s,
         )
+        if verify_current_storyboard_release_authority(
+            episode_id,
+            conn=conn,
+        ) != release_authority:
+            raise ValueError("合片期间分镜发布权威发生漂移，已拒绝覆盖成片")
         atomic_copy(silent_video, final_path)
         # 新成片已经原子替换成功，此时才清除“待更新”标记。合成失败时旧成片和
         # 标记都会保留，状态轮询不会把正在观看的成品入口移除。

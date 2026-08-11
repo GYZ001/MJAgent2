@@ -30,7 +30,14 @@ async def check(args: I.EpisodeScopedInput) -> CommandResult:
 async def create_package(args: I.EpisodeScopedInput) -> CommandResult:
     from app.orchestration import api as orch_api
 
-    outcome = await call_guarded(orch_api.create_delivery_package, args.episode_id, body={})
+    outcome = await call_guarded(
+        orch_api.create_delivery_package,
+        args.episode_id,
+        body={
+            "idempotency_key": args.idempotency_key,
+            "request_id": args.request_id,
+        },
+    )
     if isinstance(outcome, CommandResult):
         return outcome
     return succeeded(

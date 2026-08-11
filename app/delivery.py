@@ -13,7 +13,7 @@ from app import config
 from app.atomic_io import atomic_copy, atomic_write_text, atomic_zip_directory
 from app.db import get_conn, new_id, now, rows_to_dicts
 from app.evidence import repository
-from app.evidence.media import grade_shot_video, record_video_candidate, validate_video_file
+from app.evidence.media import grade_shot_video, validate_video_file
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
 from app.orchestration.engine import fingerprint
 
@@ -196,6 +196,24 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
     def check(key: str, passed: bool, message: str, evidence: Any = None) -> None:
         checks.append({"key": key, "passed": bool(passed), "message": message, "evidence": evidence})
 
+    storyboard_release_authority: dict[str, Any] | None = None
+    storyboard_release_error: str | None = None
+    try:
+        from app.downstream_authority import verify_current_storyboard_release_authority
+
+        storyboard_release_authority = verify_current_storyboard_release_authority(
+            episode_id,
+            conn=conn,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        storyboard_release_error = str(exc)
+    check(
+        "storyboard_release_authority",
+        storyboard_release_authority is not None,
+        "分镜已确认，并绑定当前已发布 revision、已消费凭证与 release qualification",
+        storyboard_release_authority or {"error": storyboard_release_error},
+    )
+
     source_chapters, source_chapter_evidence = _authorized_source_chapters(conn, ep)
     source_chapters_valid = bool(source_chapter_evidence["authorized_indices"]) and not any((
         source_chapter_evidence["parse_error"],
@@ -283,14 +301,9 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         if version and version["video_path"]:
             technical = json.loads(version["technical_validation_json"] or "{}")
             if not technical:
-                try:
-                    record_video_candidate(version["id"])
-                    version = conn.execute("SELECT * FROM shot_versions WHERE id=?", (version["id"],)).fetchone()
-                    technical = json.loads(version["technical_validation_json"] or "{}")
-                except (OSError, ValueError):
-                    technical = validate_video_file(
-                        version["video_path"], expected_duration_s=shot["duration_s"]
-                    )
+                technical = validate_video_file(
+                    version["video_path"], expected_duration_s=shot["duration_s"]
+                )
             qa = json.loads(version["qa_json"] or "{}")
             graded = grade_shot_video(
                 technical=technical,
@@ -373,6 +386,7 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
         "source_chapters": source_chapters,
         "videos": video_items,
         "final_edit_report": final_edit_report,
+        "storyboard_release_authority": storyboard_release_authority,
     }
 
 
@@ -405,6 +419,7 @@ def build_delivery_package(
             for item in gate_findings[:5]
         )
         raise ValueError(f"交付硬门禁未通过：{summary}")
+    release_authority = dict(readiness["storyboard_release_authority"] or {})
     if decision not in {None, "approve", "approve_with_risk"}:
         raise ValueError("decision 必须为 approve 或 approve_with_risk")
     if decision == "approve_with_risk" and not (accepted_risk or "").strip():
@@ -428,6 +443,8 @@ def build_delivery_package(
         if not package_path.is_relative_to(delivery_root):
             raise ValueError("交付包路径超出当前剧集目录，已拒绝读取")
         manifest = json.loads(existing["manifest_json"])
+        if manifest.get("storyboard_release_authority") != release_authority:
+            raise ValueError("交付包绑定的分镜发布权威已漂移，禁止重放旧包")
         quality_report = json.loads(existing["quality_report_json"])
         missing_files = []
         damaged_files = []
@@ -572,6 +589,7 @@ def build_delivery_package(
         "episode": {"id": episode_id, "number": ep["episode_no"], "title": ep["title"]},
         "created_at": operation_started_at,
         "source_artifacts": readiness["source_artifacts"],
+        "storyboard_release_authority": release_authority,
         "source_chapters": readiness["source_chapters"],
         "files": files,
         "reproducibility": {
@@ -642,6 +660,13 @@ def build_delivery_package(
     )
     _write_json(package_dir / "manifest.json", manifest)
     _assert_no_delivery_secrets(package_dir)
+    from app.downstream_authority import verify_current_storyboard_release_authority
+
+    if verify_current_storyboard_release_authority(
+        episode_id,
+        conn=conn,
+    ) != release_authority:
+        raise ValueError("交付构建期间分镜发布权威发生漂移，已拒绝发布交付包")
     # 先完成客户可下载的文件，再提交数据库指针；ZIP 失败不能留下“已批准但不可下载”的记录。
     archive_path = atomic_zip_directory(package_dir, archive_candidate)
 
@@ -669,6 +694,11 @@ def build_delivery_package(
             parent_artifact_ids=parent_ids,
             contract_version="delivery-1.0.0",
         ))
+    if verify_current_storyboard_release_authority(
+        episode_id,
+        conn=conn,
+    ) != release_authority:
+        raise ValueError("交付发布前分镜发布权威发生漂移，已拒绝写入交付指针")
     file_eval = Evaluation(
         evaluator_type="file",
         evaluator_name="delivery_manifest_validator",
@@ -730,10 +760,28 @@ def build_delivery_package(
             "\n".join(known_lines), operation_started_at, approved_at,
         ),
     )
-    conn.execute(
-        "UPDATE episodes SET delivery_artifact_id=?, delivery_status=? WHERE id=?",
-        (artifact["id"], status, episode_id),
+    cursor = conn.execute(
+        """UPDATE episodes
+              SET delivery_artifact_id=?, delivery_status=?
+            WHERE id=?
+              AND storyboard_artifact_id=?
+              AND published_storyboard_artifact_id=?
+              AND storyboard_production_revision_id=?
+              AND storyboard_completion_certificate_id=?
+              AND status IN ('confirmed','generating','done','mixed')""",
+        (
+            artifact["id"],
+            status,
+            episode_id,
+            release_authority["published_storyboard_artifact_id"],
+            release_authority["published_storyboard_artifact_id"],
+            release_authority["storyboard_production_revision_id"],
+            release_authority["storyboard_completion_certificate_id"],
+        ),
     )
+    if cursor.rowcount != 1:
+        conn.rollback()
+        raise ValueError("交付发布发生分镜权威 CAS 冲突，未更新交付指针")
     conn.commit()
     return {
         "package_id": package_id,

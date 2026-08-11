@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -1046,7 +1047,13 @@ async def create_delivery_package(episode_id: str, body: dict | None = Body(None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
     else:
-        payload["package_id"] = new_id("delivery")
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise HTTPException(422, "生成交付包必须提供稳定的 idempotency_key")
+        digest = hashlib.sha256(
+            f"{episode_id}\0{idempotency_key}".encode("utf-8")
+        ).hexdigest()[:24]
+        payload["package_id"] = f"delivery_{digest}"
     payload.setdefault("operation_started_at", now())
     if not get_conn().execute("SELECT 1 FROM episodes WHERE id=?", (episode_id,)).fetchone():
         raise HTTPException(404, "剧集不存在")
