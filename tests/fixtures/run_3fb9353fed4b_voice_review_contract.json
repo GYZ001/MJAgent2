@@ -1,0 +1,99 @@
+{
+  "run_id": "run_3fb9353fed4b",
+  "source_segments": [
+    {
+      "source_segment_id": "SRC0001",
+      "text": "第一章书生孟浩"
+    },
+    {
+      "source_segment_id": "SRC0002",
+      "text": "赵国是一个小国，如这南赡大地的其他小国一样，向往东土，向往大唐，向往长安，这是国主的倾慕，也是赵国文生的理想，一如都城内的唐楼，与皇宫齐高，似可以遥望千山万水外的东土长安。"
+    },
+    {
+      "source_segment_id": "SRC0003",
+      "text": "四月的季节，说不出冷，也自然没有难熬的热，轻微的风抚过大地，掠过了北漠羌笛，吹过了东土大唐，掀起一些尘土如雾，在黄昏的夕阳下，转了个弯儿，卷在南域边缘赵国的大青山，落在了此刻于这青山顶端，坐在那里的一个文生少年身上。"
+    },
+    {
+      "source_segment_id": "SRC0004",
+      "text": "少年有些瘦弱，手中拿着一个葫芦，穿着一身干净的蓝色文士长衫，看起来约莫十六七岁的样子，个字不高，皮肤有些黑，但清澈的双眼带着一抹聪颖，只是此刻皱起的眉头，使得聪颖内敛，神色中多了一抹茫然。"
+    },
+    {
+      "source_segment_id": "SRC0005",
+      "text": "“又落榜了……”少年叹了口气，他叫孟浩，是这大青山下云杰县一个普通书生，早年双亲突然失踪，留下家财本就不殷，这几年读书不菲，到了如今已贫贫如洗。"
+    }
+  ],
+  "nodes": [
+    {
+      "key": "S001-N001",
+      "source_segment_ids": ["SRC0001", "SRC0002"],
+      "summary": "旁白介绍故事背景，点明赵国文生向往东土大唐的时代背景，引出第一章主角孟浩",
+      "narrative_layer": "story",
+      "event_priority": "causal",
+      "render_policy": "standalone",
+      "temporal_domain_key": "T001",
+      "time_label": "四月黄昏",
+      "time_relation": "episode_start",
+      "location_key": "大青山上空",
+      "location_label": "大青山高空",
+      "participants": [],
+      "participant_evidence": [],
+      "action_logic": "旁白叙述赵国的地理位置与国民对东土大唐的向往，引出故事开篇",
+      "scene_boundary_before": true,
+      "scene_role": "setup",
+      "dramatic_load": 1,
+      "opening_image": "淡墨晕染的连绵大青山，天际橘粉过渡到黛青的黄昏天色",
+      "exit_state": "完成时代背景铺垫，即将切入主角视角"
+    },
+    {
+      "key": "S001-N002",
+      "source_segment_ids": ["SRC0003", "SRC0004", "SRC0005"],
+      "summary": "黄昏的风吹到大青山顶，落在落榜后坐在山顶的少年孟浩身上，介绍孟浩的基本情况与落榜的处境",
+      "narrative_layer": "story",
+      "event_priority": "causal",
+      "render_policy": "standalone",
+      "temporal_domain_key": "T001",
+      "time_label": "四月黄昏",
+      "time_relation": "continuous",
+      "location_key": "大青山顶",
+      "location_label": "大青山山顶",
+      "participants": ["孟浩"],
+      "participant_evidence": [
+        {
+          "identity_key": "孟浩",
+          "source_segment_ids": ["SRC0004", "SRC0005"],
+          "source_unit_keys": [],
+          "usage": "visible"
+        },
+        {
+          "identity_key": "孟浩",
+          "source_segment_ids": ["SRC0005"],
+          "source_unit_keys": ["SRC0005:unit:001"],
+          "usage": "voice"
+        }
+      ],
+      "action_logic": "镜头移动到山顶，孟浩坐在石上，回想起自己科举落榜、家贫的处境，低声叹气",
+      "scene_boundary_before": false,
+      "scene_role": "setup",
+      "dramatic_load": 2,
+      "opening_image": "瘦弱的黑衣少年孟浩坐在山顶石上，手中拿着葫芦，眉头紧锁满脸茫然",
+      "transition_cue": "镜头从高空往下落，聚焦到大青山顶的少年身影",
+      "exit_state": "点明孟浩落榜的现状，引出他对未来的迷茫"
+    }
+  ],
+  "unsupported_reviewer_issue": {
+    "code": "voice_identity_missing",
+    "node_keys": ["S001-N001"],
+    "source_segment_ids": ["SRC0001", "SRC0002"],
+    "message": "S001-N001包含旁白介绍的语音内容，但未配置usage=voice证据",
+    "required_resolution": "补充旁白identity与source_unit_keys",
+    "must_fix": true
+  },
+  "supported_dialogue_issue": {
+    "code": "voice_identity_missing",
+    "node_keys": ["S001-N002"],
+    "source_segment_ids": ["SRC0005"],
+    "message": "SRC0005:unit:001缺少唯一speaker",
+    "required_resolution": "为SRC0005:unit:001绑定唯一usage=voice identity",
+    "must_fix": true
+  }
+}
