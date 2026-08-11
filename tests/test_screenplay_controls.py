@@ -435,6 +435,10 @@ def test_production_state_exposes_resumable_scene_shard_checkpoint() -> None:
             blueprint_hash=str(authority["blueprint_hash"]),
             identity_registry_hash=str(authority["identity_hash"]),
         ),
+        parent_artifact_ids=[
+            authority["blueprint"]["id"],
+            authority["identity"]["id"],
+        ],
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
     save_checkpoint(revision.id, {
@@ -520,6 +524,10 @@ def test_production_state_reconciles_recovered_shard_artifact() -> None:
             blueprint_hash=str(authority["blueprint_hash"]),
             identity_registry_hash=str(authority["identity_hash"]),
         ),
+        parent_artifact_ids=[
+            authority["blueprint"]["id"],
+            authority["identity"]["id"],
+        ],
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
     assert repository.get_artifact(shard["id"]) is not None

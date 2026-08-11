@@ -1,6 +1,7 @@
 """Production Revision：以 revision 为粒度冻结一次 Baseline 生成配额。"""
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
@@ -227,6 +228,27 @@ def _artifact_hash_is_valid(row: dict[str, Any], content: dict[str, Any]) -> boo
     return bool(recorded and recorded == evidence_repository.content_hash(content))
 
 
+def _structured_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _artifact_parent_ids(row: dict[str, Any]) -> set[str] | None:
+    try:
+        values = json.loads(row.get("parent_artifact_ids_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(values, list):
+        return None
+    return {str(value) for value in values if str(value)}
+
+
 def _screenplay_checkpoint_compatibility(
     episode_id: str,
     revision: ProductionRevision,
@@ -336,6 +358,7 @@ def _screenplay_checkpoint_compatibility(
             and identity_hash
             and identity_content.get("identity_registry_hash") == identity_hash
             and isinstance(identity_content.get("identities"), list)
+            and _structured_hash(identity_content["identities"]) == identity_hash
         ):
             reusable["identity_artifact_id"] = identity_id
             reusable["identity_registry_hash"] = identity_hash
@@ -351,11 +374,14 @@ def _screenplay_checkpoint_compatibility(
         contract_version=SCREENPLAY_ENVELOPE_VERSION,
     )
     if authority_compatible and envelope_pair:
+        envelope_parents = _artifact_parent_ids(envelope_pair[0])
         try:
             envelope = ScreenplayEnvelopeIR.model_validate(envelope_pair[1])
             envelope_valid = (
                 envelope.blueprint_hash == blueprint_hash
                 and envelope.identity_registry_hash == identity_hash
+                and envelope_parents is not None
+                and {blueprint_id, identity_id} <= envelope_parents
             )
         except (TypeError, ValueError):
             envelope_valid = False
@@ -375,6 +401,7 @@ def _screenplay_checkpoint_compatibility(
         for row in candidates:
             compatible = False
             content = _artifact_json(row)
+            parent_ids = _artifact_parent_ids(row)
             if authority_compatible and content is not None:
                 compatible, _reason = screenplay_scene_shard_artifact_compatibility(
                     row,
@@ -387,6 +414,8 @@ def _screenplay_checkpoint_compatibility(
                 compatible = bool(
                     compatible
                     and _artifact_hash_is_valid(row, content)
+                    and parent_ids is not None
+                    and {blueprint_id, identity_id} <= parent_ids
                     and (
                         artifact_id == str(row.get("id") or "")
                         or (

@@ -30,6 +30,7 @@ from app.production.patch import (
 from app.production.policy import assert_baseline_allowed
 from app.production.publish import can_issue_certificate, publish_screenplay
 from app.production.revision import (
+    bind_unpublished_revision_metadata,
     ensure_production_revision,
     get_production_revision,
     mark_baseline_generated,
@@ -2966,6 +2967,17 @@ async def run_screenplay_production(
         qa_profile_version="screenplay-qa-gate-2",
         resume=resume,
     )
+    if (
+        not rev.input_fingerprint
+        or not rev.contract_version
+        or not rev.qa_profile_version
+    ):
+        rev = bind_unpublished_revision_metadata(
+            rev.id,
+            input_fingerprint=input_fp,
+            contract_version=contract.version,
+            qa_profile_version="screenplay-qa-gate-2",
+        )
     # 签发 Production Grant
     if not rev.grant_id:
         grant, _token = issue_production_grant(
