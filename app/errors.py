@@ -66,6 +66,19 @@ class ArtifactNeedsRebuildError(ValueError):
             f"需要重建：{reason}"
         )
 
+    def http_detail(
+        self,
+        *,
+        recommended_action: str = "refresh",
+    ) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "artifact_id": self.artifact_id,
+            "artifact_type": self.artifact_type,
+            "recommended_action": recommended_action,
+        }
+
 
 @dataclass
 class ErrorRecord:

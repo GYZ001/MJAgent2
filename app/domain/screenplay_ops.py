@@ -219,9 +219,9 @@ def _screenplay_rebuild_state(snapshot: dict, exc) -> dict:
     """Project a typed stale error without discarding runtime resume state."""
     return {
         **snapshot,
-        "code": exc.code,
-        "message": str(exc),
-        "artifact_id": exc.artifact_id,
+        **exc.http_detail(
+            recommended_action=snapshot["recommended_action"],
+        ),
     }
 
 

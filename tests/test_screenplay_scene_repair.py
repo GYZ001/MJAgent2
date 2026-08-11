@@ -23,11 +23,26 @@ from app.production.structured_issues import (
     structured_issue,
 )
 from app.schemas import (
+    ActionAgency,
+    AtomicAction,
     Bible,
     EpisodeScreenplay,
+    IdentityContractEvidence,
     NarrativeContinuityPlan,
+    NarrativeEvent,
+    NarrativeIdentityContract,
+    NarrativeProposition,
     ScriptScene,
+    SourceCoverageDecision,
+    SourceEvidence,
+    SourceSpan,
+    TextProvenance,
     World,
+)
+from app.screenplay_ir import IR_VERSION
+from app.screenplay_scene_shards import (
+    SCREENPLAY_MERGED_IR_VERSION,
+    SCREENPLAY_SCENE_SHARD_VERSION,
 )
 
 
@@ -76,6 +91,206 @@ def _script(story_function: str = "升级") -> EpisodeScreenplay:
         ending_hook="无集级钩子",
         source_basis="原文第一章测验广场段落",
     )
+
+
+def _create_working_artifact(
+    evidence_repository,
+    screenplay_repair,
+    script: EpisodeScreenplay,
+) -> dict:
+    script.source_coverage = [
+        SourceCoverageDecision(
+            source_segment_id="SRC0001",
+            disposition="deliver",
+            projection_policy="picture",
+            beat_ids=["SC01"],
+        ),
+    ]
+    script.narrative_plan = NarrativeContinuityPlan(
+        scope_id="ep_scene",
+        source_evidence=[
+            SourceEvidence(
+                source_evidence_id="SE001",
+                source_span=SourceSpan(chapter_id="1", start=0, end=2),
+                verbatim_excerpt="原文",
+            ),
+        ],
+        propositions=[
+            NarrativeProposition(
+                proposition_id="P001",
+                semantic_identity_key="public-test-result",
+                canonical_statement="测验员公开萧炎的三段结果。",
+                narrative_domain="source_canon",
+                entity_ids=["identity-examiner", "identity-xiao-yan"],
+                direct_source_evidence_ids=["SE001"],
+            ),
+        ],
+        events=[
+            NarrativeEvent(
+                event_id="EV001",
+                proposition_ids=["P001"],
+                action_ids=["ACT001"],
+                onscreen_entity_ids=["identity-examiner", "identity-xiao-yan"],
+                effects_add=["萧炎的三段结果被公开"],
+                narrative_layer="story",
+                event_priority="causal",
+                render_policy="standalone",
+                delivery_scope_id="ep_scene",
+            ),
+        ],
+        atomic_actions=[
+            AtomicAction(
+                action_id="ACT001",
+                actor_ids=["identity-examiner"],
+                target_ids=["identity-xiao-yan"],
+                action_agency=ActionAgency(
+                    kind="character_dialogue",
+                    identity_bearing=True,
+                    source_segment_ids=["SRC0001"],
+                ),
+                text_provenance=TextProvenance(
+                    kind="dialogue",
+                    identity_keys=["identity-examiner", "identity-xiao-yan"],
+                    source_segment_ids=["SRC0001"],
+                ),
+                dialogue_text="斗之力，三段！",
+                participant_deliveries=[],
+                semantic_intent="公开测验结果并改变萧炎的处境。",
+                effects_add=["萧炎的三段结果被公开"],
+                completion_condition="围观者听见结果且萧炎退回队尾。",
+            ),
+        ],
+        identity_contracts=[
+            NarrativeIdentityContract(
+                identity_id="identity-xiao-yan",
+                display_name="萧炎",
+                kind="persistent dramatic person",
+                visual_policy="canonical",
+                visual_canonical="黑发少年，深色练功服，神情克制",
+                asset_requirement="required",
+                evidence=IdentityContractEvidence(
+                    source_evidence_ids=["SE001"],
+                    proposition_ids=["P001"],
+                    rationale="萧炎是本场持续可见并承受结果的主体。",
+                ),
+            ),
+            NarrativeIdentityContract(
+                identity_id="identity-examiner",
+                display_name="测验员",
+                kind="scene-bound embodied speaker",
+                visual_policy="contextual",
+                visual_canonical="站在测验石旁宣读结果的成年测验员",
+                asset_requirement="optional",
+                voice_ids=["测验员"],
+                evidence=IdentityContractEvidence(
+                    source_evidence_ids=["SE001"],
+                    proposition_ids=["P001"],
+                    rationale="测验员在来源中承担可听见的结果宣告。",
+                ),
+            ),
+        ],
+    )
+
+    parent_specs = [
+        (
+            "screenplay_narrative_blueprint",
+            "screenplay-narrative-blueprint.v4",
+            {"scope_id": "ep_scene", "event_ids": ["EV001"]},
+        ),
+        (
+            "screenplay_identity_registry",
+            "screenplay-identity-registry.v1",
+            {
+                "identity_ids": [
+                    "identity-xiao-yan",
+                    "identity-examiner",
+                ],
+            },
+        ),
+        (
+            "screenplay_envelope",
+            "screenplay-envelope.v1",
+            {"scope_id": "ep_scene", "source_segment_ids": ["SRC0001"]},
+        ),
+        (
+            "screenplay_scene_shard",
+            SCREENPLAY_SCENE_SHARD_VERSION,
+            {
+                "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+                "shard_id": "SS001",
+                "scene_plan_keys": ["SC01"],
+                "scenes": [],
+                "consumed_source_ids": ["SRC0001"],
+                "unresolved_participants": [],
+            },
+        ),
+    ]
+    parents = [
+        evidence_repository.create_artifact(EvidenceArtifact(
+            type=artifact_type,
+            scope_type="episode",
+            scope_id="ep_scene",
+            status="validated",
+            trust_level="T1",
+            content=content,
+            contract_version=contract_version,
+        ))
+        for artifact_type, contract_version, content in parent_specs
+    ]
+    merged = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir_merged",
+        scope_type="episode",
+        scope_id="ep_scene",
+        status="validated",
+        trust_level="T1",
+        content={
+            "format_version": IR_VERSION,
+            "source_scene_owners": {"SRC0001": "SC01"},
+            "source_semantics": {
+                "SRC0001": {
+                    "narrative_layer": "story",
+                    "event_priority": "causal",
+                    "render_policy": "standalone",
+                    "disposition": "deliver",
+                    "projection_policy": "picture",
+                },
+            },
+            "scenes": [{
+                "key": "SC01",
+                "units": [{
+                    "key": "UNIT001",
+                    "source_segment_ids": ["SRC0001"],
+                    "narrative_layer": "story",
+                    "event_priority": "causal",
+                    "render_policy": "standalone",
+                }],
+            }],
+            "events": [{
+                "key": "EV001",
+                "source_segment_ids": ["SRC0001"],
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+            }],
+            "coverage": [{
+                "source_segment_ids": ["SRC0001"],
+                "disposition": "deliver",
+                "projection_policy": "picture",
+            }],
+        },
+        parent_artifact_ids=[parent["id"] for parent in parents],
+        contract_version=SCREENPLAY_MERGED_IR_VERSION,
+    ))
+    return evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="ep_scene",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_repair.screenplay_artifact_payload(script),
+        parent_artifact_ids=[merged["id"]],
+        contract_version="4.0.0",
+    ))
 
 
 def test_scene_validator_message_is_structured_as_scene_field_issue():
@@ -215,15 +430,11 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
         resume=False,
     )
     script = _script()
-    script.narrative_plan = NarrativeContinuityPlan(scope_id="ep_scene")
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_scene",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_working_artifact(
+        evidence_repository,
+        screenplay_repair,
+        script,
+    )
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -284,10 +495,6 @@ async def test_old_exhausted_checkpoint_resumes_without_second_baseline(monkeypa
         lambda *_args, **_kwargs: "authority-test",
     )
     monkeypatch.setattr(screenplay_repair, "run_screenplay_qa", fake_qa)
-    monkeypatch.setattr(
-        "app.portraits.screenplay_unknown_identity_errors",
-        lambda *_args, **_kwargs: [],
-    )
     monkeypatch.setattr("app.stages.generate_screenplay_baseline", forbidden_baseline)
     monkeypatch.setattr(screenplay_repair, "_llm_field_patch", semantic_scene_repair)
     monkeypatch.setattr(
@@ -338,15 +545,11 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
         resume=False,
     )
     script = _script(story_function="建立公开测验冲突并推动萧炎退场")
-    script.narrative_plan = NarrativeContinuityPlan(scope_id="ep_scene")
-    artifact = evidence_repository.create_artifact(EvidenceArtifact(
-        type="screenplay_document",
-        scope_type="episode",
-        scope_id="ep_scene",
-        status="candidate",
-        trust_level="T1",
-        content=screenplay_repair.screenplay_artifact_payload(script),
-    ))
+    artifact = _create_working_artifact(
+        evidence_repository,
+        screenplay_repair,
+        script,
+    )
     mark_baseline_generated(
         revision.id,
         baseline_artifact_id=artifact["id"],
@@ -375,10 +578,6 @@ async def test_business_qa_issue_blocks_when_no_repair_strategy_exists(monkeypat
         screenplay_repair,
         "run_screenplay_qa",
         lambda *_args, **_kwargs: ([issue], evaluation),
-    )
-    monkeypatch.setattr(
-        "app.portraits.screenplay_unknown_identity_errors",
-        lambda *_args, **_kwargs: [],
     )
     async def no_semantic_candidate(*_args, **_kwargs):
         return []

@@ -14,6 +14,7 @@ from typing import Any, TypeVar
 
 from fastapi import HTTPException
 
+from app.errors import ArtifactNeedsRebuildError
 from app.capabilities.schemas import CommandResult, CommandStatus, UiIntent
 
 T = TypeVar("T")
@@ -85,6 +86,12 @@ async def call_guarded(
         return outcome
     except HTTPException as exc:
         return from_http_exception(exc)
+    except ArtifactNeedsRebuildError as exc:
+        return failed(
+            str(exc),
+            error_code="http_409",
+            data=exc.http_detail(),
+        )
     except ValueError as exc:
         return failed(str(exc), error_code="invalid_state")
     except KeyError as exc:

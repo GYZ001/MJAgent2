@@ -159,7 +159,30 @@ def test_edit_screenplay_does_not_500_on_row_get(client: TestClient) -> None:
     )
     assert resp.status_code != 500, resp.text
     assert resp.status_code == 409, resp.text
-    assert resp.json()["detail"]["code"] == "ARTIFACT_NEEDS_REBUILD"
+    detail = resp.json()["detail"]
+    assert detail["code"] == "ARTIFACT_NEEDS_REBUILD"
+    assert detail["message"]
+    assert detail["artifact_id"].startswith("art_")
+    assert detail["artifact_type"] == "screenplay_document"
+    assert detail["recommended_action"] == "refresh"
+
+
+def test_edit_screenplay_unknown_load_error_fails_closed(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    _seed_episode(with_artifact=True)
+    monkeypatch.setattr(
+        api,
+        "_load_screenplay",
+        lambda _episode: (_ for _ in ()).throw(RuntimeError("unknown load failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="unknown load failure"):
+        client.put(
+            "/api/episodes/e1/screenplay",
+            json={"screenplay": _valid_script().model_dump(mode="json")},
+        )
 
 
 def test_edit_screenplay_version_conflict_uses_dict_get(client: TestClient) -> None:
