@@ -161,20 +161,37 @@ def identity_authority_registry(
     groups_by_authority: dict[str, set[str]] = {}
     authorities_by_group: dict[str, set[str]] = {}
 
-    def register_group(
-        authority_id: str,
+    def scoped_group_key(
         identity_group: str,
         identity_scope_fingerprint: str = "",
-    ) -> None:
-        if not identity_group:
-            return
-        scoped_group = (
+    ) -> str:
+        return (
             f"{identity_scope_fingerprint}:{identity_group}"
             if identity_scope_fingerprint
             else identity_group
         )
-        groups_by_authority.setdefault(authority_id, set()).add(scoped_group)
-        authorities_by_group.setdefault(scoped_group, set()).add(authority_id)
+
+    def register_group(
+        authority_id: str,
+        identity_group: str,
+        identity_scope_fingerprint: str = "",
+        *,
+        semantic_group: str | None = None,
+    ) -> None:
+        if not identity_group:
+            return
+        raw_scoped_group = scoped_group_key(
+            identity_group, identity_scope_fingerprint
+        )
+        # Forward uniqueness always uses the raw model decision group.  It must
+        # catch a future identity and a functional identity that both claim the
+        # same scoped F1 but resolve to different authorities.
+        authorities_by_group.setdefault(raw_scoped_group, set()).add(authority_id)
+        # Reverse uniqueness uses the semantic canonical group.  Confirmed
+        # aliases from multiple raw groups may all join one Bible identity.
+        groups_by_authority.setdefault(authority_id, set()).add(
+            semantic_group or raw_scoped_group
+        )
 
     for character in getattr(bible, "characters", None) or []:
         name = str(getattr(character, "name", "") or "").strip()
@@ -198,6 +215,8 @@ def identity_authority_registry(
         identity_scope_fingerprint = str(
             item.get("identity_scope_fingerprint") or ""
         ).strip()
+        raw_identity_group = identity_group
+        semantic_group = None
         if (
             str(item.get("resolution") or "") == "future_identity"
             and authority_id.startswith("bible:")
@@ -206,12 +225,12 @@ def identity_authority_registry(
             # Its canonical group is the same Bible authority already registered
             # above, so the former F1 token cannot make one named identity appear
             # to span two semantic groups.
-            identity_group = authority_id
-            identity_scope_fingerprint = ""
+            semantic_group = authority_id
         register_group(
             authority_id,
-            identity_group,
+            raw_identity_group,
             identity_scope_fingerprint,
+            semantic_group=semantic_group,
         )
         entry = entries.setdefault(authority_id, {
             "authority_id": authority_id,
@@ -222,7 +241,8 @@ def identity_authority_registry(
                 else "functional"
             ),
             "source_labels": [],
-            "identity_group": identity_group,
+            "identity_group": semantic_group or raw_identity_group,
+            "decision_identity_group": raw_identity_group,
             "identity_scope_fingerprint": identity_scope_fingerprint,
             "source_instance_key": (
                 item.get("source_instance_key")

@@ -1037,6 +1037,7 @@ async def _screenplay_character_discovery(
     from app.portraits import (
         ensure_cards_for_text,
         persist_screenplay_character_resolutions,
+        screenplay_identity_scope_fingerprint,
     )
 
     try:
@@ -1075,6 +1076,9 @@ async def _screenplay_character_discovery(
         result.get("resolutions") or [],
         retire_legacy_future_identity=True,
         expected_active_run_id=expected_run_id,
+        replace_identity_scope=screenplay_identity_scope_fingerprint(
+            int(ep["episode_no"]), source_text
+        ),
     )
     for warning in result.get("warnings") or []:
         errors.log_error(

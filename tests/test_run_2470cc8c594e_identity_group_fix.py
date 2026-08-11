@@ -194,6 +194,65 @@ def test_same_group_token_from_distinct_discovery_epochs_does_not_merge() -> Non
     ) == portraits.merge_screenplay_character_resolutions([], scope_b)
 
 
+@pytest.mark.parametrize(
+    ("old_resolution", "new_resolution", "new_name"),
+    [
+        ("future_identity", "future_identity", "李四"),
+        ("future_identity", "functional_identity", "新章节门卫"),
+    ],
+)
+def test_fresh_discovery_replaces_old_epoch_and_absent_groups(
+    old_resolution: str,
+    new_resolution: str,
+    new_name: str,
+) -> None:
+    old = [
+        {
+            "source_label": "同一称谓",
+            "canonical_name": "张三",
+            "resolution": old_resolution,
+            "identity_group": "current-1:F1",
+            "identity_scope_fingerprint": "source-a",
+            "decision_provenance": (
+                portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+            ),
+        },
+        {
+            "source_label": "旧集门卫",
+            "canonical_name": "旧集门卫",
+            "resolution": "functional_identity",
+            "identity_group": "current-1:F3",
+            "identity_scope_fingerprint": "source-a",
+            "decision_provenance": (
+                portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+            ),
+        },
+    ]
+    conn = _resolution_conn(old)
+    incoming = [{
+        "source_label": "同一称谓",
+        "canonical_name": new_name,
+        "resolution": new_resolution,
+        "identity_group": "current-1:F1",
+        "identity_scope_fingerprint": "source-b",
+        "decision_provenance": (
+            portraits.AUTOMATIC_IDENTITY_DECISION_PROVENANCE
+        ),
+    }]
+
+    replaced = portraits.persist_screenplay_character_resolutions(
+        conn,
+        "ep_711b29204aa9",
+        incoming,
+        replace_identity_scope="source-b",
+    )
+
+    assert len(replaced) == 1
+    assert replaced[0]["canonical_name"] == new_name
+    assert replaced[0]["identity_scope_fingerprint"] == "source-b"
+    assert all(item["identity_group"] != "current-1:F3" for item in replaced)
+
+
 def test_functional_group_upgrade_joins_existing_bible_authority() -> None:
     scope = "source-sha-episode-1"
     functional = _fresh_source_anchors(scope)[:1]
@@ -222,12 +281,130 @@ def test_functional_group_upgrade_joins_existing_bible_authority() -> None:
     assert "虎头虎脑的少年" in rich["source_labels"]
 
 
+def test_future_and_functional_claims_in_same_raw_group_still_conflict() -> None:
+    scope = "source-sha-episode-1"
+    claims = [
+        {
+            "source_label": "虎头虎脑的少年",
+            "canonical_name": "李富贵",
+            "resolution": "future_identity",
+            "identity_group": "current-1:F1",
+            "identity_scope_fingerprint": scope,
+        },
+        {
+            "source_label": "少年",
+            "canonical_name": "未知少年",
+            "resolution": "functional_identity",
+            "identity_group": "current-1:F1",
+            "identity_scope_fingerprint": scope,
+        },
+    ]
+
+    with pytest.raises(IdentityAuthorityConflictError):
+        identity_authority_registry(_empty_bible(), claims)
+
+
+def test_multiple_future_aliases_same_raw_group_join_one_bible_identity() -> None:
+    scope = "source-sha-episode-1"
+    claims = [
+        {
+            "source_label": label,
+            "canonical_name": "李富贵",
+            "resolution": "future_identity",
+            "identity_group": "current-1:F1",
+            "identity_scope_fingerprint": scope,
+        }
+        for label in ("虎头虎脑的少年", "小胖子")
+    ]
+
+    registry = identity_authority_registry(_empty_bible(), claims)
+    assert len(registry) == 1
+    assert set(registry[0]["source_labels"]) == {"虎头虎脑的少年", "小胖子"}
+
+
 def test_resolution_persist_rejects_stale_owner_without_clobbering_new_run() -> None:
     conn = _resolution_conn([])
     conn.execute(
         "UPDATE episodes SET active_screenplay_run_id='run-new', "
         "screenplay_character_resolutions='[{\"source_label\":\"B\","
         "\"canonical_name\":\"B\"}]' WHERE id='ep_711b29204aa9'"
+    )
+    conn.commit()
+
+    with pytest.raises(StateConflict, match="screenplay_resolution_owner"):
+        portraits.persist_screenplay_character_resolutions(
+            conn,
+            "ep_711b29204aa9",
+            _fresh_source_anchors(),
+            expected_active_run_id="run-old",
+        )
+
+    durable = conn.execute(
+        "SELECT active_screenplay_run_id, screenplay_character_resolutions "
+        "FROM episodes WHERE id='ep_711b29204aa9'"
+    ).fetchone()
+    assert durable["active_screenplay_run_id"] == "run-new"
+    assert json.loads(durable["screenplay_character_resolutions"])[0][
+        "canonical_name"
+    ] == "B"
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions='[]' "
+        "WHERE id='ep_711b29204aa9'"
+    )
+    conn.commit()
+
+
+def test_resolution_persist_old_value_cas_rolls_back_and_releases_connection() -> None:
+    conn = _resolution_conn([])
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id='run-current' "
+        "WHERE id='ep_711b29204aa9'"
+    )
+    conn.commit()
+
+    class RacingConnection:
+        def __init__(self, inner: sqlite3.Connection):
+            self.inner = inner
+            self.raced = False
+
+        def execute(self, sql, parameters=()):
+            if (
+                not self.raced
+                and sql.startswith(
+                    "UPDATE episodes SET screenplay_character_resolutions=? WHERE"
+                )
+            ):
+                self.raced = True
+                self.inner.execute(
+                    "UPDATE episodes SET screenplay_character_resolutions=? "
+                    "WHERE id='ep_711b29204aa9'",
+                    (json.dumps([{
+                        "source_label": "B",
+                        "canonical_name": "B",
+                    }]),),
+                )
+                self.inner.commit()
+            return self.inner.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    racing = RacingConnection(conn)
+    with pytest.raises(StateConflict, match="screenplay_resolution_cas"):
+        portraits.persist_screenplay_character_resolutions(
+            racing,
+            "ep_711b29204aa9",
+            _fresh_source_anchors(),
+            expected_active_run_id="run-current",
+        )
+
+    assert json.loads(conn.execute(
+        "SELECT screenplay_character_resolutions FROM episodes "
+        "WHERE id='ep_711b29204aa9'"
+    ).fetchone()["screenplay_character_resolutions"])[0]["canonical_name"] == "B"
+    conn.execute(
+        "UPDATE episodes SET screenplay_character_resolutions='[]' "
+        "WHERE id='ep_711b29204aa9'"
     )
     conn.commit()
 
@@ -389,25 +566,3 @@ def test_stale_structural_cache_is_neither_reused_nor_used_as_base(
     assert "reused" not in result
     assert observed_base == valid_base
     assert stale_alias[0] not in observed_base
-
-    with pytest.raises(StateConflict, match="screenplay_resolution_owner"):
-        portraits.persist_screenplay_character_resolutions(
-            conn,
-            "ep_711b29204aa9",
-            _fresh_source_anchors(),
-            expected_active_run_id="run-old",
-        )
-
-    durable = conn.execute(
-        "SELECT active_screenplay_run_id, screenplay_character_resolutions "
-        "FROM episodes WHERE id='ep_711b29204aa9'"
-    ).fetchone()
-    assert durable["active_screenplay_run_id"] == "run-new"
-    assert json.loads(durable["screenplay_character_resolutions"])[0][
-        "canonical_name"
-    ] == "B"
-    conn.execute(
-        "UPDATE episodes SET screenplay_character_resolutions='[]' "
-        "WHERE id='ep_711b29204aa9'"
-    )
-    conn.commit()

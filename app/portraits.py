@@ -65,6 +65,19 @@ FUTURE_IDENTITY_DECISION_VERSION = "screenplay-future-identity.v6"
 STRUCTURAL_IDENTITY_COVERAGE_VERSION = (
     "screenplay-identity-structural-coverage.v3"
 )
+AUTOMATIC_IDENTITY_DECISION_PROVENANCE = "automatic_identity_discovery.v1"
+DURABLE_IDENTITY_DECISION_PROVENANCE = frozenset({"manual", "bible"})
+
+
+def screenplay_identity_scope_fingerprint(
+    episode_no: int,
+    source_text: str,
+) -> str:
+    return evidence_repository.content_hash({
+        "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
+        "episode_no": episode_no,
+        "source_text": source_text,
+    })
 
 
 # ---------- 原文片段抽取（纯本地，不调模型） ----------
@@ -1487,6 +1500,10 @@ def _identity_resolution(
         "identity_group": str(item.get("identity_group") or "").strip()[:96],
         "identity_scope_fingerprint": str(
             item.get("identity_scope_fingerprint") or ""
+        ).strip(),
+        "decision_provenance": str(
+            item.get("decision_provenance")
+            or AUTOMATIC_IDENTITY_DECISION_PROVENANCE
         ).strip(),
         "decision_contract_version": FUTURE_IDENTITY_DECISION_VERSION,
     })
@@ -2925,6 +2942,13 @@ def merge_screenplay_character_resolutions(
             if (
                 str(current_item.get("source_label") or "").strip()
                 == source_label
+                and str(current_item.get("identity_group") or "").strip()
+                == str(candidate.get("identity_group") or "").strip()
+                and str(
+                    current_item.get("identity_scope_fingerprint") or ""
+                ).strip() == str(
+                    candidate.get("identity_scope_fingerprint") or ""
+                ).strip()
                 and str(
                     current_item.get("source_instance_key") or ""
                 ).strip() == source_instance_key
@@ -2977,6 +3001,7 @@ def persist_screenplay_character_resolutions(
     retire_legacy_future_identity: bool = False,
     expected_active_run_id: str | None = None,
     expected_revision_id: str | None = None,
+    replace_identity_scope: str | None = None,
 ) -> list[dict]:
     columns = "screenplay_character_resolutions"
     if expected_active_run_id is not None:
@@ -2997,6 +3022,17 @@ def persist_screenplay_character_resolutions(
         if isinstance(old_payload, list)
         else []
     )
+    if replace_identity_scope is not None:
+        # This call is the complete owned-source discovery replacement
+        # boundary, not an incremental structural audit.  Retire every prior
+        # automatic decision (including same-hash rows omitted by the fresh
+        # result); only explicitly durable human/Bible provenance survives.
+        current = [
+            item
+            for item in current
+            if str(item.get("decision_provenance") or "").strip()
+            in DURABLE_IDENTITY_DECISION_PROVENANCE
+        ]
     if expected_active_run_id is not None:
         actual_owner = str(row["active_screenplay_run_id"] or "")
         if actual_owner != expected_active_run_id:
@@ -3118,11 +3154,9 @@ async def ensure_cards_for_text(
             scope_id=str(episode_row["id"]) if episode_row else None,
         )
     )
-    identity_scope_fingerprint = evidence_repository.content_hash({
-        "contract_version": IDENTITY_DISCOVERY_CONTRACT_VERSION,
-        "episode_no": episode_no,
-        "source_text": source_text,
-    })
+    identity_scope_fingerprint = screenplay_identity_scope_fingerprint(
+        episode_no, source_text
+    )
     candidates = [
         {
             **item,
