@@ -158,33 +158,8 @@ def test_edit_screenplay_does_not_500_on_row_get(client: TestClient) -> None:
         json={"screenplay": script.model_dump(mode="json")},
     )
     assert resp.status_code != 500, resp.text
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body.get("saved") is True or body.get("ok") is True
-    row = db.get_conn().execute(
-        "SELECT screenplay_artifact_id,screenplay_production_revision_id,"
-        "screenplay_completion_certificate_id,active_screenplay_run_id "
-        "FROM episodes WHERE id='e1'"
-    ).fetchone()
-    assert row["screenplay_artifact_id"]
-    assert row["screenplay_production_revision_id"]
-    assert row["screenplay_completion_certificate_id"]
-    assert row["active_screenplay_run_id"] is None
-    published = db.get_conn().execute(
-        "SELECT * FROM episodes WHERE id='e1'"
-    ).fetchone()
-    from app.domain.common import _screenplay_ready
-
-    assert _screenplay_ready(dict(published)) is True
-    consumed = db.get_conn().execute(
-        "SELECT consumed_at FROM completion_certificates WHERE id=?",
-        (row["screenplay_completion_certificate_id"],),
-    ).fetchone()
-    assert consumed["consumed_at"] is not None
-    artifact = db.get_conn().execute(
-        "SELECT type,status FROM artifacts WHERE id=?", (row["screenplay_artifact_id"],)
-    ).fetchone()
-    assert tuple(artifact) == ("screenplay_document", "approved")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["code"] == "ARTIFACT_NEEDS_REBUILD"
 
 
 def test_edit_screenplay_version_conflict_uses_dict_get(client: TestClient) -> None:

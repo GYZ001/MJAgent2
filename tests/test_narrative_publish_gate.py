@@ -40,6 +40,9 @@ from tests.test_narrative_continuity import _board, _screenplay
 from tests.test_narrative_review import _observation, _persist_review_projection
 
 
+HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT = "3.0.0"
+
+
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "narrative-publish.db")
@@ -327,7 +330,7 @@ async def _reviewed_publish_candidate(monkeypatch) -> dict:
         "episode-generic",
         outline,
     )
-    screenplay_contract = get_contract("screenplay").version
+    screenplay_contract = HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT
     conn = db.get_conn()
     conn.execute(
         "UPDATE artifacts SET contract_version=? WHERE id=?",
@@ -518,7 +521,7 @@ def _bind_screenplay_revision(
 
 
 def test_screenplay_certificate_requires_gate_from_the_exact_artifact() -> None:
-    screenplay_contract = get_contract("screenplay").version
+    screenplay_contract = HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT
     qa_profile = "screenplay-qa-gate-2"
     first = _screenplay()
     second = _screenplay()
@@ -587,7 +590,7 @@ def test_screenplay_certificate_requires_gate_from_the_exact_artifact() -> None:
 
 
 def test_narrative_certificate_requires_exact_runtime_gate_evaluation() -> None:
-    screenplay_contract = get_contract("screenplay").version
+    screenplay_contract = HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT
     qa_profile = "screenplay-qa-gate-2"
     artifact = _artifact(
         artifact_type="screenplay_document",
@@ -629,7 +632,7 @@ def test_narrative_certificate_requires_exact_runtime_gate_evaluation() -> None:
 
 
 def test_narrative_certificate_rejects_evaluator_contract_drift() -> None:
-    screenplay_contract = get_contract("screenplay").version
+    screenplay_contract = HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT
     qa_profile = "screenplay-qa-gate-2"
     artifact = _artifact(
         artifact_type="screenplay_document",

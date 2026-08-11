@@ -500,10 +500,13 @@ def _assert_screenplay_artifact_contract(
 ) -> None:
     from app.production.screenplay_authority import (
         screenplay_contract_requires_narrative,
+        screenplay_contract_tracks_bible_projection,
     )
 
-    requires_narrative = screenplay_contract_requires_narrative(
-        str(art.get("contract_version") or "")
+    artifact_contract = str(art.get("contract_version") or "")
+    requires_narrative = screenplay_contract_requires_narrative(artifact_contract)
+    requires_current_lineage = screenplay_contract_tracks_bible_projection(
+        artifact_contract
     )
     plan = _raw_narrative_plan(content)
     if plan is None:
@@ -544,7 +547,7 @@ def _assert_screenplay_artifact_contract(
         for field in ("disposition", "projection_policy")
         if field not in coverage
     )
-    if requires_narrative:
+    if requires_current_lineage:
         missing.extend(_current_ir_semantic_gaps(art))
     if missing:
         raise ArtifactNeedsRebuildError(
