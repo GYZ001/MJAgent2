@@ -2262,17 +2262,8 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             conn.execute("DELETE FROM command_idempotency WHERE status='running'")
         except sqlite3.OperationalError:
             pass
-    # 审批进程可能在不可变 T5 快照生成前后退出。已有更新批准包则旧草稿只保留审计状态；
-    # 否则恢复等待人工，允许安全重试。
-    conn.execute(
-        """UPDATE delivery_packages AS draft SET status='superseded'
-           WHERE draft.status='approving' AND EXISTS (
-             SELECT 1 FROM delivery_packages newer
-             WHERE newer.episode_id=draft.episode_id AND newer.status='approved'
-               AND newer.created_at>draft.created_at
-           )"""
-    )
-    conn.execute("UPDATE delivery_packages SET status='waiting_human' WHERE status='approving'")
+    # ``approving`` is a durable approval claim.  Recovery resumes the exact
+    # draft snapshot; startup must not reopen it for a concurrent user action.
     conn.commit()
 
 

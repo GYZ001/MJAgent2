@@ -250,13 +250,45 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     assert recovered_draft["artifact_id"] == draft["artifact_id"]
     assert repository.get_artifact(draft["artifact_id"])["content_hash"] == draft_hash
     assert len(repository.get_evaluations(draft["artifact_id"])) == 1
+
+    # Approval is a decision over the exact draft bytes and authority manifest.
+    # It must never rebuild current live inputs into a different T5 package.
+    tracked_path.write_bytes(b"tampered-after-review")
+    with pytest.raises(ValueError, match="篡改"):
+        delivery.approve_delivery(
+            "e",
+            package_id=draft["package_id"],
+            decided_by="reviewer",
+            decision="approve",
+            reason="复验通过",
+        )
+    tracked_path.write_bytes(video.read_bytes())
+
+    conn.execute("UPDATE shot_versions SET playback_rate=1.25 WHERE id='v'")
+    conn.commit()
+    with pytest.raises(ValueError, match="已采纳视频已漂移"):
+        delivery.approve_delivery(
+            "e",
+            package_id=draft["package_id"],
+            decided_by="reviewer",
+            decision="approve",
+            reason="复验通过",
+        )
+    assert not any(
+        item["evaluator_type"] == "human"
+        for item in repository.get_evaluations(draft["artifact_id"])
+    )
+    conn.execute("UPDATE shot_versions SET playback_rate=1 WHERE id='v'")
+    conn.commit()
+
     package = delivery.approve_delivery(
         "e", decided_by="reviewer", decision="approve", reason="复验通过",
     )
-    assert package["package_id"] != draft["package_id"]
-    assert package["artifact_id"] != draft["artifact_id"]
+    assert package["package_id"] == draft["package_id"]
+    assert package["artifact_id"] == draft["artifact_id"]
     assert Path(draft["package_path"], "manifest.json").read_bytes() == draft_manifest
-    assert repository.get_artifact(draft["artifact_id"])["status"] == "superseded"
+    assert repository.get_artifact(draft["artifact_id"])["status"] == "approved"
+    assert package["approved_snapshot_preserved"] is True
     assert package["trust_level"] == "T5" and Path(package["archive_path"]).is_file()
     report_text = Path(package["package_path"], "quality-report.json").read_text(encoding="utf-8")
     assert str(tmp_path) not in report_text
