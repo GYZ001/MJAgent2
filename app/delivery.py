@@ -1116,7 +1116,7 @@ def approve_delivery(
         ).fetchone()
         if not row:
             raise ValueError("指定的交付包不存在")
-        if row["status"] not in {"waiting_human", "approving", "approved"}:
+        if row["status"] not in {"waiting_human", "approving", "approved", "rejected", "superseded"}:
             raise ValueError(f"交付包当前状态为 {row['status']}，不可审核")
     else:
         row = conn.execute(
@@ -1138,23 +1138,104 @@ def approve_delivery(
         # into this id: the human decision is bound to the exact draft bytes.
         validate_package_id(approved_package_id)
     if decision == "reject":
-        claimed = conn.execute(
-            "UPDATE delivery_packages SET status='rejected' WHERE id=? AND status='waiting_human'",
-            (row["id"],),
+        rejection_fingerprint = fingerprint(
+            episode_id,
+            {
+                "source_package_id": row["id"],
+                "source_artifact_id": row["artifact_id"],
+                "decision": decision,
+                "decided_by": decided_by,
+                "reason": reason,
+            },
         )
-        if claimed.rowcount != 1:
-            conn.rollback()
-            raise ValueError("交付草稿已由另一审批任务处理")
-        conn.execute("UPDATE artifacts SET status='rejected' WHERE id=?", (row["artifact_id"],))
-        conn.execute("UPDATE episodes SET delivery_status='rejected' WHERE id=?", (episode_id,))
-        conn.execute(
-            """INSERT INTO gate_decisions(
-                   id, artifact_id, gate_key, decision, decided_by, reason, accepted_risk, created_at
-               ) VALUES(?,?,?,?,?,?,?,?)""",
-            (new_id("gate"), row["artifact_id"], "delivery", decision, decided_by, reason, accepted_risk, now()),
+        receipt_id = "delivery_approval_" + hashlib.sha256(
+            str(row["id"]).encode("utf-8")
+        ).hexdigest()[:24]
+        owner, recovered = claim_delivery_package_operation(
+            package_id=receipt_id,
+            episode_id=episode_id,
+            request_fingerprint=rejection_fingerprint,
+            allow_interrupted_takeover=allow_interrupted_takeover,
+            conn=conn,
         )
-        conn.commit()
-        return {"artifact_id": row["artifact_id"], "decision": decision, "trust_level": "T3", "package_id": row["id"]}
+        if recovered is not None:
+            return recovered
+        assert owner is not None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _assert_delivery_operation_owner(
+                conn,
+                package_id=receipt_id,
+                request_fingerprint=rejection_fingerprint,
+                lease_owner=owner,
+            )
+            current = conn.execute(
+                "SELECT * FROM delivery_packages WHERE id=? AND episode_id=?",
+                (row["id"], episode_id),
+            ).fetchone()
+            artifact = repository.get_artifact(str(row["artifact_id"]), conn=conn)
+            if (
+                current is None
+                or current["status"] != "waiting_human"
+                or artifact is None
+                or artifact["status"] != "validated"
+            ):
+                raise ValueError("交付草稿已不是当前可拒绝候选")
+            stamp = now()
+            conn.execute(
+                "UPDATE delivery_packages SET status='rejected' WHERE id=? AND status='waiting_human'",
+                (row["id"],),
+            )
+            conn.execute(
+                "UPDATE artifacts SET status='rejected' WHERE id=? AND status='validated'",
+                (row["artifact_id"],),
+            )
+            conn.execute(
+                """UPDATE episodes SET delivery_status='rejected'
+                     WHERE id=? AND delivery_artifact_id=? AND delivery_status='waiting_human'""",
+                (episode_id, row["artifact_id"]),
+            )
+            conn.execute(
+                """INSERT INTO gate_decisions(
+                       id,artifact_id,gate_key,decision,decided_by,reason,accepted_risk,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    new_id("gate"), row["artifact_id"], "delivery", decision,
+                    decided_by, reason, accepted_risk, stamp,
+                ),
+            )
+            result = {
+                "artifact_id": row["artifact_id"],
+                "decision": decision,
+                "trust_level": "T3",
+                "package_id": row["id"],
+            }
+            receipt = conn.execute(
+                """UPDATE delivery_operation_receipts
+                      SET status='succeeded',result_json=?,lease_expires_at=0,updated_at=?
+                    WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                      AND status='running'""",
+                (
+                    json.dumps(result, ensure_ascii=False, sort_keys=True), stamp,
+                    receipt_id, rejection_fingerprint, owner,
+                ),
+            )
+            if receipt.rowcount != 1:
+                raise ValueError("交付拒绝 receipt CAS 冲突")
+            conn.commit()
+            return result
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.execute(
+                """UPDATE delivery_operation_receipts
+                      SET status='failed',lease_expires_at=0,updated_at=?
+                    WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                      AND status='running'""",
+                (time.time(), receipt_id, rejection_fingerprint, owner),
+            )
+            conn.commit()
+            raise
 
     if row["status"] == "waiting_human":
         artifact = repository.get_artifact(str(row["artifact_id"]), conn=conn)
@@ -1170,8 +1251,11 @@ def approve_delivery(
             or ep["delivery_status"] != "waiting_human"
         ):
             raise ValueError("交付草稿已不是当前可审批候选")
-    # Reject tampered/stale inputs before creating the durable approval claim.
-    _delivery_approval_snapshot(conn, row, episode_id)
+    # A first approval rejects tampered/stale input before creating a durable
+    # claim.  Recovery/replay must consult its exact receipt first: a later
+    # supersession cannot erase the historical result of the same operation.
+    if row["status"] == "waiting_human":
+        _delivery_approval_snapshot(conn, row, episode_id)
     approval_fingerprint = fingerprint(
         episode_id,
         {
@@ -1194,8 +1278,15 @@ def approve_delivery(
         conn=conn,
     )
     if recovered is not None:
+        try:
+            _delivery_approval_snapshot(conn, row, episode_id)
+            recovered["authority_current"] = row["status"] == "approved"
+        except ValueError:
+            recovered["authority_current"] = False
         return recovered
     assert owner is not None
+
+    _delivery_approval_snapshot(conn, row, episode_id)
 
     # Validate before claiming any domain state, then repeat every check inside
     # the single publish transaction immediately before the T5 write.
@@ -1264,6 +1355,20 @@ def approve_delivery(
         )
         if updated_artifact.rowcount != 1:
             raise ValueError("交付草稿 Artifact 批准 CAS 冲突")
+        old_packages = conn.execute(
+            """SELECT id,artifact_id FROM delivery_packages
+               WHERE episode_id=? AND id!=? AND status='approved'""",
+            (episode_id, row["id"]),
+        ).fetchall()
+        conn.executemany(
+            "UPDATE delivery_packages SET status='superseded' WHERE id=?",
+            [(item["id"],) for item in old_packages],
+        )
+        conn.executemany(
+            """UPDATE artifacts SET status='superseded',superseded_by_artifact_id=?
+               WHERE id=? AND status='approved'""",
+            [(row["artifact_id"], item["artifact_id"]) for item in old_packages],
+        )
         conn.execute(
             """INSERT INTO gate_decisions(
                    id,artifact_id,gate_key,decision,decided_by,reason,accepted_risk,created_at
@@ -1313,6 +1418,14 @@ def approve_delivery(
     except Exception:
         if conn.in_transaction:
             conn.rollback()
+        conn.execute(
+            """UPDATE delivery_operation_receipts
+                  SET status='failed',lease_expires_at=0,updated_at=?
+                WHERE package_id=? AND request_fingerprint=? AND lease_owner=?
+                  AND status='running'""",
+            (time.time(), receipt_id, approval_fingerprint, owner),
+        )
+        conn.commit()
         raise
 
 

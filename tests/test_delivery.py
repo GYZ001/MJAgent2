@@ -42,6 +42,7 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     conn = _conn()
     monkeypatch.setattr(repository, "get_conn", lambda: conn)
     monkeypatch.setattr(delivery, "get_conn", lambda: conn)
+    monkeypatch.setattr(orchestration_api, "get_conn", lambda: conn)
     monkeypatch.setattr(delivery.config, "PROJECTS_DIR", tmp_path)
     monkeypatch.setattr(delivery, "validate_video_file", lambda path, expected_duration_s=5: {
         "passed": True,
@@ -290,6 +291,17 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
     assert repository.get_artifact(draft["artifact_id"])["status"] == "approved"
     assert package["approved_snapshot_preserved"] is True
     assert package["trust_level"] == "T5" and Path(package["archive_path"]).is_file()
+    archive_bytes = Path(package["archive_path"]).read_bytes()
+    Path(package["archive_path"]).write_bytes(b"tampered-approved-archive")
+    with pytest.raises(Exception, match="压缩包与已审核目录不一致"):
+        orchestration_api.download_delivery_archive(package["package_id"])
+    Path(package["archive_path"]).write_bytes(archive_bytes)
+    report_path = Path(package["package_path"], "quality-report.html")
+    report_bytes = report_path.read_bytes()
+    report_path.write_bytes(b"tampered-report")
+    with pytest.raises(Exception, match="与已审核 manifest 不一致"):
+        orchestration_api.download_delivery_report(package["package_id"])
+    report_path.write_bytes(report_bytes)
     report_text = Path(package["package_path"], "quality-report.json").read_text(encoding="utf-8")
     assert str(tmp_path) not in report_text
     shot_entry = next(item for item in package["manifest"]["files"] if item["role"] == "shot_video")
@@ -352,7 +364,7 @@ def test_delivery_hard_blockers_cannot_build_or_approve(
         )
 
 
-def test_delivery_reject_can_only_be_claimed_once(monkeypatch) -> None:
+def test_delivery_reject_replays_exact_receipt(monkeypatch) -> None:
     conn = _conn()
     monkeypatch.setattr(repository, "get_conn", lambda: conn)
     monkeypatch.setattr(delivery, "get_conn", lambda: conn)
@@ -385,14 +397,14 @@ def test_delivery_reject_can_only_be_claimed_once(monkeypatch) -> None:
         reason="证据不足",
     )
     assert first["decision"] == "reject"
-    with pytest.raises(ValueError, match="不可审核"):
-        delivery.approve_delivery(
-            "e",
-            package_id="delivery_draft",
-            decided_by="reviewer",
-            decision="reject",
-            reason="重复提交",
-        )
+    replay = delivery.approve_delivery(
+        "e",
+        package_id="delivery_draft",
+        decided_by="reviewer",
+        decision="reject",
+        reason="证据不足",
+    )
+    assert replay == first
     assert conn.execute(
         "SELECT COUNT(*) FROM gate_decisions WHERE artifact_id=?", (artifact["id"],)
     ).fetchone()[0] == 1

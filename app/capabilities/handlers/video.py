@@ -14,6 +14,7 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
     from app.capabilities.bus import canonical_command_request_fingerprint
     from app.video_command_operations import (
         VideoCommandOperationConflict,
+        VideoCommandOperationInProgress,
         claim_video_command_operation,
         finish_video_command_operation,
     )
@@ -23,7 +24,7 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
         command, args.model_dump(mode="json"),
     )
     try:
-        recovered = claim_video_command_operation(
+        operation_owner, recovered = claim_video_command_operation(
             command=command,
             idempotency_key=str(args.idempotency_key or ""),
             request_fingerprint=request_fingerprint,
@@ -32,6 +33,8 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
         )
     except VideoCommandOperationConflict as exc:
         return failed(str(exc), error_code="idempotency_request_mismatch")
+    except VideoCommandOperationInProgress as exc:
+        return succeeded(str(exc), data={"idempotency_in_progress": True})
     if recovered is not None:
         return succeeded(
             f"已提交 {len(recovered.get('enqueued') or [])} 个镜头的视频生成任务",
@@ -60,6 +63,8 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
             "authorized_video_cost_cny": approved_cost,
             "idempotency_key": args.idempotency_key,
             "request_id": args.request_id,
+            "operation_request_fingerprint": request_fingerprint,
+            "operation_claim_token": operation_owner,
         },
     )
     if isinstance(outcome, CommandResult):
@@ -68,6 +73,7 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
         command=command,
         idempotency_key=str(args.idempotency_key or ""),
         request_fingerprint=request_fingerprint,
+        claim_token=str(operation_owner or ""),
         result=outcome,
     )
     enqueued = outcome.get("enqueued") or []
@@ -140,6 +146,7 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     from app.capabilities.bus import canonical_command_request_fingerprint
     from app.video_command_operations import (
         VideoCommandOperationConflict,
+        VideoCommandOperationInProgress,
         claim_video_command_operation,
         finish_video_command_operation,
     )
@@ -149,7 +156,7 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         command, args.model_dump(mode="json"),
     )
     try:
-        recovered = claim_video_command_operation(
+        operation_owner, recovered = claim_video_command_operation(
             command=command,
             idempotency_key=str(args.idempotency_key or ""),
             request_fingerprint=request_fingerprint,
@@ -158,6 +165,8 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         )
     except VideoCommandOperationConflict as exc:
         return failed(str(exc), error_code="idempotency_request_mismatch")
+    except VideoCommandOperationInProgress as exc:
+        return succeeded(str(exc), data={"idempotency_in_progress": True})
     if recovered is not None:
         return succeeded(
             "已复用既有成片" if recovered.get("reused") else "视频生成任务已提交",
@@ -194,6 +203,8 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         "idempotency_key": args.idempotency_key,
         "request_id": args.request_id,
         "authorized_video_cost_cny": approved_cost,
+        "operation_request_fingerprint": request_fingerprint,
+        "operation_claim_token": operation_owner,
     }
     outcome = await call_guarded(api._generate_shot_core, args.shot_id, body)
     if isinstance(outcome, CommandResult):
@@ -202,6 +213,7 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
         command=command,
         idempotency_key=str(args.idempotency_key or ""),
         request_fingerprint=request_fingerprint,
+        claim_token=str(operation_owner or ""),
         result=outcome,
     )
     return succeeded(

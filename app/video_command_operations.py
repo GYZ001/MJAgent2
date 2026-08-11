@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import Any
 
 from app.db import get_conn
@@ -16,6 +17,13 @@ from app.db import get_conn
 
 class VideoCommandOperationConflict(ValueError):
     """The same operation key was presented for a different canonical request."""
+
+
+class VideoCommandOperationInProgress(ValueError):
+    """Another live owner still holds the paid-operation lease."""
+
+
+_LEASE_S = 10 * 60
 
 
 def _ensure_table(conn) -> None:
@@ -29,11 +37,26 @@ def _ensure_table(conn) -> None:
             scope_id TEXT NOT NULL,
             status TEXT NOT NULL,
             result_json TEXT NOT NULL DEFAULT '{}',
+            binding_json TEXT NOT NULL DEFAULT '{}',
+            claim_token TEXT NOT NULL DEFAULT '',
+            lease_expires_at REAL NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
         )
         """
     )
+    columns = {str(row[1]) for row in conn.execute(
+        "PRAGMA table_info(video_command_operation_receipts)"
+    )}
+    for name, ddl in (
+        ("binding_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("claim_token", "TEXT NOT NULL DEFAULT ''"),
+        ("lease_expires_at", "REAL NOT NULL DEFAULT 0"),
+    ):
+        if name not in columns:
+            conn.execute(
+                f"ALTER TABLE video_command_operation_receipts ADD COLUMN {name} {ddl}"
+            )
 
 
 def claim_video_command_operation(
@@ -43,7 +66,7 @@ def claim_video_command_operation(
     request_fingerprint: str,
     scope_type: str,
     scope_id: str,
-) -> dict[str, Any] | None:
+) -> tuple[str | None, dict[str, Any] | None]:
     """Claim or resume one operation; return its exact completed domain result."""
     normalized_key = str(idempotency_key or "").strip()
     if not normalized_key:
@@ -52,24 +75,28 @@ def claim_video_command_operation(
     conn = get_conn()
     _ensure_table(conn)
     stamp = time.time()
+    owner = uuid.uuid4().hex
     try:
         conn.execute(
             """INSERT INTO video_command_operation_receipts(
                    operation_key,command,request_fingerprint,scope_type,scope_id,
-                   status,result_json,created_at,updated_at
-               ) VALUES(?,?,?,?,?,'running','{}',?,?)""",
+                   status,result_json,binding_json,claim_token,lease_expires_at,
+                   created_at,updated_at
+               ) VALUES(?,?,?,?,?,'running','{}','{}',?,?,?,?)""",
             (
                 operation_key,
                 command,
                 request_fingerprint,
                 scope_type,
                 scope_id,
+                owner,
+                stamp + _LEASE_S,
                 stamp,
                 stamp,
             ),
         )
         conn.commit()
-        return None
+        return owner, None
     except Exception:  # noqa: BLE001 -- unique conflict is resolved by exact readback
         conn.rollback()
     row = conn.execute(
@@ -89,17 +116,85 @@ def claim_video_command_operation(
             "相同 idempotency_key 已绑定不同的视频生成请求"
         )
     if str(row["status"]) != "succeeded":
-        # The generic bus prevents live concurrent owners.  Seeing ``running``
-        # here means startup/retry recovery; the domain's stable plan/version
-        # keys make re-execution an exact recovery operation.
-        return None
+        if str(row["status"]) == "running" and float(row["lease_expires_at"] or 0) > stamp:
+            raise VideoCommandOperationInProgress("相同视频生成操作正在执行")
+        try:
+            binding = json.loads(str(row["binding_json"] or "{}"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("视频命令 binding 损坏") from exc
+        if isinstance(binding, dict) and isinstance(binding.get("result"), dict):
+            recovered = dict(binding["result"])
+            conn.execute(
+                """UPDATE video_command_operation_receipts
+                      SET status='succeeded',result_json=?,lease_expires_at=0,updated_at=?
+                    WHERE operation_key=? AND request_fingerprint=?
+                      AND status!='succeeded' AND lease_expires_at<=?""",
+                (
+                    json.dumps(recovered, ensure_ascii=False, sort_keys=True),
+                    stamp,
+                    operation_key,
+                    request_fingerprint,
+                    stamp,
+                ),
+            )
+            conn.commit()
+            return None, recovered
+        updated = conn.execute(
+            """UPDATE video_command_operation_receipts
+                  SET status='running',claim_token=?,lease_expires_at=?,updated_at=?
+                WHERE operation_key=? AND request_fingerprint=?
+                  AND (status!='running' OR lease_expires_at<=?)""",
+            (
+                owner,
+                stamp + _LEASE_S,
+                stamp,
+                operation_key,
+                request_fingerprint,
+                stamp,
+            ),
+        )
+        if updated.rowcount != 1:
+            conn.rollback()
+            raise VideoCommandOperationInProgress("视频命令 receipt 接管 CAS 冲突")
+        conn.commit()
+        return owner, None
     try:
         payload = json.loads(str(row["result_json"] or "{}"))
     except json.JSONDecodeError as exc:
         raise RuntimeError("视频命令 receipt 结果损坏") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("视频命令 receipt 结果不是对象")
-    return payload
+    return None, payload
+
+
+def bind_video_command_operation(
+    *,
+    command: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    claim_token: str,
+    binding: dict[str, Any],
+    conn,
+) -> None:
+    """Bind exact plan/version/job IDs in the same transaction as enqueue."""
+    _ensure_table(conn)
+    updated = conn.execute(
+        """UPDATE video_command_operation_receipts
+              SET binding_json=?,updated_at=?
+            WHERE operation_key=? AND command=? AND request_fingerprint=?
+              AND claim_token=? AND status='running' AND lease_expires_at>?""",
+        (
+            json.dumps(binding, ensure_ascii=False, sort_keys=True, default=str),
+            time.time(),
+            f"{command}:{str(idempotency_key or '').strip()}",
+            command,
+            request_fingerprint,
+            claim_token,
+            time.time(),
+        ),
+    )
+    if updated.rowcount != 1:
+        raise VideoCommandOperationConflict("视频命令 receipt 绑定 CAS 冲突")
 
 
 def finish_video_command_operation(
@@ -107,6 +202,7 @@ def finish_video_command_operation(
     command: str,
     idempotency_key: str,
     request_fingerprint: str,
+    claim_token: str,
     result: dict[str, Any],
 ) -> None:
     conn = get_conn()
@@ -115,17 +211,17 @@ def finish_video_command_operation(
         """UPDATE video_command_operation_receipts
               SET status='succeeded',result_json=?,updated_at=?
             WHERE operation_key=? AND command=? AND request_fingerprint=?
-              AND status IN ('running','succeeded')""",
+              AND claim_token=? AND status IN ('running','succeeded')""",
         (
             json.dumps(result, ensure_ascii=False, sort_keys=True, default=str),
             time.time(),
             f"{command}:{str(idempotency_key or '').strip()}",
             command,
             request_fingerprint,
+            claim_token,
         ),
     )
     if updated.rowcount != 1:
         conn.rollback()
         raise VideoCommandOperationConflict("视频命令 receipt 已被不同请求占用")
     conn.commit()
-

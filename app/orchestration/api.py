@@ -1159,8 +1159,9 @@ def list_delivery_packages(episode_id: str):
 
 
 def _delivery_file(package_id: str, filename: str) -> Path:
-    row = get_conn().execute(
-        "SELECT package_path FROM delivery_packages WHERE id=?", (package_id,)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
     ).fetchone()
     if not row:
         raise HTTPException(404, "交付包不存在")
@@ -1168,6 +1169,22 @@ def _delivery_file(package_id: str, filename: str) -> Path:
     target = (path / filename).resolve()
     if path not in target.parents or not target.is_file():
         raise HTTPException(404, "交付文件不存在")
+    try:
+        manifest = json.loads(row["manifest_json"] or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(409, "交付 manifest 已损坏") from exc
+    item = next(
+        (entry for entry in manifest.get("files") or [] if entry.get("path") == filename),
+        None,
+    )
+    from app.delivery import _sha256
+
+    if (
+        item is None
+        or _sha256(target) != str(item.get("sha256") or "")
+        or target.stat().st_size != int(item.get("size_bytes") or -1)
+    ):
+        raise HTTPException(409, "交付文件与已审核 manifest 不一致")
     return target
 
 
@@ -1179,14 +1196,34 @@ def download_delivery_report(package_id: str):
 
 @router.get("/delivery/packages/{package_id}/archive")
 def download_delivery_archive(package_id: str):
-    row = get_conn().execute(
-        "SELECT package_path FROM delivery_packages WHERE id=?", (package_id,)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM delivery_packages WHERE id=?", (package_id,)
     ).fetchone()
     if not row:
         raise HTTPException(404, "交付包不存在")
     archive = Path(str(row["package_path"]) + ".zip").resolve()
     if not archive.is_file():
         raise HTTPException(404, "交付压缩包不存在")
+    from app.delivery import _archive_matches_directory, _sha256
+
+    package_path = Path(str(row["package_path"])).resolve()
+    if not _archive_matches_directory(archive, package_path):
+        raise HTTPException(409, "交付压缩包与已审核目录不一致")
+    evaluation = conn.execute(
+        """SELECT evidence_json FROM evaluations
+           WHERE artifact_id=? AND evaluator_type='human'
+             AND hard_gate_passed=1
+           ORDER BY created_at DESC LIMIT 1""",
+        (row["artifact_id"],),
+    ).fetchone()
+    if evaluation is not None:
+        try:
+            evidence = json.loads(evaluation["evidence_json"] or "{}")
+        except json.JSONDecodeError:
+            evidence = {}
+        if _sha256(archive) != str(evidence.get("approved_archive_sha256") or ""):
+            raise HTTPException(409, "交付压缩包与已批准证据不一致")
     return FileResponse(archive, media_type="application/zip", filename=f"{package_id}.zip")
 
 

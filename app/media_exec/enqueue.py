@@ -1272,7 +1272,9 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  supervisor_run_id: str | None = None,
                  dependency_snapshot: dict[str, Any] | None = None,
                  critique_sources: list[dict[str, Any]] | None = None,
-                 operation_idempotency_key: str | None = None) -> dict:
+                 operation_idempotency_key: str | None = None,
+                 operation_request_fingerprint: str | None = None,
+                 operation_claim_token: str | None = None) -> dict:
     """持久化校验状态；不从错误文案推断或改写分镜数据。"""
     authority_context = _assert_enqueue_storyboard_authority(shot_id)
     if (
@@ -1318,6 +1320,8 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             dependency_snapshot=dependency_snapshot,
             critique_sources=critique_sources,
             operation_idempotency_key=operation_idempotency_key,
+            operation_request_fingerprint=operation_request_fingerprint,
+            operation_claim_token=operation_claim_token,
             preflight_job_id=preflight_job_id,
             preflight_owner=preflight_owner,
         )
@@ -1351,6 +1355,8 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                        dependency_snapshot: dict[str, Any] | None = None,
                        critique_sources: list[dict[str, Any]] | None = None,
                        operation_idempotency_key: str | None = None,
+                       operation_request_fingerprint: str | None = None,
+                       operation_claim_token: str | None = None,
                        preflight_job_id: str | None = None,
                        preflight_owner: str | None = None,
                        preflight_repair: dict[str, Any] | None = None) -> dict:
@@ -1767,6 +1773,32 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                     result.update(resumed)
             if preflight_repair:
                 result["preflight_repair"] = preflight_repair
+            if (
+                operation_idempotency_key
+                and operation_request_fingerprint
+                and operation_claim_token
+            ):
+                job = conn.execute(
+                    "SELECT id,provider_operation_id,status FROM jobs WHERE version_id=? ORDER BY created_at DESC LIMIT 1",
+                    (existing["id"],),
+                ).fetchone()
+                from app.video_command_operations import bind_video_command_operation
+
+                bind_video_command_operation(
+                    command="video.generate_shot",
+                    idempotency_key=operation_idempotency_key,
+                    request_fingerprint=operation_request_fingerprint,
+                    claim_token=operation_claim_token,
+                    binding={
+                        "plan_id": (shot_plan.episode_video_plan_id if shot_plan else None),
+                        "version_id": existing["id"],
+                        "job_id": job["id"] if job else None,
+                        "provider_operation_id": job["provider_operation_id"] if job else None,
+                        "result": result,
+                    },
+                    conn=conn,
+                )
+                conn.commit()
             return result
 
     version_no = (conn.execute(
@@ -1980,6 +2012,35 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                           error='集预算不足，任务已暂停'
                     WHERE id=?""",
                 (version_id,),
+            )
+        if (
+            operation_idempotency_key
+            and operation_request_fingerprint
+            and operation_claim_token
+        ):
+            from app.video_command_operations import bind_video_command_operation
+
+            domain_result = {
+                "reused": False,
+                "version_id": version_id,
+                "job_id": job_id,
+                "task_accepted": True,
+            }
+            if not reserved:
+                domain_result["paused_budget"] = True
+            bind_video_command_operation(
+                command="video.generate_shot",
+                idempotency_key=operation_idempotency_key,
+                request_fingerprint=operation_request_fingerprint,
+                claim_token=operation_claim_token,
+                binding={
+                    "plan_id": (shot_plan.episode_video_plan_id if shot_plan else None),
+                    "version_id": version_id,
+                    "job_id": job_id,
+                    "provider_operation_id": None,
+                    "result": domain_result,
+                },
+                conn=conn,
             )
         conn.execute(
             "UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'",

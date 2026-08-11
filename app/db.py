@@ -2262,6 +2262,14 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
             conn.execute("DELETE FROM command_idempotency WHERE status='running'")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute(
+                """UPDATE video_command_operation_receipts
+                      SET lease_expires_at=0
+                    WHERE status='running'"""
+            )
+        except sqlite3.OperationalError:
+            pass
     # ``approving`` is a durable approval claim.  Recovery resumes the exact
     # draft snapshot; startup must not reopen it for a concurrent user action.
     conn.commit()

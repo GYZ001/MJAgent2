@@ -2328,7 +2328,9 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
             critique=critique, after_shot_id=after,
             dependency_snapshot=qualification,
             critique_sources=critique_sources,
-            operation_idempotency_key=body.get("idempotency_key"))
+            operation_idempotency_key=body.get("idempotency_key"),
+            operation_request_fingerprint=body.get("operation_request_fingerprint"),
+            operation_claim_token=body.get("operation_claim_token"))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 
