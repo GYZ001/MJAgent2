@@ -89,6 +89,7 @@ async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
     from app.capabilities.bus import canonical_command_request_fingerprint
     from app.video_command_operations import (
         VideoCommandOperationConflict,
+        VideoCommandOperationFailed,
         VideoCommandOperationInProgress,
         claim_video_command_operation,
         fail_video_command_operation,
@@ -109,9 +110,11 @@ async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
         )
     except VideoCommandOperationConflict as exc:
         return failed(str(exc), error_code="idempotency_request_mismatch")
+    except VideoCommandOperationFailed as exc:
+        return failed(str(exc), error_code=exc.error_code)
     except VideoCommandOperationInProgress as exc:
         return succeeded(str(exc), data={"idempotency_in_progress": True})
-    if recovered is not None:
+    if recovered is not None and recovered.get("_resume_prepared") is not True:
         return succeeded(
             "已恢复原全片视频补齐运行",
             data=recovered,
@@ -138,7 +141,15 @@ async def complete_episode(args: I.VideoCompleteEpisodeInput) -> CommandResult:
         "operation_claim_token": operation_owner,
         "operation_command": command,
     }
-    outcome = await call_guarded(api._complete_episode_core, args.episode_id, body)
+    if recovered is not None:
+        outcome = await call_guarded(
+            api._resume_prepared_complete_episode_operation,
+            args.episode_id,
+            body,
+            recovered,
+        )
+    else:
+        outcome = await call_guarded(api._complete_episode_core, args.episode_id, body)
     if isinstance(outcome, CommandResult):
         fail_video_command_operation(
             command=command,

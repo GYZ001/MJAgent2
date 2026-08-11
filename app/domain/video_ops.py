@@ -3097,10 +3097,26 @@ async def _complete_episode_core(
             request_fingerprint=operation_fingerprint,
             claim_token=operation_claim_token,
             binding={
-                "operation_complete": True,
+                "operation_complete": False,
+                "phase": "durable_run_installed",
                 "run_id": recorder.run_id,
                 "completion_grant_id": grant_id,
                 "result": completion_result,
+                "spawn": {
+                    "episode_id": episode_id,
+                    "project_id": ep["project_id"],
+                    "resume": mode == "resume",
+                    "grant_id": grant_id,
+                    "budget_cap_cny": cap,
+                    "wall_clock_cap_s": (
+                        float(wall_cap) if wall_cap is not None else None
+                    ),
+                    "allow_fallback_adopt": bool(allow_fallback),
+                    "max_fallback_shots": (
+                        int(max_fallback) if max_fallback is not None else None
+                    ),
+                    "allow_storyboard_edit": allow_edit,
+                },
             },
             conn=conn,
             merge=True,
@@ -3146,17 +3162,22 @@ async def _complete_episode_core(
             (previous_mode, ep["status"], episode_id, recorder.run_id),
         )
         if operation_fingerprint and operation_claim_token and operation_command:
-            conn.execute(
-                """UPDATE video_command_operation_receipts
-                      SET binding_json='{}',updated_at=?
-                    WHERE operation_key=? AND request_fingerprint=?
-                      AND claim_token=? AND status='running'""",
-                (
-                    now(),
-                    f"{operation_command}:{str(body.get('idempotency_key') or '').strip()}",
-                    operation_fingerprint,
-                    operation_claim_token,
-                ),
+            from app.video_command_operations import bind_video_command_operation
+
+            bind_video_command_operation(
+                command=operation_command,
+                idempotency_key=str(body.get("idempotency_key") or ""),
+                request_fingerprint=operation_fingerprint,
+                claim_token=operation_claim_token,
+                binding={
+                    "operation_complete": False,
+                    "operation_failed": True,
+                    "phase": "definitely_not_started",
+                    "failure_code": "VIDEO_COMPLETION_START_FAILED",
+                    "failure_message": "全片补齐任务未能启动，请使用新的幂等键重试",
+                },
+                conn=conn,
+                merge=True,
             )
         conn.commit()
         raise HTTPException(503, {
@@ -3166,7 +3187,120 @@ async def _complete_episode_core(
             "completion_grant_id": grant_id,
             "run_id": recorder.run_id,
         }) from exc
+    if operation_fingerprint and operation_claim_token and operation_command:
+        from app.video_command_operations import bind_video_command_operation
+
+        bind_video_command_operation(
+            command=operation_command,
+            idempotency_key=str(body.get("idempotency_key") or ""),
+            request_fingerprint=operation_fingerprint,
+            claim_token=operation_claim_token,
+            binding={
+                "operation_complete": True,
+                "phase": "spawn_registered",
+                "result": completion_result,
+            },
+            conn=conn,
+            merge=True,
+        )
+        conn.commit()
     return completion_result
+
+
+def _resume_prepared_complete_episode_operation(
+    episode_id: str,
+    body: dict,
+    prepared: dict,
+) -> dict:
+    """Register the exact durable run left between commit and task spawn.
+
+    A hard crash can happen after the run/episode owner and domain receipt are
+    committed but before the in-memory task is registered.  Recovery may only
+    resume those exact persisted IDs; it must never re-plan a second run.
+    """
+    from app.orchestration.engine import WorkflowRecorder
+    from app.video_command_operations import bind_video_command_operation
+
+    result = prepared.get("result")
+    spawn = prepared.get("spawn")
+    if not isinstance(result, dict) or not isinstance(spawn, dict):
+        raise HTTPException(409, "视频补齐恢复回执绑定不完整")
+    run_id = str(prepared.get("run_id") or result.get("run_id") or "")
+    if (
+        not run_id
+        or str(spawn.get("episode_id") or "") != episode_id
+        or str(result.get("run_id") or "") != run_id
+    ):
+        raise HTTPException(409, "视频补齐恢复回执范围不匹配")
+
+    conn = get_conn()
+    run = conn.execute(
+        """SELECT id,status,workflow_type,scope_type,scope_id
+             FROM workflow_runs WHERE id=?""",
+        (run_id,),
+    ).fetchone()
+    episode = conn.execute(
+        "SELECT project_id,active_video_run_id FROM episodes WHERE id=?",
+        (episode_id,),
+    ).fetchone()
+    if (
+        run is None
+        or episode is None
+        or run["workflow_type"] != "episode_video_completion"
+        or run["scope_type"] != "episode"
+        or run["scope_id"] != episode_id
+        or str(episode["project_id"]) != str(spawn.get("project_id") or "")
+    ):
+        raise HTTPException(409, "视频补齐恢复回执的持久化运行无效")
+
+    status = str(run["status"] or "").upper()
+    if status == "CREATED":
+        if episode["active_video_run_id"] != run_id:
+            raise HTTPException(409, "视频补齐恢复启动权已变更")
+        if not task_registry.active("video_completion", episode_id):
+            recorder = WorkflowRecorder(run_id)
+            coro = _recorded_video_completion_task(
+                episode_id,
+                recorder,
+                resume=bool(spawn.get("resume")),
+                grant_id=spawn.get("grant_id"),
+                budget_cap_cny=spawn.get("budget_cap_cny"),
+                wall_clock_cap_s=spawn.get("wall_clock_cap_s"),
+                allow_fallback_adopt=bool(spawn.get("allow_fallback_adopt", True)),
+                max_fallback_shots=spawn.get("max_fallback_shots"),
+                allow_storyboard_edit=bool(spawn.get("allow_storyboard_edit")),
+            )
+            try:
+                task_registry.spawn(
+                    "video_completion",
+                    episode_id,
+                    coro,
+                    project_id=episode["project_id"],
+                )
+            except Exception:
+                coro.close()
+                raise
+    elif status not in {
+        "RUNNING", "WAITING_RETRY", "WAITING_HUMAN", "WAITING_AUTHORIZATION",
+        "PAUSED_BUDGET", "PAUSED_EXTERNAL", "SUCCEEDED", "PARTIAL",
+    }:
+        raise HTTPException(409, "视频补齐原运行已失效，不得伪造恢复成功")
+
+    bind_video_command_operation(
+        command=str(body.get("operation_command") or ""),
+        idempotency_key=str(body.get("idempotency_key") or ""),
+        request_fingerprint=str(body.get("operation_request_fingerprint") or ""),
+        claim_token=str(body.get("operation_claim_token") or ""),
+        binding={
+            "operation_complete": True,
+            "phase": "spawn_registered",
+            "result": result,
+        },
+        conn=conn,
+        merge=True,
+    )
+    conn.commit()
+    return dict(result)
 
 
 def _video_completion_user_contract(
@@ -3814,98 +3948,162 @@ def recover_project_video_completion_queues() -> int:
 async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     """全局预算编排：按 episode_no 顺序分配 per-episode cap，串行启动未覆盖集。"""
     from app.orchestration.engine import WorkflowRecorder, fingerprint
+    from app.video_command_operations import (
+        bind_video_command_operation,
+        claim_video_command_operation,
+        finish_video_command_operation,
+        read_video_command_operation_binding,
+    )
 
     conn = get_conn()
     project = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
     if not project:
         raise HTTPException(404, "项目不存在")
-    active_queue = conn.execute(
-        """SELECT id FROM workflow_runs
-           WHERE workflow_type='project_video_completion_queue'
-             AND scope_type='project' AND scope_id=?
-             AND recovered_by_run_id IS NULL
-             AND status IN (
-               'CREATED','RUNNING','WAITING_RETRY','WAITING_HUMAN',
-               'WAITING_AUTHORIZATION','PAUSED_BUDGET','PAUSED_EXTERNAL'
-             )
-           ORDER BY updated_at DESC LIMIT 1""",
-        (project_id,),
-    ).fetchone()
-    if task_registry.active("video_completion_project", project_id) or active_queue:
-        raise HTTPException(409, {
-            "code": "PROJECT_VIDEO_COMPLETION_ALREADY_ACTIVE",
-            "message": "项目补齐队列已在运行或等待恢复，请查看现有进度",
-            "run_id": active_queue["id"] if active_queue else None,
-            "action": "view_progress",
-        })
-
-    global_cap = float(_review_validate_authorization_number(
-        body.get("global_budget_cap_cny", 500), field="global_budget_cap_cny", minimum=1, maximum=1000000, allow_none=False,
-    ))
-    per_cap = float(_review_validate_authorization_number(
-        body.get("per_episode_cap_cny", 150), field="per_episode_cap_cny", minimum=1, maximum=100000, allow_none=False,
-    ))
-    wall_cap = float(_review_validate_authorization_number(
-        body.get("wall_clock_cap_s", 4 * 3600), field="wall_clock_cap_s", minimum=60, maximum=604800, allow_none=False,
-    ))
-    allow_fallback = bool(body.get("allow_fallback_adopt", True))
-    allow_edit = bool(body.get("allow_storyboard_edit", False))
-    episode_ids = body.get("episode_ids")
-    project_idempotency_key = (
-        str(body.get("idempotency_key") or "").strip() or None
+    operation_fingerprint = str(body.get("operation_request_fingerprint") or "")
+    operation_claim_token = str(body.get("operation_claim_token") or "")
+    operation_command = str(body.get("operation_command") or "")
+    operation_idempotency_key = str(body.get("idempotency_key") or "").strip()
+    has_operation_receipt = bool(
+        operation_fingerprint
+        and operation_claim_token
+        and operation_command
+        and operation_idempotency_key
     )
 
-    rows = conn.execute(
-        """SELECT id, episode_no, status, storyboard_artifact_id FROM episodes
-           WHERE project_id=? ORDER BY episode_no""",
-        (project_id,),
-    ).fetchall()
-    if episode_ids:
-        wanted = set(episode_ids)
-        rows = [r for r in rows if r["id"] in wanted]
-    eligible = [
-        r for r in rows
-        if r["status"] in {"confirmed", "generating", "done"}
-    ]
-    if not eligible:
-        raise HTTPException(409, "没有可补齐的已确认剧集")
-
-    project_spent = _project_video_spent(project_id, conn=conn)
-    remaining_global = max(0.0, global_cap - project_spent)
-
-    plan = []
-    allocated = 0.0
-    from app.video_supervisor import rebuild_coverage_ledger
-    for r in eligible:
-        if task_registry.active("video_completion", r["id"]):
-            plan.append({
-                "episode_id": r["id"], "episode_no": r["episode_no"],
-                "status": "already_running", "allocated_cny": 0,
+    operation_binding = (
+        read_video_command_operation_binding(
+            command=operation_command,
+            idempotency_key=operation_idempotency_key,
+            request_fingerprint=operation_fingerprint,
+        )
+        if has_operation_receipt
+        else {}
+    )
+    frozen = operation_binding.get("project_plan")
+    if not isinstance(frozen, dict):
+        active_queue = conn.execute(
+            """SELECT id FROM workflow_runs
+               WHERE workflow_type='project_video_completion_queue'
+                 AND scope_type='project' AND scope_id=?
+                 AND recovered_by_run_id IS NULL
+                 AND status IN (
+                   'CREATED','RUNNING','WAITING_RETRY','WAITING_HUMAN',
+                   'WAITING_AUTHORIZATION','PAUSED_BUDGET','PAUSED_EXTERNAL'
+                 )
+               ORDER BY updated_at DESC LIMIT 1""",
+            (project_id,),
+        ).fetchone()
+        if task_registry.active("video_completion_project", project_id) or active_queue:
+            raise HTTPException(409, {
+                "code": "PROJECT_VIDEO_COMPLETION_ALREADY_ACTIVE",
+                "message": "项目补齐队列已在运行或等待恢复，请查看现有进度",
+                "run_id": active_queue["id"] if active_queue else None,
+                "action": "view_progress",
             })
-            continue
-        try:
-            ledger = rebuild_coverage_ledger(r["id"])
-            if ledger.covered_within_quota():
+
+        global_cap = float(_review_validate_authorization_number(
+            body.get("global_budget_cap_cny", 500), field="global_budget_cap_cny", minimum=1, maximum=1000000, allow_none=False,
+        ))
+        per_cap = float(_review_validate_authorization_number(
+            body.get("per_episode_cap_cny", 150), field="per_episode_cap_cny", minimum=1, maximum=100000, allow_none=False,
+        ))
+        wall_cap = float(_review_validate_authorization_number(
+            body.get("wall_clock_cap_s", 4 * 3600), field="wall_clock_cap_s", minimum=60, maximum=604800, allow_none=False,
+        ))
+        allow_fallback = bool(body.get("allow_fallback_adopt", True))
+        allow_edit = bool(body.get("allow_storyboard_edit", False))
+        episode_ids = body.get("episode_ids")
+        project_idempotency_key = operation_idempotency_key or None
+
+        rows = conn.execute(
+            """SELECT id, episode_no, status, storyboard_artifact_id FROM episodes
+               WHERE project_id=? ORDER BY episode_no""",
+            (project_id,),
+        ).fetchall()
+        if episode_ids:
+            wanted = set(episode_ids)
+            rows = [r for r in rows if r["id"] in wanted]
+        eligible = [
+            r for r in rows
+            if r["status"] in {"confirmed", "generating", "done"}
+        ]
+        if not eligible:
+            raise HTTPException(409, "没有可补齐的已确认剧集")
+
+        project_spent = _project_video_spent(project_id, conn=conn)
+        remaining_global = max(0.0, global_cap - project_spent)
+
+        plan = []
+        allocated = 0.0
+        from app.video_supervisor import rebuild_coverage_ledger
+        for r in eligible:
+            if task_registry.active("video_completion", r["id"]):
                 plan.append({
                     "episode_id": r["id"], "episode_no": r["episode_no"],
-                    "status": "already_covered", "allocated_cny": 0,
+                    "status": "already_running", "allocated_cny": 0,
                 })
                 continue
-        except Exception:  # noqa: BLE001
-            pass
-        room = remaining_global - allocated
-        if room < 5:
+            try:
+                ledger = rebuild_coverage_ledger(r["id"])
+                if ledger.covered_within_quota():
+                    plan.append({
+                        "episode_id": r["id"], "episode_no": r["episode_no"],
+                        "status": "already_covered", "allocated_cny": 0,
+                    })
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            room = remaining_global - allocated
+            if room < 5:
+                plan.append({
+                    "episode_id": r["id"], "episode_no": r["episode_no"],
+                    "status": "skipped_budget", "allocated_cny": 0,
+                })
+                continue
+            ep_cap = min(per_cap, room)
             plan.append({
                 "episode_id": r["id"], "episode_no": r["episode_no"],
-                "status": "skipped_budget", "allocated_cny": 0,
+                "status": "queued", "allocated_cny": ep_cap,
             })
-            continue
-        ep_cap = min(per_cap, room)
-        plan.append({
-            "episode_id": r["id"], "episode_no": r["episode_no"],
-            "status": "queued", "allocated_cny": ep_cap,
-        })
-        allocated += ep_cap
+            allocated += ep_cap
+
+        frozen = {
+            "project_id": project_id,
+            "global_budget_cap_cny": global_cap,
+            "per_episode_cap_cny": per_cap,
+            "wall_clock_cap_s": wall_cap,
+            "allow_fallback_adopt": allow_fallback,
+            "allow_storyboard_edit": allow_edit,
+            "idempotency_key": project_idempotency_key,
+            "eligible_episode_ids": [str(row["id"]) for row in eligible],
+            "project_spent_cny": project_spent,
+            "remaining_cny": remaining_global,
+            "plan": json.loads(json.dumps(plan, ensure_ascii=False)),
+        }
+        if has_operation_receipt:
+            bind_video_command_operation(
+                command=operation_command,
+                idempotency_key=operation_idempotency_key,
+                request_fingerprint=operation_fingerprint,
+                claim_token=operation_claim_token,
+                binding={"phase": "project_plan_frozen", "project_plan": frozen},
+                conn=conn,
+                merge=True,
+            )
+            conn.commit()
+            operation_binding = {**operation_binding, "project_plan": frozen}
+    else:
+        if str(frozen.get("project_id") or "") != project_id:
+            raise RuntimeError("项目补齐 receipt 绑定的项目已漂移")
+        global_cap = float(frozen["global_budget_cap_cny"])
+        per_cap = float(frozen["per_episode_cap_cny"])
+        wall_cap = float(frozen["wall_clock_cap_s"])
+        allow_fallback = bool(frozen["allow_fallback_adopt"])
+        allow_edit = bool(frozen["allow_storyboard_edit"])
+        project_idempotency_key = str(frozen.get("idempotency_key") or "") or None
+        project_spent = float(frozen["project_spent_cny"])
+        remaining_global = float(frozen["remaining_cny"])
+        plan = json.loads(json.dumps(frozen["plan"], ensure_ascii=False))
 
     started = []
     queue = [p for p in plan if p["status"] == "queued"]
@@ -3913,12 +4111,7 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
     project_queue_run_id = None
 
     async def _run_one(item: dict) -> dict:
-        room_now = max(0.0, global_cap - _project_video_spent(project_id))
-        if room_now < 5:
-            item["status"] = "skipped_budget"
-            return item
-        item["allocated_cny"] = min(float(item["allocated_cny"]), room_now)
-        result = await _complete_episode_core(item["episode_id"], {
+        child_body = {
             "mode": "fresh",
             "budget_cap_cny": item["allocated_cny"],
             "wall_clock_cap_s": wall_cap,
@@ -3929,14 +4122,114 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
                 if project_idempotency_key
                 else None
             ),
-        })
+        }
+        child_owner = None
+        result = None
+        if has_operation_receipt:
+            child_fingerprint = fingerprint(
+                "video.complete_project.child",
+                project_id,
+                item["episode_id"],
+                child_body,
+            )
+            child_owner, result = claim_video_command_operation(
+                command="video.complete_episode",
+                idempotency_key=str(child_body["idempotency_key"] or ""),
+                request_fingerprint=child_fingerprint,
+                scope_type="episode",
+                scope_id=item["episode_id"],
+            )
+            if result is None:
+                child_body.update({
+                    "operation_request_fingerprint": child_fingerprint,
+                    "operation_claim_token": child_owner,
+                    "operation_command": "video.complete_episode",
+                })
+        if result is None:
+            room_now = max(0.0, global_cap - _project_video_spent(project_id))
+            if room_now < 5:
+                item["status"] = "skipped_budget"
+                return item
+            item["allocated_cny"] = min(float(item["allocated_cny"]), room_now)
+            child_body["budget_cap_cny"] = item["allocated_cny"]
+            result = await _complete_episode_core(item["episode_id"], child_body)
+            if has_operation_receipt:
+                finish_video_command_operation(
+                    command="video.complete_episode",
+                    idempotency_key=str(child_body["idempotency_key"] or ""),
+                    request_fingerprint=child_fingerprint,
+                    claim_token=str(child_owner or ""),
+                    result=result,
+                )
         item["status"] = "started"
         item["run_id"] = result.get("run_id")
         item["completion_grant_id"] = result.get("completion_grant_id")
         return item
 
     if queue:
-        first = await _run_one(queue[0])
+        bound_first = operation_binding.get("first_episode")
+        if isinstance(bound_first, dict) and isinstance(bound_first.get("result"), dict):
+            first = queue[0]
+            if str(bound_first.get("episode_id") or "") != str(first["episode_id"]):
+                raise RuntimeError("项目补齐 receipt 绑定的首集已漂移")
+            first["status"] = "started"
+            first["run_id"] = bound_first["result"].get("run_id")
+            first["completion_grant_id"] = bound_first["result"].get(
+                "completion_grant_id"
+            )
+        else:
+            first = await _run_one(queue[0])
+            if has_operation_receipt and first.get("status") == "started":
+                first_result = {
+                    "status": "accepted",
+                    "run_id": first.get("run_id"),
+                    "completion_grant_id": first.get("completion_grant_id"),
+                }
+                child_binding = read_video_command_operation_binding(
+                    command="video.complete_episode",
+                    idempotency_key=(
+                        f"{project_idempotency_key}:episode:{first['episode_id']}"
+                    ),
+                    request_fingerprint=fingerprint(
+                        "video.complete_project.child",
+                        project_id,
+                        first["episode_id"],
+                        {
+                            "mode": "fresh",
+                            "budget_cap_cny": first["allocated_cny"],
+                            "wall_clock_cap_s": wall_cap,
+                            "allow_fallback_adopt": allow_fallback,
+                            "allow_storyboard_edit": allow_edit,
+                            "idempotency_key": (
+                                f"{project_idempotency_key}:episode:{first['episode_id']}"
+                            ),
+                        },
+                    ),
+                )
+                if isinstance(child_binding.get("result"), dict):
+                    first_result = dict(child_binding["result"])
+                bind_video_command_operation(
+                    command=operation_command,
+                    idempotency_key=operation_idempotency_key,
+                    request_fingerprint=operation_fingerprint,
+                    claim_token=operation_claim_token,
+                    binding={
+                        "phase": "project_first_episode_started",
+                        "first_episode": {
+                            "episode_id": first["episode_id"],
+                            "run_id": first.get("run_id"),
+                            "completion_grant_id": first.get("completion_grant_id"),
+                            "result": first_result,
+                        },
+                    },
+                    conn=conn,
+                    merge=True,
+                )
+                conn.commit()
+                operation_binding["first_episode"] = {
+                    "episode_id": first["episode_id"],
+                    "result": first_result,
+                }
         started.append(first)
         rest = queue[1:]
         if rest:
@@ -3952,28 +4245,101 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
             recorder = None
             chain_coro = None
             try:
-                recorder = WorkflowRecorder.create(
-                    workflow_type="project_video_completion_queue",
-                    scope_type="project",
-                    scope_id=project_id,
-                    input_fingerprint=fingerprint(project_id, queue_state),
-                    requested_by="user",
-                    trigger_type="manual",
-                    policy_snapshot={
-                        "serial": True,
-                        "global_budget_cap_cny": global_cap,
-                        "per_episode_cap_cny": per_cap,
-                    },
-                    config_snapshot={"queue_state": queue_state},
-                    budget_limit_cny=global_cap,
-                )
-                project_queue_run_id = recorder.run_id
-                chain_coro = _run_project_video_completion_queue(
-                    project_id, queue_state, recorder,
-                )
-                task_registry.spawn(
-                    "video_completion_project", project_id, chain_coro, project_id=project_id,
-                )
+                queue_fingerprint = fingerprint(project_id, queue_state)
+                bound_queue = operation_binding.get("project_queue")
+                if isinstance(bound_queue, dict) and bound_queue.get("run_id"):
+                    project_queue_run_id = str(bound_queue["run_id"])
+                    queue_row = conn.execute(
+                        "SELECT id,status FROM workflow_runs WHERE id=?",
+                        (project_queue_run_id,),
+                    ).fetchone()
+                    if queue_row is None:
+                        raise RuntimeError("项目补齐 receipt 绑定的队列运行已丢失")
+                    recorder = WorkflowRecorder(project_queue_run_id)
+                else:
+                    queue_row = None
+                    if has_operation_receipt:
+                        queue_row = conn.execute(
+                            """SELECT id,status FROM workflow_runs
+                               WHERE workflow_type='project_video_completion_queue'
+                                 AND scope_type='project' AND scope_id=?
+                                 AND input_fingerprint=?
+                               ORDER BY updated_at DESC LIMIT 1""",
+                            (project_id, queue_fingerprint),
+                        ).fetchone()
+                    if queue_row is not None:
+                        project_queue_run_id = str(queue_row["id"])
+                        recorder = WorkflowRecorder(project_queue_run_id)
+                    else:
+                        recorder = WorkflowRecorder.create(
+                            workflow_type="project_video_completion_queue",
+                            scope_type="project",
+                            scope_id=project_id,
+                            input_fingerprint=queue_fingerprint,
+                            requested_by="user",
+                            trigger_type="manual",
+                            policy_snapshot={
+                                "serial": True,
+                                "global_budget_cap_cny": global_cap,
+                                "per_episode_cap_cny": per_cap,
+                            },
+                            config_snapshot={"queue_state": queue_state},
+                            budget_limit_cny=global_cap,
+                        )
+                        project_queue_run_id = recorder.run_id
+                        queue_row = conn.execute(
+                            "SELECT id,status FROM workflow_runs WHERE id=?",
+                            (project_queue_run_id,),
+                        ).fetchone()
+                    if has_operation_receipt:
+                        bind_video_command_operation(
+                            command=operation_command,
+                            idempotency_key=operation_idempotency_key,
+                            request_fingerprint=operation_fingerprint,
+                            claim_token=operation_claim_token,
+                            binding={
+                                "phase": "project_queue_created",
+                                "project_queue": {
+                                    "run_id": project_queue_run_id,
+                                    "phase": "created",
+                                },
+                            },
+                            conn=conn,
+                            merge=True,
+                        )
+                        conn.commit()
+                        operation_binding["project_queue"] = {
+                            "run_id": project_queue_run_id,
+                            "phase": "created",
+                        }
+                queue_status = str(queue_row["status"] if queue_row else "")
+                if (
+                    queue_status == "CREATED"
+                    and not task_registry.active("video_completion_project", project_id)
+                ):
+                    chain_coro = _run_project_video_completion_queue(
+                        project_id, queue_state, recorder,
+                    )
+                    task_registry.spawn(
+                        "video_completion_project", project_id, chain_coro, project_id=project_id,
+                    )
+                    if has_operation_receipt:
+                        bind_video_command_operation(
+                            command=operation_command,
+                            idempotency_key=operation_idempotency_key,
+                            request_fingerprint=operation_fingerprint,
+                            claim_token=operation_claim_token,
+                            binding={
+                                "phase": "project_queue_submitted",
+                                "project_queue": {
+                                    "run_id": project_queue_run_id,
+                                    "phase": "submitted",
+                                },
+                            },
+                            conn=conn,
+                            merge=True,
+                        )
+                        conn.commit()
             except Exception as exc:
                 if chain_coro is not None:
                     chain_coro.close()
@@ -4014,15 +4380,10 @@ async def _complete_project_videos_core(project_id: str, body: dict) -> dict:
             item["episode_id"] for item in plan if item.get("status") == "failed_to_schedule"
         ],
     }
-    operation_fingerprint = str(body.get("operation_request_fingerprint") or "")
-    operation_claim_token = str(body.get("operation_claim_token") or "")
-    operation_command = str(body.get("operation_command") or "")
-    if operation_fingerprint and operation_claim_token and operation_command:
-        from app.video_command_operations import bind_video_command_operation
-
+    if has_operation_receipt:
         bind_video_command_operation(
             command=operation_command,
-            idempotency_key=str(body.get("idempotency_key") or ""),
+            idempotency_key=operation_idempotency_key,
             request_fingerprint=operation_fingerprint,
             claim_token=operation_claim_token,
             binding={

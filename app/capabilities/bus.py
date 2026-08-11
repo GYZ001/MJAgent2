@@ -68,6 +68,14 @@ def get_request_approval_token() -> str | None:
     return _request_approval_token.get()
 
 
+def _is_domain_operation_in_progress(result: CommandResult) -> bool:
+    """Intermediate domain lease responses must never become 24h bus results."""
+    return bool(
+        isinstance(result.data, dict)
+        and result.data.get("idempotency_in_progress") is True
+    )
+
+
 class CommandBus:
     def __init__(self, registry: CapabilityRegistry | None = None) -> None:
         self.registry = registry or get_registry()
@@ -215,7 +223,10 @@ class CommandBus:
                 result = outcome_resolver(spec, args, preflight)
 
             if idem_key:
-                if result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}:
+                if (
+                    result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}
+                    and not _is_domain_operation_in_progress(result)
+                ):
                     idem_store.store(
                         idem_key,
                         command=name,
@@ -309,7 +320,10 @@ class CommandBus:
                 result = await outcome_resolver(spec, args, preflight)
 
             if idem_key:
-                if result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}:
+                if (
+                    result.status in {CommandStatus.ACCEPTED, CommandStatus.SUCCEEDED}
+                    and not _is_domain_operation_in_progress(result)
+                ):
                     idem_store.store(
                         idem_key,
                         command=name,
@@ -332,7 +346,6 @@ class CommandBus:
                     claim_token=claim_token,
                 )
             raise
-
     def _gate(
         self,
         name: str,

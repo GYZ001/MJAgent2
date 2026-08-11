@@ -23,6 +23,14 @@ class VideoCommandOperationInProgress(ValueError):
     """Another live owner still holds the paid-operation lease."""
 
 
+class VideoCommandOperationFailed(ValueError):
+    """The exact operation reached a known terminal failure before side effects."""
+
+    def __init__(self, message: str, *, error_code: str = "video_operation_failed"):
+        super().__init__(message)
+        self.error_code = error_code
+
+
 _LEASE_S = 10 * 60
 
 
@@ -115,16 +123,22 @@ def claim_video_command_operation(
         raise VideoCommandOperationConflict(
             "相同 idempotency_key 已绑定不同的视频生成请求"
         )
+    try:
+        binding = json.loads(str(row["binding_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("视频命令 binding 损坏") from exc
+    if not isinstance(binding, dict):
+        raise RuntimeError("视频命令 binding 不是对象")
+    if binding.get("operation_failed") is True:
+        raise VideoCommandOperationFailed(
+            str(binding.get("failure_message") or "视频操作未启动，请使用新的幂等键重试"),
+            error_code=str(binding.get("failure_code") or "video_operation_failed"),
+        )
     if str(row["status"]) != "succeeded":
         if str(row["status"]) == "running" and float(row["lease_expires_at"] or 0) > stamp:
             raise VideoCommandOperationInProgress("相同视频生成操作正在执行")
-        try:
-            binding = json.loads(str(row["binding_json"] or "{}"))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("视频命令 binding 损坏") from exc
         if (
-            isinstance(binding, dict)
-            and isinstance(binding.get("result"), dict)
+            isinstance(binding.get("result"), dict)
             and (command == "video.generate_shot" or binding.get("operation_complete") is True)
         ):
             recovered = dict(binding["result"])
@@ -143,6 +157,12 @@ def claim_video_command_operation(
             )
             conn.commit()
             return None, recovered
+        prepared = (
+            command == "video.complete_episode"
+            and binding.get("phase") == "durable_run_installed"
+            and isinstance(binding.get("result"), dict)
+            and isinstance(binding.get("spawn"), dict)
+        )
         updated = conn.execute(
             """UPDATE video_command_operation_receipts
                   SET status='running',claim_token=?,lease_expires_at=?,updated_at=?
@@ -161,6 +181,8 @@ def claim_video_command_operation(
             conn.rollback()
             raise VideoCommandOperationInProgress("视频命令 receipt 接管 CAS 冲突")
         conn.commit()
+        if prepared:
+            return owner, {"_resume_prepared": True, **binding}
         return owner, None
     try:
         payload = json.loads(str(row["result_json"] or "{}"))
