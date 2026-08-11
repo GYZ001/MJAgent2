@@ -29,6 +29,10 @@ def _approved_artifact(kind: str, scope_type: str, scope_id: str, *, file_path: 
         type=kind, scope_type=scope_type, scope_id=scope_id,
         content={"kind": kind}, file_path=file_path, status="validated", trust_level="T2",
     ))
+    conn.execute(
+        "UPDATE artifacts SET status='validated' WHERE id=?",
+        (artifact["id"],),
+    )
     artifact = repository.commit_artifact(None, artifact["id"], [Evaluation(
         evaluator_type="deterministic", evaluator_name="test", evaluator_version="1",
         status="passed", hard_gate_passed=True, score=100,
@@ -385,6 +389,10 @@ def test_delivery_reject_replays_exact_receipt(monkeypatch) -> None:
                id,episode_id,artifact_id,status,package_path,manifest_json,
                quality_report_json,known_issues,created_at
            ) VALUES('delivery_draft','e',?,'waiting_human','/tmp/draft','{}','{}','[]',0)""",
+        (artifact["id"],),
+    )
+    conn.execute(
+        "UPDATE episodes SET delivery_artifact_id=?,delivery_status='waiting_human' WHERE id='e'",
         (artifact["id"],),
     )
     conn.commit()

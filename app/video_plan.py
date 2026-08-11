@@ -2399,14 +2399,7 @@ def _shot_plan_from_row(row: Any, parent: Any) -> ShotVideoGenerationPlan:
     })
 
 
-def load_latest_plan(episode_id: str, *, conn=None) -> EpisodeVideoGenerationPlan | None:
-    db = conn or get_conn()
-    parent = db.execute(
-        """SELECT * FROM episode_video_generation_plans
-           WHERE episode_id=? AND status IN ('valid','blocked','stale')
-           ORDER BY plan_revision DESC LIMIT 1""",
-        (episode_id,),
-    ).fetchone()
+def _load_plan_parent(parent, *, db) -> EpisodeVideoGenerationPlan | None:
     if not parent:
         return None
     rows = db.execute(
@@ -2419,22 +2412,12 @@ def load_latest_plan(episode_id: str, *, conn=None) -> EpisodeVideoGenerationPla
         episode_id=parent["episode_id"],
         plan_revision=parent["plan_revision"],
         source_storyboard_revision_id=parent["source_storyboard_revision_id"],
-        published_storyboard_artifact_id=_row_value(
-            parent, "published_storyboard_artifact_id", "",
-        ),
-        published_storyboard_artifact_hash=_row_value(
-            parent, "published_storyboard_artifact_hash", "",
-        ),
+        published_storyboard_artifact_id=_row_value(parent, "published_storyboard_artifact_id", ""),
+        published_storyboard_artifact_hash=_row_value(parent, "published_storyboard_artifact_hash", ""),
         completion_certificate_id=_row_value(parent, "completion_certificate_id", ""),
-        narrative_review_artifact_id=_row_value(
-            parent, "narrative_review_artifact_id", "",
-        ),
-        narrative_calibration_artifact_id=_row_value(
-            parent, "narrative_calibration_artifact_id", "",
-        ),
-        release_qualification_hash=_row_value(
-            parent, "release_qualification_hash", "",
-        ),
+        narrative_review_artifact_id=_row_value(parent, "narrative_review_artifact_id", ""),
+        narrative_calibration_artifact_id=_row_value(parent, "narrative_calibration_artifact_id", ""),
+        release_qualification_hash=_row_value(parent, "release_qualification_hash", ""),
         capability_snapshot_id=parent["capability_snapshot_id"],
         status=parent["status"],
         planner_provider=parent["planner_provider"] or "",
@@ -2448,6 +2431,26 @@ def load_latest_plan(episode_id: str, *, conn=None) -> EpisodeVideoGenerationPla
         created_at=parent["created_at"],
         shots=[_shot_plan_from_row(row, parent) for row in rows],
     )
+
+
+def load_plan_by_id(plan_id: str, *, conn=None) -> EpisodeVideoGenerationPlan | None:
+    db = conn or get_conn()
+    parent = db.execute(
+        "SELECT * FROM episode_video_generation_plans WHERE id=?",
+        (plan_id,),
+    ).fetchone()
+    return _load_plan_parent(parent, db=db)
+
+
+def load_latest_plan(episode_id: str, *, conn=None) -> EpisodeVideoGenerationPlan | None:
+    db = conn or get_conn()
+    parent = db.execute(
+        """SELECT * FROM episode_video_generation_plans
+           WHERE episode_id=? AND status IN ('valid','blocked','stale')
+           ORDER BY plan_revision DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    return _load_plan_parent(parent, db=db)
 
 
 def verify_episode_plan_is_current(
@@ -3405,6 +3408,7 @@ __all__ = [
     "current_capability_snapshot",
     "generate_episode_plan",
     "get_shot_plan",
+    "load_plan_by_id",
     "load_latest_plan",
     "mode_audit_for_job",
     "publish_plan",

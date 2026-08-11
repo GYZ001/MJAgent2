@@ -2045,24 +2045,42 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
     if mode == "complete" and task_registry.active("video_completion", episode_id):
         raise HTTPException(409, "全片补齐 Supervisor 运行中，请使用补齐模式或等待完成")
     conn = get_conn()
+    operation_key = str(body.get("idempotency_key") or "").strip()
+    operation_fingerprint = str(body.get("operation_request_fingerprint") or "").strip()
+    operation_owner = str(body.get("operation_claim_token") or "").strip()
+    operation_binding: dict = {}
+    if operation_key and operation_fingerprint:
+        from app.video_command_operations import read_video_command_operation_binding
+
+        operation_binding = read_video_command_operation_binding(
+            command="video.generate_episode",
+            idempotency_key=operation_key,
+            request_fingerprint=operation_fingerprint,
+        )
     shots_rows = conn.execute(
         "SELECT * FROM shots WHERE episode_id=? ORDER BY shot_no",
         (episode_id,)).fetchall()
     from app.video_plan import (
         VideoPlanValidationError,
         generate_episode_plan,
+        load_plan_by_id,
         load_latest_plan,
         verify_episode_plan_is_current,
     )
     try:
-        plan = load_latest_plan(episode_id, conn=conn)
+        bound_plan_id = str(operation_binding.get("plan_id") or "")
+        plan = (
+            load_plan_by_id(bound_plan_id, conn=conn)
+            if bound_plan_id
+            else load_latest_plan(episode_id, conn=conn)
+        )
         requested_plan_id = body.get("plan_id")
         if requested_plan_id:
             if not plan or plan.episode_video_plan_id != requested_plan_id:
                 raise HTTPException(409, "请求执行的计划不是当前有效 revision")
             if not verify_episode_plan_is_current(plan, conn=conn):
                 raise HTTPException(409, "请求执行的计划已不符合当前生成台输入策略，请重新生成计划")
-        else:
+        elif not bound_plan_id:
             plan = await generate_episode_plan(
                 episode_id, force=bool(body.get("force_replan")), conn=conn,
             )
@@ -2071,7 +2089,10 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             "status": "BLOCKED_UPSTREAM_CONTRACT",
             "blockers": exc.issues,
         }) from exc
-    if not plan or plan.status != "valid":
+    if not plan:
+        raise HTTPException(409, "视频模式计划不存在")
+    bound_plan_stale = bool(bound_plan_id and plan.status != "valid")
+    if plan.status != "valid" and not bound_plan_stale:
         raise HTTPException(409, "视频模式计划尚未通过确定性校验")
     plan_by_shot = {item.shot_id: item for item in plan.shots}
     board = _board_from_shot_rows(shots_rows, ep["episode_no"])
@@ -2134,6 +2155,57 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         }
         completed_count = sum(1 for item in selected if item["row"]["id"] in completed_ids)
         selected = [item for item in selected if item["row"]["id"] not in completed_ids]
+    bound_selected_ids = [
+        str(item) for item in (operation_binding.get("selected_shot_ids") or []) if item
+    ]
+    if bound_selected_ids:
+        by_id = {str(item["row"]["id"]): item for item in shots}
+        selected = [by_id[item] for item in bound_selected_ids if item in by_id]
+    elif operation_key and operation_fingerprint and operation_owner:
+        from app.video_command_operations import bind_video_command_operation
+
+        bind_video_command_operation(
+            command="video.generate_episode",
+            idempotency_key=operation_key,
+            request_fingerprint=operation_fingerprint,
+            claim_token=operation_owner,
+            binding={
+                "plan_id": plan.episode_video_plan_id,
+                "plan_revision": plan.plan_revision,
+                "selected_shot_ids": [str(item["row"]["id"]) for item in selected],
+                "enqueued": [],
+            },
+            conn=conn,
+            merge=True,
+        )
+        conn.commit()
+    if bound_plan_stale and operation_binding.get("enqueued"):
+        recovered_results = list(operation_binding.get("enqueued") or [])
+        outcome = {
+            "episode_video_plan_id": plan.episode_video_plan_id,
+            "plan_revision": plan.plan_revision,
+            "mode_distribution": {},
+            "critical_path_latency_ms": plan.critical_path_latency_ms,
+            "estimated_cost": plan.estimated_cost,
+            "enqueued": recovered_results,
+            "skipped_completed": 0,
+            "selected_shots": len(bound_selected_ids),
+            "recovered_partial_operation": True,
+            "remaining_requires_new_idempotency_key": True,
+        }
+        from app.video_command_operations import bind_video_command_operation
+
+        bind_video_command_operation(
+            command="video.generate_episode",
+            idempotency_key=operation_key,
+            request_fingerprint=operation_fingerprint,
+            claim_token=operation_owner,
+            binding={"operation_complete": True, "result": outcome},
+            conn=conn,
+            merge=True,
+        )
+        conn.commit()
+        return outcome
     # Quick generation must not create one doomed paid-version record per shot.
     # The completion supervisor owns the self-healing asset preparation path.
     from app.multiview import scan_episode_reference_asset_gaps
@@ -2173,8 +2245,24 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         )
     # 不再预先清空 adopted_version_id：新版本成功并通过技术门禁后由
     # select_best_video_candidate 比较切换；任务失败时保留原可交付采用结果。
-    results = []
-    for s in selected:
+    results = [dict(item) for item in (operation_binding.get("enqueued") or [])]
+    bound_enqueued_ids = {
+        str(item.get("shot_id") or "") for item in results if item.get("shot_id")
+    }
+    pending_selected = [
+        item for item in selected
+        if str(item["row"]["id"]) not in bound_enqueued_ids
+    ]
+    for s in pending_selected:
+        if operation_key and operation_fingerprint and operation_owner:
+            from app.video_command_operations import renew_video_command_operation
+
+            renew_video_command_operation(
+                command="video.generate_episode",
+                idempotency_key=operation_key,
+                request_fingerprint=operation_fingerprint,
+                claim_token=operation_owner,
+            )
         shot_plan = plan_by_shot.get(s["row"]["id"])
         if not shot_plan:
             results.append({
@@ -2189,10 +2277,11 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
                 s["row"]["id"], after_shot_id=after,
                 dependency_snapshot=qualification,
                 operation_idempotency_key=(
-                    f"{body.get('idempotency_key')}:{s['row']['id']}"
-                    if body.get("idempotency_key")
-                    else None
+                    operation_key or None
                 ),
+                operation_request_fingerprint=operation_fingerprint or None,
+                operation_claim_token=operation_owner or None,
+                operation_command="video.generate_episode",
             )
             # enqueue_shot also reports active/paused same-key jobs as reused.
             # Only an already deliverable completed version may be adopted here.
@@ -2227,8 +2316,7 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
                 "error": public,
                 "issue_codes": issue_codes,
             })
-    conn.commit()
-    return {
+    outcome = {
         "episode_video_plan_id": plan.episode_video_plan_id,
         "plan_revision": plan.plan_revision,
         "mode_distribution": {
@@ -2246,11 +2334,38 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
         "skipped_completed": completed_count,
         "selected_shots": len(selected),
     }
+    if operation_key and operation_fingerprint and operation_owner:
+        from app.video_command_operations import bind_video_command_operation
+
+        bind_video_command_operation(
+            command="video.generate_episode",
+            idempotency_key=operation_key,
+            request_fingerprint=operation_fingerprint,
+            claim_token=operation_owner,
+            binding={"operation_complete": True, "result": outcome},
+            conn=conn,
+            merge=True,
+        )
+    conn.commit()
+    return outcome
 
 
 async def _generate_shot_core(shot_id: str, body: dict) -> dict:
     """单镜生成视频的领域逻辑，供 REST 路由与 ``video.generate_shot`` Command Handler 共用。"""
     conn = get_conn()
+    if (
+        body.get("idempotency_key")
+        and body.get("operation_request_fingerprint")
+        and body.get("operation_claim_token")
+    ):
+        from app.video_command_operations import renew_video_command_operation
+
+        renew_video_command_operation(
+            command="video.generate_shot",
+            idempotency_key=str(body["idempotency_key"]),
+            request_fingerprint=str(body["operation_request_fingerprint"]),
+            claim_token=str(body["operation_claim_token"]),
+        )
     shot_row = conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
     if not shot_row:
         raise HTTPException(404, "镜头不存在")

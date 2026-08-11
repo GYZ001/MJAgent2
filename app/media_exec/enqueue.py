@@ -1274,7 +1274,8 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  critique_sources: list[dict[str, Any]] | None = None,
                  operation_idempotency_key: str | None = None,
                  operation_request_fingerprint: str | None = None,
-                 operation_claim_token: str | None = None) -> dict:
+                 operation_claim_token: str | None = None,
+                 operation_command: str = "video.generate_shot") -> dict:
     """持久化校验状态；不从错误文案推断或改写分镜数据。"""
     authority_context = _assert_enqueue_storyboard_authority(shot_id)
     if (
@@ -1322,6 +1323,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             operation_idempotency_key=operation_idempotency_key,
             operation_request_fingerprint=operation_request_fingerprint,
             operation_claim_token=operation_claim_token,
+            operation_command=operation_command,
             preflight_job_id=preflight_job_id,
             preflight_owner=preflight_owner,
         )
@@ -1357,6 +1359,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                        operation_idempotency_key: str | None = None,
                        operation_request_fingerprint: str | None = None,
                        operation_claim_token: str | None = None,
+                       operation_command: str = "video.generate_shot",
                        preflight_job_id: str | None = None,
                        preflight_owner: str | None = None,
                        preflight_repair: dict[str, Any] | None = None) -> dict:
@@ -1785,7 +1788,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                 from app.video_command_operations import bind_video_command_operation
 
                 bind_video_command_operation(
-                    command="video.generate_shot",
+                    command=operation_command,
                     idempotency_key=operation_idempotency_key,
                     request_fingerprint=operation_request_fingerprint,
                     claim_token=operation_claim_token,
@@ -1795,8 +1798,11 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                         "job_id": job["id"] if job else None,
                         "provider_operation_id": job["provider_operation_id"] if job else None,
                         "result": result,
+                        **({"append_enqueued": {"shot_id": shot_id, **result}}
+                           if operation_command == "video.generate_episode" else {}),
                     },
                     conn=conn,
+                    merge=operation_command == "video.generate_episode",
                 )
                 conn.commit()
             return result
@@ -2029,7 +2035,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             if not reserved:
                 domain_result["paused_budget"] = True
             bind_video_command_operation(
-                command="video.generate_shot",
+                command=operation_command,
                 idempotency_key=operation_idempotency_key,
                 request_fingerprint=operation_request_fingerprint,
                 claim_token=operation_claim_token,
@@ -2039,8 +2045,11 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                     "job_id": job_id,
                     "provider_operation_id": None,
                     "result": domain_result,
+                    **({"append_enqueued": {"shot_id": shot_id, **domain_result}}
+                       if operation_command == "video.generate_episode" else {}),
                 },
                 conn=conn,
+                merge=operation_command == "video.generate_episode",
             )
         conn.execute(
             "UPDATE episodes SET status='generating' WHERE id=? AND status='confirmed'",

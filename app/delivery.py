@@ -1174,11 +1174,18 @@ def approve_delivery(
                 (row["id"], episode_id),
             ).fetchone()
             artifact = repository.get_artifact(str(row["artifact_id"]), conn=conn)
+            episode = conn.execute(
+                "SELECT delivery_artifact_id,delivery_status FROM episodes WHERE id=?",
+                (episode_id,),
+            ).fetchone()
             if (
                 current is None
                 or current["status"] != "waiting_human"
                 or artifact is None
                 or artifact["status"] != "validated"
+                or episode is None
+                or episode["delivery_artifact_id"] != row["artifact_id"]
+                or episode["delivery_status"] != "waiting_human"
             ):
                 raise ValueError("交付草稿已不是当前可拒绝候选")
             stamp = now()

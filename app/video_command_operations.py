@@ -122,7 +122,11 @@ def claim_video_command_operation(
             binding = json.loads(str(row["binding_json"] or "{}"))
         except json.JSONDecodeError as exc:
             raise RuntimeError("视频命令 binding 损坏") from exc
-        if isinstance(binding, dict) and isinstance(binding.get("result"), dict):
+        if (
+            isinstance(binding, dict)
+            and isinstance(binding.get("result"), dict)
+            and (command == "video.generate_shot" or binding.get("operation_complete") is True)
+        ):
             recovered = dict(binding["result"])
             conn.execute(
                 """UPDATE video_command_operation_receipts
@@ -175,16 +179,41 @@ def bind_video_command_operation(
     claim_token: str,
     binding: dict[str, Any],
     conn,
+    merge: bool = False,
 ) -> None:
     """Bind exact plan/version/job IDs in the same transaction as enqueue."""
     _ensure_table(conn)
+    payload = dict(binding)
+    if merge:
+        row = conn.execute(
+            """SELECT binding_json FROM video_command_operation_receipts
+               WHERE operation_key=? AND request_fingerprint=? AND claim_token=?""",
+            (
+                f"{command}:{str(idempotency_key or '').strip()}",
+                request_fingerprint,
+                claim_token,
+            ),
+        ).fetchone()
+        try:
+            current = json.loads(str(row["binding_json"] or "{}")) if row else {}
+        except json.JSONDecodeError:
+            current = {}
+        if isinstance(current, dict):
+            payload = {**current, **payload}
+            if "append_enqueued" in binding:
+                items = list(current.get("enqueued") or [])
+                appended = dict(binding["append_enqueued"])
+                items = [item for item in items if item.get("shot_id") != appended.get("shot_id")]
+                items.append(appended)
+                payload["enqueued"] = items
+                payload.pop("append_enqueued", None)
     updated = conn.execute(
         """UPDATE video_command_operation_receipts
               SET binding_json=?,updated_at=?
             WHERE operation_key=? AND command=? AND request_fingerprint=?
               AND claim_token=? AND status='running' AND lease_expires_at>?""",
         (
-            json.dumps(binding, ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
             time.time(),
             f"{command}:{str(idempotency_key or '').strip()}",
             command,
@@ -195,6 +224,55 @@ def bind_video_command_operation(
     )
     if updated.rowcount != 1:
         raise VideoCommandOperationConflict("视频命令 receipt 绑定 CAS 冲突")
+
+
+def read_video_command_operation_binding(
+    *, command: str, idempotency_key: str, request_fingerprint: str,
+) -> dict[str, Any]:
+    conn = get_conn()
+    _ensure_table(conn)
+    row = conn.execute(
+        """SELECT binding_json FROM video_command_operation_receipts
+           WHERE operation_key=? AND command=? AND request_fingerprint=?""",
+        (
+            f"{command}:{str(idempotency_key or '').strip()}",
+            command,
+            request_fingerprint,
+        ),
+    ).fetchone()
+    if row is None:
+        return {}
+    try:
+        value = json.loads(str(row["binding_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("视频命令 binding 损坏") from exc
+    return value if isinstance(value, dict) else {}
+
+
+def renew_video_command_operation(
+    *, command: str, idempotency_key: str, request_fingerprint: str, claim_token: str,
+) -> None:
+    conn = get_conn()
+    _ensure_table(conn)
+    stamp = time.time()
+    updated = conn.execute(
+        """UPDATE video_command_operation_receipts
+              SET lease_expires_at=?,updated_at=?
+            WHERE operation_key=? AND command=? AND request_fingerprint=?
+              AND claim_token=? AND status='running'""",
+        (
+            stamp + _LEASE_S,
+            stamp,
+            f"{command}:{str(idempotency_key or '').strip()}",
+            command,
+            request_fingerprint,
+            claim_token,
+        ),
+    )
+    if updated.rowcount != 1:
+        conn.rollback()
+        raise VideoCommandOperationConflict("视频命令 owner 已被接管")
+    conn.commit()
 
 
 def finish_video_command_operation(
