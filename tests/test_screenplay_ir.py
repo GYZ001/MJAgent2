@@ -47,6 +47,7 @@ from app.screenplay_ir import (
     screenplay_beat_fields_repeat,
     screenplay_ir_bible_context,
     screenplay_ir_prompt_contract,
+    screenplay_ir_source_audit_contract_errors,
 )
 from app.source_excerpt import (
     index_compact_source_segments,
@@ -2770,6 +2771,38 @@ def test_recovery_accepts_legal_current_ir_artifact() -> None:
         (artifact["id"],),
     ).fetchone()
     assert tuple(row) == ("candidate", None)
+
+
+def test_recovery_rebuilds_ir_with_swapped_audit_node_source_groups() -> None:
+    episode_id = "ep-ir-contract-v3-audit-authority"
+    payload = _audit_only_ir_payload("SRC0002", "SRC0003")
+    expected = deepcopy(payload["source_audit_annotations"])
+    payload["source_audit_annotations"][0]["source_segment_ids"], payload[
+        "source_audit_annotations"
+    ][1]["source_segment_ids"] = (
+        payload["source_audit_annotations"][1]["source_segment_ids"],
+        payload["source_audit_annotations"][0]["source_segment_ids"],
+    )
+    run_id, step_id, artifact = _persist_recoverable_ir(
+        episode_id=episode_id,
+        input_fingerprint="ir-contract-v3-audit-authority",
+        contract_version=stages.IR_VERSION,
+        payload=payload,
+    )
+
+    with bind_trace(run_id, step_id):
+        recovered = stages._recover_screenplay_ir_candidate(
+            episode_id,
+            expected_source_audit_annotations=expected,
+        )
+
+    assert recovered is None
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (artifact["id"],),
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert "IR_SOURCE_AUDIT_AUTHORITY_MISMATCH" in row["stale_reason"]
 
 
 def test_recovery_marks_current_ir_without_source_audit_contract_stale() -> None:

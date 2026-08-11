@@ -2583,7 +2583,7 @@ def test_normalization_rejects_unbound_target_scaffold_drift() -> None:
     assert any("identity scaffold drift" in error for error in errors)
 
 
-def _ss004_533ac9_compile_context():
+def _ss004_533ac9_compile_context(*, current_contract: bool = True):
     replay = json.loads(
         ERR_20260810_533AC9_REPLAY.read_text(encoding="utf-8")
     )
@@ -2626,6 +2626,34 @@ def _ss004_533ac9_compile_context():
         "unit_slots": selected_slots,
         "estimated_units": len(selected_slots),
     })
+    if current_contract:
+        dialogue_unit_keys_by_source = {
+            source_id: [
+                slot.source_unit_key
+                for slot in selected_slots
+                if (
+                    slot.kind == "dialogue"
+                    and source_id in slot.source_segment_ids
+                )
+            ]
+            for source_id in source_by_id
+        }
+        for action_evidence in replay["action_evidence"]:
+            for participant in action_evidence["participant_evidence"]:
+                if (
+                    participant["usage"] != "voice"
+                    or participant.get("source_unit_keys")
+                ):
+                    continue
+                source_unit_keys = [
+                    source_unit_key
+                    for source_id in participant["source_segment_ids"]
+                    for source_unit_key in dialogue_unit_keys_by_source.get(
+                        source_id, []
+                    )
+                ]
+                if source_unit_keys:
+                    participant["source_unit_keys"] = source_unit_keys
     nodes = []
     for index, evidence in enumerate(replay["action_evidence"]):
         participants = list(dict.fromkeys(
@@ -2762,6 +2790,14 @@ def test_scene_shard_creative_schema_is_closed_and_rejects_identity_authority() 
             "onscreen_entity_keys",
             "participant_deliveries",
         } <= forbidden_locations
+
+
+def test_err_533ac9_legacy_voice_contract_requires_baseline_rebuild() -> None:
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="voice identity evidence .*source_unit_keys",
+    ):
+        _ss004_533ac9_compile_context(current_contract=False)
 
 
 def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -> None:
