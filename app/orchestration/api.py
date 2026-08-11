@@ -261,8 +261,21 @@ def _restart_screenplay_run(run_id: str, trigger_type: str):
     if task_registry.active("screenplay", episode["id"]):
         raise HTTPException(409, "该剧集已有剧本任务在运行")
     try:
-        production = domain_api._screenplay_production_state(episode["id"])
-        is_repair = production.get("operation") == "repair"
+        from app.production.revision import (
+            resolve_screenplay_resume_eligibility,
+        )
+
+        eligibility = resolve_screenplay_resume_eligibility(
+            episode["id"],
+            conn=get_conn(),
+        )
+        if not eligibility.resumable:
+            raise HTTPException(409, {
+                "code": "SCREENPLAY_RUN_NOT_RESUMABLE",
+                "message": eligibility.reason,
+                "action": "open_screenplay",
+            })
+        is_repair = eligibility.mode == "finalize"
         recorder = domain_api._new_screenplay_recorder(
             episode["id"],
             requested_by="api",
@@ -276,10 +289,14 @@ def _restart_screenplay_run(run_id: str, trigger_type: str):
             status="repairing" if is_repair else "running",
             message=(
                 "从任务中心继续局部修复：工作副本和检查点均已保留"
-                if is_repair else None
+                if is_repair
+                else f"从任务中心{eligibility.label}：恢复决策已锁定"
             ),
             expected_active_run_id=run_id,
+            resume_eligibility=eligibility,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(503, {
             "code": "RUN_RESUME_START_FAILED",

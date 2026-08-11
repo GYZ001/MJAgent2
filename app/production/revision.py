@@ -254,14 +254,14 @@ def _screenplay_checkpoint_compatibility(
     revision: ProductionRevision,
     *,
     conn,
-) -> tuple[dict[str, Any], dict[str, int]]:
+) -> tuple[dict[str, Any], dict[str, int], bool]:
     from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
     from app.screenplay_ir import IR_VERSION, ScreenplayGenerationIR
     from app.screenplay_scene_shards import (
         SCREENPLAY_ENVELOPE_VERSION,
         SCREENPLAY_MERGED_IR_VERSION,
-        ScreenplayEnvelopeIR,
         blueprint_content_hash,
+        screenplay_envelope_artifact_compatibility,
         screenplay_scene_shard_artifact_compatibility,
     )
 
@@ -302,6 +302,23 @@ def _screenplay_checkpoint_compatibility(
             (episode_id,),
         ).fetchall()
     ]
+    raw_parent_ids = {
+        parent_id
+        for row in [*artifacts.values(), *recovered_shards]
+        for parent_id in (_artifact_parent_ids(row) or set())
+    }
+    if raw_parent_ids:
+        artifacts.update({
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT id,type,scope_type,scope_id,status,contract_version,"
+                "content_json,content_hash,parent_artifact_ids_json,model_snapshot_json "
+                "FROM artifacts WHERE id IN ("
+                + ",".join("?" for _ in raw_parent_ids)
+                + ")",
+                sorted(raw_parent_ids),
+            ).fetchall()
+        })
 
     def base_artifact(
         artifact_id: str,
@@ -374,17 +391,20 @@ def _screenplay_checkpoint_compatibility(
         contract_version=SCREENPLAY_ENVELOPE_VERSION,
     )
     if authority_compatible and envelope_pair:
-        envelope_parents = _artifact_parent_ids(envelope_pair[0])
-        try:
-            envelope = ScreenplayEnvelopeIR.model_validate(envelope_pair[1])
-            envelope_valid = (
-                envelope.blueprint_hash == blueprint_hash
-                and envelope.identity_registry_hash == identity_hash
-                and envelope_parents is not None
-                and {blueprint_id, identity_id} <= envelope_parents
-            )
-        except (TypeError, ValueError):
-            envelope_valid = False
+        envelope_row = envelope_pair[0]
+        normalized_parents = _artifact_parent_ids(envelope_row) or set()
+        raw_envelope = (
+            artifacts.get(next(iter(normalized_parents)))
+            if len(normalized_parents) == 1
+            else None
+        )
+        envelope_valid, _reason = screenplay_envelope_artifact_compatibility(
+            envelope_row,
+            expected_blueprint_hash=blueprint_hash,
+            expected_identity_registry_hash=identity_hash,
+            raw_artifact=raw_envelope,
+            expected_authority_artifact_ids={blueprint_id, identity_id},
+        )
         if envelope_valid:
             reusable["envelope_artifact_id"] = envelope_id
 
@@ -401,8 +421,13 @@ def _screenplay_checkpoint_compatibility(
         for row in candidates:
             compatible = False
             content = _artifact_json(row)
-            parent_ids = _artifact_parent_ids(row)
             if authority_compatible and content is not None:
+                normalized_parents = _artifact_parent_ids(row) or set()
+                raw_shard = (
+                    artifacts.get(next(iter(normalized_parents)))
+                    if len(normalized_parents) == 1
+                    else None
+                )
                 compatible, _reason = screenplay_scene_shard_artifact_compatibility(
                     row,
                     expected_blueprint_hash=blueprint_hash,
@@ -410,12 +435,11 @@ def _screenplay_checkpoint_compatibility(
                     expected_generation_scaffold_hash=str(
                         item.get("generation_scaffold_hash") or ""
                     ),
+                    raw_artifact=raw_shard,
+                    expected_authority_artifact_ids={blueprint_id, identity_id},
                 )
                 compatible = bool(
                     compatible
-                    and _artifact_hash_is_valid(row, content)
-                    and parent_ids is not None
-                    and {blueprint_id, identity_id} <= parent_ids
                     and (
                         artifact_id == str(row.get("id") or "")
                         or (
@@ -501,7 +525,17 @@ def _screenplay_checkpoint_compatibility(
             for item in shard_rows
         ),
     }
-    return reusable, progress
+    incompatible_checkpoint = any((
+        bool(blueprint_id and not reusable.get("blueprint_artifact_id")),
+        bool(identity_id and not reusable.get("identity_artifact_id")),
+        bool(envelope_id and not reusable.get("envelope_artifact_id")),
+        bool(merged_id and not reusable.get("merged_ir_artifact_id")),
+        any(
+            item.get("normalized_artifact_id") and not shard_is_validated(item)
+            for item in shard_rows
+        ),
+    ))
+    return reusable, progress, incompatible_checkpoint
 
 
 def resolve_screenplay_resume_eligibility(
@@ -516,7 +550,12 @@ def resolve_screenplay_resume_eligibility(
     from app.production.patch import load_screenplay_from_artifact
 
     db = conn or get_conn()
-    rev = revision or get_active_production_revision(episode_id, "screenplay")
+    rev = revision or _row_to_revision(db.execute(
+        "SELECT * FROM production_revisions "
+        "WHERE episode_id=? AND kind='screenplay' AND status='active' "
+        "ORDER BY updated_at DESC LIMIT 1",
+        (episode_id,),
+    ).fetchone())
     if rev is None:
         episode = db.execute(
             "SELECT screenplay_status,active_screenplay_run_id "
@@ -566,7 +605,7 @@ def resolve_screenplay_resume_eligibility(
             reason="revision 已发布",
         )
 
-    reusable, progress = _screenplay_checkpoint_compatibility(
+    reusable, progress, incompatible_checkpoint = _screenplay_checkpoint_compatibility(
         episode_id,
         rev,
         conn=db,
@@ -574,11 +613,13 @@ def resolve_screenplay_resume_eligibility(
     reusable["shard_progress"] = progress
     current_baseline_checkpoint = bool(
         reusable.get("blueprint_artifact_id")
-        or reusable.get("identity_artifact_id")
         or reusable.get("envelope_artifact_id")
         or reusable.get("shards")
         or reusable.get("merged_ir_artifact_id")
     )
+    rebuild_transition = str(
+        (rev.checkpoint_json or {}).get("resume_mode") or ""
+    ) == "baseline_rebuild"
     working_id = str(rev.working_artifact_id or "")
     if rev.baseline_done and working_id:
         row = db.execute(
@@ -636,12 +677,8 @@ def resolve_screenplay_resume_eligibility(
                 reason="working Artifact 通过当前合同与 lineage 校验",
             )
         return ScreenplayResumeEligibility(
-            mode="baseline" if current_baseline_checkpoint else "baseline_rebuild",
-            label=(
-                "继续当前首版生成"
-                if current_baseline_checkpoint
-                else "重建当前合同首版"
-            ),
+            mode="baseline_rebuild",
+            label="按新合同重建剧本",
             revision_id=rev.id,
             revision_action="rebase",
             working_artifact_id=working_id,
@@ -651,6 +688,30 @@ def resolve_screenplay_resume_eligibility(
             reason=incompatibility_reason,
         )
 
+    if incompatible_checkpoint:
+        return ScreenplayResumeEligibility(
+            mode="baseline_rebuild",
+            label="按新合同重建剧本",
+            revision_id=rev.id,
+            revision_action="rebase",
+            working_artifact_id=None,
+            working_compatible=False,
+            reusable_checkpoint=reusable,
+            reason_code="MIXED_CHECKPOINT_REQUIRES_REBUILD",
+            reason="pre-Document checkpoint 混合了当前与不兼容合同产物",
+        )
+    if rebuild_transition:
+        return ScreenplayResumeEligibility(
+            mode="baseline_rebuild",
+            label="按新合同重建剧本",
+            revision_id=rev.id,
+            revision_action="reuse",
+            working_artifact_id=None,
+            working_compatible=False,
+            reusable_checkpoint=reusable,
+            reason_code="BASELINE_REBUILD_TRANSITION",
+            reason="新 revision 已进入当前合同重建流程",
+        )
     if current_baseline_checkpoint:
         return ScreenplayResumeEligibility(
             mode="baseline",
@@ -695,11 +756,7 @@ def resolve_screenplay_resume_eligibility(
             )
         return ScreenplayResumeEligibility(
             mode="baseline_rebuild" if metadata_incompatible else "baseline",
-            label=(
-                "重建当前合同首版"
-                if metadata_incompatible
-                else "继续首版生成"
-            ),
+            label=("按新合同重建剧本" if metadata_incompatible else "继续首版生成"),
             revision_id=rev.id,
             revision_action="rebase" if metadata_incompatible else "reuse",
             working_artifact_id=None,
@@ -735,7 +792,11 @@ def rebase_screenplay_revision_for_resume(
     conn,
 ) -> ProductionRevision:
     """CAS-supersede an incompatible working revision and create a clean baseline."""
-    if eligibility.revision_action != "rebase" or not eligibility.revision_id:
+    if (
+        eligibility.mode != "baseline_rebuild"
+        or eligibility.revision_action != "rebase"
+        or not eligibility.revision_id
+    ):
         raise ValueError("screenplay resume rebase 缺少结构化资格")
     old = conn.execute(
         "SELECT * FROM production_revisions WHERE id=?",
@@ -763,26 +824,29 @@ def rebase_screenplay_revision_for_resume(
             "UPDATE artifacts SET status='stale',stale_reason=? "
             "WHERE id=? AND status NOT IN ('rejected','stale','superseded')",
             (
-                f"[WORKING_INCOMPATIBLE] {eligibility.reason}",
+                f"[{eligibility.reason_code}] {eligibility.reason}",
                 eligibility.working_artifact_id,
             ),
         )
+    reused_inputs: dict[str, Any] = {}
+    identity_artifact_id = eligibility.reusable_checkpoint.get(
+        "identity_artifact_id"
+    )
+    identity_registry_hash = eligibility.reusable_checkpoint.get(
+        "identity_registry_hash"
+    )
+    if identity_artifact_id and identity_registry_hash:
+        reused_inputs["identity_registry"] = {
+            "artifact_id": identity_artifact_id,
+            "identity_registry_hash": identity_registry_hash,
+        }
     checkpoint = {
-        key: value
-        for key, value in eligibility.reusable_checkpoint.items()
-        if key != "shard_progress"
-    }
-    checkpoint.update({
-        "phase": (
-            "SCENE_SHARD_GENERATION"
-            if checkpoint.get("shards")
-            else "IDENTITY_FREEZE"
-            if checkpoint.get("blueprint_artifact_id")
-            else "BLUEPRINT_GENERATION"
-        ),
+        "phase": "BLUEPRINT_GENERATION",
+        "resume_mode": "baseline_rebuild",
         "source_revision_id": eligibility.revision_id,
-        "yield_reason": "working_artifact_incompatible",
-    })
+        "reused_inputs": reused_inputs,
+        "yield_reason": "baseline_rebuild_transition",
+    }
     revision_id = new_id("rev")
     conn.execute(
         """INSERT INTO production_revisions(
@@ -1037,7 +1101,6 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         eligibility.reusable_checkpoint.get(key)
         for key in (
             "blueprint_artifact_id",
-            "identity_artifact_id",
             "envelope_artifact_id",
             "shards",
             "merged_ir_artifact_id",

@@ -1780,6 +1780,30 @@ export interface Episode {
     operation: "none" | "baseline" | "baseline_rebuild" | "finalize" | "complete";
     mode?: "none" | "baseline" | "baseline_rebuild" | "finalize" | "complete";
     mode_label?: string;
+    eligibility?: {
+      mode: "none" | "baseline" | "baseline_rebuild" | "finalize" | "complete";
+      label: string;
+      revision_id: string | null;
+      revision_action: "none" | "reuse" | "rebase";
+      working_artifact_id: string | null;
+      working_compatible: boolean;
+      reusable_checkpoint: {
+        blueprint_artifact_id?: string;
+        identity_artifact_id?: string;
+        envelope_artifact_id?: string;
+        shards?: Array<Record<string, unknown>>;
+        merged_ir_artifact_id?: string;
+        shard_progress?: {
+          total: number;
+          validated: number;
+          running: number;
+          failed: number;
+        };
+      };
+      reason_code: string;
+      reason: string;
+      resumable: boolean;
+    };
     phase: string;
     phase_label?: string;
     stage_index?: number;

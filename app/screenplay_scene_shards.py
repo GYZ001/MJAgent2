@@ -360,31 +360,131 @@ class ScreenplaySceneShardIR(BaseModel):
     generation_scaffold_hash: str = ""
 
 
+def _artifact_content(
+    artifact: dict[str, Any],
+) -> dict[str, Any] | None:
+    content = artifact.get("content")
+    if isinstance(content, dict):
+        return content
+    raw_content = artifact.get("content_json")
+    try:
+        content = (
+            json.loads(raw_content)
+            if isinstance(raw_content, str)
+            else raw_content
+        )
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return content if isinstance(content, dict) else None
+
+
+def _artifact_parent_ids(
+    artifact: dict[str, Any],
+) -> set[str] | None:
+    parents = artifact.get("parent_artifact_ids")
+    if parents is None:
+        raw_parents = artifact.get("parent_artifact_ids_json")
+        try:
+            parents = (
+                json.loads(raw_parents)
+                if isinstance(raw_parents, str)
+                else raw_parents
+            )
+        except (TypeError, json.JSONDecodeError):
+            return None
+    if not isinstance(parents, list):
+        return None
+    return {str(parent_id) for parent_id in parents if str(parent_id)}
+
+
+def screenplay_normalized_artifact_lineage_compatibility(
+    artifact: dict[str, Any],
+    raw_artifact: dict[str, Any] | None,
+    *,
+    expected_raw_type: str,
+    expected_authority_artifact_ids: set[str],
+) -> tuple[bool, str]:
+    """Match the generator's normalized -> raw -> authority lineage."""
+    normalized_parents = _artifact_parent_ids(artifact)
+    if raw_artifact is None or normalized_parents != {str(raw_artifact.get("id") or "")}:
+        return False, "normalized_parent"
+    if raw_artifact.get("type") != expected_raw_type:
+        return False, "raw_artifact_type"
+    if raw_artifact.get("status") != "candidate":
+        return False, "raw_artifact_status"
+    if (
+        raw_artifact.get("scope_type") != artifact.get("scope_type")
+        or raw_artifact.get("scope_id") != artifact.get("scope_id")
+    ):
+        return False, "raw_artifact_scope"
+    if (
+        str(raw_artifact.get("contract_version") or "")
+        != str(artifact.get("contract_version") or "")
+    ):
+        return False, "raw_artifact_contract_version"
+    if _artifact_parent_ids(raw_artifact) != expected_authority_artifact_ids:
+        return False, "raw_authority_parents"
+    return True, ""
+
+
+def screenplay_envelope_artifact_compatibility(
+    artifact: dict[str, Any],
+    *,
+    expected_blueprint_hash: str,
+    expected_identity_registry_hash: str,
+    raw_artifact: dict[str, Any] | None = None,
+    expected_authority_artifact_ids: set[str] | None = None,
+) -> tuple[bool, str]:
+    content = _artifact_content(artifact)
+    if artifact.get("status") != "validated":
+        return False, "artifact_status"
+    if str(artifact.get("contract_version") or "") != SCREENPLAY_ENVELOPE_VERSION:
+        return False, "artifact_contract_version"
+    if not isinstance(content, dict):
+        return False, "artifact_content"
+    if evidence_repository.content_hash(content) != str(
+        artifact.get("content_hash") or ""
+    ):
+        return False, "artifact_content_hash"
+    try:
+        envelope = ScreenplayEnvelopeIR.model_validate(content)
+    except ValidationError:
+        return False, "content_schema"
+    if envelope.blueprint_hash != expected_blueprint_hash:
+        return False, "blueprint_hash"
+    if envelope.identity_registry_hash != expected_identity_registry_hash:
+        return False, "identity_registry_hash"
+    if expected_authority_artifact_ids is not None:
+        return screenplay_normalized_artifact_lineage_compatibility(
+            artifact,
+            raw_artifact,
+            expected_raw_type="screenplay_envelope_raw",
+            expected_authority_artifact_ids=expected_authority_artifact_ids,
+        )
+    return True, ""
+
+
 def screenplay_scene_shard_artifact_compatibility(
     artifact: dict[str, Any],
     *,
     expected_blueprint_hash: str = "",
     expected_identity_registry_hash: str = "",
     expected_generation_scaffold_hash: str = "",
+    raw_artifact: dict[str, Any] | None = None,
+    expected_authority_artifact_ids: set[str] | None = None,
 ) -> tuple[bool, str]:
     """Validate one persisted shard against the current resumable contract."""
-    content = artifact.get("content")
-    if not isinstance(content, dict):
-        raw_content = artifact.get("content_json")
-        try:
-            content = (
-                json.loads(raw_content)
-                if isinstance(raw_content, str)
-                else raw_content
-            )
-        except (TypeError, json.JSONDecodeError):
-            content = None
+    content = _artifact_content(artifact)
     if artifact.get("status") != "validated":
         return False, "artifact_status"
     if str(artifact.get("contract_version") or "") != SCREENPLAY_SCENE_SHARD_VERSION:
         return False, "artifact_contract_version"
     if not isinstance(content, dict):
         return False, "artifact_content"
+    if evidence_repository.content_hash(content) != str(
+        artifact.get("content_hash") or ""
+    ):
+        return False, "artifact_content_hash"
     if str(content.get("contract_version") or "") != SCREENPLAY_SCENE_SHARD_VERSION:
         return False, "content_contract_version"
     if not expected_blueprint_hash or not expected_identity_registry_hash:
@@ -409,6 +509,13 @@ def screenplay_scene_shard_artifact_compatibility(
         ScreenplaySceneShardIR.model_validate(content)
     except ValidationError:
         return False, "content_schema"
+    if expected_authority_artifact_ids is not None:
+        return screenplay_normalized_artifact_lineage_compatibility(
+            artifact,
+            raw_artifact,
+            expected_raw_type="screenplay_scene_shard_raw",
+            expected_authority_artifact_ids=expected_authority_artifact_ids,
+        )
     return True, ""
 
 
@@ -2497,8 +2604,9 @@ def _latest_validated_artifact(
     predicate: Callable[[dict[str, Any]], bool],
 ) -> dict[str, Any] | None:
     rows = get_conn().execute(
-        """SELECT id,content_json,content_hash,parent_artifact_ids_json,
-                  contract_version,prompt_version,model_snapshot_json
+        """SELECT id,type,scope_type,scope_id,status,content_json,content_hash,
+                  parent_artifact_ids_json,contract_version,prompt_version,
+                  model_snapshot_json
              FROM artifacts
             WHERE scope_type='episode' AND scope_id=? AND type=?
               AND status='validated'
@@ -2513,6 +2621,19 @@ def _latest_validated_artifact(
         if predicate(content):
             return {**dict(row), "content": content}
     return None
+
+
+def _raw_parent_artifact(
+    artifact: dict[str, Any],
+) -> dict[str, Any] | None:
+    parent_ids = _artifact_parent_ids(artifact)
+    if parent_ids is None or len(parent_ids) != 1:
+        return None
+    row = get_conn().execute(
+        "SELECT * FROM artifacts WHERE id=?",
+        (next(iter(parent_ids)),),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 async def generate_screenplay_envelope(
@@ -2537,7 +2658,18 @@ async def generate_screenplay_envelope(
         ),
     )
     if cached:
-        return ScreenplayEnvelopeIR.model_validate(cached["content"]), str(cached["id"])
+        compatible, _reason = screenplay_envelope_artifact_compatibility(
+            cached,
+            expected_blueprint_hash=blueprint_hash,
+            expected_identity_registry_hash=identity_registry_hash,
+            raw_artifact=_raw_parent_artifact(cached),
+            expected_authority_artifact_ids={
+                str(blueprint_artifact_id or ""),
+                str(identity_artifact_id or ""),
+            },
+        )
+        if compatible:
+            return ScreenplayEnvelopeIR.model_validate(cached["content"]), str(cached["id"])
     node_summary = [
         {
             "key": node.key,
@@ -2841,8 +2973,23 @@ async def generate_screenplay_scene_shards(
             == SCREENPLAY_SCENE_SHARD_VERSION,
         )
         if cached:
+            compatible, _reason = screenplay_scene_shard_artifact_compatibility(
+                cached,
+                expected_blueprint_hash=plan.blueprint_hash,
+                expected_identity_registry_hash=plan.identity_registry_hash,
+                expected_generation_scaffold_hash=generation_scaffold_hash,
+                raw_artifact=_raw_parent_artifact(cached),
+                expected_authority_artifact_ids={
+                    str(blueprint_artifact_id or ""),
+                    str(identity_artifact_id or ""),
+                },
+            )
             try:
-                shard = ScreenplaySceneShardIR.model_validate(cached["content"])
+                shard = (
+                    ScreenplaySceneShardIR.model_validate(cached["content"])
+                    if compatible
+                    else None
+                )
             except ValidationError:
                 shard = None
             if shard is not None:
@@ -3127,7 +3274,12 @@ def persist_identity_registry(
             content.get("identity_registry_hash") == identity_registry_hash
         ),
     )
-    if cached:
+    expected_parents = {
+        str(parent_id)
+        for parent_id in parent_artifact_ids or []
+        if str(parent_id)
+    }
+    if cached and _artifact_parent_ids(cached) == expected_parents:
         return str(cached["id"])
     trace = current_trace()
     artifact = evidence_repository.create_artifact(
