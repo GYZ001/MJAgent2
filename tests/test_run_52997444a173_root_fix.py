@@ -16,9 +16,11 @@ from app.narrative_blueprint import (
     blueprint_prompt_contract,
     blueprint_semantic_review_schema,
     blueprint_voice_identity_issues,
+    derive_blueprint_scene_plans,
     validate_narrative_blueprint,
 )
 from app.screenplay_scene_shards import (
+    ScreenplaySceneShardError,
     build_screenplay_scene_input_contracts,
     build_screenplay_scene_shard_plans,
 )
@@ -142,6 +144,145 @@ def test_voice_issue_contract_distinguishes_ambiguous_and_conflict() -> None:
     )
     issues = blueprint_voice_identity_issues(blueprint, source_text)
     assert issues[0].code == "voice_identity_conflict"
+
+
+def test_voice_evidence_without_source_unit_keys_hard_fails() -> None:
+    payload = _fixture()
+    source_text = _source(payload)
+    blueprint = _blueprint(payload, repaired=True)
+    blueprint.nodes[6].participant_evidence[1].source_unit_keys = []
+
+    issues = blueprint_voice_identity_issues(blueprint, source_text)
+
+    assert any(
+        issue.code == "voice_identity_conflict"
+        and "source_unit_keys" in issue.message
+        for issue in issues
+    )
+    assert any(
+        issue.code == "voice_identity_missing"
+        and issue.source_segment_ids == ["SRC0052"]
+        for issue in issues
+    )
+
+    repaired = _blueprint(payload, repaired=True)
+    assert apply_narrative_blueprint_patch(
+        blueprint,
+        NarrativeBlueprintPatch.model_validate({
+            "replacements": [{
+                "node_key": repaired.nodes[6].key,
+                "node": repaired.nodes[6].model_dump(mode="json"),
+            }],
+        }),
+        source_text=source_text,
+    ) == 1
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source_text,
+        identity_registry_hash="fixture-identity-registry",
+    )
+    plan = next(
+        item for item in plans if "SRC0052" in item.source_segment_ids
+    )
+    scene_plans = [
+        scene
+        for scene in blueprint.scene_plans
+        if scene.key in plan.scene_plan_keys
+    ]
+    blueprint.nodes[6].participant_evidence[1].source_unit_keys = []
+
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="voice identity evidence .*source_unit_keys",
+    ):
+        build_screenplay_scene_input_contracts(
+            plan=plan,
+            scene_plans=scene_plans,
+            source_by_id={
+                segment.segment_id: segment.text
+                for segment in index_source_segments(source_text)
+            },
+            identity_registry=payload["identity_registry"],
+            blueprint_nodes=blueprint.nodes,
+        )
+
+
+def test_voice_evidence_with_no_source_scope_hard_fails_early() -> None:
+    payload = _fixture()
+    source_text = _source(payload)
+    blueprint = _blueprint(payload, repaired=True)
+    blueprint.nodes[6].participant_evidence.append(
+        NarrativeParticipantEvidence(
+            identity_key="episode:traveler",
+            usage="voice",
+        )
+    )
+
+    issues = blueprint_voice_identity_issues(blueprint, source_text)
+
+    assert any(
+        issue.code == "voice_identity_conflict"
+        and "source_unit_keys" in issue.message
+        for issue in issues
+    )
+
+
+def test_segment_scoped_voice_without_dialogue_remains_valid() -> None:
+    source_text = "远处传来守夜人的呼喊。"
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "node-1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "守夜人在远处呼喊",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "episode-present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "courtyard",
+            "location_label": "院中",
+            "participants": ["episode:watchman"],
+            "participant_evidence": [{
+                "identity_key": "episode:watchman",
+                "source_segment_ids": ["SRC0001"],
+                "usage": "voice",
+            }],
+            "action_logic": "守夜人的呼喊从远处传入院中",
+        }],
+    })
+    derive_blueprint_scene_plans(blueprint)
+
+    assert blueprint_voice_identity_issues(blueprint, source_text) == []
+
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source_text,
+        identity_registry_hash="identity-registry",
+    )[0]
+    contracts = build_screenplay_scene_input_contracts(
+        plan=plan,
+        scene_plans=blueprint.scene_plans,
+        source_by_id={"SRC0001": source_text},
+        identity_registry=[{
+            "identity_key": "person_watchman",
+            "authority_id": "functional:watchman",
+            "canonical_name": "守夜人",
+            "identity_group": "episode:watchman",
+            "source_labels": ["守夜人"],
+        }],
+        blueprint_nodes=blueprint.nodes,
+    )
+
+    assert len(contracts[0].unit_slots) == 1
+    slot = contracts[0].unit_slots[0]
+    assert slot.kind == "action"
+    assert slot.speaker_key == "person_watchman"
+    assert [
+        (delivery.participant_key, delivery.audible)
+        for delivery in slot.participant_deliveries
+    ] == [("person_watchman", True)]
 
 
 def test_repair_preserves_timeline_and_compiles_ss004_canonical_speakers() -> None:

@@ -77,6 +77,14 @@ _AUDIT_SOURCE_SEMANTICS = BlueprintSourceSemantics(
     projection_policy="audit_only",
 )
 _SourceSemanticIdentity = tuple[str, str, str, str, str, str]
+_SourceAuditAnnotationIdentity = tuple[
+    str,
+    tuple[str, ...],
+    str,
+    str,
+    str,
+    str,
+]
 
 
 class ScreenplayIRIdentityConflictError(ValueError):
@@ -432,8 +440,31 @@ def _canonical_source_semantic_identity(
     )
 
 
+def _canonical_source_audit_annotation_identity(
+    annotation: object,
+) -> _SourceAuditAnnotationIdentity:
+    typed = (
+        annotation
+        if isinstance(annotation, BlueprintSourceAuditAnnotation)
+        else BlueprintSourceAuditAnnotation.model_validate(annotation)
+    )
+    return (
+        typed.node_key.strip(),
+        tuple(sorted(
+            _normalize_source_segment_id(source_id)
+            for source_id in typed.source_segment_ids
+        )),
+        typed.narrative_layer,
+        typed.render_policy,
+        typed.disposition,
+        typed.projection_policy,
+    )
+
+
 def screenplay_ir_source_audit_contract_errors(
     value: object,
+    *,
+    expected_source_audit_annotations: list[object] | None = None,
 ) -> list[str]:
     """Validate the explicit audit authority carried by the current IR."""
     if not isinstance(value, dict):
@@ -454,6 +485,9 @@ def screenplay_ir_source_audit_contract_errors(
 
     errors: list[str] = []
     annotation_identities: list[_SourceSemanticIdentity] = []
+    annotation_authority_identities: list[
+        _SourceAuditAnnotationIdentity
+    ] = []
     annotation_node_keys: list[str] = []
     required_annotation_fields = set(
         BlueprintSourceAuditAnnotation.model_fields
@@ -493,6 +527,9 @@ def screenplay_ir_source_audit_contract_errors(
             )
             continue
         annotation_node_keys.append(typed_annotation.node_key.strip())
+        annotation_authority_identities.append(
+            _canonical_source_audit_annotation_identity(typed_annotation)
+        )
         annotation_identities.extend(
             _canonical_source_semantic_identity(
                 source_id,
@@ -575,6 +612,28 @@ def screenplay_ir_source_audit_contract_errors(
             f"coverage={coverage_identities}, "
             f"semantics={semantic_identities}"
         )
+    if expected_source_audit_annotations is not None:
+        try:
+            expected_authority_identities = [
+                _canonical_source_audit_annotation_identity(annotation)
+                for annotation in expected_source_audit_annotations
+            ]
+        except ValueError:
+            errors.append(
+                "[IR_SOURCE_AUDIT_AUTHORITY_INVALID] "
+                "Blueprint source_audit_annotations 违反 audit 语义合同"
+            )
+        else:
+            if sorted(annotation_authority_identities) != sorted(
+                expected_authority_identities
+            ):
+                errors.append(
+                    "[IR_SOURCE_AUDIT_AUTHORITY_MISMATCH] "
+                    "source_audit_annotations 必须保留 Blueprint 的 "
+                    "node/source/semantics 完整绑定："
+                    f"actual={sorted(annotation_authority_identities)}, "
+                    f"expected={sorted(expected_authority_identities)}"
+                )
     return list(dict.fromkeys(errors))
 
 

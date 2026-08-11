@@ -1063,51 +1063,65 @@ def blueprint_voice_identity_issues(
         for evidence in node.participant_evidence:
             if evidence.usage != "voice":
                 continue
-            if evidence.source_unit_keys:
-                invalid_keys = [
-                    key
-                    for key in evidence.source_unit_keys
-                    if (
-                        key not in facts_by_key
-                        or facts_by_key[key].projection != "dialogue"
-                        or facts_by_key[key].source_segment_id
-                        not in owned_sources
-                    )
-                ]
-                if invalid_keys:
-                    issues.append(BlueprintSemanticIssue(
-                        code="voice_identity_conflict",
-                        node_keys=[node.key],
-                        source_segment_ids=list(
-                            evidence.source_segment_ids
-                        ),
-                        message=(
-                            f"{evidence.identity_key} 的 voice evidence 引用了"
-                            "非本节点 dialogue source unit："
-                            + "、".join(invalid_keys)
-                        ),
-                        required_resolution=(
-                            "保留节点、来源 ownership 与语义，只把 voice "
-                            "evidence 绑定到本节点实际拥有的 dialogue unit"
-                        ),
-                    ))
-                    continue
-                target_keys = evidence.source_unit_keys
-            else:
-                target_keys = [
-                    fact.source_unit_key
-                    for source_id in evidence.source_segment_ids
-                    for fact in dialogue_by_source.get(source_id, [])
-                    if source_id in owned_sources
-                ]
+            effective_source_ids = list(
+                evidence.source_segment_ids or node.source_segment_ids
+            )
+            effective_source_set = set(effective_source_ids)
+            invalid_keys = [
+                key
+                for key in evidence.source_unit_keys
+                if (
+                    key not in facts_by_key
+                    or facts_by_key[key].projection != "dialogue"
+                    or facts_by_key[key].source_segment_id
+                    not in owned_sources
+                    or facts_by_key[key].source_segment_id
+                    not in effective_source_set
+                )
+            ]
+            if invalid_keys:
+                issues.append(BlueprintSemanticIssue(
+                    code="voice_identity_conflict",
+                    node_keys=[node.key],
+                    source_segment_ids=list(
+                        evidence.source_segment_ids
+                    ),
+                    message=(
+                        f"{evidence.identity_key} 的 voice evidence 引用了"
+                        "非本节点 dialogue source unit："
+                        + "、".join(invalid_keys)
+                    ),
+                    required_resolution=(
+                        "保留节点、来源 ownership 与语义，只把 voice "
+                        "evidence 绑定到本节点实际拥有的 dialogue unit"
+                    ),
+                ))
+                continue
+            segment_scoped_non_dialogue_voice = (
+                bool(effective_source_ids)
+                and effective_source_set.issubset(owned_sources)
+                and not any(
+                    dialogue_by_source.get(source_id, [])
+                    for source_id in effective_source_ids
+                )
+            )
+            if (
+                not evidence.source_unit_keys
+                and segment_scoped_non_dialogue_voice
+            ):
+                # A segment-scoped offscreen voice can be valid evidence for
+                # an audible action even when the source has no dialogue unit.
+                continue
+            target_keys = evidence.source_unit_keys
             if not target_keys:
                 issues.append(BlueprintSemanticIssue(
                     code="voice_identity_conflict",
                     node_keys=[node.key],
                     source_segment_ids=list(evidence.source_segment_ids),
                     message=(
-                        f"{evidence.identity_key} 的 voice evidence 没有绑定"
-                        "本节点 dialogue source unit"
+                        f"{evidence.identity_key} 的 voice evidence 缺少 "
+                        "source_unit_keys，没有绑定本节点 "
+                        "dialogue source unit"
                     ),
                     required_resolution=(
                         "保留节点、来源 ownership 与语义，为该 voice evidence "

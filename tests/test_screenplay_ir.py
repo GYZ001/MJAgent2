@@ -2613,7 +2613,14 @@ def test_current_ir_requires_explicit_complete_source_audit_contract() -> None:
 
 
 def test_source_audit_contract_uses_canonical_identity_order() -> None:
+    expected = _audit_only_ir_payload(
+        "SRC0002", "SRC0003"
+    )["source_audit_annotations"]
     payload = _audit_only_ir_payload("SRC0002", "SRC0003")
+    payload["source_audit_annotations"] = [{
+        **payload["source_audit_annotations"][0],
+        "source_segment_ids": ["SRC0003", "SRC0002"],
+    }]
     payload["source_semantics"] = {
         source_id: dict(reversed(list(semantics.items())))
         for source_id, semantics in reversed(
@@ -2626,12 +2633,40 @@ def test_source_audit_contract_uses_canonical_identity_order() -> None:
     ]
 
     validated = ScreenplayGenerationIR.model_validate(payload)
+    authority_errors = screenplay_ir_source_audit_contract_errors(
+        payload,
+        expected_source_audit_annotations=[{
+            **expected[0],
+            "source_segment_ids": ["SRC0002", "SRC0003"],
+        }],
+    )
 
+    assert authority_errors == []
     assert {
         source_id
         for annotation in validated.source_audit_annotations
         for source_id in annotation.source_segment_ids
     } == {"SRC0002", "SRC0003"}
+
+
+def test_source_audit_authority_rejects_swapped_node_source_groups() -> None:
+    payload = _audit_only_ir_payload("SRC0002", "SRC0003")
+    expected = deepcopy(payload["source_audit_annotations"])
+    payload["source_audit_annotations"][0]["source_segment_ids"], payload[
+        "source_audit_annotations"
+    ][1]["source_segment_ids"] = (
+        payload["source_audit_annotations"][1]["source_segment_ids"],
+        payload["source_audit_annotations"][0]["source_segment_ids"],
+    )
+
+    assert ScreenplayGenerationIR.model_validate(payload)
+    assert any(
+        "IR_SOURCE_AUDIT_AUTHORITY_MISMATCH" in error
+        for error in screenplay_ir_source_audit_contract_errors(
+            payload,
+            expected_source_audit_annotations=expected,
+        )
+    )
 
 
 def test_compiler_uses_source_audit_canonical_identity_order() -> None:

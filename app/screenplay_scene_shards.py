@@ -50,6 +50,7 @@ from app.screenplay_ir import (
     IRSceneUnit,
     ScreenplayGenerationIR,
     IR_VERSION,
+    screenplay_ir_source_audit_contract_errors,
 )
 from app.source_excerpt import index_source_segments, structural_front_matter_ids
 from app.source_facts import source_segment_facts
@@ -686,6 +687,25 @@ def _compile_unit_identity_scaffold(
             if not source_set.intersection(
                 participant.source_segment_ids
             ):
+                continue
+            if (
+                participant.usage == "voice"
+                and not participant.source_unit_keys
+                and (
+                    slot.kind == "dialogue"
+                    or any(
+                        part_kind == "dialogue"
+                        for source_id in participant.source_segment_ids
+                        for part_kind, _part_text in _source_creative_parts(
+                            source_text_by_id.get(source_id, "")
+                        )
+                    )
+                )
+            ):
+                errors.append(
+                    f"{slot.unit_key} voice identity evidence "
+                    "缺少精确 source_unit_keys"
+                )
                 continue
             if (
                 participant.source_unit_keys
@@ -2550,7 +2570,7 @@ def merge_screenplay_scene_shards(
         errors.append("来源首次所有权顺序不单调")
     if errors:
         raise ScreenplaySceneMergeError(errors)
-    return ScreenplayGenerationIR(
+    merged_ir = ScreenplayGenerationIR(
         format_version=IR_VERSION,
         episode_no=envelope.episode_no,
         metadata=envelope.metadata.to_ir(),
@@ -2581,6 +2601,15 @@ def merge_screenplay_scene_shards(
         ],
         source_ownership_hash=expected_ownership_hash,
     )
+    audit_authority_errors = screenplay_ir_source_audit_contract_errors(
+        merged_ir.model_dump(mode="json"),
+        expected_source_audit_annotations=list(
+            blueprint.source_audit_annotations
+        ),
+    )
+    if audit_authority_errors:
+        raise ScreenplaySceneMergeError(audit_authority_errors)
+    return merged_ir
 
 
 def _latest_validated_artifact(

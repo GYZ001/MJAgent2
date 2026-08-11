@@ -224,6 +224,7 @@ def _recover_screenplay_ir_candidate(
     episode_id: str,
     *,
     blueprint_hash: str = "",
+    expected_source_audit_annotations: list[object] | None = None,
 ) -> tuple[ScreenplayGenerationIR, str] | None:
     """Load the latest IR produced for the same authority input."""
     from app.observability.tracing import current_trace
@@ -319,7 +320,12 @@ def _recover_screenplay_ir_candidate(
                 *screenplay_ir_missing_participant_delivery_paths(payload),
                 *screenplay_ir_missing_event_semantic_paths(payload),
             ]
-            audit_errors = screenplay_ir_source_audit_contract_errors(payload)
+            audit_errors = screenplay_ir_source_audit_contract_errors(
+                payload,
+                expected_source_audit_annotations=(
+                    expected_source_audit_annotations
+                ),
+            )
             if missing_paths or audit_errors:
                 raise ArtifactNeedsRebuildError(
                     artifact_id=str(row["id"]),
@@ -6119,6 +6125,11 @@ async def generate_screenplay_baseline(
         episode_id,
         blueprint_hash=_narrative_blueprint_content_hash(
             _narrative_blueprint
+        ),
+        expected_source_audit_annotations=(
+            list(_narrative_blueprint.source_audit_annotations)
+            if _narrative_blueprint is not None
+            else None
         ),
     )
     if recovered is not None:
