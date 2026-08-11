@@ -1271,7 +1271,8 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
                  auto_retake_count: int = 0,
                  supervisor_run_id: str | None = None,
                  dependency_snapshot: dict[str, Any] | None = None,
-                 critique_sources: list[dict[str, Any]] | None = None) -> dict:
+                 critique_sources: list[dict[str, Any]] | None = None,
+                 operation_idempotency_key: str | None = None) -> dict:
     """持久化校验状态；不从错误文案推断或改写分镜数据。"""
     authority_context = _assert_enqueue_storyboard_authority(shot_id)
     if (
@@ -1316,6 +1317,7 @@ def enqueue_shot(shot_id: str, *, prompt_override: str | None = None,
             supervisor_run_id=supervisor_run_id,
             dependency_snapshot=dependency_snapshot,
             critique_sources=critique_sources,
+            operation_idempotency_key=operation_idempotency_key,
             preflight_job_id=preflight_job_id,
             preflight_owner=preflight_owner,
         )
@@ -1348,6 +1350,7 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
                        supervisor_run_id: str | None = None,
                        dependency_snapshot: dict[str, Any] | None = None,
                        critique_sources: list[dict[str, Any]] | None = None,
+                       operation_idempotency_key: str | None = None,
                        preflight_job_id: str | None = None,
                        preflight_owner: str | None = None,
                        preflight_repair: dict[str, Any] | None = None) -> dict:
@@ -1713,9 +1716,29 @@ def _enqueue_shot_impl(shot_id: str, *, prompt_override: str | None = None,
             f"@{reference_gallery['revision']}:{reference_gallery['fingerprint']}"
         )
     if reroll:
-        key = make_idem_key(key_material + f"#reroll{time.time()}")
+        reroll_scope = str(operation_idempotency_key or "").strip()
+        if not reroll_scope:
+            reroll_scope = make_idem_key(
+                json.dumps(
+                    {
+                        "supervisor_run_id": supervisor_run_id or "",
+                        "auto_retake_count": max(0, int(auto_retake_count)),
+                        "critique": critique or [],
+                        "critique_sources": critique_sources or [],
+                        "previous_prompt_fingerprint": previous_prompt_fingerprint or "",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        key = make_idem_key(key_material + f"|reroll_operation:{reroll_scope}")
     else:
         key = make_idem_key(key_material)
+
+    # A paid command receipt can be lost after the durable enqueue commits.  The
+    # domain key therefore owns replay safety too: the same logical operation
+    # must recover the exact version/job instead of relying on the outer bus.
+    if not reroll or operation_idempotency_key:
         # 复用成功版；同时挡住仍在排队/运行中的同键任务，避免双击重复付费。
         reusable_statuses = [
             "succeeded", "queued", "running", "waiting_provider",

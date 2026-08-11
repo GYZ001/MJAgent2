@@ -11,6 +11,34 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
     from app.capabilities.preflight import video_generate_episode
     from app.completion_grant import authorize_episode_video_budget_increment
 
+    from app.capabilities.bus import canonical_command_request_fingerprint
+    from app.video_command_operations import (
+        VideoCommandOperationConflict,
+        claim_video_command_operation,
+        finish_video_command_operation,
+    )
+
+    command = "video.generate_episode"
+    request_fingerprint = canonical_command_request_fingerprint(
+        command, args.model_dump(mode="json"),
+    )
+    try:
+        recovered = claim_video_command_operation(
+            command=command,
+            idempotency_key=str(args.idempotency_key or ""),
+            request_fingerprint=request_fingerprint,
+            scope_type="episode",
+            scope_id=args.episode_id,
+        )
+    except VideoCommandOperationConflict as exc:
+        return failed(str(exc), error_code="idempotency_request_mismatch")
+    if recovered is not None:
+        return succeeded(
+            f"已提交 {len(recovered.get('enqueued') or [])} 个镜头的视频生成任务",
+            data=recovered,
+            resource_uris=[f"manju://episodes/{args.episode_id}/storyboard"],
+        )
+
     approved_cost = float(video_generate_episode(args).estimated_cost_cny or 0)
     if approved_cost > 0:
         if not args.idempotency_key:
@@ -18,25 +46,30 @@ async def generate_episode(args: I.EpisodeScopedInput) -> CommandResult:
                 "付费视频命令必须提供稳定的 idempotency_key",
                 error_code="idempotency_key_required",
             )
-        from app.capabilities.bus import canonical_command_request_fingerprint
-
         authorize_episode_video_budget_increment(
             args.episode_id,
             approved_cost,
             source="capability:video.generate_episode",
-            operation_id=f"video.generate_episode:{args.idempotency_key}",
-            request_fingerprint=canonical_command_request_fingerprint(
-                "video.generate_episode",
-                args.model_dump(mode="json"),
-            ),
+            operation_id=f"{command}:{args.idempotency_key}",
+            request_fingerprint=request_fingerprint,
         )
     outcome = await call_guarded(
         api._generate_episode_core,
         args.episode_id,
-        {"authorized_video_cost_cny": approved_cost},
+        {
+            "authorized_video_cost_cny": approved_cost,
+            "idempotency_key": args.idempotency_key,
+            "request_id": args.request_id,
+        },
     )
     if isinstance(outcome, CommandResult):
         return outcome
+    finish_video_command_operation(
+        command=command,
+        idempotency_key=str(args.idempotency_key or ""),
+        request_fingerprint=request_fingerprint,
+        result=outcome,
+    )
     enqueued = outcome.get("enqueued") or []
     return succeeded(
         f"已提交 {len(enqueued)} 个镜头的视频生成任务",
@@ -104,6 +137,34 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     from app.capabilities.preflight import video_generate_shot
     from app.completion_grant import authorize_episode_video_budget_increment
 
+    from app.capabilities.bus import canonical_command_request_fingerprint
+    from app.video_command_operations import (
+        VideoCommandOperationConflict,
+        claim_video_command_operation,
+        finish_video_command_operation,
+    )
+
+    command = "video.generate_shot"
+    request_fingerprint = canonical_command_request_fingerprint(
+        command, args.model_dump(mode="json"),
+    )
+    try:
+        recovered = claim_video_command_operation(
+            command=command,
+            idempotency_key=str(args.idempotency_key or ""),
+            request_fingerprint=request_fingerprint,
+            scope_type="shot",
+            scope_id=args.shot_id,
+        )
+    except VideoCommandOperationConflict as exc:
+        return failed(str(exc), error_code="idempotency_request_mismatch")
+    if recovered is not None:
+        return succeeded(
+            "已复用既有成片" if recovered.get("reused") else "视频生成任务已提交",
+            data=recovered,
+            resource_uris=[f"manju://shots/{args.shot_id}"],
+        )
+
     approved_cost = float(video_generate_shot(args).estimated_cost_cny or 0)
     if approved_cost > 0:
         if not args.idempotency_key:
@@ -117,17 +178,12 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
             "SELECT episode_id FROM shots WHERE id=?", (args.shot_id,),
         ).fetchone()
         if shot:
-            from app.capabilities.bus import canonical_command_request_fingerprint
-
             authorize_episode_video_budget_increment(
                 str(shot["episode_id"]),
                 approved_cost,
                 source="capability:video.generate_shot",
-                operation_id=f"video.generate_shot:{args.idempotency_key}",
-                request_fingerprint=canonical_command_request_fingerprint(
-                    "video.generate_shot",
-                    args.model_dump(mode="json"),
-                ),
+                operation_id=f"{command}:{args.idempotency_key}",
+                request_fingerprint=request_fingerprint,
             )
 
     body = {
@@ -142,6 +198,12 @@ async def generate_shot(args: I.VideoGenerateShotInput) -> CommandResult:
     outcome = await call_guarded(api._generate_shot_core, args.shot_id, body)
     if isinstance(outcome, CommandResult):
         return outcome
+    finish_video_command_operation(
+        command=command,
+        idempotency_key=str(args.idempotency_key or ""),
+        request_fingerprint=request_fingerprint,
+        result=outcome,
+    )
     return succeeded(
         "已复用既有成片" if outcome.get("reused") else "视频生成任务已提交",
         data=outcome,

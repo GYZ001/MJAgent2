@@ -2188,6 +2188,11 @@ async def _generate_episode_core(episode_id: str, body: dict) -> dict:
             r = worker.enqueue_shot(
                 s["row"]["id"], after_shot_id=after,
                 dependency_snapshot=qualification,
+                operation_idempotency_key=(
+                    f"{body.get('idempotency_key')}:{s['row']['id']}"
+                    if body.get("idempotency_key")
+                    else None
+                ),
             )
             # enqueue_shot also reports active/paused same-key jobs as reused.
             # Only an already deliverable completed version may be adopted here.
@@ -2300,6 +2305,7 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
                 shot_id,
                 reason=replan_reason,
                 conn=conn,
+                idempotency_key=body.get("idempotency_key"),
             )
     except VideoPlanValidationError as exc:
         raise HTTPException(409, {
@@ -2321,7 +2327,8 @@ async def _generate_shot_core(shot_id: str, body: dict) -> dict:
             reroll=bool(body.get("reroll")) or bool(body.get("with_critique")),
             critique=critique, after_shot_id=after,
             dependency_snapshot=qualification,
-            critique_sources=critique_sources)
+            critique_sources=critique_sources,
+            operation_idempotency_key=body.get("idempotency_key"))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
 

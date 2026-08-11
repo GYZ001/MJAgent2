@@ -2773,6 +2773,7 @@ def create_local_replan_revision(
     *,
     reason: str,
     conn=None,
+    idempotency_key: str | None = None,
 ) -> EpisodeVideoGenerationPlan:
     """Create a new plan revision while changing only one shot's input identity."""
     db = conn or get_conn()
@@ -2789,6 +2790,27 @@ def create_local_replan_revision(
         or not verify_episode_plan_is_current(current, conn=db)
     ):
         raise ValueError("单镜重做缺少当前有效的视频模式计划")
+    operation_key = str(idempotency_key or "").strip()
+    operation_fingerprint = (
+        _hash({
+            "episode_id": str(shot["episode_id"]),
+            "shot_id": shot_id,
+            "reason": reason,
+            "idempotency_key": operation_key,
+        })
+        if operation_key
+        else ""
+    )
+    if operation_fingerprint:
+        existing = db.execute(
+            """SELECT id FROM episode_video_generation_plans
+               WHERE episode_id=? AND planner_model='local-shot-replan'
+                 AND planner_prompt_fingerprint=?
+               ORDER BY plan_revision DESC LIMIT 1""",
+            (shot["episode_id"], operation_fingerprint),
+        ).fetchone()
+        if existing and current.episode_video_plan_id == str(existing["id"]):
+            return current
     next_revision = int(db.execute(
         "SELECT COALESCE(MAX(plan_revision),0)+1 n FROM episode_video_generation_plans WHERE episode_id=?",
         (shot["episode_id"],),
@@ -2801,7 +2823,7 @@ def create_local_replan_revision(
     replacement.blockers = []
     replacement.planner_provider = "deterministic"
     replacement.planner_model = "local-shot-replan"
-    replacement.planner_prompt_fingerprint = _hash({
+    replacement.planner_prompt_fingerprint = operation_fingerprint or _hash({
         "source_plan_id": current.episode_video_plan_id,
         "shot_id": shot_id,
         "reason": reason,
