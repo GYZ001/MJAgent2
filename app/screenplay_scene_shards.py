@@ -1053,27 +1053,6 @@ def build_frozen_identity_registry(
                 or authority_id
             ),
         })
-    # Narration is a compiler-owned voice identity and does not require model
-    # adjudication.  Scene shards may use it only for source-backed narration.
-    identities.append(IRIdentity(
-        key="narrator",
-        display_name="旁白",
-        authority_id="narrator:narrator",
-        source_names=[],
-        kind="narrator",
-        visual_policy="offscreen_only",
-        asset_requirement="forbidden",
-        role_type="narrator",
-        rationale="后端拥有的纯旁白身份",
-    ))
-    projected.append({
-        "authority_id": "narrator:narrator",
-        "identity_key": "narrator",
-        "canonical_name": "旁白",
-        "identity_kind": "narrator",
-        "source_labels": [],
-        "source_instance_key": "narrator:narrator",
-    })
     registry_hash = _hash(projected)
     return identities, projected, registry_hash
 
@@ -2447,6 +2426,10 @@ def merge_screenplay_scene_shards(
         scenes=merged_scenes,
         experience=envelope.experience.to_ir(),
         source_scene_owners=dict(blueprint.source_scene_owners),
+        source_semantics={
+            source_id: semantics.model_dump(mode="json")
+            for source_id, semantics in blueprint.source_semantics.items()
+        },
         scene_derivations=[
             relation.model_dump(mode="json")
             for relation in blueprint.scene_derivations

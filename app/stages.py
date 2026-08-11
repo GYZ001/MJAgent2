@@ -327,8 +327,6 @@ def _recover_screenplay_ir_candidate(
                 )
             artifact_contract = str(row["contract_version"] or "")
             payload_contract = str(payload.get("format_version") or "")
-            artifact_version = screenplay_ir_version_key(artifact_contract)
-            current_version = screenplay_ir_version_key(IR_VERSION)
             if artifact_contract == IR_VERSION and payload_contract != IR_VERSION:
                 raise ArtifactNeedsRebuildError(
                     artifact_id=str(row["id"]),
@@ -338,11 +336,14 @@ def _recover_screenplay_ir_candidate(
                         f"内容合同为 {payload_contract or 'missing'}"
                     ),
                 )
-            if artifact_version >= current_version and artifact_contract != IR_VERSION:
+            if artifact_contract != IR_VERSION:
                 raise ArtifactNeedsRebuildError(
                     artifact_id=str(row["id"]),
                     artifact_type=str(row["type"]),
-                    reason=f"当前运行时不支持合同 {artifact_contract}",
+                    reason=(
+                        f"Artifact 合同 {artifact_contract or 'missing'} "
+                        f"与当前 {IR_VERSION} 不一致，需要重建"
+                    ),
                 )
             payload, _changes = normalize_screenplay_ir_payload(payload)
             candidate = ScreenplayGenerationIR.model_validate(payload)

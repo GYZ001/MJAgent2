@@ -2330,6 +2330,9 @@ def test_generation_entry_uses_compact_ir_model_and_bounded_output(
                     "key": f"n{index}",
                     "source_segment_ids": [f"SRC{index:04d}"],
                     "summary": text,
+                    "narrative_layer": "story",
+                    "event_priority": "causal",
+                    "render_policy": "standalone",
                     "temporal_domain_key": "present",
                     "time_label": "夜",
                     "time_relation": (
@@ -2446,6 +2449,16 @@ def test_baseline_recompiles_durable_ir_without_second_model_call(
 def _participant_delivery_complete_ir_payload(version: str) -> dict:
     payload = _ir_payload()
     payload["format_version"] = version
+    payload["source_semantics"] = {
+        f"SRC{index:04d}": {
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "disposition": "deliver",
+            "projection_policy": "picture",
+        }
+        for index in range(1, 4)
+    }
     for scene in payload["scenes"]:
         for unit in scene["units"]:
             unit["narrative_layer"] = "story"
@@ -2457,6 +2470,8 @@ def _participant_delivery_complete_ir_payload(version: str) -> dict:
         event["event_priority"] = "causal"
         event["render_policy"] = "standalone"
         event["participant_deliveries"] = []
+    for coverage in payload["coverage"]:
+        coverage["projection_policy"] = "picture"
     return payload
 
 
@@ -2492,14 +2507,14 @@ def _persist_recoverable_ir(
 
 def test_current_ir_serialization_declares_participant_delivery_contract() -> None:
     payload = _participant_delivery_complete_ir_payload(
-        "screenplay-generation-ir.v2"
+        "screenplay-generation-ir.v3"
     )
 
     serialized = ScreenplayGenerationIR.model_validate(payload).model_dump(
         mode="json"
     )
 
-    assert stages.IR_VERSION == "screenplay-generation-ir.v2"
+    assert stages.IR_VERSION == "screenplay-generation-ir.v3"
     assert serialized["format_version"] == stages.IR_VERSION
     assert all(
         "participant_deliveries" in unit
@@ -2513,13 +2528,13 @@ def test_current_ir_serialization_declares_participant_delivery_contract() -> No
 
 
 def test_recovery_accepts_legal_current_ir_artifact() -> None:
-    episode_id = "ep-ir-contract-v2"
+    episode_id = "ep-ir-contract-v3"
     run_id, step_id, artifact = _persist_recoverable_ir(
         episode_id=episode_id,
-        input_fingerprint="ir-contract-v2",
-        contract_version="screenplay-generation-ir.v2",
+        input_fingerprint="ir-contract-v3",
+        contract_version="screenplay-generation-ir.v3",
         payload=_participant_delivery_complete_ir_payload(
-            "screenplay-generation-ir.v2"
+            "screenplay-generation-ir.v3"
         ),
     )
 
@@ -2529,7 +2544,7 @@ def test_recovery_accepts_legal_current_ir_artifact() -> None:
     assert recovered is not None
     candidate, artifact_id = recovered
     assert artifact_id == artifact["id"]
-    assert candidate.format_version == "screenplay-generation-ir.v2"
+    assert candidate.format_version == "screenplay-generation-ir.v3"
     row = db.get_conn().execute(
         "SELECT status,stale_reason FROM artifacts WHERE id=?",
         (artifact["id"],),

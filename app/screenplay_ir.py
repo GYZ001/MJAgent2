@@ -341,6 +341,8 @@ def screenplay_ir_missing_event_semantic_paths(value: object) -> list[str]:
         return ["$"]
     required = ("narrative_layer", "event_priority", "render_policy")
     missing: list[str] = []
+    if "source_semantics" not in value:
+        missing.append("source_semantics")
     for scene_index, scene in enumerate(value.get("scenes") or []):
         if not isinstance(scene, dict):
             continue
@@ -922,6 +924,9 @@ class ScreenplayGenerationIR(BaseModel):
     experience: IRExperience | None = None
     normalization_log: list[dict[str, Any]] = Field(default_factory=list)
     source_scene_owners: dict[str, str] = Field(default_factory=dict)
+    source_semantics: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+    )
     scene_derivations: list[dict[str, Any]] = Field(default_factory=list)
     source_ownership_hash: str = ""
     legacy_screenplay: EpisodeScreenplay | None = Field(
@@ -2342,6 +2347,7 @@ def compile_screenplay_ir(
             if value.source_scene_owners:
                 ownership_payload = {
                     "source_scene_owners": value.source_scene_owners,
+                        "source_semantics": value.source_semantics,
                     "scene_derivations": value.scene_derivations,
                 }
                 actual_ownership_hash = hashlib.sha256(
@@ -4070,9 +4076,6 @@ def compile_screenplay_ir(
             for token in event.perceivable_by
             if str(token).strip() != "audience"
         )
-    if not used_identity_keys:
-        raise ValueError("IR 没有声明任何实际参与身份")
-
     ordered_used_keys = [
         key for key in identity_by_key if key in used_identity_keys
     ]

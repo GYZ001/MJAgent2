@@ -27,6 +27,7 @@ from app.screenplay_ir import (
     IRActionParticipantDelivery,
     IRIdentity,
     IRScene,
+    compile_screenplay_ir,
 )
 from app.screenplay_scene_shards import (
     SCREENPLAY_SCENE_CREATIVE_VERSION,
@@ -46,6 +47,7 @@ from app.screenplay_scene_shards import (
     ScreenplaySceneShardIR,
     ScreenplaySceneShardPlan,
     ScreenplaySceneSourceSegment,
+    ScreenplaySceneUnitSlotPlan,
     UnresolvedParticipant,
     blueprint_content_hash,
     build_screenplay_scene_shard_repair_schema,
@@ -53,6 +55,7 @@ from app.screenplay_scene_shards import (
     build_screenplay_scene_input_contract_set,
     build_screenplay_scene_input_contracts,
     build_screenplay_scene_shard_plans,
+    compile_screenplay_scene_shard_draft,
     generate_screenplay_envelope,
     generate_screenplay_scene_shards,
     merge_screenplay_scene_shards,
@@ -62,6 +65,7 @@ from app.screenplay_scene_shards import (
     validate_screenplay_scene_shard,
 )
 from app.source_excerpt import index_source_segments
+from app.narrative_priority import picture_screenplay_projection
 
 
 SOURCE = "甲推门进入。\n\n乙接过钥匙并回答。"
@@ -110,6 +114,11 @@ SS001_FULL_ARTIFACT_FIXTURE = (
     / "fixtures"
     / "screenplay_scene_shard_ss001_art_bcebe2075a55_full.json"
 )
+RUN_E65D871AD2A0_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "run_e65d871ad2a0_sc16_paratext.json"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,6 +136,9 @@ def _blueprint(*, split_domain: bool = True) -> NarrativeBlueprint:
                 "key": "n1",
                 "source_segment_ids": ["SRC0001"],
                 "summary": "甲推门进入",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
                 "temporal_domain_key": "present",
                 "time_label": "日",
                 "time_relation": "episode_start",
@@ -140,6 +152,9 @@ def _blueprint(*, split_domain: bool = True) -> NarrativeBlueprint:
                 "key": "n2",
                 "source_segment_ids": ["SRC0002"],
                 "summary": "乙接过钥匙并回答",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
                 "temporal_domain_key": "later" if split_domain else "present",
                 "time_label": "稍后" if split_domain else "日",
                 "time_relation": "elapsed" if split_domain else "continuous",
@@ -153,6 +168,36 @@ def _blueprint(*, split_domain: bool = True) -> NarrativeBlueprint:
     })
     derive_blueprint_scene_plans(value)
     return value
+
+
+def _semantic_node(
+    *,
+    key: str,
+    source_segment_ids: list[str],
+    summary: str,
+    location_key: str,
+    location_label: str,
+    story: bool,
+    first: bool = False,
+) -> dict:
+    return {
+        "key": key,
+        "source_segment_ids": source_segment_ids,
+        "summary": summary,
+        "narrative_layer": "story" if story else "paratext",
+        "event_priority": "causal" if story else "connective",
+        "render_policy": (
+            "standalone" if story else "exclude_from_spine"
+        ),
+        "temporal_domain_key": "present",
+        "time_label": "连续时间",
+        "time_relation": "episode_start" if first else "continuous",
+        "location_key": location_key,
+        "location_label": location_label,
+        "participants": [],
+        "action_logic": summary,
+        "scene_boundary_before": story,
+    }
 
 
 def _identities() -> list[IRIdentity]:
@@ -897,7 +942,302 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v7"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v8"
+
+
+def test_blueprint_and_slot_semantics_are_required_without_defaults() -> None:
+    node_payload = _blueprint().nodes[0].model_dump(mode="json")
+    for field in (
+        "narrative_layer",
+        "event_priority",
+        "render_policy",
+    ):
+        node_payload.pop(field)
+
+    with pytest.raises(ValidationError) as node_error:
+        NarrativeNode.model_validate(node_payload)
+    missing_node_fields = {
+        error["loc"][-1] for error in node_error.value.errors()
+    }
+    assert {
+        "narrative_layer",
+        "event_priority",
+        "render_policy",
+    } <= missing_node_fields
+
+    with pytest.raises(ValidationError) as slot_error:
+        ScreenplaySceneUnitSlotPlan.model_validate({
+            "unit_key": "u1",
+            "event_key": "e1",
+            "scene_key": "s1",
+            "scene_order": 1,
+            "unit_order": 1,
+            "scene_unit_order": 1,
+            "kind": "action",
+            "source_segment_ids": ["SRC0001"],
+        })
+    missing_slot_fields = {
+        error["loc"][-1] for error in slot_error.value.errors()
+    }
+    assert {
+        "narrative_layer",
+        "event_priority",
+        "render_policy",
+    } <= missing_slot_fields
+
+    old_blueprint = _blueprint().model_dump(mode="json")
+    old_blueprint["format_version"] = "screenplay-narrative-blueprint.v3"
+    with pytest.raises(ValidationError, match="format_version"):
+        NarrativeBlueprint.model_validate(old_blueprint)
+
+
+def test_midstream_audit_only_source_never_enters_creative_or_picture_projection() -> None:
+    source = "\n\n".join([
+        "暴雨冲开沟渠，水位越过石阶。",
+        "作者说明本周更新安排并感谢阅读。",
+        "雨势减弱，沟渠水位退回警戒线下。",
+    ])
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [
+            _semantic_node(
+                key="environment-rise",
+                source_segment_ids=["SRC0001"],
+                summary="暴雨使沟渠水位越过石阶",
+                location_key="ditch",
+                location_label="山沟",
+                story=True,
+                first=True,
+            ),
+            _semantic_node(
+                key="author-audit",
+                source_segment_ids=["SRC0002"],
+                summary="作者更新说明",
+                location_key="paratext",
+                location_label="来源审计",
+                story=False,
+            ),
+            _semantic_node(
+                key="environment-fall",
+                source_segment_ids=["SRC0003"],
+                summary="雨势减弱后水位回落",
+                location_key="ditch",
+                location_label="山沟",
+                story=True,
+            ),
+        ],
+    })
+    derive_blueprint_scene_plans(blueprint)
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source,
+        identity_registry_hash="empty-registry",
+    )
+    contracts = build_screenplay_scene_input_contract_set(
+        plans=plans,
+        blueprint=blueprint,
+        source_text=source,
+        identity_registry=[],
+    )
+    shards = [
+        compile_screenplay_scene_shard_draft(
+            _creative_shard(plan, blueprint, contracts[plan.shard_id]),
+            episode_no=1,
+            plan=plan,
+            scene_plans={
+                scene.key: scene for scene in blueprint.scene_plans
+            },
+            scene_input_contracts=contracts[plan.shard_id],
+        )
+        for plan in plans
+    ]
+    merged = merge_screenplay_scene_shards(
+        envelope=ScreenplayEnvelopeIR(
+            episode_no=1,
+            metadata=ScreenplayEnvelopeMetadata(title="环境事件"),
+            experience=ScreenplayEnvelopeExperience(
+                director_objective="呈现水位变化",
+                satisfaction_criteria="环境状态清晰",
+            ),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            identity_registry_hash="empty-registry",
+        ),
+        identities=[],
+        plans=plans,
+        shards=shards,
+        scene_input_contracts=contracts,
+        blueprint=blueprint,
+        source_text=source,
+    )
+
+    assert "SRC0002" not in blueprint.source_scene_owners
+    assert all(
+        "SRC0002" not in slot.source_segment_ids
+        for plan in plans
+        for slot in plan.unit_slots
+    )
+    assert all(
+        "SRC0002" not in segment_ids
+        for contract_set in contracts.values()
+        for contract in contract_set
+        for segment_ids in [contract.source_segment_ids]
+    )
+    assert merged.coverage[0].disposition == "audit_only"
+    assert merged.coverage[0].projection_policy == "audit_only"
+
+    screenplay = compile_screenplay_ir(
+        merged,
+        episode={"id": "ep-env", "episode_no": 1, "title": "环境事件"},
+        source_text=source,
+        bible=Bible(
+            characters=[],
+            world=World(visual_style_canonical="写实环境"),
+        ),
+    )
+    projected, _report = picture_screenplay_projection(screenplay)
+    assert {
+        item.source_segment_id for item in screenplay.source_coverage
+    } == {"SRC0001", "SRC0002", "SRC0003"}
+    audit = next(
+        item for item in screenplay.source_coverage
+        if item.source_segment_id == "SRC0002"
+    )
+    assert audit.disposition == "audit_only"
+    assert audit.beat_ids == []
+    assert all(
+        "SRC0002" not in beat.source_segment_ids
+        for beat in screenplay.plot_spine.spine_beats
+    )
+    assert all(
+        "作者说明" not in requirement
+        for scene in screenplay.scene_outline
+        for requirement in scene.context_requirements
+    )
+    assert len(projected.scene_outline) == 2
+    assert all(not scene.characters for scene in projected.scene_outline)
+
+
+def test_run_e65d871ad2a0_sc16_projects_fifteen_story_scenes() -> None:
+    fixture = json.loads(
+        RUN_E65D871AD2A0_FIXTURE.read_text(encoding="utf-8")
+    )
+    source = "\n\n".join(fixture["source_segments"])
+    nodes = [
+        _semantic_node(
+            key=item["key"],
+            source_segment_ids=item["source_segment_ids"],
+            summary=item["summary"],
+            location_key=item["location_key"],
+            location_label=item["location_label"],
+            story=True,
+            first=index == 0,
+        )
+        for index, item in enumerate(fixture["story_nodes"])
+    ]
+    audit = fixture["paratext_node"]
+    nodes.append(_semantic_node(
+        key=audit["key"],
+        source_segment_ids=audit["source_segment_ids"],
+        summary=audit["summary"],
+        location_key="paratext",
+        location_label="来源审计",
+        story=False,
+    ))
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": nodes,
+    })
+    derive_blueprint_scene_plans(blueprint)
+    identities, registry, registry_hash = build_frozen_identity_registry(
+        Bible(
+            characters=[],
+            world=World(visual_style_canonical="写实环境"),
+        ),
+        [],
+    )
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source,
+        identity_registry_hash=registry_hash,
+    )
+    contracts = build_screenplay_scene_input_contract_set(
+        plans=plans,
+        blueprint=blueprint,
+        source_text=source,
+        identity_registry=registry,
+    )
+    source_by_id = {
+        segment.segment_id: segment.text
+        for segment in index_source_segments(source)
+    }
+    shards = []
+    for plan in plans:
+        creative = ScreenplaySceneShardCreativeIR.model_validate({
+            "slots": {
+                slot.unit_key: {
+                    "text": source_by_id[slot.source_segment_ids[0]],
+                    "resulting_state": (
+                        f"{slot.source_segment_ids[0]} 环境状态完成"
+                    ),
+                }
+                for slot in plan.unit_slots
+            },
+        })
+        shards.append(compile_screenplay_scene_shard_draft(
+            creative,
+            episode_no=1,
+            plan=plan,
+            scene_plans={
+                scene.key: scene for scene in blueprint.scene_plans
+            },
+            scene_input_contracts=contracts[plan.shard_id],
+        ))
+    merged = merge_screenplay_scene_shards(
+        envelope=ScreenplayEnvelopeIR(
+            episode_no=1,
+            metadata=ScreenplayEnvelopeMetadata(title="SC16 回归"),
+            experience=ScreenplayEnvelopeExperience(
+                director_objective="完整交付剧情",
+                satisfaction_criteria="旁文本只审计",
+            ),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            identity_registry_hash=registry_hash,
+        ),
+        identities=identities,
+        plans=plans,
+        shards=shards,
+        scene_input_contracts=contracts,
+        blueprint=blueprint,
+        source_text=source,
+    )
+    screenplay = compile_screenplay_ir(
+        merged,
+        episode={"id": "ep-sc16", "episode_no": 1, "title": "SC16 回归"},
+        source_text=source,
+        bible=Bible(
+            characters=[],
+            world=World(visual_style_canonical="写实环境"),
+        ),
+    )
+
+    assert fixture["run_id"] == "run_e65d871ad2a0"
+    assert len(blueprint.scene_plans) == fixture["expected_story_scene_count"]
+    assert len(screenplay.scene_outline) == 15
+    assert {item.source_segment_id for item in screenplay.source_coverage} == {
+        f"SRC{index:04d}" for index in range(1, 63)
+    }
+    assert {
+        item.source_segment_id
+        for item in screenplay.source_coverage
+        if item.disposition == "audit_only"
+    } == {"SRC0060", "SRC0061", "SRC0062"}
+    assert not identities
+    forbidden_names = {"旁白", "孟浩", "Q版人物"}
+    assert forbidden_names.isdisjoint({
+        character
+        for scene in screenplay.scene_outline
+        for character in scene.characters
+    })
 
 
 def test_scene_shard_schema_requires_explicit_participant_deliveries() -> None:
@@ -1809,7 +2149,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
     )
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v7"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v8"
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
@@ -2000,6 +2340,9 @@ def _ss004_533ac9_compile_context():
             "key": evidence["node_key"],
             "source_segment_ids": evidence["source_segment_ids"],
             "summary": f"回放动作证据 {index + 1}",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
             "temporal_domain_key": "T002",
             "time_label": "入夜",
             "time_relation": "continuous",
@@ -2234,8 +2577,8 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 
 
 def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v7"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v7"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v8"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v8"
 
 
 def test_run_195a691_replays_ten_ownership_overreaches() -> None:
@@ -2863,8 +3206,8 @@ def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
         )
         != fingerprint
     )
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v7"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v7"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v8"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v8"
 
 
 def test_dialogue_mismatch_is_not_silently_normalized() -> None:
@@ -2902,6 +3245,9 @@ def test_ambiguous_dialogue_authority_fails_before_provider_dispatch() -> None:
             "key": "n1",
             "source_segment_ids": ["SRC0001"],
             "summary": "甲和乙听到命令后抬头",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
             "temporal_domain_key": "present",
             "time_label": "日",
             "time_relation": "episode_start",
