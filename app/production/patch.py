@@ -345,6 +345,12 @@ def _historical_screenplay_artifact_is_bound(
     ).fetchone()
     if revision is not None:
         return True
+    certificate = conn.execute(
+        "SELECT 1 FROM completion_certificates WHERE artifact_id=? LIMIT 1",
+        (artifact_id,),
+    ).fetchone()
+    if certificate is not None:
+        return True
     episode = conn.execute(
         """SELECT 1 FROM episodes
             WHERE ? IN (
@@ -355,7 +361,13 @@ def _historical_screenplay_artifact_is_bound(
             LIMIT 1""",
         (artifact_id,),
     ).fetchone()
-    return episode is not None
+    if episode is not None:
+        return True
+    if evidence_repository.get_evaluations(artifact_id):
+        return True
+    return bool(
+        evidence_repository.get_lineage(artifact_id).get("descendants")
+    )
 
 
 def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
@@ -423,15 +435,33 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
             if candidate is not None
             and candidate.get("type") == "screenplay_scene_shard"
         ]
-        if not shard_parents:
-            gaps.append(f"{artifact_id}:lineage.screenplay_scene_shard")
+        direct_parent_types = {
+            str(candidate.get("type") or "")
+            for _parent_id, candidate in direct_parents
+            if candidate is not None
+        }
+        required_parent_types = {
+            "screenplay_narrative_blueprint",
+            "screenplay_identity_registry",
+            "screenplay_envelope",
+            "screenplay_scene_shard",
+        }
+        gaps.extend(
+            f"{artifact_id}:lineage.{artifact_type}"
+            for artifact_type in sorted(
+                required_parent_types - direct_parent_types
+            )
+        )
         for parent_id, candidate in direct_parents:
             if candidate is None:
                 gaps.append(f"lineage.missing_parent[{parent_id}]")
+            elif (
+                candidate.get("type") in required_parent_types
+                and candidate.get("status") not in {"validated", "approved"}
+            ):
+                gaps.append(f"{parent_id}:status")
         for shard in shard_parents:
             shard_id = str(shard.get("id") or "")
-            if shard.get("status") != "validated":
-                gaps.append(f"{shard_id}:status")
             if (
                 str(shard.get("contract_version") or "")
                 != SCREENPLAY_SCENE_SHARD_VERSION
@@ -459,19 +489,7 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
             != str(art.get("scope_id") or "")
         ):
             gaps.append(f"{artifact_id}:lineage.scope")
-    lineage_types = {
-        "screenplay_scene_shard",
-        "screenplay_generation_ir_merged",
-    }
-    if (
-        art.get("parent_artifact_ids")
-        and not merged_artifacts
-        and any(
-            (evidence_repository.get_artifact(artifact_id) or {}).get("type")
-            in lineage_types
-            for artifact_id in seen
-        )
-    ):
+    if not merged_artifacts:
         gaps.append("lineage.screenplay_generation_ir_merged")
     return list(dict.fromkeys(gaps))
 
@@ -480,15 +498,18 @@ def _assert_screenplay_artifact_contract(
     art: dict[str, Any],
     content: object,
 ) -> None:
+    from app.production.screenplay_authority import (
+        screenplay_contract_requires_narrative,
+    )
+
+    requires_narrative = screenplay_contract_requires_narrative(
+        str(art.get("contract_version") or "")
+    )
     plan = _raw_narrative_plan(content)
     if plan is None:
-        from app.harness.contracts import get_contract
-
-        artifact_contract = str(art.get("contract_version") or "")
-        current_contract = get_contract("screenplay").version
         if (
-            artifact_contract != current_contract
-            and _historical_screenplay_artifact_is_bound(art)
+            not requires_narrative
+            and not _historical_screenplay_artifact_is_bound(art)
         ):
             return
         raise ArtifactNeedsRebuildError(
@@ -523,7 +544,8 @@ def _assert_screenplay_artifact_contract(
         for field in ("disposition", "projection_policy")
         if field not in coverage
     )
-    missing.extend(_current_ir_semantic_gaps(art))
+    if requires_narrative:
+        missing.extend(_current_ir_semantic_gaps(art))
     if missing:
         raise ArtifactNeedsRebuildError(
             artifact_id=str(art.get("id") or ""),

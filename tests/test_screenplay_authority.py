@@ -275,7 +275,12 @@ def test_first_episode_baseline_resume_keeps_production_checkpoint_action(
     assert state["recommended_action"] == "resume_screenplay"
 
 
-def _source_projection_case() -> dict:
+def _source_projection_case(
+    *,
+    episode_id: str = "episode-source-projection",
+    project_id: str = "project-source-projection",
+    reuse_episode: bool = False,
+) -> dict:
     from app.screenplay_ir import (
         IR_VERSION,
         ScreenplayGenerationIR,
@@ -340,40 +345,66 @@ def _source_projection_case() -> dict:
             personality="稳定",
             speech_style="自然",
         ))
-    bible = Bible(
-        world=World(visual_style_canonical="统一动画电影风格"),
-        characters=characters,
-    )
-
-    episode_id = "episode-source-projection"
-    project_id = "project-source-projection"
+    world = World(visual_style_canonical="统一动画电影风格")
     conn = db.get_conn()
-    conn.execute(
-        "INSERT INTO projects(id,name,bible_json,created_at) VALUES(?,?,?,?)",
-        (project_id, "source projection", bible.model_dump_json(), db.now()),
-    )
-    conn.execute(
-        "INSERT INTO chapters(project_id,idx,title,content) VALUES(?,?,?,?)",
-        (project_id, 1, "Fixture", source_body),
-    )
-    conn.execute(
-        """INSERT INTO episodes(
-               id,project_id,episode_no,title,source_chapters,target_duration_s,
-               status,screenplay_status,screenplay_character_resolutions,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        (
-            episode_id,
-            project_id,
-            1,
-            "Fixture",
-            "[1]",
-            1800,
-            "planned",
-            "pending",
-            "[]",
-            db.now(),
-        ),
-    )
+    if reuse_episode:
+        project = conn.execute(
+            "SELECT bible_json FROM projects WHERE id=?",
+            (project_id,),
+        ).fetchone()
+        current_bible = Bible.model_validate_json(project["bible_json"])
+        known_names = {character.name for character in current_bible.characters}
+        current_bible.characters.extend(
+            character
+            for character in characters
+            if character.name not in known_names
+        )
+        bible = current_bible
+        conn.execute(
+            "UPDATE projects SET bible_json=? WHERE id=?",
+            (bible.model_dump_json(), project_id),
+        )
+        conn.execute("DELETE FROM chapters WHERE project_id=?", (project_id,))
+        conn.execute(
+            "INSERT INTO chapters(project_id,idx,title,content) VALUES(?,?,?,?)",
+            (project_id, 1, "Fixture", source_body),
+        )
+        conn.execute(
+            """UPDATE episodes
+                  SET source_chapters='[1]',
+                      target_duration_s=1800,
+                      screenplay_character_resolutions='[]'
+                WHERE id=?""",
+            (episode_id,),
+        )
+    else:
+        bible = Bible(world=world, characters=characters)
+        conn.execute(
+            "INSERT INTO projects(id,name,bible_json,created_at) VALUES(?,?,?,?)",
+            (project_id, "source projection", bible.model_dump_json(), db.now()),
+        )
+        conn.execute(
+            "INSERT INTO chapters(project_id,idx,title,content) VALUES(?,?,?,?)",
+            (project_id, 1, "Fixture", source_body),
+        )
+        conn.execute(
+            """INSERT INTO episodes(
+                   id,project_id,episode_no,title,source_chapters,target_duration_s,
+                   status,screenplay_status,screenplay_character_resolutions,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                episode_id,
+                project_id,
+                1,
+                "Fixture",
+                "[1]",
+                1800,
+                "planned",
+                "pending",
+                "[]",
+                db.now(),
+            ),
+        )
     conn.commit()
     episode = dict(conn.execute(
         "SELECT * FROM episodes WHERE id=?",
@@ -1011,7 +1042,7 @@ def test_legacy_screenplay_artifact_without_participant_deliveries_needs_rebuild
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
-        scope_id="episode-generic",
+        scope_id=case["episode_id"],
         status="candidate",
         trust_level="T1",
         content=payload,
@@ -1060,7 +1091,7 @@ def test_current_screenplay_artifact_requires_explicit_semantics(
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
-        scope_id="episode-generic",
+        scope_id=case["episode_id"],
         status="candidate",
         trust_level="T1",
         content=payload,
@@ -1083,17 +1114,8 @@ def test_current_screenplay_artifact_requires_explicit_semantics(
 
 
 def test_current_screenplay_artifact_with_participant_deliveries_loads() -> None:
-    screenplay = _screenplay()
-    payload = screenplay_artifact_payload(screenplay)
-    payload["narrative_plan"]["contract_version"] = "narrative-continuity.v2"
-    payload["narrative_plan"]["atomic_actions"] = [{
-        "action_id": "A-current",
-        "actor_ids": ["character-1"],
-        "target_ids": ["entity-1"],
-        "participant_deliveries": [],
-        "semantic_intent": "Change the observable state.",
-        "completion_condition": "The changed state is visible.",
-    }]
+    case = _source_projection_case()
+    payload = screenplay_artifact_payload(case["compiled"])
     assert all(
         "participant_deliveries" in action
         for action in payload["narrative_plan"]["atomic_actions"]
@@ -1105,6 +1127,7 @@ def test_current_screenplay_artifact_with_participant_deliveries_loads() -> None
         status="candidate",
         trust_level="T1",
         content=payload,
+        parent_artifact_ids=[case["merged_artifact_id"]],
         contract_version="4.0.0",
     ))
 
@@ -1277,12 +1300,23 @@ def _seed_test_bible_authority() -> tuple[dict, dict]:
 
 def _republish_as_screenplay_v4(artifact: dict) -> object:
     contract_version = "4.0.0"
-    conn = db.get_conn()
-    conn.execute(
-        "UPDATE artifacts SET contract_version=? WHERE id=?",
-        (contract_version, artifact["id"]),
+    case = _source_projection_case(
+        episode_id="episode-generic",
+        project_id="project-generic",
+        reuse_episode=True,
     )
-    conn.commit()
+    current_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="episode-generic",
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[case["merged_artifact_id"]],
+        contract_version=contract_version,
+    ))
+    artifact.clear()
+    artifact.update(current_artifact)
     input_fingerprint = screenplay_authority_fingerprint(
         "episode-generic",
         contract_version=contract_version,
