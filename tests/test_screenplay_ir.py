@@ -2552,7 +2552,7 @@ def test_recovery_accepts_legal_current_ir_artifact() -> None:
     assert tuple(row) == ("candidate", None)
 
 
-def test_recovery_keeps_structurally_complete_legacy_ir_explicitly_legacy() -> None:
+def test_recovery_marks_structurally_complete_legacy_ir_for_rebuild() -> None:
     episode_id = "ep-ir-contract-v1-complete"
     run_id, step_id, artifact = _persist_recoverable_ir(
         episode_id=episode_id,
@@ -2566,14 +2566,13 @@ def test_recovery_keeps_structurally_complete_legacy_ir_explicitly_legacy() -> N
     with bind_trace(run_id, step_id):
         recovered = stages._recover_screenplay_ir_candidate(episode_id)
 
-    assert recovered is not None
-    candidate, artifact_id = recovered
-    assert artifact_id == artifact["id"]
-    assert candidate.format_version == "screenplay-generation-ir.v1.5"
-    assert db.get_conn().execute(
-        "SELECT status FROM artifacts WHERE id=?",
+    assert recovered is None
+    row = db.get_conn().execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
         (artifact["id"],),
-    ).fetchone()["status"] == "candidate"
+    ).fetchone()
+    assert row["status"] == "stale"
+    assert "需要重建" in row["stale_reason"]
 
 
 def test_recovery_marks_legacy_ir_without_participant_deliveries_stale() -> None:

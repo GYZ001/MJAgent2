@@ -590,6 +590,7 @@ async def adjudicate_screenplay_document_identities(
     ]
     pseudo = ScreenplayGenerationIR(
         episode_no=int(episode.get("episode_no") or screenplay.episode_no),
+        source_semantics={},
         identities=pseudo_identities,
         scenes=[IRScene(
             key="document-identity-projection",

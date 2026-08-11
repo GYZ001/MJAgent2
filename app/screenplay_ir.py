@@ -4113,6 +4113,10 @@ def compile_screenplay_ir(
     event_source_prop_id: dict[str, str] = {}
     event_adapted_prop_id: dict[str, str] = {}
     event_decision_id: dict[str, str] = {}
+    environment_subject_id = (
+        "environment:"
+        + str(episode.get("id") or f"episode-{episode_no}")
+    )
 
     for position, event in enumerate(value.events, start=1):
         chapter_id, start, end, exact_excerpt = _source_location(
@@ -4158,6 +4162,8 @@ def compile_screenplay_ir(
                 for token in scene_by_key[event.scene_key].character_keys
             ],
         ]))
+        if not participants:
+            participants = [environment_subject_id]
         if not participants and not typed_visual_unit_contract:
             participants = [final_identity_ids[ordered_used_keys[0]]]
 
@@ -4264,10 +4270,10 @@ def compile_screenplay_ir(
     event_action_ids: dict[str, str] = {}
     event_character_state_ids: defaultdict[str, list[str]] = defaultdict(list)
 
-    initial_subject = identity_id(
-        value.events[0].actor_keys[0]
+    initial_subject = (
+        identity_id(value.events[0].actor_keys[0])
         if value.events[0].actor_keys
-        else ordered_used_keys[0]
+        else environment_subject_id
     )
     state_facts.append({
         "fact_id": "F-0",

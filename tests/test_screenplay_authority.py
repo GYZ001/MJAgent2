@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 
@@ -275,10 +276,37 @@ def test_first_episode_baseline_resume_keeps_production_checkpoint_action(
 
 
 def _source_projection_case() -> dict:
-    from app.screenplay_ir import ScreenplayGenerationIR, compile_screenplay_ir
+    from app.screenplay_ir import (
+        IR_VERSION,
+        ScreenplayGenerationIR,
+        compile_screenplay_ir,
+    )
 
     fixture = json.loads(MERGED_IR_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
     ir = ScreenplayGenerationIR.model_validate(fixture["content"])
+    ir.format_version = IR_VERSION
+    ir.source_semantics = {
+        source_id: {
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "disposition": "deliver",
+            "projection_policy": "picture",
+        }
+        for source_id in ir.source_scene_owners
+    }
+    ir.source_ownership_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "source_scene_owners": ir.source_scene_owners,
+                "source_semantics": ir.source_semantics,
+                "scene_derivations": ir.scene_derivations,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     source_by_id: dict[str, list[str]] = {}
     for scene in ir.scenes:
         for unit in scene.units:
@@ -368,7 +396,7 @@ def _source_projection_case() -> dict:
         status="validated",
         trust_level="T1",
         content={"fixture": True},
-        contract_version="screenplay-narrative-blueprint.v3",
+        contract_version="screenplay-narrative-blueprint.v4",
     ))
     identity_registry = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_identity_registry",

@@ -148,7 +148,8 @@ def test_legacy_terminal_non_story_scene_is_kept_as_source_context() -> None:
     assert [event.event_id for event in projected.narrative_plan.events] == ["E1"]
     assert [beat.beat_id for beat in projected.plot_spine.spine_beats] == ["S01"]
     assert projected.plot_spine.must_keep_ending == "剧情状态完成"
-    assert projected.source_coverage[1].disposition == "context"
+    assert projected.source_coverage[1].disposition == "audit_only"
+    assert projected.source_coverage[1].projection_policy == "audit_only"
     assert projected.source_coverage[1].beat_ids == []
 
 

@@ -200,6 +200,21 @@ def _semantic_node(
     }
 
 
+def _story_source_semantics(
+    source_segment_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    return {
+        source_id: {
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "disposition": "deliver",
+            "projection_policy": "picture",
+        }
+        for source_id in source_segment_ids
+    }
+
+
 def _identities() -> list[IRIdentity]:
     return [IRIdentity(
         key="narrator",
@@ -290,8 +305,15 @@ def _a78_replay_models(
 ):
     replay = json.loads(A78_ARTIFACT_REPLAY.read_text(encoding="utf-8"))
     plan = ScreenplaySceneShardPlan.model_validate(replay["plan"])
-    scene_plan = BlueprintScenePlan.model_validate(replay["scene_plan"])
+    scene_plan_payload = deepcopy(replay["scene_plan"])
+    scene_plan_payload["source_semantics"] = _story_source_semantics(
+        scene_plan_payload["source_segment_ids"]
+    )
+    scene_plan = BlueprintScenePlan.model_validate(scene_plan_payload)
     contract_payload = deepcopy(replay["scene_input_contract"])
+    contract_payload["source_semantics"] = _story_source_semantics(
+        contract_payload["source_segment_ids"]
+    )
     if bind_actor:
         slot = contract_payload["unit_slots"][0]
         slot["actor_keys"] = ["person_8ff1cb1a5861"]
@@ -899,7 +921,7 @@ def test_merge_fails_closed_on_boundary_hash_or_missing_source() -> None:
             source_text=SOURCE,
         )
     assert "boundary_hash" in str(caught.value)
-    assert "未覆盖非标题 SRC" in str(caught.value)
+    assert "未覆盖 picture SRC" in str(caught.value)
 
 
 def test_merge_rejects_source_less_unit_when_other_units_cover_all_sources() -> None:
@@ -1413,7 +1435,12 @@ def _ss004_replay_validation_context() -> tuple[
 ]:
     replay_input = json.loads(SS004_REPLAY_INPUT.read_text(encoding="utf-8"))
     scene_plans = {
-        item["key"]: BlueprintScenePlan.model_validate(item)
+        item["key"]: BlueprintScenePlan.model_validate({
+            **item,
+            "source_semantics": _story_source_semantics(
+                item["source_segment_ids"]
+            ),
+        })
         for item in replay_input["scene_plans"]
     }
     hashes = replay_input["hashes"]
@@ -1459,6 +1486,10 @@ def _ss004_replay_validation_context() -> tuple[
                 segment["source_segment_id"]
                 for segment in item["source_segments"]
             ],
+            source_semantics=_story_source_semantics([
+                segment["source_segment_id"]
+                for segment in item["source_segments"]
+            ]),
             source_segments=[
                 ScreenplaySceneSourceSegment.model_validate(segment)
                 for segment in item["source_segments"]
@@ -2621,6 +2652,9 @@ def test_compiled_unit_slot_round_trip_preserves_derived_action_agency() -> None
         "unit_order": 1,
         "scene_unit_order": 1,
         "kind": "action",
+        "narrative_layer": "story",
+        "event_priority": "causal",
+        "render_policy": "standalone",
         "source_segment_ids": ["SRC0001"],
         "actor_keys": [],
         "target_keys": [],
