@@ -1033,9 +1033,16 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         conn=conn,
     )
     has_working_baseline = eligibility.working_compatible
-    has_resumable_baseline = eligibility.mode in {
-        "baseline", "baseline_rebuild",
-    }
+    has_resumable_baseline = any(
+        eligibility.reusable_checkpoint.get(key)
+        for key in (
+            "blueprint_artifact_id",
+            "identity_artifact_id",
+            "envelope_artifact_id",
+            "shards",
+            "merged_ir_artifact_id",
+        )
+    )
     published = bool(rev.published_artifact_id)
     phase = str(
         checkpoint.get("phase")

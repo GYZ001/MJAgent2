@@ -457,7 +457,6 @@ def test_unresolved_character_identity_is_reported_by_runtime_gate() -> None:
 
 @pytest.mark.asyncio
 async def test_retry_exhaustion_never_publishes_unresolved_character_identity(monkeypatch):
-    from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
 
     revision = ensure_production_revision(
@@ -1382,7 +1381,6 @@ def test_full_regen_denied_is_a_policy_conflict_not_a_media_error():
 @pytest.mark.asyncio
 async def test_existing_baseline_resumes_qa_without_calling_full_generation(monkeypatch):
     from app import stages
-    from app.evidence import repository as evidence_repository
     from app.production import screenplay_authority, screenplay_repair
 
     revision = ensure_production_revision(
@@ -1469,7 +1467,6 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
 
 @pytest.mark.asyncio
 async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
-    from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
     from app.production.patch import PatchOperation, PatchResult
 
@@ -1570,7 +1567,6 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invalid_modern_narrative_graph_enters_patch_loop(monkeypatch):
-    from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
 
     revision = ensure_production_revision(
@@ -1622,7 +1618,6 @@ async def test_invalid_modern_narrative_graph_enters_patch_loop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
-    from app.evidence import repository as evidence_repository
     from app.production import screenplay_repair
     from app.portraits import apply_screenplay_character_resolutions
 
@@ -3187,13 +3182,15 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
     from app.evidence import repository as evidence_repository
     from app.production.revision import save_checkpoint
 
+    blueprint_value = NarrativeBlueprint(episode_no=1, nodes=[])
     blueprint = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_narrative_blueprint",
         scope_type="episode",
         scope_id="ep_p",
         status="validated",
         trust_level="T1",
-        content={"blueprint": True},
+        content=blueprint_value.model_dump(mode="json"),
+        contract_version=BLUEPRINT_VERSION,
     ))
     revision = ensure_production_revision(
         episode_id="ep_p",
@@ -3203,6 +3200,7 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
     save_checkpoint(revision.id, {
         "phase": "IDENTITY_FREEZE",
         "blueprint_artifact_id": blueprint["id"],
+        "blueprint_hash": blueprint_content_hash(blueprint_value),
     })
     recorder = screenplay_ops._new_screenplay_recorder(
         "ep_p",
