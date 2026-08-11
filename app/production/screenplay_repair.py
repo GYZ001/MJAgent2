@@ -3853,7 +3853,7 @@ def _identity_contract_repair_policy() -> dict[str, Any]:
     return {
         "authority": (
             "identity_contracts 是所有非角色圣经身份的唯一权威声明；"
-            "修复不得引入未声明的实体、场次人物或非旁白说话人"
+            "修复不得引入未声明的实体、场次人物或任何说话人（包括旁白）"
         ),
         "contract_fields": {
             "identity_id": "稳定图引用 ID",
@@ -3874,7 +3874,8 @@ def _identity_contract_repair_policy() -> dict[str, Any]:
             "canonical 必须 asset_requirement=required",
             "offscreen_only 必须 asset_requirement=forbidden",
             "除 offscreen_only 外 visual_canonical 必填",
-            "纯旁白可由 voice_bible.role_type=narrator 表达；其他画外说话人仍需合同与 voice_ids",
+            "仅当当前文档已有结构化 voice_bible.role_type=narrator 且有来源证据时才允许旁白；不得从 prose/summary/环境介绍推导或创建旁白",
+            "narrator 或 offscreen_only 可作为声源，但不得写入 scene_blocks[*].characters 伪装成可见角色",
         ],
         "semantic_decision": (
             "具名新角色、一次性功能身份、群体或纯画外身份均按当前语义意图决策；"
@@ -3889,6 +3890,40 @@ def _issue_acceptance_test(issue: Issue) -> str:
         "校验结果中消失，且不得新增任何校验错误。目标节点和字段只能由文档内"
         "稳定 ID、直接字段所有权与现行 schema 推导；来源内容必须可追溯到"
         "authorized_source_excerpt，禁止按问题码、题材、角色名或文本关键词套用模板"
+    )
+
+
+def _target_issue_signature_still_open(
+    target: Issue,
+    candidate_issues: list[Issue],
+) -> bool:
+    """Fail closed when a repair merely swaps one field error for another.
+
+    Validator prose is allowed to become more specific after a candidate is
+    applied, so comparing only the original message is insufficient.  For a
+    structured target, the code/severity/subject/path/rule identity must be
+    absent after repair; a different message in that same slot is still the
+    same unresolved deterministic invariant.
+    """
+    evidence = target.evidence or {}
+    signature = (
+        target.code,
+        target.severity,
+        target.subject,
+        str(evidence.get("path") or evidence.get("span") or ""),
+        str(evidence.get("rule_id") or ""),
+    )
+    if not signature[3] and not signature[4]:
+        return any(item.fingerprint == target.fingerprint for item in candidate_issues)
+    return any(
+        (
+            item.code,
+            item.severity,
+            item.subject,
+            str((item.evidence or {}).get("path") or (item.evidence or {}).get("span") or ""),
+            str((item.evidence or {}).get("rule_id") or ""),
+        ) == signature
+        for item in candidate_issues
     )
 
 
@@ -4931,6 +4966,8 @@ def _preflight_document_candidate(
                 subject="screenplay",
                 stage="screenplay",
             )
+            if _target_issue_signature_still_open(issue, candidate_issues):
+                continue
             if _introduced_issue_messages(baseline_issues, candidate_issues):
                 continue
             selection = {
@@ -5584,6 +5621,14 @@ async def _llm_field_patch_once(
         subject="screenplay",
         stage="screenplay",
     )
+    if _target_issue_signature_still_open(issue, candidate_issues):
+        if rejection_feedback is not None:
+            rejection_feedback.append(
+                "候选仅把当前确定性字段错误替换成同一 "
+                "code/severity/subject/path/rule 下的另一错误，"
+                "目标不变量仍未关闭。"
+            )
+        return []
     introduced = _introduced_issue_messages(
         baseline_issues,
         candidate_issues,

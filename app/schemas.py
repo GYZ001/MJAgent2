@@ -301,6 +301,7 @@ class KeyDialogueChain(BaseModel):
     """A trigger and its dependent replies; downstream must preserve the whole chain."""
 
     chain_id: str = ""
+    scene_id: str = ""
     topic: str = ""
     turns: list[KeyDialogueTurn] = Field(default_factory=list)
 

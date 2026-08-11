@@ -4864,6 +4864,7 @@ def compile_screenplay_ir(
     dialogue_chain_rows: dict[str, list[KeyDialogueTurn]] = {}
     dialogue_chain_order: list[str] = []
     dialogue_chain_topics: dict[str, str] = {}
+    dialogue_chain_scenes: dict[str, str] = {}
     key_line_event: dict[int, str] = {}
     script_lines: list[str] = []
     scene_outlines: list[ScriptScene] = []
@@ -4914,6 +4915,7 @@ def compile_screenplay_ir(
                 dialogue_chain_topics[chain_key] = (
                     scene.story_function or scene.summary
                 )
+                dialogue_chain_scenes[chain_key] = f"SC{scene_position:02d}"
             dialogue_source_evidence = _dialogue_source_text(
                 unit.source_text,
                 source_text,
@@ -5075,6 +5077,7 @@ def compile_screenplay_ir(
                 chunk[0].function = "statement"
             dialogue_chains.append(KeyDialogueChain(
                 chain_id=f"DC{len(dialogue_chains) + 1}",
+                scene_id=dialogue_chain_scenes[key],
                 topic=(
                     dialogue_chain_topics[key]
                     + ("（续）" if offset else "")

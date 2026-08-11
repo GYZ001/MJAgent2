@@ -1,0 +1,44 @@
+{
+  "run_id": "run_3f05c2a0fedd",
+  "baseline_artifact": {
+    "id": "art_2ca16afe9c64",
+    "version": 10,
+    "scene_block": {
+      "scene_id": "SC01",
+      "scene_no": 1,
+      "scene_heading": "【场1】四月黄昏 / 大青山高空",
+      "story_function": "推进本场事件并完成状态变化：淡墨晕染的连绵大青山，天际橘粉过渡到黛青的黄昏天色；完成时代背景铺垫，即将切入主角视角",
+      "characters": [],
+      "summary": "淡墨晕染的连绵大青山，天际橘粉过渡到黛青的黄昏天色；完成时代背景铺垫，即将切入主角视角",
+      "conflict": "",
+      "turn": "完成时代背景铺垫，即将切入主角视角",
+      "source_basis": "SRC0001,SRC0002",
+      "entry_state": "淡墨晕染的连绵大青山，天际橘粉过渡到黛青的黄昏天色",
+      "exit_state": "完成时代背景铺垫，即将切入主角视角",
+      "context_requirements": [
+        "先建立四月黄昏、大青山高空的时间地点与空间关系"
+      ],
+      "action_blocks": [
+        {
+          "action_id": "AC01-01",
+          "text": "淡墨晕染的连绵大青山铺展在画面中，天际从橘粉的黄昏暮色缓缓过渡到远山深处的黛青色。"
+        },
+        {
+          "action_id": "AC01-02",
+          "text": "镜头沿着大青山脉缓慢平移，远景中赵国都城的剪影逐渐显现。"
+        }
+      ],
+      "dialogue_turns": []
+    }
+  },
+  "repair_artifact": {
+    "id": "art_f8cc4d91189a",
+    "reason": "scene_outline 第1场.characters 不能为空；请写本场实际参与角色",
+    "operation": {
+      "op": "replace_field",
+      "path": "characters",
+      "target": {"kind": "scene", "id": "SC01"},
+      "value": ["旁白"]
+    }
+  }
+}

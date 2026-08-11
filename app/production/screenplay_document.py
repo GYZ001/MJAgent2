@@ -1387,14 +1387,21 @@ def _key_lines_from_chains(chains: list[KeyDialogueChain]) -> list[str]:
 
 def _chains_from_scene_turns(blocks: list[SceneBlockNode]) -> list[KeyDialogueChain]:
     by_chain: dict[str, list[DialogueTurnNode]] = {}
+    scene_ids_by_chain: dict[str, set[str]] = {}
     for block in blocks:
         for turn in block.dialogue_turns:
             cid = turn.chain_id or block.scene_id or "DC1"
             by_chain.setdefault(cid, []).append(turn)
+            scene_ids_by_chain.setdefault(cid, set()).add(block.scene_id)
     chains: list[KeyDialogueChain] = []
     for cid, turns in by_chain.items():
         chains.append(KeyDialogueChain(
             chain_id=cid,
+            scene_id=(
+                next(iter(scene_ids_by_chain[cid]))
+                if len(scene_ids_by_chain[cid]) == 1
+                else ""
+            ),
             topic="",
             turns=[
                 KeyDialogueTurn(

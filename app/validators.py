@@ -2469,6 +2469,9 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         *typed_functional_identity_names(script),
     }
     narrative_character_ids = set(bible_names)
+    nonvisual_voice_ids: set[str] = set()
+    visible_identity_names: dict[str, str] = {}
+    expected_visible_by_scene: dict[int, set[str]] = {}
     if script.narrative_plan is not None:
         for identity in script.narrative_plan.identity_contracts:
             narrative_character_ids.update({
@@ -2476,6 +2479,20 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                 identity.display_name,
                 *identity.voice_ids,
             })
+            if identity.visual_policy == "offscreen_only":
+                nonvisual_voice_ids.update({
+                    identity.identity_id,
+                    identity.display_name,
+                    *identity.voice_ids,
+                })
+            else:
+                for value in {
+                    identity.identity_id,
+                    identity.display_name,
+                    *identity.voice_ids,
+                }:
+                    if value:
+                        visible_identity_names[value] = identity.display_name
         narrative_character_ids.update(
             actor_id
             for action in script.narrative_plan.atomic_actions
@@ -2495,6 +2512,82 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
         narrative_character_ids.update(
             voice.speaker_id for voice in script.voice_bible if voice.speaker_id
         )
+        nonvisual_voice_ids.update(
+            voice.speaker_id
+            for voice in script.voice_bible
+            if (
+                voice.speaker_id
+                and voice.role_type == "narrator"
+                and voice.speaker_id not in visible_identity_names
+            )
+        )
+
+        # The narrative graph is authoritative for whether an environment-only
+        # scene actually has a visible participant.  A scene may legitimately
+        # establish time/place with no person at all; conversely, a visible
+        # graph identity cannot be omitted merely because the prose body has no
+        # dialogue.  Only typed identities count here -- natural-language
+        # mentions in summaries/actions never manufacture characters.
+        event_by_id = {
+            event.event_id: event
+            for event in script.narrative_plan.events
+            if event.event_id
+        }
+        action_by_id = {
+            action.action_id: action
+            for action in script.narrative_plan.atomic_actions
+            if action.action_id
+        }
+        character_by_state_id = {
+            state.character_state_id: state.character_id
+            for state in script.narrative_plan.character_states
+            if state.character_state_id and state.character_id
+        }
+        for fallback_index, contract in enumerate(
+            script.narrative_plan.scene_contracts,
+            start=1,
+        ):
+            match = re.search(r"\d+", contract.scene_id or "")
+            scene_no = int(match.group(0)) if match else fallback_index
+            referenced_ids: set[str] = set()
+            for event_id in contract.turn_event_ids:
+                event = event_by_id.get(event_id)
+                if event is not None:
+                    referenced_ids.update(event.onscreen_entity_ids)
+                    for action_id in event.action_ids:
+                        action = action_by_id.get(action_id)
+                        if action is not None:
+                            referenced_ids.update(action.actor_ids)
+                            referenced_ids.update(action.target_ids)
+            referenced_ids.update(
+                character_by_state_id[state_id]
+                for state_id in (
+                    *contract.character_state_in_ids,
+                    *contract.character_state_out_ids,
+                )
+                if state_id in character_by_state_id
+            )
+            if contract.point_of_view_character_id:
+                referenced_ids.add(contract.point_of_view_character_id)
+            expected_visible_by_scene[scene_no] = {
+                visible_identity_names[value]
+                for value in referenced_ids
+                if value in visible_identity_names
+            }
+
+    spoken_by_scene: dict[int, set[str]] = {}
+    for scene_no, speaker, _line in _script_dialogue_turns(
+        script.full_script_text or "",
+    ):
+        if speaker:
+            spoken_by_scene.setdefault(scene_no, set()).add(speaker)
+    for chain in script.dialogue_chains:
+        match = re.search(r"\d+", chain.scene_id or "")
+        if match:
+            scene_no = int(match.group(0))
+            spoken_by_scene.setdefault(scene_no, set()).update(
+                turn.speaker for turn in chain.turns if turn.speaker
+            )
     for i, scene in enumerate(scenes, start=1):
         heading = (scene.scene_heading or "").strip()
         tag = f"scene_outline 第{i}场" + (f"「{heading}」" if heading else "")
@@ -2529,8 +2622,26 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
                     f"{tag}.context_requirements 为空；必须声明本场先建立的"
                     "时间、地点、空间关系、人物关系或关键道具"
                 )
-        if not scene.characters:
+        visible_spoken = {
+            speaker
+            for speaker in spoken_by_scene.get(i, set())
+            if speaker not in nonvisual_voice_ids
+        }
+        requires_visible_character = (
+            not narrative_authority
+            or bool(visible_spoken)
+            or bool(expected_visible_by_scene.get(i))
+        )
+        if not scene.characters and requires_visible_character:
             errors.append(f"{tag}.characters 不能为空；请写本场实际参与角色")
+        invalid_nonvisual = [
+            name for name in scene.characters if name in nonvisual_voice_ids
+        ]
+        if invalid_nonvisual:
+            errors.append(
+                f"{tag}.characters 含仅声音/离屏身份：{invalid_nonvisual}；"
+                "旁白或 offscreen_only 声源不得伪装成可见角色"
+            )
         unknown = (
             [name for name in scene.characters if name not in narrative_character_ids]
             if narrative_authority

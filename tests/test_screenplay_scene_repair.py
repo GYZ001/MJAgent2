@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,7 @@ from app.schemas import (
     SourceEvidence,
     SourceSpan,
     TextProvenance,
+    VoiceCanonical,
     World,
 )
 from app.screenplay_ir import IR_VERSION
@@ -106,6 +108,50 @@ def _script(story_function: str = "升级") -> EpisodeScreenplay:
         emotional_curve="压抑后保持克制",
         ending_hook="无集级钩子",
         source_basis="原文第一章测验广场段落",
+    )
+
+
+def _run_3f05c2a0fedd_environment_script() -> EpisodeScreenplay:
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/run_3f05c2a0fedd_narrator_scene_regression.json"
+        ).read_text(encoding="utf-8"),
+    )
+    scene = fixture["baseline_artifact"]["scene_block"]
+    action_text = "\n".join(
+        item["text"] for item in scene["action_blocks"]
+    )
+    return EpisodeScreenplay(
+        episode_no=1,
+        id="ep_711b29204aa9",
+        title="我欲封天第一集",
+        logline="孟浩从凡俗世界意外踏入修仙世界",
+        dramatic_question="孟浩如何踏上修仙之路？",
+        protagonist_goal="孟浩想解决生计困境",
+        obstacle="凡俗困顿与意外劫掠",
+        stakes="孟浩的生计与自由都将改变",
+        scene_outline=[ScriptScene.model_validate({
+            key: value
+            for key, value in scene.items()
+            if key not in {"scene_id", "action_blocks", "dialogue_turns"}
+        })],
+        full_script_text=f'{scene["scene_heading"]}\n{action_text}',
+        emotional_curve="平静铺陈后转入命运变化",
+        ending_hook="孟浩抵达靠山宗",
+        source_basis="SRC0001,SRC0002",
+        narrative_plan=NarrativeContinuityPlan.model_validate({
+            "scope_id": "ep_711b29204aa9",
+            "events": [{
+                "event_id": "E2",
+                "onscreen_entity_ids": [],
+            }],
+            "scene_contracts": [{
+                "scene_id": "SC01",
+                "point_of_view_character_id": "environment:ep_711b29204aa9",
+                "turn_event_ids": ["E2"],
+            }],
+        }),
     )
 
 
@@ -324,6 +370,173 @@ def test_scene_validator_message_is_structured_as_scene_field_issue():
     assert issue.evidence["path"] == "/scene_blocks/SC01/story_function"
     assert issue.evidence["related_node_ids"] == ["SC01"]
     assert issue.evidence["requires_user_input"] is False
+
+
+def _scene_character_errors(script: EpisodeScreenplay) -> list[str]:
+    from app.validators import validate_screenplay
+
+    return [
+        error
+        for error in validate_screenplay(
+            script,
+            Bible(characters=[], world=World(visual_style_canonical="国风")),
+            expected_beats=max(1, len(script.scene_outline)),
+            episode_no=1,
+            source_text=script.full_script_text,
+            require_dialogue_chains=False,
+            validate_narrative=False,
+        )
+        if ".characters " in error
+    ]
+
+
+def test_run_3f05c2a0fedd_environment_scene_keeps_empty_characters() -> None:
+    script = _run_3f05c2a0fedd_environment_script()
+
+    assert script.scene_outline[0].characters == []
+    assert _scene_character_errors(script) == []
+
+
+def test_narrative_scene_with_typed_visible_participant_requires_characters() -> None:
+    script = _run_3f05c2a0fedd_environment_script()
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": script.id,
+        "identity_contracts": [{
+            "identity_id": "person-menghao",
+            "display_name": "孟浩",
+            "kind": "named_character",
+            "visual_policy": "canonical",
+            "visual_canonical": "青色文士长衫的清瘦书生",
+            "asset_requirement": "required",
+            "voice_ids": ["孟浩"],
+        }],
+        "events": [{
+            "event_id": "E2",
+            "onscreen_entity_ids": ["person-menghao"],
+        }],
+        "scene_contracts": [{
+            "scene_id": "SC01",
+            "point_of_view_character_id": "person-menghao",
+            "turn_event_ids": ["E2"],
+        }],
+    })
+
+    errors = _scene_character_errors(script)
+
+    assert len(errors) == 1
+    assert ".characters 不能为空" in errors[0]
+
+
+def test_real_dialogue_speaker_requires_visible_character_listing() -> None:
+    script = _run_3f05c2a0fedd_environment_script()
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": script.id,
+        "identity_contracts": [{
+            "identity_id": "person-menghao",
+            "display_name": "孟浩",
+            "kind": "named_character",
+            "visual_policy": "canonical",
+            "visual_canonical": "青色文士长衫的清瘦书生",
+            "asset_requirement": "required",
+            "voice_ids": ["孟浩"],
+        }],
+        "scene_contracts": [{"scene_id": "SC01"}],
+    })
+    script.full_script_text += "\n孟浩：又落榜了……"
+
+    errors = _scene_character_errors(script)
+
+    assert len(errors) == 1
+    assert ".characters 不能为空" in errors[0]
+
+
+def test_legal_offscreen_voice_stays_out_of_scene_characters() -> None:
+    script = _run_3f05c2a0fedd_environment_script()
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": script.id,
+        "identity_contracts": [{
+            "identity_id": "voice-well",
+            "display_name": "井下回声",
+            "kind": "diegetic offscreen speaker",
+            "visual_policy": "offscreen_only",
+            "asset_requirement": "forbidden",
+            "voice_ids": ["井下回声"],
+        }],
+        "scene_contracts": [{"scene_id": "SC01"}],
+    })
+    script.voice_bible = [VoiceCanonical(
+        speaker_id="井下回声",
+        voice_canonical="遥远、沉闷且带空间混响",
+        role_type="offscreen_speaker",
+    )]
+    script.full_script_text += "\n井下回声：别下来。"
+
+    assert _scene_character_errors(script) == []
+    script.scene_outline[0].characters = ["井下回声"]
+    errors = _scene_character_errors(script)
+    assert any("仅声音/离屏身份" in error for error in errors)
+
+
+@pytest.mark.asyncio
+async def test_run_3f05c2a0fedd_repair_rejects_same_slot_narrator_swap(
+    monkeypatch,
+) -> None:
+    from app.harness import model_gateway
+    from app.production import screenplay_repair
+
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/run_3f05c2a0fedd_narrator_scene_regression.json"
+        ).read_text(encoding="utf-8"),
+    )
+    script = _run_3f05c2a0fedd_environment_script()
+    historical = fixture["repair_artifact"]
+    issue = issues_from_validator_messages(
+        [historical["reason"]],
+        subject="screenplay",
+        stage="screenplay",
+    )[0]
+    bad_candidate = {
+        "candidate_id": "CAND-001",
+        "operations": [historical["operation"]],
+        "satisfies_gap_test": True,
+        "passes_deletion_test": True,
+        "passes_marginal_gain_test": True,
+        "preserves_invariants": True,
+        "expected_narrative_gain": 0.8,
+        "destructive_cost": 0.0,
+    }
+    prompts: list[dict] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(json.loads(messages[1]["content"]))
+        return json.dumps({
+            "semantic_gap": "环境建立场被误判为缺角色",
+            "candidate_plans": [
+                bad_candidate,
+                {
+                    **bad_candidate,
+                    "candidate_id": "CAND-002",
+                    "satisfies_gap_test": False,
+                },
+            ],
+            "selected_candidate_id": "CAND-001",
+            "selection_reason": "填入旁白",
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    operations = await screenplay_repair._llm_field_patch_once(
+        issue,
+        script,
+        source_text=script.full_script_text,
+    )
+
+    assert operations == []
+    policy = prompts[0]["identity_contract_policy"]
+    assert "包括旁白" in policy["authority"]
+    assert any("prose/summary" in rule for rule in policy["typed_invariants"])
 
 
 def test_legacy_scene_message_is_not_inferred_as_a_shot():
