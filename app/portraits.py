@@ -3313,6 +3313,9 @@ async def ensure_structural_identity_coverage(
     """
     conn = get_conn()
     source_hash = evidence_repository.content_hash(source_text)
+    identity_scope_fingerprint = screenplay_identity_scope_fingerprint(
+        episode_no, source_text
+    )
     structural_hash = evidence_repository.content_hash({
         "policy_version": STRUCTURAL_IDENTITY_COVERAGE_VERSION,
         "source_hash": source_hash,
@@ -3349,6 +3352,9 @@ async def ensure_structural_identity_coverage(
                 (
                     str(item.get("source_label") or "").strip(),
                     str(item.get("identity_group") or "").strip(),
+                    str(
+                        item.get("identity_scope_fingerprint") or ""
+                    ).strip(),
                 )
                 for item in cached_resolutions
                 if isinstance(item, dict)
@@ -3357,6 +3363,7 @@ async def ensure_structural_identity_coverage(
                 (
                     str(item.get("source_label") or "").strip(),
                     str(item.get("identity_group") or "").strip(),
+                    identity_scope_fingerprint,
                 )
                 for item in payload["candidates"]
                 if (

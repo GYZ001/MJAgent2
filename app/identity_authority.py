@@ -246,7 +246,10 @@ def identity_authority_registry(
             "identity_scope_fingerprint": identity_scope_fingerprint,
             "source_instance_key": (
                 item.get("source_instance_key")
-                or item.get("identity_group")
+                or scoped_group_key(
+                    raw_identity_group,
+                    identity_scope_fingerprint,
+                )
                 or authority_id
             ),
             "evidence": item.get("evidence") or "",

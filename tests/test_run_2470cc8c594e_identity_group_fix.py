@@ -481,6 +481,9 @@ def test_structural_coverage_reuses_only_current_contract_cache(
             "canonical_name": "虎头虎脑的少年",
             "resolution": "functional_identity",
             "identity_group": "current-1:F1",
+            "identity_scope_fingerprint": (
+                portraits.screenplay_identity_scope_fingerprint(1, source_text)
+            ),
         }], ensure_ascii=False),),
     )
     conn.commit()

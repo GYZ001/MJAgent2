@@ -605,12 +605,6 @@ def test_current_screenplay_artifact_complete_lineage_loads() -> None:
     ))
 
     restored = load_screenplay_from_artifact(artifact["id"])
-    assert_screenplay_matches_validated_v6_source(
-        episode_id=case["episode_id"],
-        artifact=evidence_repository.get_artifact(artifact["id"]),
-        screenplay=restored,
-        conn=conn,
-    )
 
     assert restored.narrative_plan is not None
 
@@ -2171,6 +2165,12 @@ def test_recovery_compile_receives_normalized_resolution_projection(
     )
 
     restored = load_screenplay_from_artifact(artifact["id"])
+    assert_screenplay_matches_validated_v6_source(
+        episode_id=case["episode_id"],
+        artifact=evidence_repository.get_artifact(artifact["id"]),
+        screenplay=restored,
+        conn=conn,
+    )
 
     assert restored.id == case["compiled"].id
     assert captured["episode"]["character_resolutions"][0]["authority_id"].startswith(
