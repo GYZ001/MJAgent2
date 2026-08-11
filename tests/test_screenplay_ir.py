@@ -2449,6 +2449,7 @@ def test_baseline_recompiles_durable_ir_without_second_model_call(
 def _participant_delivery_complete_ir_payload(version: str) -> dict:
     payload = _ir_payload()
     payload["format_version"] = version
+    payload["source_audit_annotations"] = []
     payload["source_semantics"] = {
         f"SRC{index:04d}": {
             "narrative_layer": "story",

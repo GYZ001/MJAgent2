@@ -374,6 +374,7 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
     from app.screenplay_ir import (
         IR_VERSION,
         screenplay_ir_missing_event_semantic_paths,
+        screenplay_ir_source_audit_contract_errors,
     )
     from app.screenplay_scene_shards import (
         SCREENPLAY_MERGED_IR_VERSION,
@@ -420,6 +421,10 @@ def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
         gaps.extend(
             f"{artifact_id}:{path}"
             for path in screenplay_ir_missing_event_semantic_paths(content)
+        )
+        gaps.extend(
+            f"{artifact_id}:{error}"
+            for error in screenplay_ir_source_audit_contract_errors(content)
         )
         direct_parents = [
             (

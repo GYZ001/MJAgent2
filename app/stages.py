@@ -125,6 +125,7 @@ from app.screenplay_ir import (
     screenplay_ir_missing_event_semantic_paths,
     screenplay_ir_missing_participant_delivery_paths,
     screenplay_ir_prompt_contract,
+    screenplay_ir_source_audit_contract_errors,
 )
 from app.identity_authority import model_identity_authority_prompt_rule
 
@@ -317,13 +318,18 @@ def _recover_screenplay_ir_candidate(
                 *screenplay_ir_missing_participant_delivery_paths(payload),
                 *screenplay_ir_missing_event_semantic_paths(payload),
             ]
-            if missing_paths:
+            audit_errors = screenplay_ir_source_audit_contract_errors(payload)
+            if missing_paths or audit_errors:
                 raise ArtifactNeedsRebuildError(
                     artifact_id=str(row["id"]),
                     artifact_type=str(row["type"]),
                     reason=(
                         "缺少当前合同要求的显式字段 "
                         + "、".join(missing_paths[:10])
+                        + (
+                            "；" + "；".join(audit_errors[:10])
+                            if audit_errors else ""
+                        )
                     ),
                 )
             artifact_contract = str(row["contract_version"] or "")
@@ -3894,21 +3900,15 @@ async def _repair_narrative_blueprint(
         ]
         repair_prompt = (
             "只局部修复叙事蓝图的硬门禁问题，禁止重写整份蓝图。"
-            "replacements 中只输出需要修改的完整 node；普通修改使用 node，"
-            "需要拆分复合时空时使用 nodes。拆分前后 source_segment_ids 的集合"
-            "必须完全相同；同一 SRC 只能归属一个程序分场。若拆分节点会落入不同场，"
-            "原 SRC 只保留在实际交付场，其他场必须通过 state_requirements、"
-            "decision.setup_node_keys 或 transition_cue 表达派生上下文，禁止重复消费。"
-            "新节点 key 必须唯一。"
-            "仅当硬门禁明确给出 BLUEPRINT_SOURCE_MISSING 时，允许把下方列出的"
-            "缺失 SRC 补入语义和原文位置最接近的节点。"
-            "若错误节点是局部修复曾产生的重复/虚构节点，可写入 delete_node_keys；"
-            "但必须先把其真实来源交付归还正确节点，删除后任何 SRC 缺失都会被拒绝。"
+            "replacements 中只输出需要修改的完整 node，并使用 node 字段。"
+            "每个 replacement 必须与原节点一对一，完整保持 canonical key、"
+            "source_segment_ids 的集合与顺序，以及"
+            "narrative_layer/event_priority/render_policy 语义三元。"
+            "禁止拆分、合并、新增、删除或重排 timeline node；"
+            "delete_node_keys 必须为空。"
             "允许修正时间关系、转场、状态事实引用、决定、行为自主性和"
             " released_constraints_for。每个 replacement node 必须显式保留或修正"
-            " narrative_layer/event_priority/render_policy；可演故事只能使用"
-            " story+causal+standalone，仅保留来源审计的旁文本只能使用"
-            " paratext+connective+exclude_from_spine，禁止省略后由程序猜测。"
+            "除上述 canonical authority 字段外的创作与分场字段。"
             "每个 replacement 必须保持修复前 projection_policy；audit_only "
             "节点与来源只能保留在来源审计，不得改成 story 或放入 scene。"
             "不得修改未列出的节点。原文没有的同谋、"
@@ -4044,7 +4044,7 @@ async def _repair_narrative_blueprint(
         changed = apply_narrative_blueprint_patch(
             blueprint,
             patch,
-            allow_source_expansion=True,
+            allow_source_expansion=False,
             source_text=source_text,
         )
         if not changed:

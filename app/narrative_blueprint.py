@@ -658,6 +658,7 @@ def blueprint_semantic_review_schema(
         raise ValueError("canonical node identities must be non-empty and unique")
 
     schema = BlueprintSemanticReview.model_json_schema()
+    schema["x-canonical-timeline-node-keys"] = identities
     issue_schema = schema["$defs"]["BlueprintSemanticIssue"]
     issue_schema["properties"]["node_keys"] = {
         "title": "Canonical Node References",
@@ -736,6 +737,8 @@ def blueprint_patch_schema(
         )
 
     schema = NarrativeBlueprintPatch.model_json_schema()
+    canonical_node_keys = [node.key for node in blueprint.nodes]
+    schema["x-canonical-timeline-node-keys"] = canonical_node_keys
     alternatives: list[dict[str, Any]] = []
     for key in keys:
         node = node_map[key]
@@ -744,6 +747,9 @@ def blueprint_patch_schema(
             "type": "object",
             "properties": {
                 "key": {"const": key},
+                "source_segment_ids": {
+                    "const": list(node.source_segment_ids),
+                },
                 "narrative_layer": {
                     "const": semantics.narrative_layer,
                 },
@@ -759,6 +765,7 @@ def blueprint_patch_schema(
                 "narrative_layer",
                 "event_priority",
                 "render_policy",
+                "source_segment_ids",
             ],
         }
         alternatives.append({
@@ -772,42 +779,15 @@ def blueprint_patch_schema(
                         node_contract,
                     ],
                 },
-                "nodes": {
-                    "type": "array",
-                    "items": {
-                        "allOf": [
-                            {"$ref": "#/$defs/NarrativeNode"},
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "narrative_layer": {
-                                        "const": semantics.narrative_layer,
-                                    },
-                                    "event_priority": {
-                                        "const": semantics.event_priority,
-                                    },
-                                    "render_policy": {
-                                        "const": semantics.render_policy,
-                                    },
-                                },
-                                "required": [
-                                    "narrative_layer",
-                                    "event_priority",
-                                    "render_policy",
-                                ],
-                            },
-                        ],
-                    },
-                },
             },
-            "required": ["node_key"],
+            "required": ["node_key", "node"],
         })
     schema["properties"]["replacements"]["items"] = {
         "oneOf": alternatives,
     }
-    schema["properties"]["delete_node_keys"]["items"] = {
-        "type": "string",
-        "enum": keys,
+    schema["properties"]["delete_node_keys"] = {
+        "type": "array",
+        "maxItems": 0,
     }
     return schema
 
@@ -1092,14 +1072,22 @@ def validate_narrative_blueprint_patch_projection(
     patch: NarrativeBlueprintPatch,
     blueprint: NarrativeBlueprint,
 ) -> list[str]:
-    """Keep repair output inside the pre-repair picture/audit projection."""
+    """Keep repair inside the canonical timeline and source authority."""
     node_map = {node.key: node for node in blueprint.nodes}
-    source_projection = {
-        source_id: node.source_semantics().projection_policy
-        for node in blueprint.nodes
-        for source_id in node.source_segment_ids
-    }
     errors: list[str] = []
+    replacement_keys = [
+        replacement.node_key for replacement in patch.replacements
+    ]
+    if len(replacement_keys) != len(set(replacement_keys)):
+        errors.append(
+            "[BLUEPRINT_PATCH_NODE_DUPLICATE] "
+            "同一 canonical node 不得重复替换"
+        )
+    if patch.delete_node_keys:
+        errors.append(
+            "[BLUEPRINT_PATCH_TIMELINE_DELETE] "
+            "repair 不得删除 canonical timeline node"
+        )
     for replacement in patch.replacements:
         original = node_map.get(replacement.node_key)
         if original is None:
@@ -1108,45 +1096,38 @@ def validate_narrative_blueprint_patch_projection(
                 f"{replacement.node_key} 不在修复窗口"
             )
             continue
-        expected_projection = (
-            original.source_semantics().projection_policy
-        )
+        if len(replacement.nodes) != 1:
+            errors.append(
+                "[BLUEPRINT_PATCH_TIMELINE_CARDINALITY] "
+                f"{replacement.node_key} 必须一对一替换"
+            )
+            continue
         for node in replacement.nodes:
-            actual_projection = node.source_semantics().projection_policy
-            if actual_projection != expected_projection:
+            if node.key != original.key:
                 errors.append(
-                    "[BLUEPRINT_PATCH_PROJECTION_POLICY_CHANGE] "
-                    f"{replacement.node_key} 必须保持 "
-                    f"projection_policy={expected_projection}"
+                    "[BLUEPRINT_PATCH_NODE_IDENTITY_CHANGE] "
+                    f"{replacement.node_key} 不得改写 canonical key"
                 )
-            escaped_sources = [
-                source_id
-                for source_id in node.source_segment_ids
-                if (
-                    source_id in source_projection
-                    and source_projection[source_id] != actual_projection
-                )
-            ]
-            if escaped_sources:
+            if node.source_segment_ids != original.source_segment_ids:
                 errors.append(
-                    "[BLUEPRINT_PATCH_SOURCE_PROJECTION_ESCAPE] "
-                    f"{node.key} 的来源投影不一致："
-                    + "、".join(escaped_sources)
+                    "[BLUEPRINT_PATCH_SOURCE_OWNERSHIP_CHANGE] "
+                    f"{replacement.node_key} 必须保持完整有序来源 ownership"
                 )
-    deleted_audit_nodes = [
-        node_key
-        for node_key in patch.delete_node_keys
-        if (
-            node_map.get(node_key) is not None
-            and node_map[node_key].source_semantics().projection_policy
-            == "audit_only"
-        )
-    ]
-    if deleted_audit_nodes:
-        errors.append(
-            "[BLUEPRINT_PATCH_AUDIT_DELETE] audit_only 节点不得删除："
-            + "、".join(deleted_audit_nodes)
-        )
+            expected_semantics = (
+                original.narrative_layer,
+                original.event_priority,
+                original.render_policy,
+            )
+            actual_semantics = (
+                node.narrative_layer,
+                node.event_priority,
+                node.render_policy,
+            )
+            if actual_semantics != expected_semantics:
+                errors.append(
+                    "[BLUEPRINT_PATCH_SOURCE_SEMANTICS_CHANGE] "
+                    f"{replacement.node_key} 必须保持来源语义三元"
+                )
     return list(dict.fromkeys(errors))
 
 
@@ -1157,6 +1138,22 @@ def apply_narrative_blueprint_patch(
     allow_source_expansion: bool = False,
     source_text: str | None = None,
 ) -> int:
+    canonical_contract = [
+        (
+            node.key,
+            tuple(node.source_segment_ids),
+            node.narrative_layer,
+            node.event_priority,
+            node.render_policy,
+        )
+        for node in blueprint.nodes
+    ]
+    projection_errors = validate_narrative_blueprint_patch_projection(
+        patch,
+        blueprint,
+    )
+    if projection_errors:
+        raise ValueError("；".join(projection_errors))
     original_keys = {node.key for node in blueprint.nodes}
     normalized_replacements: list[NarrativeNodeReplacement] = []
     replacement_by_target: dict[str, NarrativeNodeReplacement] = {}
@@ -1366,9 +1363,22 @@ def apply_narrative_blueprint_patch(
                 for node_key
                 in rebuilt_node.decision.constraint_release_node_keys
             ]
-    if source_text is not None:
-        normalize_blueprint_source_order(blueprint, source_text)
     normalize_blueprint_fact_versions(blueprint)
+    repaired_contract = [
+        (
+            node.key,
+            tuple(node.source_segment_ids),
+            node.narrative_layer,
+            node.event_priority,
+            node.render_policy,
+        )
+        for node in blueprint.nodes
+    ]
+    if repaired_contract != canonical_contract:
+        raise ValueError(
+            "[BLUEPRINT_PATCH_CANONICAL_TIMELINE_CHANGE] repair 前后 "
+            "timeline key、顺序、source ownership 与语义三元必须完全一致"
+        )
     derive_blueprint_scene_plans(blueprint)
     return changed
 

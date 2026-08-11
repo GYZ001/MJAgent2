@@ -406,6 +406,105 @@ def screenplay_ir_missing_event_semantic_paths(value: object) -> list[str]:
     return missing
 
 
+def screenplay_ir_source_audit_contract_errors(
+    value: object,
+) -> list[str]:
+    """Validate the explicit audit authority carried by the current IR."""
+    if not isinstance(value, dict):
+        return ["[IR_SOURCE_AUDIT_CONTRACT] payload 必须是对象"]
+    if str(value.get("format_version") or "") != IR_VERSION:
+        return []
+    if "source_audit_annotations" not in value:
+        return [
+            "[IR_SOURCE_AUDIT_FIELD_MISSING] "
+            "source_audit_annotations 必须显式提供"
+        ]
+    annotations = value.get("source_audit_annotations")
+    if not isinstance(annotations, list):
+        return [
+            "[IR_SOURCE_AUDIT_INVALID] "
+            "source_audit_annotations 必须是数组"
+        ]
+
+    errors: list[str] = []
+    annotation_source_ids: list[str] = []
+    annotation_node_keys: list[str] = []
+    required_annotation_fields = set(
+        BlueprintSourceAuditAnnotation.model_fields
+    )
+    for index, annotation in enumerate(annotations):
+        if isinstance(annotation, BlueprintSourceAuditAnnotation):
+            annotation = annotation.model_dump(mode="json")
+        if not isinstance(annotation, dict):
+            errors.append(
+                f"[IR_SOURCE_AUDIT_INVALID] "
+                f"source_audit_annotations[{index}] 必须是对象"
+            )
+            continue
+        missing_fields = required_annotation_fields - set(annotation)
+        if missing_fields:
+            errors.append(
+                "[IR_SOURCE_AUDIT_FIELD_MISSING] "
+                f"source_audit_annotations[{index}] 缺少显式字段："
+                + "、".join(sorted(missing_fields))
+            )
+        node_key = str(annotation.get("node_key") or "").strip()
+        source_ids = annotation.get("source_segment_ids")
+        if not node_key or not isinstance(source_ids, list) or not source_ids:
+            errors.append(
+                "[IR_SOURCE_AUDIT_INVALID] "
+                f"source_audit_annotations[{index}] 缺少节点或来源"
+            )
+            continue
+        annotation_node_keys.append(node_key)
+        annotation_source_ids.extend(str(source_id) for source_id in source_ids)
+
+    coverage_source_ids = [
+        str(source_id)
+        for group in value.get("coverage") or []
+        if isinstance(group, dict)
+        and (
+            group.get("disposition") == "audit_only"
+            or group.get("projection_policy") == "audit_only"
+        )
+        for source_id in group.get("source_segment_ids") or []
+    ]
+    source_semantics = value.get("source_semantics")
+    semantic_source_ids = [
+        str(source_id)
+        for source_id, semantics in (
+            source_semantics.items()
+            if isinstance(source_semantics, dict)
+            else ()
+        )
+        if isinstance(semantics, dict)
+        and (
+            semantics.get("disposition") == "audit_only"
+            or semantics.get("projection_policy") == "audit_only"
+        )
+    ]
+    for label, identities in (
+        ("annotation node", annotation_node_keys),
+        ("annotation source", annotation_source_ids),
+        ("coverage audit source", coverage_source_ids),
+        ("semantic audit source", semantic_source_ids),
+    ):
+        if len(identities) != len(set(identities)):
+            errors.append(
+                f"[IR_SOURCE_AUDIT_DUPLICATE] {label} 含重复 identity"
+            )
+    if (
+        annotation_source_ids != coverage_source_ids
+        or set(annotation_source_ids) != set(semantic_source_ids)
+    ):
+        errors.append(
+            "[IR_SOURCE_AUDIT_COVERAGE_MISMATCH] "
+            "source_audit_annotations、coverage 与 source_semantics "
+            "必须完整一致"
+        )
+    return list(dict.fromkeys(errors))
+
+
 class IRIdentity(BaseModel):
     key: str
     display_name: str
@@ -996,6 +1095,9 @@ class ScreenplayGenerationIR(BaseModel):
                     "[IR_CONTRACT_FIELD_MISSING] 当前 IR 合同缺少显式字段："
                     + "、".join(missing[:10])
                 )
+            audit_errors = screenplay_ir_source_audit_contract_errors(value)
+            if audit_errors:
+                raise ValueError("；".join(audit_errors))
         normalized = dict(value)
         coverage = normalized.get("coverage")
         if isinstance(coverage, dict):
@@ -1017,6 +1119,17 @@ class ScreenplayGenerationIR(BaseModel):
         elif coverage is not None and not isinstance(coverage, list):
             normalized["coverage"] = _as_list(coverage)
         return normalized
+
+    @model_validator(mode="after")
+    def _validate_source_audit_contract(self) -> ScreenplayGenerationIR:
+        if self.format_version != IR_VERSION or self.legacy_screenplay is not None:
+            return self
+        errors = screenplay_ir_source_audit_contract_errors(
+            self.model_dump(mode="json")
+        )
+        if errors:
+            raise ValueError("；".join(errors))
+        return self
 
 
 def merge_scene_shards(**kwargs: Any) -> ScreenplayGenerationIR:

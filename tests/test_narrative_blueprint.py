@@ -340,12 +340,21 @@ def test_reviewer_and_repair_schemas_bind_projection_authority() -> None:
     issue_properties = review_schema["$defs"][
         "BlueprintSemanticIssue"
     ]["properties"]
+    assert review_schema["x-canonical-timeline-node-keys"] == ["n1", "n2"]
     assert issue_properties["source_segment_ids"]["items"]["enum"] == [
         "SRC0001", "SRC0002",
     ]
 
     schema = blueprint_patch_schema(blueprint, ["n1", "n2"])
     alternatives = schema["properties"]["replacements"]["items"]["oneOf"]
+    assert schema["x-canonical-timeline-node-keys"] == [
+        node.key for node in blueprint.nodes
+    ]
+    assert schema["properties"]["delete_node_keys"]["maxItems"] == 0
+    assert all(
+        "nodes" not in alternative["properties"]
+        for alternative in alternatives
+    )
     by_key = {
         alternative["properties"]["node_key"]["const"]: alternative
         for alternative in alternatives
@@ -373,7 +382,7 @@ def test_reviewer_and_repair_schemas_bind_projection_authority() -> None:
     })
 
     assert any(
-        "PROJECTION_POLICY_CHANGE" in error
+        "SOURCE_SEMANTICS_CHANGE" in error
         for error in validate_narrative_blueprint_patch_projection(
             patch,
             blueprint,
@@ -788,7 +797,7 @@ def test_blueprint_patch_replaces_node_without_changing_source_ownership() -> No
     assert blueprint.nodes[2].transition_cue == "咖啡杯匹配剪辑到台灯"
 
 
-def test_blueprint_patch_restores_authoritative_source_order() -> None:
+def test_blueprint_patch_rejects_source_ownership_exchange() -> None:
     blueprint = _blueprint()
     memory_node = blueprint.nodes[1].model_copy(deep=True)
     return_node = blueprint.nodes[2].model_copy(deep=True)
@@ -807,16 +816,14 @@ def test_blueprint_patch_restores_authoritative_source_order() -> None:
         ],
     })
 
-    assert apply_narrative_blueprint_patch(
-        blueprint,
-        patch,
-        allow_source_expansion=True,
-        source_text=SOURCE,
-    ) == 2
-    assert [node.key for node in blueprint.nodes] == [
-        "n1", "n3", "n2", "n4",
-    ]
-    assert validate_narrative_blueprint(blueprint, SOURCE) == []
+    with pytest.raises(ValueError, match="SOURCE_OWNERSHIP_CHANGE"):
+        apply_narrative_blueprint_patch(
+            blueprint,
+            patch,
+            allow_source_expansion=True,
+            source_text=SOURCE,
+        )
+    assert [node.key for node in blueprint.nodes] == ["n1", "n2", "n3", "n4"]
 
 
 def test_blueprint_patch_repairs_malformed_provider_json(
@@ -950,7 +957,7 @@ def test_blueprint_review_exhaustion_is_quality_gate(
     assert repair_calls == 3
 
 
-def test_blueprint_patch_can_split_one_node_without_losing_sources() -> None:
+def test_blueprint_patch_rejects_node_split() -> None:
     blueprint = _blueprint()
     original = blueprint.nodes[0]
     first = original.model_copy(deep=True)
@@ -971,11 +978,12 @@ def test_blueprint_patch_can_split_one_node_without_losing_sources() -> None:
         }],
     })
 
-    assert apply_narrative_blueprint_patch(blueprint, patch) == 1
-    assert [node.key for node in blueprint.nodes[:2]] == ["n1a", "n1b"]
+    with pytest.raises(ValueError, match="TIMELINE_CARDINALITY"):
+        apply_narrative_blueprint_patch(blueprint, patch)
+    assert [node.key for node in blueprint.nodes] == ["n1", "n2", "n3", "n4"]
 
 
-def test_blueprint_patch_merges_unknown_split_key_by_unique_sources() -> None:
+def test_blueprint_patch_rejects_unknown_and_renamed_nodes() -> None:
     blueprint = _blueprint()
     original = blueprint.nodes[0]
     first = original.model_copy(deep=True)
@@ -996,11 +1004,9 @@ def test_blueprint_patch_merges_unknown_split_key_by_unique_sources() -> None:
         ],
     })
 
-    assert apply_narrative_blueprint_patch(blueprint, patch) == 1
-    assert [node.key for node in blueprint.nodes[:2]] == [
-        "n1a",
-        "model-new-node",
-    ]
+    with pytest.raises(ValueError, match="NODE_IDENTITY_CHANGE"):
+        apply_narrative_blueprint_patch(blueprint, patch)
+    assert [node.key for node in blueprint.nodes] == ["n1", "n2", "n3", "n4"]
 
 
 def test_semantic_review_must_reference_existing_nodes_and_sources() -> None:
