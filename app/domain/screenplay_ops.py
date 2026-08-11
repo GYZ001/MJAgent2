@@ -898,43 +898,21 @@ def recover_screenplay_tasks() -> int:
                 )
             except StateConflict:
                 pass
-        from app.production.revision import get_active_production_revision
+        from app.production.revision import (
+            resolve_screenplay_resume_eligibility,
+        )
 
-        revision = get_active_production_revision(episode_id, "screenplay")
-        current_contract = get_contract("screenplay").version
-        if revision is not None and revision.working_artifact_id:
-            try:
-                load_screenplay_from_artifact(revision.working_artifact_id)
-            except ArtifactNeedsRebuildError as exc:
-                conn.execute(
-                    "UPDATE episodes SET screenplay_status='repairing',"
-                    "screenplay_error=?,active_screenplay_run_id=NULL,"
-                    "screenplay_updated_at=? WHERE id=? "
-                    "AND active_screenplay_run_id=?",
-                    (
-                        str(exc),
-                        now(),
-                        episode_id,
-                        row["active_screenplay_run_id"],
-                    ),
-                )
-                conn.commit()
-                continue
-        if (
-            revision is not None
-            and revision.contract_version
-            and revision.contract_version != current_contract
-        ):
+        eligibility = resolve_screenplay_resume_eligibility(
+            episode_id,
+            conn=conn,
+        )
+        if not eligibility.resumable:
             conn.execute(
                 "UPDATE episodes SET screenplay_status='repairing',screenplay_error=?,"
                 "active_screenplay_run_id=NULL,screenplay_updated_at=? "
                 "WHERE id=? AND active_screenplay_run_id=?",
                 (
-                    (
-                        f"剧本工作副本使用旧合同 {revision.contract_version}；"
-                        f"当前合同为 {current_contract}。旧 Artifact 已保留，"
-                        "请点击继续以创建新 revision，禁止自动恢复旧付费修复循环"
-                    ),
+                    eligibility.reason,
                     now(),
                     episode_id,
                     row["active_screenplay_run_id"],
@@ -974,9 +952,10 @@ def recover_screenplay_tasks() -> int:
                 recorder,
                 project_id=row["project_id"],
                 status="queued",
-                message="恢复任务已排队，等待文本生成槽位",
+                message=f"{eligibility.label}已排队，等待文本生成槽位",
                 preserve_started_at=True,
                 expected_active_run_id=row["active_screenplay_run_id"],
+                resume_eligibility=eligibility,
                 task_factory=lambda episode_id=episode_id, recorder=recorder, batch_run_id=batch_run_id: _screenplay_guarded(
                     episode_id,
                     recorder,
@@ -1415,11 +1394,13 @@ def _spawn_screenplay_activation(
     task_factory=None,
     expected_active_run_id: str | None = None,
     clear_unpublished_ir: bool = False,
-) -> None:
+    resume_eligibility=None,
+):
     """Atomically claim one episode before registering its in-process task."""
     conn = get_conn()
     previous: dict | None = None
     registered_task = None
+    prepared_revision = None
     try:
         conn.execute("BEGIN IMMEDIATE")
         previous_row = conn.execute(
@@ -1470,6 +1451,34 @@ def _spawn_screenplay_activation(
                     episode_id,
                     {""},
                     previous_run_id,
+                )
+        if resume_eligibility is not None:
+            from app.production.revision import (
+                rebase_screenplay_revision_for_resume,
+                resolve_screenplay_resume_eligibility,
+            )
+
+            current_eligibility = resolve_screenplay_resume_eligibility(
+                episode_id,
+                conn=conn,
+            )
+            if (
+                current_eligibility.mode != resume_eligibility.mode
+                or current_eligibility.revision_id
+                != resume_eligibility.revision_id
+                or current_eligibility.working_artifact_id
+                != resume_eligibility.working_artifact_id
+            ):
+                raise StateConflict(
+                    "screenplay_resume_eligibility",
+                    episode_id,
+                    {resume_eligibility.mode},
+                    current_eligibility.mode,
+                )
+            if current_eligibility.revision_action == "rebase":
+                prepared_revision = rebase_screenplay_revision_for_resume(
+                    current_eligibility,
+                    conn=conn,
                 )
         if clear_unpublished_ir:
             _clear_unpublished_screenplay_ir(
@@ -1529,6 +1538,7 @@ def _spawn_screenplay_activation(
         # registry accepts it so a registration failure rolls back the owner
         # claim, identity columns and deleted retry-only IR in one transaction.
         conn.commit()
+        return prepared_revision
     except BaseException:
         if registered_task is not None:
             task_registry.cancel("screenplay", episode_id)
@@ -1947,16 +1957,20 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             "deduplicated": True,
         }
 
-    # 已有 published / production revision 时只允许继续 Repair；全量重生必须先显式删除。
-    from app.production.revision import get_active_production_revision
-    active_rev = get_active_production_revision(episode_id, "screenplay")
+    # 已有 published 产品时仍要求显式删除；未发布恢复统一由 resolver 决定。
+    from app.production.revision import resolve_screenplay_resume_eligibility
+    eligibility = resolve_screenplay_resume_eligibility(episode_id)
     published_id = None
     try:
         published_id = ep["published_screenplay_artifact_id"] if "published_screenplay_artifact_id" in ep.keys() else None
     except Exception:  # noqa: BLE001
         published_id = None
     has_product = bool(ep["screenplay_json"]) and ep["screenplay_status"] in {"ready", "repairing"}
-    if has_product and (active_rev or published_id or ep["screenplay_status"] == "ready"):
+    if has_product and (
+        eligibility.revision_id
+        or published_id
+        or ep["screenplay_status"] == "ready"
+    ):
         if ep["screenplay_status"] == "ready":
             raise HTTPException(
                 409,
@@ -1965,7 +1979,8 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
         # repairing → 续跑 Repair（不新建 Baseline）
         pass
 
-    resume_existing = bool(active_rev and active_rev.baseline_done and active_rev.working_artifact_id)
+    resume_existing = eligibility.resumable
+    resume_mode = eligibility.mode if resume_existing else "baseline"
     try:
         recorder = _new_screenplay_recorder(
             episode_id,
@@ -1978,14 +1993,16 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             project_id=ep["project_id"],
             status="queued",
             message=(
-                "从 working Artifact 继续结构校验、评分与发布"
-                if resume_existing else "剧本任务已排队，等待文本生成槽位"
+                f"{eligibility.label}已排队，等待文本生成槽位"
+                if resume_existing
+                else "剧本任务已排队，等待文本生成槽位"
             ),
             expected_active_run_id=(
                 ep["active_screenplay_run_id"]
                 if resume_existing else None
             ),
             clear_unpublished_ir=not resume_existing,
+            resume_eligibility=eligibility if resume_existing else None,
         )
     except Exception as exc:
         raise HTTPException(503, {
@@ -1996,7 +2013,7 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
     return {
         "status": "queued",
         "run_id": recorder.run_id,
-        "mode": "finalize" if resume_existing else "baseline",
+        "mode": resume_mode,
     }
 
 
@@ -2071,7 +2088,10 @@ def _prepare_published_screenplay_revalidation(ep: dict):
 async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
     """Continue either pre-Document shards or post-Document validation."""
     from app.capabilities.dispatch import ui_route
-    from app.production.revision import get_active_production_revision
+    from app.production.revision import (
+        get_active_production_revision,
+        resolve_screenplay_resume_eligibility,
+    )
 
     body = _as_body_dict(body)
     routed = await ui_route("screenplay.resume", {
@@ -2089,11 +2109,7 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         return {
             "status": ep["screenplay_status"],
             "run_id": ep["active_screenplay_run_id"],
-            "mode": (
-                "baseline"
-                if not active_state.get("baseline_done")
-                else "finalize"
-            ),
+            "mode": active_state.get("mode") or active_state.get("operation"),
             "deduplicated": True,
         }
     rev = get_active_production_revision(episode_id, "screenplay")
@@ -2105,13 +2121,14 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
         and not _screenplay_ready(ep)
     ):
         rev = _prepare_published_screenplay_revalidation(dict(ep))
-    can_resume_baseline = bool(production_state.get("can_resume_baseline"))
-    can_resume_repair = bool(
-        rev and rev.baseline_done and rev.working_artifact_id
+        production_state = _screenplay_production_state(episode_id)
+    eligibility = resolve_screenplay_resume_eligibility(
+        episode_id,
+        revision=rev,
     )
-    if not rev or not (can_resume_baseline or can_resume_repair):
+    if not rev or not eligibility.resumable:
         raise HTTPException(409, "没有可继续的首版检查点或完整剧本工作副本")
-    resume_mode = "baseline" if can_resume_baseline else "finalize"
+    resume_mode = eligibility.mode
 
     try:
         recorder = _new_screenplay_recorder(
@@ -2125,11 +2142,10 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
             project_id=ep["project_id"],
             status="queued",
             message=(
-                "首版场次续跑已排队，等待文本生成槽位"
-                if resume_mode == "baseline"
-                else "剧本续修已排队，等待文本生成槽位"
+                f"{eligibility.label}已排队，等待文本生成槽位"
             ),
             expected_active_run_id=ep["active_screenplay_run_id"],
+            resume_eligibility=eligibility,
         )
     except Exception as exc:
         raise HTTPException(503, {
@@ -2140,7 +2156,9 @@ async def resume_screenplay(episode_id: str, body: dict | None = Body(None)):
     return {
         "status": "queued",
         "run_id": recorder.run_id,
-        "revision_id": rev.id,
+        "revision_id": (
+            get_active_production_revision(episode_id, "screenplay").id
+        ),
         "mode": resume_mode,
     }
 

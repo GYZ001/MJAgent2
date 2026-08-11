@@ -2945,6 +2945,19 @@ async def run_screenplay_production(
         qa_profile_version="screenplay-qa-gate-2",
     )
 
+    from app.production.revision import (
+        resolve_screenplay_resume_eligibility,
+    )
+
+    entry_eligibility = resolve_screenplay_resume_eligibility(episode_id)
+    if resume and entry_eligibility.revision_action == "rebase":
+        raise RuntimeError(
+            "screenplay worker 收到未执行 rebase 的恢复资格，拒绝加载旧 working Artifact"
+        )
+    if resume and entry_eligibility.mode == "none" and entry_eligibility.revision_id:
+        raise RuntimeError(
+            f"screenplay worker 恢复资格不可执行: {entry_eligibility.reason_code}"
+        )
     rev = ensure_production_revision(
         episode_id=episode_id,
         kind="screenplay",
