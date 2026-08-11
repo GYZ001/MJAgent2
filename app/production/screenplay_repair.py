@@ -4006,11 +4006,18 @@ async def run_screenplay_production(
 
         if not rev.grant_id:
             raise RuntimeError("screenplay.patch 缺少当前 revision 的 Production Grant")
-        assert_grant_allows(
+        patch_grant = assert_grant_allows(
             rev.grant_id,
             command="screenplay.patch",
             episode_id=episode_id,
         )
+        if (
+            patch_grant.production_revision_id != rev.id
+            or patch_grant.kind != "screenplay"
+        ):
+            raise PermissionError(
+                "screenplay.patch Production Grant 未绑定当前 revision"
+            )
 
         if run_id:
             evidence_repository.append_event(

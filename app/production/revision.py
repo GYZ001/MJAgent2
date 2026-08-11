@@ -1147,7 +1147,10 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         revision=rev,
         conn=conn,
     )
-    has_working_baseline = eligibility.working_compatible
+    has_working_baseline = bool(
+        eligibility.working_compatible
+        or eligibility.reason_code == "WORKING_REVALIDATION_REQUIRED"
+    )
     has_resumable_baseline = any(
         eligibility.reusable_checkpoint.get(key)
         for key in (

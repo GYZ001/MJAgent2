@@ -522,7 +522,7 @@ def _bind_screenplay_revision(
 
 def test_screenplay_certificate_requires_gate_from_the_exact_artifact() -> None:
     screenplay_contract = HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT
-    qa_profile = "screenplay-qa-gate-2"
+    qa_profile = SCREENPLAY_QA_PROFILE_VERSION
     first = _screenplay()
     second = _screenplay()
     second.title = "A different working candidate"
@@ -591,7 +591,7 @@ def test_screenplay_certificate_requires_gate_from_the_exact_artifact() -> None:
 
 def test_narrative_certificate_requires_exact_runtime_gate_evaluation() -> None:
     screenplay_contract = HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT
-    qa_profile = "screenplay-qa-gate-2"
+    qa_profile = SCREENPLAY_QA_PROFILE_VERSION
     artifact = _artifact(
         artifact_type="screenplay_document",
         content=_screenplay().model_dump(mode="json"),
@@ -633,7 +633,7 @@ def test_narrative_certificate_requires_exact_runtime_gate_evaluation() -> None:
 
 def test_narrative_certificate_rejects_evaluator_contract_drift() -> None:
     screenplay_contract = HISTORICAL_NARRATIVE_SCREENPLAY_CONTRACT
-    qa_profile = "screenplay-qa-gate-2"
+    qa_profile = SCREENPLAY_QA_PROFILE_VERSION
     artifact = _artifact(
         artifact_type="screenplay_document",
         content=_screenplay().model_dump(mode="json"),

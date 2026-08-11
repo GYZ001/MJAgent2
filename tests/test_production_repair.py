@@ -22,6 +22,7 @@ from app.production.revision import (
     mark_first_evaluation,
     rebind_input_fingerprint,
 )
+from app.production.screenplay_authority import SCREENPLAY_QA_PROFILE_VERSION
 from app.production.screenplay_document import (
     document_to_screenplay,
     screenplay_to_document,
@@ -463,6 +464,8 @@ async def test_retry_exhaustion_never_publishes_unresolved_character_identity(mo
     revision = ensure_production_revision(
         episode_id="ep_p",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
@@ -1387,6 +1390,8 @@ async def test_existing_baseline_resumes_qa_without_calling_full_generation(monk
     revision = ensure_production_revision(
         episode_id="ep_p",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
@@ -1474,6 +1479,8 @@ async def test_runtime_qa_repairs_then_stops_without_publishing(monkeypatch):
     revision = ensure_production_revision(
         episode_id="ep_p",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
@@ -1573,6 +1580,8 @@ async def test_invalid_modern_narrative_graph_enters_patch_loop(monkeypatch):
     revision = ensure_production_revision(
         episode_id="ep_p",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _minimal_script(
@@ -1625,6 +1634,8 @@ async def test_resume_replays_persisted_identity_before_first_qa(monkeypatch):
     revision = ensure_production_revision(
         episode_id="ep_p",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
@@ -1692,6 +1703,8 @@ async def test_identity_replay_with_unchanged_payload_reaches_qa(monkeypatch):
     revision = ensure_production_revision(
         episode_id="ep_p",
         kind="screenplay",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         resume=False,
     )
     script = _minimal_script(stakes="失败将失去资格")
