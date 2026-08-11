@@ -423,12 +423,21 @@ def _storyboard_has_material(episode_id: str, ep: dict | None = None) -> bool:
 
 
 def _storyboard_checkpoint_matches_screenplay(cp, ep: dict) -> bool:
-    """Legacy checkpoints without an upstream binding remain resumable."""
+    """Only checkpoints bound to the current screenplay and Bible may resume."""
     if cp is None:
         return False
     bound = str(cp.input_versions.get("screenplay_artifact_id") or "")
     current = str(ep.get("screenplay_artifact_id") or "")
-    return not bound or not current or bound == current
+    bound_bible = str(cp.input_versions.get("bible_artifact_id") or "")
+    current_bible = str(ep.get("bible_artifact_id") or "")
+    return bool(
+        bound
+        and current
+        and bound == current
+        and bound_bible
+        and current_bible
+        and bound_bible == current_bible
+    )
 
 
 def _storyboard_has_persisted_work(episode_id: str, ep: dict | None = None) -> bool:
@@ -3377,11 +3386,16 @@ def _storyboard_status_snapshot(
     shots: list[dict],
     supervisor: dict | None,
     screenplay: EpisodeScreenplay | None = None,
+    screenplay_rebuild_error: Exception | None = None,
 ) -> dict:
     """返回供所有分镜台区域共同消费的 v1 原子状态投影。"""
     from app.storyboard_workspace import episode_fingerprint, monotonic_snapshot_version
 
-    screenplay_ready = ep.get("screenplay_status") == "ready" and bool(ep.get("screenplay_artifact_id"))
+    screenplay_ready = bool(
+        screenplay_rebuild_error is None
+        and ep.get("screenplay_status") == "ready"
+        and ep.get("screenplay_artifact_id")
+    )
     shot_count = len(shots)
     outline_count = 0
     try:
@@ -3577,7 +3591,13 @@ def _storyboard_status_snapshot(
     elif invalid:
         state, headline, action = "syncing", "状态同步中，暂不可执行高影响操作", "refresh_status"
     elif not screenplay_ready:
-        state, headline, action = "no_screenplay", "尚无可用于分镜的剧本", "go_screenplay"
+        state, headline, action = (
+            "no_screenplay",
+            "当前剧本需要按新合同重建后才能生成分镜"
+            if screenplay_rebuild_error is not None
+            else "尚无可用于分镜的剧本",
+            "go_screenplay",
+        )
     elif running:
         state, headline, action = "running", f"分镜任务进行中，当前处理第 {resume_from} 镜", "view_progress"
     elif confirmed and published_release_bound:
@@ -4341,7 +4361,7 @@ def episode_detail(episode_id: str, view: str | None = None):
     try:
         script = _load_screenplay(ep) if full or view in ("script", "board") else None
     except errors.ArtifactNeedsRebuildError as exc:
-        if view != "script":
+        if view not in {"script", "board"}:
             raise
         screenplay_rebuild_error = exc
         script = None
@@ -4634,7 +4654,11 @@ def episode_detail(episode_id: str, view: str | None = None):
             "storyboard_outline_json": outline_json_for_gate,
         }
         ep["storyboard_status"] = _storyboard_status_snapshot(
-            status_episode, shots, ep.get("supervisor"), script,
+            status_episode,
+            shots,
+            ep.get("supervisor"),
+            script,
+            screenplay_rebuild_error,
         )
         if ep["storyboard_status"].pop("_obsolete_policy_repair", False):
             ep["script_error"] = None
