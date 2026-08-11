@@ -2576,17 +2576,27 @@ def validate_screenplay(script: EpisodeScreenplay, bible: Bible, expected_beats:
             }
 
     spoken_by_scene: dict[int, set[str]] = {}
-    for scene_no, speaker, _line in _script_dialogue_turns(
-        script.full_script_text or "",
-    ):
-        if speaker:
-            spoken_by_scene.setdefault(scene_no, set()).add(speaker)
-    for chain in script.dialogue_chains:
-        match = re.search(r"\d+", chain.scene_id or "")
-        if match:
-            scene_no = int(match.group(0))
-            spoken_by_scene.setdefault(scene_no, set()).update(
-                turn.speaker for turn in chain.turns if turn.speaker
+    # Use the same deterministic projection as publication.  This makes an
+    # explicit chain.scene_id authoritative over stale prose placement, maps
+    # an empty legacy binding through the documented semantic fallback, and
+    # still retains genuinely unowned dialogue parsed from the prose body.
+    from app.production.screenplay_document import (
+        DialogueSceneBindingError,
+        rederive_projections,
+        screenplay_to_document,
+    )
+    try:
+        projected_document = rederive_projections(
+            screenplay_to_document(script),
+        )
+    except DialogueSceneBindingError as exc:
+        errors.append(f"[DIALOGUE_SCENE_BINDING_INVALID] {exc}")
+    else:
+        for block in projected_document.scene_blocks:
+            spoken_by_scene.setdefault(block.scene_no, set()).update(
+                turn.speaker
+                for turn in block.dialogue_turns
+                if turn.speaker
             )
     for i, scene in enumerate(scenes, start=1):
         heading = (scene.scene_heading or "").strip()

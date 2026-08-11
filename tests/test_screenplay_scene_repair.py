@@ -498,6 +498,114 @@ def test_atomic_action_actor_requires_character_without_state_or_pov() -> None:
     assert ".characters 不能为空" in errors[0]
 
 
+def test_required_visible_identity_cannot_be_replaced_by_another_known_person() -> None:
+    script = _run_3f05c2a0fedd_environment_script()
+    script.scene_outline[0].characters = ["王有材"]
+    script.narrative_plan = NarrativeContinuityPlan.model_validate({
+        "scope_id": script.id,
+        "identity_contracts": [
+            {
+                "identity_id": "person-menghao",
+                "display_name": "孟浩",
+                "kind": "named_character",
+                "visual_policy": "canonical",
+                "visual_canonical": "青色文士长衫的清瘦书生",
+                "asset_requirement": "required",
+            },
+            {
+                "identity_id": "person-wangyoucai",
+                "display_name": "王有材",
+                "kind": "named_character",
+                "visual_policy": "canonical",
+                "visual_canonical": "布衣少年",
+                "asset_requirement": "required",
+            },
+        ],
+        "events": [{
+            "event_id": "E2",
+            "onscreen_entity_ids": ["person-menghao"],
+        }],
+        "scene_contracts": [{
+            "scene_id": "SC01",
+            "turn_event_ids": ["E2"],
+        }],
+    })
+
+    errors = _scene_character_errors(script)
+
+    assert any("缺少结构化权威" in error and "孟浩" in error for error in errors)
+
+
+def _two_scene_dialogue_binding_script(*, scene_id: str) -> EpisodeScreenplay:
+    script = _script(story_function="建立山顶的生计困境")
+    script.scene_outline = [
+        script.scene_outline[0].model_copy(update={
+            "scene_heading": "【场1】日 / 山顶",
+            "summary": "孟浩独自坐在山顶，远处群山在夕阳中延伸。",
+            "characters": ["孟浩"],
+        }),
+        ScriptScene(
+            scene_no=2,
+            scene_heading="【场2】日 / 山洞",
+            story_function="交付山洞里的求救声",
+            characters=["王有材"],
+            summary="王有材被困在山洞深处，向外发出急促求救声。",
+            turn="孟浩听见求救声",
+            source_basis="原文山洞求救段落",
+        ),
+    ]
+    # Deliberately put the line under SC01: structured scene_id must win.
+    script.full_script_text = (
+        "【场1】日 / 山顶\n王有材：救命啊！\n"
+        "【场2】日 / 山洞\n山洞深处传来回声。"
+    )
+    script.dialogue_chains = [KeyDialogueChain(
+        chain_id="DC1",
+        scene_id=scene_id,
+        topic="山洞里的求救声",
+        turns=[KeyDialogueTurn(
+            speaker="王有材",
+            line="救命啊！",
+            source_text="救命啊！",
+        )],
+    )]
+    return script
+
+
+def test_dialogue_scene_id_wins_when_prose_semantics_conflict() -> None:
+    document = screenplay_to_document(
+        _two_scene_dialogue_binding_script(scene_id="SC02"),
+    )
+
+    result = document_to_screenplay(document)
+
+    assert "王有材：救命啊！" not in result.full_script_text.split("【场2】")[0]
+    assert "【场2】日 / 山洞\n山洞深处传来回声。\n王有材：救命啊！" in result.full_script_text
+
+
+def test_invalid_dialogue_scene_id_fails_typed_instead_of_guessing() -> None:
+    from app.production.screenplay_document import DialogueSceneBindingError
+
+    document = screenplay_to_document(
+        _two_scene_dialogue_binding_script(scene_id="SC99"),
+    )
+
+    with pytest.raises(DialogueSceneBindingError, match="SC99"):
+        document_to_screenplay(document)
+
+
+def test_empty_dialogue_scene_id_explicitly_allows_semantic_fallback() -> None:
+    script = _two_scene_dialogue_binding_script(scene_id="")
+    script.full_script_text = (
+        "【场1】日 / 山顶\n孟浩独自坐在山顶。\n"
+        "【场2】日 / 山洞\n山洞里的求救声在石壁间回荡。"
+    )
+
+    result = document_to_screenplay(screenplay_to_document(script))
+
+    assert "王有材：救命啊！" in result.full_script_text.split("【场2】")[1]
+
+
 def test_legal_offscreen_voice_stays_out_of_scene_characters() -> None:
     script = _run_3f05c2a0fedd_environment_script()
     script.narrative_plan = NarrativeContinuityPlan.model_validate({
