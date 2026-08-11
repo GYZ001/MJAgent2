@@ -1779,16 +1779,33 @@ def _screenplay_generation_preflight(episode_id: str):
     source_segment_count = len(index_source_segments(source_text))
     estimated_blueprint_shards = max(1, math.ceil(source_segment_count / 28))
     estimated_scene_shards = max(1, math.ceil(source_segment_count / 16))
-    reusable = conn.execute(
-        """SELECT type,COUNT(*) AS count FROM artifacts
+    reusable_rows = conn.execute(
+        """SELECT id,type,status,contract_version,content_json FROM artifacts
              WHERE scope_type='episode' AND scope_id=? AND status='validated'
                AND type IN (
                  'screenplay_identity_discovery','screenplay_narrative_blueprint',
                  'screenplay_identity_registry','screenplay_envelope',
                  'screenplay_scene_shard','screenplay_generation_ir_merged'
-               ) GROUP BY type""",
+               )""",
         (episode_id,),
     ).fetchall()
+    from app.screenplay_scene_shards import (
+        screenplay_scene_shard_artifact_compatibility,
+    )
+
+    reusable_counts: dict[str, int] = {}
+    for reusable_row in reusable_rows:
+        row = dict(reusable_row)
+        if row["type"] == "screenplay_scene_shard":
+            compatible, _reason = screenplay_scene_shard_artifact_compatibility(
+                row,
+            )
+            if not compatible:
+                continue
+        artifact_type = str(row["type"])
+        reusable_counts[artifact_type] = (
+            reusable_counts.get(artifact_type, 0) + 1
+        )
     return {
         "action": "generate_screenplay",
         "episode_id": episode_id,
@@ -1802,9 +1819,7 @@ def _screenplay_generation_preflight(episode_id: str):
         "wait_estimate": None,
         "cost_estimate_cny": None,
         "cast_impact": cast_impact,
-        "reusable_validated_artifacts": {
-            str(row["type"]): int(row["count"] or 0) for row in reusable
-        },
+        "reusable_validated_artifacts": reusable_counts,
         "idempotency_scope": {
             "baseline": ep.get("screenplay_artifact_id") or "empty",
             "constraint_version": int(ep.get("screenplay_constraint_version") or 0),

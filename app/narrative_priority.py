@@ -7,8 +7,8 @@ from collections import defaultdict
 from typing import Any
 
 from app import config
+from app.errors import ArtifactNeedsRebuildError
 from app.schemas import (
-    ActionParticipantDelivery,
     AudienceStatePathRef,
     EpisodeScreenplay,
     NARRATIVE_CONTRACT_VERSION,
@@ -139,140 +139,6 @@ def _scene_event_groups(screenplay: EpisodeScreenplay) -> list[list[str]]:
         ])
         cursor = end + 1
     return groups if cursor == len(events) else []
-
-
-def _identity_is_story_participant(identity: Any | None) -> bool:
-    if identity is None:
-        return True
-    if str(identity.visual_policy or "") == "offscreen_only":
-        return False
-    return str(identity.kind or "") != "source_backed_scene_context_actor"
-
-
-def _legacy_paratext_suffix(
-    screenplay: EpisodeScreenplay,
-    scene_groups: list[list[str]],
-) -> set[str]:
-    """Conservatively migrate typed legacy terminal scenes without text scans."""
-    plan = screenplay.narrative_plan
-    if plan is None or not scene_groups:
-        return set()
-    identities = {
-        item.identity_id: item
-        for item in plan.identity_contracts
-    }
-    actions = {
-        item.action_id: item
-        for item in plan.atomic_actions
-    }
-    events = {
-        item.event_id: item
-        for item in plan.events
-    }
-    excluded: set[str] = set()
-    for event_ids in reversed(scene_groups):
-        participants = {
-            participant_id
-            for event_id in event_ids
-            for action_id in events[event_id].action_ids
-            for action in [actions.get(action_id)]
-            if action is not None
-            for participant_id in (*action.actor_ids, *action.target_ids)
-        }
-        if any(
-            _identity_is_story_participant(identities.get(participant_id))
-            for participant_id in participants
-        ):
-            break
-        excluded.update(event_ids)
-    return excluded
-
-
-def _assign_legacy_semantics(
-    screenplay: EpisodeScreenplay,
-    *,
-    excluded_event_ids: set[str],
-    scene_groups: list[list[str]],
-) -> None:
-    plan = screenplay.narrative_plan
-    if plan is None:
-        return
-    info_event = {
-        item.info_id: item.event_id
-        for item in screenplay.information_ledger
-    }
-    key_events = {
-        info_event[info_id]
-        for beat in (
-            screenplay.plot_spine.spine_beats
-            if screenplay.plot_spine is not None else []
-        )
-        for info_id in beat.information_ids
-        if info_id in info_event
-    }
-    turn_events = {
-        event_id
-        for contract in plan.scene_contracts
-        for event_id in contract.turn_event_ids
-    }
-    legacy_sources = {
-        event.event_id: _source_ids(event.source_span)
-        for event in screenplay.events
-    }
-    actions = {
-        action.action_id: action
-        for action in plan.atomic_actions
-    }
-    order = [event.event_id for event in plan.events]
-    adjacent_overlap: set[str] = set()
-    for previous_id, current_id in zip(order, order[1:]):
-        if legacy_sources.get(previous_id, set()).intersection(
-            legacy_sources.get(current_id, set())
-        ):
-            adjacent_overlap.update((previous_id, current_id))
-
-    for event in plan.events:
-        if event.event_id in excluded_event_ids:
-            event.narrative_layer = "paratext"
-            event.event_priority = "connective"
-            event.render_policy = "exclude_from_spine"
-            continue
-        event.narrative_layer = "story"
-        if event.event_id in turn_events:
-            event.event_priority = "causal"
-            event.render_policy = "standalone"
-        elif event.event_id in key_events:
-            event.event_priority = "supporting"
-            event.render_policy = "merge_adjacent"
-        elif event.event_id in adjacent_overlap or all(
-            (
-                actions.get(action_id) is not None
-                and actions[action_id].decision_requirement != "applies"
-            )
-            for action_id in event.action_ids
-        ):
-            event.event_priority = "connective"
-            event.render_policy = "merge_adjacent"
-        else:
-            event.event_priority = "causal"
-            event.render_policy = "standalone"
-
-    semantic_by_event = {
-        event.event_id: (
-            event.narrative_layer,
-            event.event_priority,
-            event.render_policy,
-        )
-        for event in plan.events
-    }
-    for event in screenplay.events:
-        semantics = semantic_by_event.get(event.event_id)
-        if semantics is not None:
-            (
-                event.narrative_layer,
-                event.event_priority,
-                event.render_policy,
-            ) = semantics
 
 
 def _drop_paratext(
@@ -648,86 +514,47 @@ def _drop_paratext(
     }
 
 
-def _migrate_legacy_participant_deliveries(
-    screenplay: EpisodeScreenplay,
-) -> None:
-    """Bind old typed relations to their existing event evidence."""
-    plan = screenplay.narrative_plan
-    if plan is None:
-        return
-    identities = {
-        item.identity_id: item
-        for item in plan.identity_contracts
-    }
-    evidence_by_event = defaultdict(list)
-    for evidence in plan.evidence:
-        if evidence.anchor.type == "event":
-            evidence_by_event[evidence.anchor.id].append(evidence.evidence_id)
-    actions = {
-        item.action_id: item
-        for item in plan.atomic_actions
-    }
-    for event in plan.events:
-        evidence_ids = evidence_by_event.get(event.event_id) or []
-        if not evidence_ids:
-            continue
-        visible = set(event.onscreen_entity_ids)
-        for action_id in event.action_ids:
-            action = actions.get(action_id)
-            if action is None:
-                continue
-            existing = {
-                item.participant_id
-                for item in action.participant_deliveries
-            }
-            for participant_id in _dedupe([
-                *action.actor_ids,
-                *action.target_ids,
-            ]):
-                if participant_id in visible or participant_id in existing:
-                    continue
-                identity = identities.get(participant_id)
-                voice_only = bool(
-                    identity is not None
-                    and identity.visual_policy == "offscreen_only"
-                )
-                action.participant_deliveries.append(
-                    ActionParticipantDelivery(
-                        action_id=action_id,
-                        participant_id=participant_id,
-                        evidence_ids=[evidence_ids[0]],
-                        audible=voice_only,
-                        visible_effect=not voice_only,
-                    )
-                )
-
-
 def picture_screenplay_projection(
     screenplay: EpisodeScreenplay,
 ) -> tuple[EpisodeScreenplay, dict[str, Any]]:
     """Return a non-destructive picture-authority projection."""
+    source_plan = screenplay.narrative_plan
+    if source_plan is None:
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(screenplay.id or ""),
+            artifact_type="screenplay",
+            reason="缺少 narrative_plan 显式结构语义",
+        )
+    missing_semantics = [
+        f"events[{index}].{field}"
+        for index, event in enumerate(source_plan.events)
+        for field in (
+            "narrative_layer",
+            "event_priority",
+            "render_policy",
+        )
+        if field not in event.model_fields_set
+    ]
+    if (
+        source_plan.contract_version != NARRATIVE_CONTRACT_VERSION
+        or missing_semantics
+    ):
+        reason = (
+            f"叙事合同为 {source_plan.contract_version or 'missing'}，"
+            f"当前要求 {NARRATIVE_CONTRACT_VERSION}"
+            if source_plan.contract_version != NARRATIVE_CONTRACT_VERSION
+            else "缺少显式事件语义 " + "、".join(missing_semantics[:10])
+        )
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(screenplay.id or ""),
+            artifact_type="screenplay",
+            reason=reason,
+        )
     projected = EpisodeScreenplay.model_validate(
         screenplay.model_dump(mode="json")
     )
     plan = projected.narrative_plan
-    if plan is None:
-        return projected, {
-            "excluded_event_ids": [],
-            "excluded_source_segment_ids": [],
-            "legacy_semantics": False,
-        }
-    original_events = list(screenplay.narrative_plan.events)
-    has_explicit_semantics = (
-        plan.contract_version == NARRATIVE_CONTRACT_VERSION
-        and any(
-        {
-            "narrative_layer",
-            "event_priority",
-            "render_policy",
-        }.issubset(event.model_fields_set)
-        for event in original_events
-        )
-    )
+    assert plan is not None
     scene_groups = _scene_event_groups(projected)
     excluded = {
         event.event_id
@@ -737,25 +564,12 @@ def picture_screenplay_projection(
             or event.render_policy == "exclude_from_spine"
         )
     }
-    if not has_explicit_semantics:
-        excluded.update(_legacy_paratext_suffix(projected, scene_groups))
-        _assign_legacy_semantics(
-            projected,
-            excluded_event_ids=excluded,
-            scene_groups=scene_groups,
-        )
     report = _drop_paratext(
         projected,
         excluded_event_ids=excluded,
         scene_groups=scene_groups,
     )
-    if not has_explicit_semantics:
-        _migrate_legacy_participant_deliveries(projected)
-        if projected.narrative_plan is not None:
-            projected.narrative_plan.contract_version = (
-                NARRATIVE_CONTRACT_VERSION
-            )
-    report["legacy_semantics"] = not has_explicit_semantics
+    report["legacy_semantics"] = False
     report["story_event_count"] = len(
         projected.narrative_plan.events
         if projected.narrative_plan is not None else []

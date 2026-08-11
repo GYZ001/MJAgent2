@@ -319,6 +319,57 @@ def _raw_narrative_plan(content: object) -> dict[str, Any] | None:
     return plan if isinstance(plan, dict) else None
 
 
+def _raw_screenplay_payload(content: object) -> dict[str, Any] | None:
+    if not isinstance(content, dict):
+        return None
+    projection = content.get("_projection")
+    return projection if isinstance(projection, dict) else content
+
+
+def _current_ir_semantic_gaps(art: dict[str, Any]) -> list[str]:
+    from app.screenplay_ir import (
+        IR_VERSION,
+        screenplay_ir_missing_event_semantic_paths,
+    )
+    from app.screenplay_scene_shards import SCREENPLAY_MERGED_IR_VERSION
+
+    pending = [
+        str(parent_id)
+        for parent_id in art.get("parent_artifact_ids") or []
+        if str(parent_id)
+    ]
+    seen: set[str] = set()
+    gaps: list[str] = []
+    while pending:
+        artifact_id = pending.pop(0)
+        if artifact_id in seen:
+            continue
+        seen.add(artifact_id)
+        parent = evidence_repository.get_artifact(artifact_id)
+        if parent is None:
+            continue
+        pending.extend(
+            str(parent_id)
+            for parent_id in parent.get("parent_artifact_ids") or []
+            if str(parent_id) and str(parent_id) not in seen
+        )
+        if parent.get("type") != "screenplay_generation_ir_merged":
+            continue
+        content = parent.get("content")
+        if (
+            str(parent.get("contract_version") or "")
+            != SCREENPLAY_MERGED_IR_VERSION
+            or not isinstance(content, dict)
+            or str(content.get("format_version") or "") != IR_VERSION
+        ):
+            continue
+        gaps.extend(
+            f"{artifact_id}:{path}"
+            for path in screenplay_ir_missing_event_semantic_paths(content)
+        )
+    return gaps
+
+
 def _assert_screenplay_artifact_contract(
     art: dict[str, Any],
     content: object,
@@ -331,11 +382,34 @@ def _assert_screenplay_artifact_contract(
         for index, action in enumerate(plan.get("atomic_actions") or [])
         if isinstance(action, dict) and "participant_deliveries" not in action
     ]
+    semantic_fields = (
+        "narrative_layer",
+        "event_priority",
+        "render_policy",
+    )
+    missing.extend(
+        f"narrative_plan.events[{index}].{field}"
+        for index, event in enumerate(plan.get("events") or [])
+        if isinstance(event, dict)
+        for field in semantic_fields
+        if field not in event
+    )
+    screenplay_payload = _raw_screenplay_payload(content) or {}
+    missing.extend(
+        f"source_coverage[{index}].{field}"
+        for index, coverage in enumerate(
+            screenplay_payload.get("source_coverage") or []
+        )
+        if isinstance(coverage, dict)
+        for field in ("disposition", "projection_policy")
+        if field not in coverage
+    )
+    missing.extend(_current_ir_semantic_gaps(art))
     if missing:
         raise ArtifactNeedsRebuildError(
             artifact_id=str(art.get("id") or ""),
             artifact_type=str(art.get("type") or "screenplay_document"),
-            reason="缺少显式参与者交付字段 " + "、".join(missing[:10]),
+            reason="缺少当前合同显式结构字段 " + "、".join(missing[:10]),
         )
     invalid_agencies: list[str] = []
     for index, action in enumerate(plan.get("atomic_actions") or []):

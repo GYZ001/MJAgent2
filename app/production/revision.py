@@ -464,27 +464,43 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
         ]
         if str(value or "").strip()
     }
-    available_artifact_ids = {
-        str(row["id"])
+    artifact_rows = {
+        str(row["id"]): dict(row)
         for row in conn.execute(
-            "SELECT id FROM artifacts WHERE id IN ("
+            "SELECT id,type,status,contract_version,content_json "
+            "FROM artifacts WHERE id IN ("
             + ",".join("?" for _ in checkpoint_artifact_ids)
             + ")",
             sorted(checkpoint_artifact_ids),
         ).fetchall()
-    } if checkpoint_artifact_ids else set()
+    } if checkpoint_artifact_ids else {}
+    available_artifact_ids = {
+        artifact_id
+        for artifact_id, row in artifact_rows.items()
+        if row.get("status") == "validated"
+    }
     checkpoint_blueprint_hash = str(checkpoint.get("blueprint_hash") or "")
     checkpoint_identity_hash = str(
         checkpoint.get("identity_registry_hash") or ""
     )
-    validated_shard_keys: set[tuple[str, str, str, str, str]] = set()
+    from app.screenplay_scene_shards import (
+        screenplay_scene_shard_artifact_compatibility,
+    )
+
+    validated_shard_keys: set[tuple[str, str, str, str, str, str]] = set()
     if checkpoint_blueprint_hash and checkpoint_identity_hash:
         for artifact_row in conn.execute(
-            "SELECT content_json FROM artifacts "
+            "SELECT id,type,status,contract_version,content_json FROM artifacts "
             "WHERE scope_type='episode' AND scope_id=? "
             "AND type='screenplay_scene_shard' AND status='validated'",
             (episode_id,),
         ).fetchall():
+            row = dict(artifact_row)
+            compatible, _reason = screenplay_scene_shard_artifact_compatibility(
+                row,
+            )
+            if not compatible:
+                continue
             try:
                 content = json.loads(artifact_row["content_json"] or "{}")
             except (TypeError, json.JSONDecodeError):
@@ -495,22 +511,32 @@ def screenplay_production_state(episode_id: str) -> dict[str, Any]:
                 str(content.get("boundary_hash") or ""),
                 str(content.get("blueprint_hash") or ""),
                 str(content.get("identity_registry_hash") or ""),
+                str(content.get("generation_scaffold_hash") or ""),
             )
             if all(key):
                 validated_shard_keys.add(key)
 
     def shard_is_validated(item: dict[str, Any]) -> bool:
-        referenced_artifact_exists = bool(
-            item.get("status") == "validated"
-            and str(item.get("normalized_artifact_id") or "")
-            in available_artifact_ids
+        expected_scaffold_hash = str(
+            item.get("generation_scaffold_hash") or ""
         )
+        artifact_id = str(item.get("normalized_artifact_id") or "")
+        artifact_row = artifact_rows.get(artifact_id)
+        referenced_artifact_exists = False
+        if item.get("status") == "validated" and artifact_row is not None:
+            referenced_artifact_exists, _reason = (
+                screenplay_scene_shard_artifact_compatibility(
+                    artifact_row,
+                    expected_generation_scaffold_hash=expected_scaffold_hash,
+                )
+            )
         actual_key = (
             str(item.get("shard_id") or ""),
             str(item.get("source_hash") or ""),
             str(item.get("boundary_hash") or ""),
             checkpoint_blueprint_hash,
             checkpoint_identity_hash,
+            expected_scaffold_hash,
         )
         return referenced_artifact_exists or actual_key in validated_shard_keys
 

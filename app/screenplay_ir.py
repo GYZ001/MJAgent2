@@ -340,15 +340,32 @@ def screenplay_ir_missing_event_semantic_paths(value: object) -> list[str]:
     if not isinstance(value, dict):
         return ["$"]
     required = ("narrative_layer", "event_priority", "render_policy")
+    required_source = (
+        *required,
+        "disposition",
+        "projection_policy",
+    )
     missing: list[str] = []
-    if "source_semantics" not in value:
+    source_semantics = value.get("source_semantics")
+    if not isinstance(source_semantics, dict):
         missing.append("source_semantics")
+        source_semantics = {}
+    related_source_ids = {
+        str(source_id)
+        for source_id in (value.get("source_scene_owners") or {})
+        if str(source_id)
+    }
     for scene_index, scene in enumerate(value.get("scenes") or []):
         if not isinstance(scene, dict):
             continue
         for unit_index, unit in enumerate(scene.get("units") or []):
             if not isinstance(unit, dict):
                 continue
+            related_source_ids.update(
+                str(source_id)
+                for source_id in unit.get("source_segment_ids") or []
+                if str(source_id)
+            )
             for field in required:
                 if field not in unit:
                     missing.append(
@@ -357,17 +374,34 @@ def screenplay_ir_missing_event_semantic_paths(value: object) -> list[str]:
     for event_index, event in enumerate(value.get("events") or []):
         if not isinstance(event, dict):
             continue
+        related_source_ids.update(
+            str(source_id)
+            for source_id in event.get("source_segment_ids") or []
+            if str(source_id)
+        )
         for field in required:
             if field not in event:
                 missing.append(f"events[{event_index}].{field}")
     for coverage_index, coverage in enumerate(value.get("coverage") or []):
-        if (
-            isinstance(coverage, dict)
-            and "projection_policy" not in coverage
-        ):
+        if not isinstance(coverage, dict):
+            continue
+        related_source_ids.update(
+            str(source_id)
+            for source_id in coverage.get("source_segment_ids") or []
+            if str(source_id)
+        )
+        if "projection_policy" not in coverage:
             missing.append(
                 f"coverage[{coverage_index}].projection_policy"
             )
+    for source_id in sorted(related_source_ids):
+        semantics = source_semantics.get(source_id)
+        if not isinstance(semantics, dict):
+            missing.append(f"source_semantics[{source_id}]")
+            continue
+        for field in required_source:
+            if field not in semantics:
+                missing.append(f"source_semantics[{source_id}].{field}")
     return missing
 
 

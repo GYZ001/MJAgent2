@@ -360,6 +360,47 @@ class ScreenplaySceneShardIR(BaseModel):
     generation_scaffold_hash: str = ""
 
 
+def screenplay_scene_shard_artifact_compatibility(
+    artifact: dict[str, Any],
+    *,
+    expected_generation_scaffold_hash: str = "",
+) -> tuple[bool, str]:
+    """Validate one persisted shard against the current resumable contract."""
+    content = artifact.get("content")
+    if not isinstance(content, dict):
+        raw_content = artifact.get("content_json")
+        try:
+            content = (
+                json.loads(raw_content)
+                if isinstance(raw_content, str)
+                else raw_content
+            )
+        except (TypeError, json.JSONDecodeError):
+            content = None
+    if artifact.get("status") != "validated":
+        return False, "artifact_status"
+    if str(artifact.get("contract_version") or "") != SCREENPLAY_SCENE_SHARD_VERSION:
+        return False, "artifact_contract_version"
+    if not isinstance(content, dict):
+        return False, "artifact_content"
+    if str(content.get("contract_version") or "") != SCREENPLAY_SCENE_SHARD_VERSION:
+        return False, "content_contract_version"
+    identity_hash = str(content.get("identity_scaffold_hash") or "")
+    generation_hash = str(content.get("generation_scaffold_hash") or "")
+    if not identity_hash or not generation_hash:
+        return False, "scaffold_hash_missing"
+    if (
+        expected_generation_scaffold_hash
+        and generation_hash != expected_generation_scaffold_hash
+    ):
+        return False, "generation_scaffold_hash"
+    try:
+        ScreenplaySceneShardIR.model_validate(content)
+    except ValidationError:
+        return False, "content_schema"
+    return True, ""
+
+
 _PARTICIPANT_PERCEPTION_CHANNELS = (
     "audible",
     "visible_effect",
