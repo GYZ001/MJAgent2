@@ -539,9 +539,8 @@ def _load_request_checkpoint(
             "MiniMaxH3 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
             "请为新的生成意图创建新的 operation_id",
             retryable=False,
-            delivery_state="not_sent",
-            replay_safe=True,
-            create_not_accepted=True,
+            delivery_state="unknown",
+            requires_explicit_retry=True,
         )
     provider_request = saved.get("provider_request")
     if not isinstance(provider_request, dict):

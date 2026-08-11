@@ -2,15 +2,53 @@
 from __future__ import annotations
 
 from app.capabilities import inputs as I
-from app.capabilities.handlers.common import call_guarded, failed, succeeded
+from app.capabilities.handlers.common import accepted, call_guarded, failed, succeeded
 from app.capabilities.schemas import CommandResult
 
 
 async def concatenate(args: I.EpisodeScopedInput) -> CommandResult:
     from app import worker
+    from app.capabilities.bus import canonical_command_request_fingerprint
 
-    outcome = await call_guarded(worker.concatenate_episode, args.episode_id)
+    request_fingerprint = canonical_command_request_fingerprint(
+        "delivery.concatenate",
+        args.model_dump(mode="json"),
+    )
+    try:
+        claim_token, replay = worker.claim_concat_operation(
+            idempotency_key=args.idempotency_key or "",
+            request_fingerprint=request_fingerprint,
+            episode_id=args.episode_id,
+        )
+    except worker.ConcatOperationConflict as exc:
+        return failed(str(exc), error_code="idempotency_request_mismatch")
+    except worker.ConcatOperationInProgress as exc:
+        return accepted(
+            str(exc),
+            data={"idempotency_in_progress": True},
+            resource_uris=[f"manju://episodes/{args.episode_id}/delivery"],
+        )
+    if replay is not None:
+        return succeeded(
+            "本集已按镜号顺序拼接成片",
+            data=replay,
+            resource_uris=[f"manju://episodes/{args.episode_id}/delivery"],
+        )
+    assert claim_token is not None
+
+    outcome = await call_guarded(
+        worker.concatenate_episode,
+        args.episode_id,
+        operation_idempotency_key=args.idempotency_key,
+        operation_request_fingerprint=request_fingerprint,
+        operation_claim_token=claim_token,
+    )
     if isinstance(outcome, CommandResult):
+        worker.release_concat_operation(
+            idempotency_key=args.idempotency_key or "",
+            request_fingerprint=request_fingerprint,
+            claim_token=claim_token,
+        )
         return outcome
     return succeeded("本集已按镜号顺序拼接成片", data=outcome, resource_uris=[f"manju://episodes/{args.episode_id}/delivery"])
 

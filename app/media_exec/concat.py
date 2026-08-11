@@ -13,6 +13,155 @@ _ACTIVE_VIDEO_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_
 _CONCAT_PROBE_TIMEOUT_S = 30.0
 _CONCAT_DURATION_TOLERANCE_RATIO = 0.10
 _CONCAT_DURATION_TOLERANCE_MIN_S = 0.75
+_CONCAT_OPERATION_LEASE_S = 2 * 60 * 60
+_CONCAT_COMMAND = "delivery.concatenate"
+
+
+class ConcatOperationConflict(ValueError):
+    """A concat idempotency key is already bound to another request."""
+
+
+class ConcatOperationInProgress(ValueError):
+    """A live owner still holds the concat operation lease."""
+
+
+def _ensure_concat_operation_receipts(conn) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS concat_operation_receipts(
+               operation_key TEXT PRIMARY KEY,
+               command TEXT NOT NULL,
+               request_fingerprint TEXT NOT NULL,
+               episode_id TEXT NOT NULL,
+               status TEXT NOT NULL,
+               result_json TEXT NOT NULL DEFAULT '{}',
+               final_path TEXT NOT NULL DEFAULT '',
+               final_sha256 TEXT NOT NULL DEFAULT '',
+               report_path TEXT NOT NULL DEFAULT '',
+               report_sha256 TEXT NOT NULL DEFAULT '',
+               claim_token TEXT NOT NULL DEFAULT '',
+               lease_expires_at REAL NOT NULL DEFAULT 0,
+               created_at REAL NOT NULL,
+               updated_at REAL NOT NULL
+           )"""
+    )
+
+
+def _concat_operation_key(idempotency_key: str) -> str:
+    normalized = str(idempotency_key or "").strip()
+    if not normalized:
+        raise ConcatOperationConflict("合片命令缺少稳定幂等键")
+    return f"{_CONCAT_COMMAND}:{normalized}"
+
+
+def _load_completed_concat_result(row) -> dict[str, Any]:
+    try:
+        result = json.loads(str(row["result_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("合片 receipt 结果损坏") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("合片 receipt 结果不是对象")
+    for path_field, hash_field, label in (
+        ("final_path", "final_sha256", "成片"),
+        ("report_path", "report_sha256", "剪辑报告"),
+    ):
+        path = Path(str(row[path_field] or ""))
+        expected = str(row[hash_field] or "")
+        if not path.is_file() or not expected or _media_sha256(path) != expected:
+            raise ConcatOperationConflict(
+                f"合片 receipt 绑定的{label}已丢失或漂移，拒绝伪造幂等重放"
+            )
+    return result
+
+
+def claim_concat_operation(
+    *, idempotency_key: str, request_fingerprint: str, episode_id: str,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Claim a concat operation, or return its exact durably published result."""
+    operation_key = _concat_operation_key(idempotency_key)
+    conn = get_conn()
+    _ensure_concat_operation_receipts(conn)
+    if conn.in_transaction:
+        conn.commit()
+    stamp = now()
+    owner = new_id("concatop")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM concat_operation_receipts WHERE operation_key=?",
+            (operation_key,),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """INSERT INTO concat_operation_receipts(
+                       operation_key,command,request_fingerprint,episode_id,status,
+                       result_json,claim_token,lease_expires_at,created_at,updated_at
+                   ) VALUES(?,?,?,?,'running','{}',?,?,?,?)""",
+                (
+                    operation_key,
+                    _CONCAT_COMMAND,
+                    request_fingerprint,
+                    episode_id,
+                    owner,
+                    stamp + _CONCAT_OPERATION_LEASE_S,
+                    stamp,
+                    stamp,
+                ),
+            )
+            conn.commit()
+            return owner, None
+        if (
+            str(row["command"]) != _CONCAT_COMMAND
+            or str(row["request_fingerprint"]) != request_fingerprint
+            or str(row["episode_id"]) != episode_id
+        ):
+            raise ConcatOperationConflict(
+                "相同 idempotency_key 已绑定不同的合片请求"
+            )
+        if str(row["status"]) == "succeeded":
+            conn.commit()
+            return None, _load_completed_concat_result(row)
+        if float(row["lease_expires_at"] or 0) > stamp:
+            raise ConcatOperationInProgress("相同合片操作正在执行")
+        updated = conn.execute(
+            """UPDATE concat_operation_receipts
+                  SET claim_token=?,lease_expires_at=?,updated_at=?
+                WHERE operation_key=? AND status='running' AND lease_expires_at<=?""",
+            (
+                owner,
+                stamp + _CONCAT_OPERATION_LEASE_S,
+                stamp,
+                operation_key,
+                stamp,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ConcatOperationInProgress("合片 receipt 接管 CAS 冲突")
+        conn.commit()
+        return owner, None
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
+def release_concat_operation(
+    *, idempotency_key: str, request_fingerprint: str, claim_token: str,
+) -> None:
+    """Release a definitely failed pre-publish claim; never delete a success."""
+    conn = get_conn()
+    _ensure_concat_operation_receipts(conn)
+    conn.execute(
+        """DELETE FROM concat_operation_receipts
+            WHERE operation_key=? AND command=? AND request_fingerprint=?
+              AND claim_token=? AND status='running'""",
+        (
+            _concat_operation_key(idempotency_key),
+            _CONCAT_COMMAND,
+            request_fingerprint,
+            claim_token,
+        ),
+    )
+    conn.commit()
 
 
 def _media_sha256(path: str | Path) -> str:
@@ -30,9 +179,13 @@ def _publish_concat_output(
     candidate_path: Path,
     final_path: Path,
     report: dict[str, Any],
+    result: dict[str, Any],
     release_authority: dict[str, Any],
     video_delivery_manifest: dict[str, Any],
-) -> None:
+    operation_idempotency_key: str | None = None,
+    operation_request_fingerprint: str | None = None,
+    operation_claim_token: str | None = None,
+) -> dict[str, Any]:
     """Serialize adoption changes with final video/report/stale publication."""
     from app.atomic_io import atomic_write_text
     from app.downstream_authority import (
@@ -45,6 +198,29 @@ def _publish_concat_output(
     owner = new_id("concatpub")
     try:
         conn.execute("BEGIN IMMEDIATE")
+        operation_key: str | None = None
+        if operation_idempotency_key is not None:
+            if not operation_request_fingerprint or not operation_claim_token:
+                raise ConcatOperationConflict("合片发布缺少完整的 receipt owner 绑定")
+            _ensure_concat_operation_receipts(conn)
+            operation_key = _concat_operation_key(operation_idempotency_key)
+            renewed = conn.execute(
+                """UPDATE concat_operation_receipts
+                      SET lease_expires_at=?,updated_at=?
+                    WHERE operation_key=? AND command=? AND request_fingerprint=?
+                      AND episode_id=? AND claim_token=? AND status='running'""",
+                (
+                    now() + _CONCAT_OPERATION_LEASE_S,
+                    now(),
+                    operation_key,
+                    _CONCAT_COMMAND,
+                    operation_request_fingerprint,
+                    episode_id,
+                    operation_claim_token,
+                ),
+            )
+            if renewed.rowcount != 1:
+                raise ConcatOperationConflict("合片发布 owner 已被恢复流程围栏")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS episode_video_publish_leases(
                    episode_id TEXT PRIMARY KEY,owner TEXT NOT NULL,
@@ -70,10 +246,16 @@ def _publish_concat_output(
             raise ValueError("合片发布前已采纳视频发生漂移")
         report["final_video_sha256"] = _media_sha256(candidate_path)
         atomic_copy(candidate_path, final_path)
+        report_path = _edit_report_path(final_path)
         atomic_write_text(
-            _edit_report_path(final_path),
+            report_path,
             json.dumps(report, ensure_ascii=False, indent=2),
         )
+        final_sha256 = _media_sha256(final_path)
+        report_sha256 = _media_sha256(report_path)
+        result["video_url"] = _versioned_final_url(final_path)
+        result["final_video_sha256"] = final_sha256
+        result["edit_report_sha256"] = report_sha256
         final_path.with_suffix(".stale").unlink(missing_ok=True)
         updated = conn.execute(
             """UPDATE episode_video_publish_leases SET status='published',updated_at=?
@@ -82,7 +264,31 @@ def _publish_concat_output(
         )
         if updated.rowcount != 1:
             raise ValueError("合片 publish owner CAS 冲突")
+        if operation_key is not None:
+            receipt = conn.execute(
+                """UPDATE concat_operation_receipts
+                      SET status='succeeded',result_json=?,final_path=?,final_sha256=?,
+                          report_path=?,report_sha256=?,lease_expires_at=0,updated_at=?
+                    WHERE operation_key=? AND command=? AND request_fingerprint=?
+                      AND episode_id=? AND claim_token=? AND status='running'""",
+                (
+                    json.dumps(result, ensure_ascii=False, sort_keys=True, default=str),
+                    str(final_path),
+                    final_sha256,
+                    str(report_path),
+                    report_sha256,
+                    now(),
+                    operation_key,
+                    _CONCAT_COMMAND,
+                    operation_request_fingerprint,
+                    episode_id,
+                    operation_claim_token,
+                ),
+            )
+            if receipt.rowcount != 1:
+                raise ConcatOperationConflict("合片 receipt 发布 CAS 冲突")
         conn.commit()
+        return result
     except Exception:
         if conn.in_transaction:
             conn.rollback()
@@ -390,7 +596,13 @@ def _final_edit_decision(
     return False, "simple_timeline_fast_concat"
 
 
-def concatenate_episode(episode_id: str) -> dict:
+def concatenate_episode(
+    episode_id: str,
+    *,
+    operation_idempotency_key: str | None = None,
+    operation_request_fingerprint: str | None = None,
+    operation_claim_token: str | None = None,
+) -> dict:
     """把当前已有的真实模型视频按镜号拼接成 MP4。
 
     只接受真实模型视频。内容 QA 低分不拦截，但静态图片、轻运动卡和静音片段
@@ -555,22 +767,26 @@ def concatenate_episode(episode_id: str) -> dict:
                     expected_duration_s=float(edit_report["total_duration_s"]),
                     decode_timeout_s=concat_timeout_s,
                 )
+                result = {
+                    "total_duration_s": round(validated_duration_s, 1),
+                    **common_result,
+                    "elapsed_s": round(time.perf_counter() - started_at, 3),
+                    "final_edit": edit_report,
+                }
                 _publish_concat_output(
                     conn,
                     episode_id=episode_id,
                     candidate_path=edited_video,
                     final_path=final_path,
                     report=edit_report,
+                    result=result,
                     release_authority=release_authority,
                     video_delivery_manifest=video_delivery_manifest,
+                    operation_idempotency_key=operation_idempotency_key,
+                    operation_request_fingerprint=operation_request_fingerprint,
+                    operation_claim_token=operation_claim_token,
                 )
-            return {
-                "video_url": _versioned_final_url(final_path),
-                "total_duration_s": round(validated_duration_s, 1),
-                **common_result,
-                "elapsed_s": round(time.perf_counter() - started_at, 3),
-                "final_edit": edit_report,
-            }
+            return result
         except Exception as exc:  # noqa: BLE001 - 质量增强失败必须继续完整交付
             final_edit_elapsed_s = time.perf_counter() - final_edit_started_at
             final_edit_failure = f"{type(exc).__name__}: {exc}"[:1000]
@@ -684,6 +900,12 @@ def concatenate_episode(episode_id: str) -> dict:
         "video_delivery_manifest": video_delivery_manifest,
         "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
     }
+    result = {
+        "total_duration_s": round(total_dur, 1),
+        **common_result,
+        "elapsed_s": round(time.perf_counter() - started_at, 3),
+        "final_edit": fallback_edit_report,
+    }
     try:
         _publish_concat_output(
             conn,
@@ -691,18 +913,15 @@ def concatenate_episode(episode_id: str) -> dict:
             candidate_path=publish_candidate,
             final_path=final_path,
             report=fallback_edit_report,
+            result=result,
             release_authority=release_authority,
             video_delivery_manifest=video_delivery_manifest,
+            operation_idempotency_key=operation_idempotency_key,
+            operation_request_fingerprint=operation_request_fingerprint,
+            operation_claim_token=operation_claim_token,
         )
     finally:
         publish_candidate.unlink(missing_ok=True)
-    return {
-        # 文件已经在上方原子覆盖；版本参数确保前端把它作为新的媒体资源加载。
-        "video_url": _versioned_final_url(final_path),
-        "total_duration_s": round(total_dur, 1),
-        **common_result,
-        "elapsed_s": round(time.perf_counter() - started_at, 3),
-        "final_edit": fallback_edit_report,
-    }
+    return result
 
 __all__ = [name for name in globals() if not name.startswith("__")]

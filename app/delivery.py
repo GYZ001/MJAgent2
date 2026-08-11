@@ -271,28 +271,87 @@ def _archive_matches_directory(archive_path: Path, package_path: Path) -> bool:
         return False
 
 
-def _delivery_approval_snapshot(conn, row, episode_id: str) -> dict[str, Any]:
+def verify_delivery_package_artifact_binding(
+    conn,
+    row,
+    *,
+    episode_id: str,
+    allowed_statuses: set[str],
+) -> dict[str, Any]:
+    """Verify the immutable package row, Artifact, manifest, and lineage."""
     artifact = repository.get_artifact(str(row["artifact_id"]), conn=conn)
-    if artifact is None or artifact["type"] != "delivery_package":
-        raise ValueError("交付草稿证据不存在")
-    if artifact["scope_type"] != "episode" or artifact["scope_id"] != episode_id:
-        raise ValueError("交付草稿证据作用域不匹配")
+    if (
+        artifact is None
+        or artifact.get("type") != "delivery_package"
+        or artifact.get("scope_type") != "episode"
+        or artifact.get("scope_id") != episode_id
+        or artifact.get("status") not in allowed_statuses
+        or artifact.get("contract_version") != "delivery-1.0.0"
+    ):
+        raise ValueError("交付包 Artifact 合同、状态或作用域不匹配")
+    try:
+        manifest = json.loads(str(row["manifest_json"] or "{}"))
+        quality_report = json.loads(str(row["quality_report_json"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("交付包数据库快照损坏") from exc
     package_dir = Path(str(row["package_path"])).resolve()
-    manifest_path = package_dir / "manifest.json"
+    manifest_path = (package_dir / "manifest.json").resolve()
+    expected_content = {
+        "package_id": str(row["id"]),
+        "manifest": manifest,
+        "quality_report": quality_report,
+    }
+    expected_parents = {
+        str(item.get("id"))
+        for item in manifest.get("source_artifacts") or []
+        if item.get("id")
+    }
+    expected_parents.update(
+        str(item.get("artifact_id"))
+        for item in (manifest.get("video_delivery_manifest") or {}).get("items") or []
+        if item.get("artifact_id")
+    )
+    if (
+        artifact.get("content") != expected_content
+        or Path(str(artifact.get("file_path") or "")).resolve() != manifest_path
+        or {str(item) for item in artifact.get("parent_artifact_ids") or []}
+        != expected_parents
+    ):
+        raise ValueError("交付包 Artifact 内容、文件或父血缘绑定已漂移")
+    try:
+        actual_hash = repository.content_hash(
+            artifact.get("content"), artifact.get("file_path"),
+        )
+    except OSError as exc:
+        raise ValueError("交付包 Artifact 文件证据缺失") from exc
+    if actual_hash != str(artifact.get("content_hash") or ""):
+        raise ValueError("交付包 Artifact 实际内容哈希已漂移")
+    return {
+        "artifact": artifact,
+        "manifest": manifest,
+        "quality_report": quality_report,
+        "package_dir": package_dir,
+        "manifest_path": manifest_path,
+    }
+
+
+def _delivery_approval_snapshot(conn, row, episode_id: str) -> dict[str, Any]:
+    binding = verify_delivery_package_artifact_binding(
+        conn, row, episode_id=episode_id, allowed_statuses={"validated", "approved"},
+    )
+    artifact = binding["artifact"]
+    package_dir = binding["package_dir"]
+    manifest_path = binding["manifest_path"]
     archive_path = Path(str(package_dir) + ".zip")
     if not package_dir.is_dir() or not manifest_path.is_file():
         raise ValueError("交付草稿文件已丢失")
     try:
-        manifest = json.loads(str(row["manifest_json"] or "{}"))
+        manifest = binding["manifest"]
         disk_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("交付草稿 manifest 损坏") from exc
     if not isinstance(manifest, dict) or manifest != disk_manifest:
         raise ValueError("交付草稿 manifest 与审核快照不一致")
-    if repository.content_hash(
-        artifact.get("content"), artifact.get("file_path"),
-    ) != str(artifact.get("content_hash") or ""):
-        raise ValueError("交付草稿证据内容已被篡改")
     for item in manifest.get("files") or []:
         candidate = (package_dir / str(item.get("path") or "")).resolve()
         if package_dir not in candidate.parents or not candidate.is_file():

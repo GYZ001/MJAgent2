@@ -642,12 +642,13 @@ def current_storyboard_release_manifest(
     if not artifact_id:
         raise ValueError("当前分镜缺少已发布 Artifact")
     artifact = db.execute(
-        """SELECT scope_type,scope_id,status,content_hash
+        """SELECT type,scope_type,scope_id,status,content_hash
            FROM artifacts WHERE id=?""",
         (artifact_id,),
     ).fetchone()
     artifact_valid = bool(
         artifact is not None
+        and artifact["type"] == "storyboard"
         and artifact["scope_type"] == "episode"
         and artifact["scope_id"] == episode_id
         and artifact["status"]

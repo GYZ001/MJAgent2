@@ -351,7 +351,10 @@ def issue_completion_certificate(
     if not art:
         raise ValueError(f"artifact 不存在: {artifact_id}")
     if (
-        art.get("scope_type") != "episode"
+        art.get("type") != (
+            "storyboard" if kind == "storyboard" else "screenplay_document"
+        )
+        or art.get("scope_type") != "episode"
         or art.get("scope_id") != scope_id
         or art.get("status") not in {"validated", "approved"}
     ):
@@ -588,7 +591,10 @@ def verify_completion_certificate(
     if allow_stale_artifact_for_revision:
         allowed_artifact_statuses.add("stale")
     if (
-        art.get("scope_type") != "episode"
+        art.get("type") != (
+            "storyboard" if cert.kind == "storyboard" else "screenplay_document"
+        )
+        or art.get("scope_type") != "episode"
         or art.get("scope_id") != cert.scope_id
         or art.get("status") not in allowed_artifact_statuses
     ):

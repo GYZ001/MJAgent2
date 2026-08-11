@@ -115,6 +115,7 @@ def _publish_case() -> dict[str, Any]:
             status="validated",
             trust_level="T2",
             content=board.model_dump(mode="json"),
+            contract_version="storyboard-test.v1",
         )
     )
     revision = ensure_production_revision(
@@ -265,6 +266,64 @@ def test_publish_storyboard_commits_complete_legacy_release(publish_db) -> None:
         (result["certificate_id"],),
     ).fetchone()
     assert certificate is not None and certificate["consumed_at"] is not None
+
+
+def test_downstream_storyboard_authority_rejects_wrong_artifact_type(
+    publish_db,
+) -> None:
+    from app.downstream_authority import verify_current_storyboard_release_authority
+
+    case = _publish_case()
+    publish_storyboard(**case)
+    publish_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
+    publish_db.commit()
+
+    authority = verify_current_storyboard_release_authority("e1", conn=publish_db)
+    assert authority["published_storyboard_artifact_id"] == case["artifact_id"]
+
+    publish_db.execute(
+        "UPDATE artifacts SET type='delivery_package' WHERE id=?",
+        (case["artifact_id"],),
+    )
+    publish_db.commit()
+    with pytest.raises(ValueError, match="不是本集已批准发布权威"):
+        verify_current_storyboard_release_authority("e1", conn=publish_db)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "UPDATE episodes SET status='scripted' WHERE id='e1'",
+        "UPDATE episodes SET storyboard_artifact_id='wrong' WHERE id='e1'",
+        "UPDATE production_revisions SET status='active' WHERE episode_id='e1' AND kind='storyboard'",
+        "UPDATE production_revisions SET working_artifact_id='wrong' WHERE episode_id='e1' AND kind='storyboard'",
+        "UPDATE production_revisions SET input_fingerprint='wrong' WHERE episode_id='e1' AND kind='storyboard'",
+        "UPDATE production_revisions SET contract_version='wrong' WHERE episode_id='e1' AND kind='storyboard'",
+        "UPDATE production_revisions SET qa_profile_version='wrong' WHERE episode_id='e1' AND kind='storyboard'",
+        "UPDATE artifacts SET status='validated' WHERE type='storyboard' AND scope_id='e1'",
+        "UPDATE artifacts SET content_json='{}' WHERE type='storyboard' AND scope_id='e1'",
+        "UPDATE completion_certificates SET consumed_at=NULL WHERE kind='storyboard' AND scope_id='e1'",
+        "UPDATE completion_certificates SET artifact_hash='wrong' WHERE kind='storyboard' AND scope_id='e1'",
+        "UPDATE completion_certificates SET input_fingerprint='wrong' WHERE kind='storyboard' AND scope_id='e1'",
+        "UPDATE completion_certificates SET contract_version='wrong' WHERE kind='storyboard' AND scope_id='e1'",
+        "UPDATE completion_certificates SET qa_profile_version='wrong' WHERE kind='storyboard' AND scope_id='e1'",
+    ],
+)
+def test_downstream_storyboard_authority_drift_matrix_fails_closed(
+    publish_db, mutation: str,
+) -> None:
+    from app.downstream_authority import verify_current_storyboard_release_authority
+
+    case = _publish_case()
+    publish_storyboard(**case)
+    publish_db.execute("UPDATE episodes SET status='confirmed' WHERE id='e1'")
+    publish_db.commit()
+    assert verify_current_storyboard_release_authority("e1", conn=publish_db)
+
+    publish_db.execute(mutation)
+    publish_db.commit()
+    with pytest.raises(ValueError):
+        verify_current_storyboard_release_authority("e1", conn=publish_db)
 
 
 def test_publish_storyboard_exact_retry_returns_existing_release(publish_db) -> None:

@@ -665,6 +665,23 @@ CREATE TABLE IF NOT EXISTS customer_feedback (
     FOREIGN KEY(artifact_id) REFERENCES artifacts(id),
     FOREIGN KEY(revision_run_id) REFERENCES workflow_runs(id)
 );
+CREATE TABLE IF NOT EXISTS concat_operation_receipts (
+    operation_key TEXT PRIMARY KEY,
+    command TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    episode_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    final_path TEXT NOT NULL DEFAULT '',
+    final_sha256 TEXT NOT NULL DEFAULT '',
+    report_path TEXT NOT NULL DEFAULT '',
+    report_sha256 TEXT NOT NULL DEFAULT '',
+    claim_token TEXT NOT NULL DEFAULT '',
+    lease_expires_at REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS benchmark_runs (
     id TEXT PRIMARY KEY,
     project_id TEXT,
@@ -2282,6 +2299,15 @@ def init_db(*, reconcile_interrupted: bool = False) -> None:
                 """UPDATE video_command_operation_receipts
                       SET lease_expires_at=0
                     WHERE status='running'"""
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(
+                """UPDATE concat_operation_receipts
+                      SET lease_expires_at=0,updated_at=?
+                    WHERE status='running'""",
+                (now(),),
             )
         except sqlite3.OperationalError:
             pass

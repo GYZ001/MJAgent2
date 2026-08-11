@@ -1858,10 +1858,11 @@ async def create_video_task(
         "video_create", operation_id,
     )
     if saved_request is not None and saved_request != payload:
-        raise reject_before_create(
+        raise ProviderError(
             "Seedance 同一业务操作的请求内容发生变化，已阻止复用幂等键；"
             "请保留原任务等待供应商结果确认，或通过页面明确创建新的生成尝试",
             failure_kind="idempotency_request_mismatch",
+            delivery_state="unknown",
             requires_explicit_retry=True,
         )
     call_meta = {**(call_meta or {}), "operation_id": operation_id}

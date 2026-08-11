@@ -152,12 +152,13 @@ def verify_current_storyboard_release_authority(
         raise ValueError("当前分镜 production revision 未发布或绑定已漂移")
 
     artifact = db.execute(
-        """SELECT scope_type,scope_id,status,content_hash,contract_version
+        """SELECT type,scope_type,scope_id,status,content_hash,contract_version
              FROM artifacts WHERE id=?""",
         (published_id,),
     ).fetchone()
     if (
         artifact is None
+        or str(artifact["type"] or "") != "storyboard"
         or str(artifact["scope_type"] or "") != "episode"
         or str(artifact["scope_id"] or "") != episode_id
         or str(artifact["status"] or "") != "approved"
