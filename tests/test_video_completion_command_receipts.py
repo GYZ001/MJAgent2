@@ -377,6 +377,123 @@ async def test_caught_spawn_failure_is_exact_terminal_failure(monkeypatch) -> No
     assert new_owner and new_result is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crash_point", ["after_run_create", "after_episode_install"])
+async def test_hard_crash_reuses_actual_persisted_workflow_without_duplicate(
+    monkeypatch,
+    crash_point: str,
+) -> None:
+    from app import api, completion_grant
+    import app.evidence.repository as evidence_repository
+    import app.orchestration.engine as orchestration_engine
+
+    class SimulatedProcessLoss(BaseException):
+        pass
+
+    conn = _full_conn()
+    for module in (operations, api, evidence_repository, orchestration_engine):
+        monkeypatch.setattr(module, "get_conn", lambda: conn)
+    monkeypatch.setattr(api, "_review_assert_positive_action", lambda *_: {})
+    monkeypatch.setattr(api, "_assert_storyboard_generation_gate", lambda *_: None)
+    monkeypatch.setattr(api.task_registry, "active", lambda *_: False)
+    monkeypatch.setattr(
+        completion_grant,
+        "issue_video_completion_grant",
+        lambda **_kwargs: (
+            SimpleNamespace(
+                grant_id="grant-hard-crash",
+                budget_cap_cny=100.0,
+                wall_clock_cap_s=3600.0,
+                max_fallback_shots=0,
+            ),
+            None,
+        ),
+    )
+    owner, _ = operations.claim_video_command_operation(
+        command="video.complete_episode",
+        idempotency_key="hard-crash-op",
+        request_fingerprint="fp-hard-crash",
+        scope_type="episode",
+        scope_id="ep-1",
+    )
+    body = {
+        "mode": "fresh",
+        "idempotency_key": "hard-crash-op",
+        "operation_request_fingerprint": "fp-hard-crash",
+        "operation_claim_token": owner,
+        "operation_command": "video.complete_episode",
+    }
+    original_create = orchestration_engine.WorkflowRecorder.create
+    original_bind = operations.bind_video_command_operation
+    if crash_point == "after_run_create":
+        def crash_after_create(**kwargs):
+            original_create(**kwargs)
+            raise SimulatedProcessLoss()
+
+        monkeypatch.setattr(
+            orchestration_engine.WorkflowRecorder,
+            "create",
+            staticmethod(crash_after_create),
+        )
+    else:
+        monkeypatch.setattr(
+            operations,
+            "bind_video_command_operation",
+            lambda **_kwargs: (_ for _ in ()).throw(SimulatedProcessLoss()),
+        )
+
+    with pytest.raises(SimulatedProcessLoss):
+        await api._complete_episode_core("ep-1", body)
+    persisted = conn.execute(
+        """SELECT id,status FROM workflow_runs
+             WHERE workflow_type='episode_video_completion' AND scope_id='ep-1'"""
+    ).fetchall()
+    assert len(persisted) == 1
+    assert persisted[0]["status"] == "CREATED"
+    exact_run_id = persisted[0]["id"]
+
+    # Startup fences the domain owner. A pre-install process loss also leaves a
+    # short-lived start claim; age it to model the subsequent restart retry.
+    conn.execute("UPDATE video_command_operation_receipts SET lease_expires_at=0")
+    if crash_point == "after_run_create":
+        conn.execute(
+            "UPDATE episodes SET active_video_run_id='starting:1:dead-process' WHERE id='ep-1'"
+        )
+    conn.commit()
+    replacement_owner, recovered = operations.claim_video_command_operation(
+        command="video.complete_episode",
+        idempotency_key="hard-crash-op",
+        request_fingerprint="fp-hard-crash",
+        scope_type="episode",
+        scope_id="ep-1",
+    )
+    assert replacement_owner and recovered is None
+    body["operation_claim_token"] = replacement_owner
+    monkeypatch.setattr(
+        orchestration_engine.WorkflowRecorder,
+        "create",
+        original_create,
+    )
+    monkeypatch.setattr(operations, "bind_video_command_operation", original_bind)
+    spawned: list[str] = []
+
+    def fake_spawn(_kind, key, coro, *, project_id=None):
+        assert project_id == "project-1"
+        spawned.append(key)
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(api.task_registry, "spawn", fake_spawn)
+    result = await api._complete_episode_core("ep-1", body)
+
+    assert result["run_id"] == exact_run_id
+    assert spawned == ["ep-1"]
+    assert conn.execute(
+        """SELECT COUNT(*) FROM workflow_runs
+             WHERE workflow_type='episode_video_completion' AND scope_id='ep-1'"""
+    ).fetchone()[0] == 1
+
+
 class _PollInput(StandardCommandInput):
     episode_id: str = Field(min_length=1)
 
