@@ -169,6 +169,23 @@ class CommandBus:
         preflight = self.preflight(name, args)
         gated = self._gate(name, args, payload, preflight, session_id=session_id)
         if gated is not None:
+            if idem_key and gated.status == CommandStatus.SUCCEEDED:
+                claim_token = uuid.uuid4().hex
+                raced = idem_store.claim(
+                    idem_key,
+                    command=name,
+                    request_fingerprint=request_fingerprint,
+                    claim_token=claim_token,
+                )
+                if raced is not None:
+                    return raced
+                idem_store.store(
+                    idem_key,
+                    command=name,
+                    request_fingerprint=request_fingerprint,
+                    claim_token=claim_token,
+                    result=gated,
+                )
             return gated
 
         claimed = False
@@ -246,6 +263,23 @@ class CommandBus:
         preflight = await self.preflight_async(name, args)
         gated = self._gate(name, args, payload, preflight, session_id=session_id)
         if gated is not None:
+            if idem_key and gated.status == CommandStatus.SUCCEEDED:
+                claim_token = uuid.uuid4().hex
+                raced = idem_store.claim(
+                    idem_key,
+                    command=name,
+                    request_fingerprint=request_fingerprint,
+                    claim_token=claim_token,
+                )
+                if raced is not None:
+                    return raced
+                idem_store.store(
+                    idem_key,
+                    command=name,
+                    request_fingerprint=request_fingerprint,
+                    claim_token=claim_token,
+                    result=gated,
+                )
             return gated
 
         claimed = False

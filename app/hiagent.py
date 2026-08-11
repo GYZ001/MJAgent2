@@ -250,6 +250,7 @@ class ProviderError(Exception):
                  timeout_phase: str | None = None, failure_kind: str = "",
                  delivery_state: str = "unknown", replay_safe: bool = False,
                  requires_explicit_retry: bool = False,
+                 create_not_accepted: bool = False,
                  failure: ProviderFailure | None = None):
         super().__init__(message)
         if failure is None:
@@ -268,6 +269,7 @@ class ProviderError(Exception):
         self.delivery_state = delivery_state
         self.replay_safe = replay_safe
         self.requires_explicit_retry = requires_explicit_retry
+        self.create_not_accepted = bool(create_not_accepted)
 
 
 def _channel_semaphore(
@@ -421,11 +423,26 @@ def _structured_failure_from_http_body(body: str) -> ProviderFailure | None:
 
 def _classify_http_error(status: int, body: str, key_name: str = "HIAGENT_API_KEY") -> ProviderError:
     structured_failure = _structured_failure_from_http_body(body)
+    explicit_not_accepted = False
+    try:
+        raw_payload = json.loads(body)
+        failure_payload = (
+            (raw_payload.get("error") or {}).get("failure")
+            if isinstance(raw_payload, dict) and isinstance(raw_payload.get("error"), dict)
+            else raw_payload.get("failure") if isinstance(raw_payload, dict) else None
+        )
+        explicit_not_accepted = bool(
+            isinstance(failure_payload, dict)
+            and failure_payload.get("create_not_accepted") is True
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
     if structured_failure is not None:
         return ProviderError(
             f"上游请求失败（HTTP {status}）：{body[:300]}",
             raw=body,
             delivery_state="responded",
+            create_not_accepted=explicit_not_accepted,
             failure=structured_failure,
         )
     if status in (401, 403):

@@ -2429,6 +2429,16 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
     reconcile_result = reconcile_adopted_revision(
         shot_id, version_id, conn=conn,
     )
+    adoption_changed = bool(
+        shot and (
+            shot["adopted_version_id"] != version_id
+            or abs(previous_rate - playback_rate) > 0.0001
+        )
+    )
+    if adoption_changed:
+        from app.artifacts import invalidate_episode_delivery_authority
+
+        invalidate_episode_delivery_authority(conn, shot["episode_id"])
     conn.commit()
     _review_write_audit(
         "video_version.adopt", "shot", shot_id, target_version=version_id,
@@ -2439,10 +2449,7 @@ def _adopt_version_core(shot_id: str, body: dict) -> dict:
         new_state={"adopted_version_id": version_id, "playback_rate": playback_rate}, reason=reason,
         idempotency_key=body.get("idempotency_key"), request_id=body.get("request_id"),
     )
-    if shot and (
-        shot["adopted_version_id"] != version_id
-        or abs(previous_rate - playback_rate) > 0.0001
-    ):
+    if adoption_changed:
         worker.invalidate_episode_final(shot["episode_id"])
     return {
         "adopted": version_id,
@@ -2486,6 +2493,9 @@ def _cancel_shot_adoption_core(shot_id: str) -> dict:
     reconcile_result = reconcile_adopted_revision(
         shot_id, "__unadopted__", conn=conn,
     )
+    from app.artifacts import invalidate_episode_delivery_authority
+
+    invalidate_episode_delivery_authority(conn, shot["episode_id"])
     conn.commit()
     worker.invalidate_episode_final(shot["episode_id"])
     _review_write_audit(

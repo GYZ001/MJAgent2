@@ -112,12 +112,25 @@ def test_delivery_package_reaches_t5_and_feedback_preserves_snapshot(tmp_path, m
             "ok": True,
             "video_delivery_manifest_hash": video_manifest["manifest_hash"],
             "video_delivery_manifest": video_manifest,
+            "final_video_sha256": hashlib.sha256(final_video.read_bytes()).hexdigest(),
         }),
         encoding="utf-8",
     )
 
     readiness = delivery.delivery_readiness("e")
     assert readiness["ready"] is True and readiness["evidence_coverage"] == 1
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    delivery.delivery_readiness("e")
+    conn.set_trace_callback(None)
+    writes = (
+        "insert ", "update ", "delete ", "create ", "alter ", "drop ",
+        "begin ", "commit", "rollback",
+    )
+    assert not any(
+        statement.strip().lower().startswith(writes)
+        for statement in statements
+    )
     assert readiness["source_chapters"] == [{
         "chapter_id": 1,
         "project_id": "p",

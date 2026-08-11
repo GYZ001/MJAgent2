@@ -69,13 +69,12 @@ def _release_pre_call_video_claim(
 def _provider_create_outcome_unknown(exc: ProviderError) -> bool:
     """Fail closed unless the provider response makes replay safety explicit."""
     delivery_state = str(getattr(exc, "delivery_state", "unknown") or "unknown")
-    if bool(getattr(exc, "requires_explicit_retry", False)):
-        return True
-    if delivery_state == "unknown":
-        return True
-    if delivery_state == "responded":
+    if bool(getattr(exc, "create_not_accepted", False)):
         return False
-    return not bool(getattr(exc, "replay_safe", False))
+    return not (
+        delivery_state == "not_sent"
+        and bool(getattr(exc, "replay_safe", False))
+    )
 
 
 def _assert_provider_create_resolved(job, task_id: str | None) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 
 try:
     _queue
@@ -12,6 +13,14 @@ _ACTIVE_VIDEO_JOB_STATUSES = ("queued", "running", "waiting_provider", "waiting_
 _CONCAT_PROBE_TIMEOUT_S = 30.0
 _CONCAT_DURATION_TOLERANCE_RATIO = 0.10
 _CONCAT_DURATION_TOLERANCE_MIN_S = 0.75
+
+
+def _media_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _probe_concat_media(path: str | Path) -> dict[str, Any]:
@@ -491,6 +500,7 @@ def concatenate_episode(episode_id: str) -> dict:
                     conn=conn,
                 ) != video_delivery_manifest:
                     raise ValueError("合片期间已采纳视频发生漂移，已拒绝覆盖成片")
+                edit_report["final_video_sha256"] = _media_sha256(edited_video)
                 atomic_copy(edited_video, final_path)
             final_path.with_suffix(".stale").unlink(missing_ok=True)
             report_path = _edit_report_path(final_path)
@@ -627,6 +637,7 @@ def concatenate_episode(episode_id: str) -> dict:
         },
         "video_delivery_manifest": video_delivery_manifest,
         "video_delivery_manifest_hash": video_delivery_manifest["manifest_hash"],
+        "final_video_sha256": _media_sha256(final_path),
     }
     from app.atomic_io import atomic_write_text
 

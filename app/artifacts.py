@@ -504,6 +504,34 @@ def invalidate_episode_final(episode_id: str) -> bool:
     return True
 
 
+def invalidate_episode_delivery_authority(conn, episode_id: str) -> int:
+    """Retire current delivery pointers in the same DB transaction as adoption."""
+    package_rows = conn.execute(
+        """SELECT id,artifact_id FROM delivery_packages
+            WHERE episode_id=? AND status IN ('waiting_human','approved','approved_with_risk')""",
+        (episode_id,),
+    ).fetchall()
+    artifact_ids = [str(row["artifact_id"]) for row in package_rows if row["artifact_id"]]
+    conn.execute(
+        """UPDATE delivery_packages SET status='superseded'
+            WHERE episode_id=? AND status IN ('waiting_human','approved','approved_with_risk')""",
+        (episode_id,),
+    )
+    if artifact_ids:
+        marks = ",".join("?" for _ in artifact_ids)
+        conn.execute(
+            f"UPDATE artifacts SET status='superseded' WHERE id IN ({marks})",
+            artifact_ids,
+        )
+    conn.execute(
+        """UPDATE episodes
+              SET delivery_artifact_id=NULL,delivery_status='not_ready'
+            WHERE id=?""",
+        (episode_id,),
+    )
+    return len(package_rows)
+
+
 def _stat_generation(value: os.stat_result) -> dict[str, int]:
     return {
         "device": int(value.st_dev),

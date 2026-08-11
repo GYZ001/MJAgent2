@@ -1269,7 +1269,31 @@ async def decide_delivery(episode_id: str, body: dict = Body(...)):
 async def _resume_delivery_package(
     episode_id: str, payload: dict, recorder: WorkflowRecorder
 ) -> None:
-    from app.delivery import build_delivery_package
+    from app.delivery import (
+        build_delivery_package,
+        claim_delivery_package_operation,
+        finish_delivery_package_operation,
+    )
+
+    operation_request_fingerprint = fingerprint(
+        episode_id,
+        {
+            key: payload[key]
+            for key in sorted(payload)
+            if key not in {"request_id", "operation_started_at", "package_id"}
+        },
+    )
+    operation_owner, recovered_result = claim_delivery_package_operation(
+        package_id=payload["package_id"],
+        episode_id=episode_id,
+        request_fingerprint=operation_request_fingerprint,
+        allow_interrupted_takeover=True,
+    )
+    if recovered_result is not None:
+        recorder.start()
+        recorder.succeed("交付快照已按 durable receipt 恢复")
+        return
+    assert operation_owner is not None
 
     recorder.start()
     try:
@@ -1283,14 +1307,23 @@ async def _resume_delivery_package(
                 reason=str(payload.get("reason") or ""),
                 accepted_risk=payload.get("accepted_risk"),
                 operation_started_at=payload["operation_started_at"],
+                operation_request_fingerprint=operation_request_fingerprint,
+                operation_lease_owner=operation_owner,
             )
 
-        await recorder.step(
+        _, result = await recorder.step(
             "build_delivery_snapshot", operation,
             agent_name="delivery_loop",
             context_manifest={"immutable_snapshot": True, "recovered": True},
         )
         recorder.succeed("交付快照已从服务重启中恢复")
+        finish_delivery_package_operation(
+            package_id=payload["package_id"],
+            request_fingerprint=operation_request_fingerprint,
+            lease_owner=operation_owner,
+            result={**result, "run_id": recorder.run_id},
+            succeeded=True,
+        )
     except asyncio.CancelledError:
         if task_registry.shutdown_in_progress():
             recorder.pause_external("服务重启，交付快照等待自动恢复")
@@ -1299,6 +1332,16 @@ async def _resume_delivery_package(
         raise
     except Exception as exc:  # noqa: BLE001 recovery failure must remain visible
         recorder.fail(exc)
+        try:
+            finish_delivery_package_operation(
+                package_id=payload["package_id"],
+                request_fingerprint=operation_request_fingerprint,
+                lease_owner=operation_owner,
+                result={"error": str(exc)},
+                succeeded=False,
+            )
+        except ValueError:
+            pass
 
 
 async def _resume_delivery_approval(

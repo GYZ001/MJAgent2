@@ -44,6 +44,7 @@ def claim_delivery_package_operation(
     package_id: str,
     episode_id: str,
     request_fingerprint: str,
+    allow_interrupted_takeover: bool = False,
     conn=None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     db = conn or get_conn()
@@ -66,14 +67,18 @@ def claim_delivery_package_operation(
                 result = json.loads(row["result_json"] or "{}")
                 db.commit()
                 return None, result
-            if row["status"] == "running" and float(row["lease_expires_at"] or 0) > stamp:
+            if (
+                row["status"] == "running"
+                and float(row["lease_expires_at"] or 0) > stamp
+                and not allow_interrupted_takeover
+            ):
                 db.commit()
                 raise ValueError("相同交付操作正在执行中")
             updated = db.execute(
                 """UPDATE delivery_operation_receipts
                       SET lease_owner=?,lease_expires_at=?,status='running',updated_at=?
                     WHERE package_id=? AND request_fingerprint=?
-                      AND (status!='running' OR lease_expires_at<=?)""",
+                      AND (status!='running' OR lease_expires_at<=? OR ?)""",
                 (
                     owner,
                     stamp + _DELIVERY_OPERATION_LEASE_S,
@@ -81,6 +86,7 @@ def claim_delivery_package_operation(
                     package_id,
                     request_fingerprint,
                     stamp,
+                    int(allow_interrupted_takeover),
                 ),
             )
             if updated.rowcount != 1:
@@ -447,6 +453,21 @@ def delivery_readiness(episode_id: str) -> dict[str, Any]:
                 if video_delivery_manifest else None
             ),
             "actual": final_manifest_hash or None,
+        },
+    )
+    final_expected_sha256 = (
+        str(final_edit_report.get("final_video_sha256") or "")
+        if isinstance(final_edit_report, dict)
+        else ""
+    )
+    final_actual_sha256 = _sha256(final_path) if final_path.is_file() else ""
+    check(
+        "final_video_content_binding",
+        bool(final_expected_sha256 and final_expected_sha256 == final_actual_sha256),
+        "整集成片实际文件哈希与合片发布证明一致",
+        {
+            "expected": final_expected_sha256 or None,
+            "actual": final_actual_sha256 or None,
         },
     )
     check(

@@ -117,6 +117,18 @@ def _error_from_response(action: str, response: httpx.Response) -> ProviderError
     except (TypeError, ValueError):
         pass
     failure = provider_failure_from_http_payload(payload)
+    explicit_not_accepted = False
+    if isinstance(payload, dict):
+        error_payload = payload.get("error")
+        failure_payload = (
+            error_payload.get("failure")
+            if isinstance(error_payload, dict)
+            else payload.get("failure")
+        )
+        explicit_not_accepted = bool(
+            isinstance(failure_payload, dict)
+            and failure_payload.get("create_not_accepted") is True
+        )
     return ProviderError(
         f"MiniMaxH3 {action}失败 HTTP {response.status_code}：{detail}",
         retryable=(
@@ -127,6 +139,7 @@ def _error_from_response(action: str, response: httpx.Response) -> ProviderError
         ),
         raw=response.text,
         delivery_state="responded",
+        create_not_accepted=explicit_not_accepted,
         failure=failure,
     )
 
@@ -722,10 +735,17 @@ async def create_video_task(
             )
             return task_id
     except httpx.RequestError as exc:
+        not_sent = isinstance(
+            exc,
+            (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError),
+        )
         error = ProviderError(
             f"MiniMaxH3 创建任务网络异常：{type(exc).__name__}: {exc}",
             retryable=True,
             raw=repr(exc),
+            delivery_state="not_sent" if not_sent else "unknown",
+            replay_safe=not_sent,
+            requires_explicit_retry=not not_sent,
         )
         finish_provider_call(
             call_id,

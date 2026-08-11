@@ -510,6 +510,15 @@ def select_best_video_candidate(
     if not already_adopted:
         conn.execute("UPDATE shots SET adopted_version_id=? WHERE id=?", (best["id"], shot_id))
         conn.execute("UPDATE shot_versions SET adoption_reason=? WHERE id=?", (reason, best["id"]))
+        if previous and adopted_id != best["id"]:
+            from app.artifacts import invalidate_episode_delivery_authority
+
+            shot = conn.execute(
+                "SELECT episode_id FROM shots WHERE id=?",
+                (shot_id,),
+            ).fetchone()
+            if shot:
+                invalidate_episode_delivery_authority(conn, shot["episode_id"])
         conn.commit()
     if previous and adopted_id != best["id"]:
         from app.artifacts import invalidate_episode_final
