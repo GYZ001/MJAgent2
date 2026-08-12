@@ -671,6 +671,9 @@ class BlueprintSemanticIssue(BaseModel):
         "voice_identity_missing",
         "voice_identity_ambiguous",
         "voice_identity_conflict",
+        "source_delivery_missing",
+        "source_delivery_conflict",
+        "source_delivery_identity_conflict",
         "ending_payoff_gap",
     ]
     node_keys: list[str]
@@ -1757,6 +1760,23 @@ def apply_narrative_blueprint_patch(
 def derive_blueprint_scene_plans(
     blueprint: NarrativeBlueprint,
 ) -> list[BlueprintScenePlan]:
+    def operational_participants(node: NarrativeNode) -> list[str]:
+        if not node.participant_evidence:
+            return [
+                participant
+                for participant in node.participants
+                if participant
+            ]
+        return [
+            evidence.identity_key
+            for evidence in node.participant_evidence
+            if (
+                evidence.identity_key
+                and evidence.usage
+                in {"visible", "voice", "state_subject"}
+            )
+        ]
+
     source_semantics: dict[str, BlueprintSourceSemantics] = {}
     for node in blueprint.nodes:
         semantics = node.source_semantics()
@@ -1846,14 +1866,9 @@ def derive_blueprint_scene_plans(
                 if node.decision is not None
             ],
             participant_keys=list(dict.fromkeys(
-                evidence.identity_key
+                participant
                 for node in nodes
-                for evidence in node.participant_evidence
-                if (
-                    evidence.identity_key
-                    and evidence.usage
-                    in {"visible", "voice", "state_subject"}
-                )
+                for participant in operational_participants(node)
             )),
             scene_heading=(
                 f"【场{index}】{first.time_label} / {first.location_label}"

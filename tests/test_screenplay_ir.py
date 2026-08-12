@@ -587,9 +587,9 @@ def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor()
 
     first_action = screenplay.narrative_plan.atomic_actions[0]
     first_event = screenplay.narrative_plan.events[0]
-    assert first_action.actor_ids == ["谷言"]
+    assert first_action.actor_ids == ["bible:谷言"]
     assert "旧友" not in first_action.actor_ids
-    assert first_event.onscreen_entity_ids == ["谷言"]
+    assert first_event.onscreen_entity_ids == ["bible:谷言"]
 
 
 def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
@@ -672,7 +672,7 @@ def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
     offscreen_action = screenplay.narrative_plan.atomic_actions[-1]
     offscreen_event = screenplay.narrative_plan.events[-1]
     assert offscreen_action.actor_ids
-    assert offscreen_event.onscreen_entity_ids == ["谷言"]
+    assert offscreen_event.onscreen_entity_ids == ["bible:谷言"]
     assert offscreen_action.participant_deliveries[0].audible is True
 
 
@@ -919,6 +919,48 @@ def test_v13_compiler_accepts_unique_source_scene_owners() -> None:
     )
 
     assert screenplay.source_text_range == "screenplay-generation-ir.v1.3"
+
+
+def test_compiled_identity_ids_are_stable_when_ir_order_changes() -> None:
+    first_payload = _v13_payload()
+    second_payload = _v13_payload()
+    second_payload["identities"] = list(
+        reversed(second_payload["identities"])
+    )
+    episode = {
+        "id": "ep-ir-stable-authority",
+        "episode_no": 1,
+        "authorized_source_chapters": {"chapter-1": SOURCE},
+    }
+
+    first = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(first_payload),
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+    second = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(second_payload),
+        episode=episode,
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+    first_ids = {
+        contract.display_name: contract.identity_id
+        for contract in first.narrative_plan.identity_contracts
+    }
+    second_ids = {
+        contract.display_name: contract.identity_id
+        for contract in second.narrative_plan.identity_contracts
+    }
+
+    assert first_ids == second_ids
+    assert first_ids["谷言"] == "bible:谷言"
+    assert not first_ids["旧友"].startswith("ID-")
+    assert (
+        first.narrative_plan.events[0].onscreen_entity_ids
+        == second.narrative_plan.events[0].onscreen_entity_ids
+    )
 
 
 def test_v13_compiler_rejects_source_owned_by_another_scene() -> None:

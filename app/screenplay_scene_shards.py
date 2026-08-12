@@ -1300,8 +1300,10 @@ def _build_group_unit_slots(
     *,
     source_by_id: dict[str, str],
     scene_order_by_key: dict[str, int],
-    delivery_by_unit: dict[str, Any],
+    delivery_by_unit: dict[str, Any] | None = None,
 ) -> list[ScreenplaySceneUnitSlotPlan]:
+    legacy_delivery_fallback = delivery_by_unit is None
+    delivery_by_unit = delivery_by_unit or {}
     slots: list[ScreenplaySceneUnitSlotPlan] = []
     unit_order = 0
     for scene_plan in group:
@@ -1330,12 +1332,22 @@ def _build_group_unit_slots(
                     if fact.projection == "quoted"
                     else None
                 )
-                if fact.projection == "quoted" and delivery is None:
+                if (
+                    fact.projection == "quoted"
+                    and delivery is None
+                    and not legacy_delivery_fallback
+                ):
                     raise ValueError(
                         f"{fact.source_unit_key} 缺少 quoted source delivery"
                     )
                 delivery_mode = (
-                    delivery.mode if delivery is not None else "action"
+                    delivery.mode
+                    if delivery is not None
+                    else (
+                        "spoken_dialogue"
+                        if fact.projection == "quoted"
+                        else "action"
+                    )
                 )
                 kind = (
                     "dialogue"

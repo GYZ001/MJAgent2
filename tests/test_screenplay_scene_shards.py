@@ -17,6 +17,7 @@ from app.narrative_blueprint import (
     NarrativeBlueprint,
     NarrativeNode,
     NarrativeParticipantEvidence,
+    blueprint_voice_identity_issues,
     derive_blueprint_scene_plans,
 )
 from app.evidence import repository as evidence_repository
@@ -514,6 +515,101 @@ def test_scene_input_contracts_align_source_and_frozen_participants_per_scene() 
     )
 
 
+def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
+    source_text = (
+        "孟浩翻开小册子。“人当有靠山。”"
+        "这是小册子里的开卷语，落款是靠山老祖。"
+    )
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "n1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "孟浩阅读凝气卷开卷语",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "午后",
+            "time_relation": "episode_start",
+            "location_key": "room",
+            "location_label": "杂役房",
+            "participants": ["孟浩", "靠山老祖"],
+            "participant_evidence": [
+                {
+                    "identity_key": "孟浩",
+                    "source_segment_ids": ["SRC0001"],
+                    "usage": "visible",
+                },
+                {
+                    "identity_key": "靠山老祖",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:002"],
+                    "usage": "mentioned",
+                },
+            ],
+            "source_unit_deliveries": [{
+                "source_unit_key": "SRC0001:unit:002",
+                "mode": "written_text",
+                "content_owner_key": "靠山老祖",
+            }],
+            "action_logic": "孟浩从书页读取开卷语并理解其含义",
+        }],
+    })
+
+    assert blueprint_voice_identity_issues(blueprint, source_text) == []
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source_text,
+        identity_registry_hash="identity-hash",
+    )
+    plan = plans[0]
+    quoted_slot = next(
+        slot for slot in plan.unit_slots
+        if slot.source_surface == "quoted_span"
+    )
+    assert quoted_slot.kind == "action"
+    assert quoted_slot.delivery_mode == "written_text"
+
+    contracts = build_screenplay_scene_input_contracts(
+        plan=plan,
+        scene_plans=blueprint.scene_plans,
+        source_by_id={"SRC0001": source_text},
+        identity_registry=[{
+            "identity_key": "person_menghao",
+            "authority_id": "bible:孟浩",
+            "canonical_name": "孟浩",
+            "source_labels": ["孟浩"],
+        }],
+        blueprint_nodes=blueprint.nodes,
+    )
+    compiled = compile_screenplay_scene_shard_draft(
+        ScreenplaySceneShardCreativeIR(
+            slots={
+                slot.unit_key: ScreenplaySceneShardCreativeUnit(
+                    text="孟浩阅读书页内容。"
+                )
+                for slot in plan.unit_slots
+            },
+        ),
+        episode_no=1,
+        plan=plan,
+        scene_plans={
+            scene.key: scene for scene in blueprint.scene_plans
+        },
+        scene_input_contracts=contracts,
+    )
+    written_unit = next(
+        unit for unit in compiled.scenes[0].units
+        if unit.unit_key == quoted_slot.unit_key
+    )
+
+    assert written_unit.kind == "action"
+    assert written_unit.speaker_key is None
+    assert written_unit.required_text == "人当有靠山。"
+    assert written_unit.text_provenance.kind == "required_text"
+
+
 def test_scene_input_contract_rejects_unfrozen_blueprint_participant() -> None:
     blueprint = _blueprint(split_domain=False)
     blueprint.nodes[0].participants = ["未冻结来客"]
@@ -969,7 +1065,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v8"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v9"
 
 
 def test_blueprint_and_slot_semantics_are_required_without_defaults() -> None:
@@ -2445,7 +2541,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
     )
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v8"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v9"
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
@@ -2909,8 +3005,8 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 
 
 def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v8"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v8"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v9"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v9"
 
 
 def test_run_195a691_replays_ten_ownership_overreaches() -> None:
@@ -3541,8 +3637,8 @@ def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
         )
         != fingerprint
     )
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v8"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v8"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v9"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v9"
 
 
 def test_dialogue_mismatch_is_not_silently_normalized() -> None:
@@ -3600,7 +3696,25 @@ def test_ambiguous_dialogue_authority_fails_before_provider_dispatch() -> None:
                     "source_segment_ids": ["SRC0001"],
                     "usage": "visible",
                 },
+                {
+                    "identity_key": "甲",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:001"],
+                    "usage": "voice",
+                },
+                {
+                    "identity_key": "乙",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:001"],
+                    "usage": "voice",
+                },
             ],
+            "source_unit_deliveries": [{
+                "source_unit_key": "SRC0001:unit:001",
+                "mode": "spoken_dialogue",
+                "content_owner_key": "甲",
+                "performer_key": "甲",
+            }],
             "action_logic": "命令发出后两人抬头",
         }],
     })

@@ -92,6 +92,24 @@ def _blueprint(payload: dict, *, repaired: bool) -> NarrativeBlueprint:
                 if repaired
                 else "old_participant_evidence"
             ]
+            if repaired:
+                node["source_unit_deliveries"] = [
+                    {
+                        "source_unit_key": source_unit_key,
+                        "mode": "spoken_dialogue",
+                        "content_owner_key": payload[
+                            "blueprint_identity_reference"
+                        ],
+                        "performer_key": payload[
+                            "blueprint_identity_reference"
+                        ],
+                    }
+                    for source_unit_key in (
+                        "SRC0052:unit:001",
+                        "SRC0053:unit:001",
+                        "SRC0056:unit:001",
+                    )
+                ]
         nodes.append(node)
     return NarrativeBlueprint.model_validate({
         "episode_no": 1,
@@ -108,9 +126,9 @@ def test_old_blueprint_fails_with_typed_voice_issues_before_scene_input() -> Non
     errors = validate_narrative_blueprint(blueprint, source_text)
 
     assert [issue.code for issue in issues] == [
-        "voice_identity_missing",
-        "voice_identity_missing",
-        "voice_identity_missing",
+        "source_delivery_missing",
+        "source_delivery_missing",
+        "source_delivery_missing",
     ]
     assert [issue.source_segment_ids for issue in issues] == [
         ["SRC0052"],
@@ -118,7 +136,7 @@ def test_old_blueprint_fails_with_typed_voice_issues_before_scene_input() -> Non
         ["SRC0056"],
     ]
     assert all(
-        "[BLUEPRINT_VOICE_IDENTITY_MISSING]" in error
+        "[BLUEPRINT_SOURCE_DELIVERY_MISSING]" in error
         for error in errors
     )
 
