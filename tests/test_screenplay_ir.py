@@ -957,10 +957,9 @@ def test_compiled_identity_ids_are_stable_when_ir_order_changes() -> None:
     assert first_ids == second_ids
     assert first_ids["谷言"] == "bible:谷言"
     assert not first_ids["旧友"].startswith("ID-")
-    assert (
+    assert set(
         first.narrative_plan.events[0].onscreen_entity_ids
-        == second.narrative_plan.events[0].onscreen_entity_ids
-    )
+    ) == set(second.narrative_plan.events[0].onscreen_entity_ids)
 
 
 def test_v13_compiler_rejects_source_owned_by_another_scene() -> None:

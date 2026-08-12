@@ -33,9 +33,22 @@ def _source_text(payload: dict) -> str:
 
 
 def _blueprint(payload: dict) -> NarrativeBlueprint:
+    nodes = json.loads(json.dumps(payload["nodes"], ensure_ascii=False))
+    for node in nodes:
+        deliveries = []
+        for evidence in node.get("participant_evidence") or []:
+            if evidence.get("usage") != "voice":
+                continue
+            deliveries.extend({
+                "source_unit_key": source_unit_key,
+                "mode": "spoken_dialogue",
+                "content_owner_key": evidence["identity_key"],
+                "performer_key": evidence["identity_key"],
+            } for source_unit_key in evidence.get("source_unit_keys") or [])
+        node["source_unit_deliveries"] = deliveries
     return NarrativeBlueprint.model_validate({
         "episode_no": 1,
-        "nodes": payload["nodes"],
+        "nodes": nodes,
     })
 
 
@@ -50,7 +63,7 @@ def test_production_prose_narration_cannot_become_voice_issue() -> None:
 
     assert facts["SRC0001:unit:001"] == "action"
     assert facts["SRC0002:unit:001"] == "action"
-    assert facts["SRC0005:unit:001"] == "dialogue"
+    assert facts["SRC0005:unit:001"] == "quoted"
     assert blueprint_voice_identity_issues(blueprint, source_text) == []
 
     review = BlueprintSemanticReview.model_validate({

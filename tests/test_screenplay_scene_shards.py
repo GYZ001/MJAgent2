@@ -3741,7 +3741,7 @@ def test_ambiguous_dialogue_authority_fails_before_provider_dispatch() -> None:
 
     with pytest.raises(
         ScreenplaySceneShardError,
-        match="dialogue.*唯一 speaker",
+        match="dialogue.*多个 voice speaker",
     ):
         build_screenplay_scene_input_contracts(
             plan=plan,
