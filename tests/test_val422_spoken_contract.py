@@ -161,6 +161,89 @@ def test_duration_normalization_does_not_hide_spoken_contract_conflict() -> None
     )
 
 
+def test_offscreen_speaker_not_in_visible_is_not_conflict() -> None:
+    """shot_no=83 复现：画外说话人两侧都存 spoken_dialogue，不得判成分叉。
+
+    宗门绿袍修士2 不在 characters_visible，dialogues 与 audio_timeline 的原始
+    delivery/type 都写着 spoken_dialogue（模型/历史数据的常见写法）。可见性降级
+    过去只作用在 dialogues 派生，timeline 派生原样照搬，于是被误判为
+    SPOKEN_CONTRACT_CONFLICT。现在两侧共用 _resolve_delivery，应收敛为画外音。
+    """
+    line = "许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。"
+    shot = _compact_shot(83)
+    shot.duration_s = 9
+    shot.characters = ["孟浩", "王有材"]
+    shot.characters_visible = ["孟浩", "王有材"]
+    shot.dialogues = [
+        Dialogue(speaker="宗门绿袍修士2", line=line, emotion="平静带艳羡", delivery="spoken_dialogue")
+    ]
+    shot.audio_timeline = [
+        AudioTimelineItem(
+            start_s=0.0, end_s=8.6, type="spoken_dialogue",
+            speaker_id="宗门绿袍修士2", text=line, lip_sync=True, emotion="平静带艳羡",
+        )
+    ]
+
+    # 读侧门禁：不得再报冲突
+    assert not any(
+        i.code == "SPOKEN_CONTRACT_CONFLICT" for i in validate_spoken_contract(shot)
+    )
+    assert spoken_contract_coherence_errors(shot) == []
+
+    # 同步侧：收敛为 coherent，并把画外口径写回原始字段（上下游对齐）
+    result = synchronize_spoken_contract(shot)
+    assert result.status == "coherent"
+    assert shot.spoken_contract_status == "coherent"
+    assert shot.audio_timeline[0].type == "offscreen_voice"
+    assert shot.audio_timeline[0].lip_sync is False
+    assert shot.dialogues[0].delivery == "offscreen_voice"
+    # 文本与说话人不变，只矫正发声方式
+    assert shot.audio_timeline[0].text == line
+    assert shot.dialogues[0].line == line
+
+
+def test_visible_speaker_stays_spoken_dialogue() -> None:
+    """可见说话人不受影响：仍是 spoken_dialogue，两侧不冲突。"""
+    line = "我一定会追上你。"
+    shot = _compact_shot(84)
+    shot.duration_s = 5
+    shot.characters = ["孟浩"]
+    shot.characters_visible = ["孟浩"]
+    shot.dialogues = [Dialogue(speaker="孟浩", line=line, emotion="坚定", delivery="spoken_dialogue")]
+    shot.audio_timeline = [
+        AudioTimelineItem(
+            start_s=0.3, end_s=3.0, type="spoken_dialogue",
+            speaker_id="孟浩", text=line, lip_sync=True, emotion="坚定",
+        )
+    ]
+    assert not any(
+        i.code == "SPOKEN_CONTRACT_CONFLICT" for i in validate_spoken_contract(shot)
+    )
+    result = synchronize_spoken_contract(shot)
+    assert result.status == "coherent"
+    assert shot.audio_timeline[0].type == "spoken_dialogue"
+    assert shot.audio_timeline[0].lip_sync is True
+    assert shot.dialogues[0].delivery == "spoken_dialogue"
+
+
+def test_genuine_text_divergence_still_conflicts() -> None:
+    """收敛发声方式不能掩盖真实分歧：同一说话人、不同文本仍必须报冲突。"""
+    shot = _compact_shot(85)
+    shot.duration_s = 10
+    shot.characters = ["孟浩"]
+    shot.characters_visible = ["孟浩"]
+    shot.dialogues = [Dialogue(speaker="孟浩", line="甲。", emotion="平静", delivery="spoken_dialogue")]
+    shot.audio_timeline = [
+        AudioTimelineItem(
+            start_s=0.3, end_s=2.0, type="spoken_dialogue",
+            speaker_id="孟浩", text="乙。", lip_sync=True,
+        )
+    ]
+    assert any(
+        i.code == "SPOKEN_CONTRACT_CONFLICT" for i in validate_spoken_contract(shot)
+    )
+
+
 def test_key_line_only_in_source_excerpt_not_delivered() -> None:
     key = "薰儿相信，你会重新站起来，取回属于你的荣耀与尊严"
     shot = _compact_shot(9)
