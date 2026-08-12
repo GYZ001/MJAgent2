@@ -5629,6 +5629,7 @@ async def _generate_screenplay_scene_sharded_baseline(
         narrative_blueprint,
         source_text=source_text,
         identity_registry_hash=identity_registry_hash,
+        identity_registry=identity_registry,
     )
     scene_input_contracts = build_screenplay_scene_input_contract_set(
         plans=plans,

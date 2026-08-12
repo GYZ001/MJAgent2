@@ -558,10 +558,25 @@ def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
     })
 
     assert blueprint_voice_identity_issues(blueprint, source_text) == []
+    identity_registry = [
+        {
+            "identity_key": "person_menghao",
+            "authority_id": "bible:孟浩",
+            "canonical_name": "孟浩",
+            "source_labels": ["孟浩"],
+        },
+        {
+            "identity_key": "person_ancestor",
+            "authority_id": "reference:kaoshan-ancestor",
+            "canonical_name": "靠山老祖",
+            "source_labels": ["靠山老祖"],
+        },
+    ]
     plans = build_screenplay_scene_shard_plans(
         blueprint,
         source_text=source_text,
         identity_registry_hash="identity-hash",
+        identity_registry=identity_registry,
     )
     plan = plans[0]
     quoted_slot = next(
@@ -570,17 +585,13 @@ def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
     )
     assert quoted_slot.kind == "action"
     assert quoted_slot.delivery_mode == "written_text"
+    assert quoted_slot.content_owner_key == "person_ancestor"
 
     contracts = build_screenplay_scene_input_contracts(
         plan=plan,
         scene_plans=blueprint.scene_plans,
         source_by_id={"SRC0001": source_text},
-        identity_registry=[{
-            "identity_key": "person_menghao",
-            "authority_id": "bible:孟浩",
-            "canonical_name": "孟浩",
-            "source_labels": ["孟浩"],
-        }],
+        identity_registry=identity_registry,
         blueprint_nodes=blueprint.nodes,
     )
     compiled = compile_screenplay_scene_shard_draft(

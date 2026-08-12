@@ -1200,24 +1200,43 @@ def build_frozen_identity_registry(
         digest = hashlib.sha256(authority_id.encode("utf-8")).hexdigest()[:12]
         identity_key = f"person_{digest}"
         named = str(authority.get("identity_kind") or "") == "named"
+        reference_only = (
+            str(authority.get("identity_kind") or "") == "reference"
+        )
         identity = IRIdentity(
             key=identity_key,
             display_name=canonical_name,
             authority_id=authority_id,
             source_names=source_names,
-            kind="named_character" if named else "functional_character",
-            visual_policy="canonical" if named else "contextual",
+            kind=(
+                "referenced_identity"
+                if reference_only
+                else "named_character" if named else "functional_character"
+            ),
+            visual_policy=(
+                "offscreen_only"
+                if reference_only
+                else "canonical" if named else "contextual"
+            ),
             visual_canonical=(
                 ""
-                if named
+                if named or reference_only
                 else functional_extra_anchor(
                     canonical_name,
                     declared_functional_names={canonical_name},
                 )
             ),
-            asset_requirement="required" if named else "optional",
+            asset_requirement=(
+                "forbidden"
+                if reference_only
+                else "required" if named else "optional"
+            ),
             voice_canonical="",
-            role_type="named_character" if named else "functional_character",
+            role_type=(
+                "named_character"
+                if named or reference_only
+                else "functional_character"
+            ),
             rationale="来自冻结的人物谱/本集身份决议",
         )
         identities.append(identity)
@@ -1463,6 +1482,7 @@ def build_screenplay_scene_shard_plans(
     *,
     source_text: str,
     identity_registry_hash: str,
+    identity_registry: list[dict[str, Any]] | None = None,
     max_units: int | None = None,
     max_output_chars: int | None = None,
 ) -> list[ScreenplaySceneShardPlan]:
@@ -1479,6 +1499,11 @@ def build_screenplay_scene_shard_plans(
         segment.segment_id: segment.text
         for segment in index_source_segments(source_text)
     }
+    identity_aliases = (
+        _identity_aliases(identity_registry)
+        if identity_registry is not None
+        else {}
+    )
     delivery_by_unit: dict[str, Any] = {}
     for node in blueprint.nodes:
         if node.source_semantics().projection_policy != "picture":
@@ -1488,7 +1513,30 @@ def build_screenplay_scene_shard_plans(
                 raise ValueError(
                     f"{delivery.source_unit_key} 含多个 quoted source delivery"
                 )
-            delivery_by_unit[delivery.source_unit_key] = delivery
+            content_owner_key = delivery.content_owner_key.strip()
+            performer_key = delivery.performer_key.strip()
+            if content_owner_key and identity_registry is not None:
+                frozen_owner = identity_aliases.get(content_owner_key, "")
+                if not frozen_owner:
+                    raise ValueError(
+                        f"{delivery.source_unit_key} content owner 未冻结："
+                        f"{content_owner_key}"
+                    )
+                content_owner_key = frozen_owner
+            if performer_key and identity_registry is not None:
+                frozen_performer = identity_aliases.get(performer_key, "")
+                if not frozen_performer:
+                    raise ValueError(
+                        f"{delivery.source_unit_key} performer 未冻结："
+                        f"{performer_key}"
+                    )
+                performer_key = frozen_performer
+            delivery_by_unit[delivery.source_unit_key] = (
+                delivery.model_copy(update={
+                    "content_owner_key": content_owner_key,
+                    "performer_key": performer_key,
+                })
+            )
     blueprint_hash = blueprint_content_hash(blueprint)
     source_ownership_hash = _source_ownership_hash(blueprint)
     groups: list[list[BlueprintScenePlan]] = []

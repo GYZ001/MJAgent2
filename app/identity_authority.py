@@ -236,11 +236,17 @@ def identity_authority_registry(
             "authority_id": authority_id,
             "canonical_name": item["canonical_name"],
             "identity_kind": (
-                "named"
+                "reference"
                 if str(item.get("resolution") or "")
-                in {"future_identity", "reference_identity"}
-                else "functional"
+                == "reference_identity"
+                else (
+                    "named"
+                    if str(item.get("resolution") or "")
+                    == "future_identity"
+                    else "functional"
+                )
             ),
+            "resolution": str(item.get("resolution") or ""),
             "source_labels": [],
             "identity_group": semantic_group or raw_identity_group,
             "decision_identity_group": raw_identity_group,

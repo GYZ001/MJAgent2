@@ -448,6 +448,7 @@ class TextProvenance(BaseModel):
 
     kind: str = "creative_action"
     identity_keys: list[str] = Field(default_factory=list)
+    content_owner_keys: list[str] = Field(default_factory=list)
     source_segment_ids: list[str] = Field(default_factory=list)
 
     @field_validator("kind", mode="before")
@@ -455,7 +456,12 @@ class TextProvenance(BaseModel):
     def _normalize_kind(cls, value: object) -> str:
         return str(value or "").strip() or "creative_action"
 
-    @field_validator("identity_keys", "source_segment_ids", mode="before")
+    @field_validator(
+        "identity_keys",
+        "content_owner_keys",
+        "source_segment_ids",
+        mode="before",
+    )
     @classmethod
     def _normalize_keys(cls, value: object) -> list[str]:
         values = value if isinstance(value, (list, tuple, set)) else [value]

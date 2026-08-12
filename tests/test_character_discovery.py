@@ -1518,6 +1518,44 @@ def test_unresolved_descriptive_people_keep_source_labels(monkeypatch) -> None:
     assert result["checked"] == 0
 
 
+def test_mentioned_named_identity_gets_authority_without_character_card(
+    monkeypatch,
+) -> None:
+    conn = _make_conn()
+    _seed_project(conn, "卷首落款是靠山老祖。")
+    _patch_settings(monkeypatch, conn)
+
+    async def forbidden_ensure(*_args, **_kwargs):
+        raise AssertionError("仅内容归属身份不得创建人物卡")
+
+    monkeypatch.setattr(portraits, "ensure_character_card", forbidden_ensure)
+    bible = Bible.model_validate(json.loads(
+        conn.execute(
+            "SELECT bible_json FROM projects WHERE id='p1'"
+        ).fetchone()["bible_json"]
+    ))
+    result = asyncio.run(portraits.ensure_cards_for_text(
+        "p1",
+        21,
+        "卷首落款是靠山老祖。",
+        bible,
+        generate_portraits=False,
+        _precomputed_candidates=[{
+            "name": "靠山老祖",
+            "source_label": "靠山老祖",
+            "identity_kind": "named",
+            "identity_group": "current-1:靠山老祖",
+            "kind": "mentioned",
+            "evidence": "卷首落款明确归属",
+        }],
+    ))
+
+    assert result["checked"] == 0
+    assert result["added"] == []
+    assert result["resolutions"][0]["resolution"] == "reference_identity"
+    assert result["resolutions"][0]["authority_id"].startswith("functional:")
+
+
 def test_confirmed_real_name_is_not_downgraded_to_route_extra(monkeypatch) -> None:
     conn = _make_conn()
     _seed_project(conn, "青衣人拦路，后被认出是丁力。")
