@@ -124,6 +124,57 @@ def _visible_names(shot: Shot) -> set[str]:
     return {str(x) for x in (shot.characters_visible or shot.characters or [])}
 
 
+def _resolve_delivery(speaker: str, declared: str | None, visible: set[str]) -> str:
+    """本镜某说话人的规范发声方式：`dialogues` 与 `audio_timeline` 共用这一条规则。
+
+    事故根因 R1 的姊妹缺陷：可见性降级过去只写在 dialogues 派生里，timeline 派生原样
+    照搬 `item.type`，于是同一句「非可见说话人 + spoken_dialogue」在两侧被归一成不同
+    delivery，`_diff_segments` 判成伪冲突（shot_no=83：宗门绿袍修士2 不在 characters_visible，
+    两侧都存 spoken_dialogue，却被判 SPOKEN_CONTRACT_CONFLICT）。发声方式只有一条业务
+    定义，必须在唯一入口收敛，不能分叉到两条派生路径。
+
+    - 非法/空 delivery → spoken_dialogue（默认可听、可见）；
+    - 声明 spoken_dialogue 但说话人不在可见集合 → offscreen_voice（画外音必须保持画外）；
+    - 其余情况保留声明值，两侧真实分歧仍会照常触发冲突。
+    """
+    delivery = (declared or "spoken_dialogue").strip()
+    if delivery not in SPOKEN_DELIVERIES:
+        delivery = "spoken_dialogue"
+    if delivery == "spoken_dialogue" and visible and speaker not in visible:
+        delivery = "offscreen_voice"
+    return delivery
+
+
+def _canonicalize_delivery_fields(shot: Shot) -> bool:
+    """把规范发声方式写回原始 `audio_timeline` / `dialogues`，返回是否有改动。
+
+    只矫正真实口播轨（spoken_dialogue/offscreen_voice）的 delivery 与配套的 lip_sync；
+    ambient_sound 等非口播轨、文本、时间轴一律不动。派生段读的是同一条 `_resolve_delivery`，
+    因此这一步只是把已经生效的口径固化到落库字段，保证下游原始读取者口径一致。
+    """
+    visible = _visible_names(shot)
+    changed = False
+    for item in shot.audio_timeline or []:
+        if item.type not in SPOKEN_DELIVERIES:
+            continue
+        speaker = (item.speaker_id or "").strip()
+        delivery = _resolve_delivery(speaker, item.type, visible)
+        lip_sync = delivery == "spoken_dialogue"
+        if item.type != delivery or bool(item.lip_sync) != lip_sync:
+            item.type = delivery
+            item.lip_sync = lip_sync
+            changed = True
+    for dialogue in shot.dialogues or []:
+        if not (dialogue.line or "").strip():
+            continue
+        speaker = (dialogue.speaker or "").strip()
+        delivery = _resolve_delivery(speaker, getattr(dialogue, "delivery", None), visible)
+        if getattr(dialogue, "delivery", None) != delivery:
+            dialogue.delivery = delivery
+            changed = True
+    return changed
+
+
 def _voice_map(voice_bible: Iterable[VoiceCanonical] | None) -> dict[str, str]:
     voices: dict[str, str] = {}
     for voice in voice_bible or []:
@@ -140,21 +191,28 @@ def _voice_map(voice_bible: Iterable[VoiceCanonical] | None) -> dict[str, str]:
 # ---------- 有效口播段 ----------
 
 def segments_from_timeline(shot: Shot) -> list[SpokenSegment]:
-    """从 audio_timeline 的真实口播轨派生有效口播段。"""
+    """从 audio_timeline 的真实口播轨派生有效口播段。
+
+    delivery 走 `_resolve_delivery`：与 dialogues 派生同一条可见性规则，
+    避免「非可见说话人在 timeline 存 spoken_dialogue、在 dialogues 被降级」造成伪冲突。
+    """
+    visible = _visible_names(shot)
     segments: list[SpokenSegment] = []
     for item in shot.audio_timeline or []:
         if item.type not in SPOKEN_DELIVERIES:
             continue
         if not (item.text or "").strip():
             continue
+        speaker = (item.speaker_id or "").strip()
+        delivery = _resolve_delivery(speaker, item.type, visible)
         segments.append(SpokenSegment(
-            speaker_id=(item.speaker_id or "").strip(),
+            speaker_id=speaker,
             text=(item.text or "").strip(),
-            delivery=item.type,  # type: ignore[arg-type]
+            delivery=delivery,  # type: ignore[arg-type]
             emotion=item.emotion or "平静",
             start_s=item.start_s,
             end_s=item.end_s,
-            lip_sync=bool(item.lip_sync),
+            lip_sync=delivery == "spoken_dialogue",
             voice_canonical=item.voice_canonical or "",
         ))
     return segments
@@ -171,12 +229,8 @@ def segments_from_dialogues(
         text = (dialogue.line or "").strip()
         if not text:
             continue
-        delivery = (getattr(dialogue, "delivery", None) or "spoken_dialogue").strip()
-        if delivery not in SPOKEN_DELIVERIES:
-            delivery = "spoken_dialogue"
         speaker = (dialogue.speaker or "").strip()
-        if delivery == "spoken_dialogue" and visible and speaker not in visible:
-            delivery = "offscreen_voice"
+        delivery = _resolve_delivery(speaker, getattr(dialogue, "delivery", None), visible)
         segments.append(SpokenSegment(
             speaker_id=speaker,
             text=text,
@@ -449,6 +503,13 @@ def synchronize_spoken_contract(
             shot.audio_timeline = kept
             mutated = True
             actions.append("stripped_narration_track")
+
+    # 发声方式收敛：可见性降级过去只作用在派生段上，原始字段却仍留着 spoken_dialogue，
+    # 下游直接读 audio_timeline.type / dialogues.delivery 的编译与冷评（compiler、narrative）
+    # 会把画外说话人当成画内开口。这里把规范 delivery 写回原始字段，保证上下游读到同一口径。
+    if _canonicalize_delivery_fields(shot):
+        mutated = True
+        actions.append("canonicalized_delivery")
 
     timeline_segments = segments_from_timeline(shot)
     dialogue_segments = segments_from_dialogues(shot, voices)
