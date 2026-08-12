@@ -27,7 +27,7 @@ from app.source_excerpt import (
 from app.source_facts import SourceFact, source_facts
 
 
-BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v4"
+BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v5"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 
 
@@ -187,6 +187,39 @@ class NarrativeParticipantEvidence(BaseModel):
         return [_normalize_source_segment_id(item) for item in values]
 
 
+class NarrativeSourceUnitDelivery(BaseModel):
+    """Semantic delivery decision for one structurally quoted source unit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_unit_key: str
+    mode: Literal[
+        "spoken_dialogue",
+        "offscreen_voice",
+        "written_text",
+        "sound_effect",
+        "unspoken_reference",
+    ]
+    content_owner_key: str = ""
+    performer_key: str = ""
+
+    @model_validator(mode="after")
+    def _validate_delivery_roles(self) -> "NarrativeSourceUnitDelivery":
+        audible = self.mode in {
+            "spoken_dialogue",
+            "offscreen_voice",
+        }
+        if audible and not self.performer_key.strip():
+            raise ValueError(
+                "可听引用单元必须填写 performer_key"
+            )
+        if not audible and self.performer_key.strip():
+            raise ValueError(
+                "非声音交付不得填写 performer_key"
+            )
+        return self
+
+
 class BlueprintSourceSemantics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -246,6 +279,9 @@ class NarrativeNode(BaseModel):
     participant_evidence: list[NarrativeParticipantEvidence] = Field(
         default_factory=list,
     )
+    source_unit_deliveries: list[NarrativeSourceUnitDelivery] = Field(
+        default_factory=list,
+    )
     scene_boundary_before: bool = False
     transition_cue: str = ""
     opening_image: str = ""
@@ -299,6 +335,7 @@ class NarrativeNode(BaseModel):
         if self.narrative_layer == "paratext" and any((
             self.participants,
             self.participant_evidence,
+            self.source_unit_deliveries,
             self.state_requirements,
             self.state_changes,
             self.released_constraints_for,
@@ -383,7 +420,7 @@ class BlueprintSourceOwnershipError(ValueError):
 
 
 class NarrativeBlueprint(BaseModel):
-    format_version: Literal["screenplay-narrative-blueprint.v4"] = (
+    format_version: Literal["screenplay-narrative-blueprint.v5"] = (
         BLUEPRINT_VERSION
     )
     episode_no: int
@@ -402,7 +439,7 @@ class NarrativeBlueprint(BaseModel):
 
 
 class NarrativeBlueprintShard(BaseModel):
-    format_version: Literal["screenplay-narrative-blueprint.v4"] = (
+    format_version: Literal["screenplay-narrative-blueprint.v5"] = (
         BLUEPRINT_VERSION
     )
     episode_no: int
