@@ -1682,6 +1682,9 @@ def _rewrite_ir_identity_key(
             unit.actor_keys = replace(unit.actor_keys)
             unit.target_keys = replace(unit.target_keys)
             unit.onscreen_entity_keys = replace(unit.onscreen_entity_keys)
+            unit.text_provenance.content_owner_keys = replace(
+                unit.text_provenance.content_owner_keys
+            )
             for delivery in unit.participant_deliveries:
                 if delivery.participant_key == old_key:
                     delivery.participant_key = new_key
@@ -1690,6 +1693,9 @@ def _rewrite_ir_identity_key(
         event.target_keys = replace(event.target_keys)
         event.onscreen_entity_keys = replace(event.onscreen_entity_keys)
         event.perceivable_by = replace(event.perceivable_by)
+        event.text_provenance.content_owner_keys = replace(
+            event.text_provenance.content_owner_keys
+        )
         for delivery in event.participant_deliveries:
             if delivery.participant_key == old_key:
                 delivery.participant_key = new_key
@@ -1769,6 +1775,7 @@ def prepare_ir_identity_authorities(
                     *unit.actor_keys,
                     *unit.target_keys,
                     *unit.onscreen_entity_keys,
+                    *unit.text_provenance.content_owner_keys,
                 )
             ),
             *(
@@ -1786,6 +1793,7 @@ def prepare_ir_identity_authorities(
             *event.actor_keys,
             *event.target_keys,
             *event.onscreen_entity_keys,
+            *event.text_provenance.content_owner_keys,
             *(
                 perceiver_key
                 for perceiver_key in event.perceivable_by
@@ -3476,6 +3484,10 @@ def compile_screenplay_ir(
                             *existing.target_keys,
                         ]))
                     ),
+                    content_owner_keys=list(dict.fromkeys([
+                        *existing.text_provenance.content_owner_keys,
+                        *unit.text_provenance.content_owner_keys,
+                    ])),
                     source_segment_ids=list(existing.source_segment_ids),
                 )
                 if not screenplay_beat_fields_repeat(
@@ -3522,6 +3534,9 @@ def compile_screenplay_ir(
                             *actor_keys,
                             *target_keys,
                         ]))
+                    ),
+                    content_owner_keys=list(
+                        unit.text_provenance.content_owner_keys
                     ),
                     source_segment_ids=source_ids,
                 ),
@@ -4118,6 +4133,7 @@ def compile_screenplay_ir(
             *event.actor_keys,
             *event.target_keys,
             *event.onscreen_entity_keys,
+            *event.text_provenance.content_owner_keys,
             *(
                 delivery.participant_key
                 for delivery in event.participant_deliveries
@@ -4370,6 +4386,10 @@ def compile_screenplay_ir(
         used_identity_keys.update(identity_key(token) for token in scene.character_keys)
         for unit in scene.units:
             resolve_unit_event_key(scene, unit)
+            used_identity_keys.update(
+                identity_key(token)
+                for token in unit.text_provenance.content_owner_keys
+            )
             if unit.kind == "dialogue":
                 if not unit.speaker_key:
                     raise ValueError(f"scene {scene.key} 对白缺少 speaker_key")
@@ -4396,6 +4416,10 @@ def compile_screenplay_ir(
             identity_key(token)
             for token in event.perceivable_by
             if str(token).strip() != "audience"
+        )
+        used_identity_keys.update(
+            identity_key(token)
+            for token in event.text_provenance.content_owner_keys
         )
     ordered_used_keys = [
         key for key in identity_by_key if key in used_identity_keys
@@ -4501,6 +4525,10 @@ def compile_screenplay_ir(
             *[
                 final_identity_ids[key]
                 for key in event_speaker_keys.get(event.key, set())
+            ],
+            *[
+                identity_id(token)
+                for token in event.text_provenance.content_owner_keys
             ],
             *[
                 identity_id(token)
@@ -4727,6 +4755,10 @@ def compile_screenplay_ir(
                 "identity_keys": [
                     identity_id(token)
                     for token in event.text_provenance.identity_keys
+                ],
+                "content_owner_keys": [
+                    identity_id(token)
+                    for token in event.text_provenance.content_owner_keys
                 ],
                 "source_segment_ids": list(
                     event.text_provenance.source_segment_ids
@@ -5595,6 +5627,11 @@ def compile_screenplay_ir(
                 *[
                     identity_key(token) for token in event.target_keys
                     if str(token).strip() != "audience"
+                ],
+                *[
+                    identity_key(token)
+                    for token
+                    in event.text_provenance.content_owner_keys
                 ],
                 *event_speaker_keys.get(event.key, set()),
             }

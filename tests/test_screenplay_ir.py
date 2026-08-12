@@ -962,6 +962,46 @@ def test_compiled_identity_ids_are_stable_when_ir_order_changes() -> None:
     ) == set(second.narrative_plan.events[0].onscreen_entity_ids)
 
 
+def test_written_text_content_owner_survives_ir_authority_projection() -> None:
+    payload = _v13_payload()
+    unit = payload["scenes"][0]["units"][0]
+    unit["required_text"] = "旧友留下的字条"
+    unit["text_provenance"] = {
+        "kind": "required_text",
+        "identity_keys": [],
+        "content_owner_keys": ["friend"],
+        "source_segment_ids": ["SRC0001"],
+    }
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-written-owner",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+    owner_contract = next(
+        contract
+        for contract in screenplay.narrative_plan.identity_contracts
+        if contract.display_name == "旧友"
+    )
+    written_action = next(
+        action
+        for action in screenplay.narrative_plan.atomic_actions
+        if action.required_text == "旧友留下的字条"
+    )
+
+    assert written_action.text_provenance.identity_keys == []
+    assert written_action.text_provenance.content_owner_keys == [
+        owner_contract.identity_id
+    ]
+    assert not written_action.text_provenance.content_owner_keys[0].startswith(
+        "ID-"
+    )
+
+
 def test_v13_compiler_rejects_source_owned_by_another_scene() -> None:
     payload = _v13_payload()
     payload["source_scene_owners"] = {

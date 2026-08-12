@@ -619,6 +619,9 @@ def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
     assert written_unit.speaker_key is None
     assert written_unit.required_text == "人当有靠山。"
     assert written_unit.text_provenance.kind == "required_text"
+    assert written_unit.text_provenance.content_owner_keys == [
+        "person_ancestor"
+    ]
 
 
 def test_scene_input_contract_rejects_unfrozen_blueprint_participant() -> None:
@@ -664,6 +667,31 @@ def test_frozen_functional_identity_has_a_visible_contextual_anchor() -> None:
     assert functional.asset_requirement == "optional"
     assert functional.visual_canonical
     assert "邮差" in functional.visual_canonical
+
+
+def test_frozen_reference_identity_has_no_visual_asset_requirement() -> None:
+    identities, registry, _registry_hash = build_frozen_identity_registry(
+        Bible(characters=[], world=World(visual_style_canonical="测试")),
+        [{
+            "source_label": "靠山老祖",
+            "canonical_name": "靠山老祖",
+            "resolution": "reference_identity",
+            "identity_group": "episode:kaoshan-ancestor",
+        }],
+    )
+
+    reference = next(
+        item for item in identities
+        if item.display_name == "靠山老祖"
+    )
+    authority = next(
+        item for item in registry
+        if item["canonical_name"] == "靠山老祖"
+    )
+    assert authority["identity_kind"] == "reference"
+    assert reference.visual_policy == "offscreen_only"
+    assert reference.asset_requirement == "forbidden"
+    assert reference.visual_canonical == ""
 
 
 def test_frozen_identity_registry_rejects_conflicting_canonical_names() -> None:

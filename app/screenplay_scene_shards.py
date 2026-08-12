@@ -883,6 +883,11 @@ def _compile_text_provenance(
             )
             else relation_identity_keys
         ),
+        content_owner_keys=(
+            [compiled_slot.content_owner_key]
+            if compiled_slot.content_owner_key
+            else []
+        ),
         source_segment_ids=list(compiled_slot.source_segment_ids),
     )
     agency_kind = (
