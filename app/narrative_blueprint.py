@@ -1133,28 +1133,87 @@ def filter_blueprint_semantic_review_voice_issues(
     return removed
 
 
+AUDIBLE_SOURCE_DELIVERY_MODES = {
+    "spoken_dialogue",
+    "offscreen_voice",
+}
+
+
+def effective_source_unit_deliveries(
+    node: NarrativeNode,
+) -> list[NarrativeSourceUnitDelivery]:
+    """Return explicit delivery decisions plus exact legacy voice bindings."""
+    deliveries = [
+        item.model_copy(deep=True)
+        for item in node.source_unit_deliveries
+    ]
+    explicit_keys = {
+        item.source_unit_key for item in deliveries
+    }
+    for evidence in node.participant_evidence:
+        if evidence.usage != "voice":
+            continue
+        for key in evidence.source_unit_keys:
+            if key in explicit_keys:
+                continue
+            deliveries.append(NarrativeSourceUnitDelivery(
+                source_unit_key=key,
+                mode="spoken_dialogue",
+                content_owner_key=evidence.identity_key,
+                performer_key=evidence.identity_key,
+            ))
+    return deliveries
+
+
 def blueprint_voice_identity_issues(
     blueprint: NarrativeBlueprint,
     source_text: str,
 ) -> list[BlueprintSemanticIssue]:
-    """Return typed speaker-evidence issues for projected dialogue units."""
+    """Validate quoted-unit delivery and its exact performer identity."""
     facts = source_facts(source_text)
     facts_by_key = {fact.source_unit_key: fact for fact in facts}
-    dialogue_by_source: defaultdict[str, list[SourceFact]] = defaultdict(list)
+    quoted_by_source: defaultdict[str, list[SourceFact]] = defaultdict(list)
     for fact in facts:
-        if fact.projection == "dialogue":
-            dialogue_by_source[fact.source_segment_id].append(fact)
+        if fact.projection == "quoted":
+            quoted_by_source[fact.source_segment_id].append(fact)
 
     issues: list[BlueprintSemanticIssue] = []
     for node in blueprint.nodes:
         if node.source_semantics().projection_policy != "picture":
             continue
         owned_sources = set(node.source_segment_ids)
-        owned_dialogue = [
+        owned_quotes = [
             fact
             for source_id in node.source_segment_ids
-            for fact in dialogue_by_source.get(source_id, [])
+            for fact in quoted_by_source.get(source_id, [])
         ]
+        deliveries: defaultdict[
+            str,
+            list[NarrativeSourceUnitDelivery],
+        ] = defaultdict(list)
+        for delivery in effective_source_unit_deliveries(node):
+            fact = facts_by_key.get(delivery.source_unit_key)
+            if (
+                fact is None
+                or fact.projection != "quoted"
+                or fact.source_segment_id not in owned_sources
+            ):
+                issues.append(BlueprintSemanticIssue(
+                    code="source_delivery_conflict",
+                    node_keys=[node.key],
+                    source_segment_ids=list(node.source_segment_ids),
+                    message=(
+                        f"{delivery.source_unit_key} 不是本节点拥有的 "
+                        "quoted source unit"
+                    ),
+                    required_resolution=(
+                        "仅为本节点实际拥有的 quoted source unit "
+                        "声明交付方式"
+                    ),
+                ))
+                continue
+            deliveries[delivery.source_unit_key].append(delivery)
+
         claims: defaultdict[
             str,
             list[NarrativeParticipantEvidence],
@@ -1171,7 +1230,7 @@ def blueprint_voice_identity_issues(
                 for key in evidence.source_unit_keys
                 if (
                     key not in facts_by_key
-                    or facts_by_key[key].projection != "dialogue"
+                    or facts_by_key[key].projection != "quoted"
                     or facts_by_key[key].source_segment_id
                     not in owned_sources
                     or facts_by_key[key].source_segment_id
@@ -1187,7 +1246,7 @@ def blueprint_voice_identity_issues(
                     ),
                     message=(
                         f"{evidence.identity_key} 的 voice evidence 引用了"
-                        "非本节点 dialogue source unit："
+                        "非本节点 quoted source unit："
                         + "、".join(invalid_keys)
                     ),
                     required_resolution=(
@@ -1200,7 +1259,7 @@ def blueprint_voice_identity_issues(
                 bool(effective_source_ids)
                 and effective_source_set.issubset(owned_sources)
                 and not any(
-                    dialogue_by_source.get(source_id, [])
+                    quoted_by_source.get(source_id, [])
                     for source_id in effective_source_ids
                 )
             )
@@ -1220,7 +1279,7 @@ def blueprint_voice_identity_issues(
                     message=(
                         f"{evidence.identity_key} 的 voice evidence 缺少 "
                         "source_unit_keys，没有绑定本节点 "
-                        "dialogue source unit"
+                        "quoted source unit"
                     ),
                     required_resolution=(
                         "保留节点、来源 ownership 与语义，为该 voice evidence "
@@ -1231,17 +1290,88 @@ def blueprint_voice_identity_issues(
             for key in dict.fromkeys(target_keys):
                 claims[key].append(evidence)
 
-        for fact in owned_dialogue:
+        participant_keys = set(node.participants)
+        for fact in owned_quotes:
+            unit_deliveries = deliveries.get(fact.source_unit_key, [])
+            if not unit_deliveries:
+                issues.append(BlueprintSemanticIssue(
+                    code="source_delivery_missing",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=(
+                        f"{fact.source_unit_key} 缺少 quoted source unit "
+                        "交付决策"
+                    ),
+                    required_resolution=(
+                        "根据来源语义显式选择声音、书面文字、声音效果或"
+                        "非口播引用；引号本身不得自动等同对白"
+                    ),
+                ))
+                continue
+            if len(unit_deliveries) != 1:
+                issues.append(BlueprintSemanticIssue(
+                    code="source_delivery_conflict",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=(
+                        f"{fact.source_unit_key} 同时声明多个交付决策"
+                    ),
+                    required_resolution=(
+                        "每个 quoted source unit 只保留一个交付决策"
+                    ),
+                ))
+                continue
+            delivery = unit_deliveries[0]
+            referenced_delivery_identities = {
+                value
+                for value in (
+                    delivery.content_owner_key,
+                    delivery.performer_key,
+                )
+                if value
+            }
+            unknown_delivery_identities = (
+                referenced_delivery_identities - participant_keys
+            )
+            if unknown_delivery_identities:
+                issues.append(BlueprintSemanticIssue(
+                    code="source_delivery_identity_conflict",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=(
+                        f"{fact.source_unit_key} 的内容归属或表演身份未列入 "
+                        f"participants：{sorted(unknown_delivery_identities)}"
+                    ),
+                    required_resolution=(
+                        "内容归属与表演身份必须精确引用本节点参与者"
+                    ),
+                ))
+
             unit_claims = claims.get(fact.source_unit_key, [])
             identities = {
                 evidence.identity_key
                 for evidence in unit_claims
                 if evidence.identity_key
             }
+            if delivery.mode not in AUDIBLE_SOURCE_DELIVERY_MODES:
+                if unit_claims:
+                    issues.append(BlueprintSemanticIssue(
+                        code="voice_identity_conflict",
+                        node_keys=[node.key],
+                        source_segment_ids=[fact.source_segment_id],
+                        message=(
+                            f"{fact.source_unit_key} 的 delivery mode="
+                            f"{delivery.mode}，不得声明 voice performer"
+                        ),
+                        required_resolution=(
+                            "移除非声音交付上的 voice evidence，保留内容归属"
+                        ),
+                    ))
+                continue
             if not unit_claims:
                 code = "voice_identity_missing"
                 message = (
-                    f"{fact.source_unit_key} 缺少结构化 voice speaker identity evidence"
+                    f"{fact.source_unit_key} 缺少结构化 voice performer identity evidence"
                 )
             elif len(unit_claims) > 1 and len(identities) > 1:
                 code = "voice_identity_ambiguous"
@@ -1254,6 +1384,12 @@ def blueprint_voice_identity_issues(
                 message = (
                     f"{fact.source_unit_key} 必须恰有一个非空 voice identity evidence"
                 )
+            elif next(iter(identities)) != delivery.performer_key:
+                code = "voice_identity_conflict"
+                message = (
+                    f"{fact.source_unit_key} 的 voice identity 与 "
+                    "performer_key 不一致"
+                )
             else:
                 continue
             issues.append(BlueprintSemanticIssue(
@@ -1263,7 +1399,7 @@ def blueprint_voice_identity_issues(
                 message=message,
                 required_resolution=(
                     "保持完整 node、source ownership、来源顺序和语义三元不变；"
-                    "仅为该 dialogue source unit 提供恰一个 voice evidence，"
+                    "仅为声音交付的 quoted source unit 提供恰一个 voice evidence，"
                     "identity_key 使用人物 registry 的 typed reference"
                 ),
             ))
@@ -1710,10 +1846,14 @@ def derive_blueprint_scene_plans(
                 if node.decision is not None
             ],
             participant_keys=list(dict.fromkeys(
-                participant
+                evidence.identity_key
                 for node in nodes
-                for participant in node.participants
-                if participant
+                for evidence in node.participant_evidence
+                if (
+                    evidence.identity_key
+                    and evidence.usage
+                    in {"visible", "voice", "state_subject"}
+                )
             )),
             scene_heading=(
                 f"【场{index}】{first.time_label} / {first.location_label}"
@@ -2694,13 +2834,34 @@ def blueprint_prompt_contract() -> dict[str, Any]:
             "usage": ["visible", "voice", "mentioned", "state_subject"],
             "ownership": "source_segment_ids must be owned by the same node",
             "dialogue_voice_contract": (
-                "every projection=picture SourceFact with "
-                "projection=dialogue has exactly one usage=voice evidence; "
-                "source_unit_keys references its exact source_unit_key"
+                "every audible source_unit_delivery has exactly one "
+                "usage=voice evidence whose identity_key equals performer_key"
             ),
             "non_dialogue_voice_contract": (
-                "action and non-dialogue environment SourceFacts do not "
-                "require voice evidence"
+                "written_text, sound_effect and unspoken_reference delivery "
+                "must not carry voice evidence"
+            ),
+        },
+        "source_unit_delivery_required": {
+            "surface_authority": (
+                "SourceFact projection=quoted records syntax only"
+            ),
+            "fields": [
+                "source_unit_key",
+                "mode",
+                "content_owner_key",
+                "performer_key",
+            ],
+            "modes": [
+                "spoken_dialogue",
+                "offscreen_voice",
+                "written_text",
+                "sound_effect",
+                "unspoken_reference",
+            ],
+            "contract": (
+                "every quoted unit in a picture node has exactly one semantic "
+                "delivery decision; quotation marks never imply speech"
             ),
         },
     }

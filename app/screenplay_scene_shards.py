@@ -36,6 +36,7 @@ from app.narrative_blueprint import (
     NarrativeNode,
     NarrativeBlueprint,
     derive_blueprint_scene_plans,
+    effective_source_unit_deliveries,
 )
 from app.observability.tracing import current_trace
 from app.renderability import SCENE_STORY_FUNCTION_MIN_CHARS
@@ -57,11 +58,11 @@ from app.source_facts import source_segment_facts
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v8"
-SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v4"
-SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v8"
-SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v5"
-SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v7"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v9"
+SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v5"
+SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v9"
+SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v6"
+SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v8"
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
@@ -150,6 +151,17 @@ class ScreenplaySceneUnitSlotPlan(BaseModel):
     source_segment_ids: list[str] = Field(min_length=1)
     source_unit_key: str = ""
     source_text: str = ""
+    source_surface: Literal["prose", "quoted_span"] = "prose"
+    delivery_mode: Literal[
+        "action",
+        "spoken_dialogue",
+        "offscreen_voice",
+        "written_text",
+        "sound_effect",
+        "unspoken_reference",
+    ] = "action"
+    content_owner_key: str = ""
+    performer_key: str = ""
 
 
 class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
@@ -197,7 +209,7 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
 class ScreenplaySceneShardPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard-plan.v4"] = SCREENPLAY_SHARD_PLAN_VERSION
+    contract_version: Literal["screenplay-scene-shard-plan.v5"] = SCREENPLAY_SHARD_PLAN_VERSION
     shard_id: str
     scene_plan_keys: list[str]
     source_segment_ids: list[str]
@@ -264,7 +276,7 @@ class ScreenplayActionParticipantDeliveryContract(BaseModel):
 class ScreenplaySceneInputContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-input.v8"] = (
+    contract_version: Literal["screenplay-scene-input.v9"] = (
         SCREENPLAY_SCENE_INPUT_VERSION
     )
     scene_plan_key: str
@@ -326,7 +338,7 @@ class ScreenplaySceneShardCreativeUnit(BaseModel):
 class ScreenplaySceneShardCreativeIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-creative.v5"] = (
+    contract_version: Literal["screenplay-scene-creative.v6"] = (
         SCREENPLAY_SCENE_CREATIVE_VERSION
     )
     slots: dict[str, ScreenplaySceneShardCreativeUnit]
@@ -347,7 +359,7 @@ class ScreenplaySceneShardScene(IRScene):
 class ScreenplaySceneShardIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard.v8"] = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v9"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
@@ -691,16 +703,7 @@ def _compile_unit_identity_scaffold(
             if (
                 participant.usage == "voice"
                 and not participant.source_unit_keys
-                and (
-                    slot.kind == "dialogue"
-                    or any(
-                        part_kind == "dialogue"
-                        for source_id in participant.source_segment_ids
-                        for part_kind, _part_text in _source_creative_parts(
-                            source_text_by_id.get(source_id, "")
-                        )
-                    )
-                )
+                and slot.kind == "dialogue"
             ):
                 errors.append(
                     f"{slot.unit_key} voice identity evidence "
@@ -780,13 +783,7 @@ def _compile_unit_identity_scaffold(
             ]
         else:
             actor_keys = list(visible_keys)
-        source_has_dialogue_slot = any(
-            part_kind == "dialogue"
-            for source_id in source_ids
-            for part_kind, _part_text in _source_creative_parts(
-                source_text_by_id.get(source_id, "")
-            )
-        )
+        source_has_dialogue_slot = slot.kind == "dialogue"
         if voice_keys and not source_has_dialogue_slot:
             if len(voice_keys) == 1:
                 speaker_key = voice_keys[0]
@@ -992,6 +989,15 @@ def compile_screenplay_scene_shard_draft(
         ):
             compiled_slot = compiled_slots_by_key[planned_slot.unit_key]
             creative_unit = draft.slots[planned_slot.unit_key]
+            if planned_slot.delivery_mode == "written_text":
+                exact_text = planned_slot.source_text.strip().strip(
+                    "“”「」『』\"'"
+                )
+                creative_unit = creative_unit.model_copy(update={
+                    "required_text": exact_text,
+                    "prop_text": "",
+                    "on_screen_text": "",
+                })
             text = creative_unit.text.strip()
             if (
                 planned_slot.kind == "dialogue"
@@ -1289,20 +1295,12 @@ def _scene_estimate(
     return units, output_chars
 
 
-def _source_creative_parts(
-    source_text: str,
-) -> list[tuple[Literal["action", "dialogue"], str]]:
-    return [
-        (fact.projection, fact.text)
-        for fact in source_segment_facts("SOURCE", source_text)
-    ]
-
-
 def _build_group_unit_slots(
     group: list[BlueprintScenePlan],
     *,
     source_by_id: dict[str, str],
     scene_order_by_key: dict[str, int],
+    delivery_by_unit: dict[str, Any],
 ) -> list[ScreenplaySceneUnitSlotPlan]:
     slots: list[ScreenplaySceneUnitSlotPlan] = []
     unit_order = 0
@@ -1326,8 +1324,27 @@ def _build_group_unit_slots(
                 unit_order += 1
                 scene_unit_order += 1
                 source_part_order = fact.unit_order
-                kind = fact.projection
                 source_part = fact.text
+                delivery = (
+                    delivery_by_unit.get(fact.source_unit_key)
+                    if fact.projection == "quoted"
+                    else None
+                )
+                if fact.projection == "quoted" and delivery is None:
+                    raise ValueError(
+                        f"{fact.source_unit_key} 缺少 quoted source delivery"
+                    )
+                delivery_mode = (
+                    delivery.mode if delivery is not None else "action"
+                )
+                kind = (
+                    "dialogue"
+                    if delivery_mode in {
+                        "spoken_dialogue",
+                        "offscreen_voice",
+                    }
+                    else "action"
+                )
                 key_base = (
                     f"{scene_plan.key}:{source_id}:"
                     f"{source_part_order:03d}"
@@ -1346,7 +1363,19 @@ def _build_group_unit_slots(
                     source_segment_ids=[source_id],
                     source_unit_key=fact.source_unit_key,
                     source_text=(
-                        source_part if kind == "dialogue" else ""
+                        source_part
+                        if fact.projection == "quoted"
+                        else ""
+                    ),
+                    source_surface=fact.surface_form,
+                    delivery_mode=delivery_mode,
+                    content_owner_key=(
+                        delivery.content_owner_key
+                        if delivery is not None else ""
+                    ),
+                    performer_key=(
+                        delivery.performer_key
+                        if delivery is not None else ""
                     ),
                 ))
     return slots
@@ -1438,6 +1467,16 @@ def build_screenplay_scene_shard_plans(
         segment.segment_id: segment.text
         for segment in index_source_segments(source_text)
     }
+    delivery_by_unit: dict[str, Any] = {}
+    for node in blueprint.nodes:
+        if node.source_semantics().projection_policy != "picture":
+            continue
+        for delivery in effective_source_unit_deliveries(node):
+            if delivery.source_unit_key in delivery_by_unit:
+                raise ValueError(
+                    f"{delivery.source_unit_key} 含多个 quoted source delivery"
+                )
+            delivery_by_unit[delivery.source_unit_key] = delivery
     blueprint_hash = blueprint_content_hash(blueprint)
     source_ownership_hash = _source_ownership_hash(blueprint)
     groups: list[list[BlueprintScenePlan]] = []
@@ -1506,6 +1545,7 @@ def build_screenplay_scene_shard_plans(
             group,
             source_by_id=source_by_id,
             scene_order_by_key=scene_order_by_key,
+            delivery_by_unit=delivery_by_unit,
         )
         plans.append(ScreenplaySceneShardPlan(
             shard_id=f"SS{index:03d}",
@@ -1624,6 +1664,10 @@ def build_screenplay_scene_input_contracts(
                 ScreenplaySceneActionParticipantEvidence
             ] = []
             for evidence in node.participant_evidence:
+                if evidence.usage == "mentioned":
+                    # Content ownership is preserved in the Blueprint delivery
+                    # contract, but it is not an executable scene participant.
+                    continue
                 identity_key = aliases.get(evidence.identity_key, "")
                 if not identity_key:
                     errors.append(
@@ -2854,6 +2898,9 @@ def _scene_shard_prompt(
         "on_screen_text。required_text、prop_text、on_screen_text 只填写需要"
         "准确出现在画面中的文字内容，每个 slot 最多使用一种；对白必须只写入"
         "dialogue slot 的 text，不得把口播放入 required_text。action_agency、"
+        "source_surface 与 delivery_mode 已由来源交付合同锁定；"
+        "delivery_mode=written_text 时，compiler 会把 source_text 确定性写入"
+        "required_text，模型不得改写原文或把内容作者伪装成发声者。"
         "agency_kind、text_provenance、identity_keys 均由 compiler 根据 generation "
         "scaffold 关系、文字结构字段与 source IDs 生成，模型输出这些字段属于"
         "additionalProperties 越权并直接失败。文字中出现人物姓名不会创建人物关系。"

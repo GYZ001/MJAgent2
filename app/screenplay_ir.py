@@ -61,7 +61,7 @@ from app.spoken_contract import content_char_count
 
 
 IR_VERSION = "screenplay-generation-ir.v3"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v4"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v5"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -4401,13 +4401,37 @@ def compile_screenplay_ir(
         key for key in identity_by_key if key in used_identity_keys
     ]
     final_identity_ids: dict[str, str] = {}
-    for index, key in enumerate(ordered_used_keys, start=1):
+    identity_key_by_authority: dict[str, str] = {}
+    for key in ordered_used_keys:
         identity = identity_by_key[key]
-        final_identity_ids[key] = (
-            identity.display_name
-            if identity.display_name in bible_by_name
-            else f"ID-{index:02d}"
-        )
+        authority_id = str(identity.authority_id or "").strip()
+        if not authority_id:
+            authority_id = (
+                f"bible:{identity.display_name}"
+                if identity.display_name in bible_by_name
+                else _structural_context_authority_id(episode, key)
+            )
+            identity.authority_id = authority_id
+            compiler_audit.append({
+                "path": f"identities.{key}.authority_id",
+                "operation": "bind_stable_authority_id",
+                "to": authority_id,
+                "reason": (
+                    "compiled_graph_identity_ids_must_not_depend_on_order"
+                ),
+            })
+        previous_key = identity_key_by_authority.get(authority_id)
+        if previous_key is not None and previous_key != key:
+            raise ScreenplayIRIdentityConflictError(
+                f"authority_id={authority_id} 同时绑定多个 IR identity_key",
+                issues=[{
+                    "reason": "authority_bound_to_multiple_ir_identities",
+                    "authority_id": authority_id,
+                    "identity_keys": [previous_key, key],
+                }],
+            )
+        identity_key_by_authority[authority_id] = key
+        final_identity_ids[key] = authority_id
 
     def identity_id(token: str) -> str:
         return final_identity_ids[identity_key(token)]
