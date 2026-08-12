@@ -196,6 +196,7 @@ class InformationItem(BaseModel):
 
 class VoiceCanonical(BaseModel):
     speaker_id: str
+    display_name: str = ""
     voice_canonical: str
     language: str = "普通话"
     role_type: str = "named_character"  # named_character | functional_character | narrator

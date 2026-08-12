@@ -125,7 +125,16 @@ def _visible_names(shot: Shot) -> set[str]:
 
 
 def _voice_map(voice_bible: Iterable[VoiceCanonical] | None) -> dict[str, str]:
-    return {v.speaker_id: v.voice_canonical for v in (voice_bible or [])}
+    voices: dict[str, str] = {}
+    for voice in voice_bible or []:
+        for token in (
+            voice.speaker_id,
+            getattr(voice, "display_name", ""),
+        ):
+            value = str(token or "").strip()
+            if value:
+                voices[value] = voice.voice_canonical
+    return voices
 
 
 # ---------- 有效口播段 ----------

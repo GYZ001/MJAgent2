@@ -5565,7 +5565,8 @@ def compile_screenplay_ir(
     }
     voice_bible = [
         VoiceCanonical(
-            speaker_id=identity.display_name,
+            speaker_id=final_identity_ids[key],
+            display_name=identity.display_name,
             voice_canonical=(
                 identity.voice_canonical
                 or (
@@ -5627,7 +5628,7 @@ def compile_screenplay_ir(
             "visual_canonical": visual_canonical,
             "asset_requirement": asset_requirement,
             "voice_ids": (
-                [identity.display_name] if key in spoken_keys else []
+                [final_identity_ids[key]] if key in spoken_keys else []
             ),
             "evidence": {
                 "source_evidence_ids": related_source_ids,

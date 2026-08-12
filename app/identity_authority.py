@@ -237,7 +237,8 @@ def identity_authority_registry(
             "canonical_name": item["canonical_name"],
             "identity_kind": (
                 "named"
-                if str(item.get("resolution") or "") == "future_identity"
+                if str(item.get("resolution") or "")
+                in {"future_identity", "reference_identity"}
                 else "functional"
             ),
             "source_labels": [],

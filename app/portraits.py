@@ -2802,7 +2802,8 @@ def merge_screenplay_character_resolutions(
     priority = {
         "functional_extra": 0,
         "functional_identity": 1,
-        "future_identity": 2,
+        "reference_identity": 2,
+        "future_identity": 3,
     }
     normalized_existing = normalize_character_resolutions(existing)
     normalized_incoming = normalize_character_resolutions(incoming)
@@ -3201,6 +3202,23 @@ async def ensure_cards_for_text(
     resolutions: list[dict] = []
     assigned_extra_names: dict[str, str] = {}
     assigned_identity_groups: dict[str, str] = {}
+
+    # A stable referenced identity still needs an authority even when it never
+    # appears visually and therefore must not create a character card.
+    for item in mentioned_only_candidates:
+        source_label = str(
+            item.get("source_label") or item.get("name") or ""
+        ).strip()
+        canonical_name = str(item.get("name") or source_label).strip()
+        if source_label and canonical_name:
+            resolutions.append(_identity_resolution(
+                item,
+                canonical_name,
+                "reference_identity",
+                reason=(
+                    "来源或蓝图引用该稳定身份，但当前集不需要人物卡或视觉资产"
+                ),
+            ))
 
     for item in known_named_candidates:
         source_label = str(item.get("source_label") or "").strip()
