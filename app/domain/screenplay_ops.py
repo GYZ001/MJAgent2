@@ -1398,6 +1398,8 @@ def _new_screenplay_recorder(
                 source_text,
                 project["bible_version"] if project else 0,
             ),
+            "blueprint_retry_grant_id": "",
+            "blueprint_retry_receipts_hash": "",
         },
         parent_run_id=parent_run_id,
     )
@@ -1449,8 +1451,17 @@ def _screenplay_blueprint_budget_projection(
     )
     if current_grant_id and budget.unknown_receipts:
         grant_row = conn.execute(
-            "SELECT issued_by,input_artifact_hash FROM production_grants WHERE id=?",
-            (current_grant_id,),
+            """SELECT issued_by,input_artifact_hash
+                 FROM production_grants
+                WHERE id=? AND episode_id=? AND kind='screenplay'
+                  AND production_revision_id=?
+                  AND revoked_at IS NULL AND expires_at>?""",
+            (
+                current_grant_id,
+                episode_id,
+                str(revision["id"]),
+                now(),
+            ),
         ).fetchone()
         if (
             grant_row is not None
@@ -1638,6 +1649,28 @@ def _spawn_screenplay_activation(
                 commit=False,
             )
             budget.authorize_unknown_retry(grant.grant_id)
+            run_row = conn.execute(
+                "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
+                (recorder.run_id,),
+            ).fetchone()
+            config_snapshot = json.loads(
+                run_row["config_snapshot_json"] or "{}"
+            ) if run_row is not None else {}
+            config_snapshot.update({
+                "blueprint_retry_grant_id": grant.grant_id,
+                "blueprint_retry_receipts_hash": blueprint_retry_receipts_hash(
+                    budget_projection["unknown_receipts"]
+                ),
+            })
+            conn.execute(
+                "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    json.dumps(config_snapshot, ensure_ascii=False),
+                    activation_stamp,
+                    recorder.run_id,
+                ),
+            )
         budget.assert_activation_admissible()
         stamp = activation_stamp
         started_at = (

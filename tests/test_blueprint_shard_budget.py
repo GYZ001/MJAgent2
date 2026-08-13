@@ -1339,6 +1339,150 @@ def test_durable_wall_budget_uses_original_run_start(
         budget.claim(max_tokens=1)
 
 
+def test_runtime_budget_restores_exact_retry_grant_and_historical_unknown(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.production.grant import issue_production_grant
+    from app.production.revision import ensure_production_revision
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "runtime-budget.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    stamp = db.now()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p','p','created',?)",
+        (stamp,),
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,status,screenplay_status,created_at
+           ) VALUES('e','p',1,'e','planned','pending',?)""",
+        (stamp,),
+    )
+    for run_id, status, config in (
+        ("old", "FAILED", {}),
+        ("fresh", "RUNNING", {
+            "blueprint_budget_lineage_fingerprint": "authority",
+        }),
+    ):
+        conn.execute(
+            """INSERT INTO workflow_runs(
+                   id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+                   config_snapshot_json,started_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                run_id, "screenplay", "episode", "e", status, "authority",
+                json.dumps(config), stamp - 1, stamp,
+            ),
+        )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            stamp - 1, "chat", "model", "INTERRUPTED", 300000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+            }),
+            "old", "stable-op", 1, "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    conn.commit()
+    liability = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="fresh", episode_id="e", input_fingerprint="authority",
+    )
+    revision = ensure_production_revision(
+        episode_id="e", kind="screenplay", input_fingerprint="authority",
+        resume=False,
+    )
+    grant, _ = issue_production_grant(
+        episode_id="e", project_id="p", production_revision_id=revision.id,
+        kind="screenplay", issued_by="user_retry_approval",
+        input_artifact_hash=stages.blueprint_retry_receipts_hash(
+            liability.unknown_receipts
+        ),
+    )
+    snapshot = {
+        "blueprint_budget_lineage_fingerprint": "authority",
+        "blueprint_retry_grant_id": grant.grant_id,
+        "blueprint_retry_receipts_hash": stages.blueprint_retry_receipts_hash(
+            liability.unknown_receipts
+        ),
+    }
+    conn.execute(
+        "UPDATE workflow_runs SET config_snapshot_json=? WHERE id='fresh'",
+        (json.dumps(snapshot),),
+    )
+    conn.commit()
+
+    budget = stages._blueprint_generation_budget_for_trace(
+        SimpleNamespace(run_id="fresh"), episode_id="e",
+    )
+    assert budget.unknown_output_tokens == 8192
+    assert budget.requires_fresh_retry_grant is False
+
+    snapshot["blueprint_retry_receipts_hash"] = "sha256:wrong"
+    conn.execute(
+        "UPDATE workflow_runs SET config_snapshot_json=? WHERE id='fresh'",
+        (json.dumps(snapshot),),
+    )
+    conn.commit()
+    wrong_hash = stages._blueprint_generation_budget_for_trace(
+        SimpleNamespace(run_id="fresh"), episode_id="e",
+    )
+    assert wrong_hash.unknown_output_tokens == 8192
+    assert wrong_hash.requires_fresh_retry_grant is True
+
+    snapshot["blueprint_retry_receipts_hash"] = stages.blueprint_retry_receipts_hash(
+        liability.unknown_receipts
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET config_snapshot_json=? WHERE id='fresh'",
+        (json.dumps(snapshot),),
+    )
+    conn.execute(
+        "UPDATE production_grants SET revoked_at=? WHERE id=?",
+        (db.now(), grant.grant_id),
+    )
+    conn.commit()
+    revoked = stages._blueprint_generation_budget_for_trace(
+        SimpleNamespace(run_id="fresh"), episode_id="e",
+    )
+    assert revoked.unknown_output_tokens == 8192
+    assert revoked.requires_fresh_retry_grant is True
+
+
+@pytest.mark.parametrize("snapshot", ["{bad", "{}"])
+def test_runtime_budget_rejects_missing_or_corrupt_activation_snapshot(
+    snapshot: str,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "runtime-bad-snapshot.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    stamp = db.now()
+    conn.execute(
+        """INSERT INTO workflow_runs(
+               id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+               config_snapshot_json,started_at,updated_at
+           ) VALUES('fresh','screenplay','episode','e','RUNNING','authority',?,?,?)""",
+        (snapshot, stamp, stamp),
+    )
+    conn.commit()
+
+    with pytest.raises(stages.StageError, match="BUDGET_SNAPSHOT_INVALID"):
+        stages._blueprint_generation_budget_for_trace(
+            SimpleNamespace(run_id="fresh"), episode_id="e",
+        )
+
+
 def test_blueprint_operation_fingerprint_binds_provider_and_exact_request() -> None:
     base = {
         "episode_id": "ep-op",

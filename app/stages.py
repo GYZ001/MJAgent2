@@ -5872,6 +5872,7 @@ def _blueprint_generation_budget_for_trace(
     run_started_at: float | None = None
     input_fingerprint = ""
     retry_grant_id = ""
+    retry_receipts_hash = ""
     if run_id:
         run_row = get_conn().execute(
             "SELECT started_at,input_fingerprint,config_snapshot_json "
@@ -5880,12 +5881,28 @@ def _blueprint_generation_budget_for_trace(
         ).fetchone()
         if run_row is not None:
             run_started_at = run_row["started_at"]
+            input_fingerprint = str(run_row["input_fingerprint"] or "")
             try:
-                input_fingerprint = str(
-                    run_row["input_fingerprint"] or ""
-                )
                 config_snapshot = json.loads(
                     run_row["config_snapshot_json"] or "{}"
+                )
+                if episode_id and not str(
+                    config_snapshot.get(
+                        "blueprint_budget_lineage_fingerprint"
+                    ) or ""
+                ):
+                    raise StageError(
+                        "剧本时空因果蓝图分片",
+                        [
+                            "[BLUEPRINT_BUDGET_SNAPSHOT_INVALID] "
+                            "运行缺少冻结的蓝图预算 lineage"
+                        ],
+                    )
+                retry_grant_id = str(
+                    config_snapshot.get("blueprint_retry_grant_id") or ""
+                )
+                retry_receipts_hash = str(
+                    config_snapshot.get("blueprint_retry_receipts_hash") or ""
                 )
                 input_fingerprint = str(
                     config_snapshot.get(
@@ -5894,9 +5911,18 @@ def _blueprint_generation_budget_for_trace(
                     )
                     or input_fingerprint
                 )
-            except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-                input_fingerprint = ""
-    if episode_id:
+            except StageError:
+                raise
+            except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+                if episode_id:
+                    raise StageError(
+                        "剧本时空因果蓝图分片",
+                        [
+                            "[BLUEPRINT_BUDGET_SNAPSHOT_INVALID] "
+                            "运行蓝图预算 snapshot 损坏"
+                        ],
+                    ) from exc
+    if episode_id and not retry_grant_id:
         try:
             grant_row = get_conn().execute(
                 """SELECT r.grant_id
@@ -5922,15 +5948,26 @@ def _blueprint_generation_budget_for_trace(
     if retry_grant_id and budget.unknown_receipts:
         try:
             grant_row = get_conn().execute(
-                "SELECT issued_by,input_artifact_hash FROM production_grants "
-                "WHERE id=?",
-                (retry_grant_id,),
+                """SELECT g.issued_by,g.input_artifact_hash
+                     FROM production_grants g
+                     JOIN production_revisions r
+                       ON r.id=g.production_revision_id
+                    WHERE g.id=? AND g.episode_id=? AND g.kind='screenplay'
+                      AND r.episode_id=g.episode_id AND r.kind='screenplay'
+                      AND r.status='active' AND r.grant_id=g.id
+                      AND g.revoked_at IS NULL AND g.expires_at>?""",
+                (retry_grant_id, episode_id, time.time()),
             ).fetchone()
             if (
                 grant_row is not None
                 and str(grant_row["issued_by"] or "") == "user_retry_approval"
                 and str(grant_row["input_artifact_hash"] or "")
                 == blueprint_retry_receipts_hash(budget.unknown_receipts)
+                and (
+                    not retry_receipts_hash
+                    or retry_receipts_hash
+                    == blueprint_retry_receipts_hash(budget.unknown_receipts)
+                )
             ):
                 budget.authorize_unknown_retry(retry_grant_id)
         except Exception:  # noqa: BLE001 - isolated legacy schemas

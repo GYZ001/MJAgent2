@@ -1388,6 +1388,63 @@ def test_unrelated_or_mismatched_grant_never_authorizes_unknown_retry(
     assert reread["requires_fresh_retry_grant"] is True
 
 
+@pytest.mark.parametrize("terminal_field", ["revoked_at", "expires_at"])
+def test_revoked_or_expired_retry_grant_is_not_runtime_authority(
+    terminal_field: str,
+) -> None:
+    from app.production.grant import issue_production_grant
+    from app.stages import blueprint_retry_receipts_hash
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+    initial = api._screenplay_blueprint_budget_projection("e1")
+    revision = ensure_production_revision(
+        episode_id="e1", kind="screenplay",
+        input_fingerprint=initial["input_fingerprint"], resume=False,
+    )
+    run_id = repository.create_run(
+        workflow_type="screenplay", scope_type="episode", scope_id="e1",
+        input_fingerprint=initial["input_fingerprint"],
+    )
+    conn.execute("UPDATE workflow_runs SET status='FAILED' WHERE id=?", (run_id,))
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            db.now(), "chat", "model", "INTERRUPTED", 300000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+            }),
+            run_id, "stable-op", 1, "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    conn.commit()
+    receipts = api._screenplay_blueprint_budget_projection("e1")["unknown_receipts"]
+    grant, _ = issue_production_grant(
+        episode_id="e1", project_id="p1",
+        production_revision_id=revision.id, kind="screenplay",
+        issued_by="user_retry_approval",
+        input_artifact_hash=blueprint_retry_receipts_hash(receipts),
+    )
+    conn.execute(
+        f"UPDATE production_grants SET {terminal_field}=? WHERE id=?",
+        (db.now() if terminal_field == "revoked_at" else db.now() - 1, grant.grant_id),
+    )
+    conn.commit()
+
+    projection = api._screenplay_blueprint_budget_projection("e1")
+    assert projection["requires_fresh_retry_grant"] is True
+
+
 @pytest.mark.asyncio
 async def test_persisted_active_run_blocks_manual_save_without_local_task() -> None:
     from app.capabilities.inputs import ScreenplayUpdateInput
