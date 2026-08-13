@@ -278,13 +278,14 @@ def test_project_delete_preflight_returns_project_scoped_provider_blocker() -> N
 
     result = project_delete(ProjectDeleteInput(project_id="proj-pf-block"))
 
-    assert result.allowed is False
-    assert result.denial_code == "PROVIDER_TASKS_NOT_TERMINAL"
+    assert result.allowed is True
+    assert result.requires_confirmation is True
     blocker = result.affected.extra["blockers"][0]
     assert blocker["project_id"] == "proj-pf-block"
     assert blocker["episode_id"] == "ep-pf-block"
     assert blocker["shot_id"] == "shot-pf-block"
     assert blocker["recovery_action"] == "continue_provider_poll"
+    assert "不会创建新任务" in result.warnings[-1]
 
 
 def test_video_batch_preflight_quotes_exact_pending_shot_cost() -> None:

@@ -1289,9 +1289,14 @@ async def _delete_project_core(project_id: str) -> dict:
     from app.completion_grant import (
         assert_provider_tasks_clearable,
         prepare_provider_tasks_for_clear,
+        reconcile_project_provider_tasks_for_clear,
     )
 
     _project_or_404(project_id)
+    provider_reconciliation = await reconcile_project_provider_tasks_for_clear(
+        project_id,
+        conn=get_conn(),
+    )
     # Fast preflight before cancelling any producer. The authoritative check is
     # repeated inside the deletion transaction after all local writers stop.
     assert_provider_tasks_clearable(
@@ -1331,6 +1336,7 @@ async def _delete_project_core(project_id: str) -> dict:
         "deleted": project_id,
         "cancelled_tasks": cancelled_tasks,
         "evidence_removed": evidence_removed,
+        "provider_reconciliation": provider_reconciliation,
     }
 
 

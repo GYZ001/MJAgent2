@@ -476,6 +476,43 @@ def test_cancelled_pre_transport_provider_claim_is_released_before_clear() -> No
     assert claim["released_at"] is not None
 
 
+def test_project_delete_reconcile_settles_remote_terminal_without_download(
+    monkeypatch,
+) -> None:
+    from app import hiagent
+
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="accepted",
+        claim_status="accepted",
+        provider_task_id="provider-task-1",
+    )
+
+    async def terminal_success(task_id: str, **_kwargs) -> dict:
+        assert task_id == "provider-task-1"
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(hiagent, "poll_video_task", terminal_success)
+
+    result = asyncio.run(
+        completion_grant.reconcile_project_provider_tasks_for_clear(
+            "p",
+            conn=conn,
+        )
+    )
+
+    assert result["reconciled_job_ids"] == ["j-provider"]
+    assert result["clearance"]["safe_to_clear"] is True
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
+    ).fetchone()["status"] == "settled"
+    version = conn.execute(
+        "SELECT status,video_path FROM shot_versions WHERE id='v-provider'"
+    ).fetchone()
+    assert dict(version) == {"status": "quarantined", "video_path": None}
+
+
 def test_video_only_clear_preserves_unsettled_provider_handle_and_claim(
     tmp_path,
     monkeypatch,

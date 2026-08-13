@@ -849,6 +849,136 @@ def prepare_provider_tasks_for_clear(
     return clearance
 
 
+async def reconcile_project_provider_tasks_for_clear(
+    project_id: str,
+    *,
+    conn=None,
+) -> dict[str, Any]:
+    """Settle provider tasks that are already remotely terminal before deletion.
+
+    This path only polls durable task handles. It never downloads media, adopts
+    a result, or submits a new provider task.
+    """
+    from app import hiagent
+    from app.hiagent import ProviderError
+
+    db = conn or get_conn()
+    initial = provider_task_clearance_snapshot(
+        project_id=project_id,
+        conn=db,
+    )
+    reconciled: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for blocker in initial["blockers"]:
+        job_id = str(blocker.get("job_id") or "")
+        operation_id = str(blocker.get("provider_operation_id") or "")
+        if not job_id or not operation_id or (job_id, operation_id) in seen:
+            continue
+        seen.add((job_id, operation_id))
+        task_id = str(blocker.get("provider_task_id") or "").strip()
+        if not task_id:
+            calls = db.execute(
+                """SELECT response_json FROM provider_calls
+                    WHERE kind='video_create' AND status='OK' AND operation_id=?
+                      AND response_json IS NOT NULL
+                    ORDER BY id DESC""",
+                (operation_id,),
+            ).fetchall()
+            for call in calls:
+                try:
+                    payload = json.loads(call["response_json"])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict):
+                    task_id = str(payload.get("id") or "").strip()
+                if task_id:
+                    break
+        if not task_id:
+            continue
+        try:
+            result = await hiagent.poll_video_task(
+                task_id,
+                call_meta={
+                    "project_id": project_id,
+                    "job_id": job_id,
+                    "operation_id": operation_id,
+                    "purpose": "project_delete_terminal_reconcile",
+                },
+            )
+        except ProviderError:
+            continue
+        status = str((result or {}).get("status") or "").strip().lower()
+        if status not in {"succeeded", "failed"}:
+            continue
+        stamp = now()
+        amount_cny = max(0.0, float(blocker.get("amount_cny") or 0))
+        terminal_message = (
+            "项目删除前已核对供应商任务成功终态；费用已结算，结果保持隔离且不可采用"
+            if status == "succeeded"
+            else "项目删除前已核对供应商任务失败终态；费用责任已结算"
+        )
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                """UPDATE provider_video_budget_claims
+                      SET status='settled',updated_at=?,settled_at=?
+                    WHERE operation_id=? AND job_id=?
+                      AND status NOT IN ('released','settled','closed_liability')""",
+                (stamp, stamp, operation_id, job_id),
+            )
+            db.execute(
+                """UPDATE jobs
+                      SET status=?,error=?,provider_create_state='accepted',
+                          provider_non_cancellable=1,provider_poll_required=0,
+                          provider_result_adoptable=0,video_slot_active=0,
+                          cancellation_requested=0,abandoned=0,reserved_cost_cny=0,
+                          lease_owner=NULL,lease_expires_at=NULL,next_retry_at=NULL,
+                          updated_at=?
+                    WHERE id=? AND provider_operation_id=?""",
+                (
+                    "succeeded" if status == "succeeded" else "failed",
+                    terminal_message,
+                    stamp,
+                    job_id,
+                    operation_id,
+                ),
+            )
+            version_id = str(blocker.get("version_id") or "")
+            if version_id:
+                db.execute(
+                    """UPDATE shot_versions
+                          SET provider_task_id=?,status=?,error=?,cost_cny=?,
+                              video_slot_active=0
+                        WHERE id=?""",
+                    (
+                        task_id,
+                        "quarantined" if status == "succeeded" else "failed",
+                        terminal_message,
+                        amount_cny,
+                        version_id,
+                    ),
+                )
+            db.execute(
+                """UPDATE budget_reservations
+                      SET status='settled',settled_at=?,actual_cost_cny=?
+                    WHERE job_id=? AND status IN ('reserved','running')""",
+                (stamp, amount_cny, job_id),
+            )
+            db.commit()
+        except BaseException:
+            if db.in_transaction:
+                db.rollback()
+            raise
+        reconciled.append(job_id)
+    return {
+        "reconciled_job_ids": reconciled,
+        "clearance": provider_task_clearance_snapshot(
+            project_id=project_id,
+            conn=db,
+        ),
+    }
+
+
 def _unowned_historical_video_liabilities(episode_id: str, *, conn) -> list:
     """Return legacy version liabilities not already owned by a durable claim."""
     return conn.execute(
