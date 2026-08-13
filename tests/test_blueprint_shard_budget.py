@@ -118,6 +118,14 @@ class _StaticCacheConnection:
         return _Rows(self.rows)
 
 
+class _DurableBudgetConnection:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def execute(self, _sql: str, _params=()) -> _Rows:
+        return _Rows(self.rows)
+
+
 def _shard_response(*, source_ids: list[str], shard_index: int) -> str:
     return json.dumps({
         "format_version": stages.BLUEPRINT_VERSION,
@@ -460,6 +468,7 @@ def test_run_bd33_dynamic_split_releases_requested_reservations(
         "fresh_responses": 1,
         "reused_responses": 0,
         "unknown_responses": 0,
+        "durable_replay": False,
         "charged_output_tokens": 2,
         "global_charged_output_tokens": 14,
     }
@@ -493,3 +502,121 @@ def test_cached_response_costs_no_new_output_tokens() -> None:
     assert settlement["reused_responses"] == 1
     assert settlement["charged_output_tokens"] == 0
     assert budget.charged_output_tokens == 0
+
+
+def test_durable_success_replay_does_not_double_count_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = {
+        "response_json": json.dumps({
+            "usage": {"completion_tokens": 3},
+        }),
+        "meta": json.dumps({
+            "operation_id": "blueprint-op-1",
+            "requested_max_tokens": 10,
+        }),
+        "status": "OK",
+        "recovery_disposition": None,
+    }
+    monkeypatch.setattr(
+        stages,
+        "get_conn",
+        lambda: _DurableBudgetConnection([row]),
+    )
+
+    for _ in range(3):
+        budget = stages._BlueprintGenerationBudget.from_durable_calls(
+            run_id="run-crash-replay",
+        )
+        reservation = budget.claim(
+            max_tokens=10,
+            operation_id="blueprint-op-1",
+        )
+        budget.record_usage(reservation, {
+            "completion_tokens": 3,
+            "reused": True,
+        })
+        settlement = budget.settle(reservation)
+        assert budget.provider_calls == 1
+        assert budget.requested_output_tokens == 10
+        assert budget.actual_output_tokens == 3
+        assert settlement["durable_replay"] is True
+        assert settlement["charged_output_tokens"] == 0
+
+
+def test_two_fresh_success_rows_for_same_operation_are_both_charged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "response_json": json.dumps({
+                "usage": {"completion_tokens": completion},
+            }),
+            "meta": json.dumps({
+                "operation_id": "blueprint-op-duplicate",
+                "requested_max_tokens": 10,
+            }),
+            "status": "OK",
+            "recovery_disposition": None,
+        }
+        for completion in (3, 4)
+    ]
+    monkeypatch.setattr(
+        stages,
+        "get_conn",
+        lambda: _DurableBudgetConnection(rows),
+    )
+
+    budget = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-double-send",
+    )
+
+    assert budget.provider_calls == 2
+    assert budget.requested_output_tokens == 20
+    assert budget.actual_output_tokens == 7
+    assert budget.charged_output_tokens == 7
+
+
+def test_durable_unknown_call_is_charged_at_full_requested_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        stages,
+        "get_conn",
+        lambda: _DurableBudgetConnection([{
+            "response_json": None,
+            "meta": json.dumps({
+                "operation_id": "blueprint-op-unknown",
+                "requested_max_tokens": 12,
+            }),
+            "status": "RUNNING",
+            "recovery_disposition": None,
+        }]),
+    )
+
+    budget = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-unknown",
+    )
+
+    assert budget.provider_calls == 1
+    assert budget.unknown_output_tokens == 12
+    assert budget.charged_output_tokens == 12
+
+
+def test_durable_wall_budget_uses_original_run_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stages, "get_conn", lambda: _DurableBudgetConnection([]))
+    monkeypatch.setattr(stages.time, "time", lambda: 2000.0)
+    monotonic_values = iter([500.0, 500.0])
+    monkeypatch.setattr(stages.time, "monotonic", lambda: next(monotonic_values))
+
+    budget = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-old",
+        started_at_epoch=(
+            2000.0 - stages.BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+        ),
+    )
+
+    with pytest.raises(stages.StageError, match="TIME_BUDGET"):
+        budget.claim(max_tokens=1)

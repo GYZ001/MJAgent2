@@ -4937,20 +4937,28 @@ class _BlueprintGenerationBudget:
         self.unknown_output_tokens = 0
         self._next_reservation_id = 1
         self._reservations: dict[int, dict[str, Any]] = {}
+        self._durable_successful_operations: set[str] = set()
 
     @classmethod
-    def from_durable_calls(cls, *, run_id: str | None) -> "_BlueprintGenerationBudget":
+    def from_durable_calls(
+        cls,
+        *,
+        run_id: str | None,
+        started_at_epoch: float | None = None,
+    ) -> "_BlueprintGenerationBudget":
         budget = cls()
+        if started_at_epoch is not None:
+            elapsed = max(0.0, time.time() - float(started_at_epoch))
+            budget.started_at = time.monotonic() - elapsed
         if not run_id:
             return budget
         rows = get_conn().execute(
-            "SELECT response_json,meta,status FROM provider_calls "
+            "SELECT response_json,meta,status,recovery_disposition FROM provider_calls "
             "WHERE run_id=? AND kind='chat' "
             "AND json_extract(meta,'$.stage_key')='screenplay_blueprint_shard' "
-            "AND status IN ('OK','SUCCESS','SUCCEEDED')",
+            "AND kind != 'provider_cache_hit'",
             (run_id,),
         ).fetchall()
-        seen_operations: set[str] = set()
         for row in rows:
             try:
                 meta = json.loads(row["meta"] or "{}")
@@ -4958,10 +4966,21 @@ class _BlueprintGenerationBudget:
             except (TypeError, ValueError, json.JSONDecodeError):
                 meta, response = {}, {}
             operation_id = str(meta.get("operation_id") or "").strip()
-            if not operation_id or operation_id in seen_operations:
-                continue
-            seen_operations.add(operation_id)
             requested = max(1, int(meta.get("requested_max_tokens") or 1))
+            budget.requested_output_tokens += requested
+            budget.provider_calls += 1
+            status = str(row["status"] or "").upper()
+            if status not in {"OK", "SUCCESS", "SUCCEEDED"}:
+                disposition = str(row["recovery_disposition"] or "").lower()
+                delivery_state = str(meta.get("delivery_state") or "").lower()
+                if (
+                    disposition not in {"not_sent", "definitely_not_sent"}
+                    and delivery_state not in {"not_sent", "definitely_not_sent"}
+                ):
+                    budget.unknown_output_tokens += requested
+                continue
+            if operation_id:
+                budget._durable_successful_operations.add(operation_id)
             usage = response.get("usage") if isinstance(response, dict) else None
             actual = (
                 usage.get("completion_tokens")
@@ -4972,7 +4991,6 @@ class _BlueprintGenerationBudget:
                 budget.actual_output_tokens += actual
             else:
                 budget.unknown_output_tokens += requested
-            budget.provider_calls += 1
         return budget
 
     @property
@@ -4986,23 +5004,36 @@ class _BlueprintGenerationBudget:
     def charged_output_tokens(self) -> int:
         return self.actual_output_tokens + self.unknown_output_tokens
 
-    def claim(self, *, max_tokens: int) -> int:
+    def claim(self, *, max_tokens: int, operation_id: str = "") -> int:
+        durable_replay = bool(
+            operation_id
+            and operation_id in self._durable_successful_operations
+        )
         elapsed = time.monotonic() - self.started_at
-        if elapsed >= BLUEPRINT_GENERATION_MAX_WALL_SECONDS:
+        if (
+            not durable_replay
+            and elapsed >= BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+        ):
             raise StageError(
                 "剧本时空因果蓝图分片",
                 ["[BLUEPRINT_GENERATION_TIME_BUDGET] 超过全局时间上限"],
             )
-        if self.provider_calls >= BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS:
+        if (
+            not durable_replay
+            and self.provider_calls >= BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+        ):
             raise StageError(
                 "剧本时空因果蓝图分片",
                 ["[BLUEPRINT_GENERATION_CALL_BUDGET] 超过全局调用上限"],
             )
         if (
-            self.charged_output_tokens
-            + self.reserved_output_tokens
-            + max_tokens
-            > BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+            not durable_replay
+            and (
+                self.charged_output_tokens
+                + self.reserved_output_tokens
+                + max_tokens
+                > BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+            )
         ):
             raise StageError(
                 "剧本时空因果蓝图分片",
@@ -5010,14 +5041,16 @@ class _BlueprintGenerationBudget:
             )
         reservation_id = self._next_reservation_id
         self._next_reservation_id += 1
-        self.provider_calls += 1
-        self.requested_output_tokens += int(max_tokens)
+        if not durable_replay:
+            self.provider_calls += 1
+            self.requested_output_tokens += int(max_tokens)
         self._reservations[reservation_id] = {
             "max_tokens": int(max_tokens),
             "actual_tokens": 0,
             "fresh_responses": 0,
             "unknown_responses": 0,
             "reused_responses": 0,
+            "durable_replay": durable_replay,
         }
         return reservation_id
 
@@ -5049,6 +5082,7 @@ class _BlueprintGenerationBudget:
         if reservation is None:
             raise RuntimeError("蓝图输出 token 预留已结算或不存在")
         requested = int(reservation["max_tokens"])
+        durable_replay = bool(reservation["durable_replay"])
         fresh_responses = int(reservation["fresh_responses"])
         unknown_responses = int(reservation["unknown_responses"])
         actual = int(reservation["actual_tokens"])
@@ -5079,6 +5113,7 @@ class _BlueprintGenerationBudget:
             "fresh_responses": fresh_responses,
             "reused_responses": int(reservation["reused_responses"]),
             "unknown_responses": unknown_responses,
+            "durable_replay": durable_replay,
             "charged_output_tokens": charged,
             "global_charged_output_tokens": self.charged_output_tokens,
         }
@@ -5096,8 +5131,19 @@ async def _generate_sharded_narrative_blueprint(
     segments = index_source_segments(source_text)
     segment_shards = _partition_blueprint_segments(segments)
     shard_split_depths = [0 for _ in segment_shards]
+    trace_at_start = current_trace()
+    run_id = getattr(trace_at_start, "run_id", None)
+    run_started_at: float | None = None
+    if run_id:
+        run_row = get_conn().execute(
+            "SELECT started_at FROM workflow_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if run_row is not None:
+            run_started_at = run_row["started_at"]
     generation_budget = _BlueprintGenerationBudget.from_durable_calls(
-        run_id=getattr(current_trace(), "run_id", None),
+        run_id=run_id,
+        started_at_epoch=run_started_at,
     )
     optional_ids = structural_front_matter_ids(segments)
     merged_nodes: list[Any] = []
@@ -5219,6 +5265,7 @@ async def _generate_sharded_narrative_blueprint(
                 ).hexdigest()[:32]
                 reservation_id = generation_budget.claim(
                     max_tokens=token_budget,
+                    operation_id=operation_id,
                 )
                 remaining_seconds = (
                     BLUEPRINT_GENERATION_MAX_WALL_SECONDS
@@ -5446,6 +5493,18 @@ async def _generate_sharded_narrative_blueprint(
                 "provider_call_count": generation_budget.provider_calls,
                 "requested_output_tokens": (
                     generation_budget.requested_output_tokens
+                ),
+                "actual_output_tokens": (
+                    generation_budget.actual_output_tokens
+                ),
+                "unknown_output_tokens": (
+                    generation_budget.unknown_output_tokens
+                ),
+                "charged_output_tokens": (
+                    generation_budget.charged_output_tokens
+                ),
+                "active_reserved_output_tokens": (
+                    generation_budget.reserved_output_tokens
                 ),
             },
         ),

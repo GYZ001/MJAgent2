@@ -75,9 +75,10 @@ def _cached_successful_provider_response(
     try:
         rows = get_conn().execute(
             "SELECT id,response_json,meta FROM provider_calls "
-            "WHERE operation_id=? AND status IN ('OK','SUCCESS','SUCCEEDED') "
+            "WHERE operation_id=? AND kind=? AND model=? "
+            "AND status IN ('OK','SUCCESS','SUCCEEDED') "
             "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
-            (operation_id,),
+            (operation_id, kind, model),
         ).fetchall()
         expected_contract = str((meta or {}).get("contract_version") or "").strip()
         for row in rows:
@@ -863,7 +864,7 @@ async def _post_json(client: httpx.AsyncClient, url: str, payload: dict, *,
 async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: dict, *,
                                            fallback_kind: str, log_kind: str,
                                            preferred_model: str,
-                                           meta: dict | None = None) -> tuple[dict, str]:
+                                           meta: dict | None = None) -> tuple[dict, str, bool]:
     base_url, headers = _model_connection("bailian", preferred_model, config.BAILIAN_BASE_URL, config.BAILIAN_API_KEY)
     url = f"{base_url}/chat/completions"
     models = _bailian_fallback_models(fallback_kind, preferred_model)
@@ -875,12 +876,13 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
             data = _cached_successful_provider_response(
                 log_kind, candidate, attempt_payload, meta,
             )
+            reused = data is not None
             if data is None:
                 data = await _post_json(
                     client, url, attempt_payload, kind=log_kind, model=candidate,
                     headers=headers, key_name="BAILIAN_API_KEY", meta=meta,
                 )
-            return data, candidate
+            return data, candidate, reused
         except ProviderError as exc:
             if not exc.replay_safe:
                 raise
@@ -1104,10 +1106,10 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
         elif provider == "bailian":
             bailian_model = selected_model
             payload = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-            data, _ = await _post_bailian_chat_with_fallback(
+            data, _, reused = await _post_bailian_chat_with_fallback(
                 client, payload, fallback_kind="text", log_kind="chat",
                 preferred_model=bailian_model, meta=call_meta)
-            _notify_completion_usage(data, usage_callback, reused=False)
+            _notify_completion_usage(data, usage_callback, reused=reused)
             _reject_truncated_chat_response(data)
             content = _chat_content(data, label="chat")
         elif provider == "deepseek":
@@ -1811,7 +1813,7 @@ async def chat_with_tools(
                         client, payload, fallback_kind="text", log_kind="chat_tools",
                         preferred_model=bailian_model, meta=call_meta, on_token=on_token)
                 else:
-                    data, _ = await _post_bailian_chat_with_fallback(
+                    data, _, _ = await _post_bailian_chat_with_fallback(
                         client, payload, fallback_kind="text", log_kind="chat_tools",
                         preferred_model=bailian_model, meta=call_meta)
             else:
@@ -2200,7 +2202,7 @@ async def vlm_check(frames_b64: list[str], expectation_text: str,
             try:
                 if provider == "bailian":
                     bailian_payload = {"messages": messages, "temperature": 0, "max_tokens": 2048}
-                    data, _ = await _post_bailian_chat_with_fallback(
+                    data, _, _ = await _post_bailian_chat_with_fallback(
                         client, bailian_payload, fallback_kind="vlm", log_kind="vlm_qa",
                         preferred_model=model, meta=merged_call_meta)
                 else:
