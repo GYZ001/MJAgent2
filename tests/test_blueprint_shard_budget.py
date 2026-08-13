@@ -39,6 +39,14 @@ RUN_77675349_FIXTURE = (
     / "fixtures"
     / "run_77675349e49f_blueprint_src0005.json"
 )
+RUN_77675349_ATTEMPT_FIXTURES = (
+    Path(__file__).parent
+    / "fixtures"
+    / "run_77675349e49f_blueprint_src0005_attempt1.json",
+    Path(__file__).parent
+    / "fixtures"
+    / "run_77675349e49f_blueprint_src0005_attempt2.json",
+)
 
 
 def _source(count: int) -> str:
@@ -422,57 +430,16 @@ def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
         replay["source_text"],
     ])
 
-    def raw_candidate(attempt: dict) -> str:
-        payload = json.loads(_shard_response(
-            source_ids=["SRC0005"],
-            shard_index=5,
-        ))
-        story = payload["nodes"][0]
-        story["key"] = "S005-node_001"
-        story["participant_evidence"] = []
-        story["state_subject_assignments"] = []
-        story["environment_source_unit_keys"] = []
-        for unit_key, classification in attempt["classifications"].items():
-            if classification["mode"] == "multiple_single":
-                story["participant_evidence"].extend({
-                    "identity_key": identity_key,
-                    "source_segment_ids": ["SRC0005"],
-                    "source_unit_keys": [unit_key],
-                    "usage": "state_subject",
-                } for identity_key in classification["identity_keys"])
-            elif classification["mode"] == "joint":
-                story["state_subject_assignments"].append({
-                    "source_unit_key": unit_key,
-                    "mode": "joint",
-                    "identity_keys": classification["identity_keys"],
-                })
-            elif classification["mode"] == "environment":
-                story["environment_source_unit_keys"].append(unit_key)
-        story["participants"] = list(dict.fromkeys(
-            evidence["identity_key"]
-            for evidence in story["participant_evidence"]
-        ))
-        payload["nodes"].append({
-            "key": "S005-node_002",
-            "source_segment_ids": attempt["node_source_ids"][1],
-            "summary": "作者附言",
-            "narrative_layer": "paratext",
-            "event_priority": "connective",
-            "render_policy": "exclude_from_spine",
-            "temporal_domain_key": "paratext",
-            "time_label": "正文外",
-            "time_relation": "jump",
-            "location_key": "audit",
-            "location_label": "审计卡",
-            "action_logic": "作者附言不得进入剧情权威",
-        })
-        return json.dumps(payload, ensure_ascii=False)
-
     candidates = []
     errors: list[str] = []
     previous_candidate = None
-    for attempt_no, attempt in enumerate(replay["attempts"], start=1):
-        provider_payload = stages.extract_json(raw_candidate(attempt))
+    for attempt_no, fixture_path in enumerate(
+        RUN_77675349_ATTEMPT_FIXTURES,
+        start=1,
+    ):
+        provider_payload = stages.extract_json(
+            fixture_path.read_text(encoding="utf-8")
+        )
         candidate = stages.NarrativeBlueprintShard.model_validate(
             stages.normalize_blueprint_provider_payload(provider_payload)
         )
@@ -502,8 +469,9 @@ def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
     observed = candidates[1]
     observed_errors = errors
     assert [node.key for node in observed.nodes] == ["S005-node_001"]
-    assert observed_errors
-    assert any("BLUEPRINT_SHARD_STATE_SUBJECT" in error for error in observed_errors)
+    assert len(observed_errors) == 1
+    assert "STATE_SUBJECT_ASSIGNMENT_CONFLICT" in observed_errors[0]
+    assert "SRC0005:unit:030" in observed_errors[0]
 
     expected_payload = observed.model_dump(mode="json")
     expected_node = expected_payload["nodes"][0]
@@ -522,29 +490,31 @@ def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
                 continue
         retained_evidence.append(evidence)
     expected_node["participant_evidence"] = retained_evidence
-    expected_node["environment_source_unit_keys"] = replay[
+    environment_keys = replay[
         "expected_repair"
     ]["environment_source_unit_keys"]
-    expected_node["state_subject_assignments"] = replay[
-        "expected_repair"
-    ]["joint_assignments"]
-    expected_node["participants"] = list(dict.fromkeys(
-        [
-            evidence["identity_key"]
-            for evidence in retained_evidence
-            if evidence["identity_key"]
-        ] + [
-            identity_key
-            for assignment in expected_node["state_subject_assignments"]
-            for identity_key in assignment["identity_keys"]
-        ]
+    expected_node["environment_source_unit_keys"] = list(dict.fromkeys(
+        expected_node["environment_source_unit_keys"] + environment_keys
     ))
-    expected = stages.NarrativeBlueprintShard.model_validate(expected_payload)
+    joint_assignments = replay["expected_repair"]["joint_assignments"]
+    repaired_unit_keys = {
+        assignment["source_unit_key"]
+        for assignment in joint_assignments
+    } | set(environment_keys)
+    expected_node["state_subject_assignments"] = [
+        assignment
+        for assignment in expected_node["state_subject_assignments"]
+        if assignment["source_unit_key"] not in repaired_unit_keys
+    ] + joint_assignments
+    expected = stages.NarrativeBlueprintShard.model_validate(
+        stages.normalize_blueprint_provider_payload(expected_payload)
+    )
     expected_errors = stages.validate_narrative_blueprint_shard(
         expected,
         expected_episode_no=1,
         expected_shard_index=5,
         expected_source_segment_ids=["SRC0005"],
+        source_text=authority_source,
     )
     assignments = {
         assignment.source_unit_key: {
@@ -553,12 +523,19 @@ def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
         }
         for assignment in expected.nodes[0].state_subject_assignments
     }
+    environment_set = set(
+        expected.nodes[0].environment_source_unit_keys
+    )
     actual_classifications = {
-        "SRC0005:unit:004": {
-            "mode": "environment",
-            "identity_keys": [],
-        },
-        **assignments,
+        unit_key: (
+            {
+                "mode": "environment",
+                "identity_keys": [],
+            }
+            if unit_key in environment_set
+            else assignments[unit_key]
+        )
+        for unit_key in replay["expected_classifications"]
     }
 
     assert actual_classifications == replay["expected_classifications"]
