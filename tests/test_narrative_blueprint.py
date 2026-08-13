@@ -1922,7 +1922,7 @@ def test_real_blueprint_non_audible_voice_drift_normalizes_exact_unit() -> None:
     assert node.source_unit_deliveries[0].content_owner_key == "杂役木牌"
 
 
-def test_provider_normalization_adds_evidence_identity_without_deleting_roster() -> None:
+def test_provider_normalization_derives_roster_only_from_source_evidence() -> None:
     payload = _blueprint_cross_field_run_fixtures()[0]["payload"]
     payload = json.loads(json.dumps(payload, ensure_ascii=False))
     node = payload["nodes"][0]
@@ -1932,14 +1932,18 @@ def test_provider_normalization_adds_evidence_identity_without_deleting_roster()
         "source_unit_keys": [],
         "usage": "visible",
     })
-    original_participants = list(node["participants"])
+    unsupported_identity = "CHAR_UNKNOWN_BOY_FAT"
+    assert unsupported_identity in node["participants"]
 
     normalized = normalize_blueprint_provider_payload(payload)
 
-    assert normalized["nodes"][0]["participants"] == [
-        *original_participants,
-        "CHAR_SOURCE_BACKED_EXTRA",
-    ]
+    evidence_identities = list(dict.fromkeys(
+        evidence["identity_key"]
+        for evidence in node["participant_evidence"]
+    ))
+    assert normalized["nodes"][0]["participants"] == evidence_identities
+    assert "CHAR_SOURCE_BACKED_EXTRA" in evidence_identities
+    assert unsupported_identity not in evidence_identities
 
 
 def test_blueprint_patch_unknown_keeps_stable_operation_and_retry_lineage(
