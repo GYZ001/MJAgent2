@@ -5,9 +5,11 @@ import pytest
 from app import db
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact
+from app.orchestration.state_machine import StateConflict
 from app.production.patch import screenplay_artifact_payload
 from app.production.publish import publish_screenplay
 from app.production.revision import ensure_production_revision, mark_baseline_generated
+from app.production.screenplay_repair import _persist_screenplay_duration_expansion
 from app.production.screenplay_authority import (
     SCREENPLAY_QA_PROFILE_VERSION,
     resolve_current_screenplay_authority,
@@ -103,6 +105,47 @@ def _publish(case: dict) -> dict:
         qa_profile_version=SCREENPLAY_QA_PROFILE_VERSION,
         clear_downstream=True,
     )
+
+
+def test_baseline_duration_expansion_persists_planning_authority_with_cas() -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    conn.execute(
+        """UPDATE episodes
+              SET target_duration_s=1800,planning_target_duration_s=1800,
+                  target_duration_authority='planning_estimate'
+            WHERE id=?""",
+        (case["episode_id"],),
+    )
+    conn.commit()
+
+    _persist_screenplay_duration_expansion(
+        conn,
+        episode_id=case["episode_id"],
+        expected_target_s=1800,
+        required_target_s=1801,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT target_duration_s,planning_target_duration_s FROM episodes WHERE id=?",
+        (case["episode_id"],),
+    ).fetchone()
+    assert tuple(row) == (1801, 1801)
+    with pytest.raises(StateConflict) as exc_info:
+        _persist_screenplay_duration_expansion(
+            conn,
+            episode_id=case["episode_id"],
+            expected_target_s=1800,
+            required_target_s=1802,
+        )
+    assert exc_info.value.entity == "screenplay_duration"
+    assert exc_info.value.expected == {"1800"}
+    assert exc_info.value.actual == "1801"
+    assert tuple(conn.execute(
+        "SELECT target_duration_s,planning_target_duration_s FROM episodes WHERE id=?",
+        (case["episode_id"],),
+    ).fetchone()) == (1801, 1801)
 
 
 def test_duration_expansion_bound_as_planning_input_survives_publish_cleanup() -> None:

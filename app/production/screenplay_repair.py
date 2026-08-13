@@ -14,6 +14,7 @@ from app.character_policy import resolution_declares_functional_identity
 from app.db import get_conn, get_setting, now
 from app.evidence import repository as evidence_repository
 from app.harness.types import Evaluation, EvidenceArtifact, Issue
+from app.orchestration.state_machine import StateConflict
 from app.production.grant import assert_grant_allows, issue_production_grant
 from app.production.metrics import (
     record_activation,
@@ -56,6 +57,44 @@ MAX_REPAIR_ACTIVATION_PATCHES = 12
 MAX_REPAIR_ACTIVATION_PASSES = 32
 MAX_STRATEGY_ATTEMPTS_PER_ISSUE = 5
 SCREENPLAY_REPAIR_PLANNER_VERSION = "screenplay-repair-17"
+
+
+def _persist_screenplay_duration_expansion(
+    conn,
+    *,
+    episode_id: str,
+    expected_target_s: int,
+    required_target_s: int,
+) -> None:
+    """CAS-persist every duration field that belongs to screenplay authority."""
+    cursor = conn.execute(
+        """UPDATE episodes
+              SET target_duration_s=?,
+                  planning_target_duration_s=CASE
+                    WHEN target_duration_authority='planning_estimate'
+                    THEN ?
+                    ELSE planning_target_duration_s
+                  END,
+                  screenplay_snapshot_version=screenplay_snapshot_version+1
+            WHERE id=? AND target_duration_s=?""",
+        (
+            required_target_s,
+            required_target_s,
+            episode_id,
+            expected_target_s,
+        ),
+    )
+    if cursor.rowcount != 1:
+        current = conn.execute(
+            "SELECT target_duration_s FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        raise StateConflict(
+            "screenplay_duration",
+            episode_id,
+            {str(expected_target_s)},
+            str(current["target_duration_s"]) if current is not None else None,
+        )
 
 
 class ScreenplayIdentityGateError(RuntimeError):
@@ -3648,28 +3687,16 @@ async def run_screenplay_production(
         )
         duration_expanded = required_target > current_target
         if duration_expanded:
-            duration_cursor = conn.execute(
-                """UPDATE episodes
-                      SET target_duration_s=?,
-                          planning_target_duration_s=CASE
-                            WHEN target_duration_authority='planning_estimate'
-                            THEN ?
-                            ELSE planning_target_duration_s
-                          END,
-                          screenplay_snapshot_version=screenplay_snapshot_version+1
-                    WHERE id=? AND target_duration_s=?""",
-                (
-                    required_target,
-                    required_target,
-                    episode_id,
-                    current_target,
-                ),
-            )
-            if duration_cursor.rowcount != 1:
-                conn.rollback()
-                raise StateConflict(
-                    "剧本时长权威在 Baseline 生成期间发生变化，请按当前输入重试",
+            try:
+                _persist_screenplay_duration_expansion(
+                    conn,
+                    episode_id=episode_id,
+                    expected_target_s=current_target,
+                    required_target_s=required_target,
                 )
+            except StateConflict:
+                conn.rollback()
+                raise
             conn.commit()
             episode["target_duration_s"] = required_target
             if episode.get("target_duration_authority") == "planning_estimate":
