@@ -274,11 +274,22 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     ]
     assert len(action_contracts) == 8
     for contract in action_contracts:
-        state_subject = contract["then"]["oneOf"][0]["properties"][
+        assignments = contract["then"]["oneOf"]
+        assert len(assignments) == 3
+        state_subject = assignments[0]["properties"][
             "participant_evidence"
         ]
         assert state_subject["minContains"] == 1
         assert state_subject["maxContains"] == 1
+        joint = assignments[2]["properties"][
+            "state_subject_assignments"
+        ]
+        assert joint["minContains"] == 1
+        assert joint["maxContains"] == 1
+        assert joint["contains"]["properties"]["identity_keys"] == {
+            "minItems": 2,
+            "uniqueItems": True,
+        }
     delivery_contract = schema["$defs"]["NarrativeSourceUnitDelivery"][
         "allOf"
     ][0]["then"]

@@ -886,6 +886,7 @@ def test_joint_state_subject_creates_one_state_fact_per_exact_actor() -> None:
         unit["source_segment_ids"] = [f"SRC{index // 2 + 1:04d}"]
     first = units[0]
     first.update({
+        "event_key": "e1-joint",
         "actor_keys": ["g", "friend"],
         "onscreen_entity_keys": ["g", "friend"],
         "state_subject_key": "",
@@ -911,10 +912,9 @@ def test_joint_state_subject_creates_one_state_fact_per_exact_actor() -> None:
         if fact.fact_id in first_event.effects_add
     ]
     assert len(first_event.effects_add) == 2
-    assert {fact.subject_id for fact in joint_facts} == {
-        "bible:谷言",
-        "reference:旧友",
-    }
+    assert {fact.subject_id for fact in joint_facts} == set(
+        screenplay.narrative_plan.atomic_actions[0].actor_ids
+    )
 
 
 def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:

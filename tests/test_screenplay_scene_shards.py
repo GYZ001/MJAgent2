@@ -2540,7 +2540,14 @@ def test_repair_schema_accepts_audible_offscreen_speaker_evidence() -> None:
         scene_plans=scene_plans,
         scene_input_contracts=contracts,
     )
-    answer = shard.scenes[1].units[2]
+    answer = next(
+        unit
+        for unit in shard.scenes[1].units
+        if (
+            unit.speaker_key == "person_46e7e8b742ed"
+            and unit.participant_deliveries
+        )
+    )
     assert answer.speaker_key == "person_46e7e8b742ed"
     assert answer.participant_deliveries[0].audible is True
 

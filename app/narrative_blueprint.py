@@ -158,11 +158,10 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
             if identity_key and identity_key not in evidence_identities:
                 evidence_identities.append(identity_key)
         node["participant_evidence"] = evidence_values
-        participants = list(value.get("participants") or [])
-        for identity_key in evidence_identities:
-            if identity_key not in participants:
-                participants.append(identity_key)
-        node["participants"] = participants
+        # participant_evidence is the only source-backed identity authority.
+        # Keeping an independently model-authored roster creates two truths:
+        # a role can be listed without evidence and survive into downstream IR.
+        node["participants"] = evidence_identities
         normalized_nodes.append(node)
     normalized["nodes"] = normalized_nodes
     return normalized
