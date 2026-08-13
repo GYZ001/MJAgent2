@@ -513,12 +513,13 @@ def _scene_shard_semantic_review_compatibility(
         return False, "semantic_review_artifacts_missing"
     if any(not isinstance(phase, dict) for phase in phases):
         return False, "semantic_review_artifacts_missing"
+    phase_names = [phase.get("phase") for phase in phases]
+    if phase_names not in (["initial"], ["initial", "post_repair"]):
+        return False, "semantic_review_phase"
     if str(phases[0].get("creative_hash") or "") != initial_hash:
         return False, "semantic_review_initial_candidate"
     if str(phases[-1].get("creative_hash") or "") != reviewed_hash:
         return False, "semantic_review_final_candidate"
-    if phases[-1].get("consensus") != []:
-        return False, "semantic_review_not_clean"
     artifact_content = _artifact_content(artifact)
     try:
         validated_shard = ScreenplaySceneShardIR.model_validate(
@@ -531,11 +532,11 @@ def _scene_shard_semantic_review_compatibility(
         for scene in validated_shard.scenes
         for unit in scene.units
     }
-    validated_reviews: list[ScreenplaySceneShardSemanticReview] = []
     for phase in phases:
-        reviews = phase.get("reviews") if isinstance(phase, dict) else None
+        reviews = phase.get("reviews")
         if not isinstance(reviews, list) or len(reviews) != 2:
             return False, "semantic_review_artifacts_missing"
+        validated_reviews: list[ScreenplaySceneShardSemanticReview] = []
         for review in reviews:
             try:
                 validated_reviews.append(
@@ -543,12 +544,36 @@ def _scene_shard_semantic_review_compatibility(
                 )
             except ValidationError:
                 return False, "semantic_review_schema"
-    if any(
-        finding.unit_key not in valid_unit_keys
-        for review in validated_reviews
-        for finding in review.findings
-    ):
-        return False, "semantic_review_unit_key"
+        if any(
+            finding.unit_key not in valid_unit_keys
+            for review in validated_reviews
+            for finding in review.findings
+        ):
+            return False, "semantic_review_unit_key"
+        finding_keys = [
+            [(finding.unit_key, finding.code) for finding in review.findings]
+            for review in validated_reviews
+        ]
+        if any(len(keys) != len(set(keys)) for keys in finding_keys):
+            return False, "semantic_review_duplicate_finding"
+        finding_maps = [
+            {
+                (finding.unit_key, finding.code): finding
+                for finding in review.findings
+            }
+            for review in validated_reviews
+        ]
+        shared_keys = sorted(
+            set(finding_maps[0]).intersection(finding_maps[1])
+        )
+        expected_consensus = [
+            finding_maps[0][key].model_dump(mode="json")
+            for key in shared_keys
+        ]
+        if phase.get("consensus") != expected_consensus:
+            return False, "semantic_review_consensus"
+    if phases[-1].get("consensus") != []:
+        return False, "semantic_review_not_clean"
     return True, ""
 
 
@@ -577,6 +602,16 @@ def screenplay_normalized_artifact_lineage_compatibility(
         != str(artifact.get("contract_version") or "")
     ):
         return False, "raw_artifact_contract_version"
+    raw_content = _artifact_content(raw_artifact)
+    try:
+        raw_content_hash = evidence_repository.content_hash(
+            raw_content,
+            raw_artifact.get("file_path"),
+        )
+    except (OSError, TypeError, ValueError):
+        return False, "raw_artifact_content_hash"
+    if raw_content_hash != str(raw_artifact.get("content_hash") or ""):
+        return False, "raw_artifact_content_hash"
     if _artifact_parent_ids(raw_artifact) != expected_authority_artifact_ids:
         return False, "raw_authority_parents"
     return True, ""

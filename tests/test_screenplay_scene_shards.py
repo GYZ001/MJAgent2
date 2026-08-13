@@ -69,6 +69,7 @@ from app.screenplay_scene_shards import (
     merge_screenplay_scene_shards,
     normalize_screenplay_scene_shard,
     normalize_screenplay_scene_shard_payload,
+    screenplay_envelope_artifact_compatibility,
     screenplay_scene_identity_scaffold_hash,
     screenplay_scene_generation_scaffold_hash,
     screenplay_scene_shard_artifact_compatibility,
@@ -3129,6 +3130,206 @@ def test_normalization_rejects_offscreen_identity_scaffold_drift() -> None:
     assert any("identity scaffold drift" in error for error in errors)
 
 
+def _scene_shard_cache_compatibility_case(
+    *,
+    with_repair: bool,
+) -> tuple[dict, dict, dict]:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    initial_creative = _creative_shard(plan, blueprint, contracts)
+    reviewed_creative = initial_creative.model_copy(deep=True)
+    unit_key = next(iter(reviewed_creative.slots))
+    if with_repair:
+        reviewed_creative.slots[unit_key].text += " 修复后"
+    initial_hash = scene_shards_module._hash(
+        initial_creative.model_dump(mode="json")
+    )
+    reviewed_hash = scene_shards_module._hash(
+        reviewed_creative.model_dump(mode="json")
+    )
+    first_finding = {
+        "unit_key": unit_key,
+        "code": "source_semantic_drift",
+        "message": "第一 reviewer 的 finding",
+    }
+    second_finding = {
+        **first_finding,
+        "message": "第二 reviewer 的同键 finding",
+    }
+    phases = [{
+        "phase": "initial",
+        "creative_hash": initial_hash,
+        "reviews": (
+            [{"findings": [first_finding]}, {"findings": [second_finding]}]
+            if with_repair
+            else [{"findings": []}, {"findings": []}]
+        ),
+        "consensus": [first_finding] if with_repair else [],
+    }]
+    if with_repair:
+        phases.append({
+            "phase": "post_repair",
+            "creative_hash": reviewed_hash,
+            "reviews": [{"findings": []}, {"findings": []}],
+            "consensus": [],
+        })
+    raw_content = {
+        "shard_id": plan.shard_id,
+        "attempts": [],
+        "semantic_review_evidence": {
+            "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+            "initial_creative_hash": initial_hash,
+            "reviewed_creative_hash": reviewed_hash,
+            "phases": phases,
+        },
+    }
+    raw_artifact = {
+        "id": f"raw-scene-shard-{with_repair}",
+        "type": "screenplay_scene_shard_raw",
+        "scope_type": "episode",
+        "scope_id": "ep-scene-shard-cache-compatibility",
+        "status": "candidate",
+        "content": raw_content,
+        "content_hash": evidence_repository.content_hash(raw_content),
+        "file_path": None,
+        "parent_artifact_ids": ["blueprint-artifact", "identity-artifact"],
+        "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+    }
+    shard = compile_screenplay_scene_shard_draft(
+        reviewed_creative,
+        episode_no=1,
+        plan=plan,
+        scene_plans={
+            scene.key: scene for scene in blueprint.scene_plans
+        },
+        scene_input_contracts=contracts,
+    )
+    artifact_content = shard.model_dump(mode="json")
+    artifact = {
+        "id": f"scene-shard-{with_repair}",
+        "type": "screenplay_scene_shard",
+        "scope_type": "episode",
+        "scope_id": "ep-scene-shard-cache-compatibility",
+        "status": "validated",
+        "content": artifact_content,
+        "content_hash": evidence_repository.content_hash(artifact_content),
+        "parent_artifact_ids": [raw_artifact["id"]],
+        "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+        "model_snapshot": {
+            "semantic_review_version": (
+                SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+            ),
+            "reviewed_creative_hash": reviewed_hash,
+        },
+    }
+    compatibility_kwargs = {
+        "expected_blueprint_hash": plan.blueprint_hash,
+        "expected_identity_registry_hash": plan.identity_registry_hash,
+        "expected_generation_scaffold_hash": (
+            screenplay_scene_generation_scaffold_hash(plan, contracts)
+        ),
+        "raw_artifact": raw_artifact,
+        "expected_authority_artifact_ids": {
+            "blueprint-artifact", "identity-artifact",
+        },
+    }
+    return artifact, raw_artifact, compatibility_kwargs
+
+
+@pytest.mark.parametrize("with_repair", [False, True])
+def test_scene_shard_cache_accepts_exact_semantic_review_evidence(
+    with_repair: bool,
+) -> None:
+    artifact, _raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=with_repair)
+    )
+
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+
+    assert compatible is True, reason
+
+
+def test_envelope_cache_binds_raw_artifact_content_hash() -> None:
+    blueprint = _blueprint(split_domain=False)
+    envelope_content = _envelope(blueprint).model_dump(mode="json")
+    raw_content = {"operation_id": "envelope-op", "attempts": []}
+    raw_artifact = {
+        "id": "raw-envelope-hash-binding",
+        "type": "screenplay_envelope_raw",
+        "scope_type": "episode",
+        "scope_id": "ep-envelope-hash-binding",
+        "status": "candidate",
+        "content": raw_content,
+        "content_hash": evidence_repository.content_hash(raw_content),
+        "file_path": None,
+        "parent_artifact_ids": ["blueprint-artifact", "identity-artifact"],
+        "contract_version": scene_shards_module.SCREENPLAY_ENVELOPE_VERSION,
+    }
+    artifact = {
+        "id": "envelope-hash-binding",
+        "type": "screenplay_envelope",
+        "scope_type": "episode",
+        "scope_id": "ep-envelope-hash-binding",
+        "status": "validated",
+        "content": envelope_content,
+        "content_hash": evidence_repository.content_hash(envelope_content),
+        "parent_artifact_ids": [raw_artifact["id"]],
+        "contract_version": scene_shards_module.SCREENPLAY_ENVELOPE_VERSION,
+    }
+    kwargs = {
+        "expected_blueprint_hash": envelope_content["blueprint_hash"],
+        "expected_identity_registry_hash": (
+            envelope_content["identity_registry_hash"]
+        ),
+        "raw_artifact": raw_artifact,
+        "expected_authority_artifact_ids": {
+            "blueprint-artifact", "identity-artifact",
+        },
+    }
+
+    compatible, reason = screenplay_envelope_artifact_compatibility(
+        artifact,
+        **kwargs,
+    )
+    assert compatible is True, reason
+
+    raw_artifact["content"]["attempts"].append({"outcome": "tampered"})
+    compatible, reason = screenplay_envelope_artifact_compatibility(
+        artifact,
+        **kwargs,
+    )
+    assert compatible is False
+    assert reason == "raw_artifact_content_hash"
+
+
+def test_scene_shard_cache_binds_raw_artifact_content_hash() -> None:
+    artifact, raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=False)
+    )
+
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+    assert compatible is True, reason
+
+    raw_artifact["content"]["attempts"].append({"outcome": "tampered"})
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+    assert compatible is False
+    assert reason == "raw_artifact_content_hash"
+
+
 def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> None:
     blueprint = _blueprint(split_domain=True)
     plans = build_screenplay_scene_shard_plans(
@@ -3252,8 +3453,15 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         ("evidence_version", "semantic_review_version"),
         ("snapshot_version", "semantic_review_version"),
         ("reviewed_hash", "semantic_review_hash_binding"),
+        ("wrong_phase", "semantic_review_phase"),
+        ("reordered_phases", "semantic_review_phase"),
+        ("duplicate_phase", "semantic_review_phase"),
         ("initial_candidate", "semantic_review_initial_candidate"),
         ("not_clean", "semantic_review_not_clean"),
+        ("fake_clean", "semantic_review_consensus"),
+        ("consensus_order", "semantic_review_consensus"),
+        ("second_reviewer_consensus", "semantic_review_consensus"),
+        ("duplicate_finding", "semantic_review_duplicate_finding"),
         ("malformed_phase", "semantic_review_artifacts_missing"),
         ("empty_review", "semantic_review_schema"),
         ("legacy_issues", "semantic_review_schema"),
@@ -3351,10 +3559,91 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         )
     elif mutation == "reviewed_hash":
         artifact["model_snapshot"]["reviewed_creative_hash"] = "0" * 64
+    elif mutation == "wrong_phase":
+        evidence["phases"][0]["phase"] = "post_repair"
+    elif mutation == "reordered_phases":
+        second_phase = deepcopy(evidence["phases"][0])
+        second_phase["phase"] = "post_repair"
+        evidence["phases"] = [second_phase, evidence["phases"][0]]
+    elif mutation == "duplicate_phase":
+        evidence["phases"].append(deepcopy(evidence["phases"][0]))
     elif mutation == "initial_candidate":
         evidence["phases"][0]["creative_hash"] = "0" * 64
     elif mutation == "not_clean":
-        evidence["phases"][-1]["consensus"] = [{"unit_key": "stale"}]
+        unit_key = artifact["content"]["scenes"][0]["units"][0][
+            "unit_key"
+        ]
+        finding = {
+            "unit_key": unit_key,
+            "code": "source_semantic_drift",
+            "message": "仍未 clean",
+        }
+        evidence["phases"][-1]["reviews"] = [
+            {"findings": [finding]},
+            {"findings": [{**finding, "message": "第二 reviewer"}]},
+        ]
+        evidence["phases"][-1]["consensus"] = [finding]
+    elif mutation == "fake_clean":
+        unit_key = artifact["content"]["scenes"][0]["units"][0][
+            "unit_key"
+        ]
+        finding = {
+            "unit_key": unit_key,
+            "code": "source_semantic_drift",
+            "message": "被伪装成 clean",
+        }
+        evidence["phases"][0]["reviews"] = [
+            {"findings": [finding]},
+            {"findings": [finding]},
+        ]
+    elif mutation == "consensus_order":
+        unit_key = artifact["content"]["scenes"][0]["units"][0][
+            "unit_key"
+        ]
+        findings = [
+            {
+                "unit_key": unit_key,
+                "code": "state_subject_semantic_drift",
+                "message": "排序后应位于第二",
+            },
+            {
+                "unit_key": unit_key,
+                "code": "source_semantic_drift",
+                "message": "排序后应位于第一",
+            },
+        ]
+        evidence["phases"][0]["reviews"] = [
+            {"findings": findings},
+            {"findings": findings},
+        ]
+        evidence["phases"][0]["consensus"] = findings
+    elif mutation == "second_reviewer_consensus":
+        unit_key = artifact["content"]["scenes"][0]["units"][0][
+            "unit_key"
+        ]
+        first_finding = {
+            "unit_key": unit_key,
+            "code": "source_semantic_drift",
+            "message": "第一 reviewer",
+        }
+        second_finding = {**first_finding, "message": "第二 reviewer"}
+        evidence["phases"][0]["reviews"] = [
+            {"findings": [first_finding]},
+            {"findings": [second_finding]},
+        ]
+        evidence["phases"][0]["consensus"] = [second_finding]
+    elif mutation == "duplicate_finding":
+        unit_key = artifact["content"]["scenes"][0]["units"][0][
+            "unit_key"
+        ]
+        finding = {
+            "unit_key": unit_key,
+            "code": "source_semantic_drift",
+            "message": "重复 finding",
+        }
+        evidence["phases"][0]["reviews"][0]["findings"] = [
+            finding, finding,
+        ]
     elif mutation == "malformed_phase":
         evidence["phases"] = [None]
     elif mutation == "empty_review":
@@ -3378,6 +3667,10 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
             "code": "source_semantic_drift",
             "message": "引用不存在的 unit",
         }]
+    raw["content_hash"] = evidence_repository.content_hash(
+        raw["content"],
+        raw.get("file_path"),
+    )
     compatible, actual_reason = screenplay_scene_shard_artifact_compatibility(
         artifact,
         expected_blueprint_hash=plan.blueprint_hash,
