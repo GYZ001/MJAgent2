@@ -5436,6 +5436,8 @@ class _BlueprintGenerationBudget:
         self._durable_successful_operations: set[str] = set()
         self._durable_unknown_operations: dict[str, str] = {}
         self._durable_unknown_stage_calls: dict[str, tuple[int, str]] = {}
+        self._durable_unknown_receipts: list[dict[str, Any]] = []
+        self._explicit_retry_authorized = False
         self.retry_grant_id = ""
 
     @classmethod
@@ -5458,7 +5460,8 @@ class _BlueprintGenerationBudget:
         query = (
             "SELECT pc.id,pc.response_json,pc.meta,pc.status,"
             "pc.recovery_disposition,pc.operation_id,pc.ts,"
-            "pc.superseded_by_call_id,pc.run_id "
+            "pc.superseded_by_call_id,pc.run_id,pc.production_grant_id,"
+            "pc.request_hash "
             "FROM provider_calls pc "
             "LEFT JOIN workflow_runs wr ON wr.id=pc.run_id "
             "WHERE pc.kind='chat' "
@@ -5498,9 +5501,47 @@ class _BlueprintGenerationBudget:
                 durable_call_at = float(row["ts"])
             except (IndexError, KeyError, TypeError, ValueError):
                 durable_call_at = 0.0
+            try:
+                durable_run_id = str(row["run_id"] or "")
+            except (IndexError, KeyError):
+                durable_run_id = str(run_id or "")
             is_current_activation = bool(
-                run_id and str(row["run_id"] or "") == str(run_id)
+                run_id and durable_run_id == str(run_id)
             )
+            try:
+                durable_grant_id = str(row["production_grant_id"] or "")
+            except (IndexError, KeyError):
+                durable_grant_id = ""
+            durable_grant_id = durable_grant_id or str(
+                meta.get("production_grant_id") or ""
+            )
+            if (
+                not durable_grant_id
+                and episode_id
+                and durable_call_at > 0
+                and not str(row["superseded_by_call_id"] or "")
+            ):
+                # One narrow migration bridge for pre-column calls: a run's
+                # BASELINE_GENERATION_STARTED event names the exact revision.
+                # Bind only if that revision had exactly one grant at call
+                # time; ambiguous grant histories remain unresolved/fail-safe.
+                try:
+                    legacy_grants = get_conn().execute(
+                        """SELECT g.id
+                             FROM run_events e
+                             JOIN production_grants g
+                               ON g.production_revision_id=json_extract(
+                                  e.payload_json,'$.revision_id')
+                            WHERE e.run_id=?
+                              AND e.event_type='BASELINE_GENERATION_STARTED'
+                              AND g.episode_id=? AND g.issued_at<=?
+                            ORDER BY g.issued_at""",
+                        (durable_run_id, episode_id, durable_call_at),
+                    ).fetchall()
+                    if len(legacy_grants) == 1:
+                        durable_grant_id = str(legacy_grants[0]["id"] or "")
+                except Exception:  # noqa: BLE001 - legacy/mocked schemas
+                    durable_grant_id = ""
             operation_id = str(
                 stored_operation_id or meta.get("operation_id") or ""
             ).strip()
@@ -5524,43 +5565,27 @@ class _BlueprintGenerationBudget:
                     durable_call_id = int(row["id"])
                 except (KeyError, TypeError, ValueError):
                     durable_call_id = 0
-                prior_grant_id = str(meta.get("production_grant_id") or "")
-                if not prior_grant_id and episode_id and durable_call_at > 0:
-                    # Pre-v3 observability truncated the grant out of meta.  The
-                    # grant active when the provider request was sent is still
-                    # recoverable from the durable episode grant timeline.
-                    grant_row = get_conn().execute(
-                        """SELECT id FROM production_grants
-                             WHERE episode_id=? AND issued_at<=?
-                             ORDER BY issued_at DESC LIMIT 1""",
-                        (episode_id, durable_call_at),
-                    ).fetchone()
-                    if grant_row is not None:
-                        prior_grant_id = str(grant_row["id"] or "")
                 latest_stage_status[stage_key] = (
                     durable_call_id,
                     status,
-                    prior_grant_id,
+                    durable_grant_id,
                 )
+                try:
+                    durable_request_hash = str(row["request_hash"] or "")
+                except (IndexError, KeyError):
+                    durable_request_hash = ""
+                budget._durable_unknown_receipts.append({
+                    "call_id": durable_call_id,
+                    "stage_key": stage_key,
+                    "operation_id": operation_id,
+                    "request_hash": durable_request_hash,
+                    "effective_max_tokens": effective,
+                    "prior_grant_id": durable_grant_id,
+                })
             if operation_id:
-                prior_grant_id = str(meta.get("production_grant_id") or "")
-                if (
-                    not prior_grant_id
-                    and episode_id
-                    and durable_call_at > 0
-                    and status in {"INTERRUPTED", "RUNNING"}
-                ):
-                    grant_row = get_conn().execute(
-                        """SELECT id FROM production_grants
-                             WHERE episode_id=? AND issued_at<=?
-                             ORDER BY issued_at DESC LIMIT 1""",
-                        (episode_id, durable_call_at),
-                    ).fetchone()
-                    if grant_row is not None:
-                        prior_grant_id = str(grant_row["id"] or "")
                 latest_operation_status[operation_id] = (
                     status,
-                    prior_grant_id,
+                    durable_grant_id,
                 )
             if status not in {"OK", "SUCCESS", "SUCCEEDED"}:
                 disposition = str(row["recovery_disposition"] or "").lower()
@@ -5613,10 +5638,25 @@ class _BlueprintGenerationBudget:
         """Whether unresolved provider outcomes require a new user grant."""
         if not self._durable_unknown_stage_calls:
             return False
+        if self._explicit_retry_authorized and self.retry_grant_id:
+            return False
         return any(
-            not self.retry_grant_id or self.retry_grant_id == prior_grant_id
+            not prior_grant_id
+            or not self.retry_grant_id
+            or self.retry_grant_id == prior_grant_id
             for _call_id, prior_grant_id in self._durable_unknown_stage_calls.values()
         )
+
+    def authorize_unknown_retry(self, grant_id: str) -> None:
+        """Bind the approval-minted grant to this exact projected receipt set."""
+        if not grant_id or not self._durable_unknown_stage_calls:
+            raise ValueError("unknown retry authorization requires receipts and grant")
+        self.retry_grant_id = grant_id
+        self._explicit_retry_authorized = True
+
+    @property
+    def unknown_receipts(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._durable_unknown_receipts]
 
     def assert_activation_admissible(
         self,

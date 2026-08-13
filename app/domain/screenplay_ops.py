@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import math
 
 from app.narrative_blueprint import (
@@ -31,6 +32,19 @@ _SCREENPLAY_IR_WORKING_TYPES = (
     "screenplay_generation_ir_fidelity_patch_raw",
     "screenplay_generation_ir_scene_partition_raw",
 )
+
+_SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL = contextvars.ContextVar(
+    "screenplay_command_bus_retry_approval",
+    default=False,
+)
+
+
+def _enter_screenplay_command_bus_retry_approval():
+    return _SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.set(True)
+
+
+def _exit_screenplay_command_bus_retry_approval(token) -> None:
+    _SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.reset(token)
 
 
 def _clear_unpublished_screenplay_ir(
@@ -1378,6 +1392,12 @@ def _new_screenplay_recorder(
                 or "10"
             ),
             "duration_policy": "content_derived_unbounded",
+            "blueprint_budget_lineage_fingerprint": fingerprint(
+                episode_id,
+                ep["source_chapters"],
+                source_text,
+                project["bible_version"] if project else 0,
+            ),
         },
         parent_run_id=parent_run_id,
     )
@@ -1390,7 +1410,6 @@ def _screenplay_blueprint_budget_projection(
     started_at: float | None = None,
 ) -> dict[str, Any]:
     """Read-only budget/grant projection shared by preflight and activation."""
-    from app.production.revision import get_active_production_revision
     from app.stages import (
         BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS,
         BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS,
@@ -1412,8 +1431,14 @@ def _screenplay_blueprint_budget_projection(
         source_text,
         project["bible_version"] if project else 0,
     )
-    revision = get_active_production_revision(episode_id, "screenplay")
-    current_grant_id = str(revision.grant_id or "") if revision else ""
+    revision_row = conn.execute(
+        """SELECT id,grant_id FROM production_revisions
+             WHERE episode_id=? AND kind='screenplay' AND status='active'
+             ORDER BY updated_at DESC LIMIT 1""",
+        (episode_id,),
+    ).fetchone()
+    revision = dict(revision_row) if revision_row is not None else None
+    current_grant_id = str(revision.get("grant_id") or "") if revision else ""
     budget = _BlueprintGenerationBudget.from_durable_calls(
         run_id=run_id,
         started_at_epoch=started_at,
@@ -1434,6 +1459,7 @@ def _screenplay_blueprint_budget_projection(
         "revision": revision,
         "current_grant_id": current_grant_id,
         "requires_fresh_retry_grant": budget.requires_fresh_retry_grant,
+        "unknown_receipts": budget.unknown_receipts,
         "provider_calls": budget.provider_calls,
         "charged_output_tokens": budget.charged_output_tokens,
         "unknown_output_tokens": budget.unknown_output_tokens,
@@ -1455,6 +1481,7 @@ def _spawn_screenplay_activation(
     clear_unpublished_ir: bool = False,
     resume_eligibility=None,
     authorize_blueprint_retry: bool = False,
+    expected_blueprint_unknown_receipts: list[dict[str, Any]] | None = None,
 ):
     """Atomically claim one episode before registering its in-process task."""
     conn = get_conn()
@@ -1563,8 +1590,20 @@ def _spawn_screenplay_activation(
         )
         budget = budget_projection["budget"]
         if budget_projection["requires_fresh_retry_grant"]:
-            if not authorize_blueprint_retry:
+            trusted_retry_approval = bool(
+                authorize_blueprint_retry
+                and _SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.get()
+            )
+            if not trusted_retry_approval:
                 budget.assert_activation_admissible()
+            expected_receipts = expected_blueprint_unknown_receipts or []
+            if expected_receipts != budget_projection["unknown_receipts"]:
+                raise StateConflict(
+                    "blueprint_unknown_retry_receipts",
+                    episode_id,
+                    {fingerprint(expected_receipts)},
+                    fingerprint(budget_projection["unknown_receipts"]),
+                )
             revision = budget_projection["revision"]
             if revision is None:
                 raise RuntimeError(
@@ -1575,13 +1614,13 @@ def _spawn_screenplay_activation(
             grant, _token = issue_production_grant(
                 episode_id=episode_id,
                 project_id=project_id,
-                production_revision_id=revision.id,
+                production_revision_id=str(revision["id"]),
                 kind="screenplay",
                 issued_by="user_retry_approval",
                 conn=conn,
                 commit=False,
             )
-            budget.retry_grant_id = grant.grant_id
+            budget.authorize_unknown_retry(grant.grant_id)
         budget.assert_activation_admissible()
         stamp = activation_stamp
         started_at = (
@@ -1948,6 +1987,7 @@ def _screenplay_generation_preflight(episode_id: str):
             key: budget_projection[key]
             for key in (
                 "requires_fresh_retry_grant",
+                "unknown_receipts",
                 "provider_calls",
                 "charged_output_tokens",
                 "unknown_output_tokens",
@@ -2115,6 +2155,13 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             resume_eligibility=eligibility if resume_existing else None,
             authorize_blueprint_retry=bool(
                 body.get("authorize_blueprint_retry")
+            ),
+            expected_blueprint_unknown_receipts=(
+                body.get("expected_blueprint_unknown_receipts")
+                if isinstance(
+                    body.get("expected_blueprint_unknown_receipts"), list
+                )
+                else None
             ),
         )
     except Exception as exc:

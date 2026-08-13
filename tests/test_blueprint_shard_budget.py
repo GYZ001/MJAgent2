@@ -1175,7 +1175,7 @@ def test_production_truncated_meta_is_scoped_by_workflow_episode(
         budget.explicit_retry_call_id("screenplay_blueprint_patch")
 
 
-def test_blueprint_wall_budget_does_not_reset_across_fresh_activation(
+def test_blueprint_wall_budget_starts_new_epoch_for_fresh_activation(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1234,8 +1234,78 @@ def test_blueprint_wall_budget_does_not_reset_across_fresh_activation(
         input_fingerprint="same-wall-fingerprint",
     )
 
-    with pytest.raises(stages.StageError, match="TIME_BUDGET"):
-        budget.claim(max_tokens=1, operation_id="new-operation")
+    reservation = budget.claim(max_tokens=1, operation_id="new-operation")
+    assert budget.provider_calls == 1
+    assert budget.actual_output_tokens == 0
+    budget.settle(reservation, unreported_outcome="not_sent")
+
+
+def test_expired_old_unknown_keeps_liability_but_new_grant_opens_wall_epoch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "blueprint-retry-wall.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    now_value = 10_000.0
+    monkeypatch.setattr(stages.time, "time", lambda: now_value)
+    for run_id, status, started in (
+        ("run-old", "FAILED", now_value - 1900),
+        ("run-fresh", "RUNNING", now_value - 1),
+    ):
+        conn.execute(
+            """INSERT INTO workflow_runs(
+                   id,workflow_type,scope_type,scope_id,status,
+                   input_fingerprint,started_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                run_id, "screenplay", "episode", "ep-retry-wall", status,
+                "same-fingerprint", started, now_value,
+            ),
+        )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition,production_grant_id
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            now_value - 1800, "chat", "model", "INTERRUPTED", 300000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+            }),
+            "run-old", "stable-op", 1, "REQUIRES_EXPLICIT_RETRY", "grant-old",
+        ),
+    )
+    conn.commit()
+
+    blocked = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-fresh",
+        started_at_epoch=now_value - 1,
+        episode_id="ep-retry-wall",
+        input_fingerprint="same-fingerprint",
+        retry_grant_id="grant-old",
+    )
+    assert blocked.provider_calls == 1
+    assert blocked.unknown_output_tokens == 8192
+    with pytest.raises(stages.StageError, match="RETRY_GRANT_REQUIRED"):
+        blocked.assert_activation_admissible()
+
+    allowed = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-fresh",
+        started_at_epoch=now_value - 1,
+        episode_id="ep-retry-wall",
+        input_fingerprint="same-fingerprint",
+        retry_grant_id="grant-old",
+    )
+    allowed.authorize_unknown_retry("grant-new")
+    allowed.assert_activation_admissible()
+    reservation = allowed.claim(max_tokens=4096, operation_id="stable-op")
+    assert allowed.provider_calls == 2
+    assert allowed.unknown_output_tokens == 8192
+    allowed.settle(reservation, unreported_outcome="not_sent")
 
 
 def test_durable_wall_budget_uses_original_run_start(

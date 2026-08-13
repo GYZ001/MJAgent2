@@ -1179,6 +1179,7 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
         max_tokens=4096,
         temperature=0.1,
         call_meta={
+            "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
             "stage": "discover_character_candidates",
             "stage_key": "screenplay_character_discovery",
             "substage": "future_identity",

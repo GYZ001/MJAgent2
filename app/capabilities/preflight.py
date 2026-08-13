@@ -1055,8 +1055,12 @@ def screenplay_generate(args) -> PreflightResult:
             "active_run": run,
             "input": input_projection,
             "reusable": reusable,
+            "blueprint_budget": budget_projection,
         }),
-        requires_confirmation=downstream_impact,
+        requires_confirmation=(
+            downstream_impact
+            or bool(budget_projection.get("requires_fresh_retry_grant"))
+        ),
         confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
         denial_code=(
             "SCREENPLAY_ALREADY_RUNNING"

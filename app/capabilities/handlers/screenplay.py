@@ -8,15 +8,31 @@ from app.capabilities.schemas import CommandResult
 
 async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
     from app import api
-
-    outcome = await call_guarded(
-        api.start_screenplay,
-        args.episode_id,
-        # This handler runs only after CommandBus confirmation.  Bind that
-        # approval to the one-time Production Grant required to retry an
-        # unresolved provider outcome; direct route calls cannot set it.
-        body={"authorize_blueprint_retry": True},
+    from app.domain.screenplay_ops import (
+        _enter_screenplay_command_bus_retry_approval,
+        _exit_screenplay_command_bus_retry_approval,
+        _screenplay_blueprint_budget_projection,
     )
+
+    budget_projection = _screenplay_blueprint_budget_projection(args.episode_id)
+    approval_token = _enter_screenplay_command_bus_retry_approval()
+    try:
+        outcome = await call_guarded(
+            api.start_screenplay,
+            args.episode_id,
+            # The process-local context token is set only by this post-policy
+            # handler. Public HTTP body fields alone cannot mint a retry grant.
+            body={
+                "authorize_blueprint_retry": bool(
+                    budget_projection["requires_fresh_retry_grant"]
+                ),
+                "expected_blueprint_unknown_receipts": (
+                    budget_projection["unknown_receipts"]
+                ),
+            },
+        )
+    finally:
+        _exit_screenplay_command_bus_retry_approval(approval_token)
     if isinstance(outcome, CommandResult):
         return outcome
     run_id = outcome.get("run_id")
