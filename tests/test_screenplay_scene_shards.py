@@ -279,6 +279,26 @@ def _story_source_semantics(
     }
 
 
+def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
+    schema = ScreenplaySceneShardSemanticReview.model_json_schema()
+
+    assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION == (
+        "screenplay-scene-semantic-review.v2"
+    )
+    assert schema["required"] == ["findings"]
+    assert "default" not in schema["properties"]["findings"]
+    assert ScreenplaySceneShardSemanticReview.model_validate(
+        {"findings": []}
+    ).findings == []
+    with pytest.raises(ValidationError, match="Field required"):
+        ScreenplaySceneShardSemanticReview.model_validate({})
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ScreenplaySceneShardSemanticReview.model_validate({
+            "findings": [],
+            "explanation": "none",
+        })
+
+
 def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
     monkeypatch,
 ) -> None:
@@ -294,17 +314,38 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
     flagged_key = unit_keys[0]
     original_unflagged = draft.slots[unit_keys[1]].model_dump(mode="json")
     calls = 0
+    structured_calls: list[tuple[list[dict[str, str]], dict]] = []
 
     async def fake_structured(messages, **kwargs):
         nonlocal calls
         calls += 1
+        structured_calls.append((messages, kwargs))
+        assert [message["role"] for message in messages] == [
+            "system", "user",
+        ]
+        assert messages[0]["content"] == (
+            scene_shards_module.SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT
+        )
+        assert "response_format" not in kwargs
         if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            prompt = messages[1]["content"]
+            assert "findings=[]" not in prompt
+            assert '{"findings":[]}' in prompt
+            assert "不得输出 Markdown、解释或任何对象外文本" in prompt
+            assert kwargs["output_schema"] == (
+                ScreenplaySceneShardSemanticReview.model_json_schema()
+            )
+            assert json.dumps(
+                kwargs["output_schema"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ) in prompt
             if calls <= 2:
-                assert "person_甲" in messages[0]["content"]
-                assert '"canonical_name":"甲"' in messages[0]["content"]
-                assert '"text":"甲推门进入。"' in messages[0]["content"]
-                assert '"projection":"action"' in messages[0]["content"]
-                assert '"canonical_name":"丙"' not in messages[0]["content"]
+                assert "person_甲" in prompt
+                assert '"canonical_name":"甲"' in prompt
+                assert '"text":"甲推门进入。"' in prompt
+                assert '"projection":"action"' in prompt
+                assert '"canonical_name":"丙"' not in prompt
                 return ScreenplaySceneShardSemanticReview(findings=[
                     ScreenplaySceneShardSemanticFinding(
                         unit_key=flagged_key,
@@ -313,9 +354,18 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
                     )
                 ])
             return ScreenplaySceneShardSemanticReview(findings=[])
-        assert '"projection":"action"' in messages[0]["content"]
-        assert '"text":"甲推门进入。"' in messages[0]["content"]
-        assert '"canonical_name":"甲"' in messages[0]["content"]
+        prompt = messages[1]["content"]
+        assert '"projection":"action"' in prompt
+        assert '"text":"甲推门进入。"' in prompt
+        assert '"canonical_name":"甲"' in prompt
+        assert kwargs["output_schema"] == (
+            ScreenplaySceneShardCreativeIR.model_json_schema()
+        )
+        assert json.dumps(
+            kwargs["output_schema"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ) in prompt
         repaired = draft.model_copy(deep=True)
         repaired.slots[flagged_key].text = "甲推门进入。"
         return repaired
@@ -352,6 +402,28 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
     assert audit[0]["creative_hash"] != ""
     assert audit[-1]["creative_hash"] == scene_shards_module._hash(
         repaired.model_dump(mode="json")
+    )
+    review_calls = [
+        kwargs
+        for _messages, kwargs in structured_calls
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview
+    ]
+    repair_calls = [
+        kwargs
+        for _messages, kwargs in structured_calls
+        if kwargs["model_type"] is ScreenplaySceneShardCreativeIR
+    ]
+    assert len(review_calls) == 4
+    assert len(repair_calls) == 1
+    assert all(
+        SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+        in kwargs["operation_id"]
+        for kwargs in review_calls + repair_calls
+    )
+    assert all(
+        kwargs["call_meta"]["contract_version"]
+        == SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+        for kwargs in review_calls + repair_calls
     )
 
 
@@ -507,6 +579,15 @@ def test_scene_shard_semantic_prompt_reads_action_source_facts_for_production_dr
         scene_input_contracts=[contract],
         identity_registry=[],
     )
+    review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
+    assert "findings=[]" not in prompt
+    assert '{"findings":[]}' in prompt
+    assert "不得输出 Markdown、解释或任何对象外文本" in prompt
+    assert json.dumps(
+        review_schema,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) in prompt
     assert all(
         source_segment_facts(source_id, text)[0].text in prompt
         for source_id, text in source_rows
@@ -575,11 +656,15 @@ def test_scene_shard_semantic_clean_dual_review_uses_real_structured_signature(
     contracts = _contracts([plan], blueprint)[plan.shard_id]
     draft = _creative_shard(plan, blueprint, contracts)
     reviewer_calls: list[dict] = []
+    reviewer_messages: list[list[dict[str, str]]] = []
 
-    async def fake_chat(*_args, **kwargs):
+    async def fake_chat(messages, **kwargs):
         meta = kwargs["call_meta"]
         reviewer_calls.append(meta)
-        return ScreenplaySceneShardSemanticReview().model_dump_json()
+        reviewer_messages.append(messages)
+        return ScreenplaySceneShardSemanticReview(
+            findings=[],
+        ).model_dump_json()
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     result, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
@@ -595,6 +680,20 @@ def test_scene_shard_semantic_clean_dual_review_uses_real_structured_signature(
     assert len(reviewer_calls) == 2
     assert {item["reviewer_no"] for item in reviewer_calls} == {1, 2}
     assert all(item["semantic_attempt"] == 0 for item in reviewer_calls)
+    assert all(
+        item["contract_version"]
+        == SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+        for item in reviewer_calls
+    )
+    assert all(
+        SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+        in item["operation_id"]
+        for item in reviewer_calls
+    )
+    assert all(
+        [message["role"] for message in messages] == ["system", "user"]
+        for messages in reviewer_messages
+    )
     assert audit[0]["consensus"] == []
 
 
@@ -3062,6 +3161,8 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
     ("mutation", "reason"),
     [
         ("missing", "semantic_review_evidence_missing"),
+        ("evidence_version", "semantic_review_version"),
+        ("snapshot_version", "semantic_review_version"),
         ("reviewed_hash", "semantic_review_hash_binding"),
         ("initial_candidate", "semantic_review_initial_candidate"),
         ("not_clean", "semantic_review_not_clean"),
@@ -3149,6 +3250,12 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
     evidence = raw["content"]["semantic_review_evidence"]
     if mutation == "missing":
         raw["content"].pop("semantic_review_evidence")
+    elif mutation == "evidence_version":
+        evidence["contract_version"] = "screenplay-scene-semantic-review.v1"
+    elif mutation == "snapshot_version":
+        artifact["model_snapshot"]["semantic_review_version"] = (
+            "screenplay-scene-semantic-review.v1"
+        )
     elif mutation == "reviewed_hash":
         artifact["model_snapshot"]["reviewed_creative_hash"] = "0" * 64
     elif mutation == "initial_candidate":

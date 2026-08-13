@@ -64,7 +64,11 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v6"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v1"
+    "screenplay-scene-semantic-review.v2"
+)
+SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
+    "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
+    "不得返回 Markdown、解释或对象外文本。"
 )
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
@@ -388,9 +392,7 @@ class ScreenplaySceneShardSemanticFinding(BaseModel):
 class ScreenplaySceneShardSemanticReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    findings: list[ScreenplaySceneShardSemanticFinding] = Field(
-        default_factory=list,
-    )
+    findings: list[ScreenplaySceneShardSemanticFinding]
 
 
 class ScreenplaySceneShardUnit(IRSceneUnit):
@@ -3331,6 +3333,7 @@ def _scene_shard_semantic_review_prompt(
             identity_registry=identity_registry,
         )
     )
+    review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
     return (
         "你是剧本场次分片的独立语义审查员。逐 slot 对照原始 source_text 与"
         "程序冻结的 exact-unit state_subject/actor/speaker，检查 creative text、"
@@ -3338,12 +3341,19 @@ def _scene_shard_semantic_review_prompt(
         "不存在/相反的人物行为与反应。不能从姓名词面、visible、scene roster 猜主体；"
         "environment_only 也不能承载人物思考、发问、反应或动作。只报告有明确来源"
         "冲突的 finding；不得建议改结构、主体、时间线、source ownership 或 audit。"
-        "无问题输出 findings=[]。\n冻结 slot 权威：\n"
+        '无问题时只输出合法 JSON 对象 {"findings":[]}。不得输出 Markdown、解释或'
+        "任何对象外文本。\n冻结 slot 权威：\n"
         + json.dumps(authority_slots, ensure_ascii=False, separators=(",", ":"))
         + "\n冻结身份最小映射：\n"
         + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
         + "\n待审 creative fields：\n"
         + draft.model_dump_json()
+        + "\n完整输出 JSON Schema：\n"
+        + json.dumps(
+            review_schema,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     )
 
 
@@ -3357,6 +3367,8 @@ async def _semantic_review_scene_shard_draft(
     validate_draft: Callable[[ScreenplaySceneShardCreativeIR], list[str]],
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
     """Consensus-review creative prose without allowing structural rewrites."""
+    review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
+    creative_schema = ScreenplaySceneShardCreativeIR.model_json_schema()
 
     async def review(
         candidate: ScreenplaySceneShardCreativeIR,
@@ -3381,15 +3393,26 @@ async def _semantic_review_scene_shard_draft(
             ]
 
         return await model_gateway.chat_structured(
-            [{"role": "user", "content": _scene_shard_semantic_review_prompt(
-                draft=candidate,
-                scene_input_contracts=scene_input_contracts,
-                identity_registry=identity_registry,
-            )}],
+            [
+                {
+                    "role": "system",
+                    "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": _scene_shard_semantic_review_prompt(
+                        draft=candidate,
+                        scene_input_contracts=scene_input_contracts,
+                        identity_registry=identity_registry,
+                    ),
+                },
+            ],
             model_type=ScreenplaySceneShardSemanticReview,
             validate=validate_review,
             operation_id=(
-                f"{operation_id}:semantic:{phase}:reviewer-{reviewer_no}:"
+                f"{operation_id}:semantic:"
+                f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:{phase}:"
+                f"reviewer-{reviewer_no}:"
                 f"{_hash(candidate.model_dump(mode='json'))}"
             ),
             max_tokens=2048,
@@ -3402,7 +3425,11 @@ async def _semantic_review_scene_shard_draft(
                 "substage": phase,
                 "shard_id": shard_id,
                 "reviewer_no": reviewer_no,
+                "contract_version": (
+                    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                ),
             },
+            output_schema=review_schema,
         )
 
     async def consensus(
@@ -3495,13 +3522,26 @@ async def _semantic_review_scene_shard_draft(
         + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
         + "\n当前 creative：\n"
         + draft.model_dump_json()
+        + "\n完整 creative 输出 JSON Schema：\n"
+        + json.dumps(
+            creative_schema,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     )
     repaired = await model_gateway.chat_structured(
-        [{"role": "user", "content": repair_prompt}],
+        [
+            {
+                "role": "system",
+                "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": repair_prompt},
+        ],
         model_type=ScreenplaySceneShardCreativeIR,
         validate=validate_repair,
         operation_id=(
-            f"{operation_id}:semantic:repair:"
+            f"{operation_id}:semantic:"
+            f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:repair:"
             f"{_hash(draft.model_dump(mode='json'))}"
         ),
         max_tokens=max(4096, min(12288, len(repair_prompt) // 2)),
@@ -3513,7 +3553,9 @@ async def _semantic_review_scene_shard_draft(
             "stage_key": "screenplay_scene_shard_semantic_repair",
             "substage": "consensus_repair",
             "shard_id": shard_id,
+            "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
         },
+        output_schema=creative_schema,
     )
     if set(repaired.slots) != set(draft.slots):
         raise ScreenplaySceneShardError(

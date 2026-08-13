@@ -247,7 +247,7 @@ def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
                 "reviewed_creative_hash": creative_hash,
                 "phases": [{
                     "creative_hash": creative_hash,
-                    "reviews": [{"issues": []}, {"issues": []}],
+                    "reviews": [{"findings": []}, {"findings": []}],
                     "consensus": [],
                 }],
             },
