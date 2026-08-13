@@ -36,6 +36,7 @@ BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # truncated prefix.
 BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
+BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v2"
 
 
 def _normalize_source_segment_id(value: Any) -> str:

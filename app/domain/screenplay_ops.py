@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import math
 
+from app.narrative_blueprint import (
+    BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD,
+)
 from app.orchestration.state_machine import StateConflict
 
 try:
@@ -1786,7 +1789,13 @@ def _screenplay_generation_preflight(episode_id: str):
     from app.source_excerpt import index_source_segments
 
     source_segment_count = len(index_source_segments(source_text))
-    estimated_blueprint_shards = max(1, math.ceil(source_segment_count / 28))
+    estimated_blueprint_shards = max(
+        1,
+        math.ceil(
+            source_segment_count
+            / BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD
+        ),
+    )
     estimated_scene_shards = max(1, math.ceil(source_segment_count / 16))
     reusable_rows = conn.execute(
         """SELECT id,type,status,contract_version,content_json FROM artifacts

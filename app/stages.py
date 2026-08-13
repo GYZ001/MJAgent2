@@ -34,6 +34,7 @@ from app.harness.types import Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.narrative_blueprint import (
     BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE,
+    BLUEPRINT_SHARD_POLICY_VERSION,
     BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD,
     BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD,
     BLUEPRINT_VERSION,
@@ -5002,7 +5003,7 @@ async def _generate_sharded_narrative_blueprint(
             ).encode("utf-8")
         ).hexdigest()
         cached_rows = get_conn().execute(
-            """SELECT content_json
+            """SELECT content_json, model_snapshot_json
                  FROM artifacts
                 WHERE scope_type='episode' AND scope_id=?
                   AND type='screenplay_narrative_blueprint_shard'
@@ -5018,13 +5019,18 @@ async def _generate_sharded_narrative_blueprint(
         shard: NarrativeBlueprintShard | None = None
         for cached_row in cached_rows:
             try:
+                cached_snapshot = json.loads(
+                    cached_row["model_snapshot_json"] or "{}"
+                )
                 cached = NarrativeBlueprintShard.model_validate(
                     json.loads(cached_row["content_json"] or "{}"),
                 )
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
             if (
-                cached.shard_index == shard_index
+                cached_snapshot.get("shard_policy_version")
+                == BLUEPRINT_SHARD_POLICY_VERSION
+                and cached.shard_index == shard_index
                 and cached.source_hash == source_hash
                 and cached.boundary_hash == boundary_hash
             ):
@@ -5043,70 +5049,65 @@ async def _generate_sharded_narrative_blueprint(
                 break
         if shard is None:
             errors: list[str] = []
-            for attempt in range(1, 4):
-                prompt = (
-                    f"为第 {episode['episode_no']} 集生成叙事蓝图分片 "
-                    f"{shard_index}/{len(segment_shards)}。只处理 target_sources，"
-                    "不得复述或重新拥有边界上下文中的来源。每个节点最多绑定 "
-                    f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE} 个连续 SRC。"
-                    "同一 SRC 最终只能归属一个程序分场；跨场信息必须通过状态事实、"
-                    "决定前置或 transition_cue 派生，不得让不同场节点重复消费 SRC。"
-                    "节点只承担一个核心动作、一个主要情绪/因果转折和一个离场结果；"
-                    "跨时间域、跨地点或动作过载必须拆节点。participants、decision.actor_key"
-                    " 和状态主体必须使用人物上下文中的稳定 character_key；未具名角色使用"
-                    "地点与戏剧职责组成稳定 key；原文有称谓的实体必须复用其来源实体 key。"
-                    "第一分片首节点使用"
-                    " episode_start，后续分片根据 boundary_context 延续或明确跳转。"
-                    "必须复用 boundary_context 中仍有效的 fact_key、人物位置和时间域；"
-                    "新 node/fact key 只需在本分片内唯一，程序会加命名空间。"
-                    "每个节点必须显式输出 narrative_layer/event_priority/render_policy。"
-                    "可表演且形成画面状态变化的故事事件使用 story+causal+standalone；"
-                    "作者互动、说明等仅需完整来源审计且不应成片的旁文本使用"
-                    " paratext+connective+exclude_from_spine。不得根据 SRC 编号、所在"
-                    "位置、characters 是否为空或自由文本词表分类。"
-                    "每个 story 节点拥有的 source_facts 中，projection=quoted 的"
-                    "每个单元必须在 source_unit_deliveries 中恰有一条交付决策。"
-                    "引号只表示 quoted_span，不代表有人实际开口；必须依据当前来源"
-                    "语义选择 spoken_dialogue、offscreen_voice、written_text、"
-                    "sound_effect 或 unspoken_reference。只有前两种声音交付才在"
-                    "participant_evidence 中填写恰一条 usage=voice，source_unit_keys "
-                    "精确引用该 source_unit_key，identity_key 与 performer_key 一致；"
-                    "内容作者放 content_owner_key，不得自动变成 performer。"
-                    "同一 identity 可分别声明 visible、voice 或 mentioned；action 单元"
-                    "不要求 source_unit_delivery。但每个 projection=action 的 prose "
-                    "source unit 必须二选一：人物思考/反应/发问/动作在 "
-                    "participant_evidence 中填唯一 usage=state_subject 并以 "
-                    "source_unit_keys 精确绑定；纯环境单元才写入 "
-                    "environment_source_unit_keys。visible、scene roster、content_owner "
-                    "绝非状态主体默认值。"
-                    "只输出 JSON，不要解释。\n\n"
-                    f"上次校验错误：{json.dumps(errors, ensure_ascii=False)}\n"
-                    f"人物上下文：{json.dumps(bible_context, ensure_ascii=False, separators=(',', ':'))}\n"
-                    f"boundary_context：{json.dumps(boundary, ensure_ascii=False, separators=(',', ':'))}\n"
-                    f"target_sources：{json.dumps(source_payload, ensure_ascii=False, separators=(',', ':'))}\n"
-                    "输出 Schema："
-                    + json.dumps(
-                        NarrativeBlueprintShard.model_json_schema(),
-                        ensure_ascii=False,
+            split_for_truncation = False
+            token_budget = _blueprint_shard_token_budget(shard_segments)
+            for attempt in range(1, BLUEPRINT_SHARD_MAX_ATTEMPTS + 1):
+                prompt = _blueprint_shard_prompt(
+                    episode_no=int(episode["episode_no"]),
+                    shard_index=shard_index,
+                    shard_count=len(segment_shards),
+                    errors=errors,
+                    bible_context=bible_context,
+                    boundary=boundary,
+                    source_payload=source_payload,
+                )
+                generation_budget.claim(max_tokens=token_budget)
+                remaining_seconds = (
+                    BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+                    - (time.monotonic() - generation_budget.started_at)
+                )
+                try:
+                    raw = await asyncio.wait_for(
+                        model_gateway.chat(
+                            [
+                                {"role": "system", "content": SYSTEM_PREFIX},
+                                {"role": "user", "content": prompt},
+                            ],
+                            temperature=0.15,
+                            max_tokens=token_budget,
+                            call_meta={
+                                "stage": "剧本时空因果蓝图分片",
+                                "stage_key": "screenplay_blueprint_shard",
+                                "episode_id": str(episode.get("id") or ""),
+                                "shard_index": shard_index,
+                                "shard_count": len(segment_shards),
+                                "attempt": attempt,
+                                "split_depth": split_depth,
+                                "source_count": len(source_ids),
+                                "source_fact_count": sum(
+                                    len(item["source_facts"])
+                                    for item in source_payload
+                                ),
+                                "expected_json": True,
+                            },
+                        ),
+                        timeout=max(0.001, remaining_seconds),
                     )
-                )
-                raw = await model_gateway.chat(
-                    [
-                        {"role": "system", "content": SYSTEM_PREFIX},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.15,
-                    max_tokens=10000,
-                    call_meta={
-                        "stage": "剧本时空因果蓝图分片",
-                        "stage_key": "screenplay_blueprint_shard",
-                        "episode_id": str(episode.get("id") or ""),
-                        "shard_index": shard_index,
-                        "shard_count": len(segment_shards),
-                        "attempt": attempt,
-                        "expected_json": True,
-                    },
-                )
+                except hiagent.ProviderError as exc:
+                    if (
+                        exc.failure_kind
+                        == hiagent.ProviderFailureKind.OUTPUT_TRUNCATED.value
+                        and len(shard_segments) > 1
+                        and split_depth < BLUEPRINT_GENERATION_MAX_SPLIT_DEPTH
+                    ):
+                        split_for_truncation = True
+                        break
+                    raise
+                except asyncio.TimeoutError as exc:
+                    raise StageError(
+                        "剧本时空因果蓝图分片",
+                        ["[BLUEPRINT_GENERATION_TIME_BUDGET] provider调用超过全局时间上限"],
+                    ) from exc
                 trace = current_trace()
                 evidence_repository.create_artifact(
                     EvidenceArtifact(
@@ -5121,6 +5122,11 @@ async def _generate_sharded_narrative_blueprint(
                             "attempt": attempt,
                             "source_hash": source_hash,
                             "boundary_hash": boundary_hash,
+                            "shard_policy_version": (
+                                BLUEPRINT_SHARD_POLICY_VERSION
+                            ),
+                            "split_depth": split_depth,
+                            "requested_max_tokens": token_budget,
                         },
                         contract_version=BLUEPRINT_VERSION,
                         prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
@@ -5170,20 +5176,38 @@ async def _generate_sharded_narrative_blueprint(
                             model_snapshot={
                                 "shard_index": shard_index,
                                 "source_count": len(source_ids),
+                                "source_fact_count": sum(
+                                    len(item["source_facts"])
+                                    for item in source_payload
+                                ),
+                                "shard_policy_version": (
+                                    BLUEPRINT_SHARD_POLICY_VERSION
+                                ),
+                                "split_depth": split_depth,
+                                "requested_max_tokens": token_budget,
                             },
                         ),
                         step_run_id=trace.step_run_id,
                     )
                     break
+            if split_for_truncation:
+                split = _split_blueprint_segments(shard_segments)
+                segment_shards[shard_index - 1:shard_index] = split
+                shard_split_depths[shard_index - 1:shard_index] = [
+                    split_depth + 1,
+                    split_depth + 1,
+                ]
+                continue
             if shard is None:
                 if (
-                    len(shard_segments)
-                    > BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE
+                    len(shard_segments) > 1
+                    and split_depth < BLUEPRINT_GENERATION_MAX_SPLIT_DEPTH
                 ):
-                    midpoint = len(shard_segments) // 2
-                    segment_shards[shard_index - 1:shard_index] = [
-                        shard_segments[:midpoint],
-                        shard_segments[midpoint:],
+                    split = _split_blueprint_segments(shard_segments)
+                    segment_shards[shard_index - 1:shard_index] = split
+                    shard_split_depths[shard_index - 1:shard_index] = [
+                        split_depth + 1,
+                        split_depth + 1,
                     ]
                     continue
                 raise StageError(
@@ -5220,6 +5244,11 @@ async def _generate_sharded_narrative_blueprint(
             model_snapshot={
                 "generation_mode": "source_shards",
                 "shard_count": len(segment_shards),
+                "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+                "provider_call_count": generation_budget.provider_calls,
+                "requested_output_tokens": (
+                    generation_budget.requested_output_tokens
+                ),
             },
         ),
         step_run_id=trace.step_run_id,
