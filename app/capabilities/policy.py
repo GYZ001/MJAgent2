@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 import time
 from contextvars import ContextVar
 from typing import Any
@@ -24,6 +25,7 @@ DESTRUCTIVE_APPROVAL_TTL_S = 5 * 60
 
 _TOKEN_SECRET = secrets.token_bytes(32)
 _APPROVALS: dict[str, ApprovalTokenPayload] = {}
+_APPROVALS_LOCK = threading.RLock()
 _CONSUMED_EXECUTION_APPROVAL: ContextVar[ApprovalTokenPayload | None] = (
     ContextVar("consumed_execution_approval", default=None)
 )
@@ -117,7 +119,8 @@ def issue_approval(
         reason=reason,
         impact_snapshot=preflight.model_dump(mode="json"),
     )
-    _APPROVALS[approval_id] = payload
+    with _APPROVALS_LOCK:
+        _APPROVALS[approval_id] = payload
     token = _sign_token(approval_id)
     return token, payload
 
@@ -131,44 +134,48 @@ def consume_approval(
     session_id: str | None = None,
 ) -> ApprovalTokenPayload:
     approval_id = _verify_token(token)
-    payload = _APPROVALS.get(approval_id)
-    if payload is None:
-        raise PermissionError("approval_token unknown or revoked")
-    if payload.used_at is not None:
-        raise PermissionError("approval_token already used")
-    if time.time() > payload.expires_at:
-        raise PermissionError("approval_token expired")
-    if payload.command != command:
-        raise PermissionError("approval_token command mismatch")
-    if payload.args_hash != args_hash(args):
-        raise PermissionError("approval_token args mismatch")
-    if payload.state_fingerprint != state_fingerprint_now:
-        raise PermissionError("approval_token state fingerprint mismatch")
-    if payload.session_id is not None and payload.session_id != session_id:
-        raise PermissionError("approval_token session mismatch")
-    payload.used_at = time.time()
-    payload.decision = ApprovalDecision.APPROVE
-    _APPROVALS[approval_id] = payload
+    with _APPROVALS_LOCK:
+        payload = _APPROVALS.get(approval_id)
+        if payload is None:
+            raise PermissionError("approval_token unknown or revoked")
+        if payload.used_at is not None:
+            raise PermissionError("approval_token already used")
+        if time.time() > payload.expires_at:
+            raise PermissionError("approval_token expired")
+        if payload.command != command:
+            raise PermissionError("approval_token command mismatch")
+        if payload.args_hash != args_hash(args):
+            raise PermissionError("approval_token args mismatch")
+        if payload.state_fingerprint != state_fingerprint_now:
+            raise PermissionError("approval_token state fingerprint mismatch")
+        if payload.session_id is not None and payload.session_id != session_id:
+            raise PermissionError("approval_token session mismatch")
+        payload.used_at = time.time()
+        payload.decision = ApprovalDecision.APPROVE
+        _APPROVALS[approval_id] = payload
     _CONSUMED_EXECUTION_APPROVAL.set(payload)
     return payload
 
 
 def decide_approval(approval_id: str, decision: ApprovalDecision, reason: str | None = None) -> ApprovalTokenPayload:
-    payload = _APPROVALS.get(approval_id)
-    if payload is None:
-        raise KeyError(f"unknown approval: {approval_id}")
-    if payload.used_at is not None:
-        raise PermissionError("approval already finalized")
-    payload.decision = decision
-    payload.reason = reason
-    if decision == ApprovalDecision.REJECT:
-        payload.used_at = time.time()
-    _APPROVALS[approval_id] = payload
-    return payload
+    with _APPROVALS_LOCK:
+        payload = _APPROVALS.get(approval_id)
+        if payload is None:
+            raise KeyError(f"unknown approval: {approval_id}")
+        if payload.used_at is not None:
+            raise PermissionError("approval already finalized")
+        payload.decision = decision
+        payload.reason = reason
+        if decision == ApprovalDecision.REJECT:
+            payload.used_at = time.time()
+        _APPROVALS[approval_id] = payload
+        return payload
 
 
 def reset_approvals_for_tests() -> None:
-    _APPROVALS.clear()
+    with _APPROVALS_LOCK:
+        _APPROVALS.clear()
+    clear_consumed_execution_approval()
 
 
 def _sign_token(approval_id: str) -> str:

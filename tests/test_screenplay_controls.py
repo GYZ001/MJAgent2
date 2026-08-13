@@ -1389,6 +1389,187 @@ async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_gran
     ).fetchone()["c"] == 1
 
 
+@pytest.mark.asyncio
+async def test_unknown_receipt_appearing_after_unconfirmed_preflight_cannot_mint_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from app.capabilities.bus import get_command_bus
+    from app.capabilities.schemas import CommandStatus
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+    initial = api._screenplay_blueprint_budget_projection("e1")
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint=initial["input_fingerprint"],
+        resume=False,
+    )
+    ensure_catalog_loaded()
+    bus = get_command_bus()
+    spec = bus.registry.get_command("screenplay.generate")
+    original_handler = spec.handler
+
+    async def inject_unknown_then_handle(args):
+        run_id = repository.create_run(
+            workflow_type="screenplay",
+            scope_type="episode",
+            scope_id="e1",
+            input_fingerprint=initial["input_fingerprint"],
+        )
+        conn.execute(
+            "UPDATE workflow_runs SET status='FAILED' WHERE id=?",
+            (run_id,),
+        )
+        conn.execute(
+            """INSERT INTO provider_calls(
+                   ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+                   attempt_no,recovery_disposition
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                db.now(), "chat", "model", "INTERRUPTED", 300000,
+                json.dumps({
+                    "stage_key": "screenplay_blueprint_patch",
+                    "requested_max_tokens": 16384,
+                    "effective_max_tokens": 8192,
+                }),
+                run_id, "late-unknown-op", 1,
+                "REQUIRES_EXPLICIT_RETRY",
+            ),
+        )
+        conn.commit()
+        return await original_handler(args)
+
+    bus.registry.commands["screenplay.generate"] = replace(
+        spec,
+        handler=inject_unknown_then_handle,
+    )
+    spawned = 0
+
+    def must_not_spawn(*_args, **_kwargs):
+        nonlocal spawned
+        spawned += 1
+        raise AssertionError("late unknown must stop before spawn")
+
+    monkeypatch.setattr(task_registry, "spawn", must_not_spawn)
+    try:
+        outcome = await bus.execute_async(
+            "screenplay.generate",
+            {
+                "episode_id": "e1",
+                "idempotency_key": "screenplay-late-unknown",
+            },
+        )
+    finally:
+        bus.registry.commands["screenplay.generate"] = spec
+
+    assert outcome.status == CommandStatus.FAILED
+    assert spawned == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM production_grants WHERE episode_id='e1'"
+    ).fetchone()["c"] == 0
+    assert conn.execute(
+        "SELECT grant_id FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["grant_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_approved_unknown_receipt_drift_rolls_back_before_grant_and_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from app.capabilities.bus import get_command_bus
+    from app.capabilities.schemas import CommandStatus
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+    initial = api._screenplay_blueprint_budget_projection("e1")
+    revision = ensure_production_revision(
+        episode_id="e1", kind="screenplay",
+        input_fingerprint=initial["input_fingerprint"], resume=False,
+    )
+
+    def insert_unknown(operation_id: str, stage_key: str) -> None:
+        run_id = repository.create_run(
+            workflow_type="screenplay", scope_type="episode", scope_id="e1",
+            input_fingerprint=initial["input_fingerprint"],
+        )
+        conn.execute("UPDATE workflow_runs SET status='FAILED' WHERE id=?", (run_id,))
+        conn.execute(
+            """INSERT INTO provider_calls(
+                   ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+                   attempt_no,recovery_disposition
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                db.now(), "chat", "model", "INTERRUPTED", 300000,
+                json.dumps({
+                    "stage_key": stage_key,
+                    "requested_max_tokens": 16384,
+                    "effective_max_tokens": 8192,
+                }),
+                run_id, operation_id, 1, "REQUIRES_EXPLICIT_RETRY",
+            ),
+        )
+        conn.commit()
+
+    insert_unknown("approved-unknown", "screenplay_blueprint_patch")
+    ensure_catalog_loaded()
+    bus = get_command_bus()
+    args = {"episode_id": "e1", "idempotency_key": "screenplay-receipt-drift"}
+    waiting = await bus.execute_async("screenplay.generate", args)
+    assert waiting.status == CommandStatus.WAITING_APPROVAL
+    spec = bus.registry.get_command("screenplay.generate")
+    original_handler = spec.handler
+
+    async def drift_then_handle(handler_args):
+        insert_unknown("late-second-unknown", "screenplay_blueprint_review")
+        return await original_handler(handler_args)
+
+    bus.registry.commands["screenplay.generate"] = replace(
+        spec,
+        handler=drift_then_handle,
+    )
+    spawned = 0
+
+    def must_not_spawn(*_args, **_kwargs):
+        nonlocal spawned
+        spawned += 1
+        raise AssertionError("receipt drift must stop before spawn")
+
+    monkeypatch.setattr(task_registry, "spawn", must_not_spawn)
+    try:
+        outcome = await bus.execute_async(
+            "screenplay.generate",
+            {**args, "approval_token": waiting.data["approval_token"]},
+        )
+    finally:
+        bus.registry.commands["screenplay.generate"] = spec
+
+    assert outcome.status == CommandStatus.FAILED
+    assert spawned == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM production_grants WHERE episode_id='e1'"
+    ).fetchone()["c"] == 0
+    assert conn.execute(
+        "SELECT grant_id FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["grant_id"] is None
+
+
 @pytest.mark.parametrize(
     ("issued_by", "receipt_hash"),
     [

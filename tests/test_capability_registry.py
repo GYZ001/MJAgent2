@@ -299,6 +299,51 @@ def test_approval_token_single_use() -> None:
         consume_approval(token, command="project.delete", args=args, state_fingerprint_now="sha256:abc")
 
 
+def test_approval_token_concurrent_consume_is_exactly_once() -> None:
+    import concurrent.futures
+    import threading
+
+    preflight = PreflightResult(
+        command="project.delete",
+        allowed=True,
+        risk=RiskLevel.R3_DESTRUCTIVE,
+        summary="删除项目",
+        state_fingerprint="sha256:concurrent",
+        requires_confirmation=True,
+    )
+    args = {"project_id": "proj_x"}
+    token, approval = issue_approval(
+        command="project.delete",
+        args=args,
+        preflight=preflight,
+    )
+    barrier = threading.Barrier(2)
+
+    def consume_once() -> tuple[str, str]:
+        barrier.wait(timeout=5)
+        try:
+            value = consume_approval(
+                token,
+                command="project.delete",
+                args=args,
+                state_fingerprint_now="sha256:concurrent",
+            )
+            return "ok", value.approval_id
+        except PermissionError as exc:
+            return "error", str(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _value: consume_once(), range(2)))
+
+    assert sorted(item[0] for item in results) == ["error", "ok"]
+    assert [item[1] for item in results if item[0] == "ok"] == [
+        approval.approval_id
+    ]
+    assert "already used" in next(
+        item[1] for item in results if item[0] == "error"
+    )
+
+
 def test_approval_token_requires_bound_session() -> None:
     preflight = PreflightResult(
         command="project.delete",
