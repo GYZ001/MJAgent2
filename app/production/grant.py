@@ -94,8 +94,12 @@ def issue_production_grant(
     issued_by: str = "user",
     ttl_s: int = GRANT_TTL_S,
     max_touched_nodes: int = 8,
+    conn=None,
+    commit: bool = True,
 ) -> tuple[ProductionGrant, str]:
-    ensure_production_grants_table()
+    db = conn or get_conn()
+    if conn is None:
+        ensure_production_grants_table()
     grant_id = new_id("pgrant")
     token = secrets.token_urlsafe(24)
     issued_at = now()
@@ -113,8 +117,7 @@ def issue_production_grant(
         issued_at=issued_at,
         expires_at=expires_at,
     )
-    conn = get_conn()
-    conn.execute(
+    db.execute(
         """INSERT INTO production_grants(
             id, episode_id, project_id, production_revision_id, kind,
             input_artifact_hash, allowed_commands_json, max_touched_nodes,
@@ -128,13 +131,14 @@ def issue_production_grant(
     )
     # bind to revision
     try:
-        conn.execute(
+        db.execute(
             "UPDATE production_revisions SET grant_id=?, updated_at=? WHERE id=?",
             (grant_id, issued_at, production_revision_id),
         )
     except Exception:  # noqa: BLE001
         pass
-    conn.commit()
+    if commit:
+        db.commit()
     return grant, token
 
 

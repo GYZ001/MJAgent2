@@ -99,7 +99,13 @@ def _cached_successful_provider_response(
         for row in rows:
             if expected_contract:
                 stored_meta = json.loads(row["meta"] or "{}")
-                if str(stored_meta.get("contract_version") or "").strip() != expected_contract:
+                stored_contract = str(
+                    stored_meta.get("contract_version") or ""
+                ).strip()
+                # Legacy lossy meta may omit this field.  Exact operation,
+                # model and full request_hash remain sufficient authority;
+                # an explicitly different stored contract still fences reuse.
+                if stored_contract and stored_contract != expected_contract:
                     continue
             value = json.loads(row["response_json"])
             if not isinstance(value, dict):

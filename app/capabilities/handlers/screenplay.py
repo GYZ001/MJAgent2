@@ -12,7 +12,10 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
     outcome = await call_guarded(
         api.start_screenplay,
         args.episode_id,
-        body={},
+        # This handler runs only after CommandBus confirmation.  Bind that
+        # approval to the one-time Production Grant required to retry an
+        # unresolved provider outcome; direct route calls cannot set it.
+        body={"authorize_blueprint_retry": True},
     )
     if isinstance(outcome, CommandResult):
         return outcome

@@ -1383,6 +1383,65 @@ def _new_screenplay_recorder(
     )
 
 
+def _screenplay_blueprint_budget_projection(
+    episode_id: str,
+    *,
+    run_id: str | None = None,
+    started_at: float | None = None,
+) -> dict[str, Any]:
+    """Read-only budget/grant projection shared by preflight and activation."""
+    from app.production.revision import get_active_production_revision
+    from app.stages import (
+        BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS,
+        BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS,
+        BLUEPRINT_SHARD_MIN_TOKENS,
+        _BlueprintGenerationBudget,
+    )
+
+    conn = get_conn()
+    ep = conn.execute("SELECT * FROM episodes WHERE id=?", (episode_id,)).fetchone()
+    if ep is None:
+        raise ValueError(f"episode not found: {episode_id}")
+    project = conn.execute(
+        "SELECT bible_version FROM projects WHERE id=?", (ep["project_id"],)
+    ).fetchone()
+    source_text = _episode_source_text(conn, ep)
+    input_fp = fingerprint(
+        episode_id,
+        ep["source_chapters"],
+        source_text,
+        project["bible_version"] if project else 0,
+    )
+    revision = get_active_production_revision(episode_id, "screenplay")
+    current_grant_id = str(revision.grant_id or "") if revision else ""
+    budget = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=run_id,
+        started_at_epoch=started_at,
+        episode_id=episode_id,
+        input_fingerprint=input_fp,
+        retry_grant_id=current_grant_id,
+    )
+    token_admissible = (
+        budget.charged_output_tokens + BLUEPRINT_SHARD_MIN_TOKENS
+        <= BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+    )
+    call_admissible = (
+        budget.provider_calls < BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+    )
+    return {
+        "budget": budget,
+        "input_fingerprint": input_fp,
+        "revision": revision,
+        "current_grant_id": current_grant_id,
+        "requires_fresh_retry_grant": budget.requires_fresh_retry_grant,
+        "provider_calls": budget.provider_calls,
+        "charged_output_tokens": budget.charged_output_tokens,
+        "unknown_output_tokens": budget.unknown_output_tokens,
+        "token_admissible": token_admissible,
+        "call_admissible": call_admissible,
+        "admissible_after_approval": token_admissible and call_admissible,
+    }
+
 def _spawn_screenplay_activation(
     episode_id: str,
     recorder: WorkflowRecorder,
@@ -1395,6 +1454,7 @@ def _spawn_screenplay_activation(
     expected_active_run_id: str | None = None,
     clear_unpublished_ir: bool = False,
     resume_eligibility=None,
+    authorize_blueprint_retry: bool = False,
 ):
     """Atomically claim one episode before registering its in-process task."""
     conn = get_conn()
@@ -1403,6 +1463,7 @@ def _spawn_screenplay_activation(
     prepared_revision = None
     try:
         conn.execute("BEGIN IMMEDIATE")
+        activation_stamp = now()
         previous_row = conn.execute(
             "SELECT screenplay_status, screenplay_error, screenplay_started_at, "
             "screenplay_updated_at, active_screenplay_run_id, "
@@ -1495,7 +1556,34 @@ def _spawn_screenplay_activation(
                 "WHERE id=?",
                 (episode_id,),
             )
-        stamp = now()
+        budget_projection = _screenplay_blueprint_budget_projection(
+            episode_id,
+            run_id=recorder.run_id,
+            started_at=activation_stamp,
+        )
+        budget = budget_projection["budget"]
+        if budget_projection["requires_fresh_retry_grant"]:
+            if not authorize_blueprint_retry:
+                budget.assert_activation_admissible()
+            revision = budget_projection["revision"]
+            if revision is None:
+                raise RuntimeError(
+                    "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED: 缺少可绑定的 active revision"
+                )
+            from app.production.grant import issue_production_grant
+
+            grant, _token = issue_production_grant(
+                episode_id=episode_id,
+                project_id=project_id,
+                production_revision_id=revision.id,
+                kind="screenplay",
+                issued_by="user_retry_approval",
+                conn=conn,
+                commit=False,
+            )
+            budget.retry_grant_id = grant.grant_id
+        budget.assert_activation_admissible()
+        stamp = activation_stamp
         started_at = (
             previous["screenplay_started_at"]
             if preserve_started_at else stamp
@@ -1841,6 +1929,7 @@ def _screenplay_generation_preflight(episode_id: str):
         reusable_counts[artifact_type] = (
             reusable_counts.get(artifact_type, 0) + 1
         )
+    budget_projection = _screenplay_blueprint_budget_projection(episode_id)
     return {
         "action": "generate_screenplay",
         "episode_id": episode_id,
@@ -1855,6 +1944,18 @@ def _screenplay_generation_preflight(episode_id: str):
         "cost_estimate_cny": None,
         "cast_impact": cast_impact,
         "reusable_validated_artifacts": reusable_counts,
+        "blueprint_budget": {
+            key: budget_projection[key]
+            for key in (
+                "requires_fresh_retry_grant",
+                "provider_calls",
+                "charged_output_tokens",
+                "unknown_output_tokens",
+                "token_admissible",
+                "call_admissible",
+                "admissible_after_approval",
+            )
+        },
         "idempotency_scope": {
             "baseline": ep.get("screenplay_artifact_id") or "empty",
             "constraint_version": int(ep.get("screenplay_constraint_version") or 0),
@@ -2012,6 +2113,9 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             ),
             clear_unpublished_ir=not resume_existing,
             resume_eligibility=eligibility if resume_existing else None,
+            authorize_blueprint_retry=bool(
+                body.get("authorize_blueprint_retry")
+            ),
         )
     except Exception as exc:
         raise HTTPException(503, {

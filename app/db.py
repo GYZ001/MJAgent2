@@ -245,6 +245,8 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     error TEXT,
     request_json TEXT,
     request_hash TEXT,
+    contract_version TEXT,
+    production_grant_id TEXT,
     response_json TEXT,
     meta TEXT,
     project_id TEXT,
@@ -1414,6 +1416,8 @@ MIGRATIONS = (
     "ALTER TABLE benchmark_runs ADD COLUMN attestation_note TEXT",
     "ALTER TABLE provider_calls ADD COLUMN operation_id TEXT",
     "ALTER TABLE provider_calls ADD COLUMN request_hash TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN contract_version TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN production_grant_id TEXT",
     "ALTER TABLE provider_calls ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE provider_calls ADD COLUMN supersedes_call_id INTEGER",
     "ALTER TABLE provider_calls ADD COLUMN superseded_by_call_id INTEGER",
@@ -2429,6 +2433,7 @@ def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
     priority_keys = (
         "generation_contract",
         "published_output_contract",
+        "contract_version",
         "prompt_version",
         "stage",
         "stage_key",
@@ -2609,25 +2614,36 @@ def _log_provider_call_inner(
     op_id = operation_id or str((meta or {}).get("operation_id") or "") \
         or provider_operation_id(kind, model, request_json)
     previous = conn.execute(
-        "SELECT id, attempt_no FROM provider_calls WHERE operation_id=? ORDER BY id DESC LIMIT 1",
+        "SELECT id, attempt_no, status FROM provider_calls WHERE operation_id=? ORDER BY id DESC LIMIT 1",
         (op_id,),
     ).fetchone()
-    attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
+    retry_previous = (
+        previous
+        if previous is not None and previous["status"] == "INTERRUPTED"
+        else None
+    )
+    attempt_no = (
+        int(retry_previous["attempt_no"] or 0) + 1
+        if retry_previous else 1
+    )
     cur = conn.execute(
         """INSERT INTO provider_calls(
             ts, kind, model, status, http_status, latency_ms, error, request_json, request_hash, response_json, meta,
-            project_id, run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            project_id, run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id,
+            contract_version,production_grant_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, status, http_status, latency_ms,
          (error or "")[:500] or None, _dump_call_json(request_json), provider_request_hash(request_json), _dump_call_json(response_json),
          _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
-         op_id, attempt_no, previous["id"] if previous else None),
+         op_id, attempt_no, retry_previous["id"] if retry_previous else None,
+         str((meta or {}).get("contract_version") or "") or None,
+         str((meta or {}).get("production_grant_id") or "") or None),
     )
-    if previous and status in {"OK", "SUCCEEDED", "SUCCESS"}:
+    if retry_previous and status in {"OK", "SUCCEEDED", "SUCCESS"}:
         conn.execute(
             "UPDATE provider_calls SET superseded_by_call_id=?, recovery_disposition='RETRIED_SUCCESSFULLY' "
             "WHERE id=? AND status='INTERRUPTED'",
-            (int(cur.lastrowid), previous["id"]),
+            (int(cur.lastrowid), retry_previous["id"]),
         )
     conn.commit()
 
@@ -2699,13 +2715,21 @@ def _start_provider_call_inner(
             # edge.  A newly authorized operation may consume this unknown
             # liability once, after its own result is durable.
             legacy_unknown_resolution_id = int(legacy_previous["id"])
-    attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
+    retry_previous = (
+        previous
+        if previous is not None and previous["status"] == "INTERRUPTED"
+        else None
+    )
+    attempt_no = (
+        int(retry_previous["attempt_no"] or 0) + 1
+        if retry_previous else 1
+    )
     cur = conn.execute(
         """INSERT INTO provider_calls(
             ts, kind, model, status, http_status, latency_ms, error, request_json, request_hash, response_json, meta,
             project_id, run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id,
-            recovery_disposition
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            recovery_disposition,contract_version,production_grant_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json),
          provider_request_hash(request_json), None, _dump_meta_json({
              **(meta or {}),
@@ -2713,13 +2737,15 @@ def _start_provider_call_inner(
                  legacy_unknown_resolution_id or None
              ),
          }), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
-         op_id, attempt_no, previous["id"] if previous else None,
-         "RETRYING_INTERRUPTED" if previous and previous["status"] == "INTERRUPTED" else None),
+         op_id, attempt_no, retry_previous["id"] if retry_previous else None,
+         "RETRYING_INTERRUPTED" if retry_previous else None,
+         str((meta or {}).get("contract_version") or "") or None,
+         str((meta or {}).get("production_grant_id") or "") or None),
     )
-    if previous and previous["status"] == "INTERRUPTED":
+    if retry_previous:
         conn.execute(
             "UPDATE provider_calls SET superseded_by_call_id=?, recovery_disposition='RETRY_STARTED' WHERE id=?",
-            (int(cur.lastrowid), previous["id"]),
+            (int(cur.lastrowid), retry_previous["id"]),
         )
     conn.commit()
     return int(cur.lastrowid)

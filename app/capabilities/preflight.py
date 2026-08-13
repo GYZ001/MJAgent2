@@ -1004,6 +1004,7 @@ def screenplay_generate(args) -> PreflightResult:
 
     projection = _screenplay_generation_preflight(args.episode_id)
     input_projection = dict(projection.get("input") or {})
+    budget_projection = dict(projection.get("blueprint_budget") or {})
     cast_impact = dict(projection.get("cast_impact") or {})
     reusable = dict(projection.get("reusable_validated_artifacts") or {})
     run = evidence_repository.get_active_scoped_run(
@@ -1014,10 +1015,13 @@ def screenplay_generate(args) -> PreflightResult:
         conn=conn,
     )
     active_run = bool(run)
+    budget_admissible = bool(
+        budget_projection.get("admissible_after_approval", True)
+    )
     downstream_impact = bool(ep["screenplay_artifact_id"] or ep["storyboard_artifact_id"])
     return PreflightResult(
         command="screenplay.generate",
-        allowed=not active_run,
+        allowed=not active_run and budget_admissible,
         risk=RiskLevel.R2_MATERIAL,
         summary=(
             f"第 {ep['episode_no']} 集将按 {input_projection.get('source_segment_count', 0)} 个 SRC，"
@@ -1035,11 +1039,16 @@ def screenplay_generate(args) -> PreflightResult:
                     "requires_model_resolution", True
                 ),
                 "reusable_validated_artifacts": reusable,
+                "blueprint_budget": budget_projection,
             },
         ),
         warnings=(
-            ["重新发布完整剧本后，下游分镜/媒体可能失效"]
-            if downstream_impact else []
+            (["重新发布完整剧本后，下游分镜/媒体可能失效"] if downstream_impact else [])
+            + (
+                ["上次蓝图供应商结果未知；本次批准将签发一次新的重试授权"]
+                if budget_projection.get("requires_fresh_retry_grant")
+                else []
+            )
         ),
         state_fingerprint=_fp({
             "episode": dict(ep),
@@ -1049,8 +1058,20 @@ def screenplay_generate(args) -> PreflightResult:
         }),
         requires_confirmation=downstream_impact,
         confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
-        denial_code="SCREENPLAY_ALREADY_RUNNING" if active_run else None,
-        denial_message="本集已有剧本任务运行中或等待恢复" if active_run else None,
+        denial_code=(
+            "SCREENPLAY_ALREADY_RUNNING"
+            if active_run
+            else "BLUEPRINT_BUDGET_EXHAUSTED"
+            if not budget_admissible
+            else None
+        ),
+        denial_message=(
+            "本集已有剧本任务运行中或等待恢复"
+            if active_run
+            else "蓝图调用或 token 预算不足，禁止在人物发现前启动"
+            if not budget_admissible
+            else None
+        ),
     )
 
 

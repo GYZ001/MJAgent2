@@ -5458,7 +5458,7 @@ class _BlueprintGenerationBudget:
         query = (
             "SELECT pc.id,pc.response_json,pc.meta,pc.status,"
             "pc.recovery_disposition,pc.operation_id,pc.ts,"
-            "pc.superseded_by_call_id "
+            "pc.superseded_by_call_id,pc.run_id "
             "FROM provider_calls pc "
             "LEFT JOIN workflow_runs wr ON wr.id=pc.run_id "
             "WHERE pc.kind='chat' "
@@ -5484,7 +5484,6 @@ class _BlueprintGenerationBudget:
         rows = get_conn().execute(query, params).fetchall()
         latest_operation_status: dict[str, tuple[str, str]] = {}
         latest_stage_status: dict[str, tuple[int, str, str]] = {}
-        earliest_durable_call_at: float | None = None
         for row in rows:
             try:
                 meta = json.loads(row["meta"] or "{}")
@@ -5499,12 +5498,9 @@ class _BlueprintGenerationBudget:
                 durable_call_at = float(row["ts"])
             except (IndexError, KeyError, TypeError, ValueError):
                 durable_call_at = 0.0
-            if durable_call_at > 0:
-                earliest_durable_call_at = (
-                    durable_call_at
-                    if earliest_durable_call_at is None
-                    else min(earliest_durable_call_at, durable_call_at)
-                )
+            is_current_activation = bool(
+                run_id and str(row["run_id"] or "") == str(run_id)
+            )
             operation_id = str(
                 stored_operation_id or meta.get("operation_id") or ""
             ).strip()
@@ -5513,8 +5509,6 @@ class _BlueprintGenerationBudget:
                 1,
                 int(meta.get("effective_max_tokens") or requested),
             )
-            budget.requested_output_tokens += requested
-            budget.provider_calls += 1
             status = str(row["status"] or "").upper()
             stage_key = str(meta.get("stage_key") or "")
             try:
@@ -5530,15 +5524,43 @@ class _BlueprintGenerationBudget:
                     durable_call_id = int(row["id"])
                 except (KeyError, TypeError, ValueError):
                     durable_call_id = 0
+                prior_grant_id = str(meta.get("production_grant_id") or "")
+                if not prior_grant_id and episode_id and durable_call_at > 0:
+                    # Pre-v3 observability truncated the grant out of meta.  The
+                    # grant active when the provider request was sent is still
+                    # recoverable from the durable episode grant timeline.
+                    grant_row = get_conn().execute(
+                        """SELECT id FROM production_grants
+                             WHERE episode_id=? AND issued_at<=?
+                             ORDER BY issued_at DESC LIMIT 1""",
+                        (episode_id, durable_call_at),
+                    ).fetchone()
+                    if grant_row is not None:
+                        prior_grant_id = str(grant_row["id"] or "")
                 latest_stage_status[stage_key] = (
                     durable_call_id,
                     status,
-                    str(meta.get("production_grant_id") or ""),
+                    prior_grant_id,
                 )
             if operation_id:
+                prior_grant_id = str(meta.get("production_grant_id") or "")
+                if (
+                    not prior_grant_id
+                    and episode_id
+                    and durable_call_at > 0
+                    and status in {"INTERRUPTED", "RUNNING"}
+                ):
+                    grant_row = get_conn().execute(
+                        """SELECT id FROM production_grants
+                             WHERE episode_id=? AND issued_at<=?
+                             ORDER BY issued_at DESC LIMIT 1""",
+                        (episode_id, durable_call_at),
+                    ).fetchone()
+                    if grant_row is not None:
+                        prior_grant_id = str(grant_row["id"] or "")
                 latest_operation_status[operation_id] = (
                     status,
-                    str(meta.get("production_grant_id") or ""),
+                    prior_grant_id,
                 )
             if status not in {"OK", "SUCCESS", "SUCCEEDED"}:
                 disposition = str(row["recovery_disposition"] or "").lower()
@@ -5546,9 +5568,23 @@ class _BlueprintGenerationBudget:
                 if (
                     disposition not in {"not_sent", "definitely_not_sent"}
                     and delivery_state not in {"not_sent", "definitely_not_sent"}
+                    and not superseded_by_call_id
                 ):
+                    # A fresh retry activation inherits unresolved paid/unknown
+                    # liability, but not the elapsed wall clock of a dead
+                    # activation.  Current-activation calls and unresolved
+                    # historical calls both consume its call/token caps.
+                    budget.requested_output_tokens += requested
+                    budget.provider_calls += 1
                     budget.unknown_output_tokens += effective
                 continue
+            # Historical successful operations remain available for strict
+            # cache replay, but their already-settled cost/call count does not
+            # consume the new logical retry activation's execution epoch.
+            if not is_current_activation and episode_id and input_fingerprint:
+                continue
+            budget.requested_output_tokens += requested
+            budget.provider_calls += 1
             usage = response.get("usage") if isinstance(response, dict) else None
             actual = (
                 usage.get("completion_tokens")
@@ -5570,14 +5606,51 @@ class _BlueprintGenerationBudget:
                     call_id,
                     prior_grant_id,
                 )
-        if earliest_durable_call_at is not None:
-            durable_elapsed = max(0.0, time.time() - earliest_durable_call_at)
-            current_elapsed = max(0.0, time.monotonic() - budget.started_at)
-            budget.started_at = time.monotonic() - max(
-                durable_elapsed,
-                current_elapsed,
-            )
         return budget
+
+    @property
+    def requires_fresh_retry_grant(self) -> bool:
+        """Whether unresolved provider outcomes require a new user grant."""
+        if not self._durable_unknown_stage_calls:
+            return False
+        return any(
+            not self.retry_grant_id or self.retry_grant_id == prior_grant_id
+            for _call_id, prior_grant_id in self._durable_unknown_stage_calls.values()
+        )
+
+    def assert_activation_admissible(
+        self,
+        *,
+        minimum_output_tokens: int = BLUEPRINT_SHARD_MIN_TOKENS,
+    ) -> None:
+        """Read-only admission fence used before any character/provider call."""
+        if self.requires_fresh_retry_grant:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                [
+                    "[BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED] "
+                    "上次供应商结果未知；必须先签发新的 Production Grant"
+                ],
+            )
+        elapsed = time.monotonic() - self.started_at
+        if elapsed >= BLUEPRINT_GENERATION_MAX_WALL_SECONDS:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_GENERATION_TIME_BUDGET] 超过当前激活时间上限"],
+            )
+        if self.provider_calls >= BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_GENERATION_CALL_BUDGET] 超过全局调用上限"],
+            )
+        if (
+            self.charged_output_tokens + int(minimum_output_tokens)
+            > BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+        ):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_GENERATION_TOKEN_BUDGET] 剩余输出预算不足一次安全分片"],
+            )
 
     def explicit_retry_call_id(self, stage_key: str) -> int | None:
         prior = self._durable_unknown_stage_calls.get(stage_key)
