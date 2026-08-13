@@ -446,6 +446,14 @@ def publish_storyboard(
         ).fetchone()
         if current_episode is None:
             raise ValueError("待发布分镜所属剧集不存在")
+        from app.storyboard_workspace import (
+            assert_storyboard_source_bindings_complete,
+        )
+
+        assert_storyboard_source_bindings_complete(
+            episode_id,
+            conn=conn,
+        )
         narrative_authority = False
         if current_episode["screenplay_json"]:
             from app.production.screenplay_authority import (

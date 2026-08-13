@@ -508,8 +508,8 @@ def close_edit_session(token: str, status: str = "saved") -> None:
     conn.commit()
 
 
-def chapter_sources(episode_id: str) -> list[dict[str, Any]]:
-    conn = get_conn()
+def chapter_sources(episode_id: str, *, conn=None) -> list[dict[str, Any]]:
+    conn = conn or get_conn()
     ep = conn.execute("SELECT project_id,source_chapters FROM episodes WHERE id=?", (episode_id,)).fetchone()
     if not ep:
         raise HTTPException(404, "剧集不存在")
@@ -598,8 +598,12 @@ def realign_generated_source_binding(
     commit: bool = True,
 ) -> dict[str, Any]:
     """Atomically align and bind an automated repair's authorized source excerpt."""
-    candidate, normalized = align_generated_source_evidence(episode_id, excerpt)
     db_conn = conn or get_conn()
+    candidate, normalized = align_generated_source_evidence(
+        episode_id,
+        excerpt,
+        conn=db_conn,
+    )
     db_conn.execute(
         "UPDATE shots SET source_excerpt=? WHERE id=?",
         (candidate, shot_id),
@@ -613,13 +617,15 @@ def realign_generated_source_binding(
 def align_generated_source_evidence(
     episode_id: str,
     excerpt: str,
+    *,
+    conn=None,
 ) -> tuple[str, dict[str, Any]]:
     """Resolve model-selected evidence to the strongest authorized contiguous slice."""
     candidate = (excerpt or "").strip()
     if not candidate:
         raise HTTPException(422, "自动修复候选缺少原文证据")
     matches = []
-    for source in chapter_sources(episode_id):
+    for source in chapter_sources(episode_id, conn=conn):
         aligned = align_source_excerpt(candidate, source["content"] or "")
         if aligned is not None:
             matches.append((aligned.match_chars, int(aligned.exact), source, aligned))
@@ -638,6 +644,30 @@ def align_generated_source_evidence(
         "excerpt_hash": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
     }
     return candidate, normalized
+
+
+def assert_storyboard_source_bindings_complete(
+    episode_id: str,
+    *,
+    conn=None,
+) -> None:
+    """Fail closed when an official shot has no durable source binding."""
+    db_conn = conn or get_conn()
+    missing = db_conn.execute(
+        """SELECT s.shot_no
+             FROM shots s
+             LEFT JOIN storyboard_source_bindings b ON b.shot_id=s.id
+            WHERE s.episode_id=? AND b.shot_id IS NULL
+            ORDER BY s.shot_no""",
+        (episode_id,),
+    ).fetchall()
+    if missing:
+        shot_nos = [int(row["shot_no"]) for row in missing]
+        preview = "、".join(str(value) for value in shot_nos[:12])
+        suffix = "…" if len(shot_nos) > 12 else ""
+        raise ValueError(
+            f"分镜原文绑定不完整：第 {preview}{suffix} 镜缺少 source binding"
+        )
 
 
 def source_binding_for_shot(shot_id: str) -> dict[str, Any] | None:

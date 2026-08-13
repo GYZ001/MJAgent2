@@ -591,6 +591,22 @@ def _assert_storyboard_generation_gate(episode_id: str) -> None:
     ).fetchall()
     if not rows:
         raise HTTPException(409, "本集尚无分镜")
+    from app.storyboard_workspace import (
+        assert_storyboard_source_bindings_complete,
+    )
+
+    try:
+        assert_storyboard_source_bindings_complete(
+            episode_id,
+            conn=conn,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, {
+            "code": "STORYBOARD_SOURCE_BINDING_REQUIRED",
+            "message": str(exc),
+            "recovery_action": "返回分镜台补全原文绑定后重新发布",
+            "episode_id": episode_id,
+        }) from exc
     if _has_current_storyboard_completion_certificate(conn, episode):
         return
     screenplay = None

@@ -2427,6 +2427,10 @@ def test_episode_media_cleanup_stages_generation_fences(
 
     storyboard_db.execute("BEGIN IMMEDIATE")
     staged = artifacts.stage_episode_artifact_cleanup(storyboard_db, "e1")
+    stale_storyboard = storyboard_db.execute(
+        """SELECT status,stale_reason FROM artifacts
+             WHERE id=(SELECT storyboard_artifact_id FROM episodes WHERE id='e1')"""
+    ).fetchone()
     payload = json.loads(storyboard_db.execute(
         "SELECT payload_json FROM media_cleanup_outbox WHERE id=?",
         (staged["outbox_id"],),
@@ -2435,6 +2439,8 @@ def test_episode_media_cleanup_stages_generation_fences(
 
     assert payload["files"]
     assert payload["directories"]
+    assert stale_storyboard["status"] == "stale"
+    assert "UPSTREAM_SCREENPLAY_AUTHORITY_CHANGED" in stale_storyboard["stale_reason"]
     assert all("generation" in item for item in payload["files"])
     assert all("generation" in item for item in payload["directories"])
     missing_last_frame = next(

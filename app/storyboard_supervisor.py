@@ -1863,6 +1863,47 @@ def _write_shot_fields(
     )
 
 
+def _insert_accepted_storyboard_shot(
+    conn,
+    episode_id: str,
+    screenplay,
+    shot: Shot,
+    expected_screenplay_artifact_id: str | None = None,
+) -> str:
+    """Persist one accepted shot and its generated source binding atomically.
+
+    The caller owns the surrounding projection transaction.  Canonical source
+    alignment happens before the shot row is inserted, so the official row and
+    its accepted artifact continue to describe the same normalized excerpt.
+    """
+    from app.domain.storyboard_ops import _insert_storyboard_shot
+    from app.storyboard_workspace import (
+        align_generated_source_evidence,
+        persist_source_binding,
+    )
+
+    excerpt, binding = align_generated_source_evidence(
+        episode_id,
+        shot.source_excerpt,
+        conn=conn,
+    )
+    shot.source_excerpt = excerpt
+    shot_id = _insert_storyboard_shot(
+        conn,
+        episode_id,
+        screenplay,
+        shot,
+        expected_screenplay_artifact_id,
+    )
+    persist_source_binding(
+        shot_id,
+        binding,
+        conn=conn,
+        commit=False,
+    )
+    return shot_id
+
+
 def _ensure_storyboard_revision(
     episode_id: str,
     board: Storyboard,
@@ -1912,10 +1953,7 @@ def _commit_repair_candidate(
     run_id: str | None,
 ) -> str:
     """CAS-commit a validated candidate and its official projection in one transaction."""
-    from app.domain.storyboard_ops import (
-        _assert_storyboard_write_authorized,
-        _insert_storyboard_shot,
-    )
+    from app.domain.storyboard_ops import _assert_storyboard_write_authorized
     from app.production.revision import get_production_revision
 
     repair = cp.last_repair or {}
@@ -2021,12 +2059,8 @@ def _commit_repair_candidate(
         if mode == "insert":
             _open_shot_gap(conn, episode_id, start)
             for shot in candidate_shots:
-                shot_id = _insert_storyboard_shot(
+                _insert_accepted_storyboard_shot(
                     conn, episode_id, screenplay, shot, expected_screenplay_artifact_id,
-                )
-                from app.storyboard_workspace import realign_generated_source_binding
-                realign_generated_source_binding(
-                    episode_id, shot_id, shot.source_excerpt, conn=conn, commit=False,
                 )
         elif mode == "structure":
             old_end = int(repair.get("structure_old_end") or (start - 1))
@@ -2046,14 +2080,9 @@ def _commit_repair_candidate(
                         (int(suffix_row["shot_no"]) + delta, suffix_row["id"]),
                     )
             for shot in candidate_shots:
-                shot_id = _insert_storyboard_shot(
+                _insert_accepted_storyboard_shot(
                     conn, episode_id, screenplay, shot,
                     expected_screenplay_artifact_id,
-                )
-                from app.storyboard_workspace import realign_generated_source_binding
-
-                realign_generated_source_binding(
-                    episode_id, shot_id, shot.source_excerpt, conn=conn, commit=False,
                 )
         else:
             from app import worker
@@ -2081,13 +2110,9 @@ def _commit_repair_candidate(
                         conn=conn, commit=False,
                     )
                 else:
-                    shot_id = _insert_storyboard_shot(
+                    _insert_accepted_storyboard_shot(
                         conn, episode_id, screenplay, shot,
                         expected_screenplay_artifact_id,
-                    )
-                    realign_generated_source_binding(
-                        episode_id, shot_id, shot.source_excerpt,
-                        conn=conn, commit=False,
                     )
         if candidate_outline is not None:
             outline_authority = persist_storyboard_outline_projection(
@@ -2227,7 +2252,6 @@ async def run_storyboard_supervisor(
         _board_from_shot_rows,
         _ensure_current_storyboard_shot_artifacts,
         _finalize_storyboard_evidence,
-        _insert_storyboard_shot,
         _assert_storyboard_write_authorized,
         _persist_storyboard_character_policy_repairs,
         _reconcile_storyboard_scene_projection,
@@ -3380,7 +3404,7 @@ async def run_storyboard_supervisor(
                         expected_screenplay_artifact_id,
                     )
                     for shot in candidate_board.shots[committed_count:]:
-                        _insert_storyboard_shot(
+                        _insert_accepted_storyboard_shot(
                             write_conn,
                             episode_id,
                             screenplay,
@@ -3764,7 +3788,7 @@ async def run_storyboard_supervisor(
                     board,
                     expected_screenplay_artifact_id,
                 )
-                _insert_storyboard_shot(
+                _insert_accepted_storyboard_shot(
                     write_conn,
                     episode_id,
                     screenplay,

@@ -949,16 +949,51 @@ def stage_episode_artifact_cleanup(conn, episode_id: str) -> dict:
     if not conn.in_transaction:
         raise RuntimeError("整集媒体清理必须加入调用方事务")
     ep = conn.execute(
-        "SELECT project_id,episode_no FROM episodes WHERE id=?",
+        """SELECT project_id,episode_no,storyboard_artifact_id,
+                  working_storyboard_artifact_id,
+                  published_storyboard_artifact_id
+             FROM episodes WHERE id=?""",
         (episode_id,),
     ).fetchone()
     if ep is None:
         raise ValueError("分集不存在")
     _assert_provider_clear_scope(conn, episode_id=episode_id)
     shots = rows_to_dicts(conn.execute(
-        "SELECT id,shot_no FROM shots WHERE episode_id=? ORDER BY shot_no",
+        """SELECT id,shot_no,storyboard_artifact_id
+             FROM shots WHERE episode_id=? ORDER BY shot_no""",
         (episode_id,),
     ).fetchall())
+    # A screenplay publication is an authority epoch change.  Shot Artifacts
+    # are immutable audit evidence, but their rows are not automatically linked
+    # as descendants of the screenplay Artifact.  Mark every old projection
+    # explicitly stale before deleting the mutable shot rows; otherwise an
+    # orphaned T2 ``storyboard_shot`` can continue to look current after the
+    # episode has moved to a different screenplay contract.
+    stale_artifact_ids = {
+        str(shot.get("storyboard_artifact_id") or "")
+        for shot in shots
+        if str(shot.get("storyboard_artifact_id") or "")
+    }
+    stale_artifact_ids.update(
+        str(ep[column] or "")
+        for column in (
+            "storyboard_artifact_id",
+            "working_storyboard_artifact_id",
+            "published_storyboard_artifact_id",
+        )
+        if str(ep[column] or "")
+    )
+    if stale_artifact_ids:
+        marks = ",".join("?" for _ in stale_artifact_ids)
+        conn.execute(
+            f"""UPDATE artifacts
+                   SET status='stale',
+                       stale_reason='UPSTREAM_SCREENPLAY_AUTHORITY_CHANGED: '
+                           || 'old storyboard requires deterministic regeneration'
+                 WHERE id IN ({marks})
+                   AND status NOT IN ('rejected','superseded')""",
+            sorted(stale_artifact_ids),
+        )
     files: list[str] = []
     directories: list[str] = []
     versions_removed = 0
