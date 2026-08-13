@@ -68,6 +68,7 @@ from app.narrative_blueprint import (
     normalize_blueprint_provider_payload,
     normalize_blueprint_raw_json,
     normalize_blueprint_semantic_review_payload,
+    normalize_blueprint_state_subject_perception,
     recover_complete_blueprint_prefix,
     render_blueprint_shard_semantic_issue,
     validate_and_apply_blueprint_scene_contract,
@@ -3924,12 +3925,14 @@ async def _repair_narrative_blueprint(
 
     parent_artifact_ids: list[str] = []
     pending_external_errors = list(additional_errors or [])
+
+    def normalize_and_validate() -> list[str]:
+        normalize_blueprint_state_subject_perception(blueprint)
+        return validate_narrative_blueprint(blueprint, source_text)
+
     for round_no in range(1, 7):
         normalize_blueprint_agency_continuity(blueprint)
-        errors = (
-            validate_narrative_blueprint(blueprint, source_text)
-            + pending_external_errors
-        )
+        errors = normalize_and_validate() + pending_external_errors
         if not errors:
             trace = current_trace()
             evidence_repository.create_artifact(
@@ -4358,19 +4361,14 @@ async def _repair_narrative_blueprint(
                 prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                 model_snapshot={
                     "semantic_patch_round": round_no,
-                    "remaining_issue_count": len(
-                        validate_narrative_blueprint(
-                            blueprint,
-                            source_text,
-                        )
-                    ),
+                    "remaining_issue_count": len(normalize_and_validate()),
                 },
             ),
             step_run_id=trace.step_run_id,
         )
 
     normalize_blueprint_agency_continuity(blueprint)
-    errors = validate_narrative_blueprint(blueprint, source_text)
+    errors = normalize_and_validate()
     if errors:
         raise ContentGenerationError(
             "蓝图局部语义修复六轮后仍未通过："
@@ -7224,7 +7222,6 @@ async def _generate_sharded_narrative_blueprint(
             blueprint,
             episode=episode,
             source_text=source_text,
-            additional_errors=errors,
             generation_budget=generation_budget,
         )
     derive_blueprint_scene_plans(blueprint)

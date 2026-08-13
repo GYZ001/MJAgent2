@@ -1468,7 +1468,7 @@ def test_legacy_cached_shard_without_current_policy_is_not_reused(
     assert calls == 1
 
 
-def test_v8_t1_leaf_is_not_current_cache_authority() -> None:
+def test_v9_t1_leaf_is_not_current_cache_authority() -> None:
     segments = index_source_segments(_source(1))
     row = _cached_leaf_row(
         source_ids=["SRC0001"],
@@ -1477,7 +1477,7 @@ def test_v8_t1_leaf_is_not_current_cache_authority() -> None:
     row["id"] = "art_1048276fe8d5"
     snapshot = json.loads(row["model_snapshot_json"])
     snapshot["local_authority_validator_version"] = (
-        "blueprint-shard-local-authority.v8"
+        "blueprint-shard-local-authority.v9"
     )
     row["model_snapshot_json"] = json.dumps(snapshot)
 
@@ -1487,7 +1487,7 @@ def test_v8_t1_leaf_is_not_current_cache_authority() -> None:
     )
 
     assert stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION == (
-        "blueprint-shard-local-authority.v9"
+        "blueprint-shard-local-authority.v10"
     )
     assert [[segment.segment_id for segment in group] for group in plan] == [
         ["SRC0001"],

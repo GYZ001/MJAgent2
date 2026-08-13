@@ -39,6 +39,7 @@ from app.narrative_blueprint import (
     normalize_blueprint_agency_continuity,
     normalize_blueprint_provider_payload,
     normalize_blueprint_semantic_review_payload,
+    normalize_blueprint_state_subject_perception,
     recover_complete_blueprint_prefix,
     validate_and_apply_blueprint_scene_contract,
     validate_blueprint_semantic_review,
@@ -47,7 +48,7 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
-from app.source_facts import SOURCE_FACT_VERSION, SourceFact
+from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
 
 
 SOURCE = "\n\n".join([
@@ -1945,6 +1946,210 @@ def test_state_subject_requires_applicable_perception_evidence() -> None:
         issue.code
         for issue in blueprint_state_subject_issues(blueprint, source)
     ] == ["state_subject_perception_missing"]
+
+
+def test_state_subject_perception_normalizer_groups_and_is_idempotent() -> None:
+    source = "。".join(
+        f"甲执行动作{index}" for index in range(1, 31)
+    ) + "。"
+    unit_keys = [
+        fact.source_unit_key
+        for fact in source_facts(source)
+        if fact.projection == "action"
+    ]
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 3,
+        "nodes": [{
+            "key": "many-subjects",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "甲连续行动",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "room",
+            "location_label": "房间",
+            "participants": ["甲"],
+            "participant_evidence": [{
+                "identity_key": "甲",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [unit_key],
+                "usage": "state_subject",
+            } for unit_key in unit_keys],
+            "action_logic": "甲连续完成三十个动作",
+        }],
+    })
+
+    assert len(blueprint_state_subject_issues(blueprint, source)) == 30
+    assert normalize_blueprint_state_subject_perception(blueprint) == 1
+    visible = [
+        evidence
+        for evidence in blueprint.nodes[0].participant_evidence
+        if evidence.usage == "visible"
+    ]
+    assert len(visible) == 1
+    assert visible[0].source_segment_ids == ["SRC0001"]
+    assert visible[0].source_unit_keys == unit_keys
+    assert validate_narrative_blueprint(blueprint, source) == []
+
+    normalized = blueprint.model_dump(mode="json")
+    assert normalize_blueprint_state_subject_perception(blueprint) == 0
+    assert blueprint.model_dump(mode="json") == normalized
+
+
+def test_state_subject_perception_normalizer_covers_all_joint_identities() -> None:
+    source = "甲和乙抬桌。"
+    unit_key = source_facts(source)[0].source_unit_key
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 3,
+        "nodes": [{
+            "key": "joint-subjects",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "甲乙共同抬桌",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "room",
+            "location_label": "房间",
+            "participants": ["甲", "乙"],
+            "state_subject_assignments": [{
+                "source_unit_key": unit_key,
+                "mode": "joint",
+                "identity_keys": ["甲", "乙"],
+            }],
+            "action_logic": "甲乙共同抬桌",
+        }],
+    })
+
+    assert normalize_blueprint_state_subject_perception(blueprint) == 2
+    assert {
+        evidence.identity_key: evidence.source_unit_keys
+        for evidence in blueprint.nodes[0].participant_evidence
+        if evidence.usage == "visible"
+    } == {
+        "甲": [unit_key],
+        "乙": [unit_key],
+    }
+    assert validate_narrative_blueprint(blueprint, source) == []
+
+
+def test_state_subject_perception_normalizer_skips_environment_and_cross_src() -> None:
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 3,
+        "nodes": [{
+            "key": "environment",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "雨落下",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "yard",
+            "location_label": "院中",
+            "participants": ["甲"],
+            "participant_evidence": [{
+                "identity_key": "甲",
+                "source_segment_ids": ["SRC0002"],
+                "source_unit_keys": ["SRC0002:unit:001"],
+                "usage": "state_subject",
+            }],
+            "environment_source_unit_keys": ["SRC0001:unit:001"],
+            "action_logic": "雨落下",
+        }, {
+            "key": "owned-second-source",
+            "source_segment_ids": ["SRC0002"],
+            "summary": "甲抬头",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "continuous",
+            "location_key": "yard",
+            "location_label": "院中",
+            "environment_source_unit_keys": ["SRC0002:unit:001"],
+            "action_logic": "甲抬头",
+        }],
+    })
+
+    before = blueprint.model_dump(mode="json")
+    assert normalize_blueprint_state_subject_perception(blueprint) == 0
+    assert blueprint.model_dump(mode="json") == before
+    assert all(
+        evidence.usage != "visible"
+        for node in blueprint.nodes
+        for evidence in node.participant_evidence
+    )
+
+
+def test_repair_normalizes_perception_without_full_node_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "孟浩抬头。"
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 3,
+        "nodes": [{
+            "key": "subject-node",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "孟浩抬头",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "yard",
+            "location_label": "院中",
+            "participants": ["孟浩"],
+            "participant_evidence": [{
+                "identity_key": "孟浩",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": ["SRC0001:unit:001"],
+                "usage": "state_subject",
+            }],
+            "action_logic": "孟浩抬头",
+        }],
+    })
+    calls = 0
+
+    async def forbidden_patch(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("perception-only repair must stay local")
+
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        forbidden_patch,
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda _artifact, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-local-perception"),
+    )
+    budget = stages._BlueprintGenerationBudget()
+
+    repaired = asyncio.run(stages._repair_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-local-perception"},
+        source_text=source,
+        generation_budget=budget,
+    ))
+
+    assert calls == 0
+    assert budget.provider_calls == 0
+    assert budget.requested_output_tokens == 0
+    assert validate_narrative_blueprint(repaired, source) == []
 
 
 def _ownership_repair_fixture() -> tuple[
