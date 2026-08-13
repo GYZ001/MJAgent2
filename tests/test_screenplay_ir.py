@@ -30,8 +30,11 @@ from app.schemas import (
     Bible,
     Character,
     EpisodeScreenplay,
+    InformationItem,
     Scene,
+    VoiceCanonical,
     World,
+    system_environment_entity_id,
 )
 from app.screenplay_ir import (
     IREvent,
@@ -440,7 +443,7 @@ def test_event_onscreen_only_identity_is_included_in_compiler_registry() -> None
         "role_type": "functional_character",
         "rationale": "来源事件明确要求该身份在画面中",
     })
-    payload["events"][0]["onscreen_entity_keys"] = ["observer"]
+    payload["events"][0]["onscreen_entity_keys"] = ["g", "observer"]
 
     screenplay = compile_screenplay_ir(
         ScreenplayGenerationIR.model_validate(payload),
@@ -459,6 +462,234 @@ def test_event_onscreen_only_identity_is_included_in_compiler_registry() -> None
     )
     assert contract.visual_policy == "contextual"
     assert contract.visual_canonical
+    proposition = next(
+        item for item in screenplay.narrative_plan.propositions
+        if item.proposition_id == screenplay.narrative_plan.state_facts[0].proposition_id
+    )
+    assert contract.identity_id in proposition.entity_ids
+    assert validate_screenplay_narrative(
+        screenplay,
+        require=True,
+        expected_scope_id="ep-ir-onscreen-only",
+        authorized_source_chapters={"chapter-1": SOURCE},
+    ) == []
+
+
+def _environment_only_compiled_screenplay() -> EpisodeScreenplay:
+    """Production-shaped title/establishing event with no identity relation."""
+    payload = _ir_payload()
+    payload["scenes"][0]["character_keys"] = []
+    payload["scenes"][0]["units"] = [{
+        "kind": "action",
+        "text": "淡墨画面展开，章节标题缓缓浮现后隐去。",
+        "event_key": "e1",
+    }]
+    payload["events"][0].update({
+        "actor_keys": [],
+        "target_keys": [],
+        "onscreen_entity_keys": [],
+        "perceivable_by": ["audience"],
+        "participant_deliveries": [],
+    })
+    return compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep_711b29204aa9",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+
+def test_run_9063_environment_only_fact_is_typed_and_not_a_character() -> None:
+    screenplay = _environment_only_compiled_screenplay()
+    plan = screenplay.narrative_plan
+    environment_id = system_environment_entity_id("ep_711b29204aa9")
+    first_fact = plan.state_facts[0]
+    first_proposition = next(
+        item for item in plan.propositions
+        if item.proposition_id == first_fact.proposition_id
+    )
+
+    assert first_fact.subject_id == environment_id
+    assert environment_id in first_proposition.entity_ids
+    assert plan.scene_contracts[0].point_of_view_character_id is None
+    assert environment_id not in {
+        identity.identity_id for identity in plan.identity_contracts
+    }
+    assert environment_id not in {
+        voice.speaker_id for voice in screenplay.voice_bible
+    }
+    assert environment_id not in screenplay.scene_outline[0].characters
+    assert environment_id not in plan.events[0].onscreen_entity_ids
+    assert environment_id not in {
+        *plan.atomic_actions[0].actor_ids,
+        *plan.atomic_actions[0].target_ids,
+    }
+    assert validate_screenplay_narrative(
+        screenplay,
+        require=True,
+        expected_scope_id="ep_711b29204aa9",
+        authorized_source_chapters={"chapter-1": SOURCE},
+    ) == []
+
+
+def test_state_subject_uses_event_authority_not_scene_roster_or_initial_event() -> None:
+    payload = _ir_payload()
+    # A coarse scene roster must not make its first identity own an otherwise
+    # unattributed establishing state.
+    payload["scenes"][0]["units"] = [payload["scenes"][0]["units"][0]]
+    payload["events"][0].update({
+        "actor_keys": [],
+        "target_keys": [],
+        "perceivable_by": ["audience"],
+    })
+    # A later target-only event must use its exact target rather than inherit
+    # the first event's environment subject.
+    payload["events"][1]["actor_keys"] = []
+    payload["events"][1]["target_keys"] = ["g"]
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-state-subject",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    assert screenplay.narrative_plan.state_facts[0].subject_id == (
+        "environment:ep-ir-state-subject"
+    )
+    assert screenplay.narrative_plan.state_facts[2].subject_id == "bible:谷言"
+
+
+def test_multiple_non_actor_owners_use_environment_without_losing_graph_members() -> None:
+    payload = _ir_payload()
+    payload["scenes"][0]["units"] = [{
+        "kind": "dialogue",
+        "text": "再等十分钟。",
+        "event_key": "e1",
+        "speaker_key": "g",
+        "function": "statement",
+        "source_text": "再等十分钟。",
+        "chain_key": "multi-owner",
+    }, {
+        "kind": "dialogue",
+        "text": "拿好这把钥匙。",
+        "event_key": "e1",
+        "speaker_key": "friend",
+        "function": "statement",
+        "source_text": "拿好这把钥匙。",
+        "chain_key": "multi-owner",
+    }]
+    payload["events"][0].update({
+        "actor_keys": [],
+        "target_keys": [],
+        "perceivable_by": ["audience"],
+    })
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-multi-owner",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+    fact = screenplay.narrative_plan.state_facts[0]
+    proposition = next(
+        item for item in screenplay.narrative_plan.propositions
+        if item.proposition_id == fact.proposition_id
+    )
+
+    assert fact.subject_id == "environment:ep-ir-multi-owner"
+    assert set(proposition.entity_ids) >= {
+        "environment:ep-ir-multi-owner",
+        "bible:谷言",
+        next(
+            identity.identity_id
+            for identity in screenplay.narrative_plan.identity_contracts
+            if identity.display_name == "旧友"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["voice", "dialogue", "information", "characters", "onscreen", "actor", "pov"],
+)
+def test_system_environment_entity_cannot_be_promoted_to_identity_surface(
+    mutation: str,
+) -> None:
+    screenplay = _environment_only_compiled_screenplay()
+    environment_id = "environment:ep_711b29204aa9"
+    if mutation == "voice":
+        screenplay.voice_bible.append(VoiceCanonical(
+            speaker_id=environment_id,
+            voice_canonical="不得存在的环境声线",
+        ))
+    elif mutation == "dialogue":
+        screenplay.dialogue_chains[0].turns[0].speaker = environment_id
+    elif mutation == "information":
+        screenplay.information_ledger.append(InformationItem(
+            info_id="INFO-ENV",
+            speaker_id=environment_id,
+        ))
+    elif mutation == "characters":
+        screenplay.scene_outline[0].characters.append(environment_id)
+    elif mutation == "onscreen":
+        screenplay.narrative_plan.events[0].onscreen_entity_ids.append(
+            environment_id
+        )
+    elif mutation == "actor":
+        screenplay.narrative_plan.atomic_actions[0].actor_ids.append(
+            environment_id
+        )
+        screenplay.narrative_plan.atomic_actions[0].action_agency.identity_bearing = True
+    else:
+        screenplay.narrative_plan.scene_contracts[
+            0
+        ].point_of_view_character_id = environment_id
+
+    errors = validate_screenplay_narrative(screenplay, require=True)
+
+    assert any("SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID" in item for item in errors)
+
+
+def test_environment_subject_must_be_exact_scope_and_local_proposition_member() -> None:
+    screenplay = _environment_only_compiled_screenplay()
+    fact = screenplay.narrative_plan.state_facts[0]
+    proposition = next(
+        item for item in screenplay.narrative_plan.propositions
+        if item.proposition_id == fact.proposition_id
+    )
+    proposition.entity_ids.remove(fact.subject_id)
+    other_proposition = next(
+        item for item in screenplay.narrative_plan.propositions
+        if item.proposition_id != fact.proposition_id
+    )
+    other_proposition.entity_ids.append(fact.subject_id)
+
+    errors = validate_screenplay_narrative(screenplay, require=True)
+
+    assert any(
+        "SYSTEM_NARRATIVE_ENTITY_PROPOSITION_MISSING" in item
+        for item in errors
+    )
+
+    fact.subject_id = "environment:another-episode"
+    proposition.entity_ids.append(fact.subject_id)
+    errors = validate_screenplay_narrative(screenplay, require=True)
+    assert any(
+        "SYSTEM_NARRATIVE_ENTITY_SCOPE_MISMATCH" in item for item in errors
+    )
 
 
 def test_compiled_ir_passes_narrative_and_screenplay_gates() -> None:

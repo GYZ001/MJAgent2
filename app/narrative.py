@@ -560,6 +560,38 @@ def validate_screenplay_narrative(
             f"不等于当前权威作用域 {expected_scope_id}"
         )
     index = index_narrative_plan(plan, errors)
+    environment_entity_id = system_environment_entity_id(plan.scope_id)
+    forbidden_environment_uses: list[tuple[str, str]] = []
+    forbidden_environment_uses.extend(
+        (f"voice_bible[{position}].speaker_id", voice.speaker_id)
+        for position, voice in enumerate(screenplay.voice_bible)
+        if is_system_environment_entity_id(voice.speaker_id)
+    )
+    forbidden_environment_uses.extend(
+        (
+            f"dialogue_chains[{chain_position}].turns[{turn_position}].speaker",
+            turn.speaker,
+        )
+        for chain_position, chain in enumerate(screenplay.dialogue_chains)
+        for turn_position, turn in enumerate(chain.turns)
+        if is_system_environment_entity_id(turn.speaker)
+    )
+    forbidden_environment_uses.extend(
+        (f"information_ledger[{position}].speaker_id", item.speaker_id or "")
+        for position, item in enumerate(screenplay.information_ledger)
+        if is_system_environment_entity_id(item.speaker_id)
+    )
+    forbidden_environment_uses.extend(
+        (f"scene_outline[{position}].characters", character)
+        for position, scene in enumerate(screenplay.scene_outline)
+        for character in scene.characters
+        if is_system_environment_entity_id(character)
+    )
+    for path, entity_id in forbidden_environment_uses:
+        errors.append(
+            f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {path} 不得使用系统环境实体 "
+            f"{entity_id}"
+        )
     errors.extend(action_participant_delivery_errors(screenplay))
     if not index.source_evidence:
         errors.append("[SOURCE_EVIDENCE_MISSING] 至少需要一条逐字来源证据")
@@ -674,7 +706,6 @@ def validate_screenplay_narrative(
         for entity_id in proposition.entity_ids
         if _norm(entity_id)
     }
-    environment_entity_id = system_environment_entity_id(plan.scope_id)
     reserved_environment_ids = {
         entity_id
         for entity_id in declared_entity_ids
@@ -854,8 +885,8 @@ def validate_screenplay_narrative(
                 and fact.subject_id not in proposition.entity_ids
             ):
                 errors.append(
-                    f"[SYSTEM_NARRATIVE_ENTITY_PROPOSITION_MISSING] {fact_id} 的系统环境"
-                    f"主体未由命题 {fact.proposition_id}.entity_ids 声明"
+                    f"[SYSTEM_NARRATIVE_ENTITY_PROPOSITION_MISSING] {fact_id} 的"
+                    f"系统环境主体未由命题 {fact.proposition_id}.entity_ids 声明"
                 )
         if not _norm(fact.predicate_id):
             errors.append(f"[STATE_PREDICATE_MISSING] {fact_id}.predicate_id 不能为空")
@@ -1925,8 +1956,8 @@ def validate_screenplay_narrative(
             errors.append(f"[NARRATIVE_ENTITY_UNDECLARED] {scene_id}.point_of_view_character_id={scene.point_of_view_character_id} 未声明")
         if is_system_environment_entity_id(scene.point_of_view_character_id):
             errors.append(
-                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {scene_id} 的 POV "
-                "不得使用系统环境实体"
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {scene_id} 的 "
+                "point_of_view_character_id 不得使用系统环境实体；无人物场必须为空"
             )
         if scene.applicability not in {"applies", "not_applicable"}:
             errors.append(f"[SCENE_APPLICABILITY_INVALID] {scene_id}.applicability 非法")

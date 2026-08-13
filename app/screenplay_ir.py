@@ -4388,7 +4388,7 @@ def compile_screenplay_ir(
         return selected.key
 
     used_identity_keys: set[str] = set()
-    event_speaker_keys: defaultdict[str, set[str]] = defaultdict(set)
+    event_speaker_keys: defaultdict[str, list[str]] = defaultdict(list)
     for scene in value.scenes:
         used_identity_keys.update(identity_key(token) for token in scene.character_keys)
         for unit in scene.units:
@@ -4402,7 +4402,8 @@ def compile_screenplay_ir(
                     raise ValueError(f"scene {scene.key} 对白缺少 speaker_key")
                 speaker_key = identity_key(unit.speaker_key)
                 used_identity_keys.add(speaker_key)
-                event_speaker_keys[unit.event_key].add(speaker_key)
+                if speaker_key not in event_speaker_keys[unit.event_key]:
+                    event_speaker_keys[unit.event_key].append(speaker_key)
     for event in value.events:
         used_identity_keys.update(
             identity_key(token)
@@ -4493,6 +4494,7 @@ def compile_screenplay_ir(
         episode.get("id") or f"episode-{episode_no}"
     )
     event_participant_ids: dict[str, list[str]] = {}
+    event_state_subject_ids: dict[str, str] = {}
 
     for position, event in enumerate(value.events, start=1):
         chapter_id, start, end, exact_excerpt = _source_location(
@@ -4515,13 +4517,42 @@ def compile_screenplay_ir(
             "confidence": 1.0,
         })
 
+        actor_ids = [
+            identity_id(token) for token in event.actor_keys
+            if str(token).strip() != "audience"
+        ]
+        target_ids = [
+            identity_id(token) for token in event.target_keys
+            if str(token).strip() != "audience"
+        ]
+        speaker_ids = list(dict.fromkeys([
+            final_identity_ids[key]
+            for key in event_speaker_keys.get(event.key, [])
+        ]))
+        content_owner_ids = list(dict.fromkeys([
+            identity_id(token)
+            for token in event.text_provenance.content_owner_keys
+        ]))
+        non_actor_subject_ids = list(dict.fromkeys([
+            *speaker_ids,
+            *content_owner_ids,
+        ]))
+        state_subject_id = (
+            actor_ids
+            or target_ids
+            or (
+                non_actor_subject_ids
+                if len(non_actor_subject_ids) == 1
+                else []
+            )
+            or [environment_subject_id]
+        )[0]
+        event_state_subject_ids[event.key] = state_subject_id
         participants = list(dict.fromkeys([
+            *actor_ids,
+            *target_ids,
             *[
-                identity_id(token) for token in event.actor_keys
-                if str(token).strip() != "audience"
-            ],
-            *[
-                identity_id(token) for token in event.target_keys
+                identity_id(token) for token in event.onscreen_entity_keys
                 if str(token).strip() != "audience"
             ],
             *[
@@ -4529,21 +4560,14 @@ def compile_screenplay_ir(
                 for token in event.perceivable_by
                 if str(token).strip() != "audience"
             ],
+            *speaker_ids,
+            *content_owner_ids,
             *[
-                final_identity_ids[key]
-                for key in event_speaker_keys.get(event.key, set())
+                identity_id(delivery.participant_key)
+                for delivery in event.participant_deliveries
             ],
-            *[
-                identity_id(token)
-                for token in event.text_provenance.content_owner_keys
-            ],
-            *[
-                identity_id(token)
-                for token in scene_by_key[event.scene_key].character_keys
-            ],
+            state_subject_id,
         ]))
-        if not participants:
-            participants = [environment_subject_id]
         if not participants and not typed_visual_unit_contract:
             participants = [final_identity_ids[ordered_used_keys[0]]]
         event_participant_ids[event.key] = participants
@@ -4651,7 +4675,7 @@ def compile_screenplay_ir(
     event_action_ids: dict[str, str] = {}
     event_character_state_ids: defaultdict[str, list[str]] = defaultdict(list)
 
-    initial_subject = event_participant_ids[value.events[0].key][0]
+    initial_subject = event_state_subject_ids[value.events[0].key]
     state_facts.append({
         "fact_id": "F-0",
         "proposition_id": first_adapted_prop_id,
@@ -4720,7 +4744,7 @@ def compile_screenplay_ir(
         # the event's propositions. Falling back only to the first actor (or
         # the episode's initial subject) made target/observer/speaker/scene
         # participants disappear and produced undeclared pseudo identities.
-        subject_id = (actor_ids or target_ids or event_participant_ids[event.key])[0]
+        subject_id = event_state_subject_ids[event.key]
         state_facts.append({
             "fact_id": fact_out_id,
             "proposition_id": adapted_prop_id,
@@ -5495,10 +5519,22 @@ def compile_screenplay_ir(
             for event_key in scene_event_keys
             for state_id in event_character_state_ids[event_key]
         ]
+        scene_character_ids = [
+            identity_id(key) for key in scene.character_keys
+        ]
+        scene_state_subject_ids = [
+            event_state_subject_ids[event_key]
+            for event_key in scene_event_keys
+        ]
         pov_id = (
-            identity_id(scene.character_keys[0])
-            if scene.character_keys else initial_subject
+            scene_character_ids
+            or [
+                subject_id
+                for subject_id in scene_state_subject_ids
+                if subject_id != environment_subject_id
+            ]
         )
+        point_of_view_character_id = pov_id[0] if pov_id else None
         relationship_deltas = (
             []
             if scene.entry_state.strip() != scene.exit_state.strip()
@@ -5510,7 +5546,7 @@ def compile_screenplay_ir(
             "not_applicable_reason": None,
             "alternative_dramatic_function": None,
             "scene_question_id": "DQ-1",
-            "point_of_view_character_id": pov_id,
+            "point_of_view_character_id": point_of_view_character_id,
             "audience_state_paths": [
                 {
                     "audience_prior_id": prior_ids[key],
@@ -5641,7 +5677,7 @@ def compile_screenplay_ir(
                     for token
                     in event.text_provenance.content_owner_keys
                 ],
-                *event_speaker_keys.get(event.key, set()),
+                *event_speaker_keys.get(event.key, []),
             }
         ]
         if not related_events:
