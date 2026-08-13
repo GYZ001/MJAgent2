@@ -254,3 +254,43 @@ def test_bailian_strict_replay_all_miss_never_sends(monkeypatch) -> None:
         ))
 
     assert sends == 0
+
+
+def test_bailian_blueprint_mode_disables_fresh_candidate_fallback(monkeypatch) -> None:
+    first = "first"
+    sends: list[str] = []
+
+    async def not_sent(
+        _client, _url, _payload, *, model, **_kwargs,
+    ):
+        sends.append(model)
+        raise hiagent.ProviderError(
+            "not sent",
+            retryable=True,
+            delivery_state="not_sent",
+            replay_safe=True,
+        )
+
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *_args: ("https://bailian.test/v1", {}),
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_bailian_fallback_models",
+        lambda *_args: [first, "second"],
+    )
+    monkeypatch.setattr(hiagent, "_post_json", not_sent)
+
+    with pytest.raises(hiagent.ProviderError, match="not sent"):
+        asyncio.run(hiagent._post_bailian_chat_with_fallback(
+            object(),
+            {"messages": []},
+            fallback_kind="text",
+            log_kind="chat",
+            preferred_model=first,
+            meta={"disable_provider_candidate_fallback": True},
+        ))
+
+    assert sends == [first]
