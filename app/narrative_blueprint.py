@@ -129,9 +129,55 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
 def blueprint_shard_provider_schema() -> dict[str, Any]:
     """Return the provider schema with explicit delivery evidence surfaces."""
     schema = NarrativeBlueprintShard.model_json_schema()
-    node_schema = schema.get("$defs", {}).get("NarrativeNode")
+    definitions = schema.get("$defs", {})
+    node_schema = definitions.get("NarrativeNode")
     if not isinstance(node_schema, dict):
         return schema
+    evidence_schema = definitions.get("NarrativeParticipantEvidence")
+    if isinstance(evidence_schema, dict):
+        evidence_schema.setdefault("allOf", []).append({
+            "if": {
+                "properties": {
+                    "usage": {
+                        "enum": ["voice", "state_subject"],
+                    },
+                },
+                "required": ["usage"],
+            },
+            "then": {
+                "properties": {
+                    "identity_key": {"minLength": 1},
+                    "source_segment_ids": {"minItems": 1},
+                    "source_unit_keys": {"minItems": 1},
+                },
+                "required": [
+                    "identity_key",
+                    "source_segment_ids",
+                    "source_unit_keys",
+                ],
+            },
+        })
+    delivery_schema = definitions.get("NarrativeSourceUnitDelivery")
+    if isinstance(delivery_schema, dict):
+        delivery_schema.setdefault("allOf", []).append({
+            "if": {
+                "properties": {
+                    "mode": {
+                        "enum": [
+                            "spoken_dialogue",
+                            "offscreen_voice",
+                        ],
+                    },
+                },
+                "required": ["mode"],
+            },
+            "then": {
+                "properties": {
+                    "performer_key": {"minLength": 1},
+                },
+                "required": ["performer_key"],
+            },
+        })
     required = node_schema.setdefault("required", [])
     for field_name in (
         "participants",

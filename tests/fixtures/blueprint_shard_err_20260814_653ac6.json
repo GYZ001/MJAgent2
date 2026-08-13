@@ -1,0 +1,180 @@
+{
+  "error_id": "ERR-20260814-653ac6",
+  "provider_call_ids": [29660, 29661],
+  "raw_artifact_ids": ["art_271c1f4e96b0", "art_f8cd88c96583"],
+  "run_id": "run_9ad1461b9bcf",
+  "step_run_id": "step_3eb446ed0f50",
+  "contract_version": "screenplay-narrative-blueprint.v6",
+  "first_response_payload": {
+    "format_version": "screenplay-narrative-blueprint.v6",
+    "episode_no": 1,
+    "shard_index": 2,
+    "source_segment_ids": ["SRC0002"],
+    "nodes": [
+      {
+        "key": "N001",
+        "source_segment_ids": ["SRC0002"],
+        "summary": "黄昏大青山顶，书生孟浩因科举落榜陷入对未来的迷茫",
+        "narrative_layer": "story",
+        "event_priority": "causal",
+        "render_policy": "standalone",
+        "temporal_domain_key": "TD001",
+        "time_label": "四月黄昏",
+        "time_relation": "episode_start",
+        "location_key": "LOC001",
+        "location_label": "大青山山崖边",
+        "participants": [
+          {
+            "character_key": "C001",
+            "name": "孟浩",
+            "role": "主角"
+          }
+        ],
+        "participant_evidence": [
+          {
+            "identity_key": "C001",
+            "source_segment_ids": ["SRC0002"],
+            "source_unit_keys": [
+              "SRC0002:unit:001",
+              "SRC0002:unit:003",
+              "SRC0002:unit:005",
+              "SRC0002:unit:007",
+              "SRC0002:unit:009",
+              "SRC0002:unit:011"
+            ],
+            "usage": "state_subject"
+          }
+        ],
+        "environment_source_unit_keys": ["SRC0002:unit:001"],
+        "source_unit_deliveries": [
+          {
+            "source_unit_key": "SRC0002:unit:002",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:004",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:006",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:008",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:010",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          }
+        ],
+        "scene_boundary_before": false,
+        "transition_cue": "",
+        "opening_image": "黄昏金光洒在大青山崖边，瘦弱少年孟浩坐在崖畔手持葫芦，眉头紧锁",
+        "exit_state": "孟浩将写有心事的纸条放入葫芦，用力扔下山崖",
+        "scene_role": "setup",
+        "dramatic_load": 2,
+        "action_logic": "孟浩三次科举落榜，家境贫寒负债，对科举人生彻底失望，把迷茫寄托于漂流的葫芦",
+        "adaptation_kind": "source_direct",
+        "bridge_rationale": "",
+        "state_requirements": [],
+        "state_changes": [],
+        "released_constraints_for": [],
+        "decision": null
+      }
+    ]
+  },
+  "response_payload": {
+    "format_version": "screenplay-narrative-blueprint.v6",
+    "episode_no": 1,
+    "shard_index": 2,
+    "source_segment_ids": ["SRC0002"],
+    "nodes": [
+      {
+        "key": "N001",
+        "source_segment_ids": ["SRC0002"],
+        "summary": "南赡大地赵国四月黄昏，书生孟浩坐于大青山顶，因科举落榜对未来充满迷茫，写下字条塞入葫芦扔下青山。",
+        "narrative_layer": "story",
+        "event_priority": "causal",
+        "render_policy": "standalone",
+        "temporal_domain_key": "T001",
+        "time_label": "四月黄昏",
+        "time_relation": "episode_start",
+        "location_key": "L001",
+        "location_label": "大青山山顶",
+        "participants": ["C001"],
+        "participant_evidence": [
+          {
+            "identity_key": "C001",
+            "source_segment_ids": ["SRC0002"],
+            "source_unit_keys": [
+              "SRC0002:unit:001",
+              "SRC0002:unit:003",
+              "SRC0002:unit:005",
+              "SRC0002:unit:007",
+              "SRC0002:unit:009",
+              "SRC0002:unit:011"
+            ],
+            "usage": "state_subject"
+          }
+        ],
+        "environment_source_unit_keys": ["SRC0002:unit:001"],
+        "source_unit_deliveries": [
+          {
+            "source_unit_key": "SRC0002:unit:002",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:004",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:006",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:008",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          },
+          {
+            "source_unit_key": "SRC0002:unit:010",
+            "mode": "spoken_dialogue",
+            "content_owner_key": "C001",
+            "performer_key": "C001"
+          }
+        ],
+        "scene_boundary_before": false,
+        "transition_cue": "",
+        "opening_image": "黄昏夕阳下，瘦弱少年孟浩坐于大青山顶，手中拿着葫芦望向远方。",
+        "exit_state": "孟浩将装了字条的葫芦用力扔下大青山，神色仍带着未散的迷茫。",
+        "scene_role": "setup",
+        "dramatic_load": 2,
+        "action_logic": "孟浩从消极迷茫转为将期许写入葫芦抛下青山。",
+        "adaptation_kind": "source_direct",
+        "bridge_rationale": "",
+        "state_requirements": [],
+        "state_changes": [],
+        "released_constraints_for": [],
+        "decision": null
+      }
+    ]
+  }
+}

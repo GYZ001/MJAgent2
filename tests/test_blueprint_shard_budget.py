@@ -3,12 +3,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from app import db, hiagent, stages
 from app.source_excerpt import index_source_segments
+
+
+ERR_653AC6_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "blueprint_shard_err_20260814_653ac6.json"
+)
 
 
 def _source(count: int) -> str:
@@ -213,13 +222,100 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     )
 
     assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
-        "screenplay-blueprint-1.6.3"
+        "screenplay-blueprint-1.6.4"
     )
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt
     assert "连续动作压缩为一个核心因果进程" in prompt
+    assert "performer_key不能替代这条typed voice evidence" in prompt
+    assert "source_unit_keys只含该delivery的source_unit_key" in prompt
     assert "跨时空或过载则拆节点" not in prompt
     assert _prompt_source_ids(prompt) == ["SRC0003"]
+    schema = json.loads(prompt.split("\nschema=", 1)[1])
+    node_schema = schema["$defs"]["NarrativeNode"]
+    assert "participant_evidence" in node_schema["required"]
+    audible_contract = node_schema["allOf"][0]
+    assert audible_contract["then"]["properties"][
+        "participant_evidence"
+    ]["contains"]["properties"]["usage"] == {"const": "voice"}
+    evidence_contract = schema["$defs"]["NarrativeParticipantEvidence"][
+        "allOf"
+    ][0]["then"]
+    assert evidence_contract["properties"]["source_unit_keys"] == {
+        "minItems": 1
+    }
+    delivery_contract = schema["$defs"]["NarrativeSourceUnitDelivery"][
+        "allOf"
+    ][0]["then"]
+    assert delivery_contract["properties"]["performer_key"] == {
+        "minLength": 1
+    }
+    assert "performer_key" in delivery_contract["required"]
+
+
+def test_err_653ac6_provider_responses_require_explicit_voice_evidence() -> None:
+    replay = json.loads(ERR_653AC6_FIXTURE.read_text(encoding="utf-8"))
+
+    assert replay["error_id"] == "ERR-20260814-653ac6"
+    assert replay["provider_call_ids"] == [29660, 29661]
+    assert replay["raw_artifact_ids"] == [
+        "art_271c1f4e96b0",
+        "art_f8cd88c96583",
+    ]
+    assert replay["run_id"] == "run_9ad1461b9bcf"
+    assert replay["step_run_id"] == "step_3eb446ed0f50"
+    assert replay["contract_version"] == stages.BLUEPRINT_VERSION
+
+    payloads = [
+        replay["first_response_payload"],
+        replay["response_payload"],
+    ]
+    for payload in payloads:
+        node = payload["nodes"][0]
+        deliveries = node["source_unit_deliveries"]
+        assert len(deliveries) == 5
+        assert {item["mode"] for item in deliveries} == {"spoken_dialogue"}
+        assert not any(
+            evidence["usage"] == "voice"
+            for evidence in node["participant_evidence"]
+        )
+
+        isolated = json.loads(json.dumps(payload, ensure_ascii=False))
+        isolated_node = isolated["nodes"][0]
+        if isinstance(isolated_node["participants"][0], dict):
+            isolated_node["participants"] = [
+                item["character_key"]
+                for item in isolated_node["participants"]
+            ]
+        with pytest.raises(
+            ValidationError,
+            match="performer_key 不能替代该证据",
+        ):
+            stages.NarrativeBlueprintShard.model_validate(isolated)
+
+        isolated_node["participant_evidence"].extend([
+            {
+                "identity_key": delivery["performer_key"],
+                "source_segment_ids": ["SRC0002"],
+                "source_unit_keys": [delivery["source_unit_key"]],
+                "usage": "voice",
+            }
+            for delivery in isolated_node["source_unit_deliveries"]
+        ])
+        shard = stages.NarrativeBlueprintShard.model_validate(isolated)
+        voice_evidence = [
+            evidence
+            for evidence in shard.nodes[0].participant_evidence
+            if evidence.usage == "voice"
+        ]
+        assert len(voice_evidence) == 5
+        assert {
+            evidence.source_unit_keys[0]
+            for evidence in voice_evidence
+        } == {
+            delivery.source_unit_key
+            for delivery in shard.nodes[0].source_unit_deliveries
+        }
 
 
 def test_output_truncated_splits_once_without_accepting_prefix(
