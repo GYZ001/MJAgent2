@@ -5236,6 +5236,8 @@ class _BlueprintGenerationBudget:
         self._next_reservation_id = 1
         self._reservations: dict[int, dict[str, Any]] = {}
         self._durable_successful_operations: set[str] = set()
+        self._durable_unknown_operations: dict[str, str] = {}
+        self.retry_grant_id = ""
 
     @classmethod
     def from_durable_calls(
@@ -5243,22 +5245,41 @@ class _BlueprintGenerationBudget:
         *,
         run_id: str | None,
         started_at_epoch: float | None = None,
+        episode_id: str = "",
+        input_fingerprint: str = "",
+        retry_grant_id: str = "",
     ) -> "_BlueprintGenerationBudget":
         budget = cls()
         if started_at_epoch is not None:
             elapsed = max(0.0, time.time() - float(started_at_epoch))
             budget.started_at = time.monotonic() - elapsed
-        if not run_id:
+        budget.retry_grant_id = str(retry_grant_id or "")
+        if not run_id and not (episode_id and input_fingerprint):
             return budget
-        rows = get_conn().execute(
-            "SELECT response_json,meta,status,recovery_disposition,operation_id "
-            "FROM provider_calls WHERE run_id=? AND kind='chat' "
+        query = (
+            "SELECT pc.response_json,pc.meta,pc.status,"
+            "pc.recovery_disposition,pc.operation_id,pc.ts "
+            "FROM provider_calls pc "
+            "LEFT JOIN workflow_runs wr ON wr.id=pc.run_id "
+            "WHERE pc.kind='chat' "
             "AND json_extract(meta,'$.stage_key') IN "
             "('screenplay_blueprint_shard','screenplay_blueprint_patch',"
             "'screenplay_blueprint_review') "
-            "AND kind != 'provider_cache_hit'",
-            (run_id,),
-        ).fetchall()
+            "AND pc.kind != 'provider_cache_hit'"
+        )
+        params: tuple[Any, ...]
+        if episode_id and input_fingerprint:
+            query += (
+                " AND json_extract(pc.meta,'$.episode_id')=?"
+                " AND wr.input_fingerprint=?"
+            )
+            params = (episode_id, input_fingerprint)
+        else:
+            query += " AND pc.run_id=?"
+            params = (run_id,)
+        query += " ORDER BY pc.id"
+        rows = get_conn().execute(query, params).fetchall()
+        latest_operation_status: dict[str, tuple[str, str]] = {}
         for row in rows:
             try:
                 meta = json.loads(row["meta"] or "{}")
@@ -5280,6 +5301,11 @@ class _BlueprintGenerationBudget:
             budget.requested_output_tokens += requested
             budget.provider_calls += 1
             status = str(row["status"] or "").upper()
+            if operation_id:
+                latest_operation_status[operation_id] = (
+                    status,
+                    str(meta.get("production_grant_id") or ""),
+                )
             if status not in {"OK", "SUCCESS", "SUCCEEDED"}:
                 disposition = str(row["recovery_disposition"] or "").lower()
                 delivery_state = str(meta.get("delivery_state") or "").lower()
@@ -5301,6 +5327,11 @@ class _BlueprintGenerationBudget:
                 budget.actual_output_tokens += actual
             else:
                 budget.unknown_output_tokens += effective
+        for operation_id, (status, prior_grant_id) in latest_operation_status.items():
+            if status in {"OK", "SUCCESS", "SUCCEEDED"}:
+                budget._durable_successful_operations.add(operation_id)
+            elif status in {"INTERRUPTED", "RUNNING"}:
+                budget._durable_unknown_operations[operation_id] = prior_grant_id
         return budget
 
     @property
@@ -5325,6 +5356,20 @@ class _BlueprintGenerationBudget:
             operation_id
             and operation_id in self._durable_successful_operations
         )
+        prior_unknown_grant = self._durable_unknown_operations.get(operation_id)
+        if prior_unknown_grant is not None and not durable_replay:
+            if (
+                not self.retry_grant_id
+                or self.retry_grant_id == prior_unknown_grant
+            ):
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    [
+                        "[BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED] "
+                        "上次供应商结果未知；必须由新的 Production Grant "
+                        "显式授权同一语义 operation 的下一 attempt"
+                    ],
+                )
         elapsed = time.monotonic() - self.started_at
         if (
             not durable_replay
@@ -5442,19 +5487,45 @@ class _BlueprintGenerationBudget:
         }
 
 
-def _blueprint_generation_budget_for_trace(trace: Any) -> _BlueprintGenerationBudget:
+def _blueprint_generation_budget_for_trace(
+    trace: Any,
+    *,
+    episode_id: str = "",
+) -> _BlueprintGenerationBudget:
     run_id = getattr(trace, "run_id", None)
     run_started_at: float | None = None
+    input_fingerprint = ""
+    retry_grant_id = ""
     if run_id:
         run_row = get_conn().execute(
-            "SELECT started_at FROM workflow_runs WHERE id=?",
+            "SELECT started_at,input_fingerprint FROM workflow_runs WHERE id=?",
             (run_id,),
         ).fetchone()
         if run_row is not None:
             run_started_at = run_row["started_at"]
+            input_fingerprint = str(run_row["input_fingerprint"] or "")
+    if episode_id:
+        try:
+            grant_row = get_conn().execute(
+                """SELECT r.grant_id
+                     FROM production_revisions r
+                     JOIN production_grants g ON g.id=r.grant_id
+                    WHERE r.episode_id=? AND r.kind='screenplay'
+                      AND r.status='active'
+                      AND g.revoked_at IS NULL AND g.expires_at>?
+                    ORDER BY r.updated_at DESC LIMIT 1""",
+                (episode_id, time.time()),
+            ).fetchone()
+            if grant_row is not None:
+                retry_grant_id = str(grant_row["grant_id"] or "")
+        except Exception:  # noqa: BLE001 - isolated legacy test schemas
+            retry_grant_id = ""
     return _BlueprintGenerationBudget.from_durable_calls(
         run_id=run_id,
         started_at_epoch=run_started_at,
+        episode_id=episode_id,
+        input_fingerprint=input_fingerprint,
+        retry_grant_id=retry_grant_id,
     )
 
 
@@ -5667,6 +5738,9 @@ async def _generate_sharded_narrative_blueprint(
                                 ),
                                 "expected_json": True,
                                 "operation_id": operation_id,
+                                "production_grant_id": (
+                                    generation_budget.retry_grant_id
+                                ),
                                 "reuse_successful_operation": True,
                                 "require_cached_successful_operation": (
                                     durable_replay
@@ -5924,7 +5998,10 @@ async def _generate_screenplay_narrative_blueprint(
     from app.observability.tracing import current_trace
 
     trace = current_trace()
-    generation_budget = _blueprint_generation_budget_for_trace(trace)
+    generation_budget = _blueprint_generation_budget_for_trace(
+        trace,
+        episode_id=str(episode.get("id") or ""),
+    )
     current_run = get_conn().execute(
         "SELECT input_fingerprint FROM workflow_runs WHERE id=?",
         (trace.run_id,),
@@ -5978,7 +6055,11 @@ async def _generate_screenplay_narrative_blueprint(
                 None,
                 0,
                 meta={
-                    "episode_id": str(episode.get("id") or ""),
+                "episode_id": str(episode.get("id") or ""),
+                "production_grant_id": (
+                    generation_budget.retry_grant_id
+                    if generation_budget is not None else ""
+                ),
                     "contract_version": BLUEPRINT_VERSION,
                     "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                 },
@@ -6632,7 +6713,11 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         ),
         agent_name="screenplay_blueprint",
         context_manifest={
-            "episode_id": str(episode.get("id") or ""),
+                    "episode_id": str(episode.get("id") or ""),
+                    "production_grant_id": (
+                        generation_budget.retry_grant_id
+                        if generation_budget is not None else ""
+                    ),
             "source_chars": len(source_text),
         },
     )

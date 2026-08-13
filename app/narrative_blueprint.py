@@ -2692,13 +2692,15 @@ def validate_narrative_blueprint(
                     f"[BLUEPRINT_PARTICIPANT_EVIDENCE_ORPHAN] {node.key} "
                     f"{evidence.identity_key} 未列入 participants"
                 )
-        if node.participant_evidence:
-            missing_evidence = participant_keys - evidence_keys
-            if missing_evidence:
-                errors.append(
-                    f"[BLUEPRINT_PARTICIPANT_EVIDENCE_MISSING] {node.key} 缺少"
-                    "参与者来源证据：" + "、".join(sorted(missing_evidence))
-                )
+        # Presence of the list itself is not authority.  A node with declared
+        # participants and an empty evidence list used to bypass this gate,
+        # even though the equivalent non-empty/partial list was rejected.
+        missing_evidence = participant_keys - evidence_keys
+        if missing_evidence:
+            errors.append(
+                f"[BLUEPRINT_PARTICIPANT_EVIDENCE_MISSING] {node.key} 缺少"
+                "参与者来源证据：" + "、".join(sorted(missing_evidence))
+            )
 
         for requirement in node.state_requirements:
             if requirement.assumed_prior:
