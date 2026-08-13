@@ -64,36 +64,74 @@ def _persist_screenplay_duration_expansion(
     *,
     episode_id: str,
     expected_target_s: int,
+    expected_planning_s: int,
+    expected_duration_authority: str,
+    expected_active_run_id: str | None,
     required_target_s: int,
 ) -> None:
     """CAS-persist every duration field that belongs to screenplay authority."""
+    if expected_duration_authority != "planning_estimate":
+        raise StateConflict(
+            "screenplay_duration_authority",
+            episode_id,
+            {"planning_estimate"},
+            expected_duration_authority or None,
+        )
     cursor = conn.execute(
         """UPDATE episodes
               SET target_duration_s=?,
-                  planning_target_duration_s=CASE
-                    WHEN target_duration_authority='planning_estimate'
-                    THEN ?
-                    ELSE planning_target_duration_s
-                  END,
+                  planning_target_duration_s=?,
                   screenplay_snapshot_version=screenplay_snapshot_version+1
-            WHERE id=? AND target_duration_s=?""",
+            WHERE id=?
+              AND target_duration_s=?
+              AND planning_target_duration_s=?
+              AND target_duration_authority=?
+              AND active_screenplay_run_id IS ?""",
         (
             required_target_s,
             required_target_s,
             episode_id,
             expected_target_s,
+            expected_planning_s,
+            expected_duration_authority,
+            expected_active_run_id,
         ),
     )
     if cursor.rowcount != 1:
         current = conn.execute(
-            "SELECT target_duration_s FROM episodes WHERE id=?",
+            """SELECT target_duration_s,planning_target_duration_s,
+                      target_duration_authority,active_screenplay_run_id
+                 FROM episodes WHERE id=?""",
             (episode_id,),
         ).fetchone()
         raise StateConflict(
             "screenplay_duration",
             episode_id,
-            {str(expected_target_s)},
-            str(current["target_duration_s"]) if current is not None else None,
+            {
+                json.dumps(
+                    {
+                        "target": expected_target_s,
+                        "planning": expected_planning_s,
+                        "authority": expected_duration_authority,
+                        "owner": expected_active_run_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            },
+            (
+                json.dumps(
+                    {
+                        "target": current["target_duration_s"],
+                        "planning": current["planning_target_duration_s"],
+                        "authority": current["target_duration_authority"],
+                        "owner": current["active_screenplay_run_id"],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if current is not None else None
+            ),
         )
 
 
@@ -3692,6 +3730,16 @@ async def run_screenplay_production(
                     conn,
                     episode_id=episode_id,
                     expected_target_s=current_target,
+                    expected_planning_s=int(
+                        episode.get("planning_target_duration_s")
+                        if episode.get("planning_target_duration_s") is not None
+                        else current_target
+                    ),
+                    expected_duration_authority=str(
+                        episode.get("target_duration_authority")
+                        or "planning_estimate"
+                    ),
+                    expected_active_run_id=run_id,
                     required_target_s=required_target,
                 )
             except StateConflict:

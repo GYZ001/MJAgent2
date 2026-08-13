@@ -845,6 +845,10 @@ class IRSceneUnit(BaseModel):
     on_screen_text: str = ""
     resulting_state: str = ""
     speaker_key: str | None = None
+    # Compiler-owned state ownership.  ``environment_only`` is an explicit
+    # typed assertion, never the fallback for missing character attribution.
+    state_subject_key: str = ""
+    environment_only: bool = False
     function: str = "statement"
     source_text: str = ""
     chain_key: str = ""
@@ -903,6 +907,10 @@ class IRSceneUnit(BaseModel):
         if self.action_agency.source_segment_ids != self.source_segment_ids:
             raise ValueError(
                 "action_agency.source_segment_ids 必须与 unit 来源等价"
+            )
+        if self.environment_only and self.state_subject_key:
+            raise ValueError(
+                "unit 不得同时声明 state_subject_key 与 environment_only"
             )
         _validate_text_provenance(
             provenance=self.text_provenance,
@@ -985,6 +993,8 @@ class IREvent(BaseModel):
     participant_deliveries: list[IRActionParticipantDelivery] = Field(
         default_factory=list
     )
+    state_subject_key: str = ""
+    environment_only: bool = False
     action_agency: ActionAgency
     text_provenance: TextProvenance
     dialogue_text: str = ""
@@ -1071,6 +1081,10 @@ class IREvent(BaseModel):
         if self.action_agency.source_segment_ids != self.source_segment_ids:
             raise ValueError(
                 "event.action_agency.source_segment_ids 必须与事件来源等价"
+            )
+        if self.environment_only and self.state_subject_key:
+            raise ValueError(
+                "event 不得同时声明 state_subject_key 与 environment_only"
             )
         _validate_text_provenance(
             provenance=self.text_provenance,

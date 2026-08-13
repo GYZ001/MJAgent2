@@ -162,6 +162,8 @@ class ScreenplaySceneUnitSlotPlan(BaseModel):
     ] = "action"
     content_owner_key: str = ""
     performer_key: str = ""
+    state_subject_key: str = ""
+    environment_only: bool = False
 
 
 class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
@@ -202,6 +204,11 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
         if self.action_agency.source_segment_ids != self.source_segment_ids:
             raise ValueError(
                 "compiled slot action_agency.source_segment_ids 必须与来源等价"
+            )
+        if self.environment_only and self.state_subject_key:
+            raise ValueError(
+                "compiled slot 不得同时声明 state_subject_key "
+                "与 environment_only"
             )
         return self
 
@@ -260,6 +267,7 @@ class ScreenplaySceneActionEvidence(BaseModel):
         default_factory=list,
     )
     decision_actor_key: str | None = None
+    environment_source_unit_keys: list[str] = Field(default_factory=list)
 
 
 class ScreenplayActionParticipantDeliveryContract(BaseModel):
@@ -687,6 +695,9 @@ def _compile_unit_identity_scaffold(
     participant_channels: dict[str, list[str]] = {}
     voice_claims: list[str] = []
     decision_actor_keys: list[str] = []
+    state_subject_claims: list[str] = []
+    exact_decision_actor_keys: list[str] = []
+    environment_only = False
     source_text_by_id = {
         segment.source_segment_id: segment.text
         for segment in contract.source_segments
@@ -695,6 +706,8 @@ def _compile_unit_identity_scaffold(
     for action in contract.action_evidence:
         if not source_set.intersection(action.source_segment_ids):
             continue
+        if slot.source_unit_key in action.environment_source_unit_keys:
+            environment_only = True
         for participant in action.participants:
             if not source_set.intersection(
                 participant.source_segment_ids
@@ -711,6 +724,15 @@ def _compile_unit_identity_scaffold(
                 )
                 continue
             if (
+                participant.usage == "state_subject"
+                and not participant.source_unit_keys
+            ):
+                errors.append(
+                    f"{slot.unit_key} state_subject identity evidence "
+                    "缺少精确 source_unit_keys"
+                )
+                continue
+            if (
                 participant.source_unit_keys
                 and slot.source_unit_key
                 not in participant.source_unit_keys
@@ -722,6 +744,11 @@ def _compile_unit_identity_scaffold(
             ).add(participant.usage)
             if participant.usage == "voice":
                 voice_claims.append(participant.identity_key)
+            if (
+                participant.usage == "state_subject"
+                and participant.identity_key not in state_subject_claims
+            ):
+                state_subject_claims.append(participant.identity_key)
             channels = participant_channels.setdefault(
                 participant.identity_key,
                 [],
@@ -735,6 +762,12 @@ def _compile_unit_identity_scaffold(
             and action.decision_actor_key not in decision_actor_keys
         ):
             decision_actor_keys.append(action.decision_actor_key)
+            if any(
+                participant.identity_key == action.decision_actor_key
+                and slot.source_unit_key in participant.source_unit_keys
+                for participant in action.participants
+            ):
+                exact_decision_actor_keys.append(action.decision_actor_key)
 
     visible_keys = [
         identity_key
@@ -798,6 +831,39 @@ def _compile_unit_identity_scaffold(
         *target_keys,
         *([speaker_key] if speaker_key else []),
     ])
+    typed_actor_claims = _ordered_unique(exact_decision_actor_keys)
+    state_subject_key = ""
+    if len(state_subject_claims) > 1:
+        errors.append(
+            f"{slot.unit_key} 存在多个 state_subject identity evidence："
+            f"{state_subject_claims}"
+        )
+    elif state_subject_claims:
+        state_subject_key = state_subject_claims[0]
+    elif slot.kind == "dialogue" and speaker_key:
+        state_subject_key = speaker_key
+    elif len(typed_actor_claims) == 1:
+        state_subject_key = typed_actor_claims[0]
+    elif len(typed_actor_claims) > 1:
+        errors.append(
+            f"{slot.unit_key} 存在多个 exact-unit typed actor "
+            f"{typed_actor_claims}，必须由 Blueprint "
+            "usage=state_subject 唯一冻结"
+        )
+    if environment_only and (
+        state_subject_key
+        or state_subject_claims
+        or typed_actor_claims
+        or (slot.kind == "dialogue" and speaker_key)
+    ):
+        errors.append(
+            f"{slot.unit_key} 同时声明人物主体与 environment_only"
+        )
+    elif not environment_only and not state_subject_key:
+        errors.append(
+            f"{slot.unit_key} 缺少唯一 state_subject 结构证据，"
+            "且未显式声明 environment_only"
+        )
     participant_deliveries: list[IRActionParticipantDelivery] = []
     observable_basis = slot.source_text.strip() or " ".join(
         source_text_by_id.get(source_id, "")
@@ -831,6 +897,8 @@ def _compile_unit_identity_scaffold(
         onscreen_entity_keys=visible_keys,
         participant_deliveries=participant_deliveries,
         speaker_key=speaker_key,
+        state_subject_key=state_subject_key,
+        environment_only=environment_only,
         action_agency=ActionAgency(
             kind="character" if relation_keys else "unattributed",
             identity_bearing=bool(relation_keys),
@@ -1052,6 +1120,8 @@ def compile_screenplay_scene_shard_draft(
                 on_screen_text=creative_unit.on_screen_text,
                 resulting_state=creative_unit.resulting_state,
                 speaker_key=compiled_slot.speaker_key,
+                state_subject_key=compiled_slot.state_subject_key,
+                environment_only=compiled_slot.environment_only,
                 function=creative_unit.function,
                 source_text=planned_slot.source_text,
                 chain_key="",
@@ -1782,6 +1852,9 @@ def build_screenplay_scene_input_contracts(
                 source_segment_ids=list(node.source_segment_ids),
                 participants=participants,
                 decision_actor_key=decision_actor_key or None,
+                environment_source_unit_keys=list(
+                    node.environment_source_unit_keys
+                ),
             ))
 
         contract = ScreenplaySceneInputContract(

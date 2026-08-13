@@ -123,6 +123,9 @@ def test_baseline_duration_expansion_persists_planning_authority_with_cas() -> N
         conn,
         episode_id=case["episode_id"],
         expected_target_s=1800,
+        expected_planning_s=1800,
+        expected_duration_authority="planning_estimate",
+        expected_active_run_id=None,
         required_target_s=1801,
     )
     conn.commit()
@@ -137,22 +140,69 @@ def test_baseline_duration_expansion_persists_planning_authority_with_cas() -> N
             conn,
             episode_id=case["episode_id"],
             expected_target_s=1800,
+            expected_planning_s=1800,
+            expected_duration_authority="planning_estimate",
+            expected_active_run_id=None,
             required_target_s=1802,
         )
     assert exc_info.value.entity == "screenplay_duration"
-    assert exc_info.value.expected == {"1800"}
-    assert exc_info.value.actual == "1801"
+    assert '"target": 1800' in next(iter(exc_info.value.expected))
+    assert '"target": 1801' in str(exc_info.value.actual)
     assert tuple(conn.execute(
         "SELECT target_duration_s,planning_target_duration_s FROM episodes WHERE id=?",
         (case["episode_id"],),
     ).fetchone()) == (1801, 1801)
 
 
+@pytest.mark.parametrize(
+    ("planning_s", "authority", "active_run_id"),
+    [
+        pytest.param(1799, "planning_estimate", None, id="planning-drift"),
+        pytest.param(1800, "storyboard-outline-authority.v1", None, id="authority-drift"),
+        pytest.param(1800, "planning_estimate", "run-other", id="owner-drift"),
+    ],
+)
+def test_baseline_duration_expansion_rejects_planning_authority_or_owner_drift(
+    planning_s: int,
+    authority: str,
+    active_run_id: str | None,
+) -> None:
+    case = _source_projection_case()
+    conn = db.get_conn()
+    conn.execute(
+        """UPDATE episodes
+              SET target_duration_s=1800,planning_target_duration_s=?,
+                  target_duration_authority=?,active_screenplay_run_id=?
+            WHERE id=?""",
+        (planning_s, authority, active_run_id, case["episode_id"]),
+    )
+    conn.commit()
+
+    with pytest.raises(StateConflict):
+        _persist_screenplay_duration_expansion(
+            conn,
+            episode_id=case["episode_id"],
+            expected_target_s=1800,
+            expected_planning_s=1800,
+            expected_duration_authority="planning_estimate",
+            expected_active_run_id=None,
+            required_target_s=1801,
+        )
+
+    row = conn.execute(
+        """SELECT target_duration_s,planning_target_duration_s,
+                  target_duration_authority,active_screenplay_run_id
+             FROM episodes WHERE id=?""",
+        (case["episode_id"],),
+    ).fetchone()
+    assert tuple(row) == (1800, planning_s, authority, active_run_id)
+
+
 def test_duration_expansion_bound_as_planning_input_survives_publish_cleanup() -> None:
     # run_21a expanded the generated duration before QA.  The planning input
     # must advance with it so downstream retirement cannot revert the signed
     # fingerprint while publishing.
-    case = _pending_publish(target_duration_s=1801, planning_duration_s=1801)
+    case = _pending_publish(target_duration_s=521, planning_duration_s=521)
 
     result = _publish(case)
 
@@ -161,7 +211,7 @@ def test_duration_expansion_bound_as_planning_input_survives_publish_cleanup() -
         "SELECT target_duration_s,planning_target_duration_s FROM episodes WHERE id=?",
         (case["episode_id"],),
     ).fetchone()
-    assert tuple(row) == (1801, 1801)
+    assert tuple(row) == (521, 521)
     assert result["artifact_id"] == case["artifact"]["id"]
     assert authority.input_fingerprint == case["fingerprint"]
 
@@ -169,7 +219,7 @@ def test_duration_expansion_bound_as_planning_input_survives_publish_cleanup() -
 def test_publish_rolls_back_if_downstream_cleanup_changes_authority_fingerprint() -> None:
     # Exact production failure shape: QA signed the expanded target, but an old
     # planning value would be restored while retiring the storyboard.
-    case = _pending_publish(target_duration_s=1801, planning_duration_s=1800)
+    case = _pending_publish(target_duration_s=521, planning_duration_s=520)
     conn = db.get_conn()
     certificates_before = conn.execute(
         "SELECT COUNT(*) FROM completion_certificates WHERE scope_id=?",
@@ -187,7 +237,7 @@ def test_publish_rolls_back_if_downstream_cleanup_changes_authority_fingerprint(
         "SELECT status,published_artifact_id FROM production_revisions WHERE id=?",
         (case["revision_id"],),
     ).fetchone()
-    assert tuple(episode) == (1801, None)
+    assert tuple(episode) == (521, None)
     assert tuple(revision) == ("active", None)
     assert conn.execute(
         "SELECT status FROM artifacts WHERE id=?", (case["artifact"]["id"],),
@@ -201,7 +251,7 @@ def test_publish_rolls_back_if_downstream_cleanup_changes_authority_fingerprint(
 def test_publish_transaction_rejects_authority_cas_drift_and_rolls_back(
     monkeypatch,
 ) -> None:
-    case = _pending_publish(target_duration_s=1801, planning_duration_s=1801)
+    case = _pending_publish(target_duration_s=521, planning_duration_s=521)
     from app import storyboard_authority
 
     original = storyboard_authority.clear_storyboard_outline_authority
@@ -230,7 +280,7 @@ def test_publish_transaction_rejects_authority_cas_drift_and_rolls_back(
 
 
 def test_successful_publish_replay_does_not_issue_duplicate_certificate() -> None:
-    case = _pending_publish(target_duration_s=1801, planning_duration_s=1801)
+    case = _pending_publish(target_duration_s=521, planning_duration_s=521)
     first = _publish(case)
     conn = db.get_conn()
 

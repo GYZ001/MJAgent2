@@ -279,6 +279,11 @@ class NarrativeNode(BaseModel):
     participant_evidence: list[NarrativeParticipantEvidence] = Field(
         default_factory=list,
     )
+    # Every prose/action source unit must either have one identity-bearing
+    # state_subject evidence row or be explicitly classified as environment.
+    # Absence is never interpreted as environment: that used to turn missing
+    # character attribution into a synthetic environment state silently.
+    environment_source_unit_keys: list[str] = Field(default_factory=list)
     source_unit_deliveries: list[NarrativeSourceUnitDelivery] = Field(
         default_factory=list,
     )
@@ -335,6 +340,7 @@ class NarrativeNode(BaseModel):
         if self.narrative_layer == "paratext" and any((
             self.participants,
             self.participant_evidence,
+            self.environment_source_unit_keys,
             self.source_unit_deliveries,
             self.state_requirements,
             self.state_changes,
@@ -1409,6 +1415,142 @@ def blueprint_voice_identity_issues(
     return issues
 
 
+def blueprint_state_subject_issues(
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> list[BlueprintSemanticIssue]:
+    """Require one typed owner for every prose unit before scene generation."""
+    facts = source_facts(source_text)
+    facts_by_key = {fact.source_unit_key: fact for fact in facts}
+    issues: list[BlueprintSemanticIssue] = []
+    for node in blueprint.nodes:
+        if node.source_semantics().projection_policy != "picture":
+            continue
+        owned_sources = set(node.source_segment_ids)
+        action_facts = [
+            fact for fact in facts
+            if (
+                fact.projection == "action"
+                and fact.source_segment_id in owned_sources
+            )
+        ]
+        environment_keys = list(node.environment_source_unit_keys)
+        if len(environment_keys) != len(set(environment_keys)):
+            issues.append(BlueprintSemanticIssue(
+                code="state_subject_environment_duplicate",
+                node_keys=[node.key],
+                source_segment_ids=list(node.source_segment_ids),
+                message="environment_source_unit_keys 含重复 source unit",
+                required_resolution="每个环境 source unit 只能显式声明一次",
+            ))
+        invalid_environment_keys = [
+            key for key in environment_keys
+            if (
+                key not in facts_by_key
+                or facts_by_key[key].projection != "action"
+                or facts_by_key[key].source_segment_id not in owned_sources
+            )
+        ]
+        if invalid_environment_keys:
+            issues.append(BlueprintSemanticIssue(
+                code="state_subject_environment_invalid",
+                node_keys=[node.key],
+                source_segment_ids=list(node.source_segment_ids),
+                message=(
+                    "environment_source_unit_keys 引用非本节点 prose unit："
+                    + "、".join(invalid_environment_keys)
+                ),
+                required_resolution="只标记本节点拥有的 prose/action source unit",
+            ))
+
+        claims_by_unit: defaultdict[
+            str, list[NarrativeParticipantEvidence]
+        ] = defaultdict(list)
+        for evidence in node.participant_evidence:
+            if evidence.usage != "state_subject":
+                continue
+            if not evidence.source_unit_keys:
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_unit_missing",
+                    node_keys=[node.key],
+                    source_segment_ids=list(evidence.source_segment_ids),
+                    message=(
+                        f"{evidence.identity_key} 的 state_subject evidence "
+                        "缺少精确 source_unit_keys"
+                    ),
+                    required_resolution=(
+                        "把状态主体绑定到本节点具体 prose source unit"
+                    ),
+                ))
+                continue
+            for key in evidence.source_unit_keys:
+                fact = facts_by_key.get(key)
+                if (
+                    fact is None
+                    or fact.projection != "action"
+                    or fact.source_segment_id not in owned_sources
+                ):
+                    issues.append(BlueprintSemanticIssue(
+                        code="state_subject_unit_invalid",
+                        node_keys=[node.key],
+                        source_segment_ids=list(evidence.source_segment_ids),
+                        message=(
+                            f"{evidence.identity_key} 的 state_subject "
+                            f"引用非本节点 prose unit {key}"
+                        ),
+                        required_resolution=(
+                            "只绑定本节点拥有的 prose/action source unit"
+                        ),
+                    ))
+                    continue
+                claims_by_unit[key].append(evidence)
+
+        for fact in action_facts:
+            claims = claims_by_unit.get(fact.source_unit_key, [])
+            explicit = list(dict.fromkeys(
+                evidence.identity_key
+                for evidence in claims
+                if evidence.usage == "state_subject"
+            ))
+            environment = fact.source_unit_key in environment_keys
+            if environment and explicit:
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_environment_conflict",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=(
+                        f"{fact.source_unit_key} 同时声明人物主体与 environment"
+                    ),
+                    required_resolution="人物主体和纯环境标记必须二选一",
+                ))
+            elif len(explicit) > 1:
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_ambiguous",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=(
+                        f"{fact.source_unit_key} 存在多个候选状态主体："
+                        + "、".join(explicit)
+                    ),
+                    required_resolution=(
+                        "用唯一 usage=state_subject evidence 明确主体"
+                    ),
+                ))
+            elif not explicit and not environment:
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_missing",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=f"{fact.source_unit_key} 缺少结构化状态主体",
+                    required_resolution=(
+                        "人物思考/动作/反应填唯一 state_subject evidence；"
+                        "真正无人物的环境单元填 "
+                        "environment_source_unit_keys"
+                    ),
+                ))
+    return issues
+
+
 def normalize_blueprint_source_order(
     blueprint: NarrativeBlueprint,
     source_text: str,
@@ -2115,6 +2257,18 @@ def validate_narrative_blueprint(
             f"必须：{issue.required_resolution}"
         )
         for issue in blueprint_voice_identity_issues(
+            blueprint,
+            source_text,
+        )
+    )
+    errors.extend(
+        (
+            f"[BLUEPRINT_{issue.code.upper()}] "
+            f"{'、'.join(issue.node_keys)} "
+            f"{'、'.join(issue.source_segment_ids)}：{issue.message}；"
+            f"必须：{issue.required_resolution}"
+        )
+        for issue in blueprint_state_subject_issues(
             blueprint,
             source_text,
         )
@@ -2855,6 +3009,18 @@ def blueprint_prompt_contract() -> dict[str, Any]:
             "non_dialogue_voice_contract": (
                 "written_text, sound_effect and unspoken_reference delivery "
                 "must not carry voice evidence"
+            ),
+            "state_subject_contract": (
+                "every prose/action source unit must have exactly one "
+                "usage=state_subject evidence with an exact source_unit_key, "
+                "or its source_unit_key must be listed in "
+                "environment_source_unit_keys; missing or ambiguous ownership "
+                "is a hard failure"
+            ),
+            "environment_contract": (
+                "environment_source_unit_keys is reserved for genuinely "
+                "non-character establishing, weather, place or object state; "
+                "never use it for a person's thought, reaction, question or action"
             ),
         },
         "source_unit_delivery_required": {
