@@ -5002,6 +5002,123 @@ def _split_blueprint_segments(segments: list[Any]) -> list[list[Any]]:
     return [segments[:best_index], segments[best_index:]]
 
 
+def _blueprint_leaf_plan_from_cache(
+    segments: list[Any],
+    cached_rows: list[Any],
+    *,
+    source_corpus_hash: str | None = None,
+) -> tuple[list[list[Any]], list[int], dict[int, tuple[Any, NarrativeBlueprintShard]]]:
+    """Rebuild one exact source cover before any paid parent request.
+
+    Current-policy validated leaves are durable split-manifest entries.  They
+    may cover a prefix plus later gaps after a failed activation.  Non-identical
+    overlapping leaves are ambiguous authority and therefore fail closed;
+    uncovered ranges are partitioned deterministically without first paying for
+    a parent range that already contains reusable children.
+    """
+    source_ids = [str(segment.segment_id) for segment in segments]
+    source_positions = {
+        source_id: index for index, source_id in enumerate(source_ids)
+    }
+    interval_rows: dict[
+        tuple[int, int], tuple[Any, NarrativeBlueprintShard, int]
+    ] = {}
+    for row in cached_rows:
+        try:
+            snapshot = json.loads(row["model_snapshot_json"] or "{}")
+            if (
+                snapshot.get("shard_policy_version")
+                != BLUEPRINT_SHARD_POLICY_VERSION
+                or snapshot.get("local_authority_validator_version")
+                != BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+                or snapshot.get("split_manifest_version")
+                != BLUEPRINT_SPLIT_MANIFEST_VERSION
+            ):
+                continue
+            if source_corpus_hash is not None and snapshot.get(
+                "source_corpus_hash"
+            ) != source_corpus_hash:
+                continue
+            raw_content = json.loads(row["content_json"] or "{}")
+            from app.evidence import repository as evidence_repository
+
+            if str(row["content_hash"] or "") != evidence_repository.content_hash(
+                raw_content
+            ):
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    ["[BLUEPRINT_SPLIT_MANIFEST_HASH] validated leaf 内容哈希漂移"],
+                )
+            shard = NarrativeBlueprintShard.model_validate(raw_content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        owned = list(shard.source_segment_ids)
+        if not owned or any(source_id not in source_positions for source_id in owned):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_SPLIT_MANIFEST_SOURCE_ESCAPE] 缓存 leaf 引用当前来源外 SRC"],
+            )
+        positions = [source_positions[source_id] for source_id in owned]
+        if positions != list(range(positions[0], positions[-1] + 1)):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_SPLIT_MANIFEST_SOURCE_GAP] 缓存 leaf 来源不连续或乱序"],
+            )
+        interval = (positions[0], positions[-1] + 1)
+        prior = interval_rows.get(interval)
+        if prior is not None:
+            if prior[1].model_dump(mode="json") != shard.model_dump(mode="json"):
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    ["[BLUEPRINT_SPLIT_MANIFEST_DUPLICATE_CONFLICT] 同区间存在不同 validated leaf"],
+                )
+            continue
+        interval_rows[interval] = (
+            row,
+            shard,
+            int(snapshot.get("split_depth") or 0),
+        )
+    ordered = sorted(interval_rows)
+    for left, right in zip(ordered, ordered[1:]):
+        if right[0] < left[1]:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_SPLIT_MANIFEST_OVERLAP] validated leaf 区间重叠"],
+            )
+
+    planned: list[list[Any]] = []
+    depths: list[int] = []
+    cached_by_plan_index: dict[int, tuple[Any, NarrativeBlueprintShard]] = {}
+    cursor = 0
+    for start, end in ordered:
+        if cursor < start:
+            for gap in _partition_blueprint_segments(segments[cursor:start]):
+                planned.append(gap)
+                depths.append(0)
+        row, shard, depth = interval_rows[(start, end)]
+        planned.append(segments[start:end])
+        depths.append(depth)
+        cached_by_plan_index[len(planned)] = (row, shard)
+        cursor = end
+    if cursor < len(segments):
+        for gap in _partition_blueprint_segments(segments[cursor:]):
+            planned.append(gap)
+            depths.append(0)
+    flattened = [segment.segment_id for group in planned for segment in group]
+    if flattened != source_ids:
+        raise StageError(
+            "剧本时空因果蓝图分片",
+            ["[BLUEPRINT_SPLIT_MANIFEST_COVERAGE] leaf/gap 计划未精确覆盖当前来源"],
+        )
+    for plan_index, (_row, shard) in cached_by_plan_index.items():
+        if shard.shard_index != plan_index:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_SPLIT_MANIFEST_INDEX] 缓存 leaf 序号与精确覆盖顺序不一致"],
+            )
+    return planned, depths, cached_by_plan_index
+
+
 def _blueprint_shard_token_budget(segments: list[Any]) -> int:
     weight = sum(_blueprint_segment_output_weight(segment) for segment in segments)
     estimated = BLUEPRINT_SHARD_MIN_TOKENS + weight * 512
@@ -5353,8 +5470,32 @@ async def _generate_sharded_narrative_blueprint(
     from app.observability.tracing import current_trace
 
     segments = index_source_segments(source_text)
-    segment_shards = _partition_blueprint_segments(segments)
-    shard_split_depths = [0 for _ in segment_shards]
+    source_corpus_hash = hashlib.sha256(
+        source_text.encode("utf-8")
+    ).hexdigest()
+    cached_rows = get_conn().execute(
+        """SELECT id,content_json,content_hash,model_snapshot_json
+             FROM artifacts
+            WHERE scope_type='episode' AND scope_id=?
+              AND type='screenplay_narrative_blueprint_shard'
+              AND contract_version=?
+              AND prompt_version=? AND status='validated'
+            ORDER BY created_at DESC LIMIT 200""",
+        (
+            str(episode.get("id") or ""),
+            BLUEPRINT_VERSION,
+            SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        ),
+    ).fetchall()
+    (
+        segment_shards,
+        shard_split_depths,
+        cached_by_plan_index,
+    ) = _blueprint_leaf_plan_from_cache(
+        segments,
+        list(cached_rows),
+        source_corpus_hash=source_corpus_hash,
+    )
     if generation_budget is None:
         generation_budget = _blueprint_generation_budget_for_trace(
             current_trace(),
@@ -5397,62 +5538,59 @@ async def _generate_sharded_narrative_blueprint(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        cached_rows = get_conn().execute(
-            """SELECT content_json, model_snapshot_json
-                 FROM artifacts
-                WHERE scope_type='episode' AND scope_id=?
-                  AND type='screenplay_narrative_blueprint_shard'
-                      AND contract_version=?
-                  AND prompt_version=? AND status='validated'
-                ORDER BY created_at DESC LIMIT 50""",
-            (
-                str(episode.get("id") or ""),
-                    BLUEPRINT_VERSION,
-                SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
-            ),
-        ).fetchall()
         shard: NarrativeBlueprintShard | None = None
-        for cached_row in cached_rows:
+        planned_cached = cached_by_plan_index.get(shard_index)
+        if planned_cached is not None:
+            cached_row, cached = planned_cached
             try:
                 cached_snapshot = json.loads(
                     cached_row["model_snapshot_json"] or "{}"
                 )
-                cached = NarrativeBlueprintShard.model_validate(
-                    json.loads(cached_row["content_json"] or "{}"),
-                )
             except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if (
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    ["[BLUEPRINT_SPLIT_MANIFEST_SNAPSHOT] leaf snapshot 损坏"],
+                )
+            cached_errors = validate_narrative_blueprint_shard(
+                cached,
+                expected_episode_no=int(episode["episode_no"]),
+                expected_shard_index=shard_index,
+                expected_source_segment_ids=source_ids,
+                optional_source_segment_ids=optional_ids,
+                boundary_state_facts=boundary["active_state_facts"],
+                source_text=source_text,
+            )
+            if not (
                 cached_snapshot.get("shard_policy_version")
                 == BLUEPRINT_SHARD_POLICY_VERSION
                 and cached_snapshot.get("local_authority_validator_version")
                 == BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
-                and cached.shard_index == shard_index
                 and cached.source_hash == source_hash
                 and cached.boundary_hash == boundary_hash
-                and not validate_narrative_blueprint_shard(
-                    cached,
-                    expected_episode_no=int(episode["episode_no"]),
-                    expected_shard_index=shard_index,
-                    expected_source_segment_ids=source_ids,
-                    optional_source_segment_ids=optional_ids,
-                    boundary_state_facts=boundary["active_state_facts"],
-                    source_text=source_text,
-                )
             ):
-                shard = cached
-                log_provider_call(
-                    "screenplay_blueprint_shard_local_recompile",
-                    config.MODEL_TEXT,
-                    "REUSED",
-                    None,
-                    0,
-                    meta={
-                        "episode_id": str(episode.get("id") or ""),
-                        "shard_index": shard_index,
-                    },
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    ["[BLUEPRINT_SPLIT_MANIFEST_AUTHORITY] leaf source/boundary/policy 漂移"],
                 )
-                break
+            if cached_errors:
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    ["[BLUEPRINT_SPLIT_MANIFEST_VALIDATION] " + cached_errors[0]],
+                )
+            shard = cached
+            log_provider_call(
+                "screenplay_blueprint_shard_local_recompile",
+                config.MODEL_TEXT,
+                "REUSED",
+                None,
+                0,
+                meta={
+                    "episode_id": str(episode.get("id") or ""),
+                    "shard_index": shard_index,
+                    "artifact_id": str(cached_row["id"]),
+                    "split_manifest_version": BLUEPRINT_SPLIT_MANIFEST_VERSION,
+                },
+            )
         if shard is None:
             errors: list[str] = []
             split_for_truncation = False
@@ -5595,6 +5733,9 @@ async def _generate_sharded_narrative_blueprint(
                             "shard_policy_version": (
                                 BLUEPRINT_SHARD_POLICY_VERSION
                             ),
+                            "split_manifest_version": (
+                                BLUEPRINT_SPLIT_MANIFEST_VERSION
+                            ),
                             "split_depth": split_depth,
                             "requested_max_tokens": token_budget,
                             "token_settlement": settlement,
@@ -5658,6 +5799,10 @@ async def _generate_sharded_narrative_blueprint(
                                 "local_authority_validator_version": (
                                     BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
                                 ),
+                                "split_manifest_version": (
+                                    BLUEPRINT_SPLIT_MANIFEST_VERSION
+                                ),
+                                "source_corpus_hash": source_corpus_hash,
                                 "split_depth": split_depth,
                                 "requested_max_tokens": token_budget,
                                 "actual_completion_tokens": settlement[
@@ -5684,6 +5829,11 @@ async def _generate_sharded_narrative_blueprint(
                     split_depth + 1,
                     split_depth + 1,
                 ]
+                cached_by_plan_index = {
+                    (index + 1 if index > shard_index else index): value
+                    for index, value in cached_by_plan_index.items()
+                    if index != shard_index
+                }
                 continue
             if shard is None:
                 if (
@@ -5696,6 +5846,11 @@ async def _generate_sharded_narrative_blueprint(
                         split_depth + 1,
                         split_depth + 1,
                     ]
+                    cached_by_plan_index = {
+                        (index + 1 if index > shard_index else index): value
+                        for index, value in cached_by_plan_index.items()
+                        if index != shard_index
+                    }
                     continue
                 raise StageError(
                     f"剧本时空因果蓝图分片 {shard_index}",
@@ -5736,6 +5891,8 @@ async def _generate_sharded_narrative_blueprint(
                 "local_authority_validator_version": (
                     BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
                 ),
+                "split_manifest_version": BLUEPRINT_SPLIT_MANIFEST_VERSION,
+                "source_corpus_hash": source_corpus_hash,
                 "provider_call_count": generation_budget.provider_calls,
                 "requested_output_tokens": (
                     generation_budget.requested_output_tokens

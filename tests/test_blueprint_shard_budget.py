@@ -118,6 +118,36 @@ class _StaticCacheConnection:
         return _Rows(self.rows)
 
 
+def _cached_leaf_row(
+    *,
+    source_ids: list[str],
+    shard_index: int,
+    source_hash: str = "source",
+    boundary_hash: str = "boundary",
+) -> dict:
+    content = json.loads(_shard_response(
+        source_ids=source_ids,
+        shard_index=shard_index,
+    ))
+    content["source_hash"] = source_hash
+    content["boundary_hash"] = boundary_hash
+    from app.evidence import repository
+
+    return {
+        "id": f"art-leaf-{shard_index}-{'-'.join(source_ids)}",
+        "content_json": json.dumps(content, ensure_ascii=False),
+        "content_hash": repository.content_hash(content),
+        "model_snapshot_json": json.dumps({
+            "shard_policy_version": stages.BLUEPRINT_SHARD_POLICY_VERSION,
+            "local_authority_validator_version": (
+                stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+            ),
+            "split_manifest_version": stages.BLUEPRINT_SPLIT_MANIFEST_VERSION,
+            "split_depth": 1,
+        }),
+    }
+
+
 class _DurableBudgetConnection:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
@@ -287,7 +317,7 @@ def test_legacy_cached_shard_without_current_policy_is_not_reused(
     assert calls == 1
 
 
-def test_current_cached_shard_with_local_authority_errors_is_not_reused(
+def test_current_cached_shard_with_local_authority_errors_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     segment = index_source_segments(_source(1))[0]
@@ -322,6 +352,9 @@ def test_current_cached_shard_with_local_authority_errors_is_not_reused(
     cached["source_hash"] = source_hash
     cached["boundary_hash"] = boundary_hash
     cached["nodes"][0]["summary"] = "polluted cached authority"
+    from app.evidence import repository
+
+    cached_hash = repository.content_hash(cached)
     calls = 0
 
     async def fake_chat(messages, **kwargs):
@@ -341,12 +374,18 @@ def test_current_cached_shard_with_local_authority_errors_is_not_reused(
         stages,
         "get_conn",
         lambda: _StaticCacheConnection([{
+            "id": "art-polluted-current-leaf",
             "content_json": json.dumps(cached, ensure_ascii=False),
+            "content_hash": cached_hash,
             "model_snapshot_json": json.dumps({
                 "shard_policy_version": stages.BLUEPRINT_SHARD_POLICY_VERSION,
                 "local_authority_validator_version": (
                     stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
                 ),
+                "split_manifest_version": stages.BLUEPRINT_SPLIT_MANIFEST_VERSION,
+                "source_corpus_hash": hashlib.sha256(
+                    _source(1).encode("utf-8")
+                ).hexdigest(),
             }),
         }]),
     )
@@ -363,13 +402,176 @@ def test_current_cached_shard_with_local_authority_errors_is_not_reused(
         lambda: SimpleNamespace(step_run_id="step-local-authority-rebuild"),
     )
 
+    with pytest.raises(stages.StageError, match="SPLIT_MANIFEST_VALIDATION"):
+        asyncio.run(stages._generate_sharded_narrative_blueprint(
+            {"id": "ep-local-authority-rebuild", "episode_no": 1},
+            _source(1),
+            {},
+        ))
+
+    assert calls == 0
+
+
+def test_split_manifest_rebuilds_exact_cached_cover_plus_gap_before_calls() -> None:
+    segments = index_source_segments(_source(6))
+    rows = [
+        _cached_leaf_row(
+            source_ids=[segment.segment_id for segment in segments[:2]],
+            shard_index=1,
+        ),
+        _cached_leaf_row(
+            source_ids=[segment.segment_id for segment in segments[2:4]],
+            shard_index=2,
+        ),
+    ]
+
+    plan, depths, cached = stages._blueprint_leaf_plan_from_cache(
+        segments,
+        rows,
+    )
+
+    assert [[segment.segment_id for segment in group] for group in plan] == [
+        [segment.segment_id for segment in segments[:2]],
+        [segment.segment_id for segment in segments[2:4]],
+        [segment.segment_id for segment in segments[4:]],
+    ]
+    assert depths == [1, 1, 0]
+    assert set(cached) == {1, 2}
+
+
+def test_split_manifest_overlap_and_hash_drift_fail_closed() -> None:
+    segments = index_source_segments(_source(5))
+    overlap = [
+        _cached_leaf_row(
+            source_ids=[segment.segment_id for segment in segments[:3]],
+            shard_index=1,
+        ),
+        _cached_leaf_row(
+            source_ids=[segment.segment_id for segment in segments[2:4]],
+            shard_index=2,
+        ),
+    ]
+    with pytest.raises(stages.StageError, match="SPLIT_MANIFEST_OVERLAP"):
+        stages._blueprint_leaf_plan_from_cache(segments, overlap)
+
+    corrupted = _cached_leaf_row(
+        source_ids=[segment.segment_id for segment in segments[:2]],
+        shard_index=1,
+    )
+    corrupted["content_hash"] = "0" * 64
+    with pytest.raises(stages.StageError, match="SPLIT_MANIFEST_HASH"):
+        stages._blueprint_leaf_plan_from_cache(segments, [corrupted])
+
+
+def test_split_manifest_reuses_prefix_and_calls_only_uncovered_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_text = _source(4)
+    segments = index_source_segments(source_text)
+    prefix = segments[:2]
+    prefix_payload = [{
+        "source_segment_id": segment.segment_id,
+        "text": segment.text,
+        "source_facts": [
+            fact.model_dump(mode="json")
+            for fact in stages.source_segment_facts(
+                segment.segment_id,
+                segment.text,
+            )
+        ],
+    } for segment in prefix]
+    source_hash = hashlib.sha256(json.dumps(
+        prefix_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    boundary_hash = hashlib.sha256(json.dumps(
+        stages._blueprint_shard_boundary_context([]),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    row = _cached_leaf_row(
+        source_ids=[segment.segment_id for segment in prefix],
+        shard_index=1,
+        source_hash=source_hash,
+        boundary_hash=boundary_hash,
+    )
+    snapshot = json.loads(row["model_snapshot_json"])
+    snapshot["source_corpus_hash"] = hashlib.sha256(
+        source_text.encode("utf-8")
+    ).hexdigest()
+    row["model_snapshot_json"] = json.dumps(snapshot)
+    calls: list[list[str]] = []
+
+    async def fake_chat(messages, **kwargs):
+        source_ids = _prompt_source_ids(messages[1]["content"])
+        calls.append(source_ids)
+        return _shard_response(
+            source_ids=source_ids,
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _StaticCacheConnection([row]))
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "log_provider_call", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-exact-cover"),
+    )
+
     asyncio.run(stages._generate_sharded_narrative_blueprint(
-        {"id": "ep-local-authority-rebuild", "episode_no": 1},
-        _source(1),
+        {"id": "ep-exact-cover", "episode_no": 1},
+        source_text,
         {},
     ))
 
-    assert calls == 1
+    assert calls == [[segment.segment_id for segment in segments[2:]]]
+
+
+def test_split_manifest_boundary_drift_fails_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_text = _source(1)
+    segment = index_source_segments(source_text)[0]
+    row = _cached_leaf_row(
+        source_ids=[segment.segment_id],
+        shard_index=1,
+        source_hash="wrong-source-hash",
+        boundary_hash="wrong-boundary-hash",
+    )
+    snapshot = json.loads(row["model_snapshot_json"])
+    snapshot["source_corpus_hash"] = hashlib.sha256(
+        source_text.encode("utf-8")
+    ).hexdigest()
+    row["model_snapshot_json"] = json.dumps(snapshot)
+    calls = 0
+
+    async def forbidden_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("authority drift must fail before provider")
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _StaticCacheConnection([row]))
+    monkeypatch.setattr(stages.model_gateway, "chat", forbidden_chat)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+
+    with pytest.raises(stages.StageError, match="SPLIT_MANIFEST_AUTHORITY"):
+        asyncio.run(stages._generate_sharded_narrative_blueprint(
+            {"id": "ep-boundary-drift", "episode_no": 1},
+            source_text,
+            {},
+        ))
+
+    assert calls == 0
 
 
 def test_non_truncation_provider_error_is_not_split(
