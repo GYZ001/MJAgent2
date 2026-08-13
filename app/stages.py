@@ -36,6 +36,7 @@ from app.narrative_blueprint import (
     BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE,
     BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
     BLUEPRINT_SHARD_POLICY_VERSION,
+    BLUEPRINT_SPLIT_MANIFEST_VERSION,
     BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD,
     BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD,
     BLUEPRINT_VERSION,
@@ -4480,7 +4481,33 @@ async def _semantic_review_narrative_blueprint(
                     )
                 return errors
 
-            review = await model_gateway.chat_structured(
+            logical_run_id = str(
+                getattr(trace, "run_id", "") or "unscoped"
+            )
+            operation_id = (
+                f"screenplay.blueprint.review:{BLUEPRINT_VERSION}:"
+                f"{logical_run_id}:{current_blueprint_hash}:"
+                f"{review_round}:{sample_no}:"
+                f"{'targeted' if targeted_review else 'full'}"
+            )
+            reservation_id: int | None = None
+            remaining_seconds: float | None = None
+            if generation_budget is not None:
+                _provider, _model, effective_max_tokens = (
+                    hiagent.text_request_token_limits(
+                        requested_max_tokens=8192,
+                    )
+                )
+                reservation_id = generation_budget.claim(
+                    max_tokens=effective_max_tokens,
+                    requested_max_tokens=8192,
+                    operation_id=operation_id,
+                )
+                remaining_seconds = (
+                    BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+                    - (time.monotonic() - generation_budget.started_at)
+                )
+            review_call = model_gateway.chat_structured(
                 [
                     {"role": "system", "content": SYSTEM_PREFIX},
                     {
@@ -4490,18 +4517,18 @@ async def _semantic_review_narrative_blueprint(
                 ],
                 model_type=BlueprintSemanticReview,
                 validate=validate_review,
-                operation_id=(
-                    f"screenplay.blueprint.review:{BLUEPRINT_VERSION}:"
-                    f"{current_blueprint_hash}:{review_round}:{sample_no}:"
-                    f"{'targeted' if targeted_review else 'full'}"
-                ),
+                operation_id=operation_id,
                 temperature=0.1,
                 max_tokens=8192,
-                format_retry_limit=int(
-                    get_setting("screenplay_format_retry_limit") or 1
+                format_retry_limit=(
+                    0 if generation_budget is not None else int(
+                        get_setting("screenplay_format_retry_limit") or 1
+                    )
                 ),
-                semantic_retry_limit=int(
-                    get_setting("screenplay_semantic_retry_limit") or 1
+                semantic_retry_limit=(
+                    0 if generation_budget is not None else int(
+                        get_setting("screenplay_semantic_retry_limit") or 1
+                    )
                 ),
                 call_meta={
                     "stage": "剧本蓝图语义审稿",
@@ -4514,6 +4541,10 @@ async def _semantic_review_narrative_blueprint(
                     "contract_version": BLUEPRINT_VERSION,
                     "substage": "risk_nodes" if targeted_review else "full",
                     "source_count": len(projected_source.splitlines()),
+                    "reuse_successful_operation": True,
+                    "disable_reasoning_fallback": True,
+                    "disable_provider_retries": True,
+                    "disable_provider_candidate_fallback": True,
                 },
                 repair_context=json.dumps(
                     {
@@ -4532,7 +4563,43 @@ async def _semantic_review_narrative_blueprint(
                         projected_node_keys,
                     )
                 ),
+                usage_callback=(
+                    None
+                    if reservation_id is None
+                    else lambda usage_event: generation_budget.record_usage(
+                        reservation_id,
+                        usage_event,
+                    )
+                ),
             )
+            try:
+                review = (
+                    await review_call
+                    if remaining_seconds is None
+                    else await asyncio.wait_for(
+                        review_call,
+                        timeout=max(0.001, remaining_seconds),
+                    )
+                )
+            except hiagent.ProviderError as exc:
+                if reservation_id is not None:
+                    generation_budget.settle(
+                        reservation_id,
+                        unreported_outcome=(
+                            "not_sent"
+                            if exc.delivery_state == "not_sent"
+                            and exc.replay_safe
+                            else "unknown"
+                        ),
+                    )
+                raise
+            except BaseException:
+                if reservation_id is not None:
+                    generation_budget.settle(reservation_id)
+                raise
+            else:
+                if reservation_id is not None:
+                    generation_budget.settle(reservation_id)
             dropped_voice_issue_counts[sample_no] = (
                 filter_blueprint_semantic_review_voice_issues(
                     review,
@@ -5070,7 +5137,8 @@ class _BlueprintGenerationBudget:
             "SELECT response_json,meta,status,recovery_disposition,operation_id "
             "FROM provider_calls WHERE run_id=? AND kind='chat' "
             "AND json_extract(meta,'$.stage_key') IN "
-            "('screenplay_blueprint_shard','screenplay_blueprint_patch') "
+            "('screenplay_blueprint_shard','screenplay_blueprint_patch',"
+            "'screenplay_blueprint_review') "
             "AND kind != 'provider_cache_hit'",
             (run_id,),
         ).fetchall()

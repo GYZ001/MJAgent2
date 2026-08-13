@@ -14,7 +14,12 @@ from app.capabilities.registry import get_registry
 from app.evidence import repository
 from app.harness.contracts import get_contract
 from app.harness.types import EvidenceArtifact
-from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
+from app.narrative_blueprint import (
+    BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
+    BLUEPRINT_SHARD_POLICY_VERSION,
+    BLUEPRINT_VERSION,
+    NarrativeBlueprint,
+)
 from app.observability.tracing import bind_trace
 from app.production.patch import screenplay_artifact_payload
 from app.production.revision import (
@@ -122,6 +127,12 @@ def _current_checkpoint_artifacts() -> dict[str, object]:
         trust_level="T1",
         content=blueprint_value.model_dump(mode="json"),
         contract_version=BLUEPRINT_VERSION,
+        model_snapshot={
+            "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+            "local_authority_validator_version": (
+                BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+            ),
+        },
     ))
     identity = repository.create_artifact(EvidenceArtifact(
         type="screenplay_identity_registry",
@@ -407,6 +418,38 @@ def test_resume_eligibility_is_strictly_read_only() -> None:
         ))
     ]
     assert writes == []
+
+
+def test_current_contract_blueprint_without_local_authority_policy_rebuilds() -> None:
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        resume=False,
+    )
+    blueprint_value = NarrativeBlueprint(episode_no=1, nodes=[])
+    legacy = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=blueprint_value.model_dump(mode="json"),
+        contract_version=BLUEPRINT_VERSION,
+        model_snapshot={
+            "shard_policy_version": "blueprint-shard-policy.v2",
+        },
+    ))
+    save_checkpoint(revision.id, {
+        "phase": "IDENTITY_FREEZE",
+        "blueprint_artifact_id": legacy["id"],
+        "blueprint_hash": blueprint_content_hash(blueprint_value),
+    })
+
+    eligibility = resolve_screenplay_resume_eligibility("e1")
+
+    assert eligibility.mode == "baseline_rebuild"
+    assert eligibility.reason_code == "MIXED_CHECKPOINT_REQUIRES_REBUILD"
+    assert "blueprint_artifact_id" not in eligibility.reusable_checkpoint
 
 
 def test_mixed_old_checkpoint_requires_rebuild_and_keeps_identity_as_input() -> None:

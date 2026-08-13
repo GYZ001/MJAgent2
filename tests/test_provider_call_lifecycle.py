@@ -9,6 +9,32 @@ import pytest
 from app import db, hiagent, system_api, video_modes, worker
 
 
+def test_provider_cache_request_identity_ignores_only_stream_transport_fields() -> None:
+    payload = {
+        "model": "text-model",
+        "messages": [{"role": "user", "content": "repair"}],
+        "max_tokens": 100,
+    }
+
+    assert hiagent._provider_request_matches(
+        {
+            **payload,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+        payload,
+    )
+    assert not hiagent._provider_request_matches(
+        {
+            **payload,
+            "max_tokens": 99,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+        payload,
+    )
+
+
 class _Response:
     status_code = 200
     text = '{"choices": []}'

@@ -40,6 +40,7 @@ BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v3"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
     "blueprint-shard-local-authority.v1"
 )
+BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 
 
 def _normalize_source_segment_id(value: Any) -> str:

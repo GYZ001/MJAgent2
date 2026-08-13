@@ -50,6 +50,21 @@ _IMAGE_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.W
 _VLM_SEMAPHORES: weakref.WeakKeyDictionary[Any, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
 
+def _provider_request_matches(
+    stored_request: Any,
+    current_payload: dict[str, Any],
+) -> bool:
+    """Compare semantic request bytes while ignoring SSE transport toggles."""
+    if stored_request == current_payload:
+        return True
+    if not isinstance(stored_request, dict):
+        return False
+    normalized = dict(stored_request)
+    normalized.pop("stream", None)
+    normalized.pop("stream_options", None)
+    return normalized == current_payload
+
+
 def _cached_successful_provider_response(
     kind: str,
     model: str,
@@ -93,7 +108,7 @@ def _cached_successful_provider_response(
                 stored_request = json.loads(row["request_json"] or "null")
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
-            if stored_request != payload:
+            if not _provider_request_matches(stored_request, payload):
                 continue
             log_provider_call(
                 "provider_cache_hit",

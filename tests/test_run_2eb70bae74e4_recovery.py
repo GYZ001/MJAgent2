@@ -9,7 +9,12 @@ from app import db
 from app.evidence import repository
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact
-from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
+from app.narrative_blueprint import (
+    BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
+    BLUEPRINT_SHARD_POLICY_VERSION,
+    BLUEPRINT_VERSION,
+    NarrativeBlueprint,
+)
 from app.production.grant import issue_production_grant
 from app.production.patch import screenplay_artifact_payload
 from app.production.revision import (
@@ -119,6 +124,12 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
         trust_level="T1",
         content=blueprint_value.model_dump(mode="json"),
         contract_version=BLUEPRINT_VERSION,
+        model_snapshot={
+            "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+            "local_authority_validator_version": (
+                BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+            ),
+        },
     ))
     identity = repository.create_artifact(EvidenceArtifact(
         type="screenplay_identity_registry",

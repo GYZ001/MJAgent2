@@ -9,7 +9,12 @@ import pytest
 from app import db, errors
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
-from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
+from app.narrative_blueprint import (
+    BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
+    BLUEPRINT_SHARD_POLICY_VERSION,
+    BLUEPRINT_VERSION,
+    NarrativeBlueprint,
+)
 from app.production.certificate import (
     issue_completion_certificate,
     verify_completion_certificate,
@@ -171,6 +176,12 @@ def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
         trust_level="T1",
         content=blueprint_value.model_dump(mode="json"),
         contract_version=BLUEPRINT_VERSION,
+        model_snapshot={
+            "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+            "local_authority_validator_version": (
+                BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+            ),
+        },
     ))
     identity = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_identity_registry",
@@ -3250,6 +3261,12 @@ async def test_active_recovery_run_reuses_prebaseline_identity_checkpoint(
         trust_level="T1",
         content=blueprint_value.model_dump(mode="json"),
         contract_version=BLUEPRINT_VERSION,
+        model_snapshot={
+            "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+            "local_authority_validator_version": (
+                BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+            ),
+        },
     ))
     revision = ensure_production_revision(
         episode_id="ep_p",
