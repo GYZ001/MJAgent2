@@ -1257,10 +1257,22 @@ def compile_prompt(shot: Shot, bible: Bible, extra_negative: list[str] | None = 
             f"镜头 {shot.shot_no} 时长 {shot.duration_s}s 不合法，视频生成时长必须为 "
             f"{config.VIDEO_DURATION_MIN_S}~{config.VIDEO_DURATION_MAX_S}s 的整数")
 
-    sync_shot_continuity_fields(shot)
+    narrative_authority = bool(
+        screenplay is not None and screenplay.narrative_plan is not None
+    )
+    sync_shot_continuity_fields(
+        shot,
+        narrative_authority=narrative_authority,
+    )
     visible_names = effective_characters_visible(shot)
-    dialogue_focus = dialogue_focus_subject(shot)
-    dialogue_staging = dialogue_action_staging_kind(shot)
+    dialogue_focus = dialogue_focus_subject(
+        shot,
+        narrative_authority=narrative_authority,
+    )
+    dialogue_staging = dialogue_action_staging_kind(
+        shot,
+        narrative_authority=narrative_authority,
+    )
     mode = (continuity_mode or derive_continuity_mode(shot)).strip()
     if dialogue_focus and mode == "action_continuation":
         mode = "same_scene_cut"

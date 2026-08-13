@@ -19,10 +19,12 @@ from app.schemas import (
     Character,
     Dialogue,
     EpisodeScreenplay,
+    NarrativeContinuityPlan,
     Shot,
     Storyboard,
     StoryboardOutline,
     StoryboardOutlineShot,
+    VoiceCanonical,
     World,
 )
 from app.validators import (
@@ -349,6 +351,43 @@ def test_dialogue_with_spatial_action_is_not_collapsed_to_static_closeup() -> No
     assert "不得只拍站立说话、口型或表情变化来替代动作" in prompt
     assert "全景" in prompt
     assert "对白镜头只允许「甲」一人入画" not in prompt
+
+
+def test_narrative_dialogue_compile_ignores_same_speaker_legacy_state_delta() -> None:
+    shot = _shot(
+        continuity_state_in={
+            "characters": {
+                "甲": {"visibility": "visible", "pose": "站立"},
+            },
+        },
+        continuity_state_out={
+            "characters": {
+                "甲": {"visibility": "visible", "pose": "抬头"},
+            },
+        },
+    )
+    screenplay = EpisodeScreenplay(
+        episode_no=1,
+        narrative_plan=NarrativeContinuityPlan(scope_id="episode-1"),
+        voice_bible=[
+            VoiceCanonical(
+                speaker_id="甲",
+                voice_canonical="克制坚定的青年男声",
+            ),
+        ],
+    )
+
+    assert dialogue_framing_errors(
+        shot,
+        narrative_authority=True,
+    ) == []
+
+    prompt = compile_prompt(shot, _bible(), screenplay=screenplay)
+
+    assert "dialogue_action_staging" not in shot.risk_tags
+    assert "动作对白构图" not in prompt
+    assert "近景" in prompt
+    assert "画面可见角色仅限：甲" in prompt
 
 
 def test_dialogue_with_story_prop_keeps_hands_and_prop_in_frame() -> None:

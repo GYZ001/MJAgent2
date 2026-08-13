@@ -475,7 +475,12 @@ def inherit_structured_continuity_state(shot: Shot, prev: Shot | None = None) ->
     )
 
 
-def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
+def sync_shot_continuity_fields(
+    shot: Shot,
+    prev: Shot | None = None,
+    *,
+    narrative_authority: bool = False,
+) -> str:
     """回填 state/continuity/visible 字段，并同步 legacy continuity_from_prev。"""
     mode = derive_continuity_mode(shot, prev)
     shot.continuity_mode = mode
@@ -499,15 +504,30 @@ def sync_shot_continuity_fields(shot: Shot, prev: Shot | None = None) -> str:
         shot.characters_visible = list(shot.characters or [])
     if not shot.audio_cast:
         shot.audio_cast = effective_audio_cast(shot)
-    focus = dialogue_focus_subject(shot)
+    focus = dialogue_focus_subject(
+        shot,
+        narrative_authority=narrative_authority,
+    )
     tags = list(shot.risk_tags or [])
     if focus and DIALOGUE_FOCUS_RISK_TAG not in tags:
         tags.append(DIALOGUE_FOCUS_RISK_TAG)
     elif not focus and DIALOGUE_FOCUS_RISK_TAG in tags:
         tags.remove(DIALOGUE_FOCUS_RISK_TAG)
-    if dialogue_two_shot_required(shot) and DIALOGUE_TWO_SHOT_RISK_TAG not in tags:
+    if (
+        dialogue_two_shot_required(
+            shot,
+            narrative_authority=narrative_authority,
+        )
+        and DIALOGUE_TWO_SHOT_RISK_TAG not in tags
+    ):
         tags.append(DIALOGUE_TWO_SHOT_RISK_TAG)
-    if dialogue_action_staging_kind(shot) and "dialogue_action_staging" not in tags:
+    if (
+        dialogue_action_staging_kind(
+            shot,
+            narrative_authority=narrative_authority,
+        )
+        and "dialogue_action_staging" not in tags
+    ):
         tags.append("dialogue_action_staging")
     shot.risk_tags = tags
     if not shot.prompt_contract_version:
