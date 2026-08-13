@@ -420,7 +420,7 @@ def test_run_77675349_real_src0005_structure_and_classifications() -> None:
     assert all(fact.surface_form == "paratext_span" for fact in paratext)
 
 
-def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
+def test_run_77675349_applies_atomic_52_target_ownership_patch() -> None:
     replay = json.loads(RUN_77675349_FIXTURE.read_text(encoding="utf-8"))
     authority_source = "\n\n".join([
         "前置来源一。",
@@ -430,50 +430,35 @@ def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
         replay["source_text"],
     ])
 
-    candidates = []
-    errors: list[str] = []
-    previous_candidate = None
-    for attempt_no, fixture_path in enumerate(
-        RUN_77675349_ATTEMPT_FIXTURES,
-        start=1,
-    ):
-        provider_payload = stages.extract_json(
-            fixture_path.read_text(encoding="utf-8")
-        )
-        candidate = stages.NarrativeBlueprintShard.model_validate(
-            stages.normalize_blueprint_provider_payload(provider_payload)
-        )
-        stages._normalize_blueprint_shard_structure(
-            candidate,
-            boundary_context={"active_state_facts": []},
-            attempt=attempt_no,
-            previous_candidate=previous_candidate,
-            previous_validation_errors=errors,
-        )
-        if previous_candidate is not None:
-            stages._freeze_unreported_state_subject_ownership(
-                candidate,
-                previous_candidate=previous_candidate,
-                validation_errors=errors,
-            )
-        previous_candidate = candidate.model_dump(mode="json")
-        errors = stages.validate_narrative_blueprint_shard(
-            candidate,
-            expected_episode_no=1,
-            expected_shard_index=5,
-            expected_source_segment_ids=["SRC0005"],
-            source_text=authority_source,
-        )
-        candidates.append(candidate)
+    attempt1 = stages.NarrativeBlueprintShard.model_validate(
+        stages.normalize_blueprint_provider_payload(json.loads(
+            RUN_77675349_ATTEMPT_FIXTURES[0].read_text(encoding="utf-8")
+        ))
+    )
+    stages._normalize_blueprint_shard_structure(
+        attempt1,
+        boundary_context={"active_state_facts": []},
+        attempt=1,
+    )
+    attempt1_errors = stages.validate_narrative_blueprint_shard(
+        attempt1,
+        expected_episode_no=1,
+        expected_shard_index=5,
+        expected_source_segment_ids=["SRC0005"],
+        source_text=authority_source,
+    )
+    typed_issues = stages._blueprint_state_subject_repair_issues(
+        attempt1,
+        validation_errors=attempt1_errors,
+        source_text=authority_source,
+    )
+    assert [node.key for node in attempt1.nodes] == ["S005-node_001"]
+    assert typed_issues is not None
 
-    observed = candidates[1]
-    observed_errors = errors
-    assert [node.key for node in observed.nodes] == ["S005-node_001"]
-    assert len(observed_errors) == 1
-    assert "STATE_SUBJECT_ASSIGNMENT_CONFLICT" in observed_errors[0]
-    assert "SRC0005:unit:030" in observed_errors[0]
-
-    expected_payload = observed.model_dump(mode="json")
+    expected_payload = json.loads(
+        RUN_77675349_ATTEMPT_FIXTURES[1].read_text(encoding="utf-8")
+    )
+    expected_payload["nodes"] = [expected_payload["nodes"][0]]
     expected_node = expected_payload["nodes"][0]
     remove_single = set(
         replay["expected_repair"]["remove_single_claim_unit_keys"]
@@ -509,37 +494,125 @@ def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
     expected = stages.NarrativeBlueprintShard.model_validate(
         stages.normalize_blueprint_provider_payload(expected_payload)
     )
-    expected_errors = stages.validate_narrative_blueprint_shard(
+    assert stages.validate_narrative_blueprint_shard(
         expected,
         expected_episode_no=1,
         expected_shard_index=5,
         expected_source_segment_ids=["SRC0005"],
         source_text=authority_source,
-    )
-    assignments = {
-        assignment.source_unit_key: {
-            "mode": assignment.mode,
-            "identity_keys": assignment.identity_keys,
-        }
+    ) == []
+
+    action_keys = [
+        fact.source_unit_key
+        for fact in stages.source_segment_facts(
+            replay["source_segment_id"],
+            replay["source_text"],
+        )
+        if fact.projection == "action"
+    ]
+    required_targets = set(replay["expected_classifications"])
+    retained_keys = [
+        unit_key
+        for unit_key in action_keys
+        if unit_key not in required_targets
+    ][:6]
+    target_keys = [
+        unit_key
+        for unit_key in action_keys
+        if unit_key not in retained_keys
+    ]
+    expected_single = {
+        unit_key: evidence.identity_key
+        for evidence in expected.nodes[0].participant_evidence
+        if evidence.usage == "state_subject"
+        for unit_key in evidence.source_unit_keys
+    }
+    expected_joint = {
+        assignment.source_unit_key: list(assignment.identity_keys)
         for assignment in expected.nodes[0].state_subject_assignments
     }
-    environment_set = set(
+    expected_environment = set(
         expected.nodes[0].environment_source_unit_keys
     )
-    actual_classifications = {
-        unit_key: (
-            {
+    repairs = {}
+    for unit_key in target_keys:
+        if unit_key in expected_environment:
+            repairs[unit_key] = {
                 "mode": "environment",
                 "identity_keys": [],
             }
-            if unit_key in environment_set
-            else assignments[unit_key]
-        )
-        for unit_key in replay["expected_classifications"]
-    }
+        elif unit_key in expected_joint:
+            repairs[unit_key] = {
+                "mode": "joint",
+                "identity_keys": expected_joint[unit_key],
+            }
+        else:
+            repairs[unit_key] = {
+                "mode": "single",
+                "identity_keys": [expected_single[unit_key]],
+            }
 
-    assert actual_classifications == replay["expected_classifications"]
-    assert expected_errors == []
+    base_payload = expected.model_dump(mode="json")
+    base_node = base_payload["nodes"][0]
+    base_evidence = []
+    for evidence in base_node["participant_evidence"]:
+        if evidence["usage"] == "state_subject":
+            evidence["source_unit_keys"] = [
+                unit_key
+                for unit_key in evidence["source_unit_keys"]
+                if unit_key not in set(target_keys)
+            ]
+            if not evidence["source_unit_keys"]:
+                continue
+        base_evidence.append(evidence)
+    base_node["participant_evidence"] = base_evidence
+    base_node["state_subject_assignments"] = [
+        assignment
+        for assignment in base_node["state_subject_assignments"]
+        if assignment["source_unit_key"] not in set(target_keys)
+    ]
+    base_node["environment_source_unit_keys"] = [
+        unit_key
+        for unit_key in base_node["environment_source_unit_keys"]
+        if unit_key not in set(target_keys)
+    ]
+    base = stages.NarrativeBlueprintShard.model_validate(base_payload)
+    repaired = stages.apply_blueprint_state_subject_ownership_patch(
+        base,
+        {
+            "base_candidate_hash": stages.blueprint_shard_candidate_hash(base),
+            "repairs": repairs,
+        }
+        ,
+        target_unit_keys=target_keys,
+        source_text=authority_source,
+    )
+
+    repaired_joint = {
+        assignment.source_unit_key: list(assignment.identity_keys)
+        for assignment in repaired.nodes[0].state_subject_assignments
+    }
+    assert len(target_keys) == 52
+    assert "SRC0005:unit:004" in repaired.nodes[0].environment_source_unit_keys
+    assert {
+        unit_key: repaired_joint[unit_key]
+        for unit_key in (
+            "SRC0005:unit:028",
+            "SRC0005:unit:029",
+            "SRC0005:unit:030",
+        )
+    } == {
+        unit_key: value["identity_keys"]
+        for unit_key, value in replay["expected_classifications"].items()
+        if value["mode"] == "joint"
+    }
+    assert stages.validate_narrative_blueprint_shard(
+        repaired,
+        expected_episode_no=1,
+        expected_shard_index=5,
+        expected_source_segment_ids=["SRC0005"],
+        source_text=authority_source,
+    ) == []
 
 
 def test_initial_candidate_keeps_ungrounded_node_for_typed_gate() -> None:
@@ -1387,7 +1460,7 @@ def test_run_2284a14d5f4c_v6_t1_leaf_is_not_current_cache_authority() -> None:
     )
 
     assert stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION == (
-        "blueprint-shard-local-authority.v7"
+        "blueprint-shard-local-authority.v8"
     )
     assert [[segment.segment_id for segment in group] for group in plan] == [
         ["SRC0001"],

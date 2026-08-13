@@ -16,16 +16,21 @@ from app.narrative_blueprint import (
     BlueprintSourceOccurrenceError,
     BlueprintSemanticReview,
     BlueprintSemanticIssue,
+    BlueprintStateSubjectOwnershipPatch,
+    BlueprintStateSubjectOwnershipRepair,
     BlueprintStateChange,
     BlueprintStateRequirement,
     NarrativeBlueprint,
     NarrativeBlueprintPatch,
     NarrativeBlueprintShard,
     NarrativeNode,
+    apply_blueprint_state_subject_ownership_patch,
     apply_narrative_blueprint_patch,
     blueprint_authority_validator_fingerprint,
     blueprint_patch_schema,
+    blueprint_shard_candidate_hash,
     blueprint_shard_provider_schema,
+    blueprint_state_subject_ownership_patch_schema,
     blueprint_state_subject_issues,
     blueprint_semantic_issue_is_resolved,
     blueprint_semantic_review_schema,
@@ -1860,6 +1865,324 @@ def test_joint_action_uses_typed_assignment_without_selecting_one_subject() -> N
     })
 
     assert blueprint_state_subject_issues(blueprint, source) == []
+
+
+def _ownership_repair_fixture() -> tuple[
+    str,
+    NarrativeBlueprintShard,
+    list[str],
+]:
+    source = "“出发。”甲推门，乙和丙抬桌，雨落下，甲坐下。"
+    facts = stages.source_segment_facts("SRC0001", source)
+    quoted_key = next(
+        fact.source_unit_key
+        for fact in facts
+        if fact.projection == "quoted"
+    )
+    action_keys = [
+        fact.source_unit_key
+        for fact in facts
+        if fact.projection == "action"
+    ]
+    shard = NarrativeBlueprintShard.model_validate({
+        "episode_no": 1,
+        "shard_index": 1,
+        "source_segment_ids": ["SRC0001"],
+        "nodes": [{
+            "key": "ownership-node",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "三人搬桌，雨落下",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "room",
+            "location_label": "房间",
+            "participants": ["甲", "乙", "丙"],
+            "participant_evidence": [{
+                "identity_key": "甲",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [quoted_key],
+                "usage": "voice",
+            }, {
+                "identity_key": "乙",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [action_keys[1]],
+                "usage": "visible",
+            }, {
+                "identity_key": "丙",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [action_keys[1]],
+                "usage": "visible",
+            }, {
+                "identity_key": "乙",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [action_keys[0], action_keys[1]],
+                "usage": "state_subject",
+            }, {
+                "identity_key": "甲",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [action_keys[1], action_keys[3]],
+                "usage": "state_subject",
+            }, {
+                "identity_key": "丙",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [action_keys[2]],
+                "usage": "state_subject",
+            }],
+            "source_unit_deliveries": [{
+                "source_unit_key": quoted_key,
+                "mode": "spoken_dialogue",
+                "performer_key": "甲",
+            }],
+            "state_requirements": [{
+                "required_fact_key": "prior-weather",
+                "state_key": "weather",
+                "assumed_prior": True,
+                "reason": "保留状态字段",
+            }],
+            "state_changes": [{
+                "fact_key": "door-open",
+                "state_key": "door",
+                "value": "open",
+                "reason": "甲推门",
+            }],
+            "exit_state": "门已打开",
+            "action_logic": "甲推门，乙丙搬桌，随后下雨",
+        }],
+    })
+    return source, shard, action_keys
+
+
+def test_ownership_patch_schema_has_exact_53_targets_and_stays_compact() -> None:
+    source = "".join(f"甲完成动作{index}，" for index in range(53))
+    target_keys = [
+        fact.source_unit_key
+        for fact in stages.source_segment_facts("SRC0001", source)
+        if fact.projection == "action"
+    ]
+    shard = NarrativeBlueprintShard.model_validate({
+        "episode_no": 1,
+        "shard_index": 1,
+        "source_segment_ids": ["SRC0001"],
+        "nodes": [{
+            "key": "bulk-owner",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "批量动作",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "room",
+            "location_label": "房间",
+            "participants": ["甲", "乙"],
+            "participant_evidence": [{
+                "identity_key": identity_key,
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [target_keys[0]],
+                "usage": "visible",
+            } for identity_key in ("甲", "乙")],
+            "action_logic": "连续完成动作",
+        }],
+    })
+
+    schema = blueprint_state_subject_ownership_patch_schema(
+        shard,
+        target_keys,
+        source,
+    )
+    repairs = schema["properties"]["repairs"]
+
+    assert len(target_keys) == 53
+    assert list(repairs["properties"]) == target_keys
+    assert repairs["required"] == target_keys
+    assert repairs["additionalProperties"] is False
+    assert schema["properties"]["base_candidate_hash"]["const"] == (
+        blueprint_shard_candidate_hash(shard)
+    )
+    assert len(json.dumps(
+        schema,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")) < 10_000
+
+
+@pytest.mark.parametrize(
+    ("mode", "identity_keys"),
+    [
+        ("single", []),
+        ("single", ["甲", "乙"]),
+        ("joint", ["甲"]),
+        ("joint", ["甲", "甲"]),
+        ("environment", ["甲"]),
+    ],
+)
+def test_ownership_repair_mode_shape_fails_closed(
+    mode: str,
+    identity_keys: list[str],
+) -> None:
+    with pytest.raises(ValueError):
+        BlueprintStateSubjectOwnershipRepair(
+            mode=mode,
+            identity_keys=identity_keys,
+        )
+
+
+def test_ownership_patch_apply_is_atomic_and_preserves_other_authority() -> None:
+    source, shard, action_keys = _ownership_repair_fixture()
+    before = shard.model_dump(mode="json")
+    target_keys = action_keys[:3]
+    patch = BlueprintStateSubjectOwnershipPatch.model_validate({
+        "base_candidate_hash": blueprint_shard_candidate_hash(shard),
+        "repairs": {
+            target_keys[0]: {
+                "mode": "single",
+                "identity_keys": ["甲"],
+            },
+            target_keys[1]: {
+                "mode": "joint",
+                "identity_keys": ["乙", "丙"],
+            },
+            target_keys[2]: {
+                "mode": "environment",
+                "identity_keys": [],
+            },
+        },
+    })
+
+    repaired = apply_blueprint_state_subject_ownership_patch(
+        shard,
+        patch,
+        target_unit_keys=target_keys,
+        source_text=source,
+    )
+    node = repaired.nodes[0]
+    after = repaired.model_dump(mode="json")
+
+    assert shard.model_dump(mode="json") == before
+    assert [
+        evidence.model_dump(mode="json")
+        for evidence in node.participant_evidence
+        if evidence.usage in {"voice", "visible"}
+    ] == [
+        evidence
+        for evidence in before["nodes"][0]["participant_evidence"]
+        if evidence["usage"] in {"voice", "visible"}
+    ]
+    for field_name in (
+        "source_unit_deliveries",
+        "state_requirements",
+        "state_changes",
+        "exit_state",
+        "summary",
+        "action_logic",
+    ):
+        assert after["nodes"][0][field_name] == before["nodes"][0][field_name]
+    assert any(
+        evidence.identity_key == "甲"
+        and action_keys[3] in evidence.source_unit_keys
+        for evidence in node.participant_evidence
+        if evidence.usage == "state_subject"
+    )
+    assert {
+        assignment.source_unit_key: assignment.identity_keys
+        for assignment in node.state_subject_assignments
+    } == {target_keys[1]: ["乙", "丙"]}
+    assert node.environment_source_unit_keys == [target_keys[2]]
+    assert validate_narrative_blueprint_shard(
+        repaired,
+        expected_episode_no=1,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+        source_text=source,
+    ) == []
+
+
+def test_ownership_patch_rejects_target_hash_action_and_identity_drift() -> None:
+    source, shard, action_keys = _ownership_repair_fixture()
+    base_hash = blueprint_shard_candidate_hash(shard)
+    valid_repairs = {
+        action_keys[0]: {
+            "mode": "single",
+            "identity_keys": ["甲"],
+        },
+    }
+
+    with pytest.raises(ValueError, match="不得为空|target 集合"):
+        apply_blueprint_state_subject_ownership_patch(
+            shard,
+            {
+                "base_candidate_hash": base_hash,
+                "repairs": {},
+            },
+            target_unit_keys=[action_keys[0]],
+            source_text=source,
+        )
+    with pytest.raises(ValueError, match="target 集合"):
+        apply_blueprint_state_subject_ownership_patch(
+            shard,
+            {
+                "base_candidate_hash": base_hash,
+                "repairs": {
+                    **valid_repairs,
+                    action_keys[1]: {
+                        "mode": "environment",
+                        "identity_keys": [],
+                    },
+                },
+            },
+            target_unit_keys=[action_keys[0]],
+            source_text=source,
+        )
+    with pytest.raises(ValueError, match="hash 漂移"):
+        apply_blueprint_state_subject_ownership_patch(
+            shard,
+            {
+                "base_candidate_hash": "drifted",
+                "repairs": valid_repairs,
+            },
+            target_unit_keys=[action_keys[0]],
+            source_text=source,
+        )
+    quoted_key = next(
+        fact.source_unit_key
+        for fact in stages.source_segment_facts("SRC0001", source)
+        if fact.projection == "quoted"
+    )
+    with pytest.raises(ValueError, match="action unit"):
+        apply_blueprint_state_subject_ownership_patch(
+            shard,
+            {
+                "base_candidate_hash": base_hash,
+                "repairs": {
+                    quoted_key: {
+                        "mode": "environment",
+                        "identity_keys": [],
+                    },
+                },
+            },
+            target_unit_keys=[quoted_key],
+            source_text=source,
+        )
+    with pytest.raises(ValueError, match="owner participants"):
+        apply_blueprint_state_subject_ownership_patch(
+            shard,
+            {
+                "base_candidate_hash": base_hash,
+                "repairs": {
+                    action_keys[0]: {
+                        "mode": "single",
+                        "identity_keys": ["非法身份"],
+                    },
+                },
+            },
+            target_unit_keys=[action_keys[0]],
+            source_text=source,
+        )
 
 
 def test_call29716_ambiguous_resolution_preserves_joint_source_authority(
