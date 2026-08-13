@@ -205,7 +205,11 @@ async def chat(
         "trace_id": trace.trace_id,
         **(call_meta or {}),
     }
-    max_retries = config.TEXT_PROVIDER_MAX_RETRIES
+    max_retries = (
+        0
+        if meta.get("disable_provider_retries")
+        else config.TEXT_PROVIDER_MAX_RETRIES
+    )
     stage_key = str(meta.get("stage_key") or "") or None
     for failure_no in range(max_retries + 1):
         try:

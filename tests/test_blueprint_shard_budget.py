@@ -426,6 +426,11 @@ def test_run_bd33_dynamic_split_releases_requested_reservations(
         lambda _segments: [[segment] for segment in segments],
     )
     monkeypatch.setattr(stages, "_blueprint_shard_token_budget", lambda _s: 10)
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("hiagent", "test-model", 10),
+    )
     monkeypatch.setattr(stages, "BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS", 25)
     monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
     monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
@@ -463,6 +468,7 @@ def test_run_bd33_dynamic_split_releases_requested_reservations(
     assert len(validated) == 6
     assert raw[-1].content["token_settlement"] == {
         "requested_max_tokens": 10,
+        "effective_max_tokens": 10,
         "actual_completion_tokens": 2,
         "usage_reported": True,
         "fresh_responses": 1,
@@ -667,3 +673,50 @@ def test_strict_durable_replay_cache_miss_is_not_sent() -> None:
 
     assert caught.value.delivery_state == "not_sent"
     assert caught.value.replay_safe is True
+
+
+def test_blueprint_disables_hidden_gateway_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def not_sent(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise hiagent.ProviderError(
+            "not sent",
+            retryable=True,
+            failure_kind="connection_failed",
+            delivery_state="not_sent",
+            replay_safe=True,
+        )
+
+    monkeypatch.setattr(stages.model_gateway.hiagent, "chat", not_sent)
+
+    with pytest.raises(hiagent.ProviderError, match="not sent"):
+        asyncio.run(stages.model_gateway.chat(
+            [{"role": "user", "content": "x"}],
+            call_meta={"disable_provider_retries": True},
+        ))
+
+    assert calls == 1
+
+
+def test_effective_model_cap_controls_unknown_exposure() -> None:
+    budget = stages._BlueprintGenerationBudget()
+    reservation = budget.claim(
+        max_tokens=8,
+        requested_max_tokens=16,
+    )
+    budget.record_usage(reservation, {
+        "completion_tokens": None,
+        "reused": False,
+    })
+
+    settlement = budget.settle(reservation)
+
+    assert settlement["requested_max_tokens"] == 16
+    assert settlement["effective_max_tokens"] == 8
+    assert settlement["charged_output_tokens"] == 8
+    assert budget.requested_output_tokens == 16
+    assert budget.unknown_output_tokens == 8

@@ -5013,6 +5013,10 @@ class _BlueprintGenerationBudget:
                 meta, response = {}, {}
             operation_id = str(meta.get("operation_id") or "").strip()
             requested = max(1, int(meta.get("requested_max_tokens") or 1))
+            effective = max(
+                1,
+                int(meta.get("effective_max_tokens") or requested),
+            )
             budget.requested_output_tokens += requested
             budget.provider_calls += 1
             status = str(row["status"] or "").upper()
@@ -5023,7 +5027,7 @@ class _BlueprintGenerationBudget:
                     disposition not in {"not_sent", "definitely_not_sent"}
                     and delivery_state not in {"not_sent", "definitely_not_sent"}
                 ):
-                    budget.unknown_output_tokens += requested
+                    budget.unknown_output_tokens += effective
                 continue
             if operation_id:
                 budget._durable_successful_operations.add(operation_id)
@@ -5036,7 +5040,7 @@ class _BlueprintGenerationBudget:
             if isinstance(actual, int) and actual >= 0:
                 budget.actual_output_tokens += actual
             else:
-                budget.unknown_output_tokens += requested
+                budget.unknown_output_tokens += effective
         return budget
 
     @property
@@ -5050,7 +5054,13 @@ class _BlueprintGenerationBudget:
     def charged_output_tokens(self) -> int:
         return self.actual_output_tokens + self.unknown_output_tokens
 
-    def claim(self, *, max_tokens: int, operation_id: str = "") -> int:
+    def claim(
+        self,
+        *,
+        max_tokens: int,
+        requested_max_tokens: int | None = None,
+        operation_id: str = "",
+    ) -> int:
         durable_replay = bool(
             operation_id
             and operation_id in self._durable_successful_operations
@@ -5089,9 +5099,14 @@ class _BlueprintGenerationBudget:
         self._next_reservation_id += 1
         if not durable_replay:
             self.provider_calls += 1
-            self.requested_output_tokens += int(max_tokens)
+            self.requested_output_tokens += int(
+                requested_max_tokens or max_tokens
+            )
         self._reservations[reservation_id] = {
             "max_tokens": int(max_tokens),
+            "requested_max_tokens": int(
+                requested_max_tokens or max_tokens
+            ),
             "actual_tokens": 0,
             "fresh_responses": 0,
             "unknown_responses": 0,
@@ -5127,7 +5142,8 @@ class _BlueprintGenerationBudget:
         reservation = self._reservations.pop(reservation_id, None)
         if reservation is None:
             raise RuntimeError("蓝图输出 token 预留已结算或不存在")
-        requested = int(reservation["max_tokens"])
+        effective = int(reservation["max_tokens"])
+        requested = int(reservation["requested_max_tokens"])
         durable_replay = bool(reservation["durable_replay"])
         fresh_responses = int(reservation["fresh_responses"])
         unknown_responses = int(reservation["unknown_responses"])
@@ -5144,16 +5160,17 @@ class _BlueprintGenerationBudget:
                 actual_value = actual
                 self.actual_output_tokens += actual
             else:
-                charged = requested
+                charged = effective
                 actual_value = None
-                self.unknown_output_tokens += requested
+                self.unknown_output_tokens += effective
         else:
             actual_value = None
-            charged = actual + requested * unknown_responses
+            charged = actual + effective * unknown_responses
             self.actual_output_tokens += actual
-            self.unknown_output_tokens += requested * unknown_responses
+            self.unknown_output_tokens += effective * unknown_responses
         return {
             "requested_max_tokens": requested,
+            "effective_max_tokens": effective,
             "actual_completion_tokens": actual_value,
             "usage_reported": fresh_responses > 0 and unknown_responses == 0,
             "fresh_responses": fresh_responses,
@@ -5311,7 +5328,8 @@ async def _generate_sharded_narrative_blueprint(
                     ),
                 )
                 reservation_id = generation_budget.claim(
-                    max_tokens=token_budget,
+                    max_tokens=effective_max_tokens,
+                    requested_max_tokens=token_budget,
                     operation_id=operation_id,
                 )
                 durable_replay = bool(
@@ -5355,6 +5373,8 @@ async def _generate_sharded_narrative_blueprint(
                                 ),
                                 "contract_version": BLUEPRINT_VERSION,
                                 "disable_reasoning_fallback": True,
+                                "disable_provider_retries": True,
+                                "disable_provider_candidate_fallback": True,
                             },
                             usage_callback=lambda usage_event: (
                                 generation_budget.record_usage(

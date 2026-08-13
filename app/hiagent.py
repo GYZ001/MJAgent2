@@ -890,6 +890,8 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
     base_url, headers = _model_connection("bailian", preferred_model, config.BAILIAN_BASE_URL, config.BAILIAN_API_KEY)
     url = f"{base_url}/chat/completions"
     models = _bailian_fallback_models(fallback_kind, preferred_model)
+    if bool((meta or {}).get("disable_provider_candidate_fallback")):
+        models = [preferred_model]
     strict_replay = bool(
         (meta or {}).get("require_cached_successful_operation")
     )
