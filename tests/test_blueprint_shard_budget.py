@@ -24,6 +24,11 @@ STATE_SUBJECT_RETRY_FIXTURE = (
     / "fixtures"
     / "run_d67f041a6df4_calls29716_29717_state_subject.json"
 )
+STATE_SUBJECT_LOCAL_PATCH_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "run_c2ee780d3768_calls29726_29734_state_subject.json"
+)
 THREE_EPISODE_FIXTURE = (
     Path(__file__).parent
     / "fixtures"
@@ -446,6 +451,71 @@ def test_calls29716_29717_retry_prompt_freezes_unreported_ownership() -> None:
     assert previous_candidate["environment_units"] == replay[
         "unchanged_environment_units"
     ]
+
+
+def test_calls29726_29734_locally_restore_unreported_ownership() -> None:
+    replay = json.loads(
+        STATE_SUBJECT_LOCAL_PATCH_FIXTURE.read_text(encoding="utf-8")
+    )
+    first_payload = replay["attempts"][0]["raw_state_subject_payload"]
+    second_payload = replay["attempts"][1]["raw_state_subject_payload"]
+
+    def shard(payload: dict) -> stages.NarrativeBlueprintShard:
+        value = json.loads(_shard_response(
+            source_ids=["SRC0004"],
+            shard_index=4,
+        ))
+        node = value["nodes"][0]
+        node["key"] = replay["leaf"]
+        node["participants"] = [
+            "王有材",
+            "虎头少年",
+            "白净胖少年",
+        ]
+        node["participant_evidence"] = [payload["single_claim"]]
+        node["state_subject_assignments"] = payload[
+            "state_subject_assignments"
+        ]
+        node["environment_source_unit_keys"] = payload[
+            "environment_source_unit_keys"
+        ]
+        return stages.NarrativeBlueprintShard.model_validate(value)
+
+    previous = shard(first_payload)
+    candidate = shard(second_payload)
+    unit_key = replay["source_unit"]["source_unit_key"]
+
+    assert replay["run_id"] == "run_c2ee780d3768"
+    assert replay["step_run_id"] == "step_b7aa1037fd97"
+    assert replay["attempts"][0]["source_provider_call_id"] == 29726
+    assert replay["attempts"][0]["cache_call_id"] == 29733
+    assert replay["attempts"][1]["provider_call_id"] == 29734
+    assert replay["source_unit"]["text"] == "看到了他身边的两个少年，"
+    assert replay["attempts"][1]["previous_candidate_contains_unit_064"]
+    assert unit_key in first_payload["single_claim"]["source_unit_keys"]
+    assert unit_key not in second_payload["single_claim"]["source_unit_keys"]
+    assert all(
+        unit_key not in error
+        for error in replay["attempt_1_validation_errors"]
+    )
+
+    stages._freeze_unreported_state_subject_ownership(
+        candidate,
+        previous_candidate=previous.model_dump(mode="json"),
+        validation_errors=replay["attempt_1_validation_errors"],
+    )
+
+    claims = {
+        evidence.identity_key: set(evidence.source_unit_keys)
+        for evidence in candidate.nodes[0].participant_evidence
+        if evidence.usage == "state_subject"
+    }
+    assert unit_key in claims["王有材"]
+    assert "SRC0004:unit:054" not in claims["王有材"]
+    assert {
+        assignment.source_unit_key
+        for assignment in candidate.nodes[0].state_subject_assignments
+    } == {"SRC0004:unit:054"}
 
 
 def test_err_653ac6_provider_responses_require_explicit_voice_evidence() -> None:

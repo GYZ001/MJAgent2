@@ -1,0 +1,96 @@
+{
+  "run_id": "run_c2ee780d3768",
+  "step_run_id": "step_b7aa1037fd97",
+  "leaf": "S004-node_001",
+  "attempts": [
+    {
+      "attempt": 1,
+      "cache_call_id": 29733,
+      "source_provider_call_id": 29726,
+      "http_status": 200,
+      "raw_state_subject_payload": {
+        "single_claim": {
+          "identity_key": "王有材",
+          "source_segment_ids": ["SRC0004"],
+          "source_unit_keys": [
+            "SRC0004:unit:003",
+            "SRC0004:unit:011",
+            "SRC0004:unit:012",
+            "SRC0004:unit:020",
+            "SRC0004:unit:054",
+            "SRC0004:unit:064"
+          ],
+          "usage": "state_subject"
+        },
+        "state_subject_assignments": [
+          {
+            "source_unit_key": "SRC0004:unit:054",
+            "mode": "joint",
+            "identity_keys": ["王有材", "虎头少年", "白净胖少年"]
+          }
+        ],
+        "environment_source_unit_keys": [
+          "SRC0004:unit:019",
+          "SRC0004:unit:060",
+          "SRC0004:unit:061",
+          "SRC0004:unit:062"
+        ]
+      }
+    },
+    {
+      "attempt": 2,
+      "provider_call_id": 29734,
+      "http_status": 200,
+      "previous_candidate_contains_unit_064": true,
+      "raw_state_subject_payload": {
+        "single_claim": {
+          "identity_key": "王有材",
+          "source_segment_ids": ["SRC0004"],
+          "source_unit_keys": [
+            "SRC0004:unit:003",
+            "SRC0004:unit:011",
+            "SRC0004:unit:012",
+            "SRC0004:unit:020"
+          ],
+          "usage": "state_subject"
+        },
+        "state_subject_assignments": [
+          {
+            "source_unit_key": "SRC0004:unit:054",
+            "mode": "joint",
+            "identity_keys": ["王有材", "虎头少年", "白净胖少年"]
+          }
+        ],
+        "environment_source_unit_keys": [
+          "SRC0004:unit:019",
+          "SRC0004:unit:021",
+          "SRC0004:unit:023",
+          "SRC0004:unit:043",
+          "SRC0004:unit:049",
+          "SRC0004:unit:060",
+          "SRC0004:unit:061",
+          "SRC0004:unit:062"
+        ]
+      }
+    }
+  ],
+  "attempt_1_validation_errors": [
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] S004-node_001 SRC0004：SRC0004:unit:021 缺少结构化状态主体",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] S004-node_001 SRC0004：SRC0004:unit:023 缺少结构化状态主体",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] S004-node_001 SRC0004：SRC0004:unit:043 缺少结构化状态主体",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_AMBIGUOUS] S004-node_001 SRC0004：SRC0004:unit:047 存在多个候选状态主体：孟浩、许清",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] S004-node_001 SRC0004：SRC0004:unit:049 缺少结构化状态主体",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_AMBIGUOUS] S004-node_001 SRC0004：SRC0004:unit:051 存在多个候选状态主体：孟浩、许清",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_ASSIGNMENT_CONFLICT] S004-node_001 SRC0004：SRC0004:unit:054 同时声明 single 与 joint state subject",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_ASSIGNMENT_CONFLICT] S004-node_001 SRC0004：SRC0004:unit:067 同时声明 single 与 joint state subject",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_AMBIGUOUS] S004-node_001 SRC0004：SRC0004:unit:068 存在多个候选状态主体：虎头少年、白净胖少年",
+    "[BLUEPRINT_SHARD_STATE_SUBJECT_AMBIGUOUS] S004-node_001 SRC0004：SRC0004:unit:069 存在多个候选状态主体：虎头少年、白净胖少年"
+  ],
+  "source_unit": {
+    "source_unit_key": "SRC0004:unit:064",
+    "projection": "action",
+    "surface_form": "prose",
+    "text": "看到了他身边的两个少年，"
+  },
+  "final_error": "[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] S004-node_001 SRC0004：SRC0004:unit:064 缺少结构化状态主体"
+}

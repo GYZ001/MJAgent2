@@ -5425,6 +5425,120 @@ def _blueprint_shard_token_budget(segments: list[Any]) -> int:
     )
 
 
+_BLUEPRINT_SOURCE_UNIT_KEY_PATTERN = re.compile(r"\bSRC\d+:unit:\d+\b")
+
+
+def _freeze_unreported_state_subject_ownership(
+    candidate: NarrativeBlueprintShard,
+    *,
+    previous_candidate: dict[str, Any],
+    validation_errors: list[str],
+) -> None:
+    """Keep retry ownership changes local to units named by validation."""
+
+    previous = NarrativeBlueprintShard.model_validate(previous_candidate)
+    mutable_unit_keys = {
+        unit_key
+        for error in validation_errors
+        for unit_key in _BLUEPRINT_SOURCE_UNIT_KEY_PATTERN.findall(error)
+    }
+    candidate_nodes = {node.key: node for node in candidate.nodes}
+    previous_nodes = {node.key: node for node in previous.nodes}
+
+    def ownership_keys(node: Any) -> set[str]:
+        return {
+            unit_key
+            for evidence in node.participant_evidence
+            if evidence.usage == "state_subject"
+            for unit_key in evidence.source_unit_keys
+        } | {
+            assignment.source_unit_key
+            for assignment in node.state_subject_assignments
+        } | set(node.environment_source_unit_keys)
+
+    previous_owner_by_unit = {
+        unit_key: node.key
+        for node in previous.nodes
+        for unit_key in ownership_keys(node)
+    }
+    candidate_owned_keys = {
+        unit_key
+        for node in candidate.nodes
+        for unit_key in ownership_keys(node)
+    }
+    frozen_unit_keys = {
+        unit_key
+        for unit_key in candidate_owned_keys | set(previous_owner_by_unit)
+        if (
+            unit_key not in mutable_unit_keys
+            and (
+                unit_key not in previous_owner_by_unit
+                or previous_owner_by_unit[unit_key] in candidate_nodes
+            )
+        )
+    }
+
+    for node in candidate.nodes:
+        retained_evidence = []
+        for evidence in node.participant_evidence:
+            if evidence.usage != "state_subject":
+                retained_evidence.append(evidence)
+                continue
+            retained_keys = [
+                unit_key
+                for unit_key in evidence.source_unit_keys
+                if unit_key not in frozen_unit_keys
+            ]
+            if retained_keys:
+                evidence.source_unit_keys = retained_keys
+                retained_evidence.append(evidence)
+        node.participant_evidence = retained_evidence
+        node.state_subject_assignments = [
+            assignment
+            for assignment in node.state_subject_assignments
+            if assignment.source_unit_key not in frozen_unit_keys
+        ]
+        node.environment_source_unit_keys = [
+            unit_key
+            for unit_key in node.environment_source_unit_keys
+            if unit_key not in frozen_unit_keys
+        ]
+
+    for node_key, previous_node in previous_nodes.items():
+        node = candidate_nodes.get(node_key)
+        if node is None:
+            continue
+        for evidence in previous_node.participant_evidence:
+            if evidence.usage != "state_subject":
+                continue
+            retained_keys = [
+                unit_key
+                for unit_key in evidence.source_unit_keys
+                if unit_key in frozen_unit_keys
+            ]
+            if retained_keys:
+                restored = deepcopy(evidence)
+                restored.source_unit_keys = retained_keys
+                node.participant_evidence.append(restored)
+        node.state_subject_assignments.extend(
+            deepcopy(assignment)
+            for assignment in previous_node.state_subject_assignments
+            if assignment.source_unit_key in frozen_unit_keys
+        )
+        node.environment_source_unit_keys.extend(
+            unit_key
+            for unit_key in previous_node.environment_source_unit_keys
+            if unit_key in frozen_unit_keys
+        )
+
+    for node in candidate.nodes:
+        node.participants = list(dict.fromkeys(
+            evidence.identity_key
+            for evidence in node.participant_evidence
+            if evidence.identity_key.strip()
+        ))
+
+
 def _blueprint_shard_prompt(
     *,
     episode_no: int,
@@ -6479,6 +6593,12 @@ async def _generate_sharded_narrative_blueprint(
                     boundary_context=boundary,
                 )
                 _namespace_blueprint_shard(candidate)
+                if previous_candidate is not None:
+                    _freeze_unreported_state_subject_ownership(
+                        candidate,
+                        previous_candidate=previous_candidate,
+                        validation_errors=errors,
+                    )
                 previous_candidate = candidate.model_dump(mode="json")
                 errors = validate_narrative_blueprint_shard(
                     candidate,
