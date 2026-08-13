@@ -4411,6 +4411,7 @@ def _identity_contract_repair_policy() -> dict[str, Any]:
             "除 offscreen_only 外 visual_canonical 必填",
             "仅当当前文档已有结构化 voice_bible.role_type=narrator 且有来源证据时才允许旁白；不得从 prose/summary/环境介绍推导或创建旁白",
             "narrator 或 offscreen_only 可作为声源，但不得写入 scene_blocks[*].characters 伪装成可见角色",
+            "environment:<episode-scope> 是 compiler 独占的非人物状态主体；修复不得创建、删除或改写该 ID，也不得把它加入 identity_contracts、voice_bible、scene characters、动作参与者或 POV",
         ],
         "semantic_decision": (
             "具名新角色、一次性功能身份、群体或纯画外身份均按当前语义意图决策；"

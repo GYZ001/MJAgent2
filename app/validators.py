@@ -49,7 +49,7 @@ from app.schemas import (Bible, EpisodeScreenplay, InformationItem,
                          KeyDialogueChain, NarrativeContinuityPlan, PlotSpineBeat, Shot,
                          Storyboard, StoryboardOutline, StoryEvent, SHOT_SIZES,
                          CAMERA_MOVES, TRANSITIONS, CONTINUITY_MODES,
-                         DELIVERY_OWNERS)
+                         DELIVERY_OWNERS, is_system_environment_entity_id)
 from app.scene_contract import (
     compose_scene_setting,
     same_scene,
@@ -285,12 +285,15 @@ def validate_storyboard(
             entity_id
             for proposition in narrative_plan.propositions
             for entity_id in proposition.entity_ids
-            if entity_id
+            if entity_id and not is_system_environment_entity_id(entity_id)
         )
         narrative_character_ids.update(
             fact.subject_id
             for fact in narrative_plan.state_facts
-            if fact.subject_id
+            if (
+                fact.subject_id
+                and not is_system_environment_entity_id(fact.subject_id)
+            )
         )
         narrative_character_ids.update(
             state.character_id

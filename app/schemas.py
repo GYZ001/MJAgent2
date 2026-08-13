@@ -60,6 +60,24 @@ AUDIO_TIMELINE_TYPES = {
 
 PROMPT_CONTRACT_VERSION = "video_cinematic_continuity_v6"
 NARRATIVE_CONTRACT_VERSION = "narrative-continuity.v2"
+SYSTEM_ENVIRONMENT_ENTITY_PREFIX = "environment:"
+
+
+def system_environment_entity_id(scope_id: object) -> str:
+    """Return the reserved, non-character narrative subject for one scope."""
+    return SYSTEM_ENVIRONMENT_ENTITY_PREFIX + str(scope_id or "").strip()
+
+
+def is_system_environment_entity_id(
+    value: object,
+    *,
+    scope_id: object | None = None,
+) -> bool:
+    """Recognize only compiler-owned environment subjects, never characters."""
+    normalized = str(value or "").strip()
+    if scope_id is None:
+        return normalized.startswith(SYSTEM_ENVIRONMENT_ENTITY_PREFIX)
+    return normalized == system_environment_entity_id(scope_id)
 
 # 主线节拍 ID（S*）与剧本事件 ID（E*）长得像但语义不同，历史数据把 S07 写进了 story_event_id。
 # 这两个正则是四类 ID 分离（PRD VAL-422 §4.4.1）的判定底座。

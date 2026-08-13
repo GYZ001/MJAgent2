@@ -44,6 +44,7 @@ from app.schemas import (
     ScriptScene,
     SourceCoverageDecision,
     StoryEvent,
+    system_environment_entity_id,
     TextProvenance,
     VoiceCanonical,
 )
@@ -61,7 +62,7 @@ from app.spoken_contract import content_char_count
 
 
 IR_VERSION = "screenplay-generation-ir.v3"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v5"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v6"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -2158,7 +2159,13 @@ def screenplay_ir_prompt_contract() -> str:
     "director_objective":"", "satisfaction_criteria":"",
     "required_processing_s":1.0, "forbidden_misconceptions":[]
   }
-}""".replace(
+}
+
+System contract: do not create an identity, speaker, actor, target, or visible
+character for prose-only environment/establishing events. Leave their typed
+identity relations empty. The deterministic compiler alone may assign the
+reserved environment:<episode-scope> narrative subject; it is never a person,
+voice, scene character, or asset identity.""".replace(
         "__IDENTITY_AUTHORITY_CONTRACT__",
         model_identity_authority_prompt_rule(),
     ).replace("__IR_VERSION__", IR_VERSION)
@@ -4482,10 +4489,10 @@ def compile_screenplay_ir(
     event_source_prop_id: dict[str, str] = {}
     event_adapted_prop_id: dict[str, str] = {}
     event_decision_id: dict[str, str] = {}
-    environment_subject_id = (
-        "environment:"
-        + str(episode.get("id") or f"episode-{episode_no}")
+    environment_subject_id = system_environment_entity_id(
+        episode.get("id") or f"episode-{episode_no}"
     )
+    event_participant_ids: dict[str, list[str]] = {}
 
     for position, event in enumerate(value.events, start=1):
         chapter_id, start, end, exact_excerpt = _source_location(
@@ -4539,6 +4546,7 @@ def compile_screenplay_ir(
             participants = [environment_subject_id]
         if not participants and not typed_visual_unit_contract:
             participants = [final_identity_ids[ordered_used_keys[0]]]
+        event_participant_ids[event.key] = participants
 
         source_statement = event.source_statement.strip() or exact_excerpt
         source_identity = re.sub(r"\s+", "", source_statement).casefold()
@@ -4643,11 +4651,7 @@ def compile_screenplay_ir(
     event_action_ids: dict[str, str] = {}
     event_character_state_ids: defaultdict[str, list[str]] = defaultdict(list)
 
-    initial_subject = (
-        identity_id(value.events[0].actor_keys[0])
-        if value.events[0].actor_keys
-        else environment_subject_id
-    )
+    initial_subject = event_participant_ids[value.events[0].key][0]
     state_facts.append({
         "fact_id": "F-0",
         "proposition_id": first_adapted_prop_id,
@@ -4712,7 +4716,11 @@ def compile_screenplay_ir(
                 "planned_duration_s": event.readability_s,
                 "competing_attention_ids": [],
             })
-        subject_id = (actor_ids or target_ids or [initial_subject])[0]
+        # State ownership follows the same complete authority relation used by
+        # the event's propositions. Falling back only to the first actor (or
+        # the episode's initial subject) made target/observer/speaker/scene
+        # participants disappear and produced undeclared pseudo identities.
+        subject_id = (actor_ids or target_ids or event_participant_ids[event.key])[0]
         state_facts.append({
             "fact_id": fact_out_id,
             "proposition_id": adapted_prop_id,

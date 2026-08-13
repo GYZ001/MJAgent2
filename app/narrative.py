@@ -25,6 +25,8 @@ from app.schemas import (
     ShotContribution,
     Storyboard,
     StoryboardOutline,
+    is_system_environment_entity_id,
+    system_environment_entity_id,
 )
 from app.spoken_contract import onscreen_text_for_capacity
 
@@ -672,8 +674,34 @@ def validate_screenplay_narrative(
         for entity_id in proposition.entity_ids
         if _norm(entity_id)
     }
+    environment_entity_id = system_environment_entity_id(plan.scope_id)
+    reserved_environment_ids = {
+        entity_id
+        for entity_id in declared_entity_ids
+        if is_system_environment_entity_id(entity_id)
+    }
+    foreign_environment_ids = reserved_environment_ids - {environment_entity_id}
+    if foreign_environment_ids:
+        errors.append(
+            "[SYSTEM_NARRATIVE_ENTITY_SCOPE_MISMATCH] 命题身份图包含其他作用域的"
+            f"系统环境实体 {sorted(foreign_environment_ids)}"
+        )
     identity_display_names: dict[str, str] = {}
     for identity_id, identity in index.identities.items():
+        reserved_identity_tokens = {
+            token
+            for token in [
+                identity_id,
+                identity.display_name,
+                *identity.voice_ids,
+            ]
+            if is_system_environment_entity_id(token)
+        }
+        if reserved_identity_tokens:
+            errors.append(
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {identity_id} 把系统环境实体 "
+                f"{sorted(reserved_identity_tokens)} 注册为人物/声音身份"
+            )
         display_name = _norm(identity.display_name)
         if display_name in identity_display_names:
             errors.append(
@@ -814,6 +842,21 @@ def validate_screenplay_narrative(
         _require_refs([fact.proposition_id], index.propositions, errors, fact_id)
         if _norm(fact.subject_id) not in declared_entity_ids:
             errors.append(f"[NARRATIVE_ENTITY_UNDECLARED] {fact_id}.subject_id={fact.subject_id} 未在命题身份图中声明")
+        if is_system_environment_entity_id(fact.subject_id):
+            if fact.subject_id != environment_entity_id:
+                errors.append(
+                    f"[SYSTEM_NARRATIVE_ENTITY_SCOPE_MISMATCH] {fact_id}.subject_id="
+                    f"{fact.subject_id} 不属于当前作用域"
+                )
+            proposition = index.propositions.get(fact.proposition_id)
+            if (
+                proposition is not None
+                and fact.subject_id not in proposition.entity_ids
+            ):
+                errors.append(
+                    f"[SYSTEM_NARRATIVE_ENTITY_PROPOSITION_MISSING] {fact_id} 的系统环境"
+                    f"主体未由命题 {fact.proposition_id}.entity_ids 声明"
+                )
         if not _norm(fact.predicate_id):
             errors.append(f"[STATE_PREDICATE_MISSING] {fact_id}.predicate_id 不能为空")
         if fact.provenance not in {"source", "screenplay", "storyboard"}:
@@ -861,6 +904,16 @@ def validate_screenplay_narrative(
         }
         if undeclared_perceivers:
             errors.append(f"[NARRATIVE_ENTITY_UNDECLARED] {evidence_id}.perceivable_by 含未声明身份 {sorted(undeclared_perceivers)}")
+        environment_perceivers = {
+            entity_id
+            for entity_id in evidence.perceivable_by
+            if is_system_environment_entity_id(entity_id)
+        }
+        if environment_perceivers:
+            errors.append(
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {evidence_id}.perceivable_by "
+                f"把系统环境实体当作感知者 {sorted(environment_perceivers)}"
+            )
         if not _norm(evidence.observable_claim):
             errors.append(f"[EVIDENCE_CLAIM_MISSING] {evidence_id}.observable_claim 不能为空")
         _anchor_ref_errors(
@@ -899,6 +952,16 @@ def validate_screenplay_narrative(
             errors.append(
                 f"[NARRATIVE_ENTITY_UNDECLARED] {event_id}.onscreen_entity_ids "
                 f"含未声明身份 {sorted(undeclared_onscreen)}"
+            )
+        environment_onscreen = {
+            entity_id
+            for entity_id in event.onscreen_entity_ids
+            if is_system_environment_entity_id(entity_id)
+        }
+        if environment_onscreen:
+            errors.append(
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {event_id}.onscreen_entity_ids "
+                f"把系统环境实体当作可见人物 {sorted(environment_onscreen)}"
             )
         invalid_onscreen = (
             set(event.onscreen_entity_ids) & offscreen_only_identity_ids
@@ -1072,6 +1135,16 @@ def validate_screenplay_narrative(
         ) - declared_entity_ids
         if undeclared_participants:
             errors.append(f"[NARRATIVE_ENTITY_UNDECLARED] {action_id} 含未声明动作参与者 {sorted(undeclared_participants)}")
+        environment_participants = {
+            entity_id
+            for entity_id in [*action.actor_ids, *action.target_ids]
+            if is_system_environment_entity_id(entity_id)
+        }
+        if environment_participants:
+            errors.append(
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {action_id} 把系统环境实体"
+                f"当作动作人物 {sorted(environment_participants)}"
+            )
         if action.decision_requirement not in {"applies", "not_applicable"}:
             errors.append(f"[ACTION_DECISION_REQUIREMENT_INVALID] {action_id}.decision_requirement 非法")
         if (
@@ -1222,6 +1295,11 @@ def validate_screenplay_narrative(
     for belief_id, snapshot in index.character_beliefs.items():
         if snapshot.character_id not in declared_entity_ids:
             errors.append(f"[NARRATIVE_ENTITY_UNDECLARED] {belief_id}.character_id={snapshot.character_id} 未声明")
+        if is_system_environment_entity_id(snapshot.character_id):
+            errors.append(
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {belief_id}.character_id "
+                "不得使用系统环境实体"
+            )
         _anchor_ref_errors(
             snapshot.anchor,
             events=index.events,
@@ -1288,6 +1366,11 @@ def validate_screenplay_narrative(
     for state_id, state in index.character_states.items():
         if state.character_id not in declared_entity_ids:
             errors.append(f"[NARRATIVE_ENTITY_UNDECLARED] {state_id}.character_id={state.character_id} 未声明")
+        if is_system_environment_entity_id(state.character_id):
+            errors.append(
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {state_id}.character_id "
+                "不得使用系统环境实体"
+            )
         _anchor_ref_errors(
             state.anchor,
             events=index.events,
@@ -1840,6 +1923,11 @@ def validate_screenplay_narrative(
             and scene.point_of_view_character_id not in declared_entity_ids
         ):
             errors.append(f"[NARRATIVE_ENTITY_UNDECLARED] {scene_id}.point_of_view_character_id={scene.point_of_view_character_id} 未声明")
+        if is_system_environment_entity_id(scene.point_of_view_character_id):
+            errors.append(
+                f"[SYSTEM_NARRATIVE_ENTITY_POLICY_INVALID] {scene_id} 的 POV "
+                "不得使用系统环境实体"
+            )
         if scene.applicability not in {"applies", "not_applicable"}:
             errors.append(f"[SCENE_APPLICABILITY_INVALID] {scene_id}.applicability 非法")
         if scene.applicability == "not_applicable":

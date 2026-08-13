@@ -3704,6 +3704,8 @@ def _narrative_plan_prompt_block(scope_id: str) -> str:
         "改编命题必须属于 adapted_story，通过 AdaptationDecision 连接，"
         "实质改写后不得继承原文 direct_source_evidence_ids。命题 entity_ids 合并构成本作用域身份图，"
         "fact.subject_id、action actor/target、人物状态与可感知者都必须引用其中身份。\n"
+        "系统保留的 environment:<episode-scope> 仅由 deterministic compiler 为真正无人物的环境状态建立，"
+        "模型不得输出或把它当作 identity_contract、声音、可见人物、动作参与者或 POV。\n"
         "1a. 每条命题必须填写 semantic_identity_key，键由当前项目语义归一产生，不来自全局词表。"
         "同一 narrative_domain 中语义等价的陈述必须共用同一键，并最终只保留一个 proposition_id；"
         "不得通过同义改写、语序变化或更换 ID 重复创建同一命题。来源域与改编域可以分别拥有自己的键，"
