@@ -40,7 +40,7 @@ BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
 BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v8"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
-    "blueprint-shard-local-authority.v4"
+    "blueprint-shard-local-authority.v5"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 
@@ -157,10 +157,17 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
             identity_key = str(evidence.get("identity_key") or "").strip()
             if identity_key and identity_key not in evidence_identities:
                 evidence_identities.append(identity_key)
+        for assignment in value.get("state_subject_assignments") or []:
+            if not isinstance(assignment, dict):
+                continue
+            for identity_key_value in assignment.get("identity_keys") or []:
+                identity_key = str(identity_key_value or "").strip()
+                if identity_key and identity_key not in evidence_identities:
+                    evidence_identities.append(identity_key)
         node["participant_evidence"] = evidence_values
-        # participant_evidence is the only source-backed identity authority.
-        # Keeping an independently model-authored roster creates two truths:
-        # a role can be listed without evidence and survive into downstream IR.
+        # Evidence rows and exact-unit joint assignments are the two typed
+        # source-backed identity authorities. An independently authored roster
+        # would create a third truth that can survive into downstream IR.
         node["participants"] = evidence_identities
         normalized_nodes.append(node)
     normalized["nodes"] = normalized_nodes
@@ -203,6 +210,10 @@ def blueprint_shard_provider_schema(
         node_properties["source_segment_ids"]["items"] = {
             "enum": source_ids,
         }
+    node_properties["source_segment_ids"]["minItems"] = 1
+    node_properties["source_segment_ids"]["maxItems"] = (
+        BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE
+    )
     if action_unit_keys:
         node_properties["environment_source_unit_keys"]["items"] = {
             "enum": action_unit_keys,
@@ -212,12 +223,14 @@ def blueprint_shard_provider_schema(
         node_properties["state_subject_assignments"]["maxItems"] = 0
     node_properties.get("participants", {})["description"] = (
         "Ordered identity roster. Its unique identity set must exactly equal "
-        "participant_evidence.identity_key; never add an identity without "
-        "owned source evidence."
+        "the union of participant_evidence.identity_key and "
+        "state_subject_assignments.identity_keys; never add an identity "
+        "without owned source evidence."
     )
     node_properties.get("participant_evidence", {})["description"] = (
-        "Source-backed identity evidence. Its unique identity_key set must "
-        "exactly equal participants."
+        "Source-backed identity evidence. Together with exact-unit joint "
+        "state_subject assignments, its identity set must exactly equal "
+        "participants."
     )
     location_schema = node_properties.get("location_label")
     if isinstance(location_schema, dict):
@@ -992,13 +1005,20 @@ def validate_narrative_blueprint_shard(
     prior_position = -1
     for node_index, node in enumerate(shard.nodes):
         previous = shard.nodes[node_index - 1] if node_index else None
+        if not node.source_segment_ids:
+            errors.append(
+                f"[BLUEPRINT_SHARD_NODE_UNGROUNDED] {node.key} 没有来源段"
+            )
+            continue
         if (
-            not node.source_segment_ids
-            or len(node.source_segment_ids)
+            len(node.source_segment_ids)
             > BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE
         ):
             errors.append(
-                f"[BLUEPRINT_SHARD_NODE_SIZE] {node.key} 来源数量非法"
+                f"[BLUEPRINT_SHARD_NODE_SIZE] {node.key} 合并了"
+                f"{len(node.source_segment_ids)} 个来源段，最多允许 "
+                f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE} 个；"
+                "source-fact unit 数量不计入 node size"
             )
             continue
         positions = [
@@ -1098,6 +1118,10 @@ def validate_narrative_blueprint_shard(
             evidence.identity_key
             for evidence in node.participant_evidence
             if evidence.identity_key
+        } | {
+            identity_key
+            for assignment in node.state_subject_assignments
+            for identity_key in assignment.identity_keys
         }
         for evidence in node.participant_evidence:
             escaped_sources = (
@@ -1122,7 +1146,8 @@ def validate_narrative_blueprint_shard(
         if missing_evidence:
             errors.append(
                 f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_MISSING] "
-                f"{node.key} participants 缺少同 identity_key 的来源证据："
+                f"{node.key} participants 缺少同 identity_key 的来源证据"
+                "或 exact-unit joint assignment："
                 + "、".join(sorted(missing_evidence))
                 + "；保留有来源角色并补 participant_evidence，"
                 "不得删除角色或改用默认身份"
@@ -2532,13 +2557,13 @@ def derive_blueprint_scene_plans(
     blueprint: NarrativeBlueprint,
 ) -> list[BlueprintScenePlan]:
     def operational_participants(node: NarrativeNode) -> list[str]:
-        if not node.participant_evidence:
+        if not node.participant_evidence and not node.state_subject_assignments:
             return [
                 participant
                 for participant in node.participants
                 if participant
             ]
-        return [
+        return list(dict.fromkeys([
             evidence.identity_key
             for evidence in node.participant_evidence
             if (
@@ -2546,7 +2571,12 @@ def derive_blueprint_scene_plans(
                 and evidence.usage
                 in {"visible", "voice", "state_subject"}
             )
-        ]
+        ] + [
+            identity_key
+            for assignment in node.state_subject_assignments
+            for identity_key in assignment.identity_keys
+            if identity_key
+        ]))
 
     occurrence_nodes: defaultdict[str, list[str]] = defaultdict(list)
     occurrence_partitions: defaultdict[str, set[str]] = defaultdict(set)
@@ -3152,6 +3182,10 @@ def validate_narrative_blueprint(
         evidence_keys = {
             evidence.identity_key for evidence in node.participant_evidence
             if evidence.identity_key
+        } | {
+            identity_key
+            for assignment in node.state_subject_assignments
+            for identity_key in assignment.identity_keys
         }
         for evidence in node.participant_evidence:
             unknown_evidence_sources = (
@@ -3681,9 +3715,9 @@ def blueprint_prompt_contract() -> dict[str, Any]:
             "usage": ["visible", "voice", "mentioned", "state_subject"],
             "ownership": "source_segment_ids must be owned by the same node",
             "participant_identity_contract": (
-                "every participants identity has at least one evidence object "
+                "every participants identity has either an evidence object "
                 "with the exact same identity_key and non-empty owned "
-                "source_segment_ids"
+                "source_segment_ids, or an exact-unit joint assignment"
             ),
             "dialogue_voice_contract": (
                 "every audible source_unit_delivery has exactly one "

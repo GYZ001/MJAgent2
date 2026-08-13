@@ -7,6 +7,7 @@ words, sound effects, and actual speech cannot be conflated here.
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Literal
 
@@ -19,8 +20,11 @@ from app.source_excerpt import (
 )
 
 
-SOURCE_FACT_VERSION = "source-fact.v3"
+SOURCE_FACT_VERSION = "source-fact.v4"
 ACTION_CLAUSE_BOUNDARIES = frozenset("。！？!?；;：:，,\n\r")
+_STRUCTURAL_SECTION_DIVIDER = re.compile(
+    r"(?m)^[^\w\s]{5,}[ \t]*(?:\n|\Z)"
+)
 
 
 class SourceFactQuotationError(ValueError):
@@ -48,21 +52,27 @@ class SourceFact(BaseModel):
 
     # v2 remains readable for historical failure audits. All newly derived
     # facts use v3, and cache authority fingerprints require the current value.
-    contract_version: Literal["source-fact.v2", "source-fact.v3"] = (
+    contract_version: Literal[
+        "source-fact.v2",
+        "source-fact.v3",
+        "source-fact.v4",
+    ] = (
         SOURCE_FACT_VERSION
     )
     source_unit_key: str
     source_segment_id: str
     unit_order: int
-    projection: Literal["action", "quoted"]
-    surface_form: Literal["prose", "quoted_span"]
+    projection: Literal["action", "quoted", "paratext"]
+    surface_form: Literal["prose", "quoted_span", "paratext_span"]
     text: str
 
     @model_validator(mode="after")
     def _validate_surface_projection(self) -> "SourceFact":
-        expected = (
-            "quoted" if self.surface_form == "quoted_span" else "action"
-        )
+        expected = {
+            "prose": "action",
+            "quoted_span": "quoted",
+            "paratext_span": "paratext",
+        }[self.surface_form]
         if self.projection != expected:
             raise ValueError(
                 "SourceFact projection 必须由 surface_form 确定"
@@ -80,11 +90,16 @@ def source_segment_facts(
 ) -> list[SourceFact]:
     """Split one source segment by quotation and action-clause boundaries."""
     text = str(source_text or "").strip()
+    divider = _STRUCTURAL_SECTION_DIVIDER.search(text)
+    paratext = ""
+    if divider is not None:
+        paratext = text[divider.end():].strip()
+        text = text[:divider.start()].strip()
     if not text:
         parts: list[
             tuple[
-                Literal["action", "quoted"],
-                Literal["prose", "quoted_span"],
+                Literal["action", "quoted", "paratext"],
+                Literal["prose", "quoted_span", "paratext_span"],
                 str,
             ]
         ] = [
@@ -142,6 +157,27 @@ def source_segment_facts(
         flush_outside()
         if not parts:
             parts = [("action", "prose", text)]
+
+    if paratext:
+        appendix_unit: list[str] = []
+
+        def flush_paratext() -> None:
+            value = "".join(appendix_unit).strip()
+            appendix_unit.clear()
+            if value and any(
+                not (
+                    char.isspace()
+                    or unicodedata.category(char).startswith("P")
+                )
+                for char in value
+            ):
+                parts.append(("paratext", "paratext_span", value))
+
+        for char in paratext:
+            appendix_unit.append(char)
+            if char in ACTION_CLAUSE_BOUNDARIES:
+                flush_paratext()
+        flush_paratext()
 
     return [
         SourceFact(
