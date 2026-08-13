@@ -15,10 +15,13 @@ from app.evidence import repository
 from app.harness.contracts import get_contract
 from app.harness.types import EvidenceArtifact
 from app.narrative_blueprint import (
+    BLUEPRINT_PROMPT_VERSION,
     BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
     BLUEPRINT_SHARD_POLICY_VERSION,
+    BLUEPRINT_SPLIT_MANIFEST_VERSION,
     BLUEPRINT_VERSION,
     NarrativeBlueprint,
+    blueprint_authority_validator_fingerprint,
 )
 from app.observability.tracing import bind_trace
 from app.production.patch import screenplay_artifact_payload
@@ -127,10 +130,16 @@ def _current_checkpoint_artifacts() -> dict[str, object]:
         trust_level="T1",
         content=blueprint_value.model_dump(mode="json"),
         contract_version=BLUEPRINT_VERSION,
+        prompt_version=BLUEPRINT_PROMPT_VERSION,
         model_snapshot={
             "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
             "local_authority_validator_version": (
                 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+            ),
+            "split_manifest_version": BLUEPRINT_SPLIT_MANIFEST_VERSION,
+            "source_corpus_hash": "test-source-corpus",
+            "validator_fingerprint": (
+                blueprint_authority_validator_fingerprint()
             ),
         },
     ))

@@ -34,6 +34,7 @@ from app.harness.types import Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.narrative_blueprint import (
     BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE,
+    BLUEPRINT_PROMPT_VERSION,
     BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
     BLUEPRINT_SHARD_POLICY_VERSION,
     BLUEPRINT_SPLIT_MANIFEST_VERSION,
@@ -45,6 +46,7 @@ from app.narrative_blueprint import (
     NarrativeBlueprintPatch,
     NarrativeBlueprintShard,
     apply_narrative_blueprint_patch,
+    blueprint_authority_validator_fingerprint,
     blueprint_patch_schema,
     blueprint_semantic_issue_is_resolved,
     filter_blueprint_semantic_review_voice_issues,
@@ -145,7 +147,7 @@ SYSTEM_PREFIX = (
 )
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
-SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.1"
+SCREENPLAY_BLUEPRINT_PROMPT_VERSION = BLUEPRINT_PROMPT_VERSION
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
@@ -246,13 +248,9 @@ def _current_blueprint_authority_snapshot(
         "source_corpus_hash": hashlib.sha256(
             source_text.encode("utf-8")
         ).hexdigest(),
-        "validator_fingerprint": hashlib.sha256(
-            json.dumps(
-                validator_material,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest(),
+        "validator_fingerprint": (
+            blueprint_authority_validator_fingerprint()
+        ),
     }
     if shard_count is not None:
         snapshot["shard_count"] = int(shard_count)
@@ -4150,7 +4148,11 @@ async def _repair_narrative_blueprint(
         )
         reservation_id: int | None = None
         remaining_seconds: float | None = None
+        legacy_retry_call_id: int | None = None
         if generation_budget is not None:
+            legacy_retry_call_id = generation_budget.explicit_retry_call_id(
+                "screenplay_blueprint_patch"
+            )
             reservation_id = generation_budget.claim(
                 max_tokens=effective_max_tokens,
                 requested_max_tokens=requested_max_tokens,
@@ -4187,6 +4189,7 @@ async def _repair_narrative_blueprint(
                 "call_role": "stage_repair",
                 "call_role_label": "蓝图局部语义修复",
                 "repair_round": round_no,
+                "supersedes_provider_call_id": legacy_retry_call_id,
                 "episode_id": str(episode.get("id") or ""),
                 "production_grant_id": (
                     generation_budget.retry_grant_id
@@ -4598,7 +4601,13 @@ async def _semantic_review_narrative_blueprint(
             )
             reservation_id: int | None = None
             remaining_seconds: float | None = None
+            legacy_retry_call_id: int | None = None
             if generation_budget is not None:
+                legacy_retry_call_id = (
+                    generation_budget.explicit_retry_call_id(
+                        "screenplay_blueprint_review"
+                    )
+                )
                 reservation_id = generation_budget.claim(
                     max_tokens=effective_max_tokens,
                     requested_max_tokens=8192,
@@ -4632,6 +4641,7 @@ async def _semantic_review_narrative_blueprint(
                     "call_role_label": "蓝图独立语义审稿",
                     "review_round": review_round,
                     "review_sample": sample_no,
+                    "supersedes_provider_call_id": legacy_retry_call_id,
                     "episode_id": str(episode.get("id") or ""),
                     "production_grant_id": (
                         generation_budget.retry_grant_id
@@ -5391,6 +5401,7 @@ class _BlueprintGenerationBudget:
         self._reservations: dict[int, dict[str, Any]] = {}
         self._durable_successful_operations: set[str] = set()
         self._durable_unknown_operations: dict[str, str] = {}
+        self._durable_unknown_stage_calls: dict[str, tuple[int, str]] = {}
         self.retry_grant_id = ""
 
     @classmethod
@@ -5411,8 +5422,9 @@ class _BlueprintGenerationBudget:
         if not run_id and not (episode_id and input_fingerprint):
             return budget
         query = (
-            "SELECT pc.response_json,pc.meta,pc.status,"
-            "pc.recovery_disposition,pc.operation_id,pc.ts "
+            "SELECT pc.id,pc.response_json,pc.meta,pc.status,"
+            "pc.recovery_disposition,pc.operation_id,pc.ts,"
+            "pc.superseded_by_call_id "
             "FROM provider_calls pc "
             "LEFT JOIN workflow_runs wr ON wr.id=pc.run_id "
             "WHERE pc.kind='chat' "
@@ -5434,6 +5446,7 @@ class _BlueprintGenerationBudget:
         query += " ORDER BY pc.id"
         rows = get_conn().execute(query, params).fetchall()
         latest_operation_status: dict[str, tuple[str, str]] = {}
+        latest_stage_status: dict[str, tuple[int, str, str]] = {}
         for row in rows:
             try:
                 meta = json.loads(row["meta"] or "{}")
@@ -5455,6 +5468,25 @@ class _BlueprintGenerationBudget:
             budget.requested_output_tokens += requested
             budget.provider_calls += 1
             status = str(row["status"] or "").upper()
+            stage_key = str(meta.get("stage_key") or "")
+            try:
+                superseded_by_call_id = row["superseded_by_call_id"]
+            except (KeyError, IndexError):
+                superseded_by_call_id = None
+            if (
+                stage_key
+                and status in {"INTERRUPTED", "RUNNING"}
+                and not superseded_by_call_id
+            ):
+                try:
+                    durable_call_id = int(row["id"])
+                except (KeyError, TypeError, ValueError):
+                    durable_call_id = 0
+                latest_stage_status[stage_key] = (
+                    durable_call_id,
+                    status,
+                    str(meta.get("production_grant_id") or ""),
+                )
             if operation_id:
                 latest_operation_status[operation_id] = (
                     status,
@@ -5486,7 +5518,28 @@ class _BlueprintGenerationBudget:
                 budget._durable_successful_operations.add(operation_id)
             elif status in {"INTERRUPTED", "RUNNING"}:
                 budget._durable_unknown_operations[operation_id] = prior_grant_id
+        for stage_key, (call_id, _status, prior_grant_id) in latest_stage_status.items():
+            if call_id:
+                budget._durable_unknown_stage_calls[stage_key] = (
+                    call_id,
+                    prior_grant_id,
+                )
         return budget
+
+    def explicit_retry_call_id(self, stage_key: str) -> int | None:
+        prior = self._durable_unknown_stage_calls.get(stage_key)
+        if prior is None:
+            return None
+        call_id, prior_grant_id = prior
+        if not self.retry_grant_id or self.retry_grant_id == prior_grant_id:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                [
+                    "[BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED] "
+                    "上次供应商结果未知；缺少新的 Production Grant"
+                ],
+            )
+        return call_id
 
     @property
     def reserved_output_tokens(self) -> int:
@@ -5657,7 +5710,12 @@ def _blueprint_generation_budget_for_trace(
         ).fetchone()
         if run_row is not None:
             run_started_at = run_row["started_at"]
-            input_fingerprint = str(run_row["input_fingerprint"] or "")
+            try:
+                input_fingerprint = str(
+                    run_row["input_fingerprint"] or ""
+                )
+            except (KeyError, IndexError):
+                input_fingerprint = ""
     if episode_id:
         try:
             grant_row = get_conn().execute(

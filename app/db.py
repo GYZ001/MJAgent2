@@ -2647,6 +2647,21 @@ def _start_provider_call_inner(
         "SELECT id, attempt_no, status FROM provider_calls WHERE operation_id=? ORDER BY id DESC LIMIT 1",
         (op_id,),
     ).fetchone()
+    explicit_previous_id = int((meta or {}).get("supersedes_provider_call_id") or 0)
+    if previous is None and explicit_previous_id:
+        legacy_previous = conn.execute(
+            """SELECT id,attempt_no,status,request_json
+                 FROM provider_calls WHERE id=? AND status='INTERRUPTED'""",
+            (explicit_previous_id,),
+        ).fetchone()
+        # A version migration may replace an old run-scoped operation id with
+        # the stable semantic id.  Link it only when the exact outbound request
+        # is byte-identical; stage/round proximity is never enough authority.
+        if legacy_previous is not None and (
+            str(legacy_previous["request_json"] or "")
+            == str(_dump_call_json(request_json) or "")
+        ):
+            previous = legacy_previous
     attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
     cur = conn.execute(
         """INSERT INTO provider_calls(

@@ -256,10 +256,13 @@ def _screenplay_checkpoint_compatibility(
     conn,
 ) -> tuple[dict[str, Any], dict[str, int], bool]:
     from app.narrative_blueprint import (
+        BLUEPRINT_PROMPT_VERSION,
         BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
         BLUEPRINT_SHARD_POLICY_VERSION,
+        BLUEPRINT_SPLIT_MANIFEST_VERSION,
         BLUEPRINT_VERSION,
         NarrativeBlueprint,
+        blueprint_authority_validator_fingerprint,
         derive_blueprint_scene_plans,
     )
     from app.screenplay_ir import IR_VERSION, ScreenplayGenerationIR
@@ -290,7 +293,7 @@ def _screenplay_checkpoint_compatibility(
     artifacts = {
         str(row["id"]): dict(row)
         for row in conn.execute(
-            "SELECT id,type,scope_type,scope_id,status,contract_version,"
+            "SELECT id,type,scope_type,scope_id,status,contract_version,prompt_version,"
             "content_json,content_hash,parent_artifact_ids_json,model_snapshot_json "
             "FROM artifacts WHERE id IN ("
             + ",".join("?" for _ in artifact_ids)
@@ -301,7 +304,7 @@ def _screenplay_checkpoint_compatibility(
     recovered_shards = [
         dict(row)
         for row in conn.execute(
-            "SELECT id,type,scope_type,scope_id,status,contract_version,"
+            "SELECT id,type,scope_type,scope_id,status,contract_version,prompt_version,"
             "content_json,content_hash,parent_artifact_ids_json,model_snapshot_json "
             "FROM artifacts WHERE scope_type='episode' AND scope_id=? "
             "AND type='screenplay_scene_shard' AND status='validated'",
@@ -317,7 +320,7 @@ def _screenplay_checkpoint_compatibility(
         artifacts.update({
             str(row["id"]): dict(row)
             for row in conn.execute(
-                "SELECT id,type,scope_type,scope_id,status,contract_version,"
+                "SELECT id,type,scope_type,scope_id,status,contract_version,prompt_version,"
                 "content_json,content_hash,parent_artifact_ids_json,model_snapshot_json "
                 "FROM artifacts WHERE id IN ("
                 + ",".join("?" for _ in raw_parent_ids)
@@ -363,13 +366,23 @@ def _screenplay_checkpoint_compatibility(
             blueprint_snapshot = json.loads(
                 blueprint_pair[0].get("model_snapshot_json") or "{}"
             )
+            expected_validator_fingerprint = (
+                blueprint_authority_validator_fingerprint()
+            )
             blueprint_valid = (
                 blueprint_content_hash(blueprint) == blueprint_hash
+                and str(blueprint_pair[0].get("prompt_version") or "")
+                == BLUEPRINT_PROMPT_VERSION
                 and blueprint_snapshot.get("shard_policy_version")
                 == BLUEPRINT_SHARD_POLICY_VERSION
                 and blueprint_snapshot.get(
                     "local_authority_validator_version"
                 ) == BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+                and blueprint_snapshot.get("split_manifest_version")
+                == BLUEPRINT_SPLIT_MANIFEST_VERSION
+                and bool(blueprint_snapshot.get("source_corpus_hash"))
+                and blueprint_snapshot.get("validator_fingerprint")
+                == expected_validator_fingerprint
             )
             if blueprint_valid:
                 derive_blueprint_scene_plans(blueprint)

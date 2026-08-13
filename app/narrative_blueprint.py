@@ -7,6 +7,7 @@ passes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import defaultdict
@@ -42,6 +43,25 @@ BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
     "blueprint-shard-local-authority.v1"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
+
+
+def blueprint_authority_validator_fingerprint() -> str:
+    material = {
+        "contract_version": BLUEPRINT_VERSION,
+        "prompt_version": BLUEPRINT_PROMPT_VERSION,
+        "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+        "local_authority_validator_version": (
+            BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+        ),
+        "split_manifest_version": BLUEPRINT_SPLIT_MANIFEST_VERSION,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _normalize_source_segment_id(value: Any) -> str:
