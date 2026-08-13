@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextvars
 import math
 
 from app.narrative_blueprint import (
@@ -33,18 +32,19 @@ _SCREENPLAY_IR_WORKING_TYPES = (
     "screenplay_generation_ir_scene_partition_raw",
 )
 
-_SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL = contextvars.ContextVar(
-    "screenplay_command_bus_retry_approval",
-    default=False,
+from app import screenplay_retry_authority as _retry_authority
+
+_SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL = (
+    _retry_authority.SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL
 )
 
 
 def _enter_screenplay_command_bus_retry_approval():
-    return _SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.set(True)
+    return _retry_authority.enter_screenplay_command_bus_retry_approval()
 
 
 def _exit_screenplay_command_bus_retry_approval(token) -> None:
-    _SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.reset(token)
+    _retry_authority.exit_screenplay_command_bus_retry_approval(token)
 
 
 def _clear_unpublished_screenplay_ir(

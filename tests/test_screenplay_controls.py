@@ -1217,6 +1217,17 @@ def test_unknown_blueprint_receipt_requires_confirmation_and_direct_body_cannot_
     ] is True
     assert receipts[0]["request_hash"] == ""
 
+    episode_before = dict(conn.execute(
+        "SELECT screenplay_status,screenplay_error,active_screenplay_run_id,"
+        "screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone())
+    revision_before = dict(conn.execute(
+        "SELECT status,grant_id,updated_at FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone())
+    provider_count_before = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM provider_calls"
+    ).fetchone()["c"])
     recorder = api._new_screenplay_recorder("e1")
     spawned = 0
 
@@ -1241,11 +1252,33 @@ def test_unknown_blueprint_receipt_requires_confirmation_and_direct_body_cannot_
         "SELECT id FROM production_grants WHERE episode_id='e1' ORDER BY issued_at"
     ).fetchall()
     assert [row["id"] for row in grants] == [old_grant.grant_id]
+    assert dict(conn.execute(
+        "SELECT screenplay_status,screenplay_error,active_screenplay_run_id,"
+        "screenplay_character_resolutions FROM episodes WHERE id='e1'"
+    ).fetchone()) == episode_before
+    assert dict(conn.execute(
+        "SELECT status,grant_id,updated_at FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()) == revision_before
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM provider_calls"
+    ).fetchone()["c"] == provider_count_before
+    failed_run = conn.execute(
+        "SELECT status,config_snapshot_json FROM workflow_runs WHERE id=?",
+        (recorder.run_id,),
+    ).fetchone()
+    assert failed_run["status"] == "CANCELLED"
+    failed_snapshot = json.loads(failed_run["config_snapshot_json"])
+    assert failed_snapshot["blueprint_retry_grant_id"] == ""
+    assert failed_snapshot["blueprint_retry_receipts_hash"] == ""
 
 
-def test_confirmed_unknown_retry_mints_one_new_grant_before_any_task_or_provider(
+@pytest.mark.asyncio
+async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_grant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.capabilities.bus import get_command_bus
+    from app.capabilities.schemas import CommandStatus
     from app.production.grant import issue_production_grant
 
     conn = db.get_conn()
@@ -1287,7 +1320,6 @@ def test_confirmed_unknown_retry_mints_one_new_grant_before_any_task_or_provider
     )
     conn.commit()
     projection = api._screenplay_blueprint_budget_projection("e1")
-    recorder = api._new_screenplay_recorder("e1")
     spawned = 0
 
     def accept_without_running(_kind, _key, coro, *, project_id=None):
@@ -1297,24 +1329,40 @@ def test_confirmed_unknown_retry_mints_one_new_grant_before_any_task_or_provider
         return object()
 
     monkeypatch.setattr(task_registry, "spawn", accept_without_running)
-    token = api._enter_screenplay_command_bus_retry_approval()
-    try:
-        api._spawn_screenplay_activation(
-            "e1", recorder, project_id="p1", status="queued",
-            message="queued", authorize_blueprint_retry=True,
-            expected_blueprint_unknown_receipts=projection["unknown_receipts"],
-        )
-    finally:
-        api._exit_screenplay_command_bus_retry_approval(token)
+    ensure_catalog_loaded()
+    bus = get_command_bus()
+    args = {
+        "episode_id": "e1",
+        "idempotency_key": "screenplay-retry-cross-namespace",
+    }
+    waiting = await bus.execute_async("screenplay.generate", args)
+    assert waiting.status == CommandStatus.WAITING_APPROVAL
+    outcome = await bus.execute_async(
+        "screenplay.generate",
+        {**args, "approval_token": waiting.data["approval_token"]},
+    )
 
     grants = conn.execute(
         "SELECT id,issued_by FROM production_grants WHERE episode_id='e1' "
         "ORDER BY issued_at"
     ).fetchall()
     assert spawned == 1
+    assert outcome.status == CommandStatus.SUCCEEDED
+    assert outcome.data["run_id"]
+    assert projection["requires_fresh_retry_grant"] is True
     assert len(grants) == 2
     assert grants[0]["id"] == old_grant.grant_id
     assert grants[1]["issued_by"] == "user_retry_approval"
+    run_snapshot = json.loads(conn.execute(
+        "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
+        (outcome.data["run_id"],),
+    ).fetchone()["config_snapshot_json"])
+    assert run_snapshot["blueprint_retry_grant_id"] == grants[1]["id"]
+    assert run_snapshot["blueprint_retry_receipts_hash"]
+    assert conn.execute(
+        "SELECT grant_id FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["grant_id"] == grants[1]["id"]
     replay_projection = api._screenplay_blueprint_budget_projection("e1")
     assert replay_projection["requires_fresh_retry_grant"] is False
     assert replay_projection["unknown_receipts"] == projection["unknown_receipts"]
