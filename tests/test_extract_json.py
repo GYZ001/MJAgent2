@@ -98,6 +98,16 @@ def test_extract_json_preserves_escapes_in_embedded_string_array() -> None:
     )
 
 
+def test_embedded_array_repair_does_not_hide_missing_outer_comma() -> None:
+    text = (
+        '{"required_resolution":"修正为["甲","乙"]并保持其余字段" '
+        '"next":"不得改写为合并字段"}'
+    )
+
+    with pytest.raises(ValueError, match="JSON 解析失败"):
+        extract_json(text, repair_unescaped_inner_quotes=True)
+
+
 def test_inner_quote_repair_does_not_hide_json_structure_errors() -> None:
     text = '{"episode_no": 1, "title": "第一集" "logline": "缺少逗号"}'
     with pytest.raises(ValueError, match="JSON 解析失败"):

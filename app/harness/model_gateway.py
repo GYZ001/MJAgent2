@@ -32,52 +32,130 @@ class StructuredProviderRejection(StructuredOutputError):
     """The provider returned an explicit error envelope instead of model output."""
 
 
-def _is_nested_json_candidate(text: str, start: int, _end: int) -> bool:
-    """Detect objects whose prefix proves they are container children."""
-    expected_closers: list[str] = []
-    in_string = False
-    escaped = False
-    for char in text[:start]:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            expected_closers.append("}")
-        elif char == "[":
-            expected_closers.append("]")
-        elif char in "}]" and expected_closers and expected_closers[-1] == char:
-            expected_closers.pop()
-
-    if in_string or not expected_closers:
-        return in_string
-    prefix = text[:start].rstrip()
-    previous_char = prefix[-1] if prefix else ""
-    if expected_closers[-1] == "]":
-        return previous_char in "[,"
-    if previous_char != ":":
-        return False
-
-    key_prefix = prefix[:-1].rstrip()
-    if not key_prefix.endswith('"'):
-        return False
+def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
+    """Track only the JSON prefix states needed to prove child provenance."""
     decoder = json.JSONDecoder()
-    for key_start, char in enumerate(key_prefix):
-        if char != '"':
+    containers: list[list[str]] = []
+    damaged_root = False
+    index = 0
+
+    def close_container(kind: str) -> None:
+        nonlocal damaged_root
+        if not containers or containers[-1][0] != kind:
+            damaged_root = True
+            return
+        containers.pop()
+        if containers:
+            containers[-1][1] = "comma"
+
+    while index < start:
+        char = text[index]
+        if char.isspace():
+            index += 1
             continue
-        try:
-            key, key_end = decoder.raw_decode(key_prefix[key_start:])
-        except json.JSONDecodeError:
+
+        token = char
+        token_end = index + 1
+        if char == '"':
+            try:
+                value, token_size = decoder.raw_decode(text[index:start])
+            except json.JSONDecodeError:
+                return bool(containers or damaged_root)
+            if not isinstance(value, str):
+                damaged_root = True
+            token = "string"
+            token_end = index + token_size
+        elif char in "-0123456789tfn":
+            try:
+                _, token_size = decoder.raw_decode(text[index:start])
+            except json.JSONDecodeError:
+                token = "syntax_error"
+            else:
+                token = "scalar"
+                token_end = index + token_size
+        elif char not in "{}[],:":
+            containers.clear()
+            damaged_root = False
+            index += 1
             continue
-        if isinstance(key, str) and key_start + key_end == len(key_prefix):
-            return True
-    return False
+
+        if not containers:
+            if token == "{":
+                containers.append(["object", "key"])
+                damaged_root = False
+            elif token == "[":
+                containers.append(["array", "value"])
+                damaged_root = False
+            index = token_end
+            continue
+
+        while True:
+            kind, state = containers[-1]
+            is_value = token in {"{", "[", "string", "scalar"}
+            if kind == "object":
+                if state == "key":
+                    if token == "}":
+                        close_container("object")
+                    elif token == "string":
+                        containers[-1][1] = "colon"
+                    else:
+                        damaged_root = True
+                    break
+                if state == "colon":
+                    if token == ":":
+                        containers[-1][1] = "value"
+                        break
+                    if is_value:
+                        containers[-1][1] = "value"
+                        continue
+                    damaged_root = True
+                    break
+                if state == "comma":
+                    if token == ",":
+                        containers[-1][1] = "key"
+                        break
+                    if token == "}":
+                        close_container("object")
+                        break
+                    if token == "string":
+                        containers[-1][1] = "key"
+                        continue
+                    damaged_root = True
+                    break
+            else:
+                if state == "comma":
+                    if token == ",":
+                        containers[-1][1] = "value"
+                        break
+                    if token == "]":
+                        close_container("array")
+                        break
+                    if is_value:
+                        containers[-1][1] = "value"
+                        continue
+                    damaged_root = True
+                    break
+                if token == "]":
+                    close_container("array")
+                    break
+
+            if not is_value:
+                damaged_root = True
+            elif token == "{":
+                containers.append(["object", "key"])
+            elif token == "[":
+                containers.append(["array", "value"])
+            else:
+                containers[-1][1] = "comma"
+            break
+        index = token_end
+
+    suffix = text[end:].lstrip()
+    return bool(
+        containers
+        or damaged_root
+        or (suffix and suffix[0] in "]}")
+    )
 
 
 def _json_candidates(value: str) -> list[dict[str, Any]]:

@@ -27,6 +27,74 @@ class _PermissiveReviewPayload(BaseModel):
 
 
 @pytest.mark.parametrize(
+    ("raw", "expected_values"),
+    (
+        ('{"value":1}', [1]),
+        ('{"value":1}\n{"value":2}', [2, 1]),
+        (
+            '草稿 {"value":\n明确说明：以下是修正版\n{"value":7}',
+            [7],
+        ),
+        ('{"parent":{"value":7},"unfinished":', []),
+        ('{"parent":[{"value":7}],"unfinished":', []),
+        ('{"parent":[1 {"value":7}]', []),
+        ('{"parent" {"value":7}}', []),
+        ('{"value":\nBROKEN\n{"value":7}', [7]),
+    ),
+    ids=(
+        "direct-root",
+        "multiple-complete-roots",
+        "trailing-root-after-explanation",
+        "nested-object",
+        "nested-array",
+        "nested-object-after-missing-comma",
+        "nested-object-after-missing-colon",
+        "trailing-root-after-non-json-token",
+    ),
+)
+def test_json_candidate_provenance_acceptance_matrix(
+    raw: str,
+    expected_values: list[int],
+) -> None:
+    candidates = model_gateway._json_candidates(raw)
+
+    assert [candidate["value"] for candidate in candidates] == expected_values
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        '{"parent":[1 {"issues":[]}]}',
+        '{"parent" {"issues":[]}}',
+    ),
+    ids=("missing-comma", "missing-colon"),
+)
+def test_structured_runner_rejects_nested_permissive_candidate(
+    monkeypatch,
+    raw: str,
+) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return raw
+
+    def unavailable_root_repair(*_args, **_kwargs):
+        raise ValueError("root remains malformed")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", unavailable_root_repair)
+
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "review"}],
+            model_type=_PermissiveReviewPayload,
+            validate=None,
+            operation_id="test.reject-malformed-parent-child:v1:abc",
+            max_tokens=128,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+
+
+@pytest.mark.parametrize(
     "raw",
     (
         '草稿 {"value":\n最终答案: {"value":7}',

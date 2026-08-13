@@ -2079,6 +2079,20 @@ def extract_json(
                         if isinstance(obj, dict):
                             return obj
                     candidate = repaired
+                    if candidate_error.pos >= len(candidate):
+                        repaired = _close_missing_root_object(candidate)
+                        if repaired != candidate:
+                            try:
+                                obj, _ = json.JSONDecoder().raw_decode(repaired)
+                            except json.JSONDecodeError:
+                                pass
+                            else:
+                                if isinstance(obj, dict):
+                                    return obj
+                    # A quote repair is semantic rewriting. If it is not
+                    # sufficient, do not stack delimiter or field guesses.
+                    first_error = candidate_error
+                    break
             repaired = _repair_structural_json_delimiters(candidate)
             if repaired != candidate:
                 try:
