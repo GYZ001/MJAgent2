@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import multiprocessing
 import sqlite3
