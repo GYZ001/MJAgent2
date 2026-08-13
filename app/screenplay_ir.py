@@ -848,6 +848,7 @@ class IRSceneUnit(BaseModel):
     # Compiler-owned state ownership.  ``environment_only`` is an explicit
     # typed assertion, never the fallback for missing character attribution.
     state_subject_key: str = ""
+    state_subject_keys: list[str] = Field(default_factory=list)
     environment_only: bool = False
     function: str = "statement"
     source_text: str = ""
@@ -883,7 +884,8 @@ class IRSceneUnit(BaseModel):
 
     @field_validator(
         "source_segment_ids", "actor_keys", "target_keys",
-        "onscreen_entity_keys", "participant_deliveries", mode="before",
+        "onscreen_entity_keys", "participant_deliveries",
+        "state_subject_keys", mode="before",
     )
     @classmethod
     def _normalize_source_ids(cls, value: Any) -> list[Any]:
@@ -891,6 +893,8 @@ class IRSceneUnit(BaseModel):
 
     @model_validator(mode="after")
     def _validate_action_agency(self) -> "IRSceneUnit":
+        if self.state_subject_key and not self.state_subject_keys:
+            self.state_subject_keys = [self.state_subject_key]
         identity_bearing = bool(
             self.actor_keys or self.target_keys or self.speaker_key
         )
@@ -908,9 +912,15 @@ class IRSceneUnit(BaseModel):
             raise ValueError(
                 "action_agency.source_segment_ids 必须与 unit 来源等价"
             )
-        if self.environment_only and self.state_subject_key:
+        if self.state_subject_key and self.state_subject_keys != [
+            self.state_subject_key
+        ]:
             raise ValueError(
-                "unit 不得同时声明 state_subject_key 与 environment_only"
+                "unit state_subject_key 必须等于唯一 state_subject_keys 成员"
+            )
+        if self.environment_only and self.state_subject_keys:
+            raise ValueError(
+                "unit 不得同时声明 state_subject_keys 与 environment_only"
             )
         _validate_text_provenance(
             provenance=self.text_provenance,
@@ -994,6 +1004,7 @@ class IREvent(BaseModel):
         default_factory=list
     )
     state_subject_key: str = ""
+    state_subject_keys: list[str] = Field(default_factory=list)
     environment_only: bool = False
     action_agency: ActionAgency
     text_provenance: TextProvenance
@@ -1024,7 +1035,7 @@ class IREvent(BaseModel):
     @field_validator(
         "source_segment_ids", "actor_keys", "target_keys", "onscreen_entity_keys",
         "participant_deliveries", "causal_parent_keys", "action_phases", "perceivable_by",
-        "information", mode="before",
+        "information", "state_subject_keys", mode="before",
     )
     @classmethod
     def _normalize_lists(cls, value: Any) -> list[Any]:
@@ -1067,6 +1078,8 @@ class IREvent(BaseModel):
 
     @model_validator(mode="after")
     def _validate_action_agency(self) -> "IREvent":
+        if self.state_subject_key and not self.state_subject_keys:
+            self.state_subject_keys = [self.state_subject_key]
         identity_bearing = bool(self.actor_keys or self.target_keys)
         if self.action_agency.identity_bearing != identity_bearing:
             raise ValueError(
@@ -1082,9 +1095,15 @@ class IREvent(BaseModel):
             raise ValueError(
                 "event.action_agency.source_segment_ids 必须与事件来源等价"
             )
-        if self.environment_only and self.state_subject_key:
+        if self.state_subject_key and self.state_subject_keys != [
+            self.state_subject_key
+        ]:
             raise ValueError(
-                "event 不得同时声明 state_subject_key 与 environment_only"
+                "event state_subject_key 必须等于唯一 state_subject_keys 成员"
+            )
+        if self.environment_only and self.state_subject_keys:
+            raise ValueError(
+                "event 不得同时声明 state_subject_keys 与 environment_only"
             )
         _validate_text_provenance(
             provenance=self.text_provenance,
@@ -3250,37 +3269,52 @@ def compile_screenplay_ir(
                 )
             if typed_visual_unit_contract and (
                 "state_subject_key" not in unit.model_fields_set
+                or "state_subject_keys" not in unit.model_fields_set
                 or "environment_only" not in unit.model_fields_set
             ):
                 raise ScreenplayIRFidelityError(
                     f"IR {format_version} {scene.key}.{event_key} 缺少显式 "
-                    "state_subject_key/environment_only 状态归属合同，"
+                    "state_subject_key/state_subject_keys/environment_only "
+                    "状态归属合同，"
                     "旧 IR 必须重建"
                 )
             if typed_visual_unit_contract:
                 subject_key = unit.state_subject_key.strip()
+                subject_keys = list(dict.fromkeys(unit.state_subject_keys))
                 if unit.kind == "dialogue":
                     if unit.environment_only:
                         raise ScreenplayIRFidelityError(
                             f"IR {format_version} {scene.key}.{event_key} 对白单元"
                             "不得声明 environment_only"
                         )
-                    if not unit.speaker_key or subject_key != unit.speaker_key:
+                    if (
+                        not unit.speaker_key
+                        or subject_keys != [unit.speaker_key]
+                        or subject_key != unit.speaker_key
+                    ):
                         raise ScreenplayIRFidelityError(
                             f"IR {format_version} {scene.key}.{event_key} 对白单元"
                             "state_subject_key 必须等于唯一 speaker_key"
                         )
                 elif unit.environment_only:
-                    if subject_key or unit.actor_keys:
+                    if subject_keys or unit.actor_keys:
                         raise ScreenplayIRFidelityError(
                             f"IR {format_version} {scene.key}.{event_key} 纯环境单元"
                             "不得同时声明人物 state subject/actor"
                         )
-                elif not subject_key or subject_key not in unit.actor_keys:
+                elif (
+                    not subject_keys
+                    or any(key not in unit.actor_keys for key in subject_keys)
+                    or (
+                        len(subject_keys) == 1
+                        and subject_key != subject_keys[0]
+                    )
+                    or (len(subject_keys) > 1 and subject_key)
+                ):
                     raise ScreenplayIRFidelityError(
                         f"IR {format_version} {scene.key}.{event_key} 动作单元"
-                        "必须由唯一 exact-unit typed actor 承载 "
-                        "state_subject_key，不得从 visible/roster 猜测"
+                        "必须由 exact-unit typed actor 承载 single/joint "
+                        "state_subject_keys，不得从 visible/roster 猜测"
                     )
             # Name occurrences remain a compatibility fallback for untyped IR.
             # Current contracts carry actor/target/on-screen relations as
@@ -3492,6 +3526,7 @@ def compile_screenplay_ir(
                     )
                 if (
                     existing.state_subject_key != unit.state_subject_key
+                    or existing.state_subject_keys != unit.state_subject_keys
                     or existing.environment_only != unit.environment_only
                 ):
                     raise ScreenplayIRFidelityError(
@@ -3580,6 +3615,7 @@ def compile_screenplay_ir(
                     for delivery in unit.participant_deliveries
                 ],
                 state_subject_key=unit.state_subject_key,
+                state_subject_keys=list(unit.state_subject_keys),
                 environment_only=unit.environment_only,
                 action_agency=ActionAgency(
                     kind=unit.action_agency.kind,
@@ -4552,7 +4588,7 @@ def compile_screenplay_ir(
         episode.get("id") or f"episode-{episode_no}"
     )
     event_participant_ids: dict[str, list[str]] = {}
-    event_state_subject_ids: dict[str, str] = {}
+    event_state_subject_ids: dict[str, list[str]] = {}
 
     for position, event in enumerate(value.events, start=1):
         chapter_id, start, end, exact_excerpt = _source_location(
@@ -4593,26 +4629,31 @@ def compile_screenplay_ir(
         ]))
         if typed_visual_unit_contract:
             if event.environment_only:
-                if event.state_subject_key:
+                if event.state_subject_keys:
                     raise ScreenplayIRFidelityError(
                         f"IR {format_version} event {event.key} 同时声明"
-                        "state_subject_key 与 environment_only"
+                        "state_subject_keys 与 environment_only"
                     )
-                state_subject_id = environment_subject_id
+                state_subject_ids = [environment_subject_id]
             else:
-                subject_key = event.state_subject_key.strip()
-                if not subject_key or subject_key not in event.actor_keys:
+                subject_keys = list(dict.fromkeys(event.state_subject_keys))
+                if (
+                    not subject_keys
+                    or any(key not in event.actor_keys for key in subject_keys)
+                ):
                     raise ScreenplayIRFidelityError(
-                        f"IR {format_version} event {event.key} 缺少唯一"
-                        " exact-unit typed actor state_subject_key"
+                        f"IR {format_version} event {event.key} 缺少"
+                        " exact-unit typed actor state_subject_keys"
                     )
-                state_subject_id = identity_id(subject_key)
+                state_subject_ids = [
+                    identity_id(subject_key) for subject_key in subject_keys
+                ]
         else:
             non_actor_subject_ids = list(dict.fromkeys([
                 *speaker_ids,
                 *content_owner_ids,
             ]))
-            state_subject_id = (
+            state_subject_ids = [(
                 actor_ids
                 or target_ids
                 or (
@@ -4621,8 +4662,8 @@ def compile_screenplay_ir(
                     else []
                 )
                 or [environment_subject_id]
-            )[0]
-        event_state_subject_ids[event.key] = state_subject_id
+            )[0]]
+        event_state_subject_ids[event.key] = state_subject_ids
         participants = list(dict.fromkeys([
             *actor_ids,
             *target_ids,
@@ -4645,7 +4686,7 @@ def compile_screenplay_ir(
                 identity_id(token)
                 for token in scene_by_key[event.scene_key].character_keys
             ],
-            state_subject_id,
+            *state_subject_ids,
         ]))
         if not participants and not typed_visual_unit_contract:
             participants = [final_identity_ids[ordered_used_keys[0]]]
@@ -4754,25 +4795,32 @@ def compile_screenplay_ir(
     event_action_ids: dict[str, str] = {}
     event_character_state_ids: defaultdict[str, list[str]] = defaultdict(list)
 
-    initial_subject = event_state_subject_ids[value.events[0].key]
-    state_facts.append({
-        "fact_id": "F-0",
+    def state_fact_ids(position: int, count: int) -> list[str]:
+        base = f"F-{position}"
+        if count == 1:
+            return [base]
+        return [f"{base}-{index}" for index in range(1, count + 1)]
+
+    initial_subjects = event_state_subject_ids[value.events[0].key]
+    previous_fact_ids = state_fact_ids(0, len(initial_subjects))
+    state_facts.extend({
+        "fact_id": fact_id,
         "proposition_id": first_adapted_prop_id,
-        "subject_id": initial_subject,
+        "subject_id": subject_id,
         "predicate_id": "episode_state",
         "value": {"kind": "text", "data": value.events[0].precondition_state},
         "time_scope": "main@0",
         "visibility": "visible",
         "provenance": "screenplay",
         "confidence": 1.0,
-    })
+    } for fact_id, subject_id in zip(previous_fact_ids, initial_subjects))
 
     for position, event in enumerate(value.events, start=1):
         event_id = event_ids[event.key]
         action_id = f"A-{position}"
         evidence_id = f"EV-{position}"
-        fact_in_id = "F-0" if position == 1 else f"F-{position - 1}"
-        fact_out_id = f"F-{position}"
+        subject_ids = event_state_subject_ids[event.key]
+        current_fact_ids = state_fact_ids(position, len(subject_ids))
         pre_prop_id = (
             first_adapted_prop_id
             if position == 1
@@ -4823,9 +4871,8 @@ def compile_screenplay_ir(
         # the event's propositions. Falling back only to the first actor (or
         # the episode's initial subject) made target/observer/speaker/scene
         # participants disappear and produced undeclared pseudo identities.
-        subject_id = event_state_subject_ids[event.key]
-        state_facts.append({
-            "fact_id": fact_out_id,
+        state_facts.extend({
+            "fact_id": fact_id,
             "proposition_id": adapted_prop_id,
             "subject_id": subject_id,
             "predicate_id": "episode_state",
@@ -4834,7 +4881,7 @@ def compile_screenplay_ir(
             "visibility": "visible",
             "provenance": "screenplay",
             "confidence": 1.0,
-        })
+        } for fact_id, subject_id in zip(current_fact_ids, subject_ids))
 
         phases = list(event.action_phases) or [
             IRActionPhase(
@@ -4881,9 +4928,9 @@ def compile_screenplay_ir(
             "on_screen_text": event.on_screen_text,
             "participant_deliveries": participant_delivery_rows,
             "semantic_intent": event.action_intent,
-            "precondition_fact_ids": [fact_in_id],
-            "effects_add": [fact_out_id],
-            "effects_remove": [fact_in_id],
+            "precondition_fact_ids": list(previous_fact_ids),
+            "effects_add": list(current_fact_ids),
+            "effects_remove": list(previous_fact_ids),
             "completion_condition": event.completion_condition,
             "decision_requirement": (
                 "applies" if event.decision_required and actor_ids
@@ -4947,11 +4994,11 @@ def compile_screenplay_ir(
                 pre_prop_id, adapted_prop_id,
             ])),
             "causal_parent_ids": parents,
-            "precondition_fact_ids": [fact_in_id],
+            "precondition_fact_ids": list(previous_fact_ids),
             "action_ids": [action_id],
             "onscreen_entity_ids": onscreen_entity_ids,
-            "effects_add": [fact_out_id],
-            "effects_remove": [fact_in_id],
+            "effects_add": list(current_fact_ids),
+            "effects_remove": list(previous_fact_ids),
             "character_goal_effects": [],
             "downstream_dependency_event_ids": downstream,
             "salience": event.salience,
@@ -4964,6 +5011,7 @@ def compile_screenplay_ir(
             "delivery_policy": "deliver",
             "primary_delivery_window_id": f"RW-{position}",
         })
+        previous_fact_ids = current_fact_ids
         legacy_events.append(StoryEvent(
             event_id=event_id,
             source_span=",".join(event.source_segment_ids),
@@ -5602,8 +5650,9 @@ def compile_screenplay_ir(
             identity_id(key) for key in scene.character_keys
         ]
         scene_state_subject_ids = [
-            event_state_subject_ids[event_key]
+            subject_id
             for event_key in scene_event_keys
+            for subject_id in event_state_subject_ids[event_key]
         ]
         pov_id = (
             scene_character_ids

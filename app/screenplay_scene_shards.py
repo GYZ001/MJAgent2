@@ -177,6 +177,7 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
         default_factory=list,
     )
     speaker_key: str | None = None
+    state_subject_keys: list[str] = Field(default_factory=list)
     action_agency: ActionAgency | None = None
 
     @model_validator(mode="after")
@@ -208,9 +209,16 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
             raise ValueError(
                 "compiled slot action_agency.source_segment_ids 必须与来源等价"
             )
-        if self.environment_only and self.state_subject_key:
+        if self.state_subject_key and self.state_subject_keys != [
+            self.state_subject_key
+        ]:
             raise ValueError(
-                "compiled slot 不得同时声明 state_subject_key "
+                "compiled slot state_subject_key 必须等于唯一 "
+                "state_subject_keys 成员"
+            )
+        if self.environment_only and self.state_subject_keys:
+            raise ValueError(
+                "compiled slot 不得同时声明 state_subject_keys "
                 "与 environment_only"
             )
         return self
@@ -261,6 +269,14 @@ class ScreenplaySceneActionParticipantEvidence(BaseModel):
     ] = Field(default_factory=list)
 
 
+class ScreenplaySceneStateSubjectAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_unit_key: str
+    mode: Literal["joint"]
+    identity_keys: list[str] = Field(min_length=2)
+
+
 class ScreenplaySceneActionEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -269,6 +285,9 @@ class ScreenplaySceneActionEvidence(BaseModel):
     participants: list[ScreenplaySceneActionParticipantEvidence] = Field(
         default_factory=list,
     )
+    state_subject_assignments: list[
+        ScreenplaySceneStateSubjectAssignment
+    ] = Field(default_factory=list)
     decision_actor_key: str | None = None
     environment_source_unit_keys: list[str] = Field(default_factory=list)
 
@@ -787,6 +806,7 @@ def _compile_unit_identity_scaffold(
     voice_claims: list[str] = []
     decision_actor_keys: list[str] = []
     state_subject_claims: list[str] = []
+    joint_state_subject_claims: list[list[str]] = []
     exact_decision_actor_keys: list[str] = []
     environment_only = False
     source_text_by_id = {
@@ -799,6 +819,11 @@ def _compile_unit_identity_scaffold(
             continue
         if slot.source_unit_key in action.environment_source_unit_keys:
             environment_only = True
+        for assignment in action.state_subject_assignments:
+            if assignment.source_unit_key == slot.source_unit_key:
+                joint_state_subject_claims.append(
+                    _ordered_unique(assignment.identity_keys)
+                )
         for participant in action.participants:
             if not source_set.intersection(
                 participant.source_segment_ids
@@ -916,42 +941,55 @@ def _compile_unit_identity_scaffold(
                 )
 
     typed_actor_claims = _ordered_unique(exact_decision_actor_keys)
+    state_subject_keys: list[str] = []
     state_subject_key = ""
-    if len(state_subject_claims) > 1:
+    if len(joint_state_subject_claims) > 1:
+        errors.append(
+            f"{slot.unit_key} 存在多个 joint state_subject assignment"
+        )
+    elif joint_state_subject_claims and state_subject_claims:
+        errors.append(
+            f"{slot.unit_key} 同时声明 single 与 joint state_subject"
+        )
+    elif joint_state_subject_claims:
+        state_subject_keys = joint_state_subject_claims[0]
+    elif len(state_subject_claims) > 1:
         errors.append(
             f"{slot.unit_key} 存在多个 state_subject identity evidence："
             f"{state_subject_claims}"
         )
     elif state_subject_claims:
-        state_subject_key = state_subject_claims[0]
+        state_subject_keys = [state_subject_claims[0]]
     elif slot.kind == "dialogue" and speaker_key:
-        state_subject_key = speaker_key
+        state_subject_keys = [speaker_key]
     elif len(typed_actor_claims) == 1:
-        state_subject_key = typed_actor_claims[0]
+        state_subject_keys = [typed_actor_claims[0]]
     elif len(typed_actor_claims) > 1:
         errors.append(
             f"{slot.unit_key} 存在多个 exact-unit typed actor "
             f"{typed_actor_claims}，必须由 Blueprint "
             "usage=state_subject 唯一冻结"
         )
+    if len(state_subject_keys) == 1:
+        state_subject_key = state_subject_keys[0]
     if (
         slot.kind == "action"
-        and state_subject_key
-        and state_subject_key not in actor_keys
+        and state_subject_keys
     ):
-        actor_keys.append(state_subject_key)
+        actor_keys = _ordered_unique([*actor_keys, *state_subject_keys])
     if environment_only and (
-        state_subject_key
+        state_subject_keys
         or state_subject_claims
+        or joint_state_subject_claims
         or typed_actor_claims
         or (slot.kind == "dialogue" and speaker_key)
     ):
         errors.append(
             f"{slot.unit_key} 同时声明人物主体与 environment_only"
         )
-    elif not environment_only and not state_subject_key:
+    elif not environment_only and not state_subject_keys:
         errors.append(
-            f"{slot.unit_key} 缺少唯一 state_subject 结构证据，"
+            f"{slot.unit_key} 缺少 single/joint state_subject 结构证据，"
             "且未显式声明 environment_only"
         )
     relation_keys = _ordered_unique([
@@ -988,7 +1026,11 @@ def _compile_unit_identity_scaffold(
     return ScreenplaySceneCompiledUnitSlot(
         **slot.model_dump(
             mode="python",
-            exclude={"state_subject_key", "environment_only"},
+            exclude={
+                "state_subject_key",
+                "state_subject_keys",
+                "environment_only",
+            },
         ),
         actor_keys=actor_keys,
         target_keys=target_keys,
@@ -996,6 +1038,7 @@ def _compile_unit_identity_scaffold(
         participant_deliveries=participant_deliveries,
         speaker_key=speaker_key,
         state_subject_key=state_subject_key,
+        state_subject_keys=state_subject_keys,
         environment_only=environment_only,
         action_agency=ActionAgency(
             kind="character" if relation_keys else "unattributed",
@@ -1008,7 +1051,11 @@ def _compile_unit_identity_scaffold(
 def _structural_slot(
     slot: ScreenplaySceneCompiledUnitSlot,
 ) -> ScreenplaySceneUnitSlotPlan:
-    compiler_owned = {"state_subject_key", "environment_only"}
+    compiler_owned = {
+        "state_subject_key",
+        "state_subject_keys",
+        "environment_only",
+    }
     return ScreenplaySceneUnitSlotPlan.model_validate(
         slot.model_dump(
             mode="python",
@@ -1223,6 +1270,7 @@ def compile_screenplay_scene_shard_draft(
                 resulting_state=creative_unit.resulting_state,
                 speaker_key=compiled_slot.speaker_key,
                 state_subject_key=compiled_slot.state_subject_key,
+                state_subject_keys=list(compiled_slot.state_subject_keys),
                 environment_only=compiled_slot.environment_only,
                 function=creative_unit.function,
                 source_text=planned_slot.source_text,
@@ -1953,6 +2001,18 @@ def build_screenplay_scene_input_contracts(
                 node_key=node.key,
                 source_segment_ids=list(node.source_segment_ids),
                 participants=participants,
+                state_subject_assignments=[
+                    ScreenplaySceneStateSubjectAssignment(
+                        source_unit_key=assignment.source_unit_key,
+                        mode=assignment.mode,
+                        identity_keys=[
+                            aliases[identity_key]
+                            for identity_key in assignment.identity_keys
+                            if identity_key in aliases
+                        ],
+                    )
+                    for assignment in node.state_subject_assignments
+                ],
                 decision_actor_key=decision_actor_key or None,
                 environment_source_unit_keys=list(
                     node.environment_source_unit_keys

@@ -25,7 +25,7 @@ from app.source_excerpt import (
     index_source_segments,
     structural_front_matter_ids,
 )
-from app.source_facts import SourceFact, source_facts
+from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v7"
@@ -49,6 +49,7 @@ def blueprint_authority_validator_fingerprint() -> str:
     material = {
         "contract_version": BLUEPRINT_VERSION,
         "prompt_version": BLUEPRINT_PROMPT_VERSION,
+        "source_fact_version": SOURCE_FACT_VERSION,
         "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
         "local_authority_validator_version": (
             BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
@@ -89,6 +90,7 @@ def normalize_blueprint_raw_json(raw: str) -> str:
 _PARATEXT_EMPTY_LIST_FIELDS = (
     "participants",
     "participant_evidence",
+    "state_subject_assignments",
     "environment_source_unit_keys",
     "source_unit_deliveries",
     "state_requirements",
@@ -247,6 +249,7 @@ def blueprint_shard_provider_schema(
     for field_name in (
         "participants",
         "participant_evidence",
+        "state_subject_assignments",
         "environment_source_unit_keys",
         "source_unit_deliveries",
     ):
@@ -373,6 +376,21 @@ def blueprint_shard_provider_schema(
                     "usage",
                 ],
             }
+            joint_subject_match = {
+                "properties": {
+                    "source_unit_key": {"const": source_unit_key},
+                    "mode": {"const": "joint"},
+                    "identity_keys": {
+                        "minItems": 2,
+                        "uniqueItems": True,
+                    },
+                },
+                "required": [
+                    "source_unit_key",
+                    "mode",
+                    "identity_keys",
+                ],
+            }
             node_schema.setdefault("allOf", []).append({
                 "if": {
                     "properties": {
@@ -401,9 +419,13 @@ def blueprint_shard_provider_schema(
                                     },
                                 },
                             },
+                            "state_subject_assignments": {
+                                "not": {"contains": joint_subject_match},
+                            },
                         },
                         "required": [
                             "participant_evidence",
+                            "state_subject_assignments",
                             "environment_source_unit_keys",
                         ],
                     }, {
@@ -418,9 +440,38 @@ def blueprint_shard_provider_schema(
                                     "const": source_unit_key,
                                 },
                             },
+                            "state_subject_assignments": {
+                                "not": {"contains": joint_subject_match},
+                            },
                         },
                         "required": [
                             "participant_evidence",
+                            "state_subject_assignments",
+                            "environment_source_unit_keys",
+                        ],
+                    }, {
+                        "properties": {
+                            "participant_evidence": {
+                                "not": {
+                                    "contains": state_subject_match,
+                                },
+                            },
+                            "state_subject_assignments": {
+                                "contains": joint_subject_match,
+                                "minContains": 1,
+                                "maxContains": 1,
+                            },
+                            "environment_source_unit_keys": {
+                                "not": {
+                                    "contains": {
+                                        "const": source_unit_key,
+                                    },
+                                },
+                            },
+                        },
+                        "required": [
+                            "participant_evidence",
+                            "state_subject_assignments",
                             "environment_source_unit_keys",
                         ],
                     }],
@@ -578,6 +629,29 @@ class NarrativeParticipantEvidence(BaseModel):
         return [_normalize_source_segment_id(item) for item in values]
 
 
+class NarrativeStateSubjectAssignment(BaseModel):
+    """Typed ownership for one structurally indivisible joint action."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_unit_key: str
+    mode: Literal["joint"]
+    identity_keys: list[str] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _validate_joint_identities(self) -> NarrativeStateSubjectAssignment:
+        normalized = [
+            str(identity_key or "").strip()
+            for identity_key in self.identity_keys
+        ]
+        if any(not identity_key for identity_key in normalized):
+            raise ValueError("joint state subject identity_keys 不得为空")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("joint state subject identity_keys 不得重复")
+        self.identity_keys = normalized
+        return self
+
+
 class NarrativeSourceUnitDelivery(BaseModel):
     """Semantic delivery decision for one structurally quoted source unit."""
 
@@ -670,6 +744,9 @@ class NarrativeNode(BaseModel):
     participant_evidence: list[NarrativeParticipantEvidence] = Field(
         default_factory=list,
     )
+    state_subject_assignments: list[
+        NarrativeStateSubjectAssignment
+    ] = Field(default_factory=list)
     # Every prose/action source unit must either have one identity-bearing
     # state_subject evidence row or be explicitly classified as environment.
     # Absence is never interpreted as environment: that used to turn missing
@@ -731,6 +808,7 @@ class NarrativeNode(BaseModel):
         if self.narrative_layer == "paratext" and any((
             self.participants,
             self.participant_evidence,
+            self.state_subject_assignments,
             self.environment_source_unit_keys,
             self.source_unit_deliveries,
             self.exit_state.strip(),
@@ -2108,15 +2186,57 @@ def blueprint_state_subject_issues(
                     continue
                 claims_by_unit[key].append(evidence)
 
+        assignments_by_unit: defaultdict[
+            str, list[NarrativeStateSubjectAssignment]
+        ] = defaultdict(list)
+        for assignment in node.state_subject_assignments:
+            fact = facts_by_key.get(assignment.source_unit_key)
+            invalid_identities = (
+                set(assignment.identity_keys) - set(node.participants)
+            )
+            if (
+                fact is None
+                or fact.projection != "action"
+                or fact.source_segment_id not in owned_sources
+                or invalid_identities
+            ):
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_assignment_invalid",
+                    node_keys=[node.key],
+                    source_segment_ids=list(node.source_segment_ids),
+                    message=(
+                        f"{assignment.source_unit_key} 的 joint state subject "
+                        "引用非本节点 action unit 或非 participants identity"
+                    ),
+                    required_resolution=(
+                        "joint assignment 只绑定本节点 action unit，"
+                        "identity_keys 必须是有来源证据的 participants"
+                    ),
+                ))
+                continue
+            assignments_by_unit[assignment.source_unit_key].append(assignment)
+
         for fact in action_facts:
             claims = claims_by_unit.get(fact.source_unit_key, [])
+            assignments = assignments_by_unit.get(fact.source_unit_key, [])
             explicit = list(dict.fromkeys(
                 evidence.identity_key
                 for evidence in claims
                 if evidence.usage == "state_subject"
             ))
             environment = fact.source_unit_key in environment_keys
-            if environment and explicit:
+            if len(assignments) > 1:
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_assignment_ambiguous",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=(
+                        f"{fact.source_unit_key} 存在多个 joint state subject "
+                        "assignment"
+                    ),
+                    required_resolution="每个共同动作 unit 只能有一条 joint assignment",
+                ))
+            elif environment and (explicit or assignments):
                 issues.append(BlueprintSemanticIssue(
                     code="state_subject_environment_conflict",
                     node_keys=[node.key],
@@ -2125,6 +2245,20 @@ def blueprint_state_subject_issues(
                         f"{fact.source_unit_key} 同时声明人物主体与 environment"
                     ),
                     required_resolution="人物主体和纯环境标记必须二选一",
+                ))
+            elif assignments and claims:
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_assignment_conflict",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    message=(
+                        f"{fact.source_unit_key} 同时声明 single 与 joint "
+                        "state subject"
+                    ),
+                    required_resolution=(
+                        "可拆单主体动作使用唯一 state_subject；"
+                        "结构上不可拆的共同动作仅使用 joint assignment"
+                    ),
                 ))
             elif len(claims) > 1:
                 issues.append(BlueprintSemanticIssue(
@@ -2141,7 +2275,7 @@ def blueprint_state_subject_issues(
                         "用唯一 usage=state_subject evidence 明确主体"
                     ),
                 ))
-            elif not explicit and not environment:
+            elif not explicit and not assignments and not environment:
                 issues.append(BlueprintSemanticIssue(
                     code="state_subject_missing",
                     node_keys=[node.key],
@@ -2149,6 +2283,7 @@ def blueprint_state_subject_issues(
                     message=f"{fact.source_unit_key} 缺少结构化状态主体",
                     required_resolution=(
                         "人物思考/动作/反应填唯一 state_subject evidence；"
+                        "结构上不可拆的共同动作填唯一 joint assignment；"
                         "真正无人物的环境单元填 "
                         "environment_source_unit_keys"
                     ),

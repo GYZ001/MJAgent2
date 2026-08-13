@@ -118,7 +118,11 @@ from app.source_excerpt import (
     render_indexed_source,
     structural_front_matter_ids,
 )
-from app.source_facts import source_facts, source_segment_facts
+from app.source_facts import (
+    SOURCE_FACT_VERSION,
+    source_facts,
+    source_segment_facts,
+)
 from app.spoken_contract import onscreen_text_for_capacity
 from app.screenplay_ir import (
     IR_COMPILER_VERSION,
@@ -153,7 +157,7 @@ SYSTEM_PREFIX = (
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
 SCREENPLAY_BLUEPRINT_PROMPT_VERSION = BLUEPRINT_PROMPT_VERSION
-BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION = "blueprint-semantic-review.v2"
+BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION = "blueprint-semantic-review.v3"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
@@ -242,6 +246,7 @@ def _current_blueprint_authority_snapshot(
     validator_material = {
         "contract_version": BLUEPRINT_VERSION,
         "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        "source_fact_version": SOURCE_FACT_VERSION,
         "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
         "local_authority_validator_version": (
             BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
@@ -289,6 +294,7 @@ def _blueprint_authority_snapshot_is_current(
         for key in (
             "contract_version",
             "prompt_version",
+            "source_fact_version",
             "shard_policy_version",
             "local_authority_validator_version",
             "split_manifest_version",
@@ -5314,7 +5320,8 @@ def _blueprint_leaf_plan_from_cache(
         try:
             snapshot = json.loads(row["model_snapshot_json"] or "{}")
             if (
-                snapshot.get("shard_policy_version")
+                snapshot.get("source_fact_version") != SOURCE_FACT_VERSION
+                or snapshot.get("shard_policy_version")
                 != BLUEPRINT_SHARD_POLICY_VERSION
                 or snapshot.get("local_authority_validator_version")
                 != BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
@@ -6247,7 +6254,9 @@ async def _generate_sharded_narrative_blueprint(
                 source_text=source_text,
             )
             if not (
-                cached_snapshot.get("shard_policy_version")
+                cached_snapshot.get("source_fact_version")
+                == SOURCE_FACT_VERSION
+                and cached_snapshot.get("shard_policy_version")
                 == BLUEPRINT_SHARD_POLICY_VERSION
                 and cached_snapshot.get("local_authority_validator_version")
                 == BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
@@ -6419,6 +6428,7 @@ async def _generate_sharded_narrative_blueprint(
                             "attempt": attempt,
                             "source_hash": source_hash,
                             "boundary_hash": boundary_hash,
+                            "source_fact_version": SOURCE_FACT_VERSION,
                             "shard_policy_version": (
                                 BLUEPRINT_SHARD_POLICY_VERSION
                             ),
@@ -6478,6 +6488,7 @@ async def _generate_sharded_narrative_blueprint(
                             prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                             model_snapshot={
                                 "shard_index": shard_index,
+                                "source_fact_version": SOURCE_FACT_VERSION,
                                 "source_count": len(source_ids),
                                 "source_fact_count": sum(
                                     len(item["source_facts"])

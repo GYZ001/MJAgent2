@@ -46,7 +46,11 @@ class SourceFactQuotationError(ValueError):
 class SourceFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_version: Literal["source-fact.v3"] = SOURCE_FACT_VERSION
+    # v2 remains readable for historical failure audits. All newly derived
+    # facts use v3, and cache authority fingerprints require the current value.
+    contract_version: Literal["source-fact.v2", "source-fact.v3"] = (
+        SOURCE_FACT_VERSION
+    )
     source_unit_key: str
     source_segment_id: str
     unit_order: int

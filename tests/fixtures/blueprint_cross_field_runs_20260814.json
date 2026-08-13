@@ -1,0 +1,148 @@
+{
+  "cases": [
+    {
+      "run_id": "run_50d38e0fabb1",
+      "episode_no": 1,
+      "provider_call_id": 29693,
+      "raw_artifact_id": "art_4c807678d16a",
+      "attempt": 2,
+      "retry_input_errors": [
+        "[BLUEPRINT_SHARD_JSON] JSON 解析失败"
+      ],
+      "expected_error_code": "BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_MISSING",
+      "expected_identity": "CHAR_UNKNOWN_BOY_FAT",
+      "payload": {
+        "format_version": "screenplay-narrative-blueprint.v7",
+        "episode_no": 1,
+        "shard_index": 3,
+        "source_segment_ids": ["SRC0004"],
+        "nodes": [
+          {
+            "key": "S003-S001-NODE0004",
+            "source_segment_ids": ["SRC0004"],
+            "summary": "孟浩被许清掳入裂缝并见到被困少年",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "TD_STORY_001",
+            "time_label": "四月黄昏",
+            "time_relation": "continuous",
+            "location_key": "LOC_DAQINGSHAN_CLIFF_CRACK",
+            "location_label": "大青山山崖裂缝内",
+            "participants": [
+              "CHAR_MENGHAO",
+              "CHAR_WANGYOUCAI",
+              "CHAR_XUQING",
+              "CHAR_UNKNOWN_BOY_TIGER",
+              "CHAR_UNKNOWN_BOY_FAT"
+            ],
+            "participant_evidence": [
+              {
+                "identity_key": "CHAR_MENGHAO",
+                "source_segment_ids": ["SRC0004"],
+                "source_unit_keys": ["SRC0004:unit:001"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "CHAR_WANGYOUCAI",
+                "source_segment_ids": ["SRC0004"],
+                "source_unit_keys": ["SRC0004:unit:007"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "CHAR_XUQING",
+                "source_segment_ids": ["SRC0004"],
+                "source_unit_keys": ["SRC0004:unit:011"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "CHAR_UNKNOWN_BOY_TIGER",
+                "source_segment_ids": ["SRC0004"],
+                "source_unit_keys": ["SRC0004:unit:003"],
+                "usage": "state_subject"
+              }
+            ],
+            "environment_source_unit_keys": [],
+            "source_unit_deliveries": [],
+            "action_logic": "许清将孟浩带入裂缝"
+          }
+        ]
+      }
+    },
+    {
+      "run_id": "run_f7db5b0041b1",
+      "episode_no": 2,
+      "provider_call_id": 29703,
+      "raw_artifact_id": "art_cfa320a77ed4",
+      "attempt": 2,
+      "retry_input_errors": [
+        "[BLUEPRINT_SHARD_SOURCE_DELIVERY_IDENTITY_CONFLICT] SRC0003:unit:006 content_owner 杂役木牌未列入 participants",
+        "[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_ORPHAN] 孟浩、李富贵 未列入 participants"
+      ],
+      "normalized_voice_unit": "SRC0003:unit:006",
+      "payload": {
+        "format_version": "screenplay-narrative-blueprint.v7",
+        "episode_no": 2,
+        "shard_index": 3,
+        "source_segment_ids": ["SRC0003"],
+        "nodes": [
+          {
+            "key": "S003-S002-N001",
+            "source_segment_ids": ["SRC0003"],
+            "summary": "马脸青年发放杂役用品",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "TD001",
+            "time_label": "白日",
+            "time_relation": "continuous",
+            "location_key": "LOC001",
+            "location_label": "靠山宗北区杂役处",
+            "participants": ["孟浩", "李富贵", "绿袍男子", "马脸青年"],
+            "participant_evidence": [
+              {
+                "identity_key": "孟浩",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:007"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "李富贵",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:013"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "绿袍男子",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:001"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "马脸青年",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:005"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "马脸青年",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:006"],
+                "usage": "voice"
+              }
+            ],
+            "environment_source_unit_keys": [],
+            "source_unit_deliveries": [
+              {
+                "source_unit_key": "SRC0003:unit:006",
+                "mode": "written_text",
+                "content_owner_key": "杂役木牌"
+              }
+            ],
+            "action_logic": "马脸青年发放刻有杂字的木牌"
+          }
+        ]
+      }
+    }
+  ]
+}

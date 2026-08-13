@@ -40,7 +40,7 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
-from app.source_facts import SourceFact
+from app.source_facts import SOURCE_FACT_VERSION, SourceFact
 
 
 SOURCE = "\n\n".join([
@@ -80,6 +80,24 @@ def _latest_blueprint_failure_fixtures() -> list[dict]:
     )["cases"]
 
 
+def _blueprint_cross_field_run_fixtures() -> list[dict]:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "blueprint_cross_field_runs_20260814.json"
+    )
+    return json.loads(
+        fixture_path.read_text(encoding="utf-8")
+    )["cases"]
+
+
+def _replay_source_fact(value: dict) -> SourceFact:
+    return SourceFact.model_validate({
+        **value,
+        "contract_version": SOURCE_FACT_VERSION,
+    })
+
+
 def _blueprint() -> NarrativeBlueprint:
     return NarrativeBlueprint.model_validate({
         "episode_no": 8,
@@ -101,6 +119,11 @@ def _blueprint() -> NarrativeBlueprint:
                     "identity_key": "白洁",
                     "source_segment_ids": ["SRC0001"],
                     "source_unit_keys": ["SRC0001:unit:001"],
+                    "usage": "state_subject",
+                }, {
+                    "identity_key": "白洁",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:002"],
                     "usage": "state_subject",
                 }, {
                     "identity_key": "王申",
@@ -170,6 +193,11 @@ def _blueprint() -> NarrativeBlueprint:
                     "identity_key": "白洁",
                     "source_segment_ids": ["SRC0003"],
                     "source_unit_keys": ["SRC0003:unit:001"],
+                    "usage": "state_subject",
+                }, {
+                    "identity_key": "白洁",
+                    "source_segment_ids": ["SRC0003"],
+                    "source_unit_keys": ["SRC0003:unit:002"],
                     "usage": "state_subject",
                 }],
                 "scene_boundary_before": True,
@@ -1739,10 +1767,7 @@ def test_latest_real_blueprint_failures_replay_typed_authority(
     case: dict,
     monkeypatch,
 ) -> None:
-    facts = [
-        SourceFact.model_validate(value)
-        for value in case["source_facts"]
-    ]
+    facts = [_replay_source_fact(value) for value in case["source_facts"]]
     monkeypatch.setattr(
         "app.narrative_blueprint.source_facts",
         lambda _source_text: facts,
@@ -1769,10 +1794,7 @@ def test_real_src0003_unit016_accepts_explicit_spoken_voice_contract(
     monkeypatch,
 ) -> None:
     case = _latest_blueprint_failure_fixtures()[0]
-    facts = [
-        SourceFact.model_validate(value)
-        for value in case["source_facts"]
-    ]
+    facts = [_replay_source_fact(value) for value in case["source_facts"]]
     monkeypatch.setattr(
         "app.narrative_blueprint.source_facts",
         lambda _source_text: facts,
@@ -1819,6 +1841,68 @@ def test_blueprint_gate_rejects_empty_participant_evidence() -> None:
         and "王申" in error
         for error in errors
     )
+
+
+def test_real_blueprint_participant_failure_returns_exact_retry_contract() -> None:
+    case = _blueprint_cross_field_run_fixtures()[0]
+    shard = NarrativeBlueprintShard.model_validate(case["payload"])
+
+    errors = validate_narrative_blueprint_shard(
+        shard,
+        expected_episode_no=case["episode_no"],
+        expected_shard_index=shard.shard_index,
+        expected_source_segment_ids=shard.source_segment_ids,
+    )
+
+    matching = [
+        error
+        for error in errors
+        if case["expected_error_code"] in error
+    ]
+    assert len(matching) == 1
+    assert case["expected_identity"] in matching[0]
+    assert "保留有来源角色" in matching[0]
+    assert "不得删除角色或改用默认身份" in matching[0]
+
+
+def test_real_blueprint_non_audible_voice_drift_normalizes_exact_unit() -> None:
+    case = _blueprint_cross_field_run_fixtures()[1]
+    with pytest.raises(ValueError, match="非声音 delivery"):
+        NarrativeBlueprintShard.model_validate(case["payload"])
+
+    normalized = normalize_blueprint_provider_payload(case["payload"])
+    shard = NarrativeBlueprintShard.model_validate(normalized)
+    node = shard.nodes[0]
+
+    assert set(node.participants) == {
+        evidence.identity_key for evidence in node.participant_evidence
+    }
+    assert all(
+        case["normalized_voice_unit"] not in evidence.source_unit_keys
+        for evidence in node.participant_evidence
+        if evidence.usage == "voice"
+    )
+    assert node.source_unit_deliveries[0].content_owner_key == "杂役木牌"
+
+
+def test_provider_normalization_adds_evidence_identity_without_deleting_roster() -> None:
+    payload = _blueprint_cross_field_run_fixtures()[0]["payload"]
+    payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    node = payload["nodes"][0]
+    node["participant_evidence"].append({
+        "identity_key": "CHAR_SOURCE_BACKED_EXTRA",
+        "source_segment_ids": ["SRC0004"],
+        "source_unit_keys": [],
+        "usage": "visible",
+    })
+    original_participants = list(node["participants"])
+
+    normalized = normalize_blueprint_provider_payload(payload)
+
+    assert normalized["nodes"][0]["participants"] == [
+        *original_participants,
+        "CHAR_SOURCE_BACKED_EXTRA",
+    ]
 
 
 def test_blueprint_patch_unknown_keeps_stable_operation_and_retry_lineage(

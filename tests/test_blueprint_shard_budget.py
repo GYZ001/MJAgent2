@@ -147,6 +147,7 @@ def _cached_leaf_row(
         "content_json": json.dumps(content, ensure_ascii=False),
         "content_hash": repository.content_hash(content),
         "model_snapshot_json": json.dumps({
+            "source_fact_version": stages.SOURCE_FACT_VERSION,
             "shard_policy_version": stages.BLUEPRINT_SHARD_POLICY_VERSION,
             "local_authority_validator_version": (
                 stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
@@ -227,7 +228,8 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt
     assert "连续动作压缩为一个核心因果进程" in prompt
-    assert "participants中的每个identity必须至少有一条" in prompt
+    assert "identity_key集合完全相等" in prompt
+    assert "禁止删除角色、合并多个身份或改用默认身份" in prompt
     assert "同一SRC内部跨越多个主要地点" in prompt
     assert "performer_key不能替代这条typed voice evidence" in prompt
     assert "source_unit_keys只含该delivery的source_unit_key" in prompt
@@ -236,6 +238,17 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     schema = json.loads(prompt.split("\nschema=", 1)[1])
     node_schema = schema["$defs"]["NarrativeNode"]
     assert "participant_evidence" in node_schema["required"]
+    assert any(
+        conditional.get("if", {}).get("properties", {}).get(
+            "source_unit_deliveries", {}
+        ).get("contains", {}).get("properties", {}).get(
+            "source_unit_key"
+        ) == {"const": "SRC0003:unit:002"}
+        and conditional.get("then", {}).get("properties", {}).get(
+            "participant_evidence", {}
+        ).get("not") is not None
+        for conditional in node_schema["allOf"]
+    )
     assert node_schema["properties"]["location_label"]["pattern"] == (
         r"^(?!.*(?:、|/|\+|内外)).+$"
     )
@@ -638,6 +651,7 @@ def test_current_cached_shard_with_local_authority_errors_fails_closed(
             "content_json": json.dumps(cached, ensure_ascii=False),
             "content_hash": cached_hash,
             "model_snapshot_json": json.dumps({
+                    "source_fact_version": stages.SOURCE_FACT_VERSION,
                 "shard_policy_version": stages.BLUEPRINT_SHARD_POLICY_VERSION,
                 "local_authority_validator_version": (
                     stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
