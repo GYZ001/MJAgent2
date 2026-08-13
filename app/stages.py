@@ -4933,6 +4933,7 @@ def _blueprint_provider_operation_id(
     max_tokens: int,
     effective_max_tokens: int,
     temperature: float,
+    provider_semantic_settings: dict[str, Any],
 ) -> str:
     material = {
         "contract_version": BLUEPRINT_VERSION,
@@ -4947,6 +4948,7 @@ def _blueprint_provider_operation_id(
         "provider": provider,
         "model": model,
         "temperature": temperature,
+        "provider_semantic_settings": provider_semantic_settings,
         "requested_max_tokens": max_tokens,
         "effective_max_tokens": effective_max_tokens,
         "system_prompt_hash": hashlib.sha256(
@@ -5304,6 +5306,9 @@ async def _generate_sharded_narrative_blueprint(
                     max_tokens=token_budget,
                     effective_max_tokens=effective_max_tokens,
                     temperature=0.15,
+                    provider_semantic_settings=(
+                        hiagent.text_request_semantic_settings(provider)
+                    ),
                 )
                 reservation_id = generation_budget.claim(
                     max_tokens=token_budget,

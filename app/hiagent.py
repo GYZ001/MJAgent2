@@ -74,7 +74,7 @@ def _cached_successful_provider_response(
         or provider_operation_id(kind, model, payload)
     try:
         rows = get_conn().execute(
-            "SELECT id,response_json,meta FROM provider_calls "
+            "SELECT id,response_json,meta,request_json FROM provider_calls "
             "WHERE operation_id=? AND kind=? AND model=? "
             "AND status IN ('OK','SUCCESS','SUCCEEDED') "
             "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
@@ -88,6 +88,12 @@ def _cached_successful_provider_response(
                     continue
             value = json.loads(row["response_json"])
             if not isinstance(value, dict):
+                continue
+            try:
+                stored_request = json.loads(row["request_json"] or "null")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if stored_request != payload:
                 continue
             log_provider_call(
                 "provider_cache_hit",
@@ -1079,6 +1085,18 @@ def text_request_token_limits(
         int(limits["max_output_tokens"]),
     )
     return selected_provider, selected_model, effective
+
+
+def text_request_semantic_settings(provider: str) -> dict[str, Any]:
+    if provider == "openrouter":
+        effort = (
+            config.OPENROUTER_TEXT_REASONING_EFFORT or ""
+        ).strip().lower()
+        return {
+            "reasoning_effort": effort,
+            "uses_temperature": not effort or effort == "none",
+        }
+    return {"uses_temperature": True}
 
 
 async def _plain_chat_request(

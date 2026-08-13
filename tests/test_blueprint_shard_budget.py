@@ -635,6 +635,7 @@ def test_blueprint_operation_fingerprint_binds_provider_and_exact_request() -> N
         "max_tokens": 100,
         "effective_max_tokens": 100,
         "temperature": 0.15,
+        "provider_semantic_settings": {"uses_temperature": True},
     }
     original = stages._blueprint_provider_operation_id(**base)
 
@@ -645,6 +646,10 @@ def test_blueprint_operation_fingerprint_binds_provider_and_exact_request() -> N
         ("max_tokens", 101),
         ("effective_max_tokens", 80),
         ("temperature", 0.2),
+        (
+            "provider_semantic_settings",
+            {"reasoning_effort": "high", "uses_temperature": False},
+        ),
     ):
         assert stages._blueprint_provider_operation_id(
             **{**base, key: value},

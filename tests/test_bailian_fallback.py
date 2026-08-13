@@ -139,6 +139,31 @@ def test_bailian_does_not_switch_model_after_ambiguous_read_failure(monkeypatch)
 
 def test_bailian_stream_never_replays_after_a_token_was_emitted(monkeypatch) -> None:
     hiagent._BAILIAN_FAILED_MODELS["text"].clear()
+    first = "qwen3.7-max-2026-06-08"
+    calls: list[str] = []
+
+    async def fake_stream(client, url, payload, *, model, on_token, **kwargs):
+        calls.append(model)
+        on_token("content", "partial")
+        raise hiagent.ProviderError("connection dropped", retryable=True)
+
+    monkeypatch.setattr(hiagent, "_model_connection", lambda *args: ("https://bailian.test/v1", {}))
+    monkeypatch.setattr(hiagent, "_stream_or_fallback", fake_stream)
+
+    async def run():
+        return await hiagent._stream_bailian_chat_with_fallback(
+            object(), {"messages": []}, fallback_kind="text", log_kind="chat_tools",
+            preferred_model=first, meta=None, on_token=lambda *_: None,
+        )
+
+    try:
+        asyncio.run(run())
+        assert False, "已产出 token 后应直接报错"
+    except hiagent.ProviderError as exc:
+        assert "connection dropped" in str(exc)
+    assert calls == [first]
+
+    hiagent._BAILIAN_FAILED_MODELS["text"].clear()
 
 
 def test_bailian_strict_replay_scans_later_successful_candidate(monkeypatch) -> None:
@@ -229,28 +254,3 @@ def test_bailian_strict_replay_all_miss_never_sends(monkeypatch) -> None:
         ))
 
     assert sends == 0
-    first = "qwen3.7-max-2026-06-08"
-    calls: list[str] = []
-
-    async def fake_stream(client, url, payload, *, model, on_token, **kwargs):
-        calls.append(model)
-        on_token("content", "partial")
-        raise hiagent.ProviderError("connection dropped", retryable=True)
-
-    monkeypatch.setattr(hiagent, "_model_connection", lambda *args: ("https://bailian.test/v1", {}))
-    monkeypatch.setattr(hiagent, "_stream_or_fallback", fake_stream)
-
-    async def run():
-        return await hiagent._stream_bailian_chat_with_fallback(
-            object(), {"messages": []}, fallback_kind="text", log_kind="chat_tools",
-            preferred_model=first, meta=None, on_token=lambda *_: None,
-        )
-
-    try:
-        asyncio.run(run())
-        assert False, "已产出 token 后应直接报错"
-    except hiagent.ProviderError as exc:
-        assert "connection dropped" in str(exc)
-    assert calls == [first]
-
-    hiagent._BAILIAN_FAILED_MODELS["text"].clear()
