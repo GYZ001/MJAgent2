@@ -48,6 +48,7 @@ from app.storyboard_supervisor import (
     _commit_repair_candidate,
     _deterministic_ambient_audio_cast_candidate,
     _deterministic_dialogue_framing_candidate,
+    _insert_accepted_storyboard_shot,
     _merge_repair_candidate,
     _migrate_checkpoint,
     _open_shot_gap,
@@ -691,6 +692,78 @@ def test_supervisor_generates_and_commits_scene_packs(
     contract = json.loads(rows[1]["shot_contract_json"])
     assert contract["camera_angle"] == "平视侧面角度"
     assert contract["purpose"].startswith("第2镜")
+    bindings = conn.execute(
+        """SELECT s.shot_no,b.shot_id
+             FROM shots s
+             JOIN storyboard_source_bindings b ON b.shot_id=s.id
+            WHERE s.episode_id='e1' ORDER BY s.shot_no"""
+    ).fetchall()
+    assert [row["shot_no"] for row in bindings] == [1, 2, 3]
+
+
+def test_accepted_single_shot_and_binding_roll_back_together(
+    repair_db,
+    monkeypatch,
+) -> None:
+    conn, screenplay = repair_db
+    conn.execute("DELETE FROM shots WHERE episode_id='e1'")
+    conn.commit()
+
+    def reject_binding(*_args, **_kwargs):
+        raise RuntimeError("binding write failed")
+
+    monkeypatch.setattr(
+        "app.storyboard_workspace.persist_source_binding",
+        reject_binding,
+    )
+    conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(RuntimeError, match="binding write failed"):
+        try:
+            _insert_accepted_storyboard_shot(
+                conn, "e1", screenplay, _shot(1), "sp1",
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM shots WHERE episode_id='e1'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM storyboard_source_bindings"
+    ).fetchone()[0] == 0
+
+
+def test_repair_missing_generated_bindings_is_idempotent_for_76_to_82(
+    repair_db,
+) -> None:
+    conn, screenplay = repair_db
+    conn.execute("DELETE FROM shots WHERE episode_id='e1'")
+    for shot_no in range(76, 83):
+        shot = _shot(shot_no)
+        shot.is_final = shot_no == 82
+        _insert_storyboard_shot(conn, "e1", screenplay, shot, "sp1")
+    conn.commit()
+
+    from app.storyboard_workspace import repair_generated_source_bindings
+
+    first = repair_generated_source_bindings("e1")
+    second = repair_generated_source_bindings("e1")
+
+    assert first == {
+        "bound": 7,
+        "realigned": 0,
+        "unresolved_shot_nos": [],
+    }
+    assert second == {
+        "bound": 0,
+        "realigned": 0,
+        "unresolved_shot_nos": [],
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) FROM storyboard_source_bindings"
+    ).fetchone()[0] == 7
 
 
 def test_full_repair_scene_pack_checkpoints_without_mutating_official_rows(

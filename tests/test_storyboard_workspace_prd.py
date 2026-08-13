@@ -135,6 +135,7 @@ def storyboard_db(tmp_path, monkeypatch):
     )
     conn.execute("UPDATE episodes SET storyboard_artifact_id=? WHERE id='e1'", (artifact["id"],))
     conn.commit()
+    workspace.repair_generated_source_bindings("e1")
     yield conn
     conn.close()
 
@@ -1373,6 +1374,7 @@ def test_generated_source_binding_repair_replaces_stitched_excerpt(storyboard_db
         "UPDATE shots SET source_excerpt=? WHERE id='s1'",
         (stitched,),
     )
+    storyboard_db.execute("DELETE FROM storyboard_source_bindings WHERE shot_id='s1'")
     storyboard_db.commit()
 
     result = workspace.repair_generated_source_bindings("e1")
@@ -1383,6 +1385,36 @@ def test_generated_source_binding_repair_replaces_stitched_excerpt(storyboard_db
     ).fetchone()["source_excerpt"]
     assert repaired == "少年推开房门，看见桌上的信"
     assert workspace.verify_or_bind_existing_excerpt("e1", "s1", repaired)["chapter_idx"] == 1
+
+
+def test_generated_source_binding_repair_canonicalizes_chapter_title_card(
+    storyboard_db,
+) -> None:
+    storyboard_db.execute(
+        "UPDATE chapters SET title='First Chapter',content='First Chapter\n\nStory body.' "
+        "WHERE project_id='p1' AND idx=1"
+    )
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt='【First Chapter】\nFirst Chapter' WHERE id='s1'"
+    )
+    storyboard_db.execute("DELETE FROM storyboard_source_bindings WHERE shot_id='s1'")
+    storyboard_db.commit()
+
+    result = workspace.repair_generated_source_bindings("e1")
+
+    assert result == {
+        "bound": 1,
+        "realigned": 1,
+        "unresolved_shot_nos": [],
+    }
+    row = storyboard_db.execute(
+        "SELECT source_excerpt FROM shots WHERE id='s1'"
+    ).fetchone()
+    binding = storyboard_db.execute(
+        "SELECT start_offset,end_offset FROM storyboard_source_bindings WHERE shot_id='s1'"
+    ).fetchone()
+    assert row["source_excerpt"] == "First Chapter"
+    assert dict(binding) == {"start_offset": 0, "end_offset": 13}
 
 
 def test_generated_source_binding_repair_falls_back_to_story_event_span(
@@ -1417,6 +1449,7 @@ def test_generated_source_binding_repair_falls_back_to_story_event_span(
             json.dumps(contract, ensure_ascii=False),
         ),
     )
+    storyboard_db.execute("DELETE FROM storyboard_source_bindings WHERE shot_id='s1'")
     storyboard_db.commit()
 
     result = workspace.repair_generated_source_bindings("e1")
@@ -2448,6 +2481,31 @@ def test_episode_media_cleanup_stages_generation_fences(
         if item["path"].endswith("episode-shot_last.jpg")
     )
     assert missing_last_frame["generation"]["exists"] is False
+
+
+def test_screenplay_epoch_change_retires_storyboard_projection_but_keeps_audit_artifact(
+    storyboard_db,
+) -> None:
+    """Old shots are never rebound to a new screenplay without revalidation."""
+    from app import artifacts
+
+    old_artifact_id = storyboard_db.execute(
+        "SELECT storyboard_artifact_id FROM shots WHERE id='s1'"
+    ).fetchone()["storyboard_artifact_id"]
+    storyboard_db.execute("BEGIN IMMEDIATE")
+    artifacts.stage_episode_artifact_cleanup(storyboard_db, "e1")
+    storyboard_db.commit()
+
+    assert storyboard_db.execute(
+        "SELECT COUNT(*) AS c FROM shots WHERE episode_id='e1'"
+    ).fetchone()["c"] == 0
+    old_artifact = storyboard_db.execute(
+        "SELECT status,stale_reason FROM artifacts WHERE id=?",
+        (old_artifact_id,),
+    ).fetchone()
+    assert old_artifact is not None
+    assert old_artifact["status"] == "stale"
+    assert "UPSTREAM_SCREENPLAY_AUTHORITY_CHANGED" in old_artifact["stale_reason"]
 
 
 def test_media_cleanup_outbox_never_deletes_legacy_string_payload(

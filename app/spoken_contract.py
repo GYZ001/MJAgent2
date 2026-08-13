@@ -134,14 +134,15 @@ def _resolve_delivery(speaker: str, declared: str | None, visible: set[str]) -> 
     定义，必须在唯一入口收敛，不能分叉到两条派生路径。
 
     - 非法/空 delivery → spoken_dialogue（默认可听、可见）；
-    - 声明 spoken_dialogue 但说话人不在可见集合 → offscreen_voice（画外音必须保持画外）；
     - 其余情况保留声明值，两侧真实分歧仍会照常触发冲突。
+
+    可见性不得改写语义。原始合同明确声明 ``spoken_dialogue``
+    却漏了 speaker 时，必须由确定性门禁拒绝，不能为了让数据
+    自洽而静默篡改成 ``offscreen_voice``。
     """
     delivery = (declared or "spoken_dialogue").strip()
     if delivery not in SPOKEN_DELIVERIES:
         delivery = "spoken_dialogue"
-    if delivery == "spoken_dialogue" and visible and speaker not in visible:
-        delivery = "offscreen_voice"
     return delivery
 
 
@@ -426,8 +427,47 @@ def _timeline_issues(shot: Shot) -> list[SpokenIssue]:
     issues: list[SpokenIssue] = []
     duration = float(shot.duration_s or config.DEFAULT_VIDEO_DURATION_S)
     spoken = [item for item in (shot.audio_timeline or []) if item.type in SPOKEN_DELIVERIES]
+    visible = _visible_names(shot)
     previous_end: float | None = None
     for item in spoken:
+        speaker = str(item.speaker_id or "").strip()
+        if item.type == "spoken_dialogue" and (
+            not speaker or speaker not in visible or not bool(item.lip_sync)
+        ):
+            issues.append(SpokenIssue(
+                code="SPOKEN_VISIBLE_SPEAKER_INVALID",
+                rule_id=RULE_SPOKEN_SPEAKERS,
+                shot_no=shot.shot_no,
+                message=(
+                    f"shot_no={shot.shot_no} spoken_dialogue 说话人"
+                    f"「{speaker or '未知'}」必须在画面可见人物中且 "
+                    "lip_sync=true；若业务语义确为画外发声，必须由上游"
+                    "显式声明 offscreen_voice，系统不会静默改写"
+                ),
+                evidence={
+                    "speaker_id": speaker,
+                    "delivery": item.type,
+                    "lip_sync": bool(item.lip_sync),
+                    "visible_characters": sorted(visible),
+                },
+                repair_options=[
+                    "add_speaker_to_visible_characters",
+                    "explicitly_author_offscreen_voice",
+                ],
+            ))
+            continue
+        if item.type == "offscreen_voice" and bool(item.lip_sync):
+            issues.append(SpokenIssue(
+                code="SPOKEN_OFFSCREEN_LIPSYNC_INVALID",
+                rule_id=RULE_SPOKEN_SPEAKERS,
+                shot_no=shot.shot_no,
+                message=(
+                    f"shot_no={shot.shot_no} offscreen_voice 不得启用 lip_sync"
+                ),
+                evidence={"speaker_id": speaker, "lip_sync": True},
+                repair_options=["disable_lip_sync"],
+            ))
+            continue
         start, end = float(item.start_s or 0.0), float(item.end_s or 0.0)
         if end < start or start < 0 or end > duration + 1e-6:
             issues.append(SpokenIssue(

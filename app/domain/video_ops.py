@@ -934,11 +934,19 @@ def _confirm_episode_core_impl(
     失败抛 ValueError（消息面向 UI）；供路由与 Supervisor 复用。
     """
     from app.storyboard_workspace import (
+        assert_storyboard_source_bindings_complete,
         require_preview,
         verify_or_bind_existing_excerpt,
     )
 
     already = _episode_or_404(episode_id)
+    try:
+        assert_storyboard_source_bindings_complete(
+            episode_id,
+            conn=get_conn(),
+        )
+    except ValueError as exc:
+        raise ValueError(f"分镜确认被拒绝：{exc}") from exc
     if already["status"] == "confirmed":
         if not already["screenplay_json"]:
             from app.production.screenplay_authority import (

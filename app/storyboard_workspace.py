@@ -625,14 +625,33 @@ def align_generated_source_evidence(
     if not candidate:
         raise HTTPException(422, "自动修复候选缺少原文证据")
     matches = []
+    # The first directed shot may carry an approved chapter-title card in the
+    # display form ``【title】\ntitle``.  That composite string is not a
+    # contiguous database slice, but each non-empty line still is.  Resolve the
+    # exact authorized line and persist that canonical excerpt; never exempt the
+    # title card from binding or manufacture offsets for the decorated form.
+    evidence_candidates = [candidate]
+    for line in candidate.splitlines():
+        clean = line.strip()
+        if clean.startswith("【") and clean.endswith("】"):
+            clean = clean[1:-1].strip()
+        if clean and clean not in evidence_candidates:
+            evidence_candidates.append(clean)
     for source in chapter_sources(episode_id, conn=conn):
-        aligned = align_source_excerpt(candidate, source["content"] or "")
-        if aligned is not None:
-            matches.append((aligned.match_chars, int(aligned.exact), source, aligned))
+        for evidence in evidence_candidates:
+            aligned = align_source_excerpt(evidence, source["content"] or "")
+            if aligned is not None:
+                matches.append((
+                    aligned.match_chars,
+                    int(aligned.exact),
+                    int(evidence == candidate),
+                    source,
+                    aligned,
+                ))
     if not matches:
         raise HTTPException(422, "自动修复候选的原文证据不属于本集授权原文")
-    _score, _exact, source, aligned = max(
-        matches, key=lambda item: (item[0], item[1]),
+    _score, _exact, _whole, source, aligned = max(
+        matches, key=lambda item: (item[0], item[1], item[2]),
     )
     candidate = aligned.excerpt
     normalized = {
@@ -715,10 +734,29 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
     for row in shots:
         candidate = (row["source_excerpt"] or "").strip()
         matches = []
-        for source in sources:
-            aligned = align_source_excerpt(candidate, source["content"] or "")
+        try:
+            _canonical, normalized = align_generated_source_evidence(
+                episode_id,
+                candidate,
+                conn=conn,
+            )
+            source = next(
+                item for item in sources
+                if int(item["id"]) == int(normalized["chapter_id"])
+            )
+            aligned = align_source_excerpt(
+                _canonical,
+                source["content"] or "",
+            )
             if aligned is not None:
-                matches.append((aligned.match_chars, int(aligned.exact), source, aligned))
+                matches.append((
+                    aligned.match_chars,
+                    int(aligned.exact),
+                    source,
+                    aligned,
+                ))
+        except (HTTPException, StopIteration):
+            pass
         if not matches:
             try:
                 contract = json.loads(row["shot_contract_json"] or "{}")

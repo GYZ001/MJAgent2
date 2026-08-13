@@ -161,13 +161,13 @@ def test_duration_normalization_does_not_hide_spoken_contract_conflict() -> None
     )
 
 
-def test_offscreen_speaker_not_in_visible_is_not_conflict() -> None:
-    """shot_no=83 复现：画外说话人两侧都存 spoken_dialogue，不得判成分叉。
+def test_declared_onscreen_speaker_missing_from_visible_is_blocked() -> None:
+    """shot_no=83 复现：画内声明不得被静默改写成画外音。
 
     宗门绿袍修士2 不在 characters_visible，dialogues 与 audio_timeline 的原始
-    delivery/type 都写着 spoken_dialogue（模型/历史数据的常见写法）。可见性降级
-    过去只作用在 dialogues 派生，timeline 派生原样照搬，于是被误判为
-    SPOKEN_CONTRACT_CONFLICT。现在两侧共用 _resolve_delivery，应收敛为画外音。
+    delivery/type 都写着 spoken_dialogue，就是对画内开口和口型的明确
+    声明。如果 visible 漏了说话人，只能补可见身份或由上游明确
+    改为 offscreen_voice；不能由同步器为了自洽而猜测。
     """
     line = "许师姐已经到了凝气第七层，被掌教赐了风幡，没到筑基便可飞行，让人羡慕。"
     shot = _compact_shot(83)
@@ -184,22 +184,76 @@ def test_offscreen_speaker_not_in_visible_is_not_conflict() -> None:
         )
     ]
 
-    # 读侧门禁：不得再报冲突
+    # 两侧文字一致，但结构化可见身份仍必须硬拦截。
     assert not any(
         i.code == "SPOKEN_CONTRACT_CONFLICT" for i in validate_spoken_contract(shot)
     )
-    assert spoken_contract_coherence_errors(shot) == []
+    assert any(
+        "SPOKEN_VISIBLE_SPEAKER_INVALID" in error
+        for error in spoken_contract_coherence_errors(shot)
+    )
 
-    # 同步侧：收敛为 coherent，并把画外口径写回原始字段（上下游对齐）
+    # 同步侧不改写业务语义，仍然返回 blocker。
     result = synchronize_spoken_contract(shot)
     assert result.status == "coherent"
     assert shot.spoken_contract_status == "coherent"
-    assert shot.audio_timeline[0].type == "offscreen_voice"
-    assert shot.audio_timeline[0].lip_sync is False
-    assert shot.dialogues[0].delivery == "offscreen_voice"
-    # 文本与说话人不变，只矫正发声方式
+    assert not result.ok
+    assert shot.audio_timeline[0].type == "spoken_dialogue"
+    assert shot.audio_timeline[0].lip_sync is True
+    assert shot.dialogues[0].delivery == "spoken_dialogue"
     assert shot.audio_timeline[0].text == line
     assert shot.dialogues[0].line == line
+
+
+def test_explicit_offscreen_speaker_not_visible_remains_valid() -> None:
+    line = "许师姐已经到了凝气第七层。"
+    shot = _compact_shot(83)
+    shot.duration_s = 6
+    shot.characters = ["孟浩", "王有材"]
+    shot.characters_visible = ["孟浩", "王有材"]
+    shot.dialogues = [Dialogue(
+        speaker="宗门绿袍修士2", line=line, delivery="offscreen_voice",
+    )]
+    shot.audio_timeline = [AudioTimelineItem(
+        start_s=0.0, end_s=4.0, type="offscreen_voice",
+        speaker_id="宗门绿袍修士2", text=line, lip_sync=False,
+    )]
+
+    assert spoken_contract_coherence_errors(shot) == []
+    result = synchronize_spoken_contract(shot)
+    assert result.ok
+    assert shot.audio_timeline[0].type == "offscreen_voice"
+    assert shot.dialogues[0].delivery == "offscreen_voice"
+
+
+def test_shot83_onscreen_claim_cannot_pass_episode_gate_after_prompt_compile() -> None:
+    """Prompt compilation is not authority; the full deterministic gate still wins."""
+    from app.compiler import compile_prompt
+
+    shot = _compact_shot(83)
+    shot.duration_s = 6
+    shot.characters = ["萧薰儿"]
+    shot.characters_visible = ["萧薰儿"]
+    shot.dialogues = [Dialogue(
+        speaker="萧炎", line="我会追上来。", delivery="spoken_dialogue",
+    )]
+    shot.audio_timeline = [AudioTimelineItem(
+        start_s=0.0, end_s=3.0, type="spoken_dialogue",
+        speaker_id="萧炎", text="我会追上来。", lip_sync=True,
+    )]
+
+    # The visual prompt can be compiled from syntactically complete data.  That
+    # must not be confused with identity/action/episode authority acceptance.
+    assert compile_prompt(shot, _bible())
+    sync = synchronize_spoken_contract(shot)
+    assert not sync.ok
+    errors = validate_storyboard(
+        Storyboard(episode_no=1, shots=[shot]),
+        _bible(),
+        6,
+    )
+    assert any("SPOKEN_VISIBLE_SPEAKER_INVALID" in error for error in errors)
+    assert shot.dialogues[0].delivery == "spoken_dialogue"
 
 
 def test_visible_speaker_stays_spoken_dialogue() -> None:

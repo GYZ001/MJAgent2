@@ -29,8 +29,12 @@ def publish_db(tmp_path, monkeypatch):
     )
     conn.execute(
         """INSERT INTO episodes(
-               id,project_id,episode_no,title,target_duration_s,status,created_at
-           ) VALUES('e1','p1',1,'E',15,'scripted',1)"""
+               id,project_id,episode_no,title,source_chapters,target_duration_s,status,created_at
+           ) VALUES('e1','p1',1,'E','[1]',15,'scripted',1)"""
+    )
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content) "
+        "VALUES('p1',1,'Chapter','少年走到石碑前，抬头查看结果。')"
     )
     for shot_no in range(1, 4):
         conn.execute(
@@ -53,7 +57,7 @@ def publish_db(tmp_path, monkeypatch):
                 f"旧投影第{shot_no}镜",
                 "",
                 "",
-                "",
+                "少年走到石碑前，抬头查看结果。",
                 None,
                 "[]",
                 "硬切",
@@ -64,6 +68,9 @@ def publish_db(tmp_path, monkeypatch):
             ),
         )
     conn.commit()
+    from app.storyboard_workspace import repair_generated_source_bindings
+
+    assert repair_generated_source_bindings("e1")["bound"] == 3
     yield conn
     conn.close()
 
@@ -210,6 +217,25 @@ def test_publish_storyboard_certificate_failure_rolls_back_legacy_authority(
         (case["revision_id"],),
     ).fetchone()
     assert dict(revision) == {"status": "active", "published_artifact_id": None}
+
+
+def test_publish_storyboard_rejects_missing_source_binding(publish_db) -> None:
+    case = _publish_case()
+    publish_db.execute(
+        "DELETE FROM storyboard_source_bindings WHERE shot_id='s2'"
+    )
+    publish_db.commit()
+
+    with pytest.raises(ValueError, match="第 2 镜缺少 source binding"):
+        publish_storyboard(**case)
+
+    assert publish_db.execute(
+        "SELECT COUNT(*) FROM completion_certificates"
+    ).fetchone()[0] == 0
+    assert publish_db.execute(
+        "SELECT status FROM production_revisions WHERE id=?",
+        (case["revision_id"],),
+    ).fetchone()[0] == "active"
 
 
 def test_publish_storyboard_commits_complete_legacy_release(publish_db) -> None:

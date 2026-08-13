@@ -286,6 +286,15 @@ def _persist_review_projection(screenplay, board, screenplay_artifact=None):
                 artifact["id"],
             ),
         )
+        from app.storyboard_workspace import realign_generated_source_binding
+
+        realign_generated_source_binding(
+            "episode-generic",
+            f"shot-row-{shot.shot_no}",
+            shot.source_excerpt,
+            conn=conn,
+            commit=False,
+        )
     conn.commit()
     return screenplay_artifact, shot_artifact_ids
 
