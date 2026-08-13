@@ -1513,7 +1513,8 @@ def retry_job(job_id: str, body: dict | None = None):
         == ProviderFailureDisposition.MANUAL_REVIEW.value
     )
     if item["status"] not in {
-        "failed", "cancelled", "paused", "paused_external", "paused_budget", "waiting_retry",
+        "failed", "cancelled", "abandoned", "paused", "paused_external",
+        "paused_budget", "waiting_retry",
     } and not waiting_input_repair and not waiting_provider_create_resolution and not waiting_provider_failure:
         raise HTTPException(409, detail={
             "code": "JOB_STATE_CONFLICT", "message": f"当前状态 {item['status']} 不支持重试",
@@ -1579,6 +1580,16 @@ def retry_job(job_id: str, body: dict | None = None):
                 })
             else:
                 provider_recovery_unconfirmed = True
+        isolated_provider_recovery = bool(
+            has_provider_task
+            and (
+                request.get("isolate_provider_result")
+                or item["status"] in {"cancelled", "abandoned"}
+                or item.get("cancellation_requested")
+                or item.get("abandoned")
+                or not item.get("provider_result_adoptable", 1)
+            )
+        )
         provider_terminal_failure = bool(
             item.get("provider_failure_disposition")
             == ProviderFailureDisposition.EXTERNAL_TERMINAL.value
@@ -1640,7 +1651,12 @@ def retry_job(job_id: str, body: dict | None = None):
                 "paid_risk": "no_new_charge",
                 "will_submit_new_provider_task": False,
                 "will_continue_existing_provider_task": True,
-                "message": "将继续查询同一个供应商任务，不会重复提交或产生新任务",
+                "result_isolated": isolated_provider_recovery,
+                "message": (
+                    "将继续查询同一个供应商任务；结果只进入隔离审计，不会参与采用"
+                    if isolated_provider_recovery
+                    else "将继续查询同一个供应商任务，不会重复提交或产生新任务"
+                ),
             }
         elif provider_recovery_unconfirmed:
             target_status = "queued"
@@ -1858,6 +1874,40 @@ def retry_job(job_id: str, body: dict | None = None):
                     int(item.get("state_revision") or 0),
                 ),
             )
+        elif isolated_provider_recovery:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """UPDATE jobs
+                      SET status='waiting_provider',error=?,next_retry_at=NULL,
+                          cancellation_requested=0,abandoned=0,
+                          video_slot_active=0,provider_poll_required=1,
+                          provider_result_adoptable=0,
+                          provider_create_state='accepted',
+                          provider_non_cancellable=1,
+                          lease_owner=NULL,lease_expires_at=NULL,
+                          state_revision=COALESCE(state_revision,0)+1,updated_at=?
+                   WHERE id=? AND status=?
+                     AND COALESCE(state_revision,0)=?""",
+                (
+                    retryability["message"],
+                    time.time(),
+                    job_id,
+                    item["status"],
+                    int(item.get("state_revision") or 0),
+                ),
+            )
+            if item.get("version_id"):
+                conn.execute(
+                    """UPDATE shot_versions
+                          SET provider_task_id=?,status='waiting_provider',
+                              error=?,video_slot_active=0
+                        WHERE id=?""",
+                    (
+                        item.get("provider_task_id"),
+                        retryability["message"],
+                        item["version_id"],
+                    ),
+                )
         else:
             conn.execute("BEGIN IMMEDIATE")
             try:

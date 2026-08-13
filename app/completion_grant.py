@@ -413,6 +413,7 @@ def ensure_video_budget_authority_tables(conn=None) -> None:
 
 def _provider_task_clearance_evaluation(
     *,
+    project_id: str | None = None,
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
@@ -427,6 +428,25 @@ def _provider_task_clearance_evaluation(
     job_scope_params: list[str] = []
     claim_scope_clauses: list[str] = []
     claim_scope_params: list[str] = []
+    if project_id:
+        job_scope_clauses.extend([
+            "j.project_id=?",
+            "j.episode_id IN (SELECT id FROM episodes WHERE project_id=?)",
+            """j.shot_id IN (
+                   SELECT s.id FROM shots s
+                   JOIN episodes e ON e.id=s.episode_id
+                  WHERE e.project_id=?
+               )""",
+            """j.version_id IN (
+                   SELECT v.id FROM shot_versions v
+                   JOIN shots s ON s.id=v.shot_id
+                   JOIN episodes e ON e.id=s.episode_id
+                  WHERE e.project_id=?
+               )""",
+        ])
+        job_scope_params.extend([project_id, project_id, project_id, project_id])
+        claim_scope_clauses.append("c.project_id=?")
+        claim_scope_params.append(project_id)
     if episode_id:
         job_scope_clauses.extend([
             "j.episode_id=?",
@@ -477,6 +497,10 @@ def _provider_task_clearance_evaluation(
             f"""SELECT COALESCE(j.id,c.origin_job_id) AS job_id,
                        COALESCE(j.version_id,c.version_id,c.origin_version_id)
                            AS version_id,
+                       COALESCE(j.project_id,c.project_id) AS project_id,
+                       COALESCE(j.episode_id,c.episode_id,c.origin_episode_id)
+                           AS episode_id,
+                       COALESCE(j.shot_id,c.shot_id,c.origin_shot_id) AS shot_id,
                        j.id AS live_job_id,j.status AS job_status,
                        j.cancellation_requested,j.abandoned,
                        j.provider_non_cancellable,j.provider_operation_id,
@@ -484,7 +508,12 @@ def _provider_task_clearance_evaluation(
                        v.provider_task_id,v.status AS version_status,
                        v.video_path,v.cost_cny,
                        c.status AS claim_status,c.amount_cny AS claim_amount,
-                       c.operation_id AS claim_operation_id
+                       c.operation_id AS claim_operation_id,c.accepted_at,
+                       EXISTS(
+                           SELECT 1 FROM provider_calls pc
+                            WHERE pc.kind='video_create' AND pc.status='OK'
+                              AND pc.operation_id=c.operation_id
+                       ) AS create_call_succeeded
                   FROM provider_video_budget_claims c
                   LEFT JOIN jobs j ON j.id=c.job_id
                   LEFT JOIN shot_versions v ON v.id=c.version_id
@@ -501,7 +530,8 @@ def _provider_task_clearance_evaluation(
         else ""
     )
     rows.extend(db.execute(
-        f"""SELECT j.id AS job_id,j.version_id,j.id AS live_job_id,
+        f"""SELECT j.id AS job_id,j.version_id,j.project_id,j.episode_id,j.shot_id,
+                   j.id AS live_job_id,
                    j.status AS job_status,
                    j.cancellation_requested,j.abandoned,
                    j.provider_non_cancellable,j.provider_operation_id,
@@ -509,7 +539,13 @@ def _provider_task_clearance_evaluation(
                    v.provider_task_id,v.status AS version_status,
                    v.video_path,v.cost_cny,
                    NULL AS claim_status,NULL AS claim_amount,
-                   j.provider_operation_id AS claim_operation_id
+                   j.provider_operation_id AS claim_operation_id,
+                   NULL AS accepted_at,
+                   EXISTS(
+                       SELECT 1 FROM provider_calls pc
+                        WHERE pc.kind='video_create' AND pc.status='OK'
+                          AND pc.operation_id=j.provider_operation_id
+                   ) AS create_call_succeeded
               FROM jobs j
               LEFT JOIN shot_versions v ON v.id=j.version_id
              WHERE ({" OR ".join(f"({clause})" for clause in job_scope_clauses)})
@@ -544,6 +580,22 @@ def _provider_task_clearance_evaluation(
         provider_task_for_recovery = (
             provider_task_id if claim_is_current else None
         )
+        provably_unsubmitted_cancelled = bool(
+            claim_is_current
+            and claim_status == "reserved"
+            and operation_id
+            and row["accepted_at"] is None
+            and not provider_task_id
+            and not row["provider_non_cancellable"]
+            and create_state in {"", "not_started", "submitting"}
+            and str(row["job_status"] or "").strip().lower() == "cancelled"
+            and row["cancellation_requested"]
+            and not row["abandoned"]
+            and not row["create_call_succeeded"]
+        )
+        if provably_unsubmitted_cancelled:
+            releasable_operation_ids.append(operation_id)
+            continue
         failure_disposition = str(
             row["provider_failure_disposition"] or ""
         ).strip().lower()
@@ -619,6 +671,15 @@ def _provider_task_clearance_evaluation(
             and not row["abandoned"]
         )
         blockers.append({
+            "project_id": (
+                str(row["project_id"]) if row["project_id"] is not None else None
+            ),
+            "episode_id": (
+                str(row["episode_id"]) if row["episode_id"] is not None else None
+            ),
+            "shot_id": (
+                str(row["shot_id"]) if row["shot_id"] is not None else None
+            ),
             "job_id": str(row["job_id"]),
             "version_id": (
                 str(row["version_id"]) if row["version_id"] is not None else None
@@ -666,6 +727,7 @@ def _provider_task_clearance_evaluation(
 
 def provider_task_clearance_snapshot(
     *,
+    project_id: str | None = None,
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
@@ -678,6 +740,7 @@ def provider_task_clearance_snapshot(
     evidence blocks cleanup so its task handle and billing authority survive.
     """
     clearance, _terminal_actions = _provider_task_clearance_evaluation(
+        project_id=project_id,
         episode_id=episode_id,
         shot_ids=shot_ids,
         version_ids=version_ids,
@@ -688,12 +751,14 @@ def provider_task_clearance_snapshot(
 
 def assert_provider_tasks_clearable(
     *,
+    project_id: str | None = None,
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
     conn=None,
 ) -> dict[str, Any]:
     clearance = provider_task_clearance_snapshot(
+        project_id=project_id,
         episode_id=episode_id,
         shot_ids=shot_ids,
         version_ids=version_ids,
@@ -706,6 +771,7 @@ def assert_provider_tasks_clearable(
 
 def prepare_provider_tasks_for_clear(
     *,
+    project_id: str | None = None,
     episode_id: str | None = None,
     shot_ids: list[str] | tuple[str, ...] = (),
     version_ids: list[str] | tuple[str, ...] = (),
@@ -714,6 +780,7 @@ def prepare_provider_tasks_for_clear(
     """Fence provider risk and explicitly release unsubmitted reservations."""
     db = conn or get_conn()
     clearance, terminal_actions = _provider_task_clearance_evaluation(
+        project_id=project_id,
         episode_id=episode_id,
         shot_ids=shot_ids,
         version_ids=version_ids,

@@ -293,9 +293,12 @@ def schedule_retry(job_id: str, message: str, *, max_retries: int, base_delay: f
 def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") -> dict[str, object]:
     """Release local generation authority without losing accepted provider work."""
     db = get_conn()
+    if not db.in_transaction:
+        db.execute("BEGIN IMMEDIATE")
     row = db.execute(
         """SELECT j.status,j.provider_non_cancellable,j.provider_create_state,
                   j.version_id,j.run_id,j.step_run_id,j.episode_id,
+                  j.provider_operation_id,
                   v.provider_task_id
              FROM jobs j
              LEFT JOIN shot_versions v ON v.id=j.version_id
@@ -388,14 +391,32 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
     # running to queued. provider_non_cancellable remains the durable truth that
     # paid upstream work can still complete, so cancellation must stay abandoned.
     status = "abandoned" if non_cancellable else "cancelled"
+    pre_transport_cancel = bool(
+        not non_cancellable
+        and not row["provider_task_id"]
+        and row["provider_create_state"] in {"not_started", "submitting"}
+    )
     cursor = db.execute(
         """UPDATE jobs SET cancellation_requested=1, abandoned=?, status=?, error=?,
                   video_slot_active=0,lease_owner=NULL,lease_expires_at=NULL,
-                  next_retry_at=NULL,updated_at=?
+                  next_retry_at=NULL,
+                  provider_create_state=CASE WHEN ? THEN 'not_started'
+                                             ELSE provider_create_state END,
+                  provider_non_cancellable=CASE WHEN ? THEN 0
+                                                ELSE provider_non_cancellable END,
+                  updated_at=?
            WHERE id=? AND status IN (
                'queued','running','paused_budget','waiting_provider','waiting_retry','waiting','waiting_human'
            )""",
-        (int(status == "abandoned"), status, reason, now(), job_id),
+        (
+            int(status == "abandoned"),
+            status,
+            reason,
+            int(pre_transport_cancel),
+            int(pre_transport_cancel),
+            now(),
+            job_id,
+        ),
     )
     if cursor.rowcount != 1:
         db.rollback()
@@ -417,6 +438,32 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
                 WHERE id=? AND status IN ('queued','running','paused_budget')""",
             (status, reason, row["version_id"]),
         )
+    provider_claim_released = False
+    if pre_transport_cancel and row["provider_operation_id"]:
+        stamp = now()
+        released = db.execute(
+            """UPDATE provider_video_budget_claims
+                  SET status='released',updated_at=?,released_at=?
+                WHERE operation_id=? AND job_id=? AND status='reserved'
+                  AND accepted_at IS NULL""",
+            (
+                stamp,
+                stamp,
+                row["provider_operation_id"],
+                job_id,
+            ),
+        )
+        provider_claim_released = released.rowcount > 0
+        db.execute(
+            """UPDATE budget_reservations
+                  SET status='released',settled_at=?,actual_cost_cny=0
+                WHERE job_id=? AND status IN ('reserved','running')""",
+            (stamp, job_id),
+        )
+        db.execute(
+            "UPDATE jobs SET reserved_cost_cny=0 WHERE id=?",
+            (job_id,),
+        )
     db.commit()
     # 上游已接单：预算从 reserved/running 转为 committed 口径——保留 settled 审计，
     # 金额记为预估（不可真正取消上游时不能直接释放为 0 假装没花钱）。
@@ -431,7 +478,7 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
         )
         db.execute("UPDATE jobs SET reserved_cost_cny=0 WHERE id=?", (job_id,))
         db.commit()
-    else:
+    elif not pre_transport_cancel:
         settle_budget(job_id, 0.0, success=False)
     reconcile_cancelled_version_states(
         episode_id=row["episode_id"],
@@ -444,6 +491,7 @@ def request_cancel(job_id: str, *, reason: str = "用户已停止视频任务") 
         "status": status,
         "provider_may_continue": non_cancellable,
         "cancelled": True,
+        "provider_claim_released": provider_claim_released,
     }
 
 
