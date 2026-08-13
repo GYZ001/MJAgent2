@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -56,6 +57,39 @@ def test_blueprint_split_uses_stable_source_fact_midpoint() -> None:
     assert all(first)
 
 
+def test_run_be31_shard2_shape_is_split_by_40_fact_output_pressure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = index_source_segments(_source(28))
+    weights = {
+        segment.segment_id: (2 if index < 12 else 1)
+        for index, segment in enumerate(segments)
+    }
+    assert sum(weights.values()) == 40
+    monkeypatch.setattr(
+        stages,
+        "_blueprint_segment_output_weight",
+        lambda segment: weights[segment.segment_id],
+    )
+
+    shards = stages._partition_blueprint_segments(segments)
+
+    assert len(shards) >= 3
+    assert [item.segment_id for shard in shards for item in shard] == [
+        item.segment_id for item in segments
+    ]
+    assert all(
+        sum(weights[item.segment_id] for item in shard)
+        <= stages.BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD
+        for shard in shards
+    )
+    assert all(
+        stages._blueprint_shard_token_budget(shard)
+        <= stages.BLUEPRINT_SHARD_MAX_TOKENS
+        for shard in shards
+    )
+
+
 class _EmptyRows:
     @staticmethod
     def fetchall() -> list[dict]:
@@ -66,6 +100,22 @@ class _NoCacheConnection:
     @staticmethod
     def execute(_sql: str, _params=()) -> _EmptyRows:
         return _EmptyRows()
+
+
+class _Rows:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def fetchall(self) -> list[dict]:
+        return self.rows
+
+
+class _StaticCacheConnection:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def execute(self, _sql: str, _params=()) -> _Rows:
+        return _Rows(self.rows)
 
 
 def _shard_response(*, source_ids: list[str], shard_index: int) -> str:
@@ -153,6 +203,80 @@ def test_output_truncated_splits_once_without_accepting_prefix(
         _shard_response(source_ids=calls[1], shard_index=1),
         _shard_response(source_ids=calls[2], shard_index=2),
     ]
+
+
+def test_legacy_cached_shard_without_current_policy_is_not_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segment = index_source_segments(_source(1))[0]
+    source_payload = [{
+        "source_segment_id": segment.segment_id,
+        "text": segment.text,
+        "source_facts": [
+            fact.model_dump(mode="json")
+            for fact in stages.source_segment_facts(
+                segment.segment_id,
+                segment.text,
+            )
+        ],
+    }]
+    source_hash = hashlib.sha256(json.dumps(
+        source_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    boundary = stages._blueprint_shard_boundary_context([])
+    boundary_hash = hashlib.sha256(json.dumps(
+        boundary,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    cached = json.loads(_shard_response(
+        source_ids=[segment.segment_id],
+        shard_index=1,
+    ))
+    cached["source_hash"] = source_hash
+    cached["boundary_hash"] = boundary_hash
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _shard_response(
+            source_ids=_prompt_source_ids(messages[1]["content"]),
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    monkeypatch.setattr(
+        stages,
+        "get_conn",
+        lambda: _StaticCacheConnection([{
+            "content_json": json.dumps(cached, ensure_ascii=False),
+            "model_snapshot_json": "{}",
+        }]),
+    )
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-policy-rebuild"),
+    )
+
+    asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-policy-rebuild", "episode_no": 1},
+        _source(1),
+        {},
+    ))
+
+    assert calls == 1
 
 
 def test_non_truncation_provider_error_is_not_split(
