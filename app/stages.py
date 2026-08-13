@@ -50,6 +50,7 @@ from app.narrative_blueprint import (
     apply_narrative_blueprint_patch,
     blueprint_authority_validator_fingerprint,
     blueprint_patch_schema,
+    blueprint_source_occurrence_issues,
     blueprint_shard_provider_schema,
     blueprint_semantic_issue_is_resolved,
     filter_blueprint_semantic_review_voice_issues,
@@ -5184,23 +5185,6 @@ def _namespace_blueprint_shard(
             )
 
 
-def _is_blueprint_duplicate_source_repair(
-    validation_errors: list[str],
-) -> bool:
-    """Return whether the prior typed gate reported duplicate SRC ownership."""
-
-    return any(
-        re.match(
-            r"^\[BLUEPRINT_SHARD_(?:PICTURE|AUDIT)_SOURCE_DUPLICATE\]",
-            error,
-        )
-        or error.startswith(
-            "[BLUEPRINT_SHARD_SOURCE_PARTITION_CONFLICT]"
-        )
-        for error in validation_errors
-    )
-
-
 def _remove_duplicate_repair_orphan_nodes(
     shard: NarrativeBlueprintShard,
     *,
@@ -5213,22 +5197,64 @@ def _remove_duplicate_repair_orphan_nodes(
     if (
         attempt <= 1
         or previous_candidate is None
-        or not _is_blueprint_duplicate_source_repair(
-            previous_validation_errors
-        )
     ):
         return
     previous = NarrativeBlueprintShard.model_validate(previous_candidate)
-    previously_grounded_keys = {
-        node.key
-        for node in previous.nodes
-        if node.source_segment_ids
-    }
+    reported_errors = set(previous_validation_errors)
+    duplicate_issues = [
+        issue
+        for issue in blueprint_source_occurrence_issues(
+            previous.nodes,
+            prefix="BLUEPRINT_SHARD",
+        )
+        if issue.error in reported_errors
+    ]
+    duplicate_sources_by_node: defaultdict[str, set[str]] = defaultdict(set)
+    for issue in duplicate_issues:
+        for node_key in issue.node_keys:
+            duplicate_sources_by_node[node_key].add(
+                issue.source_segment_id
+            )
+    previous_nodes_by_key: defaultdict[str, list[Any]] = defaultdict(list)
+    for node in previous.nodes:
+        previous_nodes_by_key[node.key].append(node)
+    current_owners: defaultdict[str, list[str]] = defaultdict(list)
+    for node in shard.nodes:
+        for source_id in node.source_segment_ids:
+            current_owners[source_id].append(node.key)
+
+    def has_operational_authority(node: Any) -> bool:
+        return bool(
+            node.participants
+            or node.participant_evidence
+            or node.source_unit_deliveries
+            or node.state_subject_assignments
+            or node.environment_source_unit_keys
+            or node.state_requirements
+            or node.state_changes
+            or node.released_constraints_for
+            or node.decision is not None
+            or node.exit_state.strip()
+        )
+
+    def removable(node: Any) -> bool:
+        if node.source_segment_ids or has_operational_authority(node):
+            return False
+        previous_matches = previous_nodes_by_key.get(node.key, [])
+        if len(previous_matches) != 1:
+            return False
+        lost_sources = previous_matches[0].source_segment_ids
+        return bool(lost_sources) and all(
+            source_id in duplicate_sources_by_node[node.key]
+            and len(current_owners[source_id]) == 1
+            and current_owners[source_id][0] != node.key
+            for source_id in lost_sources
+        )
+
     shard.nodes = [
         node
         for node in shard.nodes
-        if node.source_segment_ids
-        or node.key not in previously_grounded_keys
+        if not removable(node)
     ]
 
 

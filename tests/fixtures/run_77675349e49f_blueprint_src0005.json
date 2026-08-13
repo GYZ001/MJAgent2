@@ -32,5 +32,19 @@
     "SRC0005:unit:028": {"mode": "joint", "identity_keys": ["王有材", "虎头少年", "白净胖少年"]},
     "SRC0005:unit:029": {"mode": "joint", "identity_keys": ["王有材", "虎头少年", "白净胖少年"]},
     "SRC0005:unit:030": {"mode": "joint", "identity_keys": ["王有材", "虎头少年", "白净胖少年"]}
+  },
+  "expected_repair": {
+    "basis": "observed attempt2 remains semantically wrong; apply only the documented authority correction after proving the observed candidate is rejected",
+    "remove_single_claim_unit_keys": [
+      "SRC0005:unit:028",
+      "SRC0005:unit:029",
+      "SRC0005:unit:030"
+    ],
+    "environment_source_unit_keys": ["SRC0005:unit:004"],
+    "joint_assignments": [
+      {"source_unit_key": "SRC0005:unit:028", "mode": "joint", "identity_keys": ["王有材", "虎头少年", "白净胖少年"]},
+      {"source_unit_key": "SRC0005:unit:029", "mode": "joint", "identity_keys": ["王有材", "虎头少年", "白净胖少年"]},
+      {"source_unit_key": "SRC0005:unit:030", "mode": "joint", "identity_keys": ["王有材", "虎头少年", "白净胖少年"]}
+    ]
   }
 }

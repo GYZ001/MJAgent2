@@ -817,11 +817,19 @@ class BlueprintSourceOccurrenceError(ValueError):
         super().__init__("；".join(self.errors))
 
 
-def _blueprint_source_occurrence_errors(
+class BlueprintSourceOccurrenceIssue(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source_segment_id: str
+    node_keys: list[str]
+    error: str
+
+
+def blueprint_source_occurrence_issues(
     nodes: list[NarrativeNode],
     *,
     prefix: str = "BLUEPRINT",
-) -> list[str]:
+) -> list[BlueprintSourceOccurrenceIssue]:
     owners: defaultdict[str, list[str]] = defaultdict(list)
     partitions: defaultdict[str, list[str]] = defaultdict(list)
     for node in nodes:
@@ -829,7 +837,7 @@ def _blueprint_source_occurrence_errors(
         for source_id in node.source_segment_ids:
             owners[source_id].append(node.key)
             partitions[source_id].append(partition)
-    errors: list[str] = []
+    issues: list[BlueprintSourceOccurrenceIssue] = []
     for source_id, node_keys in owners.items():
         if len(node_keys) <= 1:
             continue
@@ -840,11 +848,17 @@ def _blueprint_source_occurrence_errors(
             code = f"{prefix}_AUDIT_SOURCE_DUPLICATE"
         else:
             code = f"{prefix}_PICTURE_SOURCE_DUPLICATE"
-        errors.append(
-            f"[{code}] {source_id} 必须恰由一个 timeline node 拥有，"
-            "实际：" + "、".join(node_keys)
+        issues.append(
+            BlueprintSourceOccurrenceIssue(
+                source_segment_id=source_id,
+                node_keys=node_keys,
+                error=(
+                    f"[{code}] {source_id} 必须恰由一个 timeline node 拥有，"
+                    "实际：" + "、".join(node_keys)
+                ),
+            )
         )
-    return errors
+    return issues
 
 
 class NarrativeBlueprint(BaseModel):
@@ -974,7 +988,8 @@ def validate_narrative_blueprint_shard(
         for source_id in node.source_segment_ids
     ]
     errors.extend(
-        _blueprint_source_occurrence_errors(
+        issue.error
+        for issue in blueprint_source_occurrence_issues(
             shard.nodes,
             prefix="BLUEPRINT_SHARD",
         )
@@ -2982,7 +2997,10 @@ def validate_narrative_blueprint(
             + "、".join(sorted(unknown_source_ids)[:20])
         )
 
-    errors.extend(_blueprint_source_occurrence_errors(blueprint.nodes))
+    errors.extend(
+        issue.error
+        for issue in blueprint_source_occurrence_issues(blueprint.nodes)
+    )
 
     owned_source_ids = {
         source_id

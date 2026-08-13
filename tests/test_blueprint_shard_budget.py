@@ -230,6 +230,17 @@ def _duplicate_repair_candidates() -> tuple[
     )
 
 
+def _duplicate_repair_errors(
+    previous: stages.NarrativeBlueprintShard,
+) -> list[str]:
+    return stages.validate_narrative_blueprint_shard(
+        previous,
+        expected_episode_no=1,
+        expected_shard_index=previous.shard_index,
+        expected_source_segment_ids=previous.source_segment_ids,
+    )
+
+
 def _prompt_source_ids(prompt: str) -> list[str]:
     payload = prompt.split("target_sources=", 1)[1].split("\nschema=", 1)[0]
     return [
@@ -402,61 +413,156 @@ def test_run_77675349_real_src0005_structure_and_classifications() -> None:
 
 
 def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
-    payload = json.loads(_shard_response(
-        source_ids=["SRC0005"],
-        shard_index=5,
-    ))
-    story = payload["nodes"][0]
-    story["key"] = "S005-node_001"
-    story["participants"] = ["许清", "王有材", "虎头少年", "白净胖少年"]
-    story["participant_evidence"] = [{
-        "identity_key": "许清",
-        "source_segment_ids": ["SRC0005"],
-        "source_unit_keys": ["SRC0005:unit:001"],
-        "usage": "state_subject",
-    }]
-    story["state_subject_assignments"] = [{
-        "source_unit_key": "SRC0005:unit:029",
-        "mode": "joint",
-        "identity_keys": ["王有材", "虎头少年", "白净胖少年"],
-    }]
-    payload["nodes"].append({
-        "key": "S005-node_002",
-        "source_segment_ids": [],
-        "summary": "无来源作者附言节点",
-        "narrative_layer": "paratext",
-        "event_priority": "connective",
-        "render_policy": "exclude_from_spine",
-        "temporal_domain_key": "paratext",
-        "time_label": "正文外",
-        "time_relation": "jump",
-        "location_key": "audit",
-        "location_label": "审计卡",
-        "action_logic": "无来源节点不得保留",
-    })
+    replay = json.loads(RUN_77675349_FIXTURE.read_text(encoding="utf-8"))
+    authority_source = "\n\n".join([
+        "前置来源一。",
+        "前置来源二。",
+        "前置来源三。",
+        "前置来源四。",
+        replay["source_text"],
+    ])
 
-    normalized = stages.normalize_blueprint_provider_payload(payload)
-    candidate = stages.NarrativeBlueprintShard.model_validate(normalized)
-    stages._normalize_blueprint_shard_structure(
-        candidate,
-        boundary_context={"active_state_facts": []},
+    def raw_candidate(attempt: dict) -> str:
+        payload = json.loads(_shard_response(
+            source_ids=["SRC0005"],
+            shard_index=5,
+        ))
+        story = payload["nodes"][0]
+        story["key"] = "S005-node_001"
+        story["participant_evidence"] = []
+        story["state_subject_assignments"] = []
+        story["environment_source_unit_keys"] = []
+        for unit_key, classification in attempt["classifications"].items():
+            if classification["mode"] == "multiple_single":
+                story["participant_evidence"].extend({
+                    "identity_key": identity_key,
+                    "source_segment_ids": ["SRC0005"],
+                    "source_unit_keys": [unit_key],
+                    "usage": "state_subject",
+                } for identity_key in classification["identity_keys"])
+            elif classification["mode"] == "joint":
+                story["state_subject_assignments"].append({
+                    "source_unit_key": unit_key,
+                    "mode": "joint",
+                    "identity_keys": classification["identity_keys"],
+                })
+            elif classification["mode"] == "environment":
+                story["environment_source_unit_keys"].append(unit_key)
+        story["participants"] = list(dict.fromkeys(
+            evidence["identity_key"]
+            for evidence in story["participant_evidence"]
+        ))
+        payload["nodes"].append({
+            "key": "S005-node_002",
+            "source_segment_ids": attempt["node_source_ids"][1],
+            "summary": "作者附言",
+            "narrative_layer": "paratext",
+            "event_priority": "connective",
+            "render_policy": "exclude_from_spine",
+            "temporal_domain_key": "paratext",
+            "time_label": "正文外",
+            "time_relation": "jump",
+            "location_key": "audit",
+            "location_label": "审计卡",
+            "action_logic": "作者附言不得进入剧情权威",
+        })
+        return json.dumps(payload, ensure_ascii=False)
+
+    candidates = []
+    errors: list[str] = []
+    previous_candidate = None
+    for attempt_no, attempt in enumerate(replay["attempts"], start=1):
+        provider_payload = stages.extract_json(raw_candidate(attempt))
+        candidate = stages.NarrativeBlueprintShard.model_validate(
+            stages.normalize_blueprint_provider_payload(provider_payload)
+        )
+        stages._normalize_blueprint_shard_structure(
+            candidate,
+            boundary_context={"active_state_facts": []},
+            attempt=attempt_no,
+            previous_candidate=previous_candidate,
+            previous_validation_errors=errors,
+        )
+        if previous_candidate is not None:
+            stages._freeze_unreported_state_subject_ownership(
+                candidate,
+                previous_candidate=previous_candidate,
+                validation_errors=errors,
+            )
+        previous_candidate = candidate.model_dump(mode="json")
+        errors = stages.validate_narrative_blueprint_shard(
+            candidate,
+            expected_episode_no=1,
+            expected_shard_index=5,
+            expected_source_segment_ids=["SRC0005"],
+            source_text=authority_source,
+        )
+        candidates.append(candidate)
+
+    observed = candidates[1]
+    observed_errors = errors
+    assert [node.key for node in observed.nodes] == ["S005-node_001"]
+    assert observed_errors
+    assert any("BLUEPRINT_SHARD_STATE_SUBJECT" in error for error in observed_errors)
+
+    expected_payload = observed.model_dump(mode="json")
+    expected_node = expected_payload["nodes"][0]
+    remove_single = set(
+        replay["expected_repair"]["remove_single_claim_unit_keys"]
     )
-
-    assert [node.key for node in candidate.nodes] == ["S005-node_001"]
-    assert candidate.nodes[0].participants == [
-        "许清",
-        "王有材",
-        "虎头少年",
-        "白净胖少年",
-    ]
-    errors = stages.validate_narrative_blueprint_shard(
-        candidate,
+    retained_evidence = []
+    for evidence in expected_node["participant_evidence"]:
+        if evidence["usage"] == "state_subject":
+            evidence["source_unit_keys"] = [
+                unit_key
+                for unit_key in evidence["source_unit_keys"]
+                if unit_key not in remove_single
+            ]
+            if not evidence["source_unit_keys"]:
+                continue
+        retained_evidence.append(evidence)
+    expected_node["participant_evidence"] = retained_evidence
+    expected_node["environment_source_unit_keys"] = replay[
+        "expected_repair"
+    ]["environment_source_unit_keys"]
+    expected_node["state_subject_assignments"] = replay[
+        "expected_repair"
+    ]["joint_assignments"]
+    expected_node["participants"] = list(dict.fromkeys(
+        [
+            evidence["identity_key"]
+            for evidence in retained_evidence
+            if evidence["identity_key"]
+        ] + [
+            identity_key
+            for assignment in expected_node["state_subject_assignments"]
+            for identity_key in assignment["identity_keys"]
+        ]
+    ))
+    expected = stages.NarrativeBlueprintShard.model_validate(expected_payload)
+    expected_errors = stages.validate_narrative_blueprint_shard(
+        expected,
         expected_episode_no=1,
         expected_shard_index=5,
         expected_source_segment_ids=["SRC0005"],
     )
-    assert not any("NODE_SIZE" in error for error in errors)
-    assert not any("PARTICIPANT_EVIDENCE" in error for error in errors)
+    assignments = {
+        assignment.source_unit_key: {
+            "mode": assignment.mode,
+            "identity_keys": assignment.identity_keys,
+        }
+        for assignment in expected.nodes[0].state_subject_assignments
+    }
+    actual_classifications = {
+        "SRC0005:unit:004": {
+            "mode": "environment",
+            "identity_keys": [],
+        },
+        **assignments,
+    }
+
+    assert actual_classifications == replay["expected_classifications"]
+    assert expected_errors == []
 
 
 def test_initial_candidate_keeps_ungrounded_node_for_typed_gate() -> None:
@@ -483,25 +589,16 @@ def test_initial_candidate_keeps_ungrounded_node_for_typed_gate() -> None:
     assert any("NODE_UNGROUNDED" in error for error in errors)
 
 
-@pytest.mark.parametrize(
-    "duplicate_error",
-    [
-        "[BLUEPRINT_SHARD_PICTURE_SOURCE_DUPLICATE] SRC0001 duplicated",
-        "[BLUEPRINT_SHARD_AUDIT_SOURCE_DUPLICATE] SRC0001 duplicated",
-        "[BLUEPRINT_SHARD_SOURCE_PARTITION_CONFLICT] SRC0001 duplicated",
-    ],
-)
-def test_duplicate_repair_removes_only_newly_ungrounded_node(
-    duplicate_error: str,
-) -> None:
+def test_duplicate_repair_removes_only_newly_ungrounded_node() -> None:
     previous, candidate = _duplicate_repair_candidates()
+    previous_errors = _duplicate_repair_errors(previous)
 
     stages._normalize_blueprint_shard_structure(
         candidate,
         boundary_context={"active_state_facts": []},
         attempt=2,
         previous_candidate=previous.model_dump(mode="json"),
-        previous_validation_errors=[duplicate_error],
+        previous_validation_errors=previous_errors,
     )
 
     assert [node.key for node in candidate.nodes] == ["N001"]
@@ -510,6 +607,31 @@ def test_duplicate_repair_removes_only_newly_ungrounded_node(
         for node in candidate.nodes
         for source_id in node.source_segment_ids
     ] == ["SRC0001"]
+
+
+def test_duplicate_repair_keeps_orphan_with_operational_authority() -> None:
+    previous, candidate = _duplicate_repair_candidates()
+    candidate.nodes[1].participants = ["仍有执行权威的角色"]
+
+    stages._normalize_blueprint_shard_structure(
+        candidate,
+        boundary_context={"active_state_facts": []},
+        attempt=2,
+        previous_candidate=previous.model_dump(mode="json"),
+        previous_validation_errors=_duplicate_repair_errors(previous),
+    )
+
+    assert [node.key for node in candidate.nodes] == ["N001", "N002"]
+    errors = stages.validate_narrative_blueprint_shard(
+        candidate,
+        expected_episode_no=1,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+    )
+    assert any(
+        "NODE_UNGROUNDED" in error and "N002" in error
+        for error in errors
+    )
 
 
 def test_non_duplicate_repair_keeps_newly_ungrounded_node() -> None:
