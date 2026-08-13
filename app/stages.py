@@ -5567,6 +5567,7 @@ class _BlueprintGenerationBudget:
         episode_id: str = "",
         input_fingerprint: str = "",
         retry_grant_id: str = "",
+        include_resolved_by_call_id: int | None = None,
     ) -> "_BlueprintGenerationBudget":
         budget = cls()
         if started_at_epoch is not None:
@@ -5633,11 +5634,20 @@ class _BlueprintGenerationBudget:
             durable_grant_id = durable_grant_id or str(
                 meta.get("production_grant_id") or ""
             )
+            try:
+                superseded_by_call_id = row["superseded_by_call_id"]
+            except (KeyError, IndexError):
+                superseded_by_call_id = None
+            resolved_by_expected = bool(
+                include_resolved_by_call_id
+                and int(superseded_by_call_id or 0)
+                == int(include_resolved_by_call_id)
+            )
             if (
                 not durable_grant_id
                 and episode_id
                 and durable_call_at > 0
-                and not str(row["superseded_by_call_id"] or "")
+                and (not superseded_by_call_id or resolved_by_expected)
             ):
                 # One narrow migration bridge for pre-column calls: a run's
                 # BASELINE_GENERATION_STARTED event names the exact revision.
@@ -5670,14 +5680,10 @@ class _BlueprintGenerationBudget:
             )
             status = str(row["status"] or "").upper()
             stage_key = str(meta.get("stage_key") or "")
-            try:
-                superseded_by_call_id = row["superseded_by_call_id"]
-            except (KeyError, IndexError):
-                superseded_by_call_id = None
             if (
                 stage_key
                 and status in {"INTERRUPTED", "RUNNING"}
-                and not superseded_by_call_id
+                and (not superseded_by_call_id or resolved_by_expected)
             ):
                 try:
                     durable_call_id = int(row["id"])
@@ -5711,7 +5717,7 @@ class _BlueprintGenerationBudget:
                 if (
                     disposition not in {"not_sent", "definitely_not_sent"}
                     and delivery_state not in {"not_sent", "definitely_not_sent"}
-                    and not superseded_by_call_id
+                    and (not superseded_by_call_id or resolved_by_expected)
                 ):
                     # A fresh retry activation inherits unresolved paid/unknown
                     # liability, but not the elapsed wall clock of a dead
@@ -6978,11 +6984,34 @@ def _commit_blueprint_authority_checkpoint(
             (operation_id,),
         ).fetchone()
         resolution_id = int(resolution["id"]) if resolution is not None else 0
+        # Reconstruct the authority receipts with the same durable resolver
+        # used by preflight/runtime.  Old provider rows may have lossy meta,
+        # NULL request hashes, and no durable grant column; the resolver's
+        # narrow BASELINE-event bridge is the only authority allowed to infer
+        # those legacy fields.  On crash replay, include receipts already
+        # terminalized by this exact deterministic resolution.
+        durable_budget = _BlueprintGenerationBudget.from_durable_calls(
+            run_id=run_id,
+            episode_id=episode_id,
+            input_fingerprint=str(run["input_fingerprint"] or ""),
+            retry_grant_id=grant_id,
+            include_resolved_by_call_id=(resolution_id or None),
+        )
+        canonical_receipts = durable_budget.unknown_receipts
+        if (
+            canonical_receipts != receipts
+            or blueprint_retry_receipts_hash(canonical_receipts) != pinned_hash
+        ):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_RESOLUTION_RECEIPTS_DRIFT] durable retry receipts漂移"],
+            )
         placeholders = ",".join("?" for _ in exact_ids)
         rows = conn.execute(
             f"""SELECT pc.id,pc.status,pc.superseded_by_call_id,
                        pc.recovery_disposition,pc.operation_id,
-                       pc.request_hash,pc.meta,wr.input_fingerprint
+                       pc.request_hash,pc.production_grant_id,pc.meta,
+                       wr.input_fingerprint
                   FROM provider_calls pc
                   JOIN workflow_runs wr ON wr.id=pc.run_id
                  WHERE pc.id IN ({placeholders})
@@ -7045,6 +7074,42 @@ def _commit_blueprint_authority_checkpoint(
                 ),
             )
             resolution_id = int(cursor.lastrowid)
+        else:
+            resolution_row = conn.execute(
+                """SELECT status,run_id,production_grant_id,response_json,
+                          contract_version,recovery_disposition
+                     FROM provider_calls WHERE id=?""",
+                (resolution_id,),
+            ).fetchone()
+            resolution_response: dict[str, Any] = {}
+            if resolution_row is not None:
+                try:
+                    resolution_response = json.loads(
+                        resolution_row["response_json"] or "{}"
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            if (
+                resolution_row is None
+                or str(resolution_row["status"] or "") != "OK"
+                or str(resolution_row["run_id"] or "") != run_id
+                or str(resolution_row["production_grant_id"] or "")
+                != grant_id
+                or str(resolution_row["contract_version"] or "")
+                != BLUEPRINT_VERSION
+                or str(resolution_row["recovery_disposition"] or "")
+                != "VALIDATED_BLUEPRINT_AUTHORITY"
+                or str(resolution_response.get("artifact_id") or "")
+                != blueprint_artifact_id
+                or str(resolution_response.get("artifact_hash") or "")
+                != artifact_hash
+                or str(resolution_response.get("receipts_hash") or "")
+                != pinned_hash
+            ):
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    ["[BLUEPRINT_RESOLUTION_RECEIPT_INVALID] resolution receipt漂移"],
+                )
         for call_id in exact_ids:
             cursor = conn.execute(
                 "UPDATE provider_calls SET superseded_by_call_id=?,"

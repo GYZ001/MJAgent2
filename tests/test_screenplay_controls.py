@@ -1509,6 +1509,229 @@ def test_retry_grant_consumption_cas_failure_rolls_back_grant_snapshot_and_owner
     ).fetchone()["active_screenplay_run_id"] is None
 
 
+def test_validated_blueprint_resolution_is_exact_late_safe_and_idempotent() -> None:
+    from app.production.grant import issue_production_grant
+    from app.stages import blueprint_retry_receipts_hash
+
+    conn = db.get_conn()
+    source_text = "林舟推门。"
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章',?,?)",
+        (source_text, len(source_text)),
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+    projection = api._screenplay_blueprint_budget_projection("e1")
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint=projection["input_fingerprint"],
+        resume=False,
+    )
+    old_grant, _ = issue_production_grant(
+        episode_id="e1",
+        project_id="p1",
+        production_revision_id=revision.id,
+        kind="screenplay",
+    )
+    old_run = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint=projection["input_fingerprint"],
+    )
+    conn.execute("UPDATE workflow_runs SET status='FAILED' WHERE id=?", (old_run,))
+    repository.append_event(
+        old_run,
+        "BASELINE_GENERATION_STARTED",
+        "info",
+        "legacy baseline",
+        payload={"revision_id": revision.id},
+    )
+    old_meta = {
+        "_truncated": True,
+        "stage_key": "screenplay_blueprint_patch",
+        "requested_max_tokens": 16384,
+        "effective_max_tokens": 8192,
+    }
+    cursor = conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition,request_hash,production_grant_id
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL)""",
+        (
+            db.now(), "chat", "model", "INTERRUPTED", 300000,
+            json.dumps(old_meta), old_run, "old-unknown", 1,
+            "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    old_call_id = int(cursor.lastrowid)
+    conn.commit()
+    receipts = api._screenplay_blueprint_budget_projection("e1")[
+        "unknown_receipts"
+    ]
+    assert [item["call_id"] for item in receipts] == [old_call_id]
+    assert receipts[0]["request_hash"] == ""
+    assert receipts[0]["prior_grant_id"] == old_grant.grant_id
+    receipts_hash = blueprint_retry_receipts_hash(receipts)
+    retry_grant, _ = issue_production_grant(
+        episode_id="e1",
+        project_id="p1",
+        production_revision_id=revision.id,
+        kind="screenplay",
+        issued_by="user_retry_approval",
+        input_artifact_hash=receipts_hash,
+    )
+    run_id = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint=projection["input_fingerprint"],
+        config_snapshot={
+            "blueprint_budget_lineage_fingerprint": projection[
+                "input_fingerprint"
+            ],
+            "blueprint_retry_grant_id": retry_grant.grant_id,
+            "blueprint_retry_receipts_hash": receipts_hash,
+            "blueprint_retry_receipts": receipts,
+        },
+    )
+    stamp = db.now()
+    conn.execute(
+        "UPDATE production_grants SET consumed_at=? WHERE id=?",
+        (stamp, retry_grant.grant_id),
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='RUNNING' WHERE id=?",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE episodes SET active_screenplay_run_id=?,screenplay_status='running' "
+        "WHERE id='e1'",
+        (run_id,),
+    )
+    blueprint = NarrativeBlueprint(episode_no=1, nodes=[])
+    artifact = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=blueprint.model_dump(mode="json"),
+        contract_version=BLUEPRINT_VERSION,
+        prompt_version=BLUEPRINT_PROMPT_VERSION,
+        model_snapshot=stages._current_blueprint_authority_snapshot(
+            source_text,
+            generation_mode="semantic_reviewed",
+        ),
+    ))
+    history_before = conn.execute(
+        "SELECT request_json,response_json,meta FROM provider_calls WHERE id=?",
+        (old_call_id,),
+    ).fetchone()
+
+    with bind_trace(run_id, None):
+        stages._commit_blueprint_authority_checkpoint(
+            episode_id="e1",
+            blueprint_artifact_id=str(artifact["id"]),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            source_text=source_text,
+        )
+        # Crash-after-commit replay is exact and creates no second resolution.
+        stages._commit_blueprint_authority_checkpoint(
+            episode_id="e1",
+            blueprint_artifact_id=str(artifact["id"]),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            source_text=source_text,
+        )
+
+    resolutions = conn.execute(
+        "SELECT id FROM provider_calls "
+        "WHERE kind='blueprint_authority_resolution'"
+    ).fetchall()
+    assert len(resolutions) == 1
+    assert conn.execute(
+        "SELECT recovery_disposition FROM provider_calls WHERE id=?",
+        (old_call_id,),
+    ).fetchone()["recovery_disposition"] == (
+        "SUPERSEDED_BY_VALIDATED_BLUEPRINT_REBUILD"
+    )
+    history_after = conn.execute(
+        "SELECT request_json,response_json,meta FROM provider_calls WHERE id=?",
+        (old_call_id,),
+    ).fetchone()
+    assert tuple(history_after) == tuple(history_before)
+    checkpoint = json.loads(conn.execute(
+        "SELECT checkpoint_json FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["checkpoint_json"])
+    assert checkpoint["blueprint_artifact_id"] == artifact["id"]
+
+    resolution_id = int(resolutions[0]["id"])
+    # A foreign resolution cannot be silently adopted on a later recovery.
+    foreign = conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,run_id,operation_id,attempt_no
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (stamp, "audit", "deterministic", "OK", 0, run_id, "foreign", 1),
+    )
+    conn.execute(
+        "UPDATE provider_calls SET superseded_by_call_id=? WHERE id=?",
+        (int(foreign.lastrowid), old_call_id),
+    )
+    conn.commit()
+    with bind_trace(run_id, None), pytest.raises(
+        stages.StageError,
+        match="RECEIPTS_DRIFT|RECEIPT_CAS",
+    ):
+        stages._commit_blueprint_authority_checkpoint(
+            episode_id="e1",
+            blueprint_artifact_id=str(artifact["id"]),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            source_text=source_text,
+        )
+    conn.execute(
+        "UPDATE provider_calls SET superseded_by_call_id=?,"
+        "recovery_disposition='SUPERSEDED_BY_VALIDATED_BLUEPRINT_REBUILD' "
+        "WHERE id=?",
+        (resolution_id, old_call_id),
+    )
+    # A later unknown was never part of the approved receipt snapshot.  It is
+    # neither terminalized nor allowed to broaden the old approval.
+    late_cursor = conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition,request_hash,production_grant_id
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            stamp, "chat", "model", "INTERRUPTED", 1,
+            json.dumps({**old_meta, "stage_key": "screenplay_blueprint_review"}),
+            run_id, "late-unknown", 1, "REQUIRES_EXPLICIT_RETRY",
+            "hash-late", retry_grant.grant_id,
+        ),
+    )
+    late_call_id = int(late_cursor.lastrowid)
+    conn.commit()
+    with bind_trace(run_id, None), pytest.raises(
+        stages.StageError,
+        match="RECEIPTS_DRIFT",
+    ):
+        stages._commit_blueprint_authority_checkpoint(
+            episode_id="e1",
+            blueprint_artifact_id=str(artifact["id"]),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            source_text=source_text,
+        )
+    late = conn.execute(
+        "SELECT superseded_by_call_id,recovery_disposition "
+        "FROM provider_calls WHERE id=?",
+        (late_call_id,),
+    ).fetchone()
+    assert late["superseded_by_call_id"] is None
+    assert late["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
+
+
 @pytest.mark.asyncio
 async def test_unknown_receipt_appearing_after_unconfirmed_preflight_cannot_mint_grant(
     monkeypatch: pytest.MonkeyPatch,
