@@ -191,10 +191,11 @@ def _json_candidates(value: str) -> list[dict[str, Any]]:
     return [payload for _end, payload in sorted(candidates, key=lambda item: item[0], reverse=True)]
 
 
-def _first_json_recovery_root(value: str) -> str | None:
-    """Return the first object-like substring proven not to be a child."""
+def _latest_json_recovery_root(value: str) -> str | None:
+    """Return the latest object-like substring proven not to be a child."""
     text = str(value or "").strip()
     decoder = json.JSONDecoder()
+    latest_root: str | None = None
     for index, char in enumerate(text):
         if char != "{":
             continue
@@ -208,8 +209,8 @@ def _first_json_recovery_root(value: str) -> str | None:
         else:
             end = index + candidate_size
         if not _is_nested_json_candidate(text, index, end):
-            return text[index:]
-    return None
+            latest_root = text[index:]
+    return latest_root
 
 
 def _model_schema(model_type: Any) -> dict[str, Any]:
@@ -560,9 +561,9 @@ async def chat_structured(
             )
             break
         # Preserve independent trailing-object priority, then conservatively
-        # repair the original root when no complete root satisfies the model.
+        # repair the latest eligible root when no complete root satisfies the model.
         if parsed is None:
-            recovery_root = _first_json_recovery_root(last_raw)
+            recovery_root = _latest_json_recovery_root(last_raw)
             recovered = None
             if recovery_root is not None:
                 try:

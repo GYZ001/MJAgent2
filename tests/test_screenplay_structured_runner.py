@@ -248,6 +248,60 @@ def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
     assert attempts[0]["local_recovery"] is True
 
 
+def test_structured_runner_repairs_latest_eligible_review_root(
+    monkeypatch,
+) -> None:
+    calls = 0
+    attempts: list[dict] = []
+    raw = """{"legacy_issues":[]}
+以上是旧草稿，以下是最新修正版。
+{"issues":[
+    {
+        "code":"state_subject_assignment_conflict",
+        "node_keys":["S005-E01-S05-N001"],
+        "message":"joint主体与原文冲突",
+        "required_resolution":"修正为["孟浩","王有材"]并保持其余字段"
+    },
+    {
+        "code":"timeline_conflict",
+        "node_keys":["S004-N001"],
+        "message":"时间顺序冲突",
+        "required_resolution":"恢复原文顺序"
+    }
+]}"""
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return raw
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "review current blueprint"}],
+        model_type=BlueprintSemanticReview,
+        validate=None,
+        operation_id="test.latest-review-root:v1:production-29805-redacted",
+        max_tokens=8192,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+        on_attempt=attempts.append,
+    ))
+
+    assert [issue.code for issue in result.issues] == [
+        "state_subject_assignment_conflict",
+        "timeline_conflict",
+    ]
+    assert result.issues[0].required_resolution == (
+        '修正为["孟浩","王有材"]并保持其余字段'
+    )
+    assert calls == 1
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "validated"
+    assert attempts[0]["format_attempt"] == 0
+    assert attempts[0]["local_recovery"] is True
+
+
 def test_structured_runner_does_not_accept_nested_candidate_as_root(
     monkeypatch,
 ) -> None:
