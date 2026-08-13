@@ -54,6 +54,35 @@ def test_extract_json_can_repair_unescaped_quotes_for_screenplay_only() -> None:
     assert obj["turn"]["source_text"] == "这个“天才”仍在原地"
 
 
+def test_extract_json_repairs_bare_string_array_inside_string() -> None:
+    # Production 29805 shape, with run-specific content and identifiers redacted.
+    text = '''{"issues":[
+    {
+        "code":"state_subject_assignment_conflict",
+        "node_keys":["S005-E01-S05-N001"],
+        "message":"joint主体与原文冲突",
+        "required_resolution":"修正为["孟浩","王有材"]并保持其余字段"
+    },
+    {
+        "code":"timeline_conflict",
+        "node_keys":["S004-N001"],
+        "message":"时间顺序冲突",
+        "required_resolution":"恢复原文顺序"
+    }
+]}'''
+
+    with pytest.raises(ValueError, match="JSON 解析失败"):
+        extract_json(text)
+
+    obj = extract_json(text, repair_unescaped_inner_quotes=True)
+
+    assert len(obj["issues"]) == 2
+    assert obj["issues"][0]["required_resolution"] == (
+        '修正为["孟浩","王有材"]并保持其余字段'
+    )
+    assert obj["issues"][1]["code"] == "timeline_conflict"
+
+
 def test_inner_quote_repair_does_not_hide_json_structure_errors() -> None:
     text = '{"episode_no": 1, "title": "第一集" "logline": "缺少逗号"}'
     with pytest.raises(ValueError, match="JSON 解析失败"):
