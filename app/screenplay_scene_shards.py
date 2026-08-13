@@ -519,10 +519,36 @@ def _scene_shard_semantic_review_compatibility(
         return False, "semantic_review_final_candidate"
     if phases[-1].get("consensus") != []:
         return False, "semantic_review_not_clean"
+    artifact_content = _artifact_content(artifact)
+    try:
+        validated_shard = ScreenplaySceneShardIR.model_validate(
+            artifact_content
+        )
+    except (TypeError, ValidationError):
+        return False, "semantic_review_artifact_schema"
+    valid_unit_keys = {
+        unit.unit_key
+        for scene in validated_shard.scenes
+        for unit in scene.units
+    }
+    validated_reviews: list[ScreenplaySceneShardSemanticReview] = []
     for phase in phases:
         reviews = phase.get("reviews") if isinstance(phase, dict) else None
         if not isinstance(reviews, list) or len(reviews) != 2:
             return False, "semantic_review_artifacts_missing"
+        for review in reviews:
+            try:
+                validated_reviews.append(
+                    ScreenplaySceneShardSemanticReview.model_validate(review)
+                )
+            except ValidationError:
+                return False, "semantic_review_schema"
+    if any(
+        finding.unit_key not in valid_unit_keys
+        for review in validated_reviews
+        for finding in review.findings
+    ):
+        return False, "semantic_review_unit_key"
     return True, ""
 
 
@@ -3505,6 +3531,22 @@ async def _semantic_review_scene_shard_draft(
         scene_input_contracts=scene_input_contracts,
         identity_registry=identity_registry,
     )
+    findings_payload = [
+        item.model_dump(mode="json")
+        for item in findings
+    ]
+    original_draft_payload = draft.model_dump(mode="json")
+    repair_context = json.dumps(
+        {
+            "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+            "consensus_findings": findings_payload,
+            "frozen_slots": frozen_slots,
+            "identity_authority": identity_labels,
+            "original_draft": original_draft_payload,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     repair_prompt = (
         "只修复下列 consensus finding 对应 slot 的 creative fields：text、"
         "performance、resulting_state、function、required_text、prop_text、"
@@ -3512,7 +3554,7 @@ async def _semantic_review_scene_shard_draft(
         "不得增加删除 slot，不得输出或改变任何结构、身份、timeline、source ownership"
         "或 audit 字段。返回完整 creative root。\nfindings：\n"
         + json.dumps(
-            [item.model_dump(mode="json") for item in findings],
+            findings_payload,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -3555,6 +3597,7 @@ async def _semantic_review_scene_shard_draft(
             "shard_id": shard_id,
             "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
         },
+        repair_context=repair_context,
         output_schema=creative_schema,
     )
     if set(repaired.slots) != set(draft.slots):
