@@ -73,6 +73,13 @@ def test_optional_provider_media_public_base_url_schema_and_health(monkeypatch) 
 def test_nonempty_provider_media_public_base_url_uses_public_url_validator(
     monkeypatch,
 ) -> None:
+    with pytest.raises(HTTPException) as private_url:
+        monitoring.normalize_setting(
+            "provider_media_public_base_url",
+            "http://127.0.0.1/project-media",
+        )
+    assert private_url.value.status_code == 422
+
     checked: list[str] = []
     monkeypatch.setattr(
         system_api,
