@@ -370,24 +370,6 @@ async def chat_structured(
                 })
             raise StructuredProviderRejection(message)
         candidates = _json_candidates(last_raw)
-        # Reuse the repository's conservative JSON repair for provider output
-        # that is structurally complete but contains an unescaped quote/newline
-        # inside a declared string field.  This is a local format recovery, so it
-        # does not consume either the provider transport budget or the semantic
-        # correction budget.
-        if not candidates:
-            try:
-                from app.schemas import extract_json
-
-                recovered = extract_json(
-                    last_raw,
-                    repair_unescaped_inner_quotes=True,
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                recovered = None
-            if isinstance(recovered, dict):
-                candidates = [recovered]
-                local_recovery = True
         parsed: T | None = None
         parse_error: Exception | None = None
         repair_payload: dict[str, Any] | None = None
@@ -421,6 +403,39 @@ async def chat_structured(
                 or direct_payload != candidate_payload
             )
             break
+        # A malformed root may still expose valid nested object candidates.
+        # Preserve trailing-object priority, then repair the root only when no
+        # complete candidate can satisfy the requested model.
+        if parsed is None:
+            try:
+                from app.schemas import extract_json
+
+                recovered = extract_json(
+                    last_raw,
+                    repair_unescaped_inner_quotes=True,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                recovered = None
+            if (
+                isinstance(recovered, dict)
+                and all(recovered != payload for payload in candidates)
+            ):
+                recovered_payload = (
+                    normalize_payload(recovered)
+                    if normalize_payload is not None
+                    else recovered
+                )
+                try:
+                    parsed = _coerce_structured(
+                        model_type,
+                        recovered_payload,
+                    )
+                except (TypeError, ValueError, ValidationError) as exc:
+                    if parse_error is None:
+                        parse_error = exc
+                        repair_payload = recovered_payload
+                else:
+                    local_recovery = True
         if parsed is None:
             if on_attempt is not None:
                 on_attempt({

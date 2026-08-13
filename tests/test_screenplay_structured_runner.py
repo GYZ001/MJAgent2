@@ -5,7 +5,9 @@ import asyncio
 import pytest
 from pydantic import BaseModel, Field
 
+from app import schemas
 from app.harness import model_gateway
+from app.narrative_blueprint import BlueprintSemanticReview
 
 
 class _Payload(BaseModel):
@@ -29,7 +31,11 @@ def test_structured_runner_recovers_complete_trailing_json(monkeypatch) -> None:
         calls += 1
         return '草稿 {"value":\n最终 {"value":7}'
 
+    def unexpected_root_repair(*_args, **_kwargs):
+        raise AssertionError("valid trailing object must win before root repair")
+
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
     result = asyncio.run(model_gateway.chat_structured(
         [{"role": "user", "content": "return json"}],
         model_type=_Payload,
@@ -41,6 +47,93 @@ def test_structured_runner_recovers_complete_trailing_json(monkeypatch) -> None:
     assert result.value == 7
     assert calls == 1
     assert attempts[0]["outcome"] == "validated"
+    assert attempts[0]["local_recovery"] is True
+
+
+def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
+    monkeypatch,
+) -> None:
+    calls = 0
+    repair_calls = 0
+    attempts: list[dict] = []
+    raw = """{"issues":[
+    {
+        "code":"state_subject_assignment_conflict",
+        "node_keys":["S005-E01-S05-N001"],
+        "message":"joint主体与原文冲突",
+        "required_resolution":"修正为["孟浩","王有材"]并保持其余字段"
+    },
+    {
+        "code":"timeline_conflict",
+        "node_keys":["S004-N001"],
+        "message":"时间顺序冲突",
+        "required_resolution":"恢复原文顺序"
+    }
+],"transport_note":"sample1"}"""
+    recovered = {
+        "issues": [
+            {
+                "code": "state_subject_assignment_conflict",
+                "node_keys": ["S005-E01-S05-N001"],
+                "message": "joint主体与原文冲突",
+                "required_resolution": '修正为["孟浩","王有材"]并保持其余字段',
+            },
+            {
+                "code": "timeline_conflict",
+                "node_keys": ["S004-N001"],
+                "message": "时间顺序冲突",
+                "required_resolution": "恢复原文顺序",
+            },
+        ],
+        "transport_note": "sample1",
+    }
+
+    nested_candidates = model_gateway._json_candidates(raw)
+    assert nested_candidates
+    assert all("issues" not in candidate for candidate in nested_candidates)
+
+    async def fake_chat(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return raw
+
+    def fake_extract_json(value, *, repair_unescaped_inner_quotes=False):
+        nonlocal repair_calls
+        repair_calls += 1
+        assert value == raw
+        assert repair_unescaped_inner_quotes is True
+        return recovered
+
+    def normalize(payload):
+        normalized = dict(payload)
+        normalized.pop("transport_note", None)
+        return normalized
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", fake_extract_json)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "review current blueprint"}],
+        model_type=BlueprintSemanticReview,
+        validate=None,
+        operation_id="test.review-root-recovery:v1:sample1",
+        max_tokens=8192,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+        normalize_payload=normalize,
+        on_attempt=attempts.append,
+    ))
+
+    assert isinstance(result, BlueprintSemanticReview)
+    assert result.issues[0].required_resolution == (
+        '修正为["孟浩","王有材"]并保持其余字段'
+    )
+    assert calls == 1
+    assert repair_calls == 1
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "validated"
+    assert attempts[0]["format_attempt"] == 0
+    assert attempts[0]["semantic_attempt"] == 0
     assert attempts[0]["local_recovery"] is True
 
 
