@@ -60,6 +60,7 @@ def _two_phase_action_story() -> tuple[object, Storyboard]:
             action_id="ACT-RELATION",
             actor_ids=["character-1"],
             target_ids=["entity-1"],
+            participant_deliveries=[],
             semantic_intent="Change the target through one ordered execution.",
             precondition_fact_ids=["F-before"],
             effects_add=["F-after"],
@@ -294,6 +295,7 @@ def _equivalent_action_story() -> object:
     common = {
         "actor_ids": ["character-1"],
         "target_ids": ["entity-1"],
+        "participant_deliveries": [],
         "semantic_intent": "Create the same observable relation.",
         "completion_condition": "The same observable relation is established.",
         "decision_requirement": "not_applicable",
@@ -689,6 +691,7 @@ def test_character_resolution_atomically_rewrites_the_narrative_graph() -> None:
             action_id="ACT-IDENTITY",
             actor_ids=[source_id],
             target_ids=["entity-1"],
+            participant_deliveries=[],
             semantic_intent=f"{source_id} performs the resolved relation.",
             completion_condition=f"{source_id} is visible in the result.",
             decision_requirement="not_applicable",

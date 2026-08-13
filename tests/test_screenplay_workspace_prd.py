@@ -882,6 +882,7 @@ def _legacy_screenplay_payload() -> dict:
         action_id="A-legacy",
         actor_ids=["character-1"],
         target_ids=["entity-1"],
+        participant_deliveries=[],
         semantic_intent="Change the observable state.",
         completion_condition="The changed state is visible.",
     )]

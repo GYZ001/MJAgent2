@@ -49,6 +49,7 @@ def _plan(*, phase_durations: list[float]) -> NarrativeContinuityPlan:
                 action_id="ACT-QUORVEX",
                 actor_ids=["entity-performer"],
                 target_ids=["entity-target"],
+                participant_deliveries=[],
                 semantic_intent="Reconfigure the target into the intended observable state.",
                 precondition_fact_ids=["FACT-BEFORE"],
                 effects_add=["FACT-AFTER"],

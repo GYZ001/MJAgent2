@@ -533,6 +533,7 @@ def test_atomic_action_actor_requires_character_without_state_or_pov() -> None:
         "atomic_actions": [{
             "action_id": "A-1",
             "actor_ids": ["person-menghao"],
+                "participant_deliveries": [],
             "semantic_intent": "孟浩抬头看向远山",
             "completion_condition": "孟浩的视线停在远山",
         }],

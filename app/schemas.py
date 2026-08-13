@@ -500,9 +500,7 @@ class AtomicAction(BaseModel):
     required_text: str = ""
     prop_text: str = ""
     on_screen_text: str = ""
-    participant_deliveries: list[ActionParticipantDelivery] = Field(
-        default_factory=list
-    )
+    participant_deliveries: list[ActionParticipantDelivery]
     semantic_intent: str
     precondition_fact_ids: list[str] = Field(default_factory=list)
     effects_add: list[str] = Field(default_factory=list)

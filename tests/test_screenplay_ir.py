@@ -75,6 +75,11 @@ MERGED_IR_ARTIFACT_FIXTURE = (
     / "fixtures"
     / "screenplay_generation_ir_merged_art_949de359c598.json"
 )
+ERR_36A2C4_ARTIFACT_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "screenplay_document_err_20260813_36a2c4.json"
+)
 
 
 def _bible() -> Bible:
@@ -961,6 +966,14 @@ def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
     assert offscreen_action.actor_ids
     assert offscreen_event.onscreen_entity_ids == ["bible:谷言"]
     assert offscreen_action.participant_deliveries[0].audible is True
+    serialized_actions = screenplay.model_dump(mode="json")[
+        "narrative_plan"
+    ]["atomic_actions"]
+    assert all(
+        "participant_deliveries" in action
+        for action in serialized_actions
+    )
+    assert serialized_actions[-1]["participant_deliveries"][0]["audible"] is True
 
 
 def test_atomic_action_missing_agency_derives_from_owned_relations() -> None:
@@ -968,6 +981,7 @@ def test_atomic_action_missing_agency_derives_from_owned_relations() -> None:
         "action_id": "A-environment",
         "actor_ids": [],
         "target_ids": [],
+        "participant_deliveries": [],
         "semantic_intent": "环境状态发生变化",
         "completion_condition": "变化已可见",
     })
@@ -975,6 +989,7 @@ def test_atomic_action_missing_agency_derives_from_owned_relations() -> None:
         "action_id": "A-character",
         "actor_ids": ["character-1"],
         "target_ids": ["character-2"],
+        "participant_deliveries": [],
         "semantic_intent": "人物改变目标状态",
         "completion_condition": "目标状态已改变",
     })
@@ -983,6 +998,37 @@ def test_atomic_action_missing_agency_derives_from_owned_relations() -> None:
     assert unattributed.action_agency.identity_bearing is False
     assert attributed.action_agency.kind == "character"
     assert attributed.action_agency.identity_bearing is True
+
+
+def test_atomic_action_requires_explicit_participant_deliveries() -> None:
+    with pytest.raises(ValidationError, match="participant_deliveries"):
+        AtomicAction.model_validate({
+            "action_id": "A-missing-delivery-contract",
+            "actor_ids": ["character-1"],
+            "target_ids": [],
+            "semantic_intent": "人物完成动作。",
+            "completion_condition": "动作结果可见。",
+        })
+
+
+def test_err_36a2c4_first_ten_actions_cannot_default_missing_deliveries() -> None:
+    replay = json.loads(
+        ERR_36A2C4_ARTIFACT_FIXTURE.read_text(encoding="utf-8")
+    )
+
+    assert replay["error_id"] == "ERR-20260813-36a2c4"
+    assert replay["artifact_id"] == "art_48426cfb07d2"
+    assert replay["provider_call_id"] == 14815
+    assert replay["provider_contract"] == "screenplay-generation-ir.v1.4"
+    assert replay["atomic_action_count"] == 47
+    actions = replay["atomic_actions_0_9"]
+    assert [action["action_id"] for action in actions] == [
+        f"A-{index}" for index in range(1, 11)
+    ]
+    assert all("participant_deliveries" not in action for action in actions)
+    for action in actions:
+        with pytest.raises(ValidationError, match="participant_deliveries"):
+            AtomicAction.model_validate(action)
 
 
 def test_character_action_agency_requires_identity_bearing_relation() -> None:

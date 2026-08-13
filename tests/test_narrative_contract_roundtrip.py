@@ -116,6 +116,7 @@ def _narrative_plan() -> NarrativeContinuityPlan:
                     "action_id": "A-1",
                     "actor_ids": ["character-1"],
                     "target_ids": ["entity-1"],
+                        "participant_deliveries": [],
                     "semantic_intent": "Test the dormant rule.",
                     "precondition_fact_ids": ["F-before"],
                     "effects_add": ["F-after"],

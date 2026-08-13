@@ -1,0 +1,81 @@
+{
+  "error_id": "ERR-20260813-36a2c4",
+  "artifact_id": "art_48426cfb07d2",
+  "artifact_content_hash": "f571f33d9822f95506d9f9e2ce621a09cedc6d11d7e2722926ec630020530775",
+  "provider_call_id": 14815,
+  "provider_contract": "screenplay-generation-ir.v1.4",
+  "provider_response_sha256": "6e2fe180e1af528215530697331a9ddea38f7334347be86b40a32ff7f22dda72",
+  "atomic_action_count": 47,
+  "atomic_actions_0_9": [
+    {
+      "action_id": "A-1",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "黄昏暖光漫洒在大青山顶，十七岁的瘦弱少年孟浩穿着洗得发白的粗布长衫，坐在崖边石头上，手里摩挲着一个木质葫芦，眉头紧锁神色茫然",
+      "completion_condition": "黄昏暖光漫洒在大青山顶，十七岁的瘦弱少年孟浩穿着洗得发白的粗布长衫，坐在崖边石头上，手里摩挲着一个木质葫芦，眉头紧锁神色茫然"
+    },
+    {
+      "action_id": "A-2",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "孟浩说出对白「又落榜了……」",
+      "completion_condition": "孟浩说出对白「又落榜了……」"
+    },
+    {
+      "action_id": "A-3",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "孟浩说出对白「考了三年，整日看这些贤者书籍都快吐了，难道科举真不是我孟浩的出路？」",
+      "completion_condition": "孟浩说出对白「考了三年，整日看这些贤者书籍都快吐了，难道科举真不是我孟浩的出路？」"
+    },
+    {
+      "action_id": "A-4",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "孟浩说出对白「当官发财的理想越来越远，更别说去东土大唐了……真是百无一用是书生啊。」",
+      "completion_condition": "孟浩说出对白「当官发财的理想越来越远，更别说去东土大唐了……真是百无一用是书生啊。」"
+    },
+    {
+      "action_id": "A-5",
+      "actor_ids": ["孟浩", "ID-08"],
+      "target_ids": [],
+      "semantic_intent": "孟浩说出对白「就算做县城的教习先生，每月也就几钱银子，还不如王伯的木匠铺赚得多，早知道当年不学木匠手艺，也不至于现在一无所有。」",
+      "completion_condition": "孟浩说出对白「就算做县城的教习先生，每月也就几钱银子，还不如王伯的木匠铺赚得多，早知道当年不学木匠手艺，也不至于现在一无所有。」"
+    },
+    {
+      "action_id": "A-6",
+      "actor_ids": ["孟浩", "ID-09"],
+      "target_ids": [],
+      "semantic_intent": "孟浩说出对白「家里粮食快没了，银子也花光了，还欠了周员外三两银子，以后可怎么办啊……」",
+      "completion_condition": "孟浩说出对白「家里粮食快没了，银子也花光了，还欠了周员外三两银子，以后可怎么办啊……」"
+    },
+    {
+      "action_id": "A-7",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "孟浩沉默许久，从怀里掏出一张皱巴巴的纸条，认真看了几秒后塞进葫芦里，猛地站起身，用尽全身力气将葫芦扔向崖下的大河",
+      "completion_condition": "孟浩沉默许久，从怀里掏出一张皱巴巴的纸条，认真看了几秒后塞进葫芦里，猛地站起身，用尽全身力气将葫芦扔向崖下的大河"
+    },
+    {
+      "action_id": "A-8",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "孟浩站在崖边，目光追随着逐渐飘远的葫芦，直到葫芦变成河面上的一个小点，才缓缓收回目光，深吸了一口山顶的新鲜空气，原本茫然的眼神逐渐变得坚定",
+      "completion_condition": "孟浩站在崖边，目光追随着逐渐飘远的葫芦，直到葫芦变成河面上的一个小点，才缓缓收回目光，深吸了一口山顶的新鲜空气，原本茫然的眼神逐渐变得坚定"
+    },
+    {
+      "action_id": "A-9",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "孟浩说出对白「不管怎么样，读书也好，做工也罢，总得活下去。」",
+      "completion_condition": "孟浩说出对白「不管怎么样，读书也好，做工也罢，总得活下去。」"
+    },
+    {
+      "action_id": "A-10",
+      "actor_ids": ["孟浩"],
+      "target_ids": [],
+      "semantic_intent": "孟浩拍了拍身上的尘土，转身正要下山，忽然听到风里传来微弱的呼救声",
+      "completion_condition": "孟浩拍了拍身上的尘土，转身正要下山，忽然听到风里传来微弱的呼救声"
+    }
+  ]
+}

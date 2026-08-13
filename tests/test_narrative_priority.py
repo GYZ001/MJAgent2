@@ -104,12 +104,14 @@ def test_legacy_terminal_non_story_scene_requires_rebuild() -> None:
                 AtomicAction(
                     action_id="A1",
                     actor_ids=["hero"],
+                    participant_deliveries=[],
                     semantic_intent="完成剧情行动",
                     completion_condition="剧情状态完成",
                 ),
                 AtomicAction(
                     action_id="A2",
                     actor_ids=["context"],
+                    participant_deliveries=[],
                     semantic_intent="传递来源附带信息",
                     completion_condition="旁文本传递完成",
                 ),

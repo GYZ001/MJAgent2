@@ -50,6 +50,7 @@ def _attach_generic_action(screenplay) -> AtomicAction:
         action_id="ACT-1",
         actor_ids=["character-1"],
         target_ids=["entity-1"],
+        participant_deliveries=[],
         semantic_intent="The actor changes the target after speaking.",
         precondition_fact_ids=["F-before"],
         effects_add=["F-after"],
@@ -235,6 +236,7 @@ def test_action_relation_does_not_reuse_short_line_inside_longer_quote() -> None
     long_action = AtomicAction(
         action_id="ACT-2",
         actor_ids=["character-1"],
+        participant_deliveries=[],
         semantic_intent="character-1 says 「前面啊……啊……后面」",
         completion_condition="character-1 finishes the longer line.",
         decision_requirement="not_applicable",

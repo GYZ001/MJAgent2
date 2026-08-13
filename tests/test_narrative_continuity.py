@@ -593,6 +593,7 @@ def _episode_6_relationship_golden() -> tuple[EpisodeScreenplay, Storyboard]:
         AtomicAction(
             action_id="A-E6-TRAIN",
             actor_ids=["character-1"],
+            participant_deliveries=[],
             semantic_intent="Choose training in response to the disclosed evidence.",
             completion_condition="The training decision is observably committed.",
         )
@@ -993,6 +994,7 @@ def test_two_shots_cannot_both_own_the_same_primary_action() -> None:
     screenplay.narrative_plan.atomic_actions.append(
         AtomicAction(
             action_id="A-1",
+            participant_deliveries=[],
             semantic_intent="Perform one indivisible action.",
             completion_condition="Its result becomes observable.",
         )
