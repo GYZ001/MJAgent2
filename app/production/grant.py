@@ -117,28 +117,45 @@ def issue_production_grant(
         issued_at=issued_at,
         expires_at=expires_at,
     )
-    db.execute(
-        """INSERT INTO production_grants(
-            id, episode_id, project_id, production_revision_id, kind,
-            input_artifact_hash, allowed_commands_json, max_touched_nodes,
-            token_hash, issued_by, issued_at, expires_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            grant_id, episode_id, project_id, production_revision_id, kind,
-            input_artifact_hash, json.dumps(grant.allowed_commands, ensure_ascii=False),
-            max_touched_nodes, _hash_token(token), issued_by, issued_at, expires_at,
-        ),
-    )
-    # bind to revision
     try:
         db.execute(
-            "UPDATE production_revisions SET grant_id=?, updated_at=? WHERE id=?",
-            (grant_id, issued_at, production_revision_id),
+            """INSERT INTO production_grants(
+                id, episode_id, project_id, production_revision_id, kind,
+                input_artifact_hash, allowed_commands_json, max_touched_nodes,
+                token_hash, issued_by, issued_at, expires_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                grant_id, episode_id, project_id, production_revision_id, kind,
+                input_artifact_hash,
+                json.dumps(grant.allowed_commands, ensure_ascii=False),
+                max_touched_nodes, _hash_token(token), issued_by, issued_at,
+                expires_at,
+            ),
         )
-    except Exception:  # noqa: BLE001
-        pass
-    if commit:
-        db.commit()
+        # Bind in the caller's transaction.  A detached grant is not authority:
+        # missing/stale revisions must fail closed so the outer activation can
+        # rollback the grant insert, receipt binding and episode owner together.
+        cursor = db.execute(
+            "UPDATE production_revisions SET grant_id=?, updated_at=? "
+            "WHERE id=? AND episode_id=? AND kind=? AND status='active'",
+            (
+                grant_id,
+                issued_at,
+                production_revision_id,
+                episode_id,
+                kind,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "Production Grant revision authority changed during issuance"
+            )
+        if commit:
+            db.commit()
+    except BaseException:
+        if conn is None and db.in_transaction:
+            db.rollback()
+        raise
     return grant, token
 
 

@@ -1,6 +1,7 @@
 """剧本台按钮必须映射到真实的 Baseline / Patch 后端阶段。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 
@@ -1321,14 +1322,29 @@ async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_gran
     conn.commit()
     projection = api._screenplay_blueprint_budget_projection("e1")
     spawned = 0
+    worker_authority: list[bool] = []
 
-    def accept_without_running(_kind, _key, coro, *, project_id=None):
+    async def observe_worker_authority(*_args, **_kwargs):
+        from app.screenplay_retry_authority import (
+            SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL,
+        )
+
+        worker_authority.append(
+            bool(SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.get())
+        )
+
+    def observe_spawn(_kind, _key, coro, *, project_id=None):
         nonlocal spawned
         spawned += 1
-        coro.close()
-        return object()
+        return task_registry.register(
+            _kind,
+            _key,
+            asyncio.get_running_loop().create_task(coro),
+            project_id=project_id,
+        )
 
-    monkeypatch.setattr(task_registry, "spawn", accept_without_running)
+    monkeypatch.setattr(api, "_screenplay_guarded", observe_worker_authority)
+    monkeypatch.setattr(task_registry, "spawn", observe_spawn)
     ensure_catalog_loaded()
     bus = get_command_bus()
     args = {
@@ -1341,12 +1357,14 @@ async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_gran
         "screenplay.generate",
         {**args, "approval_token": waiting.data["approval_token"]},
     )
+    await asyncio.sleep(0)
 
     grants = conn.execute(
         "SELECT id,issued_by FROM production_grants WHERE episode_id='e1' "
         "ORDER BY issued_at"
     ).fetchall()
     assert spawned == 1
+    assert worker_authority == [False]
     assert outcome.status == CommandStatus.SUCCEEDED
     assert outcome.data["run_id"]
     assert projection["requires_fresh_retry_grant"] is True
@@ -1434,6 +1452,50 @@ def test_unrelated_or_mismatched_grant_never_authorizes_unknown_retry(
 
     reread = api._screenplay_blueprint_budget_projection("e1")
     assert reread["requires_fresh_retry_grant"] is True
+
+
+@pytest.mark.parametrize("failure_mode", ["missing_revision", "update_error"])
+def test_standalone_grant_issue_rolls_back_when_revision_bind_fails(
+    failure_mode: str,
+) -> None:
+    from app.production.grant import issue_production_grant
+
+    conn = db.get_conn()
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint="grant-bind-rollback",
+        resume=False,
+    )
+    revision_id = revision.id
+    if failure_mode == "missing_revision":
+        revision_id = "rev-missing"
+    else:
+        conn.execute(
+            """CREATE TEMP TRIGGER fail_grant_revision_bind
+               BEFORE UPDATE OF grant_id ON production_revisions
+               BEGIN SELECT RAISE(ABORT, 'grant bind exploded'); END"""
+        )
+        conn.commit()
+    count_before = conn.execute(
+        "SELECT COUNT(*) AS c FROM production_grants"
+    ).fetchone()["c"]
+
+    with pytest.raises(Exception, match=(
+        "authority changed" if failure_mode == "missing_revision"
+        else "grant bind exploded"
+    )):
+        issue_production_grant(
+            episode_id="e1",
+            project_id="p1",
+            production_revision_id=revision_id,
+            kind="screenplay",
+        )
+
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM production_grants"
+    ).fetchone()["c"] == count_before
 
 
 @pytest.mark.parametrize("terminal_field", ["revoked_at", "expires_at"])
@@ -2023,6 +2085,14 @@ async def test_first_screenplay_spawn_failure_restores_state_and_legacy_columns(
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["action"] == "retry_generate"
+    cause_error_id = exc_info.value.detail["cause_error_id"]
+    cause = conn.execute(
+        "SELECT action,message,traceback FROM error_logs WHERE id=?",
+        (cause_error_id,),
+    ).fetchone()
+    assert cause["action"] == "screenplay_start_activation"
+    assert cause["message"] == "event loop unavailable"
+    assert "RuntimeError: event loop unavailable" in cause["traceback"]
     row = conn.execute(
         "SELECT screenplay_status,screenplay_error,screenplay_started_at,"
         "screenplay_updated_at,active_screenplay_run_id,screenplay_required_dialogues,"

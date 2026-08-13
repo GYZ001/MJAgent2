@@ -1616,7 +1616,7 @@ def _spawn_screenplay_activation(
         if budget_projection["requires_fresh_retry_grant"]:
             trusted_retry_approval = bool(
                 authorize_blueprint_retry
-                and _SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.get()
+                and _retry_authority.consume_screenplay_command_bus_retry_approval()
             )
             if not trusted_retry_approval:
                 budget.assert_activation_admissible()
@@ -2215,10 +2215,20 @@ async def start_screenplay(episode_id: str, body: dict | None = Body(None)):
             ),
         )
     except Exception as exc:
+        cause = errors.log_error(
+            exc,
+            action="screenplay_start_activation",
+            context={
+                "episode_id": episode_id,
+                "run_id": getattr(locals().get("recorder"), "run_id", None),
+                "resume_existing": resume_existing,
+            },
+        )
         raise HTTPException(503, {
             "code": "SCREENPLAY_START_FAILED",
             "message": "剧本任务未能启动，原状态已恢复，请重试",
             "action": "retry_resume" if resume_existing else "retry_generate",
+            "cause_error_id": cause.error_id,
         }) from exc
     return {
         "status": "queued",
