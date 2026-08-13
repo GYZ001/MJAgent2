@@ -205,6 +205,7 @@ def _current_shard_artifact(
         "initial_creative_hash": creative_hash,
         "reviewed_creative_hash": creative_hash,
         "phases": [{
+            "phase": "initial",
             "creative_hash": creative_hash,
             "reviews": [{"findings": []}, {"findings": []}],
             "consensus": [],
