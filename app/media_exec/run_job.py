@@ -570,7 +570,8 @@ def _commit_provider_acceptance_in_transaction(
         """UPDATE provider_video_budget_claims
               SET status='accepted',updated_at=?,
                   accepted_at=COALESCE(accepted_at,?)
-            WHERE operation_id=? AND job_id=?""",
+            WHERE operation_id=? AND job_id=?
+              AND status NOT IN ('released','settled','closed_liability')""",
         (stamp, stamp, operation_id, job_id),
     )
 

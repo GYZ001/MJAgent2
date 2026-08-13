@@ -489,16 +489,19 @@ def test_project_delete_reconcile_settles_remote_terminal_without_download(
         provider_task_id="provider-task-1",
     )
 
-    async def terminal_success(task_id: str, **_kwargs) -> dict:
-        assert task_id == "provider-task-1"
-        return {"status": "succeeded"}
+    async def unexpected_poll(*_args, **_kwargs) -> dict:
+        raise AssertionError("durable terminal observation must avoid provider polling")
 
-    monkeypatch.setattr(hiagent, "poll_video_task", terminal_success)
+    monkeypatch.setattr(hiagent, "poll_video_task", unexpected_poll)
 
     result = asyncio.run(
         completion_grant.reconcile_project_provider_tasks_for_clear(
             "p",
             conn=conn,
+            terminal_observations={
+                "provider-task-1": {"status": "succeeded"},
+            },
+            evidence_source="sha256:test-snapshot",
         )
     )
 
@@ -508,9 +511,16 @@ def test_project_delete_reconcile_settles_remote_terminal_without_download(
         "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
     ).fetchone()["status"] == "settled"
     version = conn.execute(
-        "SELECT status,video_path FROM shot_versions WHERE id='v-provider'"
+        "SELECT status,video_path,error FROM shot_versions WHERE id='v-provider'"
     ).fetchone()
-    assert dict(version) == {"status": "quarantined", "video_path": None}
+    assert dict(version) == {
+        "status": "quarantined",
+        "video_path": None,
+        "error": (
+            "项目删除前已核对供应商任务成功终态；费用已结算，"
+            "结果保持隔离且不可采用；核对证据=sha256:test-snapshot"
+        ),
+    }
 
 
 def test_video_only_clear_preserves_unsettled_provider_handle_and_claim(

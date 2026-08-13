@@ -1733,6 +1733,14 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                       (v.provider_task_id IS NOT NULL AND v.provider_task_id!='')
                       OR j.provider_non_cancellable=1
                     )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM provider_video_budget_claims c
+                       WHERE c.job_id=j.id
+                         AND c.operation_id=j.provider_operation_id
+                         AND c.status IN (
+                           'released','settled','closed_liability'
+                         )
+                    )
                   )
               )
             ORDER BY j.shot_id,

@@ -853,6 +853,8 @@ async def reconcile_project_provider_tasks_for_clear(
     project_id: str,
     *,
     conn=None,
+    terminal_observations: dict[str, dict[str, Any]] | None = None,
+    evidence_source: str | None = None,
 ) -> dict[str, Any]:
     """Settle provider tasks that are already remotely terminal before deletion.
 
@@ -895,18 +897,20 @@ async def reconcile_project_provider_tasks_for_clear(
                     break
         if not task_id:
             continue
-        try:
-            result = await hiagent.poll_video_task(
-                task_id,
-                call_meta={
-                    "project_id": project_id,
-                    "job_id": job_id,
-                    "operation_id": operation_id,
-                    "purpose": "project_delete_terminal_reconcile",
-                },
-            )
-        except ProviderError:
-            continue
+        result = (terminal_observations or {}).get(task_id)
+        if result is None:
+            try:
+                result = await hiagent.poll_video_task(
+                    task_id,
+                    call_meta={
+                        "project_id": project_id,
+                        "job_id": job_id,
+                        "operation_id": operation_id,
+                        "purpose": "project_delete_terminal_reconcile",
+                    },
+                )
+            except ProviderError:
+                continue
         status = str((result or {}).get("status") or "").strip().lower()
         if status not in {"succeeded", "failed"}:
             continue
@@ -917,6 +921,8 @@ async def reconcile_project_provider_tasks_for_clear(
             if status == "succeeded"
             else "项目删除前已核对供应商任务失败终态；费用责任已结算"
         )
+        if evidence_source:
+            terminal_message += f"；核对证据={evidence_source}"
         db.execute("BEGIN IMMEDIATE")
         try:
             db.execute(
