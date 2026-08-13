@@ -68,7 +68,22 @@ def test_run_21a_old_merged_ir_requires_state_subject_rebuild() -> None:
             and "environment_only" not in unit
         )
     }
-    assert len(invalid_unattributed_units) >= 15
+    assert invalid_unattributed_units == {
+        "bp-sc001:SRC0001:001:unit",
+        "bp-sc001:SRC0002:001:unit",
+        "bp-sc001:SRC0003:001:unit",
+        "bp-sc002:SRC0008:001:unit",
+        "bp-sc002:SRC0009:001:unit",
+        "bp-sc003:SRC0013:001:unit",
+        "bp-sc006:SRC0026:001:unit",
+        "bp-sc008:SRC0030:002:unit",
+        "bp-sc008:SRC0031:002:unit",
+        "bp-sc009:SRC0032:002:unit",
+        "bp-sc009:SRC0033:002:unit",
+        "bp-sc013:SRC0044:002:unit",
+        "bp-sc013:SRC0045:002:unit",
+        "bp-sc017:SRC0056:002:unit",
+    }
 
     with pytest.raises(
         ScreenplayIRFidelityError,

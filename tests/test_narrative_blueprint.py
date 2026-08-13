@@ -78,6 +78,17 @@ def _blueprint() -> NarrativeBlueprint:
                 "location_key": "home-bedroom",
                 "location_label": "白洁家卧室",
                 "participants": ["白洁", "王申"],
+                "participant_evidence": [{
+                    "identity_key": "白洁",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:001"],
+                    "usage": "state_subject",
+                }, {
+                    "identity_key": "王申",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:001"],
+                    "usage": "visible",
+                }],
                 "action_logic": "回家、洗澡、躺下按顺序发生",
                 "state_changes": [{
                     "fact_key": "F001",
@@ -99,6 +110,17 @@ def _blueprint() -> NarrativeBlueprint:
                 "location_key": "cafe",
                 "location_label": "咖啡店",
                 "participants": ["白洁", "冷小玉"],
+                "participant_evidence": [{
+                    "identity_key": "白洁",
+                    "source_segment_ids": ["SRC0002"],
+                    "source_unit_keys": ["SRC0002:unit:001"],
+                    "usage": "state_subject",
+                }, {
+                    "identity_key": "冷小玉",
+                    "source_segment_ids": ["SRC0002"],
+                    "source_unit_keys": ["SRC0002:unit:001"],
+                    "usage": "visible",
+                }],
                 "scene_boundary_before": True,
                 "transition_cue": "卧室环境声淡出，咖啡杯声进入",
                 "action_logic": "冷小玉展示生活差距，刺激白洁",
@@ -125,6 +147,12 @@ def _blueprint() -> NarrativeBlueprint:
                 "location_key": "home-bedroom",
                 "location_label": "白洁家卧室",
                 "participants": ["白洁"],
+                "participant_evidence": [{
+                    "identity_key": "白洁",
+                    "source_segment_ids": ["SRC0003"],
+                    "source_unit_keys": ["SRC0003:unit:001"],
+                    "usage": "state_subject",
+                }],
                 "scene_boundary_before": True,
                 "transition_cue": "咖啡杯倒影匹配剪辑为卧室台灯",
                 "action_logic": "明确回到现在",
@@ -142,6 +170,17 @@ def _blueprint() -> NarrativeBlueprint:
                 "location_key": "school-gate",
                 "location_label": "学校门口",
                 "participants": ["白洁", "小张"],
+                "participant_evidence": [{
+                    "identity_key": "小张",
+                    "source_segment_ids": ["SRC0004"],
+                    "source_unit_keys": ["SRC0004:unit:001"],
+                    "usage": "state_subject",
+                }, {
+                    "identity_key": "白洁",
+                    "source_segment_ids": ["SRC0004"],
+                    "source_unit_keys": ["SRC0004:unit:001"],
+                    "usage": "visible",
+                }],
                 "scene_boundary_before": True,
                 "transition_cue": "字幕【次日】并建立学校外景",
                 "action_logic": "小张驾驶车辆到达",
@@ -198,9 +237,12 @@ def test_picture_partition_preserves_mixed_node_order_and_audit_coverage() -> No
             "temporal_domain_key": "present",
             "time_label": "当下",
             "time_relation": "episode_start" if index == 1 else "continuous",
-            "location_key": "room",
-            "location_label": "房间",
-            "action_logic": key,
+                "location_key": "room",
+                "location_label": "房间",
+                "environment_source_unit_keys": (
+                    [f"SRC{index:04d}:unit:001"] if story else []
+                ),
+                "action_logic": key,
         })
     blueprint = NarrativeBlueprint.model_validate({
         "episode_no": 1,
@@ -285,8 +327,12 @@ def test_run_64a2e395d6df_candidate_replays_picture_partition() -> None:
             "temporal_domain_key": "episode-present",
             "time_label": "当下",
             "time_relation": "episode_start" if index == 0 else "continuous",
-            "location_key": "episode-location",
-            "location_label": "当前地点",
+                "location_key": "episode-location",
+                "location_label": "当前地点",
+                "environment_source_unit_keys": (
+                    [f"{source_id}:unit:001" for source_id in source_ids]
+                    if story else []
+                ),
             "scene_boundary_before": key in scene_starts and index > 0,
             "dramatic_load": 1,
             "action_logic": f"{key} source-backed action",

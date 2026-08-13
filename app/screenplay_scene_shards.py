@@ -3180,12 +3180,11 @@ def _scene_shard_prompt(
     )
 
 
-def _scene_shard_semantic_review_prompt(
+def _scene_shard_semantic_authority_payload(
     *,
-    draft: ScreenplaySceneShardCreativeIR,
     scene_input_contracts: list[ScreenplaySceneInputContract],
     identity_registry: list[dict[str, Any]],
-) -> str:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     source_facts_by_key = {
         fact.source_unit_key: fact.model_dump(mode="json")
         for contract in scene_input_contracts
@@ -3236,6 +3235,21 @@ def _scene_shard_semantic_review_prompt(
         for item in identity_registry
         if str(item.get("identity_key") or "") in allowed_identity_keys
     }
+    return authority_slots, identity_labels
+
+
+def _scene_shard_semantic_review_prompt(
+    *,
+    draft: ScreenplaySceneShardCreativeIR,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+    identity_registry: list[dict[str, Any]],
+) -> str:
+    authority_slots, identity_labels = (
+        _scene_shard_semantic_authority_payload(
+            scene_input_contracts=scene_input_contracts,
+            identity_registry=identity_registry,
+        )
+    )
     return (
         "你是剧本场次分片的独立语义审查员。逐 slot 对照原始 source_text 与"
         "程序冻结的 exact-unit state_subject/actor/speaker，检查 creative text、"
@@ -3335,11 +3349,10 @@ async def _semantic_review_scene_shard_draft(
     if not findings:
         return draft, audit
 
-    frozen_slots = {
-        slot.unit_key: slot.model_dump(mode="json")
-        for contract in scene_input_contracts
-        for slot in contract.unit_slots
-    }
+    frozen_slots, identity_labels = _scene_shard_semantic_authority_payload(
+        scene_input_contracts=scene_input_contracts,
+        identity_registry=identity_registry,
+    )
     repair_prompt = (
         "只修复下列 consensus finding 对应 slot 的 creative fields：text、"
         "performance、resulting_state、function、required_text、prop_text、"
@@ -3353,6 +3366,8 @@ async def _semantic_review_scene_shard_draft(
         )
         + "\n冻结 slots：\n"
         + json.dumps(frozen_slots, ensure_ascii=False, separators=(",", ":"))
+        + "\n冻结身份最小映射：\n"
+        + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
         + "\n当前 creative：\n"
         + draft.model_dump_json()
     )

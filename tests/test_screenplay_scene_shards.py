@@ -309,6 +309,9 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
                     )
                 ])
             return ScreenplaySceneShardSemanticReview(findings=[])
+        assert '"projection":"action"' in messages[0]["content"]
+        assert '"text":"甲推门进入。"' in messages[0]["content"]
+        assert '"canonical_name":"甲"' in messages[0]["content"]
         repaired = draft.model_copy(deep=True)
         repaired.slots[flagged_key].text = "甲推门进入。"
         return repaired
@@ -464,6 +467,7 @@ def test_scene_shard_semantic_prompt_reads_action_source_facts_for_production_dr
     base_contract = _contracts([plan], blueprint)[plan.shard_id][0]
     base_slot = base_contract.unit_slots[0]
     source_rows = [
+        ("SRC0030", "孟浩顺着藤条问道：你还没说要带我去哪？"),
         ("SRC0031", "虎头虎脑的少年说飞行需要宝物"),
         ("SRC0033", "王有材解释他们被抓来的缘由"),
         ("SRC0044", "许师姐对孟浩宣告靠山宗规矩"),

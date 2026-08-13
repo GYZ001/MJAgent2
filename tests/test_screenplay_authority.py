@@ -1035,7 +1035,6 @@ def test_revalidation_marks_invalid_current_action_projection_stale() -> None:
         )
 
     published_screenplay = case["compiled"].model_copy(deep=True)
-    published_action = published_screenplay.narrative_plan.atomic_actions[unit_index]
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
