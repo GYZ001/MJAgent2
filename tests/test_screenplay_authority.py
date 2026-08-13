@@ -332,6 +332,7 @@ def _source_projection_case(
             speaker = str(unit.get("speaker_key") or "")
             actor_keys = [speaker] if speaker else list(relations["actors"])
             unit.update({
+                "event_key": f"{scene['key']}:event:{unit_index:03d}",
                 "unit_key": f"{scene['key']}:{source_id}:{unit_index:03d}:unit",
                 "source_segment_ids": [source_id],
                 "actor_keys": actor_keys,
@@ -729,17 +730,17 @@ def _drift_to_contextual_actor(screenplay):
     drifted = screenplay.model_copy(deep=True)
     plan = drifted.narrative_plan
     assert plan is not None
-    action = next(
-        item for item in plan.atomic_actions
-        if not item.actor_ids and not item.target_ids
-    )
-    action.actor_ids = ["ID-08"]
+    action = plan.atomic_actions[0]
+    action.actor_ids = [*action.actor_ids, "ID-08"]
+    action.text_provenance.identity_keys = list(dict.fromkeys([
+        *action.actor_ids,
+        *action.target_ids,
+    ]))
     action.action_agency = ActionAgency(
         kind="character",
         identity_bearing=True,
         source_segment_ids=list(action.action_agency.source_segment_ids),
     )
-    action.text_provenance.identity_keys = ["ID-08"]
     event = next(
         item for item in plan.events
         if action.action_id in item.action_ids
@@ -863,10 +864,10 @@ def test_compile_publish_action_projection_hash_is_identical() -> None:
     assert evidence_repository.content_hash(compiled_projection) == (
         evidence_repository.content_hash(published_projection)
     )
-    assert sum(
-        not action["actor_ids"] and not action["target_ids"]
+    assert all(
+        action["actor_ids"] or action["target_ids"]
         for action in published_projection
-    ) == 12
+    )
     assert not any(
         identity_id == "ID-08"
         for action in published_projection
@@ -874,7 +875,7 @@ def test_compile_publish_action_projection_hash_is_identical() -> None:
     )
 
 
-def test_revalidation_marks_equal_invalid_v6_action_projection_stale() -> None:
+def test_revalidation_marks_invalid_current_action_projection_stale() -> None:
     from app.errors import ArtifactNeedsRebuildError
 
     case = _source_projection_case()
@@ -900,18 +901,15 @@ def test_revalidation_marks_equal_invalid_v6_action_projection_stale() -> None:
         for unit in scene["units"]
     ]
     unit_index = next(
-        index
-        for index, unit in enumerate(merged_units)
-        if (
-            not unit.get("actor_keys")
-            and not unit.get("target_keys")
-            and not unit.get("speaker_key")
-        )
+        index for index, unit in enumerate(merged_units)
+        if unit.get("kind") == "action"
     )
     invalid_unit = merged_units[unit_index]
-    invalid_unit["text"] = "绿袍执事乙扫视四个少年"
+    invalid_unit["actor_keys"] = []
+    invalid_unit["state_subject_key"] = ""
+    invalid_unit["environment_only"] = False
     invalid_unit["action_agency"] = {
-        "kind": "character",
+        "kind": "unattributed",
         "identity_bearing": False,
         "source_segment_ids": list(invalid_unit["source_segment_ids"]),
     }
@@ -937,18 +935,7 @@ def test_revalidation_marks_equal_invalid_v6_action_projection_stale() -> None:
         )
 
     published_screenplay = case["compiled"].model_copy(deep=True)
-    published_action = published_screenplay.narrative_plan.atomic_actions[
-        unit_index
-    ]
-    assert not published_action.actor_ids
-    assert not published_action.target_ids
-    published_action.action_agency = ActionAgency.model_construct(
-        kind="character",
-        identity_bearing=False,
-        source_segment_ids=list(
-            published_action.action_agency.source_segment_ids
-        ),
-    )
+    published_action = published_screenplay.narrative_plan.atomic_actions[unit_index]
     artifact = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
         scope_type="episode",
@@ -1619,7 +1606,9 @@ def test_contract_v4_accepts_character_cards_appended_during_generation() -> Non
     _published_case()
     bible, _artifact = _seed_test_bible_authority()
     runtime_bible = Bible.model_validate(bible)
-    projection = json.loads(json.dumps(bible))
+    projection = json.loads(conn.execute(
+        "SELECT bible_json FROM projects WHERE id='project-generic'"
+    ).fetchone()["bible_json"])
     projection["characters"].append({
         "name": "New Ally",
         "role": "配角",
@@ -1717,7 +1706,9 @@ def test_published_authority_survives_later_character_appends(
         )
         conn.commit()
     published_authority = _republish_as_screenplay_v4(published_artifact)
-    projection = json.loads(json.dumps(bible))
+    projection = json.loads(conn.execute(
+        "SELECT bible_json FROM projects WHERE id='project-generic'"
+    ).fetchone()["bible_json"])
     projection["characters"].append({
         "name": "New Ally",
         "role": "配角",
