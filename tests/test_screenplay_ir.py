@@ -2693,7 +2693,12 @@ def test_generation_entry_uses_compact_ir_model_and_bounded_output(
     captured: dict = {}
     compiled = _compile()
 
-    async def fake_blueprint(_episode, _source_text, _bible_context):
+    async def fake_blueprint(
+        _episode,
+        _source_text,
+        _bible_context,
+        **_kwargs,
+    ):
         return stages.NarrativeBlueprint.model_validate({
             "episode_no": 1,
             "nodes": [

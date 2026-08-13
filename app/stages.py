@@ -223,6 +223,77 @@ def _narrative_blueprint_content_hash(
     ).hexdigest()
 
 
+def _current_blueprint_authority_snapshot(
+    source_text: str,
+    *,
+    generation_mode: str,
+    generation_budget: Any | None = None,
+    shard_count: int | None = None,
+) -> dict[str, Any]:
+    """One versioned authority binding for every final Blueprint producer."""
+    validator_material = {
+        "contract_version": BLUEPRINT_VERSION,
+        "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+        "local_authority_validator_version": (
+            BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+        ),
+        "split_manifest_version": BLUEPRINT_SPLIT_MANIFEST_VERSION,
+    }
+    snapshot: dict[str, Any] = {
+        "generation_mode": generation_mode,
+        **validator_material,
+        "source_corpus_hash": hashlib.sha256(
+            source_text.encode("utf-8")
+        ).hexdigest(),
+        "validator_fingerprint": hashlib.sha256(
+            json.dumps(
+                validator_material,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    if shard_count is not None:
+        snapshot["shard_count"] = int(shard_count)
+    if generation_budget is not None:
+        snapshot.update({
+            "provider_call_count": generation_budget.provider_calls,
+            "requested_output_tokens": (
+                generation_budget.requested_output_tokens
+            ),
+            "actual_output_tokens": generation_budget.actual_output_tokens,
+            "unknown_output_tokens": generation_budget.unknown_output_tokens,
+            "charged_output_tokens": generation_budget.charged_output_tokens,
+            "active_reserved_output_tokens": (
+                generation_budget.reserved_output_tokens
+            ),
+        })
+    return snapshot
+
+
+def _blueprint_authority_snapshot_is_current(
+    snapshot: dict[str, Any],
+    source_text: str,
+) -> bool:
+    expected = _current_blueprint_authority_snapshot(
+        source_text,
+        generation_mode=str(snapshot.get("generation_mode") or "authority"),
+    )
+    return all(
+        snapshot.get(key) == expected.get(key)
+        for key in (
+            "contract_version",
+            "prompt_version",
+            "shard_policy_version",
+            "local_authority_validator_version",
+            "split_manifest_version",
+            "source_corpus_hash",
+            "validator_fingerprint",
+        )
+    )
+
+
 def _screenplay_ir_blueprint_snapshot_matches(
     model_snapshot: dict[str, Any],
     expected_blueprint_hash: str,
@@ -3820,6 +3891,11 @@ async def _repair_narrative_blueprint(
                     parent_artifact_ids=parent_artifact_ids,
                     contract_version=BLUEPRINT_VERSION,
                     prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                    model_snapshot=_current_blueprint_authority_snapshot(
+                        source_text,
+                        generation_mode="semantic_repair",
+                        generation_budget=generation_budget,
+                    ),
                 ),
                 step_run_id=trace.step_run_id,
             )
@@ -4055,20 +4131,26 @@ async def _repair_narrative_blueprint(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        logical_run_id = str(getattr(trace, "run_id", "") or "unscoped")
-        operation_id = (
-            f"screenplay.blueprint.patch:{BLUEPRINT_VERSION}:"
-            f"{logical_run_id}:{repair_input_hash}:{round_no}"
-        )
         requested_max_tokens = 16384
+        patch_messages = [
+            {"role": "system", "content": SYSTEM_PREFIX},
+            {"role": "user", "content": repair_prompt},
+        ]
+        operation_id, effective_max_tokens = (
+            _blueprint_structured_operation_id(
+                operation_kind="patch",
+                episode_id=str(episode.get("id") or ""),
+                semantic_input_hash=repair_input_hash,
+                ordinal=str(round_no),
+                messages=patch_messages,
+                output_schema=patch_schema,
+                requested_max_tokens=requested_max_tokens,
+                temperature=0.1,
+            )
+        )
         reservation_id: int | None = None
         remaining_seconds: float | None = None
         if generation_budget is not None:
-            _provider, _model, effective_max_tokens = (
-                hiagent.text_request_token_limits(
-                    requested_max_tokens=requested_max_tokens,
-                )
-            )
             reservation_id = generation_budget.claim(
                 max_tokens=effective_max_tokens,
                 requested_max_tokens=requested_max_tokens,
@@ -4079,10 +4161,7 @@ async def _repair_narrative_blueprint(
                 - (time.monotonic() - generation_budget.started_at)
             )
         structured_call = model_gateway.chat_structured(
-            [
-                {"role": "system", "content": SYSTEM_PREFIX},
-                {"role": "user", "content": repair_prompt},
-            ],
+            patch_messages,
             model_type=NarrativeBlueprintPatch,
             validate=lambda value: (
                 validate_narrative_blueprint_patch_projection(
@@ -4109,9 +4188,18 @@ async def _repair_narrative_blueprint(
                 "call_role_label": "蓝图局部语义修复",
                 "repair_round": round_no,
                 "episode_id": str(episode.get("id") or ""),
+                "production_grant_id": (
+                    generation_budget.retry_grant_id
+                    if generation_budget is not None else ""
+                ),
                 "contract_version": BLUEPRINT_VERSION,
                 "expected_json": True,
                 "reuse_successful_operation": True,
+                "require_cached_successful_operation": bool(
+                    generation_budget is not None
+                    and operation_id
+                    in generation_budget._durable_successful_operations
+                ),
                 "disable_reasoning_fallback": True,
                 "disable_provider_retries": True,
                 "disable_provider_candidate_fallback": True,
@@ -4231,6 +4319,11 @@ async def _repair_narrative_blueprint(
             parent_artifact_ids=parent_artifact_ids,
             contract_version=BLUEPRINT_VERSION,
             prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            model_snapshot=_current_blueprint_authority_snapshot(
+                source_text,
+                generation_mode="semantic_repair",
+                generation_budget=generation_budget,
+            ),
         ),
         step_run_id=trace.step_run_id,
     )
@@ -4481,23 +4574,31 @@ async def _semantic_review_narrative_blueprint(
                     )
                 return errors
 
-            logical_run_id = str(
-                getattr(trace, "run_id", "") or "unscoped"
-            )
-            operation_id = (
-                f"screenplay.blueprint.review:{BLUEPRINT_VERSION}:"
-                f"{logical_run_id}:{current_blueprint_hash}:"
-                f"{review_round}:{sample_no}:"
-                f"{'targeted' if targeted_review else 'full'}"
+            review_messages = [
+                {"role": "system", "content": SYSTEM_PREFIX},
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n独立审稿样本编号：{sample_no}",
+                },
+            ]
+            operation_id, effective_max_tokens = (
+                _blueprint_structured_operation_id(
+                    operation_kind="review",
+                    episode_id=str(episode.get("id") or ""),
+                    semantic_input_hash=current_blueprint_hash,
+                    ordinal=(
+                        f"{review_round}:{sample_no}:"
+                        f"{'targeted' if targeted_review else 'full'}"
+                    ),
+                    messages=review_messages,
+                    output_schema=review_schema,
+                    requested_max_tokens=8192,
+                    temperature=0.1,
+                )
             )
             reservation_id: int | None = None
             remaining_seconds: float | None = None
             if generation_budget is not None:
-                _provider, _model, effective_max_tokens = (
-                    hiagent.text_request_token_limits(
-                        requested_max_tokens=8192,
-                    )
-                )
                 reservation_id = generation_budget.claim(
                     max_tokens=effective_max_tokens,
                     requested_max_tokens=8192,
@@ -4508,13 +4609,7 @@ async def _semantic_review_narrative_blueprint(
                     - (time.monotonic() - generation_budget.started_at)
                 )
             review_call = model_gateway.chat_structured(
-                [
-                    {"role": "system", "content": SYSTEM_PREFIX},
-                    {
-                        "role": "user",
-                        "content": f"{prompt}\n独立审稿样本编号：{sample_no}",
-                    },
-                ],
+                review_messages,
                 model_type=BlueprintSemanticReview,
                 validate=validate_review,
                 operation_id=operation_id,
@@ -4538,10 +4633,19 @@ async def _semantic_review_narrative_blueprint(
                     "review_round": review_round,
                     "review_sample": sample_no,
                     "episode_id": str(episode.get("id") or ""),
+                    "production_grant_id": (
+                        generation_budget.retry_grant_id
+                        if generation_budget is not None else ""
+                    ),
                     "contract_version": BLUEPRINT_VERSION,
                     "substage": "risk_nodes" if targeted_review else "full",
                     "source_count": len(projected_source.splitlines()),
                     "reuse_successful_operation": True,
+                    "require_cached_successful_operation": bool(
+                        generation_budget is not None
+                        and operation_id
+                        in generation_budget._durable_successful_operations
+                    ),
                     "disable_reasoning_fallback": True,
                     "disable_provider_retries": True,
                     "disable_provider_candidate_fallback": True,
@@ -5215,6 +5319,56 @@ def _blueprint_provider_operation_id(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()[:32]
+
+
+def _blueprint_structured_operation_id(
+    *,
+    operation_kind: str,
+    episode_id: str,
+    semantic_input_hash: str,
+    ordinal: str,
+    messages: list[dict[str, str]],
+    output_schema: dict[str, Any],
+    requested_max_tokens: int,
+    temperature: float,
+) -> tuple[str, int]:
+    """Fingerprint an exact paid structured request, independent of run id.
+
+    A process/run boundary is not a new semantic operation.  Provider/model
+    routing and every setting that changes the outbound payload are included,
+    so a legitimate configuration change becomes a new operation instead of
+    either reusing or being blocked by an old cached response.
+    """
+    provider, model, effective_max_tokens = hiagent.text_request_token_limits(
+        requested_max_tokens=requested_max_tokens,
+    )
+    material = {
+        "operation_kind": operation_kind,
+        "episode_id": episode_id,
+        "contract_version": BLUEPRINT_VERSION,
+        "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        "semantic_input_hash": semantic_input_hash,
+        "ordinal": ordinal,
+        "provider": provider,
+        "model": model,
+        "requested_max_tokens": requested_max_tokens,
+        "effective_max_tokens": effective_max_tokens,
+        "temperature": temperature,
+        "provider_semantic_settings": (
+            hiagent.text_request_semantic_settings(provider)
+        ),
+        "messages": messages,
+        "output_schema": output_schema,
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"screenplay.blueprint.{operation_kind}:{digest}", effective_max_tokens
 
 
 class _BlueprintGenerationBudget:
@@ -5958,32 +6112,12 @@ async def _generate_sharded_narrative_blueprint(
             content=blueprint.model_dump(mode="json"),
             contract_version=BLUEPRINT_VERSION,
             prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
-            model_snapshot={
-                "generation_mode": "source_shards",
-                "shard_count": len(segment_shards),
-                "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
-                "local_authority_validator_version": (
-                    BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
-                ),
-                "split_manifest_version": BLUEPRINT_SPLIT_MANIFEST_VERSION,
-                "source_corpus_hash": source_corpus_hash,
-                "provider_call_count": generation_budget.provider_calls,
-                "requested_output_tokens": (
-                    generation_budget.requested_output_tokens
-                ),
-                "actual_output_tokens": (
-                    generation_budget.actual_output_tokens
-                ),
-                "unknown_output_tokens": (
-                    generation_budget.unknown_output_tokens
-                ),
-                "charged_output_tokens": (
-                    generation_budget.charged_output_tokens
-                ),
-                "active_reserved_output_tokens": (
-                    generation_budget.reserved_output_tokens
-                ),
-            },
+            model_snapshot=_current_blueprint_authority_snapshot(
+                source_text,
+                generation_mode="source_shards",
+                generation_budget=generation_budget,
+                shard_count=len(segment_shards),
+            ),
         ),
         step_run_id=trace.step_run_id,
     )
@@ -6055,11 +6189,7 @@ async def _generate_screenplay_narrative_blueprint(
                 None,
                 0,
                 meta={
-                "episode_id": str(episode.get("id") or ""),
-                "production_grant_id": (
-                    generation_budget.retry_grant_id
-                    if generation_budget is not None else ""
-                ),
+                    "episode_id": str(episode.get("id") or ""),
                     "contract_version": BLUEPRINT_VERSION,
                     "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                 },
@@ -6421,7 +6551,9 @@ async def _generate_screenplay_scene_sharded_baseline(
     blueprint_hash = blueprint_content_hash(narrative_blueprint)
     trace = current_trace()
     blueprint_row = get_conn().execute(
-        """SELECT id,content_json FROM artifacts
+        """SELECT id,content_json,model_snapshot_json,contract_version,
+                  prompt_version
+             FROM artifacts
              WHERE scope_type='episode' AND scope_id=?
                AND type='screenplay_narrative_blueprint'
                AND status='validated'
@@ -6431,11 +6563,21 @@ async def _generate_screenplay_scene_sharded_baseline(
     blueprint_artifact_id = None
     for row in blueprint_row:
         try:
-            if _narrative_blueprint_content_hash(
-                NarrativeBlueprint.model_validate(
-                    json.loads(row["content_json"] or "{}")
+            snapshot = json.loads(row["model_snapshot_json"] or "{}")
+            if (
+                str(row["contract_version"] or "") == BLUEPRINT_VERSION
+                and str(row["prompt_version"] or "")
+                == SCREENPLAY_BLUEPRINT_PROMPT_VERSION
+                and _blueprint_authority_snapshot_is_current(
+                    snapshot,
+                    source_text,
                 )
-            ) == blueprint_hash:
+                and _narrative_blueprint_content_hash(
+                    NarrativeBlueprint.model_validate(
+                        json.loads(row["content_json"] or "{}")
+                    )
+                ) == blueprint_hash
+            ):
                 blueprint_artifact_id = str(row["id"])
                 break
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -6451,6 +6593,10 @@ async def _generate_screenplay_scene_sharded_baseline(
                 content=narrative_blueprint.model_dump(mode="json"),
                 contract_version=BLUEPRINT_VERSION,
                 prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                model_snapshot=_current_blueprint_authority_snapshot(
+                    source_text,
+                    generation_mode="current_authority_wrapper",
+                ),
             ),
             step_run_id=trace.step_run_id,
         )
@@ -6713,11 +6859,7 @@ async def generate_screenplay(episode: dict, source_text: str, bible: Bible,
         ),
         agent_name="screenplay_blueprint",
         context_manifest={
-                    "episode_id": str(episode.get("id") or ""),
-                    "production_grant_id": (
-                        generation_budget.retry_grant_id
-                        if generation_budget is not None else ""
-                    ),
+            "episode_id": str(episode.get("id") or ""),
             "source_chars": len(source_text),
         },
     )

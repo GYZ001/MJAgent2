@@ -537,6 +537,85 @@ def test_split_manifest_reuses_prefix_and_calls_only_uncovered_gap(
     assert calls == [[segment.segment_id for segment in segments[2:]]]
 
 
+def test_split_manifest_complete_six_leaf_cover_makes_zero_provider_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_text = _source(6)
+    segments = index_source_segments(source_text)
+    corpus_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    rows: list[dict] = []
+    prior_nodes: list = []
+    for shard_index, segment in enumerate(segments, start=1):
+        source_payload = [{
+            "source_segment_id": segment.segment_id,
+            "text": segment.text,
+            "source_facts": [
+                fact.model_dump(mode="json")
+                for fact in stages.source_segment_facts(
+                    segment.segment_id,
+                    segment.text,
+                )
+            ],
+        }]
+        source_hash = hashlib.sha256(json.dumps(
+            source_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()).hexdigest()
+        boundary_hash = hashlib.sha256(json.dumps(
+            stages._blueprint_shard_boundary_context(prior_nodes),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()).hexdigest()
+        row = _cached_leaf_row(
+            source_ids=[segment.segment_id],
+            shard_index=shard_index,
+            source_hash=source_hash,
+            boundary_hash=boundary_hash,
+        )
+        snapshot = json.loads(row["model_snapshot_json"])
+        snapshot["source_corpus_hash"] = corpus_hash
+        row["model_snapshot_json"] = json.dumps(snapshot)
+        rows.append(row)
+        prior_nodes.extend(
+            stages.NarrativeBlueprintShard.model_validate(
+                json.loads(row["content_json"])
+            ).nodes
+        )
+
+    async def forbidden_chat(*_args, **_kwargs):
+        raise AssertionError("complete exact cover must not call provider")
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _StaticCacheConnection(rows))
+    monkeypatch.setattr(stages.model_gateway, "chat", forbidden_chat)
+    monkeypatch.setattr(
+        stages,
+        "validate_narrative_blueprint_shard",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "log_provider_call", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-complete-cover"),
+    )
+
+    result = asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-complete-cover", "episode_no": 1},
+        source_text,
+        {},
+    ))
+
+    assert len(result.nodes) == 6
+
+
 def test_split_manifest_boundary_drift_fails_before_provider_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

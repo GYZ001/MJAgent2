@@ -1539,7 +1539,21 @@ def test_shard_gate_rejects_local_state_subject_and_participant_authority() -> N
     )
 
 
-def test_blueprint_patch_unknown_is_charged_and_new_run_gets_new_operation(
+def test_blueprint_gate_rejects_empty_participant_evidence() -> None:
+    blueprint = _blueprint()
+    blueprint.nodes[0].participant_evidence = []
+
+    errors = validate_narrative_blueprint(blueprint, SOURCE)
+
+    assert any(
+        "BLUEPRINT_PARTICIPANT_EVIDENCE_MISSING" in error
+        and "白洁" in error
+        and "王申" in error
+        for error in errors
+    )
+
+
+def test_blueprint_patch_unknown_keeps_stable_operation_and_retry_lineage(
     monkeypatch,
 ) -> None:
     operation_ids: list[str] = []
@@ -1572,22 +1586,47 @@ def test_blueprint_patch_unknown_is_charged_and_new_run_gets_new_operation(
         for evidence in blueprint.nodes[0].participant_evidence
         if evidence.usage != "state_subject"
     ]
-    budgets = [stages._BlueprintGenerationBudget() for _ in range(2)]
+    first_budget = stages._BlueprintGenerationBudget()
+    first_budget.retry_grant_id = "grant-first"
+    with pytest.raises(hiagent.ProviderError, match="outcome unknown"):
+        asyncio.run(stages._repair_narrative_blueprint(
+            blueprint.model_copy(deep=True),
+            episode={"id": "ep-patch-retry"},
+            source_text=SOURCE,
+            generation_budget=first_budget,
+        ))
 
-    for budget in budgets:
-        with pytest.raises(hiagent.ProviderError, match="outcome unknown"):
-            asyncio.run(stages._repair_narrative_blueprint(
-                blueprint.model_copy(deep=True),
-                episode={"id": "ep-patch-retry"},
-                source_text=SOURCE,
-                generation_budget=budget,
-            ))
+    retry_budget = stages._BlueprintGenerationBudget()
+    retry_budget.provider_calls = first_budget.provider_calls
+    retry_budget.unknown_output_tokens = first_budget.unknown_output_tokens
+    retry_budget._durable_unknown_operations[operation_ids[0]] = "grant-first"
+    retry_budget.retry_grant_id = "grant-explicit-retry"
+    with pytest.raises(hiagent.ProviderError, match="outcome unknown"):
+        asyncio.run(stages._repair_narrative_blueprint(
+            blueprint.model_copy(deep=True),
+            episode={"id": "ep-patch-retry"},
+            source_text=SOURCE,
+            generation_budget=retry_budget,
+        ))
 
-    assert operation_ids[0] != operation_ids[1]
-    assert "run-first" in operation_ids[0]
-    assert "run-explicit-retry" in operation_ids[1]
-    assert [budget.provider_calls for budget in budgets] == [1, 1]
-    assert [budget.unknown_output_tokens for budget in budgets] == [16384, 16384]
+    assert operation_ids[0] == operation_ids[1]
+    assert "run-first" not in operation_ids[0]
+    assert "run-explicit-retry" not in operation_ids[1]
+    assert first_budget.provider_calls == 1
+    assert first_budget.unknown_output_tokens == 16384
+    assert retry_budget.provider_calls == 2
+    assert retry_budget.unknown_output_tokens == 32768
+
+
+def test_blueprint_unknown_retry_without_fresh_grant_sends_nothing() -> None:
+    budget = stages._BlueprintGenerationBudget()
+    budget._durable_unknown_operations["op-unknown"] = "grant-old"
+    budget.retry_grant_id = "grant-old"
+
+    with pytest.raises(stages.StageError, match="RETRY_GRANT_REQUIRED"):
+        budget.claim(max_tokens=100, operation_id="op-unknown")
+
+    assert budget.provider_calls == 0
 def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
     blueprint = _blueprint()
     derive_blueprint_scene_plans(blueprint)
