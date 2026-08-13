@@ -70,7 +70,8 @@ def episode_fingerprint(episode_id: str) -> str:
             for row in rows
         ]
     bindings = conn.execute(
-        """SELECT b.shot_id,b.chapter_id,b.source_version_hash,b.start_offset,b.end_offset,b.excerpt_hash
+        """SELECT b.shot_id,b.binding_kind,b.chapter_id,b.source_version_hash,
+                  b.start_offset,b.end_offset,b.excerpt_hash
            FROM storyboard_source_bindings b
            JOIN shots s ON s.id=b.shot_id
            WHERE s.episode_id=? ORDER BY s.shot_no""",
@@ -551,6 +552,7 @@ def validate_source_binding(episode_id: str, binding: dict[str, Any]) -> tuple[s
     if binding.get("excerpt_hash") not in (None, "", expected_excerpt_hash):
         raise HTTPException(422, "原文片段内容校验失败，请重新框选")
     normalized = {
+        "binding_kind": "source_excerpt",
         "chapter_id": chapter_id,
         "chapter_idx": int(source["idx"]),
         "source_version_hash": source["source_version_hash"],
@@ -571,16 +573,18 @@ def persist_source_binding(
     db_conn = conn or get_conn()
     db_conn.execute(
         """INSERT INTO storyboard_source_bindings(
-               shot_id,chapter_id,chapter_idx,source_version_hash,start_offset,end_offset,
-               excerpt_hash,updated_at
-           ) VALUES(?,?,?,?,?,?,?,?)
+               shot_id,binding_kind,chapter_id,chapter_idx,source_version_hash,
+               start_offset,end_offset,excerpt_hash,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?)
            ON CONFLICT(shot_id) DO UPDATE SET
+               binding_kind=excluded.binding_kind,
                chapter_id=excluded.chapter_id,chapter_idx=excluded.chapter_idx,
                source_version_hash=excluded.source_version_hash,
                start_offset=excluded.start_offset,end_offset=excluded.end_offset,
                excerpt_hash=excluded.excerpt_hash,updated_at=excluded.updated_at""",
         (
-            shot_id, normalized["chapter_id"], normalized["chapter_idx"],
+            shot_id, normalized.get("binding_kind", "source_excerpt"),
+            normalized["chapter_id"], normalized["chapter_idx"],
             normalized["source_version_hash"], normalized["start_offset"],
             normalized["end_offset"], normalized["excerpt_hash"], now(),
         ),
@@ -637,7 +641,61 @@ def align_generated_source_evidence(
             clean = clean[1:-1].strip()
         if clean and clean not in evidence_candidates:
             evidence_candidates.append(clean)
-    for source in chapter_sources(episode_id, conn=conn):
+    sources = chapter_sources(episode_id, conn=conn)
+
+    # A title-card exception is deliberately narrower than generic excerpt
+    # alignment.  It only applies to a decorated, repeated title form such as
+    # ``【第一章书生孟浩】\n第一章书生孟浩``.  The unwrapped text must be
+    # exactly the authorized chapter title or the first non-empty content line,
+    # and it must still have a real contiguous offset in chapter content.
+    nonempty_lines = [line.strip() for line in candidate.splitlines() if line.strip()]
+    decorated_title = None
+    if len(nonempty_lines) >= 2:
+        unwrapped: list[str] = []
+        has_decoration = False
+        for line in nonempty_lines:
+            if line.startswith("【") and line.endswith("】"):
+                line = line[1:-1].strip()
+                has_decoration = True
+            unwrapped.append(line)
+        if has_decoration and unwrapped and len(set(unwrapped)) == 1:
+            decorated_title = unwrapped[0]
+    title_matches: list[tuple[dict[str, Any], int]] = []
+    if decorated_title:
+        for source in sources:
+            content = str(source.get("content") or "")
+            first_nonempty = next(
+                (line.strip() for line in content.splitlines() if line.strip()),
+                "",
+            )
+            authorized_titles = {
+                value
+                for value in (str(source.get("title") or "").strip(), first_nonempty)
+                if value
+            }
+            if decorated_title not in authorized_titles:
+                continue
+            start = content.find(decorated_title)
+            if start >= 0:
+                title_matches.append((source, start))
+    if len(title_matches) > 1:
+        raise HTTPException(422, "装饰标题卡在多个授权章节中重复，无法唯一绑定")
+    if title_matches:
+        source, start = title_matches[0]
+        end = start + len(decorated_title)
+        return decorated_title, {
+            "binding_kind": "paratext_title",
+            "chapter_id": int(source["id"]),
+            "chapter_idx": int(source["idx"]),
+            "source_version_hash": source["source_version_hash"],
+            "start_offset": start,
+            "end_offset": end,
+            "excerpt_hash": hashlib.sha256(
+                decorated_title.encode("utf-8")
+            ).hexdigest(),
+        }
+
+    for source in sources:
         for evidence in evidence_candidates:
             aligned = align_source_excerpt(evidence, source["content"] or "")
             if aligned is not None:
@@ -655,6 +713,7 @@ def align_generated_source_evidence(
     )
     candidate = aligned.excerpt
     normalized = {
+        "binding_kind": "source_excerpt",
         "chapter_id": int(source["id"]),
         "chapter_idx": int(source["idx"]),
         "source_version_hash": source["source_version_hash"],
@@ -735,26 +794,22 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
         candidate = (row["source_excerpt"] or "").strip()
         matches = []
         try:
-            _canonical, normalized = align_generated_source_evidence(
+            canonical, normalized = align_generated_source_evidence(
                 episode_id,
                 candidate,
                 conn=conn,
             )
-            source = next(
-                item for item in sources
-                if int(item["id"]) == int(normalized["chapter_id"])
+            if canonical != candidate:
+                conn.execute(
+                    "UPDATE shots SET source_excerpt=? WHERE id=?",
+                    (canonical, row["id"]),
+                )
+                realigned += 1
+            persist_source_binding(
+                str(row["id"]), normalized, conn=conn, commit=False,
             )
-            aligned = align_source_excerpt(
-                _canonical,
-                source["content"] or "",
-            )
-            if aligned is not None:
-                matches.append((
-                    aligned.match_chars,
-                    int(aligned.exact),
-                    source,
-                    aligned,
-                ))
+            bound += 1
+            continue
         except (HTTPException, StopIteration):
             pass
         if not matches:
@@ -801,9 +856,9 @@ def repair_generated_source_bindings(episode_id: str) -> dict[str, Any]:
         excerpt_hash = hashlib.sha256(aligned.excerpt.encode("utf-8")).hexdigest()
         conn.execute(
             """INSERT INTO storyboard_source_bindings(
-                   shot_id,chapter_id,chapter_idx,source_version_hash,start_offset,end_offset,
-                   excerpt_hash,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?)""",
+                   shot_id,binding_kind,chapter_id,chapter_idx,source_version_hash,
+                   start_offset,end_offset,excerpt_hash,updated_at
+               ) VALUES(?,'source_excerpt',?,?,?,?,?,?,?)""",
             (
                 row["id"], int(source["id"]), int(source["idx"]),
                 source["source_version_hash"], aligned.start_offset,
@@ -863,6 +918,7 @@ def verify_or_bind_existing_excerpt(
         raise HTTPException(422, "现有原文证据无法在本集授权原文中定位，请重新框选")
     source, start = matches[0]
     normalized = {
+        "binding_kind": "source_excerpt",
         "chapter_id": int(source["id"]),
         "chapter_idx": int(source["idx"]),
         "source_version_hash": source["source_version_hash"],

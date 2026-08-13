@@ -1417,10 +1417,80 @@ def test_generated_source_binding_repair_canonicalizes_chapter_title_card(
         "SELECT source_excerpt FROM shots WHERE id='s1'"
     ).fetchone()
     binding = storyboard_db.execute(
-        "SELECT start_offset,end_offset FROM storyboard_source_bindings WHERE shot_id='s1'"
+        """SELECT binding_kind,start_offset,end_offset
+             FROM storyboard_source_bindings WHERE shot_id='s1'"""
     ).fetchone()
     assert row["source_excerpt"] == "First Chapter"
-    assert dict(binding) == {"start_offset": 0, "end_offset": 13}
+    assert dict(binding) == {
+        "binding_kind": "paratext_title",
+        "start_offset": 0,
+        "end_offset": 13,
+    }
+
+
+def test_generated_source_binding_repair_binds_short_chinese_title_as_paratext(
+    storyboard_db,
+) -> None:
+    title = "第一章书生孟浩"
+    storyboard_db.execute(
+        "UPDATE chapters SET title=?,content=? WHERE project_id='p1' AND idx=1",
+        (title, title + "\n\n靠山宗山门外人来人往。"),
+    )
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s1'",
+        (f"【{title}】\n{title}",),
+    )
+    storyboard_db.execute(
+        "DELETE FROM storyboard_source_bindings WHERE shot_id='s1'"
+    )
+    storyboard_db.commit()
+
+    result = workspace.repair_generated_source_bindings("e1")
+
+    assert result == {
+        "bound": 1,
+        "realigned": 1,
+        "unresolved_shot_nos": [],
+    }
+    shot = storyboard_db.execute(
+        "SELECT source_excerpt FROM shots WHERE id='s1'"
+    ).fetchone()
+    binding = storyboard_db.execute(
+        """SELECT binding_kind,start_offset,end_offset,excerpt_hash
+             FROM storyboard_source_bindings WHERE shot_id='s1'"""
+    ).fetchone()
+    assert shot["source_excerpt"] == title
+    assert binding["binding_kind"] == "paratext_title"
+    assert (binding["start_offset"], binding["end_offset"]) == (0, len(title))
+    assert binding["excerpt_hash"] == hashlib.sha256(
+        title.encode("utf-8")
+    ).hexdigest()
+
+
+def test_generic_short_excerpt_still_does_not_bypass_match_threshold(
+    storyboard_db,
+) -> None:
+    short = "第一章书生孟浩"
+    storyboard_db.execute(
+        "UPDATE chapters SET title=?,content=? WHERE project_id='p1' AND idx=1",
+        (short, short + "\n\n靠山宗山门外人来人往。"),
+    )
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s1'",
+        (short,),
+    )
+    storyboard_db.execute(
+        "DELETE FROM storyboard_source_bindings WHERE shot_id='s1'"
+    )
+    storyboard_db.commit()
+
+    result = workspace.repair_generated_source_bindings("e1")
+
+    assert result == {
+        "bound": 0,
+        "realigned": 0,
+        "unresolved_shot_nos": [1],
+    }
 
 
 def test_generated_source_binding_repair_falls_back_to_story_event_span(

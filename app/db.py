@@ -602,6 +602,7 @@ CREATE INDEX IF NOT EXISTS idx_media_cleanup_outbox_pending
     ON media_cleanup_outbox(status, created_at);
 CREATE TABLE IF NOT EXISTS storyboard_source_bindings (
     shot_id TEXT PRIMARY KEY,
+    binding_kind TEXT NOT NULL DEFAULT 'source_excerpt',
     chapter_id INTEGER NOT NULL,
     chapter_idx INTEGER NOT NULL,
     source_version_hash TEXT NOT NULL,
@@ -1493,6 +1494,10 @@ MIGRATIONS = (
     # 人物姓名消歧是剧本生产输入的一部分，必须跨进程恢复、Patch 和手工发布保留。
     "ALTER TABLE episodes ADD COLUMN screenplay_character_resolutions TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE shots ADD COLUMN shot_uid TEXT",
+    # Generated chapter-title cards may bind a short, exact authorized
+    # paratext line without weakening generic source-excerpt match thresholds.
+    "ALTER TABLE storyboard_source_bindings ADD COLUMN binding_kind TEXT "
+    "NOT NULL DEFAULT 'source_excerpt'",
     # QA score-only metadata for typed Evaluation rows.
     "ALTER TABLE evaluations ADD COLUMN evaluation_role TEXT",
     "ALTER TABLE evaluations ADD COLUMN score_status TEXT",
