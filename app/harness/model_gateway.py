@@ -199,9 +199,6 @@ def _latest_json_recovery_root(value: str) -> str | None:
     for index, char in enumerate(text):
         if char != "{":
             continue
-        remainder = text[index + 1:].lstrip()
-        if not remainder or remainder[0] not in {'"', "}"}:
-            continue
         try:
             _, candidate_size = decoder.raw_decode(text[index:])
         except (TypeError, ValueError, json.JSONDecodeError):

@@ -227,6 +227,48 @@ def test_structured_runner_only_validates_latest_complete_root(
     assert attempts[0]["local_recovery"] is True
 
 
+@pytest.mark.parametrize(
+    "raw",
+    (
+        '{"value":1}\n以下是最新修正版\n{value:2}',
+        '{"value":1}\n以下是最新修正版\n{not JSON}',
+        "{value:2}",
+        "{not JSON}",
+    ),
+    ids=(
+        "old-valid-before-unquoted-key",
+        "old-valid-before-non-json-object",
+        "standalone-unquoted-key",
+        "standalone-non-json-object",
+    ),
+)
+def test_structured_runner_fails_closed_on_latest_unparseable_root(
+    monkeypatch,
+    raw: str,
+) -> None:
+    attempts: list[dict] = []
+
+    async def fake_chat(*_args, **_kwargs):
+        return raw
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(model_gateway.StructuredFormatError, match="JSON 解析失败"):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "return json"}],
+            model_type=_Payload,
+            validate=None,
+            operation_id="test.fail-closed-latest-root:v1:abc",
+            max_tokens=128,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+            on_attempt=attempts.append,
+        ))
+
+    assert attempts[0]["outcome"] == "format_error"
+    assert "JSON 解析失败" in attempts[0]["validation_errors"][0]
+
+
 def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
     monkeypatch,
 ) -> None:
