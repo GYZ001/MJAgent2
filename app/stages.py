@@ -5428,9 +5428,11 @@ def _blueprint_shard_prompt(
     """Render the complete Blueprint contract without prose duplication."""
 
     rules = (
-        "仅处理target_sources；每个SRC只归一个节点，节点按源顺序且最多"
-        f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE}个连续SRC。每节点只写一个核心动作、"
-        "一个因果/情绪转折；仅story节点填exit_state，跨时空或过载则拆节点。"
+        "仅处理target_sources；每个SRC必须整体且只归一个节点，严禁把同一SRC按"
+        "source unit、动作、对白、时空或容量拆给多个节点。节点只能在SRC边界拆分，"
+        "按源顺序且最多"
+        f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE}个连续SRC。每节点把所拥有SRC内的"
+        "连续动作压缩为一个核心因果进程和一个因果/情绪转折；仅story节点填exit_state。"
         "首分片首节点time_relation=episode_start；其余严格延续boundary_context。"
         "复用有效fact_key、人物位置、时间域和稳定character_key；本分片新key保持唯一。"
         "每节点显式narrative_layer/event_priority/render_policy。故事画面用"

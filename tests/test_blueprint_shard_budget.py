@@ -188,6 +188,40 @@ def _prompt_source_ids(prompt: str) -> list[str]:
     ]
 
 
+def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
+    source_payload = [{
+        "source_segment_id": "SRC0003",
+        "text": "孟浩决定下山，听见呼救，认出王有材并找来藤条施救。",
+        "source_facts": [
+            {
+                "source_unit_key": f"SRC0003:unit:{index:03d}",
+                "projection": "quoted" if index % 2 == 0 else "action",
+                "text": f"来源单元{index}",
+            }
+            for index in range(1, 17)
+        ],
+    }]
+
+    prompt = stages._blueprint_shard_prompt(
+        episode_no=1,
+        shard_index=2,
+        shard_count=4,
+        errors=[],
+        bible_context={},
+        boundary={},
+        source_payload=source_payload,
+    )
+
+    assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
+        "screenplay-blueprint-1.6.3"
+    )
+    assert "每个SRC必须整体且只归一个节点" in prompt
+    assert "节点只能在SRC边界拆分" in prompt
+    assert "连续动作压缩为一个核心因果进程" in prompt
+    assert "跨时空或过载则拆节点" not in prompt
+    assert _prompt_source_ids(prompt) == ["SRC0003"]
+
+
 def test_output_truncated_splits_once_without_accepting_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
