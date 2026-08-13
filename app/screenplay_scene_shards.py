@@ -352,6 +352,25 @@ class ScreenplaySceneShardCreativeIR(BaseModel):
     slots: dict[str, ScreenplaySceneShardCreativeUnit]
 
 
+class ScreenplaySceneShardSemanticFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    unit_key: str
+    code: Literal[
+        "state_subject_semantic_drift",
+        "source_semantic_drift",
+    ]
+    message: str
+
+
+class ScreenplaySceneShardSemanticReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    findings: list[ScreenplaySceneShardSemanticFinding] = Field(
+        default_factory=list,
+    )
+
+
 class ScreenplaySceneShardUnit(IRSceneUnit):
     model_config = ConfigDict(extra="forbid")
 
@@ -2562,7 +2581,7 @@ def _recover_scene_shard_from_provider_calls(
     blueprint: NarrativeBlueprint,
     identity_keys: set[str],
     front_matter_ids: set[str],
-) -> tuple[ScreenplaySceneShardIR, dict[str, Any]] | None:
+) -> tuple[ScreenplaySceneShardCreativeIR, dict[str, Any]] | None:
     """Revalidate a complete prior response before issuing another paid call."""
     rows = get_conn().execute(
         """SELECT id,response_json
@@ -2605,7 +2624,7 @@ def _recover_scene_shard_from_provider_calls(
                 front_matter_ids=front_matter_ids,
             )
             if not errors:
-                return shard, {
+                return draft, {
                     "outcome": "validated_provider_recovery",
                     "provider_call_id": int(row["id"]),
                     "local_recovery": True,
@@ -3089,6 +3108,165 @@ def _scene_shard_prompt(
     )
 
 
+def _scene_shard_semantic_review_prompt(
+    *,
+    draft: ScreenplaySceneShardCreativeIR,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+) -> str:
+    authority_slots = {
+        slot.unit_key: {
+            "kind": slot.kind,
+            "source_unit_key": slot.source_unit_key,
+            "source_text": slot.source_text,
+            "state_subject_key": slot.state_subject_key,
+            "environment_only": slot.environment_only,
+            "actor_keys": slot.actor_keys,
+            "target_keys": slot.target_keys,
+            "speaker_key": slot.speaker_key,
+            "onscreen_entity_keys": slot.onscreen_entity_keys,
+        }
+        for contract in scene_input_contracts
+        for slot in contract.unit_slots
+    }
+    return (
+        "你是剧本场次分片的独立语义审查员。逐 slot 对照原始 source_text 与"
+        "程序冻结的 exact-unit state_subject/actor/speaker，检查 creative text、"
+        "performance、resulting_state 是否把主体 A 改写成主体 B，或加入来源中"
+        "不存在/相反的人物行为与反应。不能从姓名词面、visible、scene roster 猜主体；"
+        "environment_only 也不能承载人物思考、发问、反应或动作。只报告有明确来源"
+        "冲突的 finding；不得建议改结构、主体、时间线、source ownership 或 audit。"
+        "无问题输出 findings=[]。\n冻结 slot 权威：\n"
+        + json.dumps(authority_slots, ensure_ascii=False, separators=(",", ":"))
+        + "\n待审 creative fields：\n"
+        + draft.model_dump_json()
+    )
+
+
+async def _semantic_review_scene_shard_draft(
+    *,
+    draft: ScreenplaySceneShardCreativeIR,
+    scene_input_contracts: list[ScreenplaySceneInputContract],
+    operation_id: str,
+    shard_id: str,
+) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
+    """Consensus-review creative prose without allowing structural rewrites."""
+
+    async def review(
+        candidate: ScreenplaySceneShardCreativeIR,
+        reviewer_no: int,
+        phase: str,
+    ) -> ScreenplaySceneShardSemanticReview:
+        return await model_gateway.chat_structured(
+            [{"role": "user", "content": _scene_shard_semantic_review_prompt(
+                draft=candidate,
+                scene_input_contracts=scene_input_contracts,
+            )}],
+            model_type=ScreenplaySceneShardSemanticReview,
+            operation_id=(
+                f"{operation_id}:semantic:{phase}:reviewer-{reviewer_no}:"
+                f"{_hash(candidate.model_dump(mode='json'))}"
+            ),
+            max_tokens=2048,
+            temperature=0.0,
+            format_retry_limit=1,
+            semantic_retry_limit=0,
+            call_meta={
+                "stage": "剧本场次语义审查",
+                "stage_key": "screenplay_scene_shard_semantic_review",
+                "substage": phase,
+                "shard_id": shard_id,
+                "reviewer_no": reviewer_no,
+            },
+        )
+
+    async def consensus(
+        candidate: ScreenplaySceneShardCreativeIR,
+        phase: str,
+    ) -> tuple[list[ScreenplaySceneShardSemanticFinding], list[dict[str, Any]]]:
+        reviews = await asyncio.gather(
+            review(candidate, 1, phase),
+            review(candidate, 2, phase),
+        )
+        maps = [
+            {(finding.unit_key, finding.code): finding for finding in item.findings}
+            for item in reviews
+        ]
+        shared = sorted(set(maps[0]).intersection(maps[1]))
+        return (
+            [maps[0][key] for key in shared],
+            [item.model_dump(mode="json") for item in reviews],
+        )
+
+    findings, initial_reviews = await consensus(draft, "initial")
+    audit = [{
+        "phase": "initial",
+        "reviews": initial_reviews,
+        "consensus": [item.model_dump(mode="json") for item in findings],
+    }]
+    if not findings:
+        return draft, audit
+
+    frozen_slots = {
+        slot.unit_key: slot.model_dump(mode="json")
+        for contract in scene_input_contracts
+        for slot in contract.unit_slots
+    }
+    repair_prompt = (
+        "只修复下列 consensus finding 对应 slot 的 creative fields：text、"
+        "performance、resulting_state、function、required_text、prop_text、"
+        "on_screen_text。必须忠于 source_text 与 exact state_subject/actor/speaker；"
+        "不得增加删除 slot，不得输出或改变任何结构、身份、timeline、source ownership"
+        "或 audit 字段。返回完整 creative root。\nfindings：\n"
+        + json.dumps(
+            [item.model_dump(mode="json") for item in findings],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n冻结 slots：\n"
+        + json.dumps(frozen_slots, ensure_ascii=False, separators=(",", ":"))
+        + "\n当前 creative：\n"
+        + draft.model_dump_json()
+    )
+    repaired = await model_gateway.chat_structured(
+        [{"role": "user", "content": repair_prompt}],
+        model_type=ScreenplaySceneShardCreativeIR,
+        operation_id=(
+            f"{operation_id}:semantic:repair:"
+            f"{_hash(draft.model_dump(mode='json'))}"
+        ),
+        max_tokens=max(4096, min(12288, len(repair_prompt) // 2)),
+        temperature=0.2,
+        format_retry_limit=1,
+        semantic_retry_limit=1,
+        call_meta={
+            "stage": "剧本场次语义修复",
+            "stage_key": "screenplay_scene_shard_semantic_repair",
+            "substage": "consensus_repair",
+            "shard_id": shard_id,
+        },
+    )
+    if set(repaired.slots) != set(draft.slots):
+        raise ScreenplaySceneShardError(
+            shard_id,
+            ["语义 repair 改变了 generation slot 集合"],
+        )
+    remaining, final_reviews = await consensus(repaired, "post_repair")
+    audit.append({
+        "phase": "post_repair",
+        "reviews": final_reviews,
+        "consensus": [item.model_dump(mode="json") for item in remaining],
+    })
+    if remaining:
+        raise ScreenplaySceneShardError(
+            shard_id,
+            [
+                f"{item.unit_key} creative semantic gate 未收口：{item.message}"
+                for item in remaining
+            ],
+        )
+    return repaired, audit
+
+
 async def generate_screenplay_scene_shards(
     *,
     episode: dict[str, Any],
@@ -3303,7 +3481,7 @@ async def generate_screenplay_scene_shards(
             front_matter_ids=front_matter_ids,
         )
         if recovered is not None:
-            shard, recovery_attempt = recovered
+            draft, recovery_attempt = recovered
             attempts.append(recovery_attempt)
         else:
             async with semaphore:
@@ -3375,13 +3553,19 @@ async def generate_screenplay_scene_shards(
                     repair_schema=repair_schema,
                     on_attempt=attempts.append,
                 )
-                shard = compile_screenplay_scene_shard_draft(
-                    draft,
-                    episode_no=int(episode["episode_no"]),
-                    plan=plan,
-                    scene_plans=scene_plan_map,
-                    scene_input_contracts=plan_scene_input_contracts,
-                )
+        draft, semantic_reviews = await _semantic_review_scene_shard_draft(
+            draft=draft,
+            scene_input_contracts=plan_scene_input_contracts,
+            operation_id=operation_id,
+            shard_id=plan.shard_id,
+        )
+        shard = compile_screenplay_scene_shard_draft(
+            draft,
+            episode_no=int(episode["episode_no"]),
+            plan=plan,
+            scene_plans=scene_plan_map,
+            scene_input_contracts=plan_scene_input_contracts,
+        )
         _assert_episode_owner(episode_id)
         trace = current_trace()
         parents = [
@@ -3402,6 +3586,7 @@ async def generate_screenplay_scene_shards(
                         generation_scaffold_hash
                     ),
                     "attempts": attempts,
+                    "semantic_reviews": semantic_reviews,
                 },
                 parent_artifact_ids=parents,
                 contract_version=SCREENPLAY_SCENE_SHARD_VERSION,

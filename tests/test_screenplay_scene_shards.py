@@ -223,6 +223,10 @@ def _semantic_node(
         "location_key": location_key,
         "location_label": location_label,
         "participants": [],
+        "environment_source_unit_keys": (
+            [f"{source_id}:unit:001" for source_id in source_segment_ids]
+            if story else []
+        ),
         "action_logic": summary,
         "scene_boundary_before": story,
     }

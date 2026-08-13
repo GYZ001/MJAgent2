@@ -312,6 +312,22 @@ def _source_projection_case(
 
     payload = _ir_payload()
     payload["format_version"] = IR_VERSION
+    payload["identities"] = [payload["identities"][0]]
+    payload["identities"][0].update({
+        "display_name": "Hero",
+        "authority_id": "bible:Hero",
+    })
+    payload["scenes"] = [payload["scenes"][0]]
+    payload["scenes"][0]["character_keys"] = ["g"]
+    payload["scenes"][0]["units"][0]["text"] = (
+        "Hero独自在咖啡厅等待同行者，不时看向门口。"
+    )
+    payload["scenes"][0]["units"][1]["speaker_key"] = "g"
+    payload["scenes"][0]["units"][1]["text"] = "再等十分钟。"
+    payload["scenes"][0]["units"][1]["source_text"] = "再等十分钟。"
+    payload["events"] = [payload["events"][0]]
+    payload["events"][0]["actor_keys"] = ["g"]
+    payload["events"][0]["target_keys"] = []
     event_relations = {
         str(event["key"]): {
             "actors": list(event.get("actor_keys") or []),
@@ -1606,9 +1622,7 @@ def test_contract_v4_accepts_character_cards_appended_during_generation() -> Non
     _published_case()
     bible, _artifact = _seed_test_bible_authority()
     runtime_bible = Bible.model_validate(bible)
-    projection = json.loads(conn.execute(
-        "SELECT bible_json FROM projects WHERE id='project-generic'"
-    ).fetchone()["bible_json"])
+    projection = json.loads(json.dumps(bible))
     projection["characters"].append({
         "name": "New Ally",
         "role": "配角",
