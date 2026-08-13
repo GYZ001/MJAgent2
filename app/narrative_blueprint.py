@@ -28,8 +28,8 @@ from app.source_excerpt import (
 from app.source_facts import SourceFact, source_facts
 
 
-BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v6"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.5"
+BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v7"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.7.0"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -38,9 +38,9 @@ BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # truncated prefix.
 BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
-BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v6"
+BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v7"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
-    "blueprint-shard-local-authority.v3"
+    "blueprint-shard-local-authority.v4"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 
@@ -98,12 +98,13 @@ _PARATEXT_EMPTY_LIST_FIELDS = (
 
 
 def normalize_blueprint_provider_payload(payload: Any) -> Any:
-    """Project explicit paratext nodes onto their deterministic empty contract.
+    """Normalize provider-only cross-field drift without inventing authority.
 
     Provider bytes remain preserved in the raw T0 artifact.  This projection is
-    intentionally limited to nodes that already declared ``narrative_layer`` as
-    paratext; it never guesses source semantics and does not weaken the strict
-    ``NarrativeNode`` validator used for stored or caller-supplied artifacts.
+    limited to explicit provider claims: paratext fields are emptied, evidence
+    identities are added to the participant roster, and voice claims are
+    removed only for the exact units explicitly classified as non-audible.
+    Missing evidence is never synthesized and participants are never deleted.
     """
     if not isinstance(payload, dict):
         return payload
@@ -113,14 +114,53 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
         return normalized
     normalized_nodes: list[Any] = []
     for value in nodes:
-        if not isinstance(value, dict) or value.get("narrative_layer") != "paratext":
+        if not isinstance(value, dict):
             normalized_nodes.append(value)
             continue
         node = dict(value)
-        for field_name in _PARATEXT_EMPTY_LIST_FIELDS:
-            node[field_name] = []
-        node["decision"] = None
-        node["exit_state"] = ""
+        if value.get("narrative_layer") == "paratext":
+            for field_name in _PARATEXT_EMPTY_LIST_FIELDS:
+                node[field_name] = []
+            node["decision"] = None
+            node["exit_state"] = ""
+            normalized_nodes.append(node)
+            continue
+
+        non_audible_units = {
+            str(delivery.get("source_unit_key") or "")
+            for delivery in value.get("source_unit_deliveries") or []
+            if (
+                isinstance(delivery, dict)
+                and delivery.get("mode") not in AUDIBLE_SOURCE_DELIVERY_MODES
+            )
+        }
+        evidence_values: list[Any] = []
+        evidence_identities: list[str] = []
+        for evidence_value in value.get("participant_evidence") or []:
+            if not isinstance(evidence_value, dict):
+                evidence_values.append(evidence_value)
+                continue
+            evidence = dict(evidence_value)
+            if evidence.get("usage") == "voice":
+                source_unit_keys = evidence.get("source_unit_keys") or []
+                retained_keys = [
+                    key
+                    for key in source_unit_keys
+                    if str(key) not in non_audible_units
+                ]
+                if source_unit_keys and not retained_keys:
+                    continue
+                evidence["source_unit_keys"] = retained_keys
+            evidence_values.append(evidence)
+            identity_key = str(evidence.get("identity_key") or "").strip()
+            if identity_key and identity_key not in evidence_identities:
+                evidence_identities.append(identity_key)
+        node["participant_evidence"] = evidence_values
+        participants = list(value.get("participants") or [])
+        for identity_key in evidence_identities:
+            if identity_key not in participants:
+                participants.append(identity_key)
+        node["participants"] = participants
         normalized_nodes.append(node)
     normalized["nodes"] = normalized_nodes
     return normalized
@@ -136,6 +176,15 @@ def blueprint_shard_provider_schema(
     if not isinstance(node_schema, dict):
         return schema
     node_properties = node_schema.get("properties", {})
+    node_properties.get("participants", {})["description"] = (
+        "Ordered identity roster. Its unique identity set must exactly equal "
+        "participant_evidence.identity_key; never add an identity without "
+        "owned source evidence."
+    )
+    node_properties.get("participant_evidence", {})["description"] = (
+        "Source-backed identity evidence. Its unique identity_key set must "
+        "exactly equal participants."
+    )
     location_schema = node_properties.get("location_label")
     if isinstance(location_schema, dict):
         location_schema["pattern"] = r"^(?!.*(?:、|/|\+|内外)).+$"
@@ -259,10 +308,53 @@ def blueprint_shard_provider_schema(
         if not source_id:
             continue
         for fact in source.get("source_facts") or []:
-            if fact.get("projection") != "action":
+            projection = fact.get("projection")
+            if projection not in {"action", "quoted"}:
                 continue
             source_unit_key = str(fact.get("source_unit_key") or "")
             if not source_unit_key:
+                continue
+            if projection == "quoted":
+                non_audible_match = {
+                    "properties": {
+                        "source_unit_key": {"const": source_unit_key},
+                        "mode": {
+                            "enum": [
+                                "written_text",
+                                "sound_effect",
+                                "unspoken_reference",
+                            ],
+                        },
+                    },
+                    "required": ["source_unit_key", "mode"],
+                }
+                voice_match = {
+                    "properties": {
+                        "usage": {"const": "voice"},
+                        "source_unit_keys": {
+                            "contains": {"const": source_unit_key},
+                        },
+                    },
+                    "required": ["source_unit_keys", "usage"],
+                }
+                node_schema.setdefault("allOf", []).append({
+                    "if": {
+                        "properties": {
+                            "source_unit_deliveries": {
+                                "contains": non_audible_match,
+                            },
+                        },
+                        "required": ["source_unit_deliveries"],
+                    },
+                    "then": {
+                        "properties": {
+                            "participant_evidence": {
+                                "not": {"contains": voice_match},
+                            },
+                        },
+                        "required": ["participant_evidence"],
+                    },
+                })
                 continue
             state_subject_match = {
                 "properties": {
@@ -783,7 +875,7 @@ def _blueprint_source_occurrence_errors(
 
 
 class NarrativeBlueprint(BaseModel):
-    format_version: Literal["screenplay-narrative-blueprint.v6"] = (
+    format_version: Literal["screenplay-narrative-blueprint.v7"] = (
         BLUEPRINT_VERSION
     )
     episode_no: int
@@ -802,7 +894,7 @@ class NarrativeBlueprint(BaseModel):
 
 
 class NarrativeBlueprintShard(BaseModel):
-    format_version: Literal["screenplay-narrative-blueprint.v6"] = (
+    format_version: Literal["screenplay-narrative-blueprint.v7"] = (
         BLUEPRINT_VERSION
     )
     episode_no: int
@@ -830,7 +922,7 @@ class NarrativeBlueprintShard(BaseModel):
     def _require_typed_voice_delivery_evidence(
         self,
     ) -> "NarrativeBlueprintShard":
-        """Make audible performer ownership part of the v6 typed response."""
+        """Make audible performer ownership part of the v7 typed response."""
         for node in self.nodes:
             voice_claims: defaultdict[
                 str,
@@ -1040,6 +1132,41 @@ def validate_narrative_blueprint_shard(
     node_keys = [node.key for node in shard.nodes]
     if len(node_keys) != len(set(node_keys)):
         errors.append("[BLUEPRINT_SHARD_NODE_DUPLICATE] 节点 key 重复")
+    for node in shard.nodes:
+        participant_keys = set(node.participants)
+        evidence_keys = {
+            evidence.identity_key
+            for evidence in node.participant_evidence
+            if evidence.identity_key
+        }
+        for evidence in node.participant_evidence:
+            escaped_sources = (
+                set(evidence.source_segment_ids)
+                - set(node.source_segment_ids)
+            )
+            if escaped_sources:
+                errors.append(
+                    f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_OUT_OF_SCOPE] "
+                    f"{node.key} identity_key={evidence.identity_key} "
+                    "引用非 owned SRC："
+                    + "、".join(sorted(escaped_sources))
+                )
+        orphan_evidence = evidence_keys - participant_keys
+        if orphan_evidence:
+            errors.append(
+                f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_ORPHAN] "
+                f"{node.key} evidence identity 未列入 participants："
+                + "、".join(sorted(orphan_evidence))
+            )
+        missing_evidence = participant_keys - evidence_keys
+        if missing_evidence:
+            errors.append(
+                f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_MISSING] "
+                f"{node.key} participants 缺少同 identity_key 的来源证据："
+                + "、".join(sorted(missing_evidence))
+                + "；保留有来源角色并补 participant_evidence，"
+                "不得删除角色或改用默认身份"
+            )
     if source_text is not None:
         local_blueprint = NarrativeBlueprint(
             episode_no=shard.episode_no,
@@ -1055,37 +1182,6 @@ def validate_narrative_blueprint_shard(
                 f"{'、'.join(issue.source_segment_ids)}：{issue.message}；"
                 f"必须：{issue.required_resolution}"
             )
-        for node in shard.nodes:
-            participant_keys = set(node.participants)
-            evidence_keys = {
-                evidence.identity_key
-                for evidence in node.participant_evidence
-                if evidence.identity_key
-            }
-            for evidence in node.participant_evidence:
-                escaped_sources = (
-                    set(evidence.source_segment_ids)
-                    - set(node.source_segment_ids)
-                )
-                if escaped_sources:
-                    errors.append(
-                        f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_OUT_OF_SCOPE] "
-                        f"{node.key} {evidence.identity_key} 引用非 owned SRC："
-                        + "、".join(sorted(escaped_sources))
-                    )
-                if evidence.identity_key not in participant_keys:
-                    errors.append(
-                        f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_ORPHAN] "
-                        f"{node.key} {evidence.identity_key} 未列入 participants"
-                    )
-            if node.participant_evidence:
-                missing_evidence = participant_keys - evidence_keys
-                if missing_evidence:
-                    errors.append(
-                        f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_MISSING] "
-                        f"{node.key} 缺少参与者来源证据："
-                        + "、".join(sorted(missing_evidence))
-                    )
     try:
         derive_blueprint_scene_plans(NarrativeBlueprint(
             episode_no=shard.episode_no,
@@ -1839,13 +1935,8 @@ def blueprint_voice_identity_issues(
                 continue
             delivery = unit_deliveries[0]
             referenced_delivery_identities = {
-                value
-                for value in (
-                    delivery.content_owner_key,
-                    delivery.performer_key,
-                )
-                if value
-            }
+                delivery.performer_key
+            } if delivery.performer_key else set()
             unknown_delivery_identities = (
                 referenced_delivery_identities - participant_keys
             )
@@ -1855,11 +1946,12 @@ def blueprint_voice_identity_issues(
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
                     message=(
-                        f"{fact.source_unit_key} 的内容归属或表演身份未列入 "
+                        f"{fact.source_unit_key} 的表演身份未列入 "
                         f"participants：{sorted(unknown_delivery_identities)}"
                     ),
                     required_resolution=(
-                        "内容归属与表演身份必须精确引用本节点参与者"
+                        "声音 delivery 的 performer_key 必须精确引用"
+                        "本节点参与者；content_owner_key 可以是文字或物件归属"
                     ),
                 ))
 

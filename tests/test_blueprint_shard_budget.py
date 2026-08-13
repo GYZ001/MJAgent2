@@ -222,7 +222,7 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     )
 
     assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
-        "screenplay-blueprint-1.6.5"
+        "screenplay-blueprint-1.7.0"
     )
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt

@@ -19,7 +19,8 @@ from app.source_excerpt import (
 )
 
 
-SOURCE_FACT_VERSION = "source-fact.v2"
+SOURCE_FACT_VERSION = "source-fact.v3"
+ACTION_CLAUSE_BOUNDARIES = frozenset("。！？!?；;：:，,\n\r")
 
 
 class SourceFactQuotationError(ValueError):
@@ -45,7 +46,7 @@ class SourceFactQuotationError(ValueError):
 class SourceFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_version: Literal["source-fact.v2"] = SOURCE_FACT_VERSION
+    contract_version: Literal["source-fact.v3"] = SOURCE_FACT_VERSION
     source_unit_key: str
     source_segment_id: str
     unit_order: int
@@ -73,7 +74,7 @@ def source_segment_facts(
     source_segment_id: str,
     source_text: str,
 ) -> list[SourceFact]:
-    """Split one source segment by structural quotation boundaries."""
+    """Split one source segment by quotation and action-clause boundaries."""
     text = str(source_text or "").strip()
     if not text:
         parts: list[
@@ -116,6 +117,8 @@ def source_segment_facts(
                     quoted.append(char)
                 else:
                     outside.append(char)
+                    if char in ACTION_CLAUSE_BOUNDARIES:
+                        flush_outside()
                 continue
             quoted.append(char)
             if quotation_closing(quote_open, char):

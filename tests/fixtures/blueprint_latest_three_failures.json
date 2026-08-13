@@ -29,7 +29,7 @@
         }
       ],
       "shard": {
-        "format_version": "screenplay-narrative-blueprint.v6",
+        "format_version": "screenplay-narrative-blueprint.v7",
         "episode_no": 1,
         "shard_index": 3,
         "source_segment_ids": ["SRC0003"],
@@ -87,7 +87,7 @@
         }
       ],
       "shard": {
-        "format_version": "screenplay-narrative-blueprint.v6",
+        "format_version": "screenplay-narrative-blueprint.v7",
         "episode_no": 2,
         "shard_index": 2,
         "source_segment_ids": ["SRC0002"],
@@ -157,7 +157,7 @@
         }
       ],
       "shard": {
-        "format_version": "screenplay-narrative-blueprint.v6",
+        "format_version": "screenplay-narrative-blueprint.v7",
         "episode_no": 3,
         "shard_index": 3,
         "source_segment_ids": ["SRC0003"],

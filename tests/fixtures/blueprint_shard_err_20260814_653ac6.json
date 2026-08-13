@@ -4,9 +4,9 @@
   "raw_artifact_ids": ["art_271c1f4e96b0", "art_f8cd88c96583"],
   "run_id": "run_9ad1461b9bcf",
   "step_run_id": "step_3eb446ed0f50",
-  "contract_version": "screenplay-narrative-blueprint.v6",
+  "contract_version": "screenplay-narrative-blueprint.v7",
   "first_response_payload": {
-    "format_version": "screenplay-narrative-blueprint.v6",
+    "format_version": "screenplay-narrative-blueprint.v7",
     "episode_no": 1,
     "shard_index": 2,
     "source_segment_ids": ["SRC0002"],
@@ -95,7 +95,7 @@
     ]
   },
   "response_payload": {
-    "format_version": "screenplay-narrative-blueprint.v6",
+    "format_version": "screenplay-narrative-blueprint.v7",
     "episode_no": 1,
     "shard_index": 2,
     "source_segment_ids": ["SRC0002"],

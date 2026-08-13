@@ -163,7 +163,7 @@ SCREENPLAY_IR_MAX_TOKENS = 36864
 
 BLUEPRINT_SHARD_MIN_TOKENS = 6144
 BLUEPRINT_SHARD_MAX_TOKENS = 16384
-BLUEPRINT_SHARD_MAX_ATTEMPTS = 2
+BLUEPRINT_SHARD_MAX_ATTEMPTS = 3
 BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 12
 BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS = 131072
 BLUEPRINT_GENERATION_MAX_WALL_SECONDS = 1800.0
@@ -5435,9 +5435,11 @@ def _blueprint_shard_prompt(
         "连续动作压缩为一个核心因果进程和一个因果/情绪转折；仅story节点填exit_state。"
         "首分片首节点time_relation=episode_start；其余严格延续boundary_context。"
         "复用有效fact_key、人物位置、时间域和稳定character_key；本分片新key保持唯一。"
-        "participants中的每个identity必须至少有一条identity_key完全相同的"
-        "participant_evidence，source_segment_ids必须非空且只引用本节点owned SRC；"
-        "不得仅把人物写入participants，不得默认补角色。"
+        "participants去重后的identity集合必须与participant_evidence中非空"
+        "identity_key集合完全相等；每个identity至少有一条来源证据，"
+        "source_segment_ids必须非空且只引用本节点owned SRC。修复缺证据时必须保留"
+        "原文已有角色并补同identity_key的participant_evidence，禁止删除角色、"
+        "合并多个身份或改用默认身份。"
         "每节点显式narrative_layer/event_priority/render_policy。故事画面用"
         "story+causal+standalone；旁文本用paratext+connective+exclude_from_spine。"
         "paratext只保留summary/action_logic/opening_image等文字展示；participants、"
@@ -5450,8 +5452,10 @@ def _blueprint_shard_prompt(
         "追加一条独立对象：identity_key与performer_key相同、usage=\"voice\"、"
         "source_unit_keys只含该delivery的source_unit_key、source_segment_ids只含"
         "该unit所属SRC。performer_key不能替代这条typed voice evidence；每个声音"
-        "unit必须恰有一条，非声音delivery禁止voice evidence。content_owner不是"
-        "performer。仅story/picture的action单元"
+        "unit必须恰有一条；written_text、sound_effect、unspoken_reference等非声音"
+        "delivery在同一source_unit_key上不得有usage=voice。content_owner可以是"
+        "文字、物件或概念的归属，不要求列入participants，也绝不等于performer。"
+        "仅story/picture的action单元"
         "不写delivery，但必须精确二选一：人物动作/思考/反应/发问写唯一"
         "usage=state_subject；纯环境写environment_source_unit_keys。visible、roster和"
         "content_owner绝非主体默认值。paratext/audit_only无论原文unit是"
