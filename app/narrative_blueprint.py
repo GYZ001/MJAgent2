@@ -1189,6 +1189,20 @@ def blueprint_voice_identity_issues(
     issues: list[BlueprintSemanticIssue] = []
     for node in blueprint.nodes:
         if node.source_semantics().projection_policy != "picture":
+            if node.environment_source_unit_keys:
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_environment_non_picture",
+                    node_keys=[node.key],
+                    source_segment_ids=list(node.source_segment_ids),
+                    message=(
+                        "paratext/audit-only node 不得携带 "
+                        "environment_source_unit_keys"
+                    ),
+                    required_resolution=(
+                        "移除非画面节点的 environment 主体标记；"
+                        "其 source ownership 与顺序保持不变"
+                    ),
+                ))
             continue
         owned_sources = set(node.source_segment_ids)
         owned_quotes = [

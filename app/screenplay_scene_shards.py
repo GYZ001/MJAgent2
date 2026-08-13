@@ -63,6 +63,9 @@ SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v6"
 SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v6"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
+SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
+    "screenplay-scene-semantic-review.v1"
+)
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
@@ -439,6 +442,69 @@ def _artifact_parent_ids(
     return {str(parent_id) for parent_id in parents if str(parent_id)}
 
 
+def _artifact_model_snapshot(
+    artifact: dict[str, Any],
+) -> dict[str, Any] | None:
+    snapshot = artifact.get("model_snapshot")
+    if isinstance(snapshot, dict):
+        return snapshot
+    raw_snapshot = artifact.get("model_snapshot_json")
+    try:
+        snapshot = (
+            json.loads(raw_snapshot)
+            if isinstance(raw_snapshot, str)
+            else raw_snapshot
+        )
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _scene_shard_semantic_review_compatibility(
+    artifact: dict[str, Any],
+    raw_artifact: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    """Bind a reusable shard to a clean review of the exact creative root."""
+    if raw_artifact is None:
+        return False, "semantic_review_raw_missing"
+    raw_content = _artifact_content(raw_artifact)
+    snapshot = _artifact_model_snapshot(artifact)
+    if not isinstance(raw_content, dict) or not isinstance(snapshot, dict):
+        return False, "semantic_review_metadata_missing"
+    evidence = raw_content.get("semantic_review_evidence")
+    if not isinstance(evidence, dict):
+        return False, "semantic_review_evidence_missing"
+    if (
+        evidence.get("contract_version")
+        != SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+        or snapshot.get("semantic_review_version")
+        != SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+    ):
+        return False, "semantic_review_version"
+    initial_hash = str(evidence.get("initial_creative_hash") or "")
+    reviewed_hash = str(evidence.get("reviewed_creative_hash") or "")
+    if len(initial_hash) != 64 or len(reviewed_hash) != 64:
+        return False, "semantic_review_hash_missing"
+    if snapshot.get("reviewed_creative_hash") != reviewed_hash:
+        return False, "semantic_review_hash_binding"
+    phases = evidence.get("phases")
+    if not isinstance(phases, list) or not phases:
+        return False, "semantic_review_artifacts_missing"
+    if any(not isinstance(phase, dict) for phase in phases):
+        return False, "semantic_review_artifacts_missing"
+    if str(phases[0].get("creative_hash") or "") != initial_hash:
+        return False, "semantic_review_initial_candidate"
+    if str(phases[-1].get("creative_hash") or "") != reviewed_hash:
+        return False, "semantic_review_final_candidate"
+    if phases[-1].get("consensus") != []:
+        return False, "semantic_review_not_clean"
+    for phase in phases:
+        reviews = phase.get("reviews") if isinstance(phase, dict) else None
+        if not isinstance(reviews, list) or len(reviews) != 2:
+            return False, "semantic_review_artifacts_missing"
+    return True, ""
+
+
 def screenplay_normalized_artifact_lineage_compatibility(
     artifact: dict[str, Any],
     raw_artifact: dict[str, Any] | None,
@@ -552,11 +618,17 @@ def screenplay_scene_shard_artifact_compatibility(
     except ValidationError:
         return False, "content_schema"
     if expected_authority_artifact_ids is not None:
-        return screenplay_normalized_artifact_lineage_compatibility(
+        compatible, reason = screenplay_normalized_artifact_lineage_compatibility(
             artifact,
             raw_artifact,
             expected_raw_type="screenplay_scene_shard_raw",
             expected_authority_artifact_ids=expected_authority_artifact_ids,
+        )
+        if not compatible:
+            return compatible, reason
+        return _scene_shard_semantic_review_compatibility(
+            artifact,
+            raw_artifact,
         )
     return True, ""
 
@@ -3114,11 +3186,21 @@ def _scene_shard_semantic_review_prompt(
     scene_input_contracts: list[ScreenplaySceneInputContract],
     identity_registry: list[dict[str, Any]],
 ) -> str:
+    source_facts_by_key = {
+        fact.source_unit_key: fact.model_dump(mode="json")
+        for contract in scene_input_contracts
+        for segment in contract.source_segments
+        for fact in source_segment_facts(
+            segment.source_segment_id,
+            segment.text,
+        )
+    }
     authority_slots = {
         slot.unit_key: {
             "kind": slot.kind,
             "source_unit_key": slot.source_unit_key,
             "source_text": slot.source_text,
+            "source_fact": source_facts_by_key.get(slot.source_unit_key),
             "state_subject_key": slot.state_subject_key,
             "environment_only": slot.environment_only,
             "actor_keys": slot.actor_keys,
@@ -3217,6 +3299,21 @@ async def _semantic_review_scene_shard_draft(
             review(candidate, 1, phase),
             review(candidate, 2, phase),
         )
+        known_unit_keys = set(candidate.slots)
+        unknown_finding_keys = {
+            finding.unit_key
+            for item in reviews
+            for finding in item.findings
+            if finding.unit_key not in known_unit_keys
+        }
+        if unknown_finding_keys:
+            raise ScreenplaySceneShardError(
+                shard_id,
+                [
+                    "语义审查引用未知 unit_key："
+                    + ",".join(sorted(unknown_finding_keys))
+                ],
+            )
         maps = [
             {(finding.unit_key, finding.code): finding for finding in item.findings}
             for item in reviews
@@ -3227,18 +3324,11 @@ async def _semantic_review_scene_shard_draft(
             [item.model_dump(mode="json") for item in reviews],
         )
 
+    initial_hash = _hash(draft.model_dump(mode="json"))
     findings, initial_reviews = await consensus(draft, "initial")
-    known_unit_keys = set(draft.slots)
-    unknown_finding_keys = {
-        item.unit_key for item in findings if item.unit_key not in known_unit_keys
-    }
-    if unknown_finding_keys:
-        raise ScreenplaySceneShardError(
-            shard_id,
-            ["语义审查引用未知 unit_key：" + ",".join(sorted(unknown_finding_keys))],
-        )
     audit = [{
         "phase": "initial",
+        "creative_hash": initial_hash,
         "reviews": initial_reviews,
         "consensus": [item.model_dump(mode="json") for item in findings],
     }]
@@ -3310,6 +3400,7 @@ async def _semantic_review_scene_shard_draft(
     remaining, final_reviews = await consensus(repaired, "post_repair")
     audit.append({
         "phase": "post_repair",
+        "creative_hash": _hash(repaired.model_dump(mode="json")),
         "reviews": final_reviews,
         "consensus": [item.model_dump(mode="json") for item in remaining],
     })
@@ -3610,6 +3701,7 @@ async def generate_screenplay_scene_shards(
                     repair_schema=repair_schema,
                     on_attempt=attempts.append,
                 )
+        initial_creative_hash = _hash(draft.model_dump(mode="json"))
         draft, semantic_reviews = await _semantic_review_scene_shard_draft(
             draft=draft,
             scene_input_contracts=plan_scene_input_contracts,
@@ -3617,6 +3709,19 @@ async def generate_screenplay_scene_shards(
             operation_id=operation_id,
             shard_id=plan.shard_id,
         )
+        reviewed_creative_hash = _hash(draft.model_dump(mode="json"))
+        if (
+            not semantic_reviews
+            or semantic_reviews[-1].get("consensus") != []
+            or semantic_reviews[0].get("creative_hash")
+            != initial_creative_hash
+            or semantic_reviews[-1].get("creative_hash")
+            != reviewed_creative_hash
+        ):
+            raise ScreenplaySceneShardError(
+                plan.shard_id,
+                ["语义审查证据未绑定精确 creative candidate"],
+            )
         shard = compile_screenplay_scene_shard_draft(
             draft,
             episode_no=int(episode["episode_no"]),
@@ -3644,7 +3749,14 @@ async def generate_screenplay_scene_shards(
                         generation_scaffold_hash
                     ),
                     "attempts": attempts,
-                    "semantic_reviews": semantic_reviews,
+                    "semantic_review_evidence": {
+                        "contract_version": (
+                            SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                        ),
+                        "initial_creative_hash": initial_creative_hash,
+                        "reviewed_creative_hash": reviewed_creative_hash,
+                        "phases": semantic_reviews,
+                    },
                 },
                 parent_artifact_ids=parents,
                 contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
@@ -3669,6 +3781,10 @@ async def generate_screenplay_scene_shards(
                     "generation_scaffold_hash": (
                         generation_scaffold_hash
                     ),
+                    "semantic_review_version": (
+                        SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                    ),
+                    "reviewed_creative_hash": reviewed_creative_hash,
                 },
             ),
             step_run_id=trace.step_run_id,

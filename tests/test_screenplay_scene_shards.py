@@ -33,6 +33,7 @@ from app.screenplay_ir import (
 from app.screenplay_scene_shards import (
     SCREENPLAY_SCENE_CREATIVE_VERSION,
     SCREENPLAY_SCENE_INPUT_VERSION,
+    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
     ScreenplaySceneShardCreativeIR,
     ScreenplaySceneShardSemanticReview,
@@ -80,7 +81,15 @@ _REAL_SEMANTIC_REVIEW = (
 @pytest.fixture(autouse=True)
 def _clean_scene_shard_semantic_review(monkeypatch):
     async def clean_review(*, draft, **_kwargs):
-        return draft, []
+        creative_hash = scene_shards_module._hash(
+            draft.model_dump(mode="json")
+        )
+        return draft, [{
+            "phase": "initial",
+            "creative_hash": creative_hash,
+            "reviews": [{"findings": []}, {"findings": []}],
+            "consensus": [],
+        }]
 
     monkeypatch.setattr(
         "app.screenplay_scene_shards._semantic_review_scene_shard_draft",
@@ -286,6 +295,9 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
             if calls <= 2:
                 assert "person_甲" in messages[0]["content"]
                 assert '"canonical_name":"甲"' in messages[0]["content"]
+                assert '"text":"甲推门进入。"' in messages[0]["content"]
+                assert '"projection":"action"' in messages[0]["content"]
+                assert '"canonical_name":"丙"' not in messages[0]["content"]
                 return ScreenplaySceneShardSemanticReview(findings=[
                     ScreenplaySceneShardSemanticFinding(
                         unit_key=flagged_key,
@@ -313,7 +325,12 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
                 "source_labels": [label],
             }
             for label in ("甲", "乙")
-        ],
+        ] + [{
+            "identity_key": "person_丙",
+            "authority_id": "bible:丙",
+            "canonical_name": "丙",
+            "source_labels": ["丙"],
+        }],
         operation_id="scene-semantic-fixture",
         shard_id=plan.shard_id,
     ))
@@ -321,6 +338,163 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
     assert repaired.slots[flagged_key].text == "甲推门进入。"
     assert repaired.slots[unit_keys[1]].model_dump(mode="json") == original_unflagged
     assert len(audit) == 2
+    assert audit[0]["creative_hash"] != ""
+    assert audit[-1]["creative_hash"] == scene_shards_module._hash(
+        repaired.model_dump(mode="json")
+    )
+
+
+def test_scene_shard_semantic_single_reviewer_finding_does_not_repair(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint, source_text=SOURCE, identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    flagged_key = next(iter(draft.slots))
+    calls = 0
+
+    async def fake_structured(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["model_type"] is ScreenplaySceneShardSemanticReview
+        return ScreenplaySceneShardSemanticReview(findings=(
+            [ScreenplaySceneShardSemanticFinding(
+                unit_key=flagged_key,
+                code="source_semantic_drift",
+                message="single reviewer only",
+            )] if calls == 1 else []
+        ))
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    result, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        operation_id="scene-semantic-single",
+        shard_id=plan.shard_id,
+    ))
+    assert result == draft
+    assert calls == 2
+    assert audit[0]["consensus"] == []
+
+
+def test_scene_shard_semantic_unknown_finding_is_hard_failure(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint, source_text=SOURCE, identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+
+    async def fake_structured(*_args, **_kwargs):
+        return ScreenplaySceneShardSemanticReview(findings=[
+            ScreenplaySceneShardSemanticFinding(
+                unit_key="UNKNOWN-SRC0031",
+                code="source_semantic_drift",
+                message="unknown",
+            ),
+        ])
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    with pytest.raises(ScreenplaySceneShardError, match="未知 unit_key"):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-unknown",
+            shard_id=plan.shard_id,
+        ))
+
+
+def test_scene_shard_semantic_post_repair_consensus_failure_is_hard(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint, source_text=SOURCE, identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    flagged_key = next(iter(draft.slots))
+
+    async def fake_structured(*_args, **kwargs):
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            return ScreenplaySceneShardSemanticReview(findings=[
+                ScreenplaySceneShardSemanticFinding(
+                    unit_key=flagged_key,
+                    code="state_subject_semantic_drift",
+                    message="F43/F47/F60 drift remains",
+                ),
+            ])
+        return draft.model_copy(deep=True)
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    with pytest.raises(ScreenplaySceneShardError, match="semantic gate 未收口"):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-post-fail",
+            shard_id=plan.shard_id,
+        ))
+
+
+def test_scene_shard_semantic_prompt_reads_action_source_facts_for_production_drift() -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint, source_text=SOURCE, identity_registry_hash="identity-hash",
+    )[0]
+    base_contract = _contracts([plan], blueprint)[plan.shard_id][0]
+    base_slot = base_contract.unit_slots[0]
+    source_rows = [
+        ("SRC0031", "虎头虎脑的少年说飞行需要宝物"),
+        ("SRC0033", "王有材解释他们被抓来的缘由"),
+        ("SRC0044", "许师姐对孟浩宣告靠山宗规矩"),
+    ]
+    slots = [
+        base_slot.model_copy(update={
+            "unit_key": f"F{index}",
+            "source_unit_key": f"{source_id}:unit:001",
+            "source_segment_ids": [source_id],
+            "source_text": "",
+        })
+        for index, (source_id, _text) in enumerate(source_rows, start=43)
+    ]
+    contract = base_contract.model_copy(update={
+        "source_segments": [
+            ScreenplaySceneSourceSegment(source_segment_id=source_id, text=text)
+            for source_id, text in source_rows
+        ],
+        "unit_slots": slots,
+    })
+    draft = ScreenplaySceneShardCreativeIR(
+        slots={
+            slot.unit_key: ScreenplaySceneShardCreativeUnit(text="错误人物反应")
+            for slot in slots
+        },
+    )
+    prompt = scene_shards_module._scene_shard_semantic_review_prompt(
+        draft=draft,
+        scene_input_contracts=[contract],
+        identity_registry=[],
+    )
+    assert all(text in prompt for _source_id, text in source_rows)
+    assert all(f'"source_unit_key":"{source_id}:unit:001"' in prompt for source_id, _ in source_rows)
+    assert all(slot.source_text == "" for slot in slots)
 
 
 def test_scene_shard_semantic_repair_rejects_unflagged_slot_rewrite(
@@ -2604,13 +2778,39 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
     cached_ids: list[str] = []
     for plan in plans:
         shard = _shard(plan, blueprint)
+        creative = _creative_shard(
+            plan,
+            blueprint,
+            _contracts([plan], blueprint)[plan.shard_id],
+        )
+        creative_hash = scene_shards_module._hash(
+            creative.model_dump(mode="json")
+        )
         raw = evidence_repository.create_artifact(EvidenceArtifact(
             type="screenplay_scene_shard_raw",
             scope_type="episode",
             scope_id=episode_id,
             status="candidate",
             trust_level="T0",
-            content={"shard_id": plan.shard_id, "attempts": []},
+            content={
+                "shard_id": plan.shard_id,
+                "attempts": [],
+                "semantic_review_evidence": {
+                    "contract_version": (
+                        SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                    ),
+                    "initial_creative_hash": creative_hash,
+                    "reviewed_creative_hash": creative_hash,
+                    "phases": [{
+                        "phase": "initial",
+                        "creative_hash": creative_hash,
+                        "reviews": [
+                            {"findings": []}, {"findings": []},
+                        ],
+                        "consensus": [],
+                    }],
+                },
+            },
             parent_artifact_ids=[
                 blueprint_artifact["id"],
                 identity_artifact["id"],
@@ -2626,6 +2826,12 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
             content=shard.model_dump(mode="json"),
             parent_artifact_ids=[raw["id"]],
             contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+            model_snapshot={
+                "semantic_review_version": (
+                    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                ),
+                "reviewed_creative_hash": creative_hash,
+            },
         ))
         cached_ids.append(str(artifact["id"]))
 
