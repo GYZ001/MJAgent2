@@ -29,7 +29,7 @@ from app.source_facts import SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v6"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.1"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.2"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -38,7 +38,7 @@ BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # truncated prefix.
 BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
-BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v3"
+BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v4"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
     "blueprint-shard-local-authority.v1"
 )
@@ -84,6 +84,70 @@ def normalize_blueprint_raw_json(raw: str) -> str:
         r"}]}],\1",
         normalized,
     )
+
+
+_PARATEXT_EMPTY_LIST_FIELDS = (
+    "participants",
+    "participant_evidence",
+    "environment_source_unit_keys",
+    "source_unit_deliveries",
+    "state_requirements",
+    "state_changes",
+    "released_constraints_for",
+)
+
+
+def normalize_blueprint_provider_payload(payload: Any) -> Any:
+    """Project explicit paratext nodes onto their deterministic empty contract.
+
+    Provider bytes remain preserved in the raw T0 artifact.  This projection is
+    intentionally limited to nodes that already declared ``narrative_layer`` as
+    paratext; it never guesses source semantics and does not weaken the strict
+    ``NarrativeNode`` validator used for stored or caller-supplied artifacts.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return normalized
+    normalized_nodes: list[Any] = []
+    for value in nodes:
+        if not isinstance(value, dict) or value.get("narrative_layer") != "paratext":
+            normalized_nodes.append(value)
+            continue
+        node = dict(value)
+        for field_name in _PARATEXT_EMPTY_LIST_FIELDS:
+            node[field_name] = []
+        node["decision"] = None
+        node["exit_state"] = ""
+        normalized_nodes.append(node)
+    normalized["nodes"] = normalized_nodes
+    return normalized
+
+
+def blueprint_shard_provider_schema() -> dict[str, Any]:
+    """Return a provider schema with the paratext empty-state contract encoded."""
+    schema = NarrativeBlueprintShard.model_json_schema()
+    node_schema = schema.get("$defs", {}).get("NarrativeNode")
+    if not isinstance(node_schema, dict):
+        return schema
+    paratext_properties: dict[str, Any] = {
+        field_name: {"const": []}
+        for field_name in _PARATEXT_EMPTY_LIST_FIELDS
+    }
+    paratext_properties.update({
+        "decision": {"const": None},
+        "exit_state": {"const": ""},
+    })
+    node_schema.setdefault("allOf", []).append({
+        "if": {
+            "properties": {"narrative_layer": {"const": "paratext"}},
+            "required": ["narrative_layer"],
+        },
+        "then": {"properties": paratext_properties},
+    })
+    return schema
 
 
 def recover_complete_blueprint_prefix(raw: str) -> dict[str, Any] | None:
@@ -375,6 +439,7 @@ class NarrativeNode(BaseModel):
             self.participant_evidence,
             self.environment_source_unit_keys,
             self.source_unit_deliveries,
+            self.exit_state.strip(),
             self.state_requirements,
             self.state_changes,
             self.released_constraints_for,
@@ -967,6 +1032,15 @@ def blueprint_patch_schema(
             },
             "required": list(NarrativeNode.model_fields),
         }
+        if semantics.narrative_layer == "paratext":
+            node_contract["properties"].update({
+                field_name: {"const": []}
+                for field_name in _PARATEXT_EMPTY_LIST_FIELDS
+            })
+            node_contract["properties"].update({
+                "decision": {"const": None},
+                "exit_state": {"const": ""},
+            })
         alternatives.append({
             "type": "object",
             "additionalProperties": False,

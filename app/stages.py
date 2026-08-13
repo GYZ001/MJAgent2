@@ -48,6 +48,7 @@ from app.narrative_blueprint import (
     apply_narrative_blueprint_patch,
     blueprint_authority_validator_fingerprint,
     blueprint_patch_schema,
+    blueprint_shard_provider_schema,
     blueprint_semantic_issue_is_resolved,
     filter_blueprint_semantic_review_voice_issues,
     blueprint_prompt_contract,
@@ -55,6 +56,7 @@ from app.narrative_blueprint import (
     derive_blueprint_scene_plans,
     normalize_blueprint_agency_continuity,
     normalize_blueprint_fact_versions,
+    normalize_blueprint_provider_payload,
     normalize_blueprint_raw_json,
     normalize_blueprint_semantic_review_payload,
     recover_complete_blueprint_prefix,
@@ -4055,6 +4057,12 @@ async def _repair_narrative_blueprint(
             "除上述 canonical authority 字段外的创作与分场字段。"
             "每个 replacement 必须保持修复前 projection_policy；audit_only "
             "节点与来源只能保留在来源审计，不得改成 story 或放入 scene。"
+            "paratext/audit_only replacement 必须把 participants、"
+            "participant_evidence、environment_source_unit_keys、"
+            "source_unit_deliveries、state_requirements、state_changes、"
+            "released_constraints_for 全部保持为空列表，decision=null，"
+            "exit_state=空字符串；标题卡可见文字只写入 summary/"
+            "action_logic/opening_image，不得伪造 written_text delivery。"
             "不得修改未列出的节点。原文没有的同谋、"
             "关系、满房、行程或人物动机默认禁止；若为修复原文自身的明确逻辑矛盾"
             "确有必要，必须设 adaptation_kind=logic_bridge，并用 bridge_rationale"
@@ -5291,11 +5299,15 @@ def _blueprint_shard_prompt(
     rules = (
         "仅处理target_sources；每个SRC只归一个节点，节点按源顺序且最多"
         f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE}个连续SRC。每节点只写一个核心动作、"
-        "一个因果/情绪转折和一个exit_state；跨时空或过载则拆节点。"
+        "一个因果/情绪转折；仅story节点填exit_state，跨时空或过载则拆节点。"
         "首分片首节点time_relation=episode_start；其余严格延续boundary_context。"
         "复用有效fact_key、人物位置、时间域和稳定character_key；本分片新key保持唯一。"
         "每节点显式narrative_layer/event_priority/render_policy。故事画面用"
-        "story+causal+standalone；旁文本用paratext+connective+exclude_from_spine，"
+        "story+causal+standalone；旁文本用paratext+connective+exclude_from_spine。"
+        "paratext只保留summary/action_logic/opening_image等文字展示；participants、"
+        "participant_evidence、environment_source_unit_keys、source_unit_deliveries、"
+        "state_requirements、state_changes、released_constraints_for必须全为[]，"
+        "decision必须null，exit_state必须空字符串。"
         "不得按SRC编号、位置、空人物或词表猜分类。quoted单元逐一给"
         "source_unit_deliveries；quoted_span不等于开口。spoken/offscreen声音须唯一"
         "usage=voice并精确绑定source_unit_key；content_owner不是performer。action单元"
@@ -5315,7 +5327,7 @@ def _blueprint_shard_prompt(
         f"boundary_context={compact(boundary)}\n"
         f"target_sources={compact(source_payload)}\n"
         "schema="
-        + compact(NarrativeBlueprintShard.model_json_schema())
+        + compact(blueprint_shard_provider_schema())
     )
 
 
@@ -6266,11 +6278,12 @@ async def _generate_sharded_narrative_blueprint(
                     step_run_id=trace.step_run_id,
                 )
                 try:
-                    candidate = NarrativeBlueprintShard.model_validate(
-                        extract_json(
+                    provider_payload = extract_json(
                             raw,
                             repair_unescaped_inner_quotes=True,
-                        ),
+                        )
+                    candidate = NarrativeBlueprintShard.model_validate(
+                        normalize_blueprint_provider_payload(provider_payload),
                     )
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     errors = [f"[BLUEPRINT_SHARD_JSON] {exc}"]
@@ -6537,6 +6550,11 @@ async def _generate_screenplay_narrative_blueprint(
    仅保留完整来源审计、不进入成片的旁文本只能使用
    paratext+connective+exclude_from_spine。不得按 SRC 编号、章节位置、
    characters 是否为空或文本关键词分类。
+   paratext 节点的 participants、participant_evidence、
+   environment_source_unit_keys、source_unit_deliveries、state_requirements、
+   state_changes、released_constraints_for 必须为空列表，decision=null，
+   exit_state=空字符串。标题可见文字只放 summary/action_logic/opening_image，
+   不得生成 written_text delivery。
 2. temporal_domain_key 表示同一连续时间域；回忆必须明确 flashback_enter、
    flashback_continue、flashback_exit。次日、当晚、数日后和蒙太奇必须使用正确
    time_relation，并提供观众可见/可听的 transition_cue。
