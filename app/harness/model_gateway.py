@@ -190,6 +190,7 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 8192,
     call_meta: dict[str, Any] | None = None,
+    usage_callback: Callable[[int | None], None] | None = None,
 ) -> str:
     """The only text-model entry point for business stages.
 
@@ -210,13 +211,15 @@ async def chat(
         try:
             from app.generation_concurrency import run_with_provider_call_slot
 
+            provider_kwargs: dict[str, Any] = {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "call_meta": meta,
+            }
+            if usage_callback is not None:
+                provider_kwargs["usage_callback"] = usage_callback
             result = await run_with_provider_call_slot(
-                lambda: hiagent.chat(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    call_meta=meta,
-                )
+                lambda: hiagent.chat(messages, **provider_kwargs)
             )
             if meta.get("expected_json") and _is_non_candidate_json_response(result):
                 raise hiagent.ProviderError(
