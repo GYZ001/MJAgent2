@@ -191,6 +191,27 @@ def _json_candidates(value: str) -> list[dict[str, Any]]:
     return [payload for _end, payload in sorted(candidates, key=lambda item: item[0], reverse=True)]
 
 
+def _first_json_recovery_root(value: str) -> str | None:
+    """Return the first object-like substring proven not to be a child."""
+    text = str(value or "").strip()
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        remainder = text[index + 1:].lstrip()
+        if not remainder or remainder[0] not in {'"', "}"}:
+            continue
+        try:
+            _, candidate_size = decoder.raw_decode(text[index:])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            end = len(text)
+        else:
+            end = index + candidate_size
+        if not _is_nested_json_candidate(text, index, end):
+            return text[index:]
+    return None
+
+
 def _model_schema(model_type: Any) -> dict[str, Any]:
     schema = getattr(model_type, "model_json_schema", None)
     return schema() if callable(schema) else {"type": "object"}
@@ -541,15 +562,18 @@ async def chat_structured(
         # Preserve independent trailing-object priority, then conservatively
         # repair the original root when no complete root satisfies the model.
         if parsed is None:
-            try:
-                from app.schemas import extract_json
+            recovery_root = _first_json_recovery_root(last_raw)
+            recovered = None
+            if recovery_root is not None:
+                try:
+                    from app.schemas import extract_json
 
-                recovered = extract_json(
-                    last_raw,
-                    repair_unescaped_inner_quotes=True,
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                recovered = None
+                    recovered = extract_json(
+                        recovery_root,
+                        repair_unescaped_inner_quotes=True,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
             if (
                 isinstance(recovered, dict)
                 and all(recovered != payload for payload in candidates)
@@ -560,7 +584,7 @@ async def chat_structured(
                     else recovered
                 )
                 try:
-                    parsed = _coerce_structured(
+                    recovered_parsed = _coerce_structured(
                         model_type,
                         recovered_payload,
                     )
@@ -570,6 +594,18 @@ async def chat_structured(
                     local_recovery = True
                 else:
                     local_recovery = True
+                    explicit_fields = getattr(
+                        recovered_parsed,
+                        "model_fields_set",
+                        None,
+                    )
+                    if explicit_fields is not None and not explicit_fields:
+                        parse_error = ValueError(
+                            "修复后的 JSON 未显式提供任何模型字段"
+                        )
+                        repair_payload = recovered_payload
+                    else:
+                        parsed = recovered_parsed
         if parsed is None:
             if on_attempt is not None:
                 on_attempt({

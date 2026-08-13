@@ -81,11 +81,7 @@ def test_structured_runner_rejects_nested_permissive_candidate(
     async def fake_chat(*_args, **_kwargs):
         return raw
 
-    def unavailable_root_repair(*_args, **_kwargs):
-        raise ValueError("root remains malformed")
-
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", unavailable_root_repair)
 
     with pytest.raises(model_gateway.StructuredFormatError):
         asyncio.run(model_gateway.chat_structured(
@@ -93,6 +89,36 @@ def test_structured_runner_rejects_nested_permissive_candidate(
             model_type=_PermissiveReviewPayload,
             validate=None,
             operation_id="test.reject-malformed-parent-child:v1:abc",
+            max_tokens=128,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "[{}]",
+        '[{"issues":[]}]',
+        '说明文字：[{"issues":[]}]',
+    ),
+    ids=("empty-object-child", "valid-object-child", "prose-bracket-child"),
+)
+def test_structured_runner_rejects_array_or_bracket_child_end_to_end(
+    monkeypatch,
+    raw: str,
+) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return raw
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "review"}],
+            model_type=_PermissiveReviewPayload,
+            validate=None,
+            operation_id="test.reject-array-child:v1:abc",
             max_tokens=128,
             format_retry_limit=0,
             semantic_retry_limit=0,
@@ -246,6 +272,48 @@ def test_structured_runner_does_not_accept_nested_candidate_as_root(
     ))
 
     assert [issue["code"] for issue in result.issues] == ["first", "second"]
+
+
+def test_structured_runner_rejects_unknown_only_quote_repaired_root(
+    monkeypatch,
+) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return '{"transport_note":"修正为["甲","乙"]"}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "review"}],
+            model_type=_PermissiveReviewPayload,
+            validate=None,
+            operation_id="test.reject-default-only-recovery:v1:abc",
+            max_tokens=128,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+
+
+def test_structured_runner_preserves_direct_empty_object_behavior(
+    monkeypatch,
+) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return "{}"
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "review"}],
+        model_type=_PermissiveReviewPayload,
+        validate=None,
+        operation_id="test.direct-empty-object:v1:abc",
+        max_tokens=128,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+    ))
+
+    assert result.issues == []
+    assert result.model_fields_set == set()
 
 
 def test_structured_runner_uses_one_format_repair(monkeypatch) -> None:
