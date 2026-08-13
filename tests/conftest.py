@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import sqlite3
@@ -221,6 +222,18 @@ def _reset_command_bus_runtime(capability_bus) -> None:
     capability_bus._BUS = capability_bus.CommandBus(capability_bus.get_registry())
 
 
+def _reset_media_worker_runtime() -> None:
+    """Do not let an in-memory media backlog leak between isolated tests."""
+
+    worker = sys.modules.get("app.worker")
+    if worker is None:
+        return
+    worker._queue = asyncio.Queue()
+    worker._reference_queue = worker._queue
+    worker._video_ready_queue = asyncio.Queue()
+    worker._poll_queue = asyncio.Queue()
+
+
 @pytest.fixture(autouse=True)
 def _reset_capability_runtime(
     monkeypatch: pytest.MonkeyPatch,
@@ -245,6 +258,7 @@ def _reset_capability_runtime(
     _clone_database(_DATABASE_TEMPLATE, test_database)
     _restore_isolated_runtime(db, database_path=test_database)
     _reset_command_bus_runtime(capability_bus)
+    _reset_media_worker_runtime()
     reset_approvals_for_tests()
 
     try:
@@ -254,6 +268,7 @@ def _reset_capability_runtime(
             monkeypatch.undo()
         finally:
             _reset_command_bus_runtime(capability_bus)
+            _reset_media_worker_runtime()
             reset_approvals_for_tests()
             _release_local_connection(db, owned_database=test_database)
             _restore_isolated_runtime(db, database_path=_DATABASE_TEMPLATE)
