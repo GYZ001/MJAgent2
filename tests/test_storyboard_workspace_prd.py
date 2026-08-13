@@ -1753,6 +1753,49 @@ def test_structure_commit_keeps_contiguous_numbers_and_one_final(storyboard_db):
     assert status["editable"] is True
 
 
+def test_duplicate_title_card_preserves_paratext_binding_kind(
+    storyboard_db,
+) -> None:
+    title = "第一章书生孟浩"
+    storyboard_db.execute(
+        "UPDATE chapters SET title=?,content=? WHERE project_id='p1' AND idx=1",
+        (title, title + "\n\n靠山宗山门外人来人往。"),
+    )
+    storyboard_db.execute(
+        "UPDATE shots SET source_excerpt=? WHERE id='s1'",
+        (f"【{title}】\n{title}",),
+    )
+    storyboard_db.execute(
+        "DELETE FROM storyboard_source_bindings WHERE shot_id='s1'"
+    )
+    storyboard_db.commit()
+    assert workspace.repair_generated_source_bindings("e1")["bound"] == 1
+
+    preview = api.preview_storyboard_structure("e1", {
+        "operation": "duplicate_after",
+        "shot_id": "s1",
+        "target_index": 0,
+    })
+    api.apply_storyboard_structure("e1", {
+        "preview_token": preview["preview_token"],
+        "operation": "duplicate_after",
+        "shot_id": "s1",
+        "target_index": 0,
+        "new_final_shot_id": None,
+    })
+
+    bindings = storyboard_db.execute(
+        """SELECT s.shot_no,b.binding_kind
+             FROM shots s JOIN storyboard_source_bindings b ON b.shot_id=s.id
+            WHERE s.episode_id='e1' ORDER BY s.shot_no"""
+    ).fetchall()
+    assert [dict(row) for row in bindings] == [
+        {"shot_no": 1, "binding_kind": "paratext_title"},
+        {"shot_no": 2, "binding_kind": "paratext_title"},
+    ]
+    workspace.assert_storyboard_source_bindings_complete("e1")
+
+
 def test_structure_mutation_rejects_review_pointer_without_published_authority(storyboard_db):
     lineage = _seed_narrative_review_lineage(storyboard_db)
     with pytest.raises(HTTPException) as caught:
@@ -1958,6 +2001,47 @@ def test_confirmation_rejects_missing_source_binding(storyboard_db) -> None:
     ).fetchone()
     assert episode["status"] == "scripted"
     assert episode["storyboard_completion_certificate_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            "UPDATE storyboard_source_bindings SET binding_kind='unknown' "
+            "WHERE shot_id='s1'",
+            "binding_kind=unknown 非法",
+        ),
+        (
+            "UPDATE storyboard_source_bindings SET source_version_hash='drift' "
+            "WHERE shot_id='s1'",
+            "原文版本指纹已漂移",
+        ),
+        (
+            "UPDATE storyboard_source_bindings SET start_offset=start_offset+1 "
+            "WHERE shot_id='s1'",
+            "绑定切片与 source_excerpt 不一致",
+        ),
+        (
+            "UPDATE storyboard_source_bindings SET excerpt_hash='drift' "
+            "WHERE shot_id='s1'",
+            "excerpt_hash 校验失败",
+        ),
+        (
+            "UPDATE shots SET source_excerpt='tampered' WHERE id='s1'",
+            "绑定切片与 source_excerpt 不一致",
+        ),
+    ],
+)
+def test_storyboard_source_binding_integrity_rejects_tampering(
+    storyboard_db,
+    mutation,
+    message,
+) -> None:
+    storyboard_db.execute(mutation)
+    storyboard_db.commit()
+
+    with pytest.raises(ValueError, match=message):
+        workspace.assert_storyboard_source_bindings_complete("e1")
 
 
 def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db):

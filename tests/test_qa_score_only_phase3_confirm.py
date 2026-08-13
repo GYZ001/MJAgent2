@@ -122,13 +122,13 @@ def test_must_keep_spine_delivery_finding_remains_score_only(confirm_db, monkeyp
     assert issue in preview["warnings"]
 
 
-def test_unlocatable_legacy_excerpt_stays_internal_audit_only(confirm_db, monkeypatch):
+def test_display_excerpt_drift_is_blocked_by_binding_integrity(confirm_db, monkeypatch):
     confirm_db.execute(
         "UPDATE shots SET source_excerpt=? WHERE id='s1'",
         ("这是一段长度足够但并非授权章节逐字原文的历史证据",),
     )
-    # The immutable source binding remains the authority; editing the legacy
-    # display excerpt alone must not delete or rewrite that durable evidence.
+    # Editing the display excerpt alone must not rewrite durable evidence, and
+    # confirmation must fail instead of publishing the two divergent truths.
     confirm_db.commit()
     monkeypatch.setattr(video_ops, "validate_storyboard", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(video_ops, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
@@ -138,11 +138,14 @@ def test_unlocatable_legacy_excerpt_stays_internal_audit_only(confirm_db, monkey
 
     assert preview["hard_gates"]["passed"] is True
     assert not any("授权原文中定位" in warning for warning in preview["warnings"])
-    result = video_ops.confirm_episode_core("e1", preview_token=preview["preview_token"])
-    assert result["confirmed"] is True
+    with pytest.raises(ValueError, match="绑定切片与 source_excerpt 不一致"):
+        video_ops.confirm_episode_core(
+            "e1",
+            preview_token=preview["preview_token"],
+        )
     assert confirm_db.execute(
-        "SELECT storyboard_warning FROM episodes WHERE id='e1'",
-    ).fetchone()["storyboard_warning"] is None
+        "SELECT status FROM episodes WHERE id='e1'",
+    ).fetchone()["status"] == "scripted"
 
 
 def test_hard_gate_failure_blocks_confirmation_preview(confirm_db, monkeypatch):

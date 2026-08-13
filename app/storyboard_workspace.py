@@ -729,23 +729,84 @@ def assert_storyboard_source_bindings_complete(
     *,
     conn=None,
 ) -> None:
-    """Fail closed when an official shot has no durable source binding."""
+    """Fail closed unless every shot has an intact authorized source binding."""
     db_conn = conn or get_conn()
-    missing = db_conn.execute(
-        """SELECT s.shot_no
+    rows = db_conn.execute(
+        """SELECT s.shot_no,s.source_excerpt,
+                  b.shot_id,b.binding_kind,b.chapter_id,b.chapter_idx,
+                  b.source_version_hash,b.start_offset,b.end_offset,b.excerpt_hash
              FROM shots s
              LEFT JOIN storyboard_source_bindings b ON b.shot_id=s.id
-            WHERE s.episode_id=? AND b.shot_id IS NULL
+            WHERE s.episode_id=?
             ORDER BY s.shot_no""",
         (episode_id,),
     ).fetchall()
-    if missing:
-        shot_nos = [int(row["shot_no"]) for row in missing]
-        preview = "、".join(str(value) for value in shot_nos[:12])
-        suffix = "…" if len(shot_nos) > 12 else ""
-        raise ValueError(
-            f"分镜原文绑定不完整：第 {preview}{suffix} 镜缺少 source binding"
-        )
+    authorized = {
+        int(source["id"]): source
+        for source in chapter_sources(episode_id, conn=db_conn)
+    }
+    issues: list[str] = []
+    allowed_kinds = {"source_excerpt", "paratext_title"}
+    for row in rows:
+        shot_no = int(row["shot_no"])
+        if row["shot_id"] is None:
+            issues.append(f"第 {shot_no} 镜缺少 source binding")
+            continue
+        kind = str(row["binding_kind"] or "")
+        if kind not in allowed_kinds:
+            issues.append(f"第 {shot_no} 镜 binding_kind={kind or '空'} 非法")
+            continue
+        try:
+            chapter_id = int(row["chapter_id"])
+            start = int(row["start_offset"])
+            end = int(row["end_offset"])
+        except (TypeError, ValueError):
+            issues.append(f"第 {shot_no} 镜章节或偏移非法")
+            continue
+        source = authorized.get(chapter_id)
+        if source is None:
+            issues.append(f"第 {shot_no} 镜绑定了未授权章节")
+            continue
+        content = str(source.get("content") or "")
+        if int(row["chapter_idx"]) != int(source["idx"]):
+            issues.append(f"第 {shot_no} 镜 chapter_idx 与授权章节不一致")
+            continue
+        if str(row["source_version_hash"] or "") != str(
+            source["source_version_hash"]
+        ):
+            issues.append(f"第 {shot_no} 镜原文版本指纹已漂移")
+            continue
+        if start < 0 or end <= start or end > len(content):
+            issues.append(f"第 {shot_no} 镜原文偏移越界")
+            continue
+        actual = content[start:end]
+        excerpt = str(row["source_excerpt"] or "").strip()
+        if actual != excerpt:
+            issues.append(f"第 {shot_no} 镜绑定切片与 source_excerpt 不一致")
+            continue
+        if kind == "paratext_title":
+            first_nonempty = next(
+                (line.strip() for line in content.splitlines() if line.strip()),
+                "",
+            )
+            authorized_titles = {
+                value
+                for value in (
+                    str(source.get("title") or "").strip(),
+                    first_nonempty,
+                )
+                if value
+            }
+            if actual not in authorized_titles:
+                issues.append(f"第 {shot_no} 镜 paratext_title 不是授权章标题")
+                continue
+        actual_hash = hashlib.sha256(actual.encode("utf-8")).hexdigest()
+        if str(row["excerpt_hash"] or "") != actual_hash:
+            issues.append(f"第 {shot_no} 镜 excerpt_hash 校验失败")
+    if issues:
+        preview = "；".join(issues[:12])
+        suffix = "…" if len(issues) > 12 else ""
+        raise ValueError(f"分镜原文绑定不完整或已漂移：{preview}{suffix}")
 
 
 def source_binding_for_shot(shot_id: str) -> dict[str, Any] | None:

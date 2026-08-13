@@ -3997,6 +3997,7 @@ def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
     )
     from app.storyboard_workspace import (
         assert_storyboard_mutation_allowed,
+        persist_source_binding,
         require_preview,
         source_binding_for_shot,
     )
@@ -4079,14 +4080,11 @@ def _apply_storyboard_structure_transaction(episode_id: str, body: dict):
         ordered_ids.insert(insert_at, created_id)
         binding = source_binding_for_shot(target["id"])
         if binding:
-            conn.execute(
-                """INSERT INTO storyboard_source_bindings(
-                       shot_id,chapter_id,chapter_idx,source_version_hash,start_offset,end_offset,excerpt_hash,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?)""",
-                (
-                    created_id, binding["chapter_id"], binding["chapter_idx"], binding["source_version_hash"],
-                    binding["start_offset"], binding["end_offset"], binding["excerpt_hash"], now(),
-                ),
+            persist_source_binding(
+                created_id,
+                binding,
+                conn=conn,
+                commit=False,
             )
     elif operation == "delete":
         deleted_id = target["id"]
