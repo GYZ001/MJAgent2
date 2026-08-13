@@ -859,6 +859,213 @@ def test_calls29726_29734_locally_restore_unreported_ownership() -> None:
     } == {"SRC0004:unit:054"}
 
 
+_VOICE_FREEZE_UNIT = "SRC0005:unit:050"
+_VOICE_FREEZE_NODE = "S005-node_001"
+
+
+def _voice_freeze_payloads(
+    *,
+    remove_delivery: bool = False,
+) -> tuple[dict, dict]:
+    previous = json.loads(
+        RUN_77675349_ATTEMPT_FIXTURES[0].read_text(encoding="utf-8")
+    )
+    candidate = json.loads(json.dumps(previous, ensure_ascii=False))
+    node = next(
+        item
+        for item in candidate["nodes"]
+        if item["key"] == _VOICE_FREEZE_NODE
+    )
+    retained_evidence = []
+    for evidence in node["participant_evidence"]:
+        if evidence["usage"] == "voice":
+            evidence["source_unit_keys"] = [
+                unit_key
+                for unit_key in evidence["source_unit_keys"]
+                if unit_key != _VOICE_FREEZE_UNIT
+            ]
+            if not evidence["source_unit_keys"]:
+                continue
+        retained_evidence.append(evidence)
+    node["participant_evidence"] = retained_evidence
+    if remove_delivery:
+        node["source_unit_deliveries"] = [
+            delivery
+            for delivery in node["source_unit_deliveries"]
+            if delivery["source_unit_key"] != _VOICE_FREEZE_UNIT
+        ]
+    return previous, candidate
+
+
+def _freeze_voice_payload(
+    previous: dict,
+    candidate: dict,
+    *,
+    validation_errors: list[str] | None = None,
+) -> dict:
+    normalized = stages.normalize_blueprint_provider_payload(candidate)
+    restored = stages._freeze_unreported_voice_pairs(
+        normalized,
+        previous_candidate=previous,
+        validation_errors=validation_errors or [],
+    )
+    return stages.normalize_blueprint_provider_payload(restored)
+
+
+def _unit_voice_claims(payload: dict) -> list[dict]:
+    return [
+        evidence
+        for node in payload["nodes"]
+        for evidence in node["participant_evidence"]
+        if (
+            evidence["usage"] == "voice"
+            and _VOICE_FREEZE_UNIT in evidence["source_unit_keys"]
+        )
+    ]
+
+
+def test_run_2284a14d5f4c_shard5_restores_real_unit050_voice_pair() -> None:
+    for remove_delivery in (False, True):
+        previous, candidate = _voice_freeze_payloads(
+            remove_delivery=remove_delivery,
+        )
+
+        restored = _freeze_voice_payload(previous, candidate)
+        shard = stages.NarrativeBlueprintShard.model_validate(restored)
+
+        claims = _unit_voice_claims(restored)
+        assert len(claims) == 1
+        assert claims[0]["identity_key"] == "孟浩"
+        assert claims[0]["source_unit_keys"] == [_VOICE_FREEZE_UNIT]
+        node = next(
+            item for item in shard.nodes if item.key == _VOICE_FREEZE_NODE
+        )
+        assert any(
+            delivery.source_unit_key == _VOICE_FREEZE_UNIT
+            and delivery.mode == "spoken_dialogue"
+            and delivery.performer_key == "孟浩"
+            for delivery in node.source_unit_deliveries
+        )
+
+
+def test_voice_freeze_does_not_restore_mutable_unit() -> None:
+    previous, candidate = _voice_freeze_payloads()
+
+    restored = _freeze_voice_payload(
+        previous,
+        candidate,
+        validation_errors=[
+            f"[BLUEPRINT_SHARD_VOICE_IDENTITY_MISSING] {_VOICE_FREEZE_UNIT}"
+        ],
+    )
+
+    assert _unit_voice_claims(restored) == []
+    with pytest.raises(ValidationError):
+        stages.NarrativeBlueprintShard.model_validate(restored)
+
+
+def test_voice_freeze_does_not_restore_explicit_non_audible_unit() -> None:
+    previous, candidate = _voice_freeze_payloads()
+    node = next(
+        item
+        for item in candidate["nodes"]
+        if item["key"] == _VOICE_FREEZE_NODE
+    )
+    delivery = next(
+        item
+        for item in node["source_unit_deliveries"]
+        if item["source_unit_key"] == _VOICE_FREEZE_UNIT
+    )
+    delivery["mode"] = "written_text"
+    delivery.pop("performer_key")
+
+    restored = _freeze_voice_payload(previous, candidate)
+
+    assert _unit_voice_claims(restored) == []
+    stages.NarrativeBlueprintShard.model_validate(restored)
+
+
+def test_voice_freeze_requires_unique_key_and_ordered_source_ownership() -> None:
+    previous, key_drift = _voice_freeze_payloads()
+    key_drift["nodes"][0]["key"] = "S005-node_changed"
+
+    ordered_previous, source_drift = _voice_freeze_payloads()
+    ordered_previous["nodes"][0]["source_segment_ids"] = [
+        "SRC0005",
+        "SRC0006",
+    ]
+    source_drift["nodes"][0]["source_segment_ids"] = [
+        "SRC0006",
+        "SRC0005",
+    ]
+
+    duplicate_previous, duplicate_key = _voice_freeze_payloads()
+    duplicate_key["nodes"].append(json.loads(json.dumps(
+        duplicate_key["nodes"][0],
+        ensure_ascii=False,
+    )))
+
+    for prior, candidate in (
+        (previous, key_drift),
+        (ordered_previous, source_drift),
+        (duplicate_previous, duplicate_key),
+    ):
+        restored = _freeze_voice_payload(prior, candidate)
+        assert _unit_voice_claims(restored) == []
+
+
+def test_voice_freeze_does_not_overwrite_conflicts_or_invalid_previous() -> None:
+    previous, different_delivery = _voice_freeze_payloads()
+    delivery = next(
+        item
+        for item in different_delivery["nodes"][0][
+            "source_unit_deliveries"
+        ]
+        if item["source_unit_key"] == _VOICE_FREEZE_UNIT
+    )
+    delivery["mode"] = "offscreen_voice"
+
+    _, different_identity = _voice_freeze_payloads()
+    different_identity["nodes"][0]["participant_evidence"].append({
+        "identity_key": "王有材",
+        "usage": "voice",
+        "source_segment_ids": ["SRC0005"],
+        "source_unit_keys": [_VOICE_FREEZE_UNIT],
+    })
+
+    _, duplicate_claim = _voice_freeze_payloads()
+    duplicate_claim["nodes"][0]["participant_evidence"].extend([
+        {
+            "identity_key": identity_key,
+            "usage": "voice",
+            "source_segment_ids": ["SRC0005"],
+            "source_unit_keys": [_VOICE_FREEZE_UNIT],
+        }
+        for identity_key in ("孟浩", "王有材")
+    ])
+
+    invalid_previous, missing_again = _voice_freeze_payloads()
+    previous_claim = _unit_voice_claims(invalid_previous)[0]
+    previous_claim["source_segment_ids"] = []
+
+    expected_claim_counts = (0, 1, 2, 0)
+    for candidate, expected_count in zip(
+        (
+            different_delivery,
+            different_identity,
+            duplicate_claim,
+            missing_again,
+        ),
+        expected_claim_counts,
+        strict=True,
+    ):
+        prior = invalid_previous if candidate is missing_again else previous
+        restored = _freeze_voice_payload(prior, candidate)
+        assert len(_unit_voice_claims(restored)) == expected_count
+        with pytest.raises(ValidationError):
+            stages.NarrativeBlueprintShard.model_validate(restored)
+
+
 def test_err_653ac6_provider_responses_require_explicit_voice_evidence() -> None:
     replay = json.loads(ERR_653AC6_FIXTURE.read_text(encoding="utf-8"))
 
@@ -1161,7 +1368,7 @@ def test_legacy_cached_shard_without_current_policy_is_not_reused(
     assert calls == 1
 
 
-def test_run_9d6_v5_t1_leaf_is_not_current_cache_authority() -> None:
+def test_run_2284a14d5f4c_v6_t1_leaf_is_not_current_cache_authority() -> None:
     segments = index_source_segments(_source(1))
     row = _cached_leaf_row(
         source_ids=["SRC0001"],
@@ -1170,7 +1377,7 @@ def test_run_9d6_v5_t1_leaf_is_not_current_cache_authority() -> None:
     row["id"] = "art_1048276fe8d5"
     snapshot = json.loads(row["model_snapshot_json"])
     snapshot["local_authority_validator_version"] = (
-        "blueprint-shard-local-authority.v5"
+        "blueprint-shard-local-authority.v6"
     )
     row["model_snapshot_json"] = json.dumps(snapshot)
 
@@ -1180,7 +1387,7 @@ def test_run_9d6_v5_t1_leaf_is_not_current_cache_authority() -> None:
     )
 
     assert stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION == (
-        "blueprint-shard-local-authority.v6"
+        "blueprint-shard-local-authority.v7"
     )
     assert [[segment.segment_id for segment in group] for group in plan] == [
         ["SRC0001"],
