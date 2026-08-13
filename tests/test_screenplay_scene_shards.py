@@ -151,6 +151,17 @@ def _blueprint(*, split_domain: bool = True) -> NarrativeBlueprint:
                 "location_key": "door",
                 "location_label": "门口",
                 "participants": [],
+                "participant_evidence": [{
+                    "identity_key": "甲",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:001"],
+                    "usage": "state_subject",
+                }, {
+                    "identity_key": "甲",
+                    "source_segment_ids": ["SRC0001"],
+                    "source_unit_keys": ["SRC0001:unit:001"],
+                    "usage": "visible",
+                }],
                 "action_logic": "甲推门进入",
                 "scene_boundary_before": True,
             },
@@ -167,6 +178,17 @@ def _blueprint(*, split_domain: bool = True) -> NarrativeBlueprint:
                 "location_key": "room",
                 "location_label": "室内",
                 "participants": [],
+                "participant_evidence": [{
+                    "identity_key": "乙",
+                    "source_segment_ids": ["SRC0002"],
+                    "source_unit_keys": ["SRC0002:unit:001"],
+                    "usage": "state_subject",
+                }, {
+                    "identity_key": "乙",
+                    "source_segment_ids": ["SRC0002"],
+                    "source_unit_keys": ["SRC0002:unit:001"],
+                    "usage": "visible",
+                }],
                 "action_logic": "乙接过钥匙并回答",
                 "scene_boundary_before": True,
             },
@@ -230,7 +252,18 @@ def _identities() -> list[IRIdentity]:
         visual_policy="offscreen_only",
         asset_requirement="forbidden",
         role_type="narrator",
-    )]
+    ), *[
+        IRIdentity(
+            key=f"person_{label}",
+            display_name=label,
+            authority_id=f"bible:{label}",
+            kind="source_character",
+            visual_policy="canonical",
+            asset_requirement="required",
+            role_type="supporting",
+        )
+        for label in ("甲", "乙")
+    ]]
 
 
 def _shard(
@@ -300,7 +333,15 @@ def _contracts(
         plans=plans,
         blueprint=blueprint,
         source_text=SOURCE,
-        identity_registry=identity_registry or [],
+        identity_registry=identity_registry or [
+            {
+                "identity_key": f"person_{label}",
+                "authority_id": f"bible:{label}",
+                "canonical_name": label,
+                "source_labels": [label],
+            }
+            for label in ("甲", "乙")
+        ],
     )
 
 
@@ -570,6 +611,15 @@ def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
                     "source_segment_ids": ["SRC0001"],
                     "usage": "visible",
                 },
+                *[
+                    {
+                        "identity_key": "孟浩",
+                        "source_segment_ids": ["SRC0001"],
+                        "source_unit_keys": [f"SRC0001:unit:{index:03d}"],
+                        "usage": "state_subject",
+                    }
+                    for index in range(1, 4)
+                ],
                 {
                     "identity_key": "靠山老祖",
                     "source_segment_ids": ["SRC0001"],
@@ -656,6 +706,14 @@ def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
 def test_scene_input_contract_rejects_unfrozen_blueprint_participant() -> None:
     blueprint = _blueprint(split_domain=False)
     blueprint.nodes[0].participants = ["未冻结来客"]
+    blueprint.nodes[0].participant_evidence = [
+        NarrativeParticipantEvidence(
+            identity_key="未冻结来客",
+            source_segment_ids=["SRC0001"],
+            source_unit_keys=["SRC0001:unit:001"],
+            usage="state_subject",
+        )
+    ]
     derive_blueprint_scene_plans(blueprint)
     plan = build_screenplay_scene_shard_plans(
         blueprint,
@@ -675,6 +733,7 @@ def test_scene_input_contract_rejects_unfrozen_blueprint_participant() -> None:
                 for segment in index_source_segments(SOURCE)
             },
             identity_registry=[],
+            blueprint_nodes=blueprint.nodes,
         )
 
 
@@ -936,6 +995,10 @@ def test_scene_shard_rejects_program_and_identity_field_drift() -> None:
         "identity_key": "narrator",
         "canonical_name": "旁白",
         "source_labels": ["旁白"],
+    }, {
+        "identity_key": "person_甲",
+        "canonical_name": "甲",
+        "source_labels": ["甲"],
     }]
     shard = _shard(plan, blueprint, registry)
     shard.episode_no = 99
@@ -1133,7 +1196,7 @@ def test_scene_shard_contract_version_is_not_silently_upgraded() -> None:
     payload["contract_version"] = "screenplay-scene-shard.v0"
     with pytest.raises(ValidationError):
         ScreenplaySceneShardIR.model_validate(payload)
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v9"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v10"
 
 
 def test_blueprint_and_slot_semantics_are_required_without_defaults() -> None:
@@ -1218,6 +1281,12 @@ def test_midstream_audit_only_source_never_enters_creative_or_picture_projection
             ),
         ],
     })
+    blueprint.nodes[0].environment_source_unit_keys = [
+        "SRC0001:unit:001"
+    ]
+    blueprint.nodes[2].environment_source_unit_keys = [
+        "SRC0003:unit:001"
+    ]
     derive_blueprint_scene_plans(blueprint)
     plans = build_screenplay_scene_shard_plans(
         blueprint,
@@ -2609,7 +2678,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
     )
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v9"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
@@ -3073,8 +3142,8 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
 
 
 def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v9"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v9"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v10"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
 
 
 def test_run_195a691_replays_ten_ownership_overreaches() -> None:
@@ -3705,8 +3774,8 @@ def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
         )
         != fingerprint
     )
-    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v9"
-    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v9"
+    assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v10"
+    assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
 
 
 def test_dialogue_mismatch_is_not_silently_normalized() -> None:

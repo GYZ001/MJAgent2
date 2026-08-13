@@ -917,10 +917,14 @@ def _compile_unit_identity_scaffold(
 def _structural_slot(
     slot: ScreenplaySceneCompiledUnitSlot,
 ) -> ScreenplaySceneUnitSlotPlan:
+    compiler_owned = {"state_subject_key", "environment_only"}
     return ScreenplaySceneUnitSlotPlan.model_validate(
         slot.model_dump(
             mode="python",
-            include=set(ScreenplaySceneUnitSlotPlan.model_fields),
+            include=(
+                set(ScreenplaySceneUnitSlotPlan.model_fields)
+                - compiler_owned
+            ),
         )
     )
 

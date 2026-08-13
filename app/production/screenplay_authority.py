@@ -1148,16 +1148,28 @@ def _validated_v7_source_artifacts(
     )
     from app.errors import ArtifactNeedsRebuildError
 
-    for _depth, candidate in _artifact_ancestors_by_depth(
+    ancestors = _artifact_ancestors_by_depth(
         artifact,
         conn=conn,
-    ):
+    )
+    for _depth, candidate in ancestors:
         if candidate.get("type") != "screenplay_generation_ir_merged":
             continue
+        direct_parent_ids = [
+            str(parent_id)
+            for parent_id in candidate.get("parent_artifact_ids") or []
+            if str(parent_id)
+        ]
         direct_parents = [
             evidence_repository.get_artifact(str(parent_id), conn=conn)
-            for parent_id in candidate.get("parent_artifact_ids") or []
+            for parent_id in direct_parent_ids
         ]
+        if any(parent is None for parent in direct_parents):
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason="merged IR lineage 缺少已声明的直接父 Artifact",
+            )
         shard_parents = [
             parent
             for parent in direct_parents
@@ -1165,15 +1177,11 @@ def _validated_v7_source_artifacts(
             and parent.get("type") == "screenplay_scene_shard"
         ]
         if not shard_parents:
-            if str(candidate.get("contract_version") or "") == (
-                SCREENPLAY_MERGED_IR_VERSION
-            ):
-                raise ArtifactNeedsRebuildError(
-                    artifact_id=str(artifact.get("id") or ""),
-                    artifact_type=str(artifact.get("type") or ""),
-                    reason="当前 merged IR lineage 缺少 validated scene shard 父链",
-                )
-            continue
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason="merged IR lineage 缺少 validated scene shard 父链",
+            )
         has_current_source = any(
             str(parent.get("contract_version") or "")
             == SCREENPLAY_SCENE_SHARD_VERSION
@@ -1194,7 +1202,12 @@ def _validated_v7_source_artifacts(
                 or parent.get("status") != "validated"
             )
         ]
-        if invalid or candidate.get("status") != "validated":
+        if (
+            invalid
+            or candidate.get("status") != "validated"
+            or str(candidate.get("contract_version") or "")
+            != SCREENPLAY_MERGED_IR_VERSION
+        ):
             raise ArtifactNeedsRebuildError(
                 artifact_id=str(artifact.get("id") or ""),
                 artifact_type=str(artifact.get("type") or ""),
@@ -1204,6 +1217,16 @@ def _validated_v7_source_artifacts(
                 ),
             )
         return candidate, shard_parents
+    if any(
+        candidate.get("type")
+        in {"screenplay_generation_ir_merged", "screenplay_scene_shard"}
+        for _depth, candidate in ancestors
+    ):
+        raise ArtifactNeedsRebuildError(
+            artifact_id=str(artifact.get("id") or ""),
+            artifact_type=str(artifact.get("type") or ""),
+            reason="scene shard lineage 未包含完整当前 merged IR 权威",
+        )
     return None
 
 
@@ -1409,13 +1432,6 @@ def assert_screenplay_matches_validated_v7_source(
             )
             db.commit()
         raise
-
-
-# Compatibility import for callers migrating with the compiler v7 contract.
-# It resolves to the current-version gate and never accepts a v6 artifact.
-assert_screenplay_matches_validated_v6_source = (
-    assert_screenplay_matches_validated_v7_source
-)
 
 
 def episode_requires_immutable_screenplay_authority(

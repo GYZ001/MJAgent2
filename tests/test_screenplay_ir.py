@@ -2912,7 +2912,7 @@ def test_current_ir_serialization_declares_participant_delivery_contract() -> No
         mode="json"
     )
 
-    assert stages.IR_VERSION == "screenplay-generation-ir.v3"
+    assert stages.IR_VERSION == "screenplay-generation-ir.v4"
     assert serialized["format_version"] == stages.IR_VERSION
     assert all(
         "participant_deliveries" in unit
@@ -3122,7 +3122,7 @@ def test_recovery_accepts_legal_current_ir_artifact() -> None:
     assert recovered is not None
     candidate, artifact_id = recovered
     assert artifact_id == artifact["id"]
-    assert candidate.format_version == "screenplay-generation-ir.v3"
+    assert candidate.format_version == "screenplay-generation-ir.v4"
     row = db.get_conn().execute(
         "SELECT status,stale_reason FROM artifacts WHERE id=?",
         (artifact["id"],),

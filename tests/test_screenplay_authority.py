@@ -21,7 +21,7 @@ from app.production.patch import (
 from app.production.revision import ensure_production_revision, mark_baseline_generated
 from app.production.screenplay_authority import (
     SCREENPLAY_QA_PROFILE_VERSION,
-    assert_screenplay_matches_validated_v6_source,
+    assert_screenplay_matches_validated_v7_source,
     resolve_current_screenplay_authority,
     screenplay_authority_material,
     screenplay_bible_payload,
@@ -215,7 +215,7 @@ def test_unknown_revalidation_check_fails_closed_without_executable_action(
         raise RuntimeError("unknown validation failure")
 
     monkeypatch.setattr(
-        "app.production.screenplay_authority.assert_screenplay_matches_validated_v6_source",
+        "app.production.screenplay_authority.assert_screenplay_matches_validated_v7_source",
         fail_unknown,
     )
 
@@ -251,7 +251,7 @@ def test_typed_source_drift_has_priority_without_marking_artifact_stale(
         )
 
     monkeypatch.setattr(
-        "app.production.screenplay_authority.assert_screenplay_matches_validated_v6_source",
+        "app.production.screenplay_authority.assert_screenplay_matches_validated_v7_source",
         fail_typed,
     )
 
@@ -787,7 +787,7 @@ def _action_agency_projection(screenplay) -> list[dict]:
     ]
 
 
-def test_publish_rejects_contextual_drift_from_validated_v6_source() -> None:
+def test_publish_rejects_contextual_drift_from_validated_v7_source() -> None:
     from app.errors import ArtifactNeedsRebuildError
 
     case = _source_projection_case()
@@ -931,7 +931,7 @@ def test_revalidation_marks_equal_invalid_v6_action_projection_stale() -> None:
         ArtifactNeedsRebuildError,
         match="需要重建",
     ):
-        assert_screenplay_matches_validated_v6_source(
+        assert_screenplay_matches_validated_v7_source(
             episode_id=case["episode_id"],
             artifact=artifact,
             screenplay=published_screenplay,
@@ -2165,7 +2165,7 @@ def test_recovery_compile_receives_normalized_resolution_projection(
     )
 
     restored = load_screenplay_from_artifact(artifact["id"])
-    assert_screenplay_matches_validated_v6_source(
+    assert_screenplay_matches_validated_v7_source(
         episode_id=case["episode_id"],
         artifact=evidence_repository.get_artifact(artifact["id"]),
         screenplay=restored,

@@ -662,6 +662,7 @@ def resolve_screenplay_resume_eligibility(
         ).fetchone()
         artifact = dict(row) if row else None
         current_contract = get_contract("screenplay").version
+        incompatibility_reason = ""
         known_incompatibility = (
             artifact is None
             or artifact.get("type") != "screenplay_document"
@@ -719,7 +720,10 @@ def resolve_screenplay_resume_eligibility(
             else:
                 incompatibility_reason = ""
         else:
-            incompatibility_reason = "working Artifact 不符合当前类型、状态、合同或内容哈希"
+            if not incompatibility_reason:
+                incompatibility_reason = (
+                    "working Artifact 不符合当前类型、状态、合同或内容哈希"
+                )
         if not known_incompatibility:
             from app.production.screenplay_authority import (
                 SCREENPLAY_QA_PROFILE_VERSION,

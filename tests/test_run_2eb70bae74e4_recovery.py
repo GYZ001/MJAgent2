@@ -265,7 +265,10 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
             content=screenplay_artifact_payload(polluted),
             parent_artifact_ids=[baseline["id"], repair_patch["id"]],
             contract_version=get_contract("screenplay").version,
-            model_snapshot={"repair_run_id": "run_2eb70bae74e4"},
+            model_snapshot={
+                "repair_run_id": "run_2eb70bae74e4",
+                "compiler_version": IR_COMPILER_VERSION,
+            },
         ))
     revision = ensure_production_revision(
         episode_id="ep_run_2eb",
