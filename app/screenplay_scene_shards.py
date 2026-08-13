@@ -3112,6 +3112,7 @@ def _scene_shard_semantic_review_prompt(
     *,
     draft: ScreenplaySceneShardCreativeIR,
     scene_input_contracts: list[ScreenplaySceneInputContract],
+    identity_registry: list[dict[str, Any]],
 ) -> str:
     authority_slots = {
         slot.unit_key: {
@@ -3128,6 +3129,31 @@ def _scene_shard_semantic_review_prompt(
         for contract in scene_input_contracts
         for slot in contract.unit_slots
     }
+    allowed_identity_keys = {
+        value
+        for slot in authority_slots.values()
+        for field in (
+            "actor_keys", "target_keys", "onscreen_entity_keys",
+        )
+        for value in slot[field]
+    } | {
+        str(slot.get("speaker_key") or "")
+        for slot in authority_slots.values()
+        if str(slot.get("speaker_key") or "")
+    } | {
+        str(slot.get("state_subject_key") or "")
+        for slot in authority_slots.values()
+        if str(slot.get("state_subject_key") or "")
+    }
+    identity_labels = {
+        str(item.get("identity_key") or ""): {
+            "canonical_name": str(item.get("canonical_name") or ""),
+            "source_labels": list(item.get("source_labels") or []),
+            "authority_id": str(item.get("authority_id") or ""),
+        }
+        for item in identity_registry
+        if str(item.get("identity_key") or "") in allowed_identity_keys
+    }
     return (
         "你是剧本场次分片的独立语义审查员。逐 slot 对照原始 source_text 与"
         "程序冻结的 exact-unit state_subject/actor/speaker，检查 creative text、"
@@ -3137,6 +3163,8 @@ def _scene_shard_semantic_review_prompt(
         "冲突的 finding；不得建议改结构、主体、时间线、source ownership 或 audit。"
         "无问题输出 findings=[]。\n冻结 slot 权威：\n"
         + json.dumps(authority_slots, ensure_ascii=False, separators=(",", ":"))
+        + "\n冻结身份最小映射：\n"
+        + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
         + "\n待审 creative fields：\n"
         + draft.model_dump_json()
     )
@@ -3146,6 +3174,7 @@ async def _semantic_review_scene_shard_draft(
     *,
     draft: ScreenplaySceneShardCreativeIR,
     scene_input_contracts: list[ScreenplaySceneInputContract],
+    identity_registry: list[dict[str, Any]],
     operation_id: str,
     shard_id: str,
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
@@ -3160,6 +3189,7 @@ async def _semantic_review_scene_shard_draft(
             [{"role": "user", "content": _scene_shard_semantic_review_prompt(
                 draft=candidate,
                 scene_input_contracts=scene_input_contracts,
+                identity_registry=identity_registry,
             )}],
             model_type=ScreenplaySceneShardSemanticReview,
             operation_id=(
@@ -3198,6 +3228,15 @@ async def _semantic_review_scene_shard_draft(
         )
 
     findings, initial_reviews = await consensus(draft, "initial")
+    known_unit_keys = set(draft.slots)
+    unknown_finding_keys = {
+        item.unit_key for item in findings if item.unit_key not in known_unit_keys
+    }
+    if unknown_finding_keys:
+        raise ScreenplaySceneShardError(
+            shard_id,
+            ["语义审查引用未知 unit_key：" + ",".join(sorted(unknown_finding_keys))],
+        )
     audit = [{
         "phase": "initial",
         "reviews": initial_reviews,
@@ -3249,6 +3288,24 @@ async def _semantic_review_scene_shard_draft(
         raise ScreenplaySceneShardError(
             shard_id,
             ["语义 repair 改变了 generation slot 集合"],
+        )
+    flagged_unit_keys = {item.unit_key for item in findings}
+    rewritten_unflagged = [
+        unit_key
+        for unit_key in draft.slots
+        if (
+            unit_key not in flagged_unit_keys
+            and repaired.slots[unit_key].model_dump(mode="json")
+            != draft.slots[unit_key].model_dump(mode="json")
+        )
+    ]
+    if rewritten_unflagged:
+        raise ScreenplaySceneShardError(
+            shard_id,
+            [
+                "语义 repair 越权改写未被 consensus 标记的 slot："
+                + ",".join(rewritten_unflagged)
+            ],
         )
     remaining, final_reviews = await consensus(repaired, "post_repair")
     audit.append({
@@ -3556,6 +3613,7 @@ async def generate_screenplay_scene_shards(
         draft, semantic_reviews = await _semantic_review_scene_shard_draft(
             draft=draft,
             scene_input_contracts=plan_scene_input_contracts,
+            identity_registry=identity_registry,
             operation_id=operation_id,
             shard_id=plan.shard_id,
         )

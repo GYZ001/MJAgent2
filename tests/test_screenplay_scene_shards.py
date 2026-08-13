@@ -35,6 +35,8 @@ from app.screenplay_scene_shards import (
     SCREENPLAY_SCENE_INPUT_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
     ScreenplaySceneShardCreativeIR,
+    ScreenplaySceneShardSemanticReview,
+    ScreenplaySceneShardSemanticFinding,
     ScreenplaySceneShardCreativeUnit,
     ScreenplayEnvelopeExperience,
     ScreenplayEnvelopeIR,
@@ -70,6 +72,20 @@ from app.narrative_priority import picture_screenplay_projection
 
 
 SOURCE = "甲推门进入。\n\n乙接过钥匙并回答。"
+_REAL_SEMANTIC_REVIEW = (
+    scene_shards_module._semantic_review_scene_shard_draft
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_scene_shard_semantic_review(monkeypatch):
+    async def clean_review(*, draft, **_kwargs):
+        return draft, []
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards._semantic_review_scene_shard_draft",
+        clean_review,
+    )
 ERR_20260810_REPLAY = (
     Path(__file__).parent
     / "fixtures"
@@ -245,6 +261,113 @@ def _story_source_semantics(
         }
         for source_id in source_segment_ids
     }
+
+
+def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    unit_keys = list(draft.slots)
+    flagged_key = unit_keys[0]
+    original_unflagged = draft.slots[unit_keys[1]].model_dump(mode="json")
+    calls = 0
+
+    async def fake_structured(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            if calls <= 2:
+                assert "person_甲" in messages[0]["content"]
+                assert '"canonical_name":"甲"' in messages[0]["content"]
+                return ScreenplaySceneShardSemanticReview(findings=[
+                    ScreenplaySceneShardSemanticFinding(
+                        unit_key=flagged_key,
+                        code="state_subject_semantic_drift",
+                        message="冻结主体为甲，creative 却写成乙的动作",
+                    )
+                ])
+            return ScreenplaySceneShardSemanticReview(findings=[])
+        repaired = draft.model_copy(deep=True)
+        repaired.slots[flagged_key].text = "甲推门进入。"
+        return repaired
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    repaired, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[
+            {
+                "identity_key": f"person_{label}",
+                "authority_id": f"bible:{label}",
+                "canonical_name": label,
+                "source_labels": [label],
+            }
+            for label in ("甲", "乙")
+        ],
+        operation_id="scene-semantic-fixture",
+        shard_id=plan.shard_id,
+    ))
+
+    assert repaired.slots[flagged_key].text == "甲推门进入。"
+    assert repaired.slots[unit_keys[1]].model_dump(mode="json") == original_unflagged
+    assert len(audit) == 2
+
+
+def test_scene_shard_semantic_repair_rejects_unflagged_slot_rewrite(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    unit_keys = list(draft.slots)
+    calls = 0
+
+    async def fake_structured(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            return ScreenplaySceneShardSemanticReview(findings=[
+                ScreenplaySceneShardSemanticFinding(
+                    unit_key=unit_keys[0],
+                    code="source_semantic_drift",
+                    message="production F43/F47/F60 型来源主体漂移",
+                )
+            ])
+        repaired = draft.model_copy(deep=True)
+        repaired.slots[unit_keys[0]].text = "甲推门进入。"
+        repaired.slots[unit_keys[1]].text = "越权重写另一来源动作"
+        return repaired
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match="越权改写未被 consensus 标记",
+    ):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-overreach",
+            shard_id=plan.shard_id,
+        ))
 
 
 def _identities() -> list[IRIdentity]:
