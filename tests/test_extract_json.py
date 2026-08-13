@@ -40,6 +40,13 @@ def test_extract_json_does_not_accept_nested_object_from_broken_root() -> None:
         extract_json(text)
 
 
+def test_extract_json_rejects_object_inside_unclosed_top_level_string() -> None:
+    text = '"unfinished {"issues":[]}'
+
+    with pytest.raises(ValueError, match="JSON 解析失败"):
+        extract_json(text, repair_unescaped_inner_quotes=True)
+
+
 def test_extract_json_can_repair_unescaped_quotes_for_screenplay_only() -> None:
     text = '''{
   "episode_no": 1,

@@ -47,6 +47,10 @@ def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
         containers.pop()
         if containers:
             containers[-1][1] = "comma"
+        else:
+            # A matching top-level closer is the only token that explicitly
+            # ends an active root and permits a later independent candidate.
+            damaged_root = False
 
     while index < start:
         char = text[index]
@@ -60,7 +64,8 @@ def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
             try:
                 value, token_size = decoder.raw_decode(text[index:start])
             except json.JSONDecodeError:
-                return bool(containers or damaged_root)
+                # The candidate starts inside an unterminated JSON string.
+                return True
             if not isinstance(value, str):
                 damaged_root = True
             token = "string"
@@ -74,8 +79,8 @@ def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
                 token = "scalar"
                 token_end = index + token_size
         elif char not in "{}[],:":
-            containers.clear()
-            damaged_root = False
+            if containers or damaged_root:
+                damaged_root = True
             index += 1
             continue
 

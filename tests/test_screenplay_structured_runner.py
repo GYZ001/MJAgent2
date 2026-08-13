@@ -30,26 +30,31 @@ class _PermissiveReviewPayload(BaseModel):
     ("raw", "expected_values"),
     (
         ('{"value":1}', [1]),
-        ('{"value":1}\n{"value":2}', [2, 1]),
         (
-            '草稿 {"value":\n明确说明：以下是修正版\n{"value":7}',
+            '{"value":1}\n明确说明：以下是修正版\n{"value":2}',
+            [2, 1],
+        ),
+        (
+            '草稿说明\n明确说明：以下是修正版\n{"value":7}',
             [7],
         ),
         ('{"parent":{"value":7},"unfinished":', []),
         ('{"parent":[{"value":7}],"unfinished":', []),
         ('{"parent":[1 {"value":7}]', []),
         ('{"parent" {"value":7}}', []),
-        ('{"value":\nBROKEN\n{"value":7}', [7]),
+        ('{"value":\nBROKEN\n{"value":7}', []),
+        ('"unfinished {"value":7}', []),
     ),
     ids=(
         "direct-root",
-        "multiple-complete-roots",
-        "trailing-root-after-explanation",
+        "root-after-explicitly-completed-root",
+        "root-after-explanation-with-no-active-root",
         "nested-object",
         "nested-array",
         "nested-object-after-missing-comma",
         "nested-object-after-missing-colon",
-        "trailing-root-after-non-json-token",
+        "non-json-token-does-not-reset-active-root",
+        "candidate-inside-unclosed-top-level-string",
     ),
 )
 def test_json_candidate_provenance_acceptance_matrix(
@@ -97,8 +102,37 @@ def test_structured_runner_rejects_nested_permissive_candidate(
 @pytest.mark.parametrize(
     "raw",
     (
-        '草稿 {"value":\n最终答案: {"value":7}',
-        '草稿 {"value":\n最终 {"value":7}, 以上为修正版',
+        '{"value":\nBROKEN\n{"issues":[]}',
+        '"unfinished {"issues":[]}',
+    ),
+    ids=("damaged-active-root", "unclosed-top-level-string"),
+)
+def test_structured_runner_rejects_polluted_permissive_candidate_end_to_end(
+    monkeypatch,
+    raw: str,
+) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return raw
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    with pytest.raises(model_gateway.StructuredFormatError):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "review"}],
+            model_type=_PermissiveReviewPayload,
+            validate=None,
+            operation_id="test.reject-polluted-permissive:v1:abc",
+            max_tokens=128,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        '草稿说明\n最终答案: {"value":7}',
+        '草稿说明\n最终 {"value":7}, 以上为修正版',
     ),
 )
 def test_structured_runner_recovers_complete_trailing_json(

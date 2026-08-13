@@ -2030,6 +2030,24 @@ def _escape_json_control_chars_in_strings(text: str) -> str:
     return "".join(repaired)
 
 
+def _has_unclosed_json_string_prefix(text: str) -> bool:
+    """Return whether the prefix ends inside an ASCII-quoted JSON string."""
+    in_string = False
+    escaped = False
+    for char in text:
+        if not in_string:
+            if char == '"':
+                in_string = True
+            continue
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            in_string = False
+    return in_string
+
+
 def extract_json(
     text: str,
     *,
@@ -2058,6 +2076,8 @@ def extract_json(
         # 不能继续向内扫描并误把 dialogues 中的小对象当成整份输出。
         remainder = cleaned[start + 1:].lstrip()
         if remainder and not (remainder.startswith('"') or remainder.startswith("}")):
+            continue
+        if _has_unclosed_json_string_prefix(cleaned[:start]):
             continue
         candidate = _repair_singleton_string_object_fields(
             cleaned[start:],
