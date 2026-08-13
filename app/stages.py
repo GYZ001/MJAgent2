@@ -139,7 +139,7 @@ SYSTEM_PREFIX = (
 )
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
-SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.5.0"
+SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.0"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.

@@ -61,8 +61,8 @@ from app.source_excerpt import (
 from app.spoken_contract import content_char_count
 
 
-IR_VERSION = "screenplay-generation-ir.v3"
-IR_COMPILER_VERSION = "screenplay-ir-compiler.v6"
+IR_VERSION = "screenplay-generation-ir.v4"
+IR_COMPILER_VERSION = "screenplay-ir-compiler.v7"
 IR_MAX_SOURCE_SEGMENTS_PER_UNIT = 16
 IR_MIN_ADAPTED_SOURCE_RATIO = 0.35
 IR_MIN_LOCAL_ADAPTED_SOURCE_RATIO = 0.18
@@ -3248,6 +3248,40 @@ def compile_screenplay_ir(
                     f"IR {format_version} {scene.key}.{event_key} 动作单元缺少显式 "
                     "actor_keys，禁止从动作文本猜测执行者"
                 )
+            if typed_visual_unit_contract and (
+                "state_subject_key" not in unit.model_fields_set
+                or "environment_only" not in unit.model_fields_set
+            ):
+                raise ScreenplayIRFidelityError(
+                    f"IR {format_version} {scene.key}.{event_key} 缺少显式 "
+                    "state_subject_key/environment_only 状态归属合同，"
+                    "旧 IR 必须重建"
+                )
+            if typed_visual_unit_contract:
+                subject_key = unit.state_subject_key.strip()
+                if unit.kind == "dialogue":
+                    if unit.environment_only:
+                        raise ScreenplayIRFidelityError(
+                            f"IR {format_version} {scene.key}.{event_key} 对白单元"
+                            "不得声明 environment_only"
+                        )
+                    if not unit.speaker_key or subject_key != unit.speaker_key:
+                        raise ScreenplayIRFidelityError(
+                            f"IR {format_version} {scene.key}.{event_key} 对白单元"
+                            "state_subject_key 必须等于唯一 speaker_key"
+                        )
+                elif unit.environment_only:
+                    if subject_key or unit.actor_keys:
+                        raise ScreenplayIRFidelityError(
+                            f"IR {format_version} {scene.key}.{event_key} 纯环境单元"
+                            "不得同时声明人物 state subject/actor"
+                        )
+                elif not subject_key or subject_key not in unit.actor_keys:
+                    raise ScreenplayIRFidelityError(
+                        f"IR {format_version} {scene.key}.{event_key} 动作单元"
+                        "必须由唯一 exact-unit typed actor 承载 "
+                        "state_subject_key，不得从 visible/roster 猜测"
+                    )
             # Name occurrences remain a compatibility fallback for untyped IR.
             # Current contracts carry actor/target/on-screen relations as
             # frozen identity keys and never infer them from story words.
@@ -3456,6 +3490,14 @@ def compile_screenplay_ir(
                         "同一 event_key 的语义优先级合同不一致："
                         f"{event_key}"
                     )
+                if (
+                    existing.state_subject_key != unit.state_subject_key
+                    or existing.environment_only != unit.environment_only
+                ):
+                    raise ScreenplayIRFidelityError(
+                        f"IR {format_version} {scene.key}.{event_key} 同一事件"
+                        "包含不一致的 state subject/environment 声明"
+                    )
                 existing.source_segment_ids = list(dict.fromkeys([
                     *existing.source_segment_ids,
                     *source_ids,
@@ -3537,6 +3579,8 @@ def compile_screenplay_ir(
                     delivery.model_copy(deep=True)
                     for delivery in unit.participant_deliveries
                 ],
+                state_subject_key=unit.state_subject_key,
+                environment_only=unit.environment_only,
                 action_agency=ActionAgency(
                     kind=unit.action_agency.kind,
                     identity_bearing=bool(actor_keys or target_keys),
@@ -4547,20 +4591,37 @@ def compile_screenplay_ir(
             identity_id(token)
             for token in event.text_provenance.content_owner_keys
         ]))
-        non_actor_subject_ids = list(dict.fromkeys([
-            *speaker_ids,
-            *content_owner_ids,
-        ]))
-        state_subject_id = (
-            actor_ids
-            or target_ids
-            or (
-                non_actor_subject_ids
-                if len(non_actor_subject_ids) == 1
-                else []
-            )
-            or [environment_subject_id]
-        )[0]
+        if typed_visual_unit_contract:
+            if event.environment_only:
+                if event.state_subject_key:
+                    raise ScreenplayIRFidelityError(
+                        f"IR {format_version} event {event.key} 同时声明"
+                        "state_subject_key 与 environment_only"
+                    )
+                state_subject_id = environment_subject_id
+            else:
+                subject_key = event.state_subject_key.strip()
+                if not subject_key or subject_key not in event.actor_keys:
+                    raise ScreenplayIRFidelityError(
+                        f"IR {format_version} event {event.key} 缺少唯一"
+                        " exact-unit typed actor state_subject_key"
+                    )
+                state_subject_id = identity_id(subject_key)
+        else:
+            non_actor_subject_ids = list(dict.fromkeys([
+                *speaker_ids,
+                *content_owner_ids,
+            ]))
+            state_subject_id = (
+                actor_ids
+                or target_ids
+                or (
+                    non_actor_subject_ids
+                    if len(non_actor_subject_ids) == 1
+                    else []
+                )
+                or [environment_subject_id]
+            )[0]
         event_state_subject_ids[event.key] = state_subject_id
         participants = list(dict.fromkeys([
             *actor_ids,

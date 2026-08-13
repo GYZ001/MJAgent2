@@ -3792,3 +3792,110 @@ def test_ambiguous_dialogue_authority_fails_before_provider_dispatch() -> None:
             identity_registry=registry,
             blueprint_nodes=blueprint.nodes,
         )
+
+
+def _state_subject_contract(
+    *,
+    participants: list[dict],
+    environment_only: bool = False,
+) -> tuple[ScreenplaySceneUnitSlotPlan, ScreenplaySceneInputContract]:
+    source_unit_key = "SRC0001:unit:001"
+    slot = ScreenplaySceneUnitSlotPlan(
+        unit_key="unit-1",
+        event_key="event-1",
+        scene_key="scene-1",
+        scene_order=1,
+        unit_order=1,
+        scene_unit_order=1,
+        kind="action",
+        narrative_layer="story",
+        event_priority="causal",
+        render_policy="standalone",
+        source_segment_ids=["SRC0001"],
+        source_unit_key=source_unit_key,
+        source_text="甲抬头。",
+    )
+    action = scene_shards_module.ScreenplaySceneActionEvidence(
+        node_key="node-1",
+        source_segment_ids=["SRC0001"],
+        participants=[
+            scene_shards_module.ScreenplaySceneActionParticipantEvidence(
+                identity_key=item["identity_key"],
+                source_segment_ids=["SRC0001"],
+                source_unit_keys=[source_unit_key],
+                usage=item["usage"],
+            )
+            for item in participants
+        ],
+        environment_source_unit_keys=(
+            [source_unit_key] if environment_only else []
+        ),
+    )
+    contract = ScreenplaySceneInputContract(
+        scene_plan_key="scene-1",
+        node_keys=["node-1"],
+        source_segment_ids=["SRC0001"],
+        source_semantics=_story_source_semantics(["SRC0001"]),
+        source_segments=[ScreenplaySceneSourceSegment(
+            source_segment_id="SRC0001",
+            text="甲抬头。",
+        )],
+        participant_bindings=[],
+        source_scene_owners={"SRC0001": "scene-1"},
+        action_evidence=[action],
+        unit_slots=[],
+        source_ownership_hash="test",
+    )
+    return slot, contract
+
+
+def test_exact_state_subject_wins_with_multiple_visible_people() -> None:
+    slot, contract = _state_subject_contract(participants=[
+        {"identity_key": "person_a", "usage": "state_subject"},
+        {"identity_key": "person_a", "usage": "visible"},
+        {"identity_key": "person_b", "usage": "visible"},
+    ])
+
+    compiled, errors = scene_shards_module._compile_unit_identity_scaffold(
+        slot,
+        contract=contract,
+    )
+
+    assert errors == []
+    assert compiled.state_subject_key == "person_a"
+    assert compiled.actor_keys == ["person_a"]
+    assert compiled.onscreen_entity_keys == ["person_a", "person_b"]
+
+
+def test_unique_visible_person_is_not_an_implicit_state_subject() -> None:
+    slot, contract = _state_subject_contract(participants=[
+        {"identity_key": "person_a", "usage": "visible"},
+    ])
+
+    compiled, errors = scene_shards_module._compile_unit_identity_scaffold(
+        slot,
+        contract=contract,
+    )
+
+    assert compiled.actor_keys == []
+    assert compiled.state_subject_key == ""
+    assert compiled.onscreen_entity_keys == ["person_a"]
+    assert any("缺少唯一 state_subject" in error for error in errors)
+
+
+def test_explicit_environment_keeps_visible_people_out_of_actor_relation() -> None:
+    slot, contract = _state_subject_contract(
+        participants=[{"identity_key": "person_a", "usage": "visible"}],
+        environment_only=True,
+    )
+
+    compiled, errors = scene_shards_module._compile_unit_identity_scaffold(
+        slot,
+        contract=contract,
+    )
+
+    assert errors == []
+    assert compiled.environment_only is True
+    assert compiled.state_subject_key == ""
+    assert compiled.actor_keys == []
+    assert compiled.onscreen_entity_keys == ["person_a"]

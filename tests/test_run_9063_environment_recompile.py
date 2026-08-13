@@ -9,22 +9,25 @@ from pathlib import Path
 import pytest
 
 from app.domain.common import _episode_source_text
-from app.narrative import validate_screenplay_narrative
 from app.production.screenplay_authority import (
     screenplay_authorized_source_chapters,
 )
 from app.schemas import Bible
-from app.screenplay_ir import ScreenplayGenerationIR, compile_screenplay_ir
+from app.screenplay_ir import (
+    ScreenplayGenerationIR,
+    ScreenplayIRFidelityError,
+    compile_screenplay_ir,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_DB = ROOT / "data" / "manju.db"
 EPISODE_ID = "ep_711b29204aa9"
-MERGED_IR_ID = "art_d341438579e3"
+MERGED_IR_ID = "art_5283a3ccb12b"
 
 
 @pytest.mark.live_integration
-def test_run_9063_exact_merged_ir_recompiles_environment_subjects() -> None:
+def test_run_21a_old_merged_ir_requires_state_subject_rebuild() -> None:
     if not PRODUCTION_DB.exists():
         pytest.skip("production database is not present")
     conn = sqlite3.connect(f"file:{PRODUCTION_DB}?mode=ro", uri=True)
@@ -53,53 +56,27 @@ def test_run_9063_exact_merged_ir_recompiles_environment_subjects() -> None:
         EPISODE_ID,
         conn=conn,
     )
-    screenplay = compile_screenplay_ir(
-        ScreenplayGenerationIR.model_validate(json.loads(artifact_row[0])),
-        episode=episode,
-        source_text=source_text,
-        bible=Bible.model_validate(json.loads(project_row[0])),
-    )
+    payload = json.loads(artifact_row[0])
+    invalid_unattributed_units = {
+        unit["unit_key"]
+        for scene in payload["scenes"]
+        for unit in scene["units"]
+        if (
+            unit.get("kind") == "action"
+            and not unit.get("actor_keys")
+            and not unit.get("state_subject_key")
+            and "environment_only" not in unit
+        )
+    }
+    assert len(invalid_unattributed_units) >= 15
 
-    plan = screenplay.narrative_plan
-    environment_id = f"environment:{EPISODE_ID}"
-    environment_facts = [
-        fact for fact in plan.state_facts if fact.subject_id == environment_id
-    ]
-    propositions = {
-        proposition.proposition_id: proposition
-        for proposition in plan.propositions
-    }
-    assert len(plan.events) == 83
-    assert len(environment_facts) == 15
-    assert all(
-        environment_id in propositions[fact.proposition_id].entity_ids
-        for fact in environment_facts
-    )
-    assert environment_id not in {
-        identity.identity_id for identity in plan.identity_contracts
-    }
-    assert environment_id not in {
-        voice.speaker_id for voice in screenplay.voice_bible
-    }
-    assert all(
-        environment_id not in scene.characters
-        for scene in screenplay.scene_outline
-    )
-    assert all(
-        environment_id not in event.onscreen_entity_ids
-        for event in plan.events
-    )
-    assert all(
-        environment_id not in [*action.actor_ids, *action.target_ids]
-        for action in plan.atomic_actions
-    )
-    assert all(
-        scene.point_of_view_character_id != environment_id
-        for scene in plan.scene_contracts
-    )
-    assert validate_screenplay_narrative(
-        screenplay,
-        require=True,
-        expected_scope_id=EPISODE_ID,
-        authorized_source_chapters=episode["authorized_source_chapters"],
-    ) == []
+    with pytest.raises(
+        ScreenplayIRFidelityError,
+        match="state_subject_key/environment_only.*旧 IR 必须重建",
+    ):
+        compile_screenplay_ir(
+            ScreenplayGenerationIR.model_validate(payload),
+            episode=episode,
+            source_text=source_text,
+            bible=Bible.model_validate(json.loads(project_row[0])),
+        )

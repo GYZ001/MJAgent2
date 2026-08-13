@@ -58,11 +58,11 @@ from app.source_facts import source_segment_facts
 
 
 SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
-SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v9"
-SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v5"
-SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v9"
+SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v10"
+SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v6"
+SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v6"
-SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v8"
+SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
 SCREENPLAY_SCENE_SHARD_SCENE_RESERVE_TOKENS = 512
@@ -216,7 +216,7 @@ class ScreenplaySceneCompiledUnitSlot(ScreenplaySceneUnitSlotPlan):
 class ScreenplaySceneShardPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard-plan.v5"] = SCREENPLAY_SHARD_PLAN_VERSION
+    contract_version: Literal["screenplay-scene-shard-plan.v6"] = SCREENPLAY_SHARD_PLAN_VERSION
     shard_id: str
     scene_plan_keys: list[str]
     source_segment_ids: list[str]
@@ -271,7 +271,7 @@ class ScreenplaySceneActionEvidence(BaseModel):
 
 
 class ScreenplayActionParticipantDeliveryContract(BaseModel):
-    contract_version: Literal["screenplay-generation-ir.v3"] = IR_VERSION
+    contract_version: Literal["screenplay-generation-ir.v4"] = IR_VERSION
     evidence_schema: dict[str, Any] = Field(
         default_factory=IRActionParticipantDelivery.model_json_schema,
     )
@@ -284,7 +284,7 @@ class ScreenplayActionParticipantDeliveryContract(BaseModel):
 class ScreenplaySceneInputContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-input.v9"] = (
+    contract_version: Literal["screenplay-scene-input.v10"] = (
         SCREENPLAY_SCENE_INPUT_VERSION
     )
     scene_plan_key: str
@@ -367,7 +367,7 @@ class ScreenplaySceneShardScene(IRScene):
 class ScreenplaySceneShardIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-shard.v9"] = SCREENPLAY_SCENE_SHARD_VERSION
+    contract_version: Literal["screenplay-scene-shard.v10"] = SCREENPLAY_SCENE_SHARD_VERSION
     episode_no: int
     shard_id: str
     scene_plan_keys: list[str]
@@ -814,8 +814,6 @@ def _compile_unit_identity_scaffold(
                 key for key in visible_keys
                 if key not in decision_actor_keys
             ]
-        else:
-            actor_keys = list(visible_keys)
         source_has_dialogue_slot = slot.kind == "dialogue"
         if voice_keys and not source_has_dialogue_slot:
             if len(voice_keys) == 1:
@@ -826,11 +824,6 @@ def _compile_unit_identity_scaffold(
                     "必须在 Blueprint 中拆分来源"
                 )
 
-    relation_keys = _ordered_unique([
-        *actor_keys,
-        *target_keys,
-        *([speaker_key] if speaker_key else []),
-    ])
     typed_actor_claims = _ordered_unique(exact_decision_actor_keys)
     state_subject_key = ""
     if len(state_subject_claims) > 1:
@@ -850,6 +843,12 @@ def _compile_unit_identity_scaffold(
             f"{typed_actor_claims}，必须由 Blueprint "
             "usage=state_subject 唯一冻结"
         )
+    if (
+        slot.kind == "action"
+        and state_subject_key
+        and state_subject_key not in actor_keys
+    ):
+        actor_keys.append(state_subject_key)
     if environment_only and (
         state_subject_key
         or state_subject_claims
@@ -864,6 +863,11 @@ def _compile_unit_identity_scaffold(
             f"{slot.unit_key} 缺少唯一 state_subject 结构证据，"
             "且未显式声明 environment_only"
         )
+    relation_keys = _ordered_unique([
+        *actor_keys,
+        *target_keys,
+        *([speaker_key] if speaker_key else []),
+    ])
     participant_deliveries: list[IRActionParticipantDelivery] = []
     observable_basis = slot.source_text.strip() or " ".join(
         source_text_by_id.get(source_id, "")
@@ -890,8 +894,11 @@ def _compile_unit_identity_scaffold(
             visible_reaction="visible_reaction" in channels,
         ))
 
-    return ScreenplaySceneCompiledUnitSlot(
-        **slot.model_dump(mode="python"),
+        return ScreenplaySceneCompiledUnitSlot(
+        **slot.model_dump(
+            mode="python",
+            exclude={"state_subject_key", "environment_only"},
+        ),
         actor_keys=actor_keys,
         target_keys=target_keys,
         onscreen_entity_keys=visible_keys,

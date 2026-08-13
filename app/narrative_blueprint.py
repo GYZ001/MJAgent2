@@ -27,7 +27,7 @@ from app.source_excerpt import (
 from app.source_facts import SourceFact, source_facts
 
 
-BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v5"
+BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v6"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 
 
@@ -426,7 +426,7 @@ class BlueprintSourceOwnershipError(ValueError):
 
 
 class NarrativeBlueprint(BaseModel):
-    format_version: Literal["screenplay-narrative-blueprint.v5"] = (
+    format_version: Literal["screenplay-narrative-blueprint.v6"] = (
         BLUEPRINT_VERSION
     )
     episode_no: int
@@ -445,7 +445,7 @@ class NarrativeBlueprint(BaseModel):
 
 
 class NarrativeBlueprintShard(BaseModel):
-    format_version: Literal["screenplay-narrative-blueprint.v5"] = (
+    format_version: Literal["screenplay-narrative-blueprint.v6"] = (
         BLUEPRINT_VERSION
     )
     episode_no: int
