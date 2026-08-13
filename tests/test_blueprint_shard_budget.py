@@ -1050,6 +1050,7 @@ def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_gran
     monkeypatch.setattr(db._local, "conn", None, raising=False)
     db.init_db()
     conn = db.get_conn()
+    current_time = db.now()
     for run_id in ("run-old", "run-fresh"):
         conn.execute(
             """INSERT INTO workflow_runs(
@@ -1063,8 +1064,8 @@ def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_gran
                 "ep-lineage",
                 "FAILED" if run_id == "run-old" else "RUNNING",
                 "same-authority-fingerprint",
-                100.0,
-                100.0,
+                current_time - 2,
+                current_time,
             ),
         )
     conn.execute(
@@ -1073,7 +1074,7 @@ def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_gran
                attempt_no,recovery_disposition
            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (
-            101.0,
+            current_time - 1,
             "chat",
             "model",
             "INTERRUPTED",
@@ -1118,6 +1119,69 @@ def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_gran
     assert allowed.unknown_output_tokens == 8192
     assert allowed.reserved_output_tokens == 4096
     allowed.settle(reservation, unreported_outcome="not_sent")
+
+
+def test_blueprint_wall_budget_does_not_reset_across_fresh_activation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "blueprint-wall-lineage.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    now_value = 10_000.0
+    monkeypatch.setattr(stages.time, "time", lambda: now_value)
+    for run_id in ("run-wall-old", "run-wall-fresh"):
+        conn.execute(
+            """INSERT INTO workflow_runs(
+                   id,workflow_type,scope_type,scope_id,status,
+                   input_fingerprint,started_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                run_id,
+                "screenplay_production",
+                "episode",
+                "ep-wall-lineage",
+                "FAILED" if run_id.endswith("old") else "RUNNING",
+                "same-wall-fingerprint",
+                now_value - (1900 if run_id.endswith("old") else 1),
+                now_value,
+            ),
+        )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,response_json,run_id,
+               operation_id,attempt_no
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            now_value - 1900,
+            "chat",
+            "model",
+            "OK",
+            10,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_shard",
+                "episode_id": "ep-wall-lineage",
+                "requested_max_tokens": 10,
+                "effective_max_tokens": 10,
+            }),
+            json.dumps({"usage": {"completion_tokens": 1}}),
+            "run-wall-old",
+            "wall-operation",
+            1,
+        ),
+    )
+    conn.commit()
+
+    budget = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-wall-fresh",
+        started_at_epoch=now_value - 1,
+        episode_id="ep-wall-lineage",
+        input_fingerprint="same-wall-fingerprint",
+    )
+
+    with pytest.raises(stages.StageError, match="TIME_BUDGET"):
+        budget.claim(max_tokens=1, operation_id="new-operation")
 
 
 def test_durable_wall_budget_uses_original_run_start(

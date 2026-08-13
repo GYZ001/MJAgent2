@@ -89,7 +89,7 @@ def _cached_successful_provider_response(
         or provider_operation_id(kind, model, payload)
     try:
         rows = get_conn().execute(
-            "SELECT id,response_json,meta,request_json FROM provider_calls "
+            "SELECT id,response_json,meta,request_json,request_hash FROM provider_calls "
             "WHERE operation_id=? AND kind=? AND model=? "
             "AND status IN ('OK','SUCCESS','SUCCEEDED') "
             "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
@@ -104,12 +104,19 @@ def _cached_successful_provider_response(
             value = json.loads(row["response_json"])
             if not isinstance(value, dict):
                 continue
-            try:
-                stored_request = json.loads(row["request_json"] or "null")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if not _provider_request_matches(stored_request, payload):
-                continue
+            from app.db import provider_request_hash
+
+            stored_hash = str(row["request_hash"] or "")
+            if stored_hash:
+                if stored_hash != provider_request_hash(payload):
+                    continue
+            else:
+                try:
+                    stored_request = json.loads(row["request_json"] or "null")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not _provider_request_matches(stored_request, payload):
+                    continue
             log_provider_call(
                 "provider_cache_hit",
                 model,

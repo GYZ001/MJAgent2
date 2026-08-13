@@ -5481,6 +5481,7 @@ class _BlueprintGenerationBudget:
         rows = get_conn().execute(query, params).fetchall()
         latest_operation_status: dict[str, tuple[str, str]] = {}
         latest_stage_status: dict[str, tuple[int, str, str]] = {}
+        earliest_durable_call_at: float | None = None
         for row in rows:
             try:
                 meta = json.loads(row["meta"] or "{}")
@@ -5491,6 +5492,16 @@ class _BlueprintGenerationBudget:
                 stored_operation_id = row["operation_id"]
             except (IndexError, KeyError):
                 stored_operation_id = None
+            try:
+                durable_call_at = float(row["ts"])
+            except (IndexError, KeyError, TypeError, ValueError):
+                durable_call_at = 0.0
+            if durable_call_at > 0:
+                earliest_durable_call_at = (
+                    durable_call_at
+                    if earliest_durable_call_at is None
+                    else min(earliest_durable_call_at, durable_call_at)
+                )
             operation_id = str(
                 stored_operation_id or meta.get("operation_id") or ""
             ).strip()
@@ -5556,6 +5567,13 @@ class _BlueprintGenerationBudget:
                     call_id,
                     prior_grant_id,
                 )
+        if earliest_durable_call_at is not None:
+            durable_elapsed = max(0.0, time.time() - earliest_durable_call_at)
+            current_elapsed = max(0.0, time.monotonic() - budget.started_at)
+            budget.started_at = time.monotonic() - max(
+                durable_elapsed,
+                current_elapsed,
+            )
         return budget
 
     def explicit_retry_call_id(self, stage_key: str) -> int | None:

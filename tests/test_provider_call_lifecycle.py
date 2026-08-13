@@ -673,6 +673,87 @@ def test_versioned_operation_migration_links_only_exact_interrupted_request(
     assert dict(mismatch_row) == {"supersedes_call_id": None, "attempt_no": 1}
 
 
+def test_long_request_hash_preserves_tail_for_cache_and_retry_linkage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-long-request.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    prefix = "x" * 120_001
+    request_a = {"messages": [{"role": "user", "content": prefix + "A"}]}
+    request_b = {"messages": [{"role": "user", "content": prefix + "B"}]}
+    assert db._dump_call_json(request_a) == db._dump_call_json(request_b)
+    assert db.provider_request_hash(request_a) != db.provider_request_hash(request_b)
+
+    first = db.start_provider_call(
+        "chat",
+        "m",
+        request_json=request_a,
+        meta={"operation_id": "legacy-long-a"},
+    )
+    db.get_conn().execute(
+        "UPDATE provider_calls SET status='INTERRUPTED' WHERE id=?",
+        (first,),
+    )
+    db.get_conn().commit()
+    exact = db.start_provider_call(
+        "chat",
+        "m",
+        request_json=request_a,
+        meta={
+            "operation_id": "stable-long-a",
+            "supersedes_provider_call_id": first,
+        },
+    )
+    different = db.start_provider_call(
+        "chat",
+        "m",
+        request_json=request_b,
+        meta={
+            "operation_id": "stable-long-b",
+            "supersedes_provider_call_id": first,
+        },
+    )
+    rows = db.get_conn().execute(
+        "SELECT id,supersedes_call_id FROM provider_calls WHERE id IN (?,?)",
+        (exact, different),
+    ).fetchall()
+    assert [dict(row) for row in rows] == [
+        {"id": exact, "supersedes_call_id": first},
+        {"id": different, "supersedes_call_id": None},
+    ]
+
+    cache_call = db.start_provider_call(
+        "chat",
+        "m",
+        request_json=request_a,
+        meta={
+            "operation_id": "stable-long-cache",
+            "reuse_successful_operation": True,
+            "contract_version": "contract-v1",
+        },
+    )
+    db.finish_provider_call(
+        cache_call,
+        "OK",
+        200,
+        10,
+        response_json={"choices": [{"message": {"content": "cached"}}]},
+    )
+    meta = {
+        "operation_id": "stable-long-cache",
+        "reuse_successful_operation": True,
+        "contract_version": "contract-v1",
+    }
+    assert hiagent._cached_successful_provider_response(
+        "chat", "m", request_a, meta,
+    ) is not None
+    assert hiagent._cached_successful_provider_response(
+        "chat", "m", request_b, meta,
+    ) is None
+
+
 def test_late_response_from_old_process_cannot_overwrite_interrupted_call(
     tmp_path, monkeypatch,
 ) -> None:

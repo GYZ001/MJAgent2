@@ -2398,6 +2398,10 @@ def _dump_call_json(value: Any) -> str | None:
 
 def provider_request_hash(value: Any | None) -> str:
     """Hash the complete canonical request; observability truncation is excluded."""
+    if isinstance(value, dict):
+        value = dict(value)
+        value.pop("stream", None)
+        value.pop("stream_options", None)
     try:
         raw = json.dumps(
             value,
@@ -2489,6 +2493,7 @@ def _provider_recovery_ledger_available(conn: sqlite3.Connection) -> bool:
     return {
         "operation_id", "attempt_no", "supersedes_call_id",
         "superseded_by_call_id", "recovery_disposition",
+        "request_hash",
     }.issubset(columns)
 
 
@@ -2604,11 +2609,11 @@ def _log_provider_call_inner(
     attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
     cur = conn.execute(
         """INSERT INTO provider_calls(
-            ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta,
+            ts, kind, model, status, http_status, latency_ms, error, request_json, request_hash, response_json, meta,
             project_id, run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, status, http_status, latency_ms,
-         (error or "")[:500] or None, _dump_call_json(request_json), _dump_call_json(response_json),
+         (error or "")[:500] or None, _dump_call_json(request_json), provider_request_hash(request_json), _dump_call_json(response_json),
          _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None),
     )
@@ -2667,7 +2672,7 @@ def _start_provider_call_inner(
     explicit_previous_id = int((meta or {}).get("supersedes_provider_call_id") or 0)
     if previous is None and explicit_previous_id:
         legacy_previous = conn.execute(
-            """SELECT id,attempt_no,status,request_json
+            """SELECT id,attempt_no,status,request_hash
                  FROM provider_calls WHERE id=? AND status='INTERRUPTED'""",
             (explicit_previous_id,),
         ).fetchone()
@@ -2675,19 +2680,19 @@ def _start_provider_call_inner(
         # the stable semantic id.  Link it only when the exact outbound request
         # is byte-identical; stage/round proximity is never enough authority.
         if legacy_previous is not None and (
-            str(legacy_previous["request_json"] or "")
-            == str(_dump_call_json(request_json) or "")
+            str(legacy_previous["request_hash"] or "")
+            == provider_request_hash(request_json)
         ):
             previous = legacy_previous
     attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
     cur = conn.execute(
         """INSERT INTO provider_calls(
-            ts, kind, model, status, http_status, latency_ms, error, request_json, response_json, meta,
+            ts, kind, model, status, http_status, latency_ms, error, request_json, request_hash, response_json, meta,
             project_id, run_id, step_run_id, trace_id, operation_id, attempt_no, supersedes_call_id,
             recovery_disposition
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json), None,
-         _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json),
+         provider_request_hash(request_json), None, _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None,
          "RETRYING_INTERRUPTED" if previous and previous["status"] == "INTERRUPTED" else None),
     )
@@ -2750,9 +2755,9 @@ def update_provider_call_request(
     conn = get_conn()
     try:
         conn.execute(
-            """UPDATE provider_calls SET request_json=?
+            """UPDATE provider_calls SET request_json=?,request_hash=?
                WHERE id=? AND status='RUNNING'""",
-            (encoded, call_id),
+            (encoded, provider_request_hash(request_json), call_id),
         )
         conn.commit()
     except sqlite3.OperationalError:
