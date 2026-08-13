@@ -1313,15 +1313,22 @@ def blueprint_semantic_voice_issue_has_dialogue_authority(
     blueprint: NarrativeBlueprint,
     source_text: str,
 ) -> bool:
-    """Require exact deterministic support for reviewer voice findings."""
-    if not issue.code.startswith("voice_identity_"):
-        return True
-    deterministic_issues = [
-        deterministic_issue
-        for deterministic_issue in blueprint_voice_identity_issues(
+    """Require exact deterministic support for contract-shaped findings."""
+    if issue.code.startswith(("voice_identity_", "source_delivery_")):
+        candidate_issues = blueprint_voice_identity_issues(
             blueprint,
             source_text,
         )
+    elif issue.code.startswith("state_subject_"):
+        candidate_issues = blueprint_state_subject_issues(
+            blueprint,
+            source_text,
+        )
+    else:
+        return True
+    deterministic_issues = [
+        deterministic_issue
+        for deterministic_issue in candidate_issues
         if deterministic_issue.code == issue.code
     ]
     issue_node_keys = set(issue.node_keys)
@@ -1355,7 +1362,7 @@ def filter_blueprint_semantic_review_voice_issues(
     blueprint: NarrativeBlueprint,
     source_text: str,
 ) -> int:
-    """Drop natural-language voice guesses before reviewer consensus."""
+    """Drop unsupported delivery/subject guesses before reviewer consensus."""
     retained = [
         issue
         for issue in review.issues

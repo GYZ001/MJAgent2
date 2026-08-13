@@ -26,6 +26,7 @@ from app.narrative_blueprint import (
     blueprint_semantic_issue_is_resolved,
     blueprint_semantic_review_schema,
     derive_blueprint_scene_plans,
+    filter_blueprint_semantic_review_voice_issues,
     normalize_blueprint_agency_continuity,
     normalize_blueprint_provider_payload,
     normalize_blueprint_semantic_review_payload,
@@ -367,6 +368,82 @@ def test_paratext_provider_schema_and_patch_schema_encode_empty_contract() -> No
     ]["node"]["allOf"][1]["properties"]
     assert props["source_unit_deliveries"] == {"const": []}
     assert props["exit_state"] == {"const": ""}
+
+
+def test_semantic_consensus_drops_paratext_contract_guesses_but_keeps_real_story_gate() -> None:
+    paratext_source = "“卷末附记”"
+    paratext = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "audit-quoted",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "卷末附记",
+            "narrative_layer": "paratext",
+            "event_priority": "connective",
+            "render_policy": "exclude_from_spine",
+            "temporal_domain_key": "paratext",
+            "time_label": "章节外",
+            "time_relation": "episode_start",
+            "location_key": "paratext-card",
+            "location_label": "字幕卡",
+            "action_logic": "展示附记",
+        }],
+    })
+    guessed = BlueprintSemanticReview(issues=[
+        BlueprintSemanticIssue(
+            code="source_delivery_missing",
+            node_keys=["audit-quoted"],
+            source_segment_ids=["SRC0001"],
+            message="误报delivery",
+            required_resolution="误补delivery",
+        ),
+        BlueprintSemanticIssue(
+            code="state_subject_missing",
+            node_keys=["audit-quoted"],
+            source_segment_ids=["SRC0001"],
+            message="误报subject",
+            required_resolution="误补subject",
+        ),
+    ])
+
+    assert filter_blueprint_semantic_review_voice_issues(
+        guessed,
+        paratext,
+        paratext_source,
+    ) == 2
+    assert guessed.issues == []
+
+    story_source = "孟浩推开木门。"
+    story = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "story-1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "孟浩推门",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "door",
+            "location_label": "木门前",
+            "action_logic": "孟浩推门",
+        }],
+    })
+    real = BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+        code="state_subject_missing",
+        node_keys=["story-1"],
+        source_segment_ids=["SRC0001"],
+        message="缺少subject",
+        required_resolution="补exact subject",
+    )])
+    assert filter_blueprint_semantic_review_voice_issues(
+        real,
+        story,
+        story_source,
+    ) == 0
+    assert [issue.code for issue in real.issues] == ["state_subject_missing"]
 
 
 def test_partition_gate_rejects_picture_omission_duplicate_and_audit_leak() -> None:

@@ -1724,6 +1724,28 @@ def _spawn_screenplay_activation(
             activation_retry_revision_id = (
                 str(revision["id"]) if revision is not None else ""
             )
+            run_row = conn.execute(
+                "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
+                (recorder.run_id,),
+            ).fetchone()
+            config_snapshot = json.loads(
+                run_row["config_snapshot_json"] or "{}"
+            ) if run_row is not None else {}
+            config_snapshot.update({
+                "blueprint_retry_grant_id": activation_retry_grant_id,
+                "blueprint_retry_receipts_hash": (
+                    activation_retry_receipts_hash
+                ),
+            })
+            conn.execute(
+                "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    json.dumps(config_snapshot, ensure_ascii=False),
+                    activation_stamp,
+                    recorder.run_id,
+                ),
+            )
         budget.assert_activation_admissible()
         stamp = activation_stamp
         started_at = (

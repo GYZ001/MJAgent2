@@ -248,11 +248,13 @@ def test_production_src0001_paratext_root_split_validates_without_retry_exhausti
 ) -> None:
     source = "第一章 书生孟浩\n\n孟浩推开木门。"
     calls: list[list[str]] = []
+    prompts: list[str] = []
     artifacts: list[object] = []
 
     async def fake_chat(messages, **kwargs):
         source_ids = _prompt_source_ids(messages[1]["content"])
         calls.append(source_ids)
+        prompts.append(messages[1]["content"])
         if len(source_ids) > 1:
             raise hiagent.ProviderError(
                 "root needs deterministic split",
@@ -292,7 +294,8 @@ def test_production_src0001_paratext_root_split_validates_without_retry_exhausti
                 "render_policy": "standalone",
                 "temporal_domain_key": "present",
                 "time_label": "当下",
-                "time_relation": "continuous",
+                "time_relation": "jump",
+                "transition_cue": "标题卡淡出后切入木门前",
                 "location_key": "door",
                 "location_label": "木门前",
                 "participants": ["孟浩"],
@@ -331,6 +334,12 @@ def test_production_src0001_paratext_root_split_validates_without_retry_exhausti
     ))
 
     assert calls == [["SRC0001", "SRC0002"], ["SRC0001"], ["SRC0002"]]
+    assert all("仅story/picture节点" in prompt for prompt in prompts)
+    assert all(
+        "paratext/audit_only无论原文unit是quoted还是action" in prompt
+        for prompt in prompts
+    )
+    assert all('"exit_state":{"const":""}' in prompt for prompt in prompts)
     title = next(node for node in result.nodes if node.narrative_layer == "paratext")
     assert title.source_segment_ids == ["SRC0001"]
     assert title.source_unit_deliveries == []
