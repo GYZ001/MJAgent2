@@ -12,6 +12,7 @@ from app.domain.video_ops import ConfirmationEvaluation
 from app.evidence import repository
 from app.harness.types import EvidenceArtifact, Issue, IssueSeverity
 from app.production.publish import can_issue_certificate
+from app.storyboard_workspace import realign_generated_source_binding
 
 
 @pytest.fixture()
@@ -69,6 +70,13 @@ def confirm_db(tmp_path, monkeypatch):
         ),
     )
     conn.execute("UPDATE episodes SET storyboard_artifact_id=? WHERE id='e1'", (artifact["id"],))
+    realign_generated_source_binding(
+        "e1",
+        "s1",
+        source,
+        conn=conn,
+        commit=False,
+    )
     conn.commit()
     yield conn
     conn.close()
@@ -119,6 +127,8 @@ def test_unlocatable_legacy_excerpt_stays_internal_audit_only(confirm_db, monkey
         "UPDATE shots SET source_excerpt=? WHERE id='s1'",
         ("这是一段长度足够但并非授权章节逐字原文的历史证据",),
     )
+    # The immutable source binding remains the authority; editing the legacy
+    # display excerpt alone must not delete or rewrite that durable evidence.
     confirm_db.commit()
     monkeypatch.setattr(video_ops, "validate_storyboard", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(video_ops, "validate_storyboard_soundtrack", lambda *_args, **_kwargs: [])
