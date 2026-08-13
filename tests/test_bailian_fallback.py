@@ -208,7 +208,10 @@ def test_bailian_strict_replay_scans_later_successful_candidate(monkeypatch) -> 
             fallback_kind="text",
             log_kind="chat",
             preferred_model=first,
-            meta={"require_cached_successful_operation": True},
+            meta={
+                "require_cached_successful_operation": True,
+                "disable_provider_candidate_fallback": True,
+            },
         )
     )
 
