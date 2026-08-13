@@ -6912,6 +6912,9 @@ def _commit_blueprint_authority_checkpoint(
         artifact_blueprint = NarrativeBlueprint.model_validate(
             json.loads(artifact["content_json"] or "{}")
         )
+        artifact_blueprint_hash = _narrative_blueprint_content_hash(
+            artifact_blueprint
+        )
         artifact_errors = validate_narrative_blueprint(
             artifact_blueprint,
             source_text,
@@ -6933,8 +6936,7 @@ def _commit_blueprint_authority_checkpoint(
                 getattr(exc, "errors", None) or [str(exc)]
             )
         if (
-            _narrative_blueprint_content_hash(artifact_blueprint)
-            != blueprint_hash
+            artifact_blueprint_hash != blueprint_hash
             or not _blueprint_authority_snapshot_is_current(
                 snapshot,
                 source_text,

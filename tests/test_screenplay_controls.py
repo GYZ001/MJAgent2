@@ -1613,6 +1613,45 @@ def test_validated_blueprint_resolution_is_exact_late_safe_and_idempotent() -> N
         "WHERE id='e1'",
         (run_id,),
     )
+    empty_blueprint = NarrativeBlueprint(episode_no=1, nodes=[])
+    invalid_artifact = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content=empty_blueprint.model_dump(mode="json"),
+        contract_version=BLUEPRINT_VERSION,
+        prompt_version=BLUEPRINT_PROMPT_VERSION,
+        model_snapshot=stages._current_blueprint_authority_snapshot(
+            source_text,
+            generation_mode="semantic_reviewed",
+        ),
+    ))
+    conn.commit()
+    with bind_trace(run_id, None), pytest.raises(
+        stages.StageError,
+        match="BLUEPRINT_EMPTY",
+    ):
+        stages._commit_blueprint_authority_checkpoint(
+            episode_id="e1",
+            blueprint_artifact_id=str(invalid_artifact["id"]),
+            blueprint_hash=blueprint_content_hash(empty_blueprint),
+            source_text=source_text,
+        )
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM provider_calls "
+        "WHERE kind='blueprint_authority_resolution'"
+    ).fetchone()["c"] == 0
+    assert conn.execute(
+        "SELECT superseded_by_call_id FROM provider_calls WHERE id=?",
+        (old_call_id,),
+    ).fetchone()["superseded_by_call_id"] is None
+    assert json.loads(conn.execute(
+        "SELECT checkpoint_json FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["checkpoint_json"]).get("blueprint_artifact_id") is None
+
     # Use a fully valid current Blueprint; the authority transaction itself
     # independently re-runs deterministic semantic and scene-partition gates.
     blueprint = _blueprint()
