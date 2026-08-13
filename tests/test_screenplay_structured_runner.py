@@ -427,7 +427,7 @@ def test_format_repair_keeps_outer_candidate_validation_error(
     assert "Field required" not in prompts[1]
 
 
-def test_format_repair_uses_distinct_recovered_root_error_and_payload(
+def test_format_repair_does_not_fall_back_past_latest_complete_root(
     monkeypatch,
 ) -> None:
     prompts: list[str] = []
@@ -452,10 +452,10 @@ def test_format_repair_uses_distinct_recovered_root_error_and_payload(
     ))
 
     assert result.value == 3
-    assert "Input should be a valid integer" in prompts[1]
-    assert '"value":"bad"' in prompts[1]
-    assert '"other":1' not in prompts[1]
-    assert "Field required" not in prompts[1]
+    assert "Field required" in prompts[1]
+    assert '"other":1' in prompts[1]
+    assert '"value":"bad"' not in prompts[1]
+    assert "Input should be a valid integer" not in prompts[1]
 
 
 def test_structured_runner_applies_local_payload_normalizer(
