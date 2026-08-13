@@ -680,6 +680,14 @@ class BlueprintSemanticIssue(BaseModel):
         "source_delivery_missing",
         "source_delivery_conflict",
         "source_delivery_identity_conflict",
+        "state_subject_missing",
+        "state_subject_ambiguous",
+        "state_subject_unit_missing",
+        "state_subject_unit_invalid",
+        "state_subject_environment_duplicate",
+        "state_subject_environment_invalid",
+        "state_subject_environment_conflict",
+        "state_subject_environment_non_picture",
         "ending_payoff_gap",
     ]
     node_keys: list[str]
@@ -1503,6 +1511,10 @@ def blueprint_state_subject_issues(
                     fact is None
                     or fact.projection != "action"
                     or fact.source_segment_id not in owned_sources
+                    or fact.source_segment_id not in evidence.source_segment_ids
+                    or bool(
+                        set(evidence.source_segment_ids) - owned_sources
+                    )
                 ):
                     issues.append(BlueprintSemanticIssue(
                         code="state_subject_unit_invalid",
@@ -1537,14 +1549,16 @@ def blueprint_state_subject_issues(
                     ),
                     required_resolution="人物主体和纯环境标记必须二选一",
                 ))
-            elif len(explicit) > 1:
+            elif len(claims) > 1:
                 issues.append(BlueprintSemanticIssue(
                     code="state_subject_ambiguous",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
                     message=(
                         f"{fact.source_unit_key} 存在多个候选状态主体："
-                        + "、".join(explicit)
+                        + "、".join(
+                            evidence.identity_key for evidence in claims
+                        )
                     ),
                     required_resolution=(
                         "用唯一 usage=state_subject evidence 明确主体"

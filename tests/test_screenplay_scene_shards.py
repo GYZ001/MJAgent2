@@ -17,6 +17,7 @@ from app.narrative_blueprint import (
     NarrativeBlueprint,
     NarrativeNode,
     NarrativeParticipantEvidence,
+    blueprint_state_subject_issues,
     blueprint_voice_identity_issues,
     derive_blueprint_scene_plans,
 )
@@ -66,6 +67,8 @@ from app.screenplay_scene_shards import (
     normalize_screenplay_scene_shard,
     normalize_screenplay_scene_shard_payload,
     screenplay_scene_identity_scaffold_hash,
+    screenplay_scene_generation_scaffold_hash,
+    screenplay_scene_shard_artifact_compatibility,
     validate_screenplay_scene_shard,
 )
 from app.source_excerpt import index_source_segments
@@ -2860,6 +2863,123 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
     assert all(row["attempt"] == 0 and row["reused"] for row in rows)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing", "semantic_review_evidence_missing"),
+        ("reviewed_hash", "semantic_review_hash_binding"),
+        ("initial_candidate", "semantic_review_initial_candidate"),
+        ("not_clean", "semantic_review_not_clean"),
+        ("malformed_phase", "semantic_review_artifacts_missing"),
+    ],
+)
+def test_scene_shard_review_evidence_is_exact_cache_authority(
+    monkeypatch,
+    mutation: str,
+    reason: str,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint, source_text=SOURCE, identity_registry_hash="identity-hash",
+    )[0]
+    episode_id = f"ep-semantic-review-evidence-{mutation}"
+    blueprint_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content=blueprint.model_dump(mode="json"),
+        contract_version=blueprint.format_version,
+    ))
+    identity_artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_identity_registry",
+        scope_type="episode",
+        scope_id=episode_id,
+        status="validated",
+        trust_level="T1",
+        content={
+            "contract_version": "screenplay-identity-registry.v1",
+            "identity_registry_hash": "identity-hash",
+            "identities": [],
+        },
+        parent_artifact_ids=[blueprint_artifact["id"]],
+        contract_version="screenplay-identity-registry.v1",
+    ))
+    contracts = _contracts([plan], blueprint)
+
+    async def creative_response(*_args, **_kwargs):
+        return _creative_shard(plan, blueprint, contracts[plan.shard_id])
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        creative_response,
+    )
+    _shards, artifact_ids, _rows = asyncio.run(
+        generate_screenplay_scene_shards(
+            episode={"id": episode_id, "episode_no": 1},
+            source_text=SOURCE,
+            blueprint=blueprint,
+            identity_registry=[],
+            identities=_identities(),
+            plans=[plan],
+            scene_input_contracts=contracts,
+            blueprint_artifact_id=blueprint_artifact["id"],
+            identity_artifact_id=identity_artifact["id"],
+        )
+    )
+    artifact = evidence_repository.get_artifact(artifact_ids[0])
+    assert artifact is not None
+    raw_id = artifact["parent_artifact_ids"][0]
+    raw = evidence_repository.get_artifact(raw_id)
+    assert raw is not None
+    compatible, actual_reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        expected_blueprint_hash=plan.blueprint_hash,
+        expected_identity_registry_hash=plan.identity_registry_hash,
+        expected_generation_scaffold_hash=(
+            screenplay_scene_generation_scaffold_hash(
+                plan, contracts[plan.shard_id],
+            )
+        ),
+        raw_artifact=raw,
+        expected_authority_artifact_ids={
+            blueprint_artifact["id"], identity_artifact["id"],
+        },
+    )
+    assert compatible is True, actual_reason
+
+    artifact = deepcopy(artifact)
+    raw = deepcopy(raw)
+    evidence = raw["content"]["semantic_review_evidence"]
+    if mutation == "missing":
+        raw["content"].pop("semantic_review_evidence")
+    elif mutation == "reviewed_hash":
+        artifact["model_snapshot"]["reviewed_creative_hash"] = "0" * 64
+    elif mutation == "initial_candidate":
+        evidence["phases"][0]["creative_hash"] = "0" * 64
+    elif mutation == "not_clean":
+        evidence["phases"][-1]["consensus"] = [{"unit_key": "stale"}]
+    else:
+        evidence["phases"] = [None]
+    compatible, actual_reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        expected_blueprint_hash=plan.blueprint_hash,
+        expected_identity_registry_hash=plan.identity_registry_hash,
+        expected_generation_scaffold_hash=(
+            screenplay_scene_generation_scaffold_hash(
+                plan, contracts[plan.shard_id],
+            )
+        ),
+        raw_artifact=raw,
+        expected_authority_artifact_ids={
+            blueprint_artifact["id"], identity_artifact["id"],
+        },
+    )
+    assert compatible is False
+    assert actual_reason == reason
+
+
 def test_owner_change_after_provider_response_prevents_artifact_persist(monkeypatch) -> None:
     blueprint = _blueprint(split_domain=True)
     plan = build_screenplay_scene_shard_plans(
@@ -4330,3 +4450,76 @@ def test_explicit_environment_keeps_visible_people_out_of_actor_relation() -> No
     assert compiled.state_subject_key == ""
     assert compiled.actor_keys == []
     assert compiled.onscreen_entity_keys == ["person_a"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_codes"),
+    [
+        ("exact", set()),
+        ("missing", {"state_subject_missing"}),
+        ("multiple", {"state_subject_ambiguous"}),
+        ("environment_conflict", {"state_subject_environment_conflict"}),
+        ("environment_visible", set()),
+        ("missing_unit_key", {"state_subject_unit_missing", "state_subject_missing"}),
+        ("out_of_scope", {"state_subject_unit_invalid", "state_subject_missing"}),
+        ("wrong_segment", {"state_subject_unit_invalid", "state_subject_missing"}),
+        ("duplicate_same_identity", {"state_subject_ambiguous"}),
+    ],
+)
+def test_blueprint_state_subject_early_gate_matrix(
+    mutation: str,
+    expected_codes: set[str],
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    node = blueprint.nodes[0]
+    subject = next(
+        evidence for evidence in node.participant_evidence
+        if evidence.usage == "state_subject"
+    )
+    unit_key = "SRC0001:unit:001"
+    if mutation in {"missing", "environment_visible"}:
+        node.participant_evidence = [
+            evidence for evidence in node.participant_evidence
+            if evidence.usage != "state_subject"
+        ]
+    if mutation == "environment_visible":
+        node.environment_source_unit_keys = [unit_key]
+    elif mutation == "multiple":
+        node.participant_evidence.append(subject.model_copy(update={
+            "identity_key": "乙",
+        }))
+    elif mutation == "environment_conflict":
+        node.environment_source_unit_keys = [unit_key]
+    elif mutation == "missing_unit_key":
+        subject.source_unit_keys = []
+    elif mutation == "out_of_scope":
+        subject.source_unit_keys = ["SRC9999:unit:001"]
+    elif mutation == "wrong_segment":
+        subject.source_segment_ids = ["SRC0002"]
+    elif mutation == "duplicate_same_identity":
+        node.participant_evidence.append(subject.model_copy(deep=True))
+
+    codes = {
+        issue.code
+        for issue in blueprint_state_subject_issues(blueprint, SOURCE)
+        if node.key in issue.node_keys
+    }
+    assert codes == expected_codes
+
+
+def test_paratext_forbids_environment_subject_contract() -> None:
+    payload = _blueprint(split_domain=False).nodes[0].model_dump(mode="json")
+    payload.update({
+        "narrative_layer": "paratext",
+        "event_priority": "connective",
+        "render_policy": "exclude_from_spine",
+        "participants": [],
+        "participant_evidence": [],
+        "environment_source_unit_keys": ["SRC0001:unit:001"],
+        "state_requirements": [],
+        "state_changes": [],
+        "released_constraints_for": [],
+        "decision": None,
+    })
+    with pytest.raises(ValidationError, match="paratext 节点不得承载"):
+        NarrativeNode.model_validate(payload)

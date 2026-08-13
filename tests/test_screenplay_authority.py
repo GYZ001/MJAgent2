@@ -742,6 +742,90 @@ def test_current_screenplay_artifact_broken_lineage_needs_rebuild() -> None:
     _assert_artifact_needs_rebuild(artifact["id"])
 
 
+@pytest.mark.parametrize(
+    ("lineage_case", "should_rebuild"),
+    [
+        ("all_old_shards", True),
+        ("mixed_shards", True),
+        ("old_merged_current_shards", True),
+        ("complete_current", False),
+    ],
+)
+def test_validated_v7_source_authority_requires_complete_current_lineage(
+    lineage_case: str,
+    should_rebuild: bool,
+) -> None:
+    case = _source_projection_case(
+        episode_id=f"episode-lineage-{lineage_case}",
+        project_id=f"project-lineage-{lineage_case}",
+    )
+    conn = db.get_conn()
+    merged = evidence_repository.get_artifact(case["merged_artifact_id"])
+    assert merged is not None
+    shard_ids = [
+        parent_id for parent_id in merged["parent_artifact_ids"]
+        if (evidence_repository.get_artifact(parent_id) or {}).get("type")
+        == "screenplay_scene_shard"
+    ]
+    assert shard_ids
+    if lineage_case == "all_old_shards":
+        conn.execute(
+            "UPDATE artifacts SET contract_version=? WHERE id=?",
+            ("screenplay-scene-shard.v9", shard_ids[0]),
+        )
+    elif lineage_case == "mixed_shards":
+        old_shard = evidence_repository.create_artifact(EvidenceArtifact(
+            type="screenplay_scene_shard",
+            scope_type="episode",
+            scope_id=case["episode_id"],
+            status="validated",
+            trust_level="T1",
+            content={"contract_version": "screenplay-scene-shard.v9"},
+            contract_version="screenplay-scene-shard.v9",
+        ))
+        conn.execute(
+            "UPDATE artifacts SET parent_artifact_ids_json=? WHERE id=?",
+            (
+                json.dumps([*merged["parent_artifact_ids"], old_shard["id"]]),
+                merged["id"],
+            ),
+        )
+    elif lineage_case == "old_merged_current_shards":
+        conn.execute(
+            "UPDATE artifacts SET contract_version=? WHERE id=?",
+            ("screenplay-generation-ir-merged.v8", merged["id"]),
+        )
+    conn.commit()
+    artifact = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id=case["episode_id"],
+        status="candidate",
+        trust_level="T1",
+        content=screenplay_artifact_payload(case["compiled"]),
+        parent_artifact_ids=[merged["id"]],
+        contract_version="4.0.0",
+    ))
+    persisted = evidence_repository.get_artifact(artifact["id"])
+    assert persisted is not None
+
+    if should_rebuild:
+        with pytest.raises(app_errors.ArtifactNeedsRebuildError):
+            assert_screenplay_matches_validated_v7_source(
+                episode_id=case["episode_id"],
+                artifact=persisted,
+                screenplay=case["compiled"],
+                conn=conn,
+            )
+    else:
+        assert_screenplay_matches_validated_v7_source(
+            episode_id=case["episode_id"],
+            artifact=persisted,
+            screenplay=case["compiled"],
+            conn=conn,
+        )
+
+
 def _drift_to_contextual_actor(screenplay):
     drifted = screenplay.model_copy(deep=True)
     plan = drifted.narrative_plan
