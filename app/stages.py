@@ -5535,8 +5535,6 @@ class _BlueprintGenerationBudget:
                 ):
                     budget.unknown_output_tokens += effective
                 continue
-            if operation_id:
-                budget._durable_successful_operations.add(operation_id)
             usage = response.get("usage") if isinstance(response, dict) else None
             actual = (
                 usage.get("completion_tokens")

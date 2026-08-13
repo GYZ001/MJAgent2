@@ -1004,6 +1004,44 @@ def test_durable_unknown_blueprint_patch_is_restored_as_budget_liability(
     assert budget.charged_output_tokens == 8192
 
 
+def test_later_unknown_attempt_is_not_misclassified_as_durable_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    common_meta = {
+        "stage_key": "screenplay_blueprint_patch",
+        "requested_max_tokens": 100,
+        "effective_max_tokens": 100,
+    }
+    monkeypatch.setattr(
+        stages,
+        "get_conn",
+        lambda: _DurableBudgetConnection([{
+            "response_json": json.dumps({
+                "usage": {"completion_tokens": 10},
+            }),
+            "meta": json.dumps(common_meta),
+            "operation_id": "same-operation",
+            "status": "OK",
+            "recovery_disposition": None,
+        }, {
+            "response_json": None,
+            "meta": json.dumps(common_meta),
+            "operation_id": "same-operation",
+            "status": "INTERRUPTED",
+            "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
+        }]),
+    )
+
+    budget = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-latest-unknown",
+    )
+
+    assert "same-operation" not in budget._durable_successful_operations
+    assert "same-operation" in budget._durable_unknown_operations
+    assert budget.actual_output_tokens == 10
+    assert budget.unknown_output_tokens == 100
+
+
 def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_grant(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

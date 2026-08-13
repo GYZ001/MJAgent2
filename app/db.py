@@ -244,6 +244,7 @@ CREATE TABLE IF NOT EXISTS provider_calls (
     latency_ms INTEGER,
     error TEXT,
     request_json TEXT,
+    request_hash TEXT,
     response_json TEXT,
     meta TEXT,
     project_id TEXT,
@@ -1412,6 +1413,7 @@ MIGRATIONS = (
     "ALTER TABLE benchmark_runs ADD COLUMN attested_by TEXT",
     "ALTER TABLE benchmark_runs ADD COLUMN attestation_note TEXT",
     "ALTER TABLE provider_calls ADD COLUMN operation_id TEXT",
+    "ALTER TABLE provider_calls ADD COLUMN request_hash TEXT",
     "ALTER TABLE provider_calls ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE provider_calls ADD COLUMN supersedes_call_id INTEGER",
     "ALTER TABLE provider_calls ADD COLUMN superseded_by_call_id INTEGER",
@@ -2394,6 +2396,21 @@ def _dump_call_json(value: Any) -> str | None:
         return json.dumps(str(value), ensure_ascii=False)
 
 
+def provider_request_hash(value: Any | None) -> str:
+    """Hash the complete canonical request; observability truncation is excluded."""
+    try:
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError):
+        raw = json.dumps(str(value), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
 def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
     """Serialize metadata as valid JSON even when the original payload is large."""
     value = meta or {}
@@ -2459,7 +2476,7 @@ def _dump_meta_json(meta: dict | None, *, max_chars: int = 800) -> str:
 
 def provider_operation_id(kind: str, model: str, request_json: Any | None) -> str:
     """Stable business-operation fingerprint shared by retries and process restarts."""
-    payload = _dump_call_json(request_json) or "null"
+    payload = provider_request_hash(request_json)
     digest = hashlib.sha256(
         f"{kind}\0{model}\0{payload}".encode("utf-8", "replace")
     ).hexdigest()
