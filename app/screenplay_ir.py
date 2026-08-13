@@ -4566,6 +4566,10 @@ def compile_screenplay_ir(
                 identity_id(delivery.participant_key)
                 for delivery in event.participant_deliveries
             ],
+            *[
+                identity_id(token)
+                for token in scene_by_key[event.scene_key].character_keys
+            ],
             state_subject_id,
         ]))
         if not participants and not typed_visual_unit_contract:

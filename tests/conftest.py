@@ -228,6 +228,10 @@ def _reset_capability_runtime(
 ):
     """每个测试独占数据库，并重置进程内 Command Bus 与审批状态。"""
 
+    if _LIVE_INTEGRATION:
+        yield
+        return
+
     from app.capabilities import bus as capability_bus
     from app.capabilities.policy import reset_approvals_for_tests
     from app import db

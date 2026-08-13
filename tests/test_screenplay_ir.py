@@ -536,6 +536,51 @@ def test_run_9063_environment_only_fact_is_typed_and_not_a_character() -> None:
     ) == []
 
 
+def test_environment_subject_and_scene_roster_have_separate_graph_roles() -> None:
+    payload = _ir_payload()
+    payload["scenes"] = [payload["scenes"][0]]
+    payload["scenes"][0]["units"] = [payload["scenes"][0]["units"][0]]
+    payload["events"] = [payload["events"][0]]
+    payload["events"][0].update({
+        "actor_keys": [],
+        "target_keys": [],
+        "perceivable_by": ["audience"],
+    })
+    payload["beats"] = [payload["beats"][0]]
+    payload["coverage"] = [payload["coverage"][0]]
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-environment-roster",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+    fact = screenplay.narrative_plan.state_facts[0]
+    proposition = next(
+        item for item in screenplay.narrative_plan.propositions
+        if item.proposition_id == fact.proposition_id
+    )
+
+    assert fact.subject_id == "environment:ep-ir-environment-roster"
+    assert set(proposition.entity_ids) >= {
+        "environment:ep-ir-environment-roster",
+        "bible:谷言",
+    }
+    assert screenplay.narrative_plan.scene_contracts[
+        0
+    ].point_of_view_character_id == "bible:谷言"
+    assert validate_screenplay_narrative(
+        screenplay,
+        require=True,
+        expected_scope_id="ep-ir-environment-roster",
+        authorized_source_chapters={"chapter-1": SOURCE},
+    ) == []
+
+
 def test_state_subject_uses_event_authority_not_scene_roster_or_initial_event() -> None:
     payload = _ir_payload()
     # A coarse scene roster must not make its first identity own an otherwise
