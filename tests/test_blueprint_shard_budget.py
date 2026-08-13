@@ -454,6 +454,14 @@ def test_run_77675349_applies_atomic_52_target_ownership_patch() -> None:
     )
     assert [node.key for node in attempt1.nodes] == ["S005-node_001"]
     assert typed_issues is not None
+    assert stages._blueprint_state_subject_repair_issues(
+        attempt1,
+        validation_errors=[
+            *attempt1_errors,
+            "[BLUEPRINT_SHARD_LOCATION_COMPOSITE] mixed non-ownership error",
+        ],
+        source_text=authority_source,
+    ) is None
 
     expected_payload = json.loads(
         RUN_77675349_ATTEMPT_FIXTURES[1].read_text(encoding="utf-8")
@@ -582,8 +590,7 @@ def test_run_77675349_applies_atomic_52_target_ownership_patch() -> None:
         {
             "base_candidate_hash": stages.blueprint_shard_candidate_hash(base),
             "repairs": repairs,
-        }
-        ,
+        },
         target_unit_keys=target_keys,
         source_text=authority_source,
     )
