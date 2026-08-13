@@ -44,11 +44,16 @@ from app.schemas import (
     VoiceCanonical,
     World,
 )
-from app.screenplay_ir import IR_VERSION, ScreenplayGenerationIR
+from app.screenplay_ir import (
+    IR_COMPILER_VERSION,
+    IR_VERSION,
+    ScreenplayGenerationIR,
+)
 from app.screenplay_scene_shards import (
     SCREENPLAY_ENVELOPE_VERSION,
     SCREENPLAY_MERGED_IR_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
+    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
     ScreenplayEnvelopeExperience,
     ScreenplayEnvelopeIR,
     ScreenplayEnvelopeMetadata,
@@ -188,6 +193,16 @@ def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
         blueprint_hash=blueprint_hash,
         identity_registry_hash=identity_hash,
     )
+    envelope_raw = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_envelope_raw",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T0",
+        content={"attempts": []},
+        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        contract_version=SCREENPLAY_ENVELOPE_VERSION,
+    ))
     envelope = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_envelope",
         scope_type="episode",
@@ -195,8 +210,30 @@ def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
         status="validated",
         trust_level="T1",
         content=envelope_value.model_dump(mode="json"),
-        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        parent_artifact_ids=[envelope_raw["id"]],
         contract_version=SCREENPLAY_ENVELOPE_VERSION,
+    ))
+    creative_hash = "a" * 64
+    shard_raw = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard_raw",
+        scope_type="episode",
+        scope_id="ep_p",
+        status="candidate",
+        trust_level="T0",
+        content={
+            "semantic_review_evidence": {
+                "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+                "initial_creative_hash": creative_hash,
+                "reviewed_creative_hash": creative_hash,
+                "phases": [{
+                    "creative_hash": creative_hash,
+                    "reviews": [{"issues": []}, {"issues": []}],
+                    "consensus": [],
+                }],
+            },
+        },
+        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
     ))
     shard = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_scene_shard",
@@ -218,8 +255,12 @@ def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
             "identity_scaffold_hash": "identity",
             "generation_scaffold_hash": "generation",
         },
-        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        parent_artifact_ids=[shard_raw["id"]],
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+        model_snapshot={
+            "semantic_review_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+            "reviewed_creative_hash": creative_hash,
+        },
     ))
     merged_value = ScreenplayGenerationIR(
         format_version=IR_VERSION,
@@ -252,6 +293,10 @@ def _create_current_working_artifact(script: EpisodeScreenplay) -> dict:
         content=screenplay_artifact_payload(script),
         parent_artifact_ids=[merged["id"]],
         contract_version=get_contract("screenplay").version,
+        model_snapshot={
+            "compiler_version": IR_COMPILER_VERSION,
+            "source_merged_content_hash": merged["content_hash"],
+        },
     ))
 
 

@@ -7,12 +7,17 @@ from pathlib import Path
 import pytest
 
 from app import db
-from app.narrative_blueprint import BlueprintScenePlan, NarrativeBlueprint
+from app.narrative_blueprint import (
+    BlueprintScenePlan,
+    NarrativeBlueprint,
+    NarrativeNode,
+)
 from app.screenplay_ir import IRIdentity
 from app.screenplay_scene_shards import (
     ScreenplaySceneInputContract,
     ScreenplaySceneShardCreativeIR,
     ScreenplaySceneShardCreativeUnit,
+    ScreenplaySceneShardSemanticReview,
     ScreenplaySceneShardPlan,
     ScreenplaySceneUnitSlotPlan,
     build_screenplay_scene_input_contracts,
@@ -82,6 +87,7 @@ def _plan(case: dict) -> ScreenplaySceneShardPlan:
                 event_priority="causal",
                 render_policy="standalone",
                 source_segment_ids=[source_id],
+                source_unit_key=f"{source_id}:unit:001",
             ))
     return ScreenplaySceneShardPlan(
         shard_id="SS004",
@@ -127,11 +133,41 @@ def _contracts(
         for value in case["scene_inputs"]
         for segment in value["source_segments"]
     }
+    blueprint_nodes = [
+        NarrativeNode.model_validate({
+            "key": node_key,
+            "source_segment_ids": source_ids,
+            "summary": "预算回放的结构环境单元",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": scene_plan.temporal_domain_key,
+            "time_label": scene_plan.time_label,
+            "time_relation": "episode_start",
+            "location_key": scene_plan.location_key,
+            "location_label": scene_plan.location_label,
+            "environment_source_unit_keys": [
+                f"{source_id}:unit:001"
+                for source_id in source_ids
+            ],
+            "action_logic": "按来源顺序完成预算回放",
+        })
+        for scene_plan in blueprint.scene_plans
+        for node_index, node_key in enumerate(scene_plan.node_keys)
+        for source_ids in [[
+            source_id
+            for source_index, source_id in enumerate(
+                scene_plan.source_segment_ids
+            )
+            if source_index % len(scene_plan.node_keys) == node_index
+        ]]
+    ]
     return build_screenplay_scene_input_contracts(
         plan=plan,
         scene_plans=list(blueprint.scene_plans),
         source_by_id=source_by_id,
         identity_registry=case["identity_registry"],
+        blueprint_nodes=blueprint_nodes,
     )
 
 
@@ -200,6 +236,8 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
     captured: dict = {}
 
     async def fake_structured(messages, **kwargs):
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            return ScreenplaySceneShardSemanticReview(findings=[])
         captured["prompt"] = messages[0]["content"]
         captured["max_tokens"] = kwargs["max_tokens"]
         captured["repair_context"] = kwargs["repair_context"]

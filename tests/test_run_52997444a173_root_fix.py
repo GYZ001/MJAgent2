@@ -25,6 +25,7 @@ from app.screenplay_scene_shards import (
     build_screenplay_scene_shard_plans,
 )
 from app.source_excerpt import index_source_segments
+from app.source_facts import source_facts
 
 
 FIXTURE = (
@@ -50,6 +51,7 @@ def _source(payload: dict) -> str:
 
 
 def _blueprint(payload: dict, *, repaired: bool) -> NarrativeBlueprint:
+    facts = source_facts(_source(payload))
     ranges = [
         (1, 8),
         (9, 16),
@@ -110,6 +112,17 @@ def _blueprint(payload: dict, *, repaired: bool) -> NarrativeBlueprint:
                         "SRC0056:unit:001",
                     )
                 ]
+        if not audit_only:
+            action_facts = [
+                fact for fact in facts
+                if (
+                    fact.projection == "action"
+                    and fact.source_segment_id in node["source_segment_ids"]
+                )
+            ]
+            node["environment_source_unit_keys"] = [
+                fact.source_unit_key for fact in action_facts
+            ]
         nodes.append(node)
     return NarrativeBlueprint.model_validate({
         "episode_no": 1,
@@ -266,6 +279,11 @@ def test_segment_scoped_voice_without_dialogue_remains_valid() -> None:
                 "identity_key": "episode:watchman",
                 "source_segment_ids": ["SRC0001"],
                 "usage": "voice",
+            }, {
+                "identity_key": "episode:watchman",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": ["SRC0001:unit:001"],
+                "usage": "state_subject",
             }],
             "action_logic": "守夜人的呼喊从远处传入院中",
         }],

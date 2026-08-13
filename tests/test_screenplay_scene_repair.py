@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from app import db
 from app.harness.contracts import get_contract
 from app.harness.types import Evaluation, EvidenceArtifact, Issue, IssueSeverity
+from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
 from app.production.revision import (
     ensure_production_revision,
     mark_baseline_generated,
@@ -45,10 +47,16 @@ from app.schemas import (
     VoiceCanonical,
     World,
 )
-from app.screenplay_ir import IR_VERSION
+from app.screenplay_ir import IR_COMPILER_VERSION, IR_VERSION
 from app.screenplay_scene_shards import (
+    SCREENPLAY_ENVELOPE_VERSION,
     SCREENPLAY_MERGED_IR_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
+    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+    ScreenplayEnvelopeExperience,
+    ScreenplayEnvelopeIR,
+    ScreenplayEnvelopeMetadata,
+    blueprint_content_hash,
 )
 
 
@@ -255,52 +263,86 @@ def _create_working_artifact(
         ],
     )
 
-    parent_specs = [
-        (
-            "screenplay_narrative_blueprint",
-            "screenplay-narrative-blueprint.v4",
-            {"scope_id": "ep_scene", "event_ids": ["EV001"]},
-        ),
-        (
-            "screenplay_identity_registry",
-            "screenplay-identity-registry.v1",
-            {
-                "identity_ids": [
-                    "identity-xiao-yan",
-                    "identity-examiner",
-                ],
-            },
-        ),
-        (
-            "screenplay_envelope",
-            "screenplay-envelope.v1",
-            {"scope_id": "ep_scene", "source_segment_ids": ["SRC0001"]},
-        ),
-        (
-            "screenplay_scene_shard",
-            SCREENPLAY_SCENE_SHARD_VERSION,
-            {
-                "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
-                "shard_id": "SS001",
-                "scene_plan_keys": ["SC01"],
-                "scenes": [],
-                "consumed_source_ids": ["SRC0001"],
-                "unresolved_participants": [],
-            },
-        ),
-    ]
-    parents = [
-        evidence_repository.create_artifact(EvidenceArtifact(
-            type=artifact_type,
-            scope_type="episode",
-            scope_id="ep_scene",
-            status="validated",
-            trust_level="T1",
-            content=content,
-            contract_version=contract_version,
-        ))
-        for artifact_type, contract_version, content in parent_specs
-    ]
+    blueprint_value = NarrativeBlueprint(episode_no=1, nodes=[])
+    blueprint_hash = blueprint_content_hash(blueprint_value)
+    identities: list[dict] = []
+    identity_hash = hashlib.sha256(b"[]").hexdigest()
+    blueprint = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_narrative_blueprint", scope_type="episode",
+        scope_id="ep_scene", status="validated", trust_level="T1",
+        content=blueprint_value.model_dump(mode="json"),
+        contract_version=BLUEPRINT_VERSION,
+    ))
+    identity = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_identity_registry", scope_type="episode",
+        scope_id="ep_scene", status="validated", trust_level="T1",
+        content={
+            "contract_version": "screenplay-identity-registry.v1",
+            "identity_registry_hash": identity_hash,
+            "identities": identities,
+        },
+        parent_artifact_ids=[blueprint["id"]],
+        contract_version="screenplay-identity-registry.v1",
+    ))
+    envelope_value = ScreenplayEnvelopeIR(
+        episode_no=1,
+        metadata=ScreenplayEnvelopeMetadata(),
+        experience=ScreenplayEnvelopeExperience(),
+        blueprint_hash=blueprint_hash,
+        identity_registry_hash=identity_hash,
+    )
+    envelope_raw = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_envelope_raw", scope_type="episode",
+        scope_id="ep_scene", status="candidate", trust_level="T0",
+        content={"attempts": []},
+        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        contract_version=SCREENPLAY_ENVELOPE_VERSION,
+    ))
+    envelope = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_envelope", scope_type="episode",
+        scope_id="ep_scene", status="validated", trust_level="T1",
+        content=envelope_value.model_dump(mode="json"),
+        parent_artifact_ids=[envelope_raw["id"]],
+        contract_version=SCREENPLAY_ENVELOPE_VERSION,
+    ))
+    creative_hash = "a" * 64
+    shard_raw = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard_raw", scope_type="episode",
+        scope_id="ep_scene", status="candidate", trust_level="T0",
+        content={"semantic_review_evidence": {
+            "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+            "initial_creative_hash": creative_hash,
+            "reviewed_creative_hash": creative_hash,
+            "phases": [{
+                "creative_hash": creative_hash,
+                "reviews": [{"issues": []}, {"issues": []}],
+                "consensus": [],
+            }],
+        }},
+        parent_artifact_ids=[blueprint["id"], identity["id"]],
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+    ))
+    shard = evidence_repository.create_artifact(EvidenceArtifact(
+        type="screenplay_scene_shard", scope_type="episode",
+        scope_id="ep_scene", status="validated", trust_level="T1",
+        content={
+            "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+            "episode_no": 1, "shard_id": "SS001",
+            "scene_plan_keys": [], "scenes": [],
+            "consumed_source_ids": [], "unresolved_participants": [],
+            "blueprint_hash": blueprint_hash,
+            "identity_registry_hash": identity_hash,
+            "source_ownership_hash": "ownership",
+            "identity_scaffold_hash": "identity",
+            "generation_scaffold_hash": "generation",
+        },
+        parent_artifact_ids=[shard_raw["id"]],
+        contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+        model_snapshot={
+            "semantic_review_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+            "reviewed_creative_hash": creative_hash,
+        },
+    ))
     merged = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_generation_ir_merged",
         scope_type="episode",
@@ -343,8 +385,14 @@ def _create_working_artifact(
                 "projection_policy": "picture",
             }],
         },
-        parent_artifact_ids=[parent["id"] for parent in parents],
+        parent_artifact_ids=[
+            blueprint["id"], identity["id"], envelope["id"], shard["id"],
+        ],
         contract_version=SCREENPLAY_MERGED_IR_VERSION,
+        model_snapshot={
+            "blueprint_hash": blueprint_hash,
+            "identity_registry_hash": identity_hash,
+        },
     ))
     return evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_document",
@@ -355,6 +403,10 @@ def _create_working_artifact(
         content=screenplay_repair.screenplay_artifact_payload(script),
         parent_artifact_ids=[merged["id"]],
         contract_version="4.0.0",
+        model_snapshot={
+            "compiler_version": IR_COMPILER_VERSION,
+            "source_merged_content_hash": merged["content_hash"],
+        },
     ))
 
 
