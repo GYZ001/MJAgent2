@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from app import stages
+from app import hiagent, stages
 from app.errors import ContentGenerationError
 from app.harness import model_gateway
 from app.narrative_blueprint import (
@@ -1507,6 +1507,87 @@ def test_shard_gate_rejects_composite_location_and_unknown_fact() -> None:
 
     assert any("LOCATION_COMPOSITE" in error for error in errors)
     assert any("FACT_UNKNOWN" in error for error in errors)
+
+
+def test_shard_gate_rejects_local_state_subject_and_participant_authority() -> None:
+    node = _blueprint().nodes[0].model_copy(deep=True)
+    node.participant_evidence = [
+        evidence
+        for evidence in node.participant_evidence
+        if evidence.usage != "state_subject"
+    ]
+    shard = NarrativeBlueprintShard(
+        episode_no=8,
+        shard_index=1,
+        source_segment_ids=["SRC0001"],
+        nodes=[node],
+    )
+
+    errors = validate_narrative_blueprint_shard(
+        shard,
+        expected_episode_no=8,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+        source_text=SOURCE,
+    )
+
+    assert any("SHARD_STATE_SUBJECT_MISSING" in error for error in errors)
+    assert any(
+        "SHARD_PARTICIPANT_EVIDENCE_MISSING" in error
+        and "白洁" in error
+        for error in errors
+    )
+
+
+def test_blueprint_patch_unknown_is_charged_and_new_run_gets_new_operation(
+    monkeypatch,
+) -> None:
+    operation_ids: list[str] = []
+    traces = iter([
+        SimpleNamespace(run_id="run-first", step_run_id="step-first"),
+        SimpleNamespace(run_id="run-explicit-retry", step_run_id="step-second"),
+    ])
+
+    async def unknown_patch(*_args, **kwargs):
+        operation_ids.append(kwargs["operation_id"])
+        raise hiagent.ProviderError(
+            "read outcome unknown",
+            delivery_state="unknown",
+            replay_safe=False,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", unknown_patch)
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("hiagent", "model", 16384),
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: next(traces),
+    )
+    blueprint = _blueprint()
+    blueprint.nodes[0].participant_evidence = [
+        evidence
+        for evidence in blueprint.nodes[0].participant_evidence
+        if evidence.usage != "state_subject"
+    ]
+    budgets = [stages._BlueprintGenerationBudget() for _ in range(2)]
+
+    for budget in budgets:
+        with pytest.raises(hiagent.ProviderError, match="outcome unknown"):
+            asyncio.run(stages._repair_narrative_blueprint(
+                blueprint.model_copy(deep=True),
+                episode={"id": "ep-patch-retry"},
+                source_text=SOURCE,
+                generation_budget=budget,
+            ))
+
+    assert operation_ids[0] != operation_ids[1]
+    assert "run-first" in operation_ids[0]
+    assert "run-explicit-retry" in operation_ids[1]
+    assert [budget.provider_calls for budget in budgets] == [1, 1]
+    assert [budget.unknown_output_tokens for budget in budgets] == [16384, 16384]
 def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
     blueprint = _blueprint()
     derive_blueprint_scene_plans(blueprint)
@@ -1636,6 +1717,10 @@ def test_blueprint_generation_reuses_validated_cached_artifact(
         @staticmethod
         def execute(sql, _params):
             sql_seen.append(sql)
+            if "SELECT started_at" in sql:
+                return QueryResult(one={"started_at": None})
+            if "FROM provider_calls" in sql:
+                return QueryResult(many=[])
             if "SELECT input_fingerprint" in sql:
                 return QueryResult(one={"input_fingerprint": "same-input"})
             if "FROM artifacts a" in sql:

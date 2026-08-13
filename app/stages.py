@@ -5067,9 +5067,10 @@ class _BlueprintGenerationBudget:
         if not run_id:
             return budget
         rows = get_conn().execute(
-            "SELECT response_json,meta,status,recovery_disposition FROM provider_calls "
-            "WHERE run_id=? AND kind='chat' "
-            "AND json_extract(meta,'$.stage_key')='screenplay_blueprint_shard' "
+            "SELECT response_json,meta,status,recovery_disposition,operation_id "
+            "FROM provider_calls WHERE run_id=? AND kind='chat' "
+            "AND json_extract(meta,'$.stage_key') IN "
+            "('screenplay_blueprint_shard','screenplay_blueprint_patch') "
             "AND kind != 'provider_cache_hit'",
             (run_id,),
         ).fetchall()
@@ -5079,7 +5080,13 @@ class _BlueprintGenerationBudget:
                 response = json.loads(row["response_json"] or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 meta, response = {}, {}
-            operation_id = str(meta.get("operation_id") or "").strip()
+            try:
+                stored_operation_id = row["operation_id"]
+            except (IndexError, KeyError):
+                stored_operation_id = None
+            operation_id = str(
+                stored_operation_id or meta.get("operation_id") or ""
+            ).strip()
             requested = max(1, int(meta.get("requested_max_tokens") or 1))
             effective = max(
                 1,
@@ -5658,6 +5665,9 @@ async def _generate_sharded_narrative_blueprint(
                 "generation_mode": "source_shards",
                 "shard_count": len(segment_shards),
                 "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+                "local_authority_validator_version": (
+                    BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+                ),
                 "provider_call_count": generation_budget.provider_calls,
                 "requested_output_tokens": (
                     generation_budget.requested_output_tokens

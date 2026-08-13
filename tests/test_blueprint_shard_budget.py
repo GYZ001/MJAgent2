@@ -287,6 +287,91 @@ def test_legacy_cached_shard_without_current_policy_is_not_reused(
     assert calls == 1
 
 
+def test_current_cached_shard_with_local_authority_errors_is_not_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segment = index_source_segments(_source(1))[0]
+    source_payload = [{
+        "source_segment_id": segment.segment_id,
+        "text": segment.text,
+        "source_facts": [
+            fact.model_dump(mode="json")
+            for fact in stages.source_segment_facts(
+                segment.segment_id,
+                segment.text,
+            )
+        ],
+    }]
+    source_hash = hashlib.sha256(json.dumps(
+        source_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    boundary = stages._blueprint_shard_boundary_context([])
+    boundary_hash = hashlib.sha256(json.dumps(
+        boundary,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    cached = json.loads(_shard_response(
+        source_ids=[segment.segment_id],
+        shard_index=1,
+    ))
+    cached["source_hash"] = source_hash
+    cached["boundary_hash"] = boundary_hash
+    cached["nodes"][0]["summary"] = "polluted cached authority"
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _shard_response(
+            source_ids=_prompt_source_ids(messages[1]["content"]),
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    def fake_validate(shard, **_kwargs):
+        if shard.nodes[0].summary == "polluted cached authority":
+            return ["[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] cached"]
+        return []
+
+    monkeypatch.setattr(
+        stages,
+        "get_conn",
+        lambda: _StaticCacheConnection([{
+            "content_json": json.dumps(cached, ensure_ascii=False),
+            "model_snapshot_json": json.dumps({
+                "shard_policy_version": stages.BLUEPRINT_SHARD_POLICY_VERSION,
+                "local_authority_validator_version": (
+                    stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
+                ),
+            }),
+        }]),
+    )
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", fake_validate)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-local-authority-rebuild"),
+    )
+
+    asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-local-authority-rebuild", "episode_no": 1},
+        _source(1),
+        {},
+    ))
+
+    assert calls == 1
+
+
 def test_non_truncation_provider_error_is_not_split(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -607,6 +692,35 @@ def test_durable_unknown_call_is_charged_at_full_requested_cap(
     assert budget.provider_calls == 1
     assert budget.unknown_output_tokens == 12
     assert budget.charged_output_tokens == 12
+
+
+def test_durable_unknown_blueprint_patch_is_restored_as_budget_liability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        stages,
+        "get_conn",
+        lambda: _DurableBudgetConnection([{
+            "response_json": None,
+            "meta": json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+            }),
+            "operation_id": "screenplay.blueprint.patch:v6:run-x:hash:1",
+            "status": "INTERRUPTED",
+            "recovery_disposition": "REQUIRES_EXPLICIT_RETRY",
+        }]),
+    )
+
+    budget = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-x",
+    )
+
+    assert budget.provider_calls == 1
+    assert budget.requested_output_tokens == 16384
+    assert budget.unknown_output_tokens == 8192
+    assert budget.charged_output_tokens == 8192
 
 
 def test_durable_wall_budget_uses_original_run_start(

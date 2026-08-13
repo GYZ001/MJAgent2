@@ -256,6 +256,8 @@ def _screenplay_checkpoint_compatibility(
     conn,
 ) -> tuple[dict[str, Any], dict[str, int], bool]:
     from app.narrative_blueprint import (
+        BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
+        BLUEPRINT_SHARD_POLICY_VERSION,
         BLUEPRINT_VERSION,
         NarrativeBlueprint,
         derive_blueprint_scene_plans,
@@ -358,8 +360,16 @@ def _screenplay_checkpoint_compatibility(
     if blueprint_pair and blueprint_hash:
         try:
             blueprint = NarrativeBlueprint.model_validate(blueprint_pair[1])
+            blueprint_snapshot = json.loads(
+                blueprint_pair[0].get("model_snapshot_json") or "{}"
+            )
             blueprint_valid = (
                 blueprint_content_hash(blueprint) == blueprint_hash
+                and blueprint_snapshot.get("shard_policy_version")
+                == BLUEPRINT_SHARD_POLICY_VERSION
+                and blueprint_snapshot.get(
+                    "local_authority_validator_version"
+                ) == BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
             )
             if blueprint_valid:
                 derive_blueprint_scene_plans(blueprint)
