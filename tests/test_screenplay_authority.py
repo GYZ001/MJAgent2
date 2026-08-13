@@ -305,10 +305,49 @@ def _source_projection_case(
         compile_screenplay_ir,
     )
 
-    fixture = json.loads(MERGED_IR_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
-    ir = ScreenplayGenerationIR.model_validate(fixture["content"])
-    ir.format_version = IR_VERSION
-    ir.source_semantics = {
+    # Build the current authority fixture from typed event ownership.  The old
+    # production merged fixture intentionally remains an incompatible-rebuild
+    # fixture; it must never be promoted by reading character names from prose.
+    from tests.test_screenplay_ir import _ir_payload
+
+    payload = _ir_payload()
+    payload["format_version"] = IR_VERSION
+    event_relations = {
+        str(event["key"]): {
+            "actors": list(event.get("actor_keys") or []),
+            "targets": list(event.get("target_keys") or []),
+        }
+        for event in payload["events"]
+    }
+    payload["events"] = []
+    payload["beats"] = []
+    payload["coverage"] = []
+    payload["source_audit_annotations"] = []
+    payload["source_scene_owners"] = {}
+    for source_index, scene in enumerate(payload["scenes"], start=1):
+        source_id = f"SRC{source_index:04d}"
+        payload["source_scene_owners"][source_id] = scene["key"]
+        relations = event_relations[scene["units"][0]["event_key"]]
+        for unit_index, unit in enumerate(scene["units"], start=1):
+            speaker = str(unit.get("speaker_key") or "")
+            actor_keys = [speaker] if speaker else list(relations["actors"])
+            unit.update({
+                "unit_key": f"{scene['key']}:{source_id}:{unit_index:03d}:unit",
+                "source_segment_ids": [source_id],
+                "actor_keys": actor_keys,
+                "target_keys": list(relations["targets"]),
+                "onscreen_entity_keys": list(dict.fromkeys([
+                    *actor_keys,
+                    *relations["targets"],
+                ])),
+                "participant_deliveries": [],
+                "state_subject_key": speaker or actor_keys[0],
+                "environment_only": False,
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+            })
+    payload["source_semantics"] = {
         source_id: {
             "narrative_layer": "story",
             "event_priority": "causal",
@@ -316,20 +355,21 @@ def _source_projection_case(
             "disposition": "deliver",
             "projection_policy": "picture",
         }
-        for source_id in ir.source_scene_owners
+        for source_id in payload["source_scene_owners"]
     }
-    ir.source_ownership_hash = hashlib.sha256(
+    payload["source_ownership_hash"] = hashlib.sha256(
         json.dumps(
             {
-                "source_scene_owners": ir.source_scene_owners,
-                "source_semantics": ir.source_semantics,
-                "scene_derivations": ir.scene_derivations,
+                "source_scene_owners": payload["source_scene_owners"],
+                "source_semantics": payload["source_semantics"],
+                "scene_derivations": payload.get("scene_derivations") or [],
             },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-    ).hexdigest()
+        ).hexdigest()
+    ir = ScreenplayGenerationIR.model_validate(payload)
     source_by_id: dict[str, list[str]] = {}
     for scene in ir.scenes:
         for unit in scene.units:
