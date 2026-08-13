@@ -528,85 +528,66 @@ async def chat_structured(
                     "validation_errors": [message],
                 })
             raise StructuredProviderRejection(message)
-        candidates = _json_candidates(last_raw)
         parsed: T | None = None
         parse_error: Exception | None = None
         repair_payload: dict[str, Any] | None = None
-        for candidate_no, payload in enumerate(candidates):
+        # Only the latest provenance-qualified root may represent this response.
+        recovery_root = _latest_json_recovery_root(last_raw)
+        repair_candidate_text = recovery_root or last_raw
+        payload: dict[str, Any] | None = None
+        decoded: Any = None
+        repaired_locally = False
+        if recovery_root is not None:
+            local_recovery = bool(
+                local_recovery
+                or recovery_root.strip() != last_raw.strip()
+            )
+            try:
+                decoded, _ = json.JSONDecoder().raw_decode(recovery_root)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                try:
+                    from app.schemas import extract_json
+
+                    decoded = extract_json(
+                        recovery_root,
+                        repair_unescaped_inner_quotes=True,
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    parse_error = exc
+                else:
+                    repaired_locally = True
+            if isinstance(decoded, dict):
+                payload = decoded
+            elif parse_error is None:
+                parse_error = ValueError("JSON 根节点不是对象")
+
+        if payload is not None:
             candidate_payload = (
                 normalize_payload(payload)
                 if normalize_payload is not None
                 else payload
             )
             normalized_locally = candidate_payload != payload
+            repair_payload = candidate_payload
+            local_recovery = bool(
+                local_recovery
+                or repaired_locally
+                or normalized_locally
+                or not isinstance(direct_error, dict)
+                or direct_error != candidate_payload
+            )
             try:
                 parsed = _coerce_structured(model_type, candidate_payload)
             except (TypeError, ValueError, ValidationError) as exc:
-                # Independent roots are ordered newest first. Keep that root's
-                # error instead of replacing it with an older draft's error.
-                if parse_error is None:
-                    parse_error = exc
-                    repair_payload = candidate_payload
-                continue
-            try:
-                direct_payload = json.loads(last_raw.strip())
-            except (TypeError, ValueError, json.JSONDecodeError):
-                direct_payload = None
-            local_recovery = bool(
-                local_recovery
-                or normalized_locally
-                or candidate_no > 0
-                or not isinstance(direct_payload, dict)
-                or direct_payload != candidate_payload
-            )
-            break
-        # Preserve independent trailing-object priority, then conservatively
-        # repair the latest eligible root when no complete root satisfies the model.
-        if parsed is None:
-            recovery_root = _latest_json_recovery_root(last_raw)
-            recovered = None
-            if recovery_root is not None:
-                try:
-                    from app.schemas import extract_json
-
-                    recovered = extract_json(
-                        recovery_root,
-                        repair_unescaped_inner_quotes=True,
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    pass
-            if (
-                isinstance(recovered, dict)
-                and all(recovered != payload for payload in candidates)
-            ):
-                recovered_payload = (
-                    normalize_payload(recovered)
-                    if normalize_payload is not None
-                    else recovered
-                )
-                try:
-                    recovered_parsed = _coerce_structured(
-                        model_type,
-                        recovered_payload,
-                    )
-                except (TypeError, ValueError, ValidationError) as exc:
-                    parse_error = exc
-                    repair_payload = recovered_payload
-                    local_recovery = True
-                else:
-                    local_recovery = True
-                    explicit_fields = getattr(
-                        recovered_parsed,
-                        "model_fields_set",
-                        None,
-                    )
+                parse_error = exc
+            else:
+                if repaired_locally:
+                    explicit_fields = getattr(parsed, "model_fields_set", None)
                     if explicit_fields is not None and not explicit_fields:
+                        parsed = None
                         parse_error = ValueError(
                             "修复后的 JSON 未显式提供任何模型字段"
                         )
-                        repair_payload = recovered_payload
-                    else:
-                        parsed = recovered_parsed
         if parsed is None:
             if on_attempt is not None:
                 on_attempt({
@@ -632,7 +613,7 @@ async def chat_structured(
                     separators=(",", ":"),
                 )
                 if repair_payload is not None
-                else last_raw
+                else repair_candidate_text
             )
             current_messages = [
                 {

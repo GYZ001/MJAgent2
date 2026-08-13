@@ -192,6 +192,41 @@ def test_structured_runner_recovers_complete_trailing_json(
     assert attempts[0]["local_recovery"] is True
 
 
+def test_structured_runner_only_validates_latest_complete_root(
+    monkeypatch,
+) -> None:
+    attempts: list[dict] = []
+    raw = '{"value":1}\n以下是最新修正版\n{"value":2}'
+
+    async def fake_chat(*_args, **_kwargs):
+        return raw
+
+    def unexpected_candidate_scan(*_args, **_kwargs):
+        raise AssertionError("chat_structured must not enumerate older roots")
+
+    def unexpected_root_repair(*_args, **_kwargs):
+        raise AssertionError("a complete latest root must not use extract_json")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(model_gateway, "_json_candidates", unexpected_candidate_scan)
+    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "return json"}],
+        model_type=_Payload,
+        validate=None,
+        operation_id="test.authoritative-latest-complete:v1:abc",
+        max_tokens=128,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+        on_attempt=attempts.append,
+    ))
+
+    assert result.value == 2
+    assert attempts[0]["outcome"] == "validated"
+    assert attempts[0]["local_recovery"] is True
+
+
 def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
     monkeypatch,
 ) -> None:
@@ -253,7 +288,7 @@ def test_structured_runner_repairs_latest_eligible_review_root(
 ) -> None:
     calls = 0
     attempts: list[dict] = []
-    raw = """{"legacy_issues":[]}
+    raw = """{"issues":[]}
 以上是旧草稿，以下是最新修正版。
 {"issues":[
     {
@@ -431,10 +466,48 @@ def test_format_repair_does_not_fall_back_past_latest_complete_root(
     monkeypatch,
 ) -> None:
     prompts: list[str] = []
-    raw = (
-        '{"value":"bad","note":"修正为["甲","乙"]"}\n'
-        '最终候选 {"other":1}'
-    )
+    attempts: list[dict] = []
+    raw = '{"value":1}\n最终候选 {"other":1}'
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return raw if len(prompts) == 1 else '{"value":3}'
+
+    def unexpected_root_repair(*_args, **_kwargs):
+        raise AssertionError("a complete latest root must not use extract_json")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "original"}],
+        model_type=_Payload,
+        validate=None,
+        operation_id="test.recovered-root-format-error:v1:abc",
+        max_tokens=128,
+        format_retry_limit=1,
+        on_attempt=attempts.append,
+    ))
+
+    assert result.value == 3
+    assert "Field required" in prompts[1]
+    assert '"other":1' in prompts[1]
+    assert '"value":1' not in prompts[1]
+    assert "Input should be a valid integer" not in prompts[1]
+    assert [attempt["outcome"] for attempt in attempts] == [
+        "format_error",
+        "validated",
+    ]
+    assert "Field required" in attempts[0]["validation_errors"][0]
+    assert attempts[0]["local_recovery"] is True
+
+
+def test_format_repair_uses_unrepairable_latest_root_not_older_valid_root(
+    monkeypatch,
+) -> None:
+    prompts: list[str] = []
+    attempts: list[dict] = []
+    raw = '{"value":1}\n最终候选 {"value":2 "note":"缺少逗号"}'
 
     async def fake_chat(messages, **_kwargs):
         prompts.append(messages[0]["content"])
@@ -446,16 +519,22 @@ def test_format_repair_does_not_fall_back_past_latest_complete_root(
         [{"role": "user", "content": "original"}],
         model_type=_Payload,
         validate=None,
-        operation_id="test.recovered-root-format-error:v1:abc",
+        operation_id="test.unrepairable-latest-root:v1:abc",
         max_tokens=128,
         format_retry_limit=1,
+        on_attempt=attempts.append,
     ))
 
     assert result.value == 3
-    assert "Field required" in prompts[1]
-    assert '"other":1' in prompts[1]
-    assert '"value":"bad"' not in prompts[1]
-    assert "Input should be a valid integer" not in prompts[1]
+    assert "JSON 解析失败" in prompts[1]
+    assert '{"value":2 "note":"缺少逗号"}' in prompts[1]
+    assert '{"value":1}' not in prompts[1]
+    assert [attempt["outcome"] for attempt in attempts] == [
+        "format_error",
+        "validated",
+    ]
+    assert "JSON 解析失败" in attempts[0]["validation_errors"][0]
+    assert attempts[0]["local_recovery"] is True
 
 
 def test_structured_runner_applies_local_payload_normalizer(
