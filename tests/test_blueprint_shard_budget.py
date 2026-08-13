@@ -222,11 +222,13 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     )
 
     assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
-        "screenplay-blueprint-1.6.4"
+        "screenplay-blueprint-1.6.5"
     )
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt
     assert "连续动作压缩为一个核心因果进程" in prompt
+    assert "participants中的每个identity必须至少有一条" in prompt
+    assert "同一SRC内部跨越多个主要地点" in prompt
     assert "performer_key不能替代这条typed voice evidence" in prompt
     assert "source_unit_keys只含该delivery的source_unit_key" in prompt
     assert "跨时空或过载则拆节点" not in prompt
@@ -234,6 +236,9 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     schema = json.loads(prompt.split("\nschema=", 1)[1])
     node_schema = schema["$defs"]["NarrativeNode"]
     assert "participant_evidence" in node_schema["required"]
+    assert node_schema["properties"]["location_label"]["pattern"] == (
+        r"^(?!.*(?:、|/|\+|内外)).+$"
+    )
     audible_contract = node_schema["allOf"][0]
     assert audible_contract["then"]["properties"][
         "participant_evidence"
@@ -244,6 +249,23 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     assert evidence_contract["properties"]["source_unit_keys"] == {
         "minItems": 1
     }
+    evidence_properties = schema["$defs"][
+        "NarrativeParticipantEvidence"
+    ]["properties"]
+    assert evidence_properties["identity_key"]["minLength"] == 1
+    assert evidence_properties["source_segment_ids"]["minItems"] == 1
+    action_contracts = [
+        contract
+        for contract in node_schema["allOf"]
+        if "oneOf" in contract.get("then", {})
+    ]
+    assert len(action_contracts) == 8
+    for contract in action_contracts:
+        state_subject = contract["then"]["oneOf"][0]["properties"][
+            "participant_evidence"
+        ]
+        assert state_subject["minContains"] == 1
+        assert state_subject["maxContains"] == 1
     delivery_contract = schema["$defs"]["NarrativeSourceUnitDelivery"][
         "allOf"
     ][0]["then"]

@@ -40,6 +40,7 @@ from app.narrative_blueprint import (
     validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
 )
+from app.source_facts import SourceFact
 
 
 SOURCE = "\n\n".join([
@@ -66,6 +67,17 @@ def _partition_replay_fixture() -> dict:
         / "run_64a2e395d6df_blueprint_partition.json"
     )
     return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _latest_blueprint_failure_fixtures() -> list[dict]:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "blueprint_latest_three_failures.json"
+    )
+    return json.loads(
+        fixture_path.read_text(encoding="utf-8")
+    )["cases"]
 
 
 def _blueprint() -> NarrativeBlueprint:
@@ -1716,6 +1728,41 @@ def test_shard_gate_rejects_local_state_subject_and_participant_authority() -> N
         and "白洁" in error
         for error in errors
     )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _latest_blueprint_failure_fixtures(),
+    ids=lambda case: case["error_id"],
+)
+def test_latest_real_blueprint_failures_replay_typed_authority(
+    case: dict,
+    monkeypatch,
+) -> None:
+    facts = [
+        SourceFact.model_validate(value)
+        for value in case["source_facts"]
+    ]
+    monkeypatch.setattr(
+        "app.narrative_blueprint.source_facts",
+        lambda _source_text: facts,
+    )
+    shard = NarrativeBlueprintShard.model_validate(case["shard"])
+
+    errors = validate_narrative_blueprint_shard(
+        shard,
+        expected_episode_no=shard.episode_no,
+        expected_shard_index=shard.shard_index,
+        expected_source_segment_ids=shard.source_segment_ids,
+        source_text="fixture source facts are injected above",
+    )
+
+    for error_code in case["expected_error_codes"]:
+        assert any(error_code in error for error in errors), (
+            case["provider_call_id"],
+            case["raw_artifact_id"],
+            errors,
+        )
 
 
 def test_blueprint_gate_rejects_empty_participant_evidence() -> None:

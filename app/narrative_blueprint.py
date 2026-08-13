@@ -136,13 +136,12 @@ def blueprint_shard_provider_schema(
     if not isinstance(node_schema, dict):
         return schema
     node_properties = node_schema.get("properties", {})
-    for field_name in ("location_key", "location_label"):
-        location_schema = node_properties.get(field_name)
-        if isinstance(location_schema, dict):
-            location_schema["pattern"] = r"^(?!.*(?:、|/|\+|内外)).+$"
-            location_schema["description"] = (
-                "Exactly one primary location; never combine locations."
-            )
+    location_schema = node_properties.get("location_label")
+    if isinstance(location_schema, dict):
+        location_schema["pattern"] = r"^(?!.*(?:、|/|\+|内外)).+$"
+        location_schema["description"] = (
+            "Exactly one primary location; never combine locations."
+        )
     evidence_schema = definitions.get("NarrativeParticipantEvidence")
     if isinstance(evidence_schema, dict):
         evidence_properties = evidence_schema.get("properties", {})
