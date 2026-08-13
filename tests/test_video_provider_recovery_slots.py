@@ -150,6 +150,83 @@ def _create_database(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def test_provider_acceptance_does_not_reopen_terminal_claim(tmp_path: Path) -> None:
+    conn = _create_database(tmp_path / "terminal-claim.db")
+    conn.execute(
+        """UPDATE jobs
+              SET status='running',lease_owner='worker',lease_expires_at=9999999999
+            WHERE id='job-owner'"""
+    )
+    conn.execute(
+        """UPDATE provider_video_budget_claims
+              SET status='settled',settled_at=20
+            WHERE operation_id='video-create-owner'"""
+    )
+    conn.commit()
+
+    worker._commit_provider_acceptance_in_transaction(
+        conn,
+        job_id="job-owner",
+        version_id="version-owner",
+        owner="worker",
+        operation_id="video-create-owner",
+        task_id="provider-task-owner",
+        submitted_at=10,
+    )
+    conn.commit()
+
+    claim = conn.execute(
+        """SELECT status,settled_at
+             FROM provider_video_budget_claims
+            WHERE operation_id='video-create-owner'"""
+    ).fetchone()
+    assert dict(claim) == {"status": "settled", "settled_at": 20.0}
+
+
+def test_startup_migration_does_not_requeue_settled_provider_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "settled-provider-restart.db"
+    conn = _create_database(database)
+    conn.execute(
+        """UPDATE jobs
+              SET status='succeeded',provider_poll_required=0,
+                  provider_result_adoptable=0,video_slot_active=0
+            WHERE id='job-history'"""
+    )
+    conn.execute(
+        """UPDATE shot_versions
+              SET status='quarantined',video_slot_active=0
+            WHERE id='version-history'"""
+    )
+    conn.execute(
+        """UPDATE provider_video_budget_claims
+              SET status='settled',settled_at=20
+            WHERE operation_id='video-create-history'"""
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db, "DB_PATH", database)
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "_local", threading.local())
+
+    db.init_db(reconcile_interrupted=True)
+
+    restarted = db.get_conn()
+    job = restarted.execute(
+        """SELECT status,provider_poll_required,
+                  provider_result_adoptable,video_slot_active
+             FROM jobs WHERE id='job-history'"""
+    ).fetchone()
+    assert dict(job) == {
+        "status": "succeeded",
+        "provider_poll_required": 0,
+        "provider_result_adoptable": 0,
+        "video_slot_active": 0,
+    }
+
+
 def test_startup_migration_keeps_every_accepted_task_pollable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
