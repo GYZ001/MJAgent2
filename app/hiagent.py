@@ -96,7 +96,8 @@ def _cached_successful_provider_response(
     try:
         marks = ",".join("?" for _ in operation_ids)
         rows = get_conn().execute(
-            "SELECT id,response_json,meta,request_json,request_hash FROM provider_calls "
+            "SELECT id,response_json,meta,request_json,request_hash,"
+            "contract_version FROM provider_calls "
             f"WHERE operation_id IN ({marks}) AND kind=? AND model=? "
             "AND status IN ('OK','SUCCESS','SUCCEEDED') "
             "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
@@ -107,7 +108,9 @@ def _cached_successful_provider_response(
             if expected_contract:
                 stored_meta = json.loads(row["meta"] or "{}")
                 stored_contract = str(
-                    stored_meta.get("contract_version") or ""
+                    row["contract_version"]
+                    or stored_meta.get("contract_version")
+                    or ""
                 ).strip()
                 # Legacy lossy meta may omit this field.  Exact operation,
                 # model and full request_hash remain sufficient authority;

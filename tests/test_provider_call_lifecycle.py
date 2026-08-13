@@ -990,6 +990,40 @@ def test_exact_identity_success_replays_when_legacy_meta_lost_contract(
     ).fetchone()["c"] == 1
 
 
+def test_durable_contract_column_fences_truncated_meta_cache_reuse(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-durable-contract.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    payload = {"model": "m", "messages": [{"role": "user", "content": "same"}]}
+    operation_id = "durable-contract-operation"
+    call_id = db.start_provider_call(
+        "chat", "m",
+        meta={"operation_id": operation_id, "contract_version": "contract-old"},
+        request_json=payload,
+    )
+    db.finish_provider_call(
+        call_id, "OK", 200, 1,
+        response_json={"choices": [{"message": {"content": "old"}}]},
+    )
+    db.get_conn().execute(
+        "UPDATE provider_calls SET meta=? WHERE id=?",
+        (json.dumps({"_truncated": True, "operation_id": operation_id}), call_id),
+    )
+    db.get_conn().commit()
+
+    assert hiagent._cached_successful_provider_response(
+        "chat", "m", payload,
+        {
+            "reuse_successful_operation": True,
+            "operation_id": operation_id,
+            "contract_version": "contract-new",
+        },
+    ) is None
+
+
 def test_previous_success_is_not_recorded_as_retry_supersedes_edge(
     tmp_path,
     monkeypatch,
