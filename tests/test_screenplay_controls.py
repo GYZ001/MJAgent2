@@ -1512,9 +1512,11 @@ def test_retry_grant_consumption_cas_failure_rolls_back_grant_snapshot_and_owner
 def test_validated_blueprint_resolution_is_exact_late_safe_and_idempotent() -> None:
     from app.production.grant import issue_production_grant
     from app.stages import blueprint_retry_receipts_hash
+    from tests.test_narrative_blueprint import SOURCE as blueprint_source
+    from tests.test_narrative_blueprint import _blueprint
 
     conn = db.get_conn()
-    source_text = "林舟推门。"
+    source_text = blueprint_source
     conn.execute(
         "INSERT INTO chapters(project_id,idx,title,content,char_count) "
         "VALUES('p1',1,'第一章',?,?)",
@@ -1611,7 +1613,9 @@ def test_validated_blueprint_resolution_is_exact_late_safe_and_idempotent() -> N
         "WHERE id='e1'",
         (run_id,),
     )
-    blueprint = NarrativeBlueprint(episode_no=1, nodes=[])
+    # Use a fully valid current Blueprint; the authority transaction itself
+    # independently re-runs deterministic semantic and scene-partition gates.
+    blueprint = _blueprint()
     artifact = repository.create_artifact(EvidenceArtifact(
         type="screenplay_narrative_blueprint",
         scope_type="episode",
@@ -1669,6 +1673,30 @@ def test_validated_blueprint_resolution_is_exact_late_safe_and_idempotent() -> N
     assert checkpoint["blueprint_artifact_id"] == artifact["id"]
 
     resolution_id = int(resolutions[0]["id"])
+    resolution_response = conn.execute(
+        "SELECT response_json FROM provider_calls WHERE id=?",
+        (resolution_id,),
+    ).fetchone()["response_json"]
+    conn.execute(
+        "UPDATE provider_calls SET response_json='{}' WHERE id=?",
+        (resolution_id,),
+    )
+    conn.commit()
+    with bind_trace(run_id, None), pytest.raises(
+        stages.StageError,
+        match="RECEIPT_INVALID",
+    ):
+        stages._commit_blueprint_authority_checkpoint(
+            episode_id="e1",
+            blueprint_artifact_id=str(artifact["id"]),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            source_text=source_text,
+        )
+    conn.execute(
+        "UPDATE provider_calls SET response_json=? WHERE id=?",
+        (resolution_response, resolution_id),
+    )
+    conn.commit()
     # A foreign resolution cannot be silently adopted on a later recovery.
     foreign = conn.execute(
         """INSERT INTO provider_calls(
@@ -1730,6 +1758,52 @@ def test_validated_blueprint_resolution_is_exact_late_safe_and_idempotent() -> N
     ).fetchone()
     assert late["superseded_by_call_id"] is None
     assert late["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
+
+    # An exception after checkpoint/resolution writes but before receipt CAS
+    # rolls the whole SQLite transaction back; historical provider bytes stay
+    # untouched.
+    conn.execute("DELETE FROM provider_calls WHERE id=?", (late_call_id,))
+    conn.execute(
+        "UPDATE provider_calls SET superseded_by_call_id=NULL,"
+        "recovery_disposition='REQUIRES_EXPLICIT_RETRY' WHERE id=?",
+        (old_call_id,),
+    )
+    conn.execute("DELETE FROM provider_calls WHERE id=?", (resolution_id,))
+    conn.execute("DELETE FROM provider_calls WHERE id=?", (int(foreign.lastrowid),))
+    conn.execute(
+        "UPDATE production_revisions SET checkpoint_json='{}' WHERE id=?",
+        (revision.id,),
+    )
+    conn.execute(
+        f"""CREATE TRIGGER abort_blueprint_resolution_receipt
+             BEFORE UPDATE OF superseded_by_call_id ON provider_calls
+             WHEN OLD.id={old_call_id}
+             BEGIN SELECT RAISE(ABORT, 'receipt-cas-crash'); END"""
+    )
+    conn.commit()
+    with bind_trace(run_id, None), pytest.raises(Exception, match="receipt-cas-crash"):
+        stages._commit_blueprint_authority_checkpoint(
+            episode_id="e1",
+            blueprint_artifact_id=str(artifact["id"]),
+            blueprint_hash=blueprint_content_hash(blueprint),
+            source_text=source_text,
+        )
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM provider_calls "
+        "WHERE kind='blueprint_authority_resolution'"
+    ).fetchone()["c"] == 0
+    assert json.loads(conn.execute(
+        "SELECT checkpoint_json FROM production_revisions WHERE id=?",
+        (revision.id,),
+    ).fetchone()["checkpoint_json"]) == {}
+    rolled_back = conn.execute(
+        "SELECT superseded_by_call_id,recovery_disposition,request_json,"
+        "response_json,meta FROM provider_calls WHERE id=?",
+        (old_call_id,),
+    ).fetchone()
+    assert rolled_back["superseded_by_call_id"] is None
+    assert rolled_back["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
+    assert tuple(rolled_back)[2:] == tuple(history_before)
 
 
 @pytest.mark.asyncio

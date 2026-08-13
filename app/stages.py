@@ -41,6 +41,8 @@ from app.narrative_blueprint import (
     BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD,
     BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD,
     BLUEPRINT_VERSION,
+    BlueprintSourceOccurrenceError,
+    BlueprintSourceOwnershipError,
     BlueprintSemanticReview,
     NarrativeBlueprint,
     NarrativeBlueprintPatch,
@@ -62,6 +64,7 @@ from app.narrative_blueprint import (
     recover_complete_blueprint_prefix,
     validate_and_apply_blueprint_scene_contract,
     validate_blueprint_semantic_review,
+    validate_blueprint_scene_partition,
     validate_narrative_blueprint,
     validate_narrative_blueprint_patch_projection,
     validate_narrative_blueprint_shard,
@@ -4463,6 +4466,22 @@ async def _semantic_review_narrative_blueprint(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    review_source_corpus_hash = hashlib.sha256(
+        source_text.encode("utf-8")
+    ).hexdigest()
+    review_input_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "episode_id": str(episode.get("id") or ""),
+                "blueprint_hash": initial_blueprint_hash,
+                "source_corpus_hash": review_source_corpus_hash,
+                "review_policy_version": BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION,
+                "authority_fingerprint": blueprint_authority_validator_fingerprint(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     cached_rows = get_conn().execute(
         """SELECT id,content_json,model_snapshot_json
              FROM artifacts
@@ -4493,6 +4512,10 @@ async def _semantic_review_narrative_blueprint(
             == BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
             and cached_snapshot.get("authority_fingerprint")
             == blueprint_authority_validator_fingerprint()
+            and cached_snapshot.get("source_corpus_hash")
+            == review_source_corpus_hash
+            and cached_snapshot.get("review_input_fingerprint")
+            == review_input_fingerprint
         ):
             persist_reviewed_authority(parent_artifact_ids=[str(row["id"])])
             return blueprint
@@ -4934,6 +4957,8 @@ async def _semantic_review_narrative_blueprint(
                         "authority_fingerprint": (
                             blueprint_authority_validator_fingerprint()
                         ),
+                        "source_corpus_hash": review_source_corpus_hash,
+                        "review_input_fingerprint": review_input_fingerprint,
                     },
                 ),
                 step_run_id=trace.step_run_id,
@@ -5005,6 +5030,8 @@ async def _semantic_review_narrative_blueprint(
                     "authority_fingerprint": (
                         blueprint_authority_validator_fingerprint()
                     ),
+                    "source_corpus_hash": review_source_corpus_hash,
+                    "review_input_fingerprint": review_input_fingerprint,
                 },
             ),
             step_run_id=trace.step_run_id,
@@ -6885,6 +6912,26 @@ def _commit_blueprint_authority_checkpoint(
         artifact_blueprint = NarrativeBlueprint.model_validate(
             json.loads(artifact["content_json"] or "{}")
         )
+        artifact_errors = validate_narrative_blueprint(
+            artifact_blueprint,
+            source_text,
+        )
+        try:
+            artifact_plans = derive_blueprint_scene_plans(artifact_blueprint)
+            artifact_errors.extend(
+                validate_blueprint_scene_partition(
+                    artifact_blueprint,
+                    artifact_plans,
+                )
+            )
+        except (
+            BlueprintSourceOccurrenceError,
+            BlueprintSourceOwnershipError,
+            ValueError,
+        ) as exc:
+            artifact_errors.extend(
+                getattr(exc, "errors", None) or [str(exc)]
+            )
         if (
             _narrative_blueprint_content_hash(artifact_blueprint)
             != blueprint_hash
@@ -6892,10 +6939,14 @@ def _commit_blueprint_authority_checkpoint(
                 snapshot,
                 source_text,
             )
+            or artifact_errors
         ):
             raise StageError(
                 "剧本时空因果蓝图分片",
-                ["[BLUEPRINT_AUTHORITY_SNAPSHOT_DRIFT] Blueprint authority版本漂移"],
+                [
+                    "[BLUEPRINT_AUTHORITY_SNAPSHOT_DRIFT] "
+                    "Blueprint authority版本或语义漂移"
+                ] + artifact_errors[:10],
             )
         checkpoint = json.loads(revision["checkpoint_json"] or "{}")
         checkpoint.update({

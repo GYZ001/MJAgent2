@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from app.narrative_blueprint import (
     NarrativeBlueprintShard,
     NarrativeNode,
     apply_narrative_blueprint_patch,
+    blueprint_authority_validator_fingerprint,
     blueprint_patch_schema,
     blueprint_shard_provider_schema,
     blueprint_semantic_issue_is_resolved,
@@ -1961,6 +1963,76 @@ def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
     ))
     assert result is blueprint
     assert modes == ["risk_nodes", "risk_nodes", "full", "full"]
+
+
+def test_clean_semantic_review_cache_is_bound_to_source_corpus(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    derive_blueprint_scene_plans(blueprint)
+    source_now = SOURCE + "\n新的来源版本"
+    blueprint_hash = hashlib.sha256(
+        json.dumps(
+            blueprint.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    stale_snapshot = {
+        "review_policy_version": stages.BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION,
+        "authority_fingerprint": blueprint_authority_validator_fingerprint(),
+        "source_corpus_hash": hashlib.sha256(SOURCE.encode("utf-8")).hexdigest(),
+        "review_input_fingerprint": "stale-review-input",
+    }
+
+    class CachedRows:
+        @staticmethod
+        def fetchall():
+            return [{
+                "id": "stale-clean-consensus",
+                "content_json": json.dumps({
+                    "blueprint_hash": blueprint_hash,
+                    "consensus_issue_keys": [],
+                    "review_outcome": "clean",
+                }),
+                "model_snapshot_json": json.dumps(stale_snapshot),
+            }]
+
+    class CachedConnection:
+        @staticmethod
+        def execute(*_args, **_kwargs):
+            return CachedRows()
+
+    calls = 0
+
+    async def fake_structured(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return BlueprintSemanticReview(issues=[])
+
+    monkeypatch.setattr(stages, "get_conn", lambda: CachedConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: "false"
+        if key == "screenplay_targeted_blueprint_review_enabled"
+        else "1",
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-source-drift-review"},
+        source_text=source_now,
+    ))
+
+    assert result is blueprint
+    assert calls == 2
 
 
 def test_reviewer_input_and_retry_share_canonical_contract(
