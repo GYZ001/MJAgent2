@@ -1105,12 +1105,25 @@ def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_gran
     with pytest.raises(stages.StageError, match="RETRY_GRANT_REQUIRED"):
         blocked.claim(max_tokens=4096, operation_id="stable-patch-operation")
 
+    unrelated_grant = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-fresh",
+        episode_id="ep-lineage",
+        input_fingerprint="same-authority-fingerprint",
+        retry_grant_id="grant-new",
+    )
+    with pytest.raises(stages.StageError, match="RETRY_GRANT_REQUIRED"):
+        unrelated_grant.claim(
+            max_tokens=4096,
+            operation_id="stable-patch-operation",
+        )
+
     allowed = stages._BlueprintGenerationBudget.from_durable_calls(
         run_id="run-fresh",
         episode_id="ep-lineage",
         input_fingerprint="same-authority-fingerprint",
         retry_grant_id="grant-new",
     )
+    allowed.authorize_unknown_retry("grant-new")
     reservation = allowed.claim(
         max_tokens=4096,
         operation_id="stable-patch-operation",

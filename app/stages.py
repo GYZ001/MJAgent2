@@ -5640,12 +5640,7 @@ class _BlueprintGenerationBudget:
             return False
         if self._explicit_retry_authorized and self.retry_grant_id:
             return False
-        return any(
-            not prior_grant_id
-            or not self.retry_grant_id
-            or self.retry_grant_id == prior_grant_id
-            for _call_id, prior_grant_id in self._durable_unknown_stage_calls.values()
-        )
+        return True
 
     def authorize_unknown_retry(self, grant_id: str) -> None:
         """Bind the approval-minted grant to this exact projected receipt set."""
@@ -5731,10 +5726,7 @@ class _BlueprintGenerationBudget:
         )
         prior_unknown_grant = self._durable_unknown_operations.get(operation_id)
         if prior_unknown_grant is not None and not durable_replay:
-            if (
-                not self.retry_grant_id
-                or self.retry_grant_id == prior_unknown_grant
-            ):
+            if not self._explicit_retry_authorized:
                 raise StageError(
                     "剧本时空因果蓝图分片",
                     [
@@ -5860,6 +5852,17 @@ class _BlueprintGenerationBudget:
         }
 
 
+def blueprint_retry_receipts_hash(receipts: list[dict[str, Any]]) -> str:
+    """Canonical authority binding for one explicit unknown-retry grant."""
+    raw = json.dumps(
+        receipts,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _blueprint_generation_budget_for_trace(
     trace: Any,
     *,
@@ -5871,7 +5874,8 @@ def _blueprint_generation_budget_for_trace(
     retry_grant_id = ""
     if run_id:
         run_row = get_conn().execute(
-            "SELECT started_at,input_fingerprint FROM workflow_runs WHERE id=?",
+            "SELECT started_at,input_fingerprint,config_snapshot_json "
+            "FROM workflow_runs WHERE id=?",
             (run_id,),
         ).fetchone()
         if run_row is not None:
@@ -5880,7 +5884,17 @@ def _blueprint_generation_budget_for_trace(
                 input_fingerprint = str(
                     run_row["input_fingerprint"] or ""
                 )
-            except (KeyError, IndexError):
+                config_snapshot = json.loads(
+                    run_row["config_snapshot_json"] or "{}"
+                )
+                input_fingerprint = str(
+                    config_snapshot.get(
+                        "blueprint_budget_lineage_fingerprint",
+                        input_fingerprint,
+                    )
+                    or input_fingerprint
+                )
+            except (KeyError, IndexError, TypeError, json.JSONDecodeError):
                 input_fingerprint = ""
     if episode_id:
         try:
@@ -5898,13 +5912,30 @@ def _blueprint_generation_budget_for_trace(
                 retry_grant_id = str(grant_row["grant_id"] or "")
         except Exception:  # noqa: BLE001 - isolated legacy test schemas
             retry_grant_id = ""
-    return _BlueprintGenerationBudget.from_durable_calls(
+    budget = _BlueprintGenerationBudget.from_durable_calls(
         run_id=run_id,
         started_at_epoch=run_started_at,
         episode_id=episode_id,
         input_fingerprint=input_fingerprint,
         retry_grant_id=retry_grant_id,
     )
+    if retry_grant_id and budget.unknown_receipts:
+        try:
+            grant_row = get_conn().execute(
+                "SELECT issued_by,input_artifact_hash FROM production_grants "
+                "WHERE id=?",
+                (retry_grant_id,),
+            ).fetchone()
+            if (
+                grant_row is not None
+                and str(grant_row["issued_by"] or "") == "user_retry_approval"
+                and str(grant_row["input_artifact_hash"] or "")
+                == blueprint_retry_receipts_hash(budget.unknown_receipts)
+            ):
+                budget.authorize_unknown_retry(retry_grant_id)
+        except Exception:  # noqa: BLE001 - isolated legacy schemas
+            pass
+    return budget
 
 
 async def _generate_sharded_narrative_blueprint(

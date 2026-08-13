@@ -1415,6 +1415,7 @@ def _screenplay_blueprint_budget_projection(
         BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS,
         BLUEPRINT_SHARD_MIN_TOKENS,
         _BlueprintGenerationBudget,
+        blueprint_retry_receipts_hash,
     )
 
     conn = get_conn()
@@ -1446,6 +1447,18 @@ def _screenplay_blueprint_budget_projection(
         input_fingerprint=input_fp,
         retry_grant_id=current_grant_id,
     )
+    if current_grant_id and budget.unknown_receipts:
+        grant_row = conn.execute(
+            "SELECT issued_by,input_artifact_hash FROM production_grants WHERE id=?",
+            (current_grant_id,),
+        ).fetchone()
+        if (
+            grant_row is not None
+            and str(grant_row["issued_by"] or "") == "user_retry_approval"
+            and str(grant_row["input_artifact_hash"] or "")
+            == blueprint_retry_receipts_hash(budget.unknown_receipts)
+        ):
+            budget.authorize_unknown_retry(current_grant_id)
     token_admissible = (
         budget.charged_output_tokens + BLUEPRINT_SHARD_MIN_TOKENS
         <= BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
@@ -1610,12 +1623,16 @@ def _spawn_screenplay_activation(
                     "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED: 缺少可绑定的 active revision"
                 )
             from app.production.grant import issue_production_grant
+            from app.stages import blueprint_retry_receipts_hash
 
             grant, _token = issue_production_grant(
                 episode_id=episode_id,
                 project_id=project_id,
                 production_revision_id=str(revision["id"]),
                 kind="screenplay",
+                input_artifact_hash=blueprint_retry_receipts_hash(
+                    budget_projection["unknown_receipts"]
+                ),
                 issued_by="user_retry_approval",
                 conn=conn,
                 commit=False,

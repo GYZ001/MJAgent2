@@ -935,6 +935,85 @@ def test_success_cache_requires_matching_contract_version(tmp_path, monkeypatch)
     assert matching == {"choices": [{"message": {"content": "old contract result"}}]}
 
 
+def test_exact_identity_success_replays_when_legacy_meta_lost_contract(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-legacy-identity.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    payload = {
+        "model": "identity-model",
+        "messages": [{"role": "user", "content": "x" * 4000}],
+        "temperature": 0.1,
+        "max_tokens": 4096,
+    }
+    operation_id = "screenplay.identity.future.v6:1:stable"
+    call_id = db.start_provider_call(
+        "chat",
+        "identity-model",
+        meta={
+            "operation_id": operation_id,
+            "contract_version": "screenplay-future-identity.v6",
+        },
+        request_json=payload,
+    )
+    db.finish_provider_call(
+        call_id,
+        "OK",
+        200,
+        25,
+        response_json={"choices": [{"message": {"content": "cached identity"}}]},
+    )
+    # Production 61443 shape: the old lossy meta omitted contract_version.
+    db.get_conn().execute(
+        "UPDATE provider_calls SET meta=?,contract_version=NULL WHERE id=?",
+        (json.dumps({"_truncated": True, "operation_id": operation_id}), call_id),
+    )
+    db.get_conn().commit()
+
+    recovered = hiagent._cached_successful_provider_response(
+        "chat",
+        "identity-model",
+        payload,
+        {
+            "reuse_successful_operation": True,
+            "operation_id": operation_id,
+            "contract_version": "screenplay-future-identity.v6",
+        },
+    )
+    assert recovered == {
+        "choices": [{"message": {"content": "cached identity"}}]
+    }
+    assert db.get_conn().execute(
+        "SELECT COUNT(*) AS c FROM provider_calls WHERE kind='chat'"
+    ).fetchone()["c"] == 1
+
+
+def test_previous_success_is_not_recorded_as_retry_supersedes_edge(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-success-edge.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    payload_a = {"messages": [{"role": "user", "content": "A"}]}
+    payload_b = {"messages": [{"role": "user", "content": "B"}]}
+    operation_id = "semantic-operation-with-changed-request"
+    first = db.start_provider_call(
+        "chat", "m", meta={"operation_id": operation_id}, request_json=payload_a,
+    )
+    db.finish_provider_call(first, "OK", 200, 1, response_json={"ok": True})
+    second = db.start_provider_call(
+        "chat", "m", meta={"operation_id": operation_id}, request_json=payload_b,
+    )
+    row = db.get_conn().execute(
+        "SELECT attempt_no,supersedes_call_id FROM provider_calls WHERE id=?",
+        (second,),
+    ).fetchone()
+    assert dict(row) == {"attempt_no": 1, "supersedes_call_id": None}
+
+
 def test_provider_metadata_truncation_preserves_valid_json(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-meta.db")
     monkeypatch.setattr(db._local, "conn", None, raising=False)

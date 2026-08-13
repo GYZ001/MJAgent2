@@ -1154,6 +1154,240 @@ def test_screenplay_generate_preflight_allows_terminal_run_takeover() -> None:
     assert live.state_fingerprint != terminal.state_fingerprint
 
 
+def test_unknown_blueprint_receipt_requires_confirmation_and_direct_body_cannot_authorize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.capabilities.inputs import ScreenplayGenerateInput
+    from app.capabilities.preflight import screenplay_generate
+    from app.production.grant import issue_production_grant
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+    projection = api._screenplay_blueprint_budget_projection("e1")
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint=projection["input_fingerprint"],
+        resume=False,
+    )
+    old_grant, _ = issue_production_grant(
+        episode_id="e1",
+        project_id="p1",
+        production_revision_id=revision.id,
+        kind="screenplay",
+    )
+    old_run = repository.create_run(
+        workflow_type="screenplay",
+        scope_type="episode",
+        scope_id="e1",
+        input_fingerprint=projection["input_fingerprint"],
+    )
+    conn.execute(
+        "UPDATE workflow_runs SET status='FAILED' WHERE id=?", (old_run,)
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition,request_hash
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,NULL)""",
+        (
+            db.now(), "chat", "model", "INTERRUPTED", 303769,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 16384,
+            }),
+            old_run, "legacy-run-scoped-op", 1,
+            "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    conn.commit()
+
+    preflight = screenplay_generate(ScreenplayGenerateInput(episode_id="e1"))
+    receipts = preflight.affected.extra["blueprint_budget"]["unknown_receipts"]
+    assert preflight.allowed is True
+    assert preflight.requires_confirmation is True
+    assert preflight.affected.extra["blueprint_budget"][
+        "requires_fresh_retry_grant"
+    ] is True
+    assert receipts[0]["request_hash"] == ""
+
+    recorder = api._new_screenplay_recorder("e1")
+    spawned = 0
+
+    def must_not_spawn(*_args, **_kwargs):
+        nonlocal spawned
+        spawned += 1
+        raise AssertionError("untrusted route must fail before task registration")
+
+    monkeypatch.setattr(task_registry, "spawn", must_not_spawn)
+    with pytest.raises(Exception, match="RETRY_GRANT_REQUIRED"):
+        api._spawn_screenplay_activation(
+            "e1",
+            recorder,
+            project_id="p1",
+            status="queued",
+            message="queued",
+            authorize_blueprint_retry=True,
+            expected_blueprint_unknown_receipts=receipts,
+        )
+    assert spawned == 0
+    grants = conn.execute(
+        "SELECT id FROM production_grants WHERE episode_id='e1' ORDER BY issued_at"
+    ).fetchall()
+    assert [row["id"] for row in grants] == [old_grant.grant_id]
+
+
+def test_confirmed_unknown_retry_mints_one_new_grant_before_any_task_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.production.grant import issue_production_grant
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+    initial = api._screenplay_blueprint_budget_projection("e1")
+    revision = ensure_production_revision(
+        episode_id="e1", kind="screenplay",
+        input_fingerprint=initial["input_fingerprint"], resume=False,
+    )
+    old_grant, _ = issue_production_grant(
+        episode_id="e1", project_id="p1",
+        production_revision_id=revision.id, kind="screenplay",
+    )
+    old_run = repository.create_run(
+        workflow_type="screenplay", scope_type="episode", scope_id="e1",
+        input_fingerprint=initial["input_fingerprint"],
+    )
+    conn.execute("UPDATE workflow_runs SET status='FAILED' WHERE id=?", (old_run,))
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition,production_grant_id
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            db.now(), "chat", "model", "INTERRUPTED", 300000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+            }),
+            old_run, "stable-op", 1, "REQUIRES_EXPLICIT_RETRY",
+            old_grant.grant_id,
+        ),
+    )
+    conn.commit()
+    projection = api._screenplay_blueprint_budget_projection("e1")
+    recorder = api._new_screenplay_recorder("e1")
+    spawned = 0
+
+    def accept_without_running(_kind, _key, coro, *, project_id=None):
+        nonlocal spawned
+        spawned += 1
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(task_registry, "spawn", accept_without_running)
+    token = api._enter_screenplay_command_bus_retry_approval()
+    try:
+        api._spawn_screenplay_activation(
+            "e1", recorder, project_id="p1", status="queued",
+            message="queued", authorize_blueprint_retry=True,
+            expected_blueprint_unknown_receipts=projection["unknown_receipts"],
+        )
+    finally:
+        api._exit_screenplay_command_bus_retry_approval(token)
+
+    grants = conn.execute(
+        "SELECT id,issued_by FROM production_grants WHERE episode_id='e1' "
+        "ORDER BY issued_at"
+    ).fetchall()
+    assert spawned == 1
+    assert len(grants) == 2
+    assert grants[0]["id"] == old_grant.grant_id
+    assert grants[1]["issued_by"] == "user_retry_approval"
+    replay_projection = api._screenplay_blueprint_budget_projection("e1")
+    assert replay_projection["requires_fresh_retry_grant"] is False
+    assert replay_projection["unknown_receipts"] == projection["unknown_receipts"]
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM provider_calls"
+    ).fetchone()["c"] == 1
+
+
+@pytest.mark.parametrize(
+    ("issued_by", "receipt_hash"),
+    [
+        ("user", "exact"),
+        ("user_retry_approval", "wrong"),
+        ("user", "wrong"),
+    ],
+)
+def test_unrelated_or_mismatched_grant_never_authorizes_unknown_retry(
+    issued_by: str,
+    receipt_hash: str,
+) -> None:
+    from app.production.grant import issue_production_grant
+    from app.stages import blueprint_retry_receipts_hash
+
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO chapters(project_id,idx,title,content,char_count) "
+        "VALUES('p1',1,'第一章','林舟推门。',5)"
+    )
+    conn.execute("UPDATE episodes SET source_chapters='[1]' WHERE id='e1'")
+    conn.commit()
+    initial = api._screenplay_blueprint_budget_projection("e1")
+    revision = ensure_production_revision(
+        episode_id="e1", kind="screenplay",
+        input_fingerprint=initial["input_fingerprint"], resume=False,
+    )
+    old_run = repository.create_run(
+        workflow_type="screenplay", scope_type="episode", scope_id="e1",
+        input_fingerprint=initial["input_fingerprint"],
+    )
+    conn.execute("UPDATE workflow_runs SET status='FAILED' WHERE id=?", (old_run,))
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            db.now(), "chat", "model", "INTERRUPTED", 300000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+            }),
+            old_run, "stable-op", 1, "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    conn.commit()
+    projection = api._screenplay_blueprint_budget_projection("e1")
+    expected_hash = blueprint_retry_receipts_hash(
+        projection["unknown_receipts"]
+    )
+    issue_production_grant(
+        episode_id="e1", project_id="p1",
+        production_revision_id=revision.id, kind="screenplay",
+        issued_by=issued_by,
+        input_artifact_hash=(
+            expected_hash if receipt_hash == "exact" else "sha256:wrong"
+        ),
+    )
+
+    reread = api._screenplay_blueprint_budget_projection("e1")
+    assert reread["requires_fresh_retry_grant"] is True
+
+
 @pytest.mark.asyncio
 async def test_persisted_active_run_blocks_manual_save_without_local_task() -> None:
     from app.capabilities.inputs import ScreenplayUpdateInput
