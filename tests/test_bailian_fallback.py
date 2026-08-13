@@ -139,6 +139,96 @@ def test_bailian_does_not_switch_model_after_ambiguous_read_failure(monkeypatch)
 
 def test_bailian_stream_never_replays_after_a_token_was_emitted(monkeypatch) -> None:
     hiagent._BAILIAN_FAILED_MODELS["text"].clear()
+
+
+def test_bailian_strict_replay_scans_later_successful_candidate(monkeypatch) -> None:
+    first = "qwen3.7-max-2026-06-08"
+    second = "qwen3.7-max-2026-05-20"
+    sends = 0
+
+    def fake_cached(_kind, model, _payload, _meta):
+        if model == second:
+            return {
+                "choices": [{"message": {"content": "replayed"}}],
+                "usage": {"completion_tokens": 3},
+            }
+        return None
+
+    async def forbidden_send(*_args, **_kwargs):
+        nonlocal sends
+        sends += 1
+        raise AssertionError("strict replay must not send")
+
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *_args: ("https://bailian.test/v1", {}),
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_bailian_fallback_models",
+        lambda *_args: [first, second],
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_cached_successful_provider_response",
+        fake_cached,
+    )
+    monkeypatch.setattr(hiagent, "_post_json", forbidden_send)
+
+    data, model, reused = asyncio.run(
+        hiagent._post_bailian_chat_with_fallback(
+            object(),
+            {"messages": []},
+            fallback_kind="text",
+            log_kind="chat",
+            preferred_model=first,
+            meta={"require_cached_successful_operation": True},
+        )
+    )
+
+    assert data["choices"][0]["message"]["content"] == "replayed"
+    assert model == second
+    assert reused is True
+    assert sends == 0
+
+
+def test_bailian_strict_replay_all_miss_never_sends(monkeypatch) -> None:
+    sends = 0
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *_args: ("https://bailian.test/v1", {}),
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_bailian_fallback_models",
+        lambda *_args: ["first", "second"],
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_cached_successful_provider_response",
+        lambda *_args: None,
+    )
+
+    async def forbidden_send(*_args, **_kwargs):
+        nonlocal sends
+        sends += 1
+        raise AssertionError("strict replay must not send")
+
+    monkeypatch.setattr(hiagent, "_post_json", forbidden_send)
+
+    with pytest.raises(hiagent.ProviderError, match="durable provider"):
+        asyncio.run(hiagent._post_bailian_chat_with_fallback(
+            object(),
+            {"messages": []},
+            fallback_kind="text",
+            log_kind="chat",
+            preferred_model="first",
+            meta={"require_cached_successful_operation": True},
+        ))
+
+    assert sends == 0
     first = "qwen3.7-max-2026-06-08"
     calls: list[str] = []
 

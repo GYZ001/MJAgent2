@@ -4919,6 +4919,50 @@ def _blueprint_shard_prompt(
     )
 
 
+def _blueprint_provider_operation_id(
+    *,
+    episode_id: str,
+    shard_index: int,
+    attempt: int,
+    split_depth: int,
+    source_hash: str,
+    boundary_hash: str,
+    prompt: str,
+    provider: str,
+    model: str,
+    max_tokens: int,
+    effective_max_tokens: int,
+    temperature: float,
+) -> str:
+    material = {
+        "contract_version": BLUEPRINT_VERSION,
+        "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+        "episode_id": episode_id,
+        "shard_index": shard_index,
+        "attempt": attempt,
+        "split_depth": split_depth,
+        "source_hash": source_hash,
+        "boundary_hash": boundary_hash,
+        "provider": provider,
+        "model": model,
+        "temperature": temperature,
+        "requested_max_tokens": max_tokens,
+        "effective_max_tokens": effective_max_tokens,
+        "system_prompt_hash": hashlib.sha256(
+            SYSTEM_PREFIX.encode("utf-8")
+        ).hexdigest(),
+        "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+    }
+    return "blueprint_" + hashlib.sha256(
+        json.dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:32]
+
+
 class _BlueprintGenerationBudget:
     """Reserve call exposure, then settle against provider-reported usage.
 
@@ -5242,33 +5286,37 @@ async def _generate_sharded_narrative_blueprint(
                     boundary=boundary,
                     source_payload=source_payload,
                 )
-                operation_material = {
-                    "contract_version": BLUEPRINT_VERSION,
-                    "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
-                    "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
-                    "episode_id": str(episode.get("id") or ""),
-                    "shard_index": shard_index,
-                    "attempt": attempt,
-                    "split_depth": split_depth,
-                    "source_hash": source_hash,
-                    "boundary_hash": boundary_hash,
-                    "prompt_hash": hashlib.sha256(
-                        prompt.encode("utf-8")
-                    ).hexdigest(),
-                }
-                operation_id = "blueprint_" + hashlib.sha256(
-                    json.dumps(
-                        operation_material,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()[:32]
+                provider, model, effective_max_tokens = (
+                    hiagent.text_request_token_limits(
+                        requested_max_tokens=token_budget,
+                    )
+                )
+                operation_id = _blueprint_provider_operation_id(
+                    episode_id=str(episode.get("id") or ""),
+                    shard_index=shard_index,
+                    attempt=attempt,
+                    split_depth=split_depth,
+                    source_hash=source_hash,
+                    boundary_hash=boundary_hash,
+                    prompt=prompt,
+                    provider=provider,
+                    model=model,
+                    max_tokens=token_budget,
+                    effective_max_tokens=effective_max_tokens,
+                    temperature=0.15,
+                )
                 reservation_id = generation_budget.claim(
                     max_tokens=token_budget,
                     operation_id=operation_id,
                 )
+                durable_replay = bool(
+                    operation_id
+                    in generation_budget._durable_successful_operations
+                )
                 remaining_seconds = (
                     BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+                    if durable_replay
+                    else BLUEPRINT_GENERATION_MAX_WALL_SECONDS
                     - (time.monotonic() - generation_budget.started_at)
                 )
                 settlement: dict[str, Any] | None = None
@@ -5297,6 +5345,9 @@ async def _generate_sharded_narrative_blueprint(
                                 "expected_json": True,
                                 "operation_id": operation_id,
                                 "reuse_successful_operation": True,
+                                "require_cached_successful_operation": (
+                                    durable_replay
+                                ),
                                 "contract_version": BLUEPRINT_VERSION,
                                 "disable_reasoning_fallback": True,
                             },

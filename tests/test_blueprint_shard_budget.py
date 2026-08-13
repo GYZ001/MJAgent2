@@ -608,8 +608,7 @@ def test_durable_wall_budget_uses_original_run_start(
 ) -> None:
     monkeypatch.setattr(stages, "get_conn", lambda: _DurableBudgetConnection([]))
     monkeypatch.setattr(stages.time, "time", lambda: 2000.0)
-    monotonic_values = iter([500.0, 500.0])
-    monkeypatch.setattr(stages.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(stages.time, "monotonic", lambda: 500.0)
 
     budget = stages._BlueprintGenerationBudget.from_durable_calls(
         run_id="run-old",
@@ -620,3 +619,46 @@ def test_durable_wall_budget_uses_original_run_start(
 
     with pytest.raises(stages.StageError, match="TIME_BUDGET"):
         budget.claim(max_tokens=1)
+
+
+def test_blueprint_operation_fingerprint_binds_provider_and_exact_request() -> None:
+    base = {
+        "episode_id": "ep-op",
+        "shard_index": 1,
+        "attempt": 1,
+        "split_depth": 0,
+        "source_hash": "source",
+        "boundary_hash": "boundary",
+        "prompt": "user prompt",
+        "provider": "hiagent",
+        "model": "model-a",
+        "max_tokens": 100,
+        "effective_max_tokens": 100,
+        "temperature": 0.15,
+    }
+    original = stages._blueprint_provider_operation_id(**base)
+
+    for key, value in (
+        ("provider", "openrouter"),
+        ("model", "model-b"),
+        ("prompt", "changed prompt"),
+        ("max_tokens", 101),
+        ("effective_max_tokens", 80),
+        ("temperature", 0.2),
+    ):
+        assert stages._blueprint_provider_operation_id(
+            **{**base, key: value},
+        ) != original
+
+
+def test_strict_durable_replay_cache_miss_is_not_sent() -> None:
+    with pytest.raises(
+        hiagent.ProviderError,
+        match="durable provider",
+    ) as caught:
+        hiagent._require_cached_replay_or_raise(None, {
+            "require_cached_successful_operation": True,
+        })
+
+    assert caught.value.delivery_state == "not_sent"
+    assert caught.value.replay_safe is True

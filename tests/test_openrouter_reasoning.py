@@ -45,6 +45,58 @@ def test_openrouter_retries_without_reasoning_when_budget_is_exhausted(monkeypat
     assert calls[1][2]["reasoning_fallback_cause"] == "reasoning_budget_exhausted"
 
 
+def test_reasoning_fallback_reports_both_paid_response_usages(monkeypatch) -> None:
+    responses = [
+        {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"content": None, "reasoning": "thinking"},
+            }],
+            "usage": {"completion_tokens": 6},
+        },
+        {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "ok"},
+            }],
+            "usage": {"completion_tokens": 2},
+        },
+    ]
+    usage_events: list[dict] = []
+
+    async def fake_post_json(*_args, **_kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(hiagent, "active_provider", lambda _kind: "openrouter")
+    monkeypatch.setattr(
+        hiagent,
+        "active_model",
+        lambda _kind, provider=None: "reasoning-model",
+    )
+    monkeypatch.setattr(
+        hiagent.config,
+        "OPENROUTER_TEXT_REASONING_EFFORT",
+        "high",
+    )
+    monkeypatch.setattr(
+        hiagent,
+        "_model_connection",
+        lambda *_args: ("https://openrouter.test/v1", {}),
+    )
+    monkeypatch.setattr(hiagent, "_post_json", fake_post_json)
+
+    content = asyncio.run(hiagent.chat(
+        [{"role": "user", "content": "x"}],
+        usage_callback=usage_events.append,
+    ))
+
+    assert content == "ok"
+    assert usage_events == [
+        {"completion_tokens": 6, "reused": False},
+        {"completion_tokens": 2, "reused": False},
+    ]
+
+
 def test_nonempty_length_response_is_rejected_as_truncated(monkeypatch) -> None:
     calls = 0
 

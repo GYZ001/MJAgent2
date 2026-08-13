@@ -107,6 +107,22 @@ def _cached_successful_provider_response(
         return None
 
 
+def _require_cached_replay_or_raise(
+    data: dict[str, Any] | None,
+    meta: dict[str, Any] | None,
+) -> None:
+    if data is not None or not bool(
+        (meta or {}).get("require_cached_successful_operation")
+    ):
+        return
+    raise ProviderError(
+        "durable provider 成功回执缺失，禁止未重新预留预算即重发",
+        failure_kind="durable_replay_missing",
+        delivery_state="not_sent",
+        replay_safe=True,
+    )
+
+
 def _latest_provider_operation_request(
     kind: str,
     operation_id: str,
@@ -868,6 +884,19 @@ async def _post_bailian_chat_with_fallback(client: httpx.AsyncClient, payload: d
     base_url, headers = _model_connection("bailian", preferred_model, config.BAILIAN_BASE_URL, config.BAILIAN_API_KEY)
     url = f"{base_url}/chat/completions"
     models = _bailian_fallback_models(fallback_kind, preferred_model)
+    strict_replay = bool(
+        (meta or {}).get("require_cached_successful_operation")
+    )
+    if strict_replay:
+        for candidate in models:
+            attempt_payload = {**payload, "model": candidate}
+            data = _cached_successful_provider_response(
+                log_kind, candidate, attempt_payload, meta,
+            )
+            if data is not None:
+                return data, candidate, True
+        _require_cached_replay_or_raise(None, meta)
+        raise AssertionError("strict replay gate must raise")
     errors: list[str] = []
     last_err: ProviderError | None = None
     for candidate in models:
@@ -959,6 +988,7 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
                                      usage_callback: Callable[[dict[str, Any]], None] | None = None) -> str:
     """封装推理模型的降级重试逻辑：若首轮因推理过长导致 content 为空，则关闭推理重试一次。"""
     data = _cached_successful_provider_response(kind, model, payload, call_meta)
+    _require_cached_replay_or_raise(data, call_meta)
     reused = data is not None
     if data is None:
         data = await _plain_chat_request(
@@ -1031,6 +1061,26 @@ def _plain_chat_streaming_enabled(call_meta: dict | None) -> bool:
     return bool((call_meta or {}).get("gateway") == "execution_harness")
 
 
+def text_request_token_limits(
+    *,
+    requested_max_tokens: int,
+    provider: str | None = None,
+    model: str | None = None,
+) -> tuple[str, str, int]:
+    selected_provider = provider or active_provider("text")
+    selected_model = model or active_model("text", selected_provider)
+    limits = active_model_token_limits(
+        selected_provider,
+        selected_model,
+        get_setting,
+    )
+    effective = min(
+        max(1, int(requested_max_tokens)),
+        int(limits["max_output_tokens"]),
+    )
+    return selected_provider, selected_model, effective
+
+
 async def _plain_chat_request(
     client: httpx.AsyncClient,
     url: str,
@@ -1073,12 +1123,14 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
     按设置在火山 HiAgent、OpenRouter、阿里云百炼、DeepSeek、智谱官方 API 之间路由（后两者仅文本，
     图像/视频始终走火山）。"""
     timeout = httpx.Timeout(connect=10, read=_chat_read_timeout_s(call_meta), write=30, pool=10)
-    provider = active_provider("text")
-    selected_model = model or active_model("text", provider)
+    provider, selected_model, effective_max_tokens = text_request_token_limits(
+        requested_max_tokens=max_tokens,
+        model=model,
+    )
     token_limits = active_model_token_limits(provider, selected_model, get_setting)
     requested_max_tokens = max(1, int(max_tokens))
     runtime_output_limit = int(token_limits["max_output_tokens"])
-    max_tokens = min(requested_max_tokens, runtime_output_limit)
+    max_tokens = effective_max_tokens
     call_meta = {
         **(call_meta or {}),
         "model_context_window_tokens": int(token_limits["context_window_tokens"]),
@@ -1143,6 +1195,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             data = _cached_successful_provider_response(
                 "chat", custom_model, payload, call_meta,
             )
+            _require_cached_replay_or_raise(data, call_meta)
             reused = data is not None
             if data is None:
                 data = await _plain_chat_request(
@@ -1163,6 +1216,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
             payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             data = _cached_successful_provider_response("chat", model, payload, call_meta)
+            _require_cached_replay_or_raise(data, call_meta)
             reused = data is not None
             if data is None:
                 data = await _plain_chat_request(
