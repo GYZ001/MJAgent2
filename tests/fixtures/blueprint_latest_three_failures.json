@@ -6,7 +6,7 @@
       "raw_artifact_id": "art_a099922e53fa",
       "expected_error_codes": [
         "BLUEPRINT_SHARD_STATE_SUBJECT_AMBIGUOUS",
-        "BLUEPRINT_SHARD_STATE_SUBJECT_MISSING"
+        "BLUEPRINT_SHARD_SOURCE_DELIVERY_MISSING"
       ],
       "source_facts": [
         {
@@ -23,9 +23,9 @@
           "source_unit_key": "SRC0003:unit:016",
           "source_segment_id": "SRC0003",
           "unit_order": 16,
-          "projection": "action",
-          "surface_form": "prose",
-          "text": "“你还没说，你们到底怎么下去的？"
+          "projection": "quoted",
+          "surface_form": "quoted_span",
+          "text": "“你还没说，你们到底怎么下去的？”"
         }
       ],
       "shard": {

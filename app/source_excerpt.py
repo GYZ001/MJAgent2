@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 import re
+import unicodedata
 
 
 _PUNCTUATION_EQUIVALENTS = str.maketrans({
@@ -44,6 +45,68 @@ class SourceSegment:
     end_offset: int
 
 
+def quotation_opening(char: str) -> bool:
+    """Return whether one Unicode character structurally opens a quote."""
+    category = unicodedata.category(char)
+    return (
+        category == "Pi"
+        or (
+            category not in {"Pi", "Pf"}
+            and "QUOTATION MARK" in unicodedata.name(char, "")
+        )
+    )
+
+
+def quotation_closing(opening: str, char: str) -> bool:
+    """Return whether ``char`` closes the active structural quote."""
+    if unicodedata.category(opening) == "Pi":
+        return unicodedata.category(char) == "Pf"
+    return (
+        "QUOTATION MARK" in unicodedata.name(char, "")
+        and char == opening
+    )
+
+
+def unclosed_quotation(
+    text: str,
+    *,
+    start: int = 0,
+    end: int | None = None,
+) -> tuple[str, int] | None:
+    """Return the active opening quote and offset at the end of a span."""
+    opening = ""
+    opening_offset = -1
+    upper = len(text) if end is None else min(len(text), end)
+    for offset in range(max(0, start), upper):
+        char = text[offset]
+        if not opening:
+            if quotation_opening(char):
+                opening = char
+                opening_offset = offset
+            continue
+        if quotation_closing(opening, char):
+            opening = ""
+            opening_offset = -1
+    return (opening, opening_offset) if opening else None
+
+
+def _extend_cut_through_closing_quote(
+    raw: str,
+    *,
+    cursor: int,
+    cut: int,
+    end: int,
+) -> int:
+    active = unclosed_quotation(raw, start=cursor, end=cut)
+    if active is None:
+        return cut
+    opening, _opening_offset = active
+    for offset in range(cut, end):
+        if quotation_closing(opening, raw[offset]):
+            return offset + 1
+    return cut
+
+
 def index_source_segments(
     source: str,
     *,
@@ -75,6 +138,12 @@ def index_source_segments(
                 cut = window_end
             else:
                 cut += 1
+            cut = _extend_cut_through_closing_quote(
+                raw,
+                cursor=cursor,
+                cut=cut,
+                end=end,
+            )
             chunks.append((cursor, cut))
             cursor = cut
             while cursor < end and raw[cursor].isspace():

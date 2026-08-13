@@ -1765,6 +1765,48 @@ def test_latest_real_blueprint_failures_replay_typed_authority(
         )
 
 
+def test_real_src0003_unit016_accepts_explicit_spoken_voice_contract(
+    monkeypatch,
+) -> None:
+    case = _latest_blueprint_failure_fixtures()[0]
+    facts = [
+        SourceFact.model_validate(value)
+        for value in case["source_facts"]
+    ]
+    monkeypatch.setattr(
+        "app.narrative_blueprint.source_facts",
+        lambda _source_text: facts,
+    )
+    payload = json.loads(json.dumps(case["shard"], ensure_ascii=False))
+    node = payload["nodes"][0]
+    node["participant_evidence"] = [
+        node["participant_evidence"][0],
+        {
+            "identity_key": "char_孟浩",
+            "source_segment_ids": ["SRC0003"],
+            "source_unit_keys": ["SRC0003:unit:016"],
+            "usage": "voice",
+        },
+    ]
+    node["source_unit_deliveries"] = [{
+        "source_unit_key": "SRC0003:unit:016",
+        "mode": "spoken_dialogue",
+        "performer_key": "char_孟浩",
+    }]
+    shard = NarrativeBlueprintShard.model_validate(payload)
+
+    errors = validate_narrative_blueprint_shard(
+        shard,
+        expected_episode_no=shard.episode_no,
+        expected_shard_index=shard.shard_index,
+        expected_source_segment_ids=shard.source_segment_ids,
+        source_text="fixture source facts are injected above",
+    )
+
+    assert not any("SOURCE_DELIVERY" in error for error in errors)
+    assert not any("VOICE_IDENTITY" in error for error in errors)
+
+
 def test_blueprint_gate_rejects_empty_participant_evidence() -> None:
     blueprint = _blueprint()
     blueprint.nodes[0].participant_evidence = []

@@ -12,10 +12,34 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from app.source_excerpt import index_source_segments
+from app.source_excerpt import (
+    index_source_segments,
+    quotation_closing,
+    quotation_opening,
+)
 
 
 SOURCE_FACT_VERSION = "source-fact.v2"
+
+
+class SourceFactQuotationError(ValueError):
+    """A source unit contains an opening quote with no structural close."""
+
+    def __init__(
+        self,
+        source_segment_id: str,
+        *,
+        opening: str,
+        offset: int,
+    ) -> None:
+        self.source_segment_id = source_segment_id
+        self.opening = opening
+        self.offset = offset
+        super().__init__(
+            "[SOURCE_FACT_QUOTE_UNCLOSED] "
+            f"{source_segment_id} offset={offset} 的开引号 "
+            f"{opening!r} 没有闭引号"
+        )
 
 
 class SourceFact(BaseModel):
@@ -66,6 +90,7 @@ def source_segment_facts(
         outside: list[str] = []
         quoted: list[str] = []
         quote_open = ""
+        quote_open_offset = -1
 
         def has_content(value: str) -> bool:
             return any(
@@ -82,29 +107,31 @@ def source_segment_facts(
             if value and has_content(value):
                 parts.append(("action", "prose", value))
 
-        for char in text:
-            category = unicodedata.category(char)
-            quotation_mark = "QUOTATION MARK" in unicodedata.name(char, "")
+        for offset, char in enumerate(text):
             if not quote_open:
-                if category == "Pi" or quotation_mark:
+                if quotation_opening(char):
                     flush_outside()
                     quote_open = char
+                    quote_open_offset = offset
                     quoted.append(char)
                 else:
                     outside.append(char)
                 continue
             quoted.append(char)
-            if category == "Pf" or (
-                quotation_mark and char == quote_open
-            ):
+            if quotation_closing(quote_open, char):
                 value = "".join(quoted).strip()
                 quoted.clear()
                 quote_open = ""
+                quote_open_offset = -1
                 if value:
                     parts.append(("quoted", "quoted_span", value))
 
         if quoted:
-            outside.extend(quoted)
+            raise SourceFactQuotationError(
+                source_segment_id,
+                opening=quote_open,
+                offset=quote_open_offset,
+            )
         flush_outside()
         if not parts:
             parts = [("action", "prose", text)]
