@@ -420,6 +420,10 @@ def _provider_task_clearance_evaluation(
     conn=None,
 ) -> tuple[dict[str, Any], dict[str, list[str]]]:
     db = conn or get_conn()
+    job_columns = {
+        str(row["name"] if hasattr(row, "keys") else row[1])
+        for row in db.execute("PRAGMA table_info(jobs)").fetchall()
+    }
     normalized_shots = list(dict.fromkeys(str(value) for value in shot_ids if value))
     normalized_versions = list(
         dict.fromkeys(str(value) for value in version_ids if value)
@@ -429,9 +433,15 @@ def _provider_task_clearance_evaluation(
     claim_scope_clauses: list[str] = []
     claim_scope_params: list[str] = []
     if project_id:
+        if "project_id" in job_columns:
+            job_scope_clauses.append("j.project_id=?")
+            job_scope_params.append(project_id)
+        if "episode_id" in job_columns:
+            job_scope_clauses.append(
+                "j.episode_id IN (SELECT id FROM episodes WHERE project_id=?)"
+            )
+            job_scope_params.append(project_id)
         job_scope_clauses.extend([
-            "j.project_id=?",
-            "j.episode_id IN (SELECT id FROM episodes WHERE project_id=?)",
             """j.shot_id IN (
                    SELECT s.id FROM shots s
                    JOIN episodes e ON e.id=s.episode_id
@@ -444,12 +454,14 @@ def _provider_task_clearance_evaluation(
                   WHERE e.project_id=?
                )""",
         ])
-        job_scope_params.extend([project_id, project_id, project_id, project_id])
+        job_scope_params.extend([project_id, project_id])
         claim_scope_clauses.append("c.project_id=?")
         claim_scope_params.append(project_id)
     if episode_id:
+        if "episode_id" in job_columns:
+            job_scope_clauses.append("j.episode_id=?")
+            job_scope_params.append(episode_id)
         job_scope_clauses.extend([
-            "j.episode_id=?",
             "j.shot_id IN (SELECT id FROM shots WHERE episode_id=?)",
             """j.version_id IN (
                    SELECT v.id FROM shot_versions v
@@ -457,7 +469,7 @@ def _provider_task_clearance_evaluation(
                   WHERE s.episode_id=?
                )""",
         ])
-        job_scope_params.extend([episode_id, episode_id, episode_id])
+        job_scope_params.extend([episode_id, episode_id])
         claim_scope_clauses.append(
             "(c.episode_id=? OR c.origin_episode_id=?)"
         )
@@ -491,6 +503,19 @@ def _provider_task_clearance_evaluation(
         """SELECT 1 FROM sqlite_master
             WHERE type='table' AND name='provider_video_budget_claims'"""
     ).fetchone())
+    provider_calls_available = bool(db.execute(
+        """SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='provider_calls'"""
+    ).fetchone())
+    create_call_succeeded_sql = (
+        """EXISTS(
+               SELECT 1 FROM provider_calls pc
+                WHERE pc.kind='video_create' AND pc.status='OK'
+                  AND pc.operation_id={operation}
+           )"""
+        if provider_calls_available
+        else "0"
+    )
     rows = []
     if claims_available:
         rows.extend(db.execute(
@@ -509,11 +534,8 @@ def _provider_task_clearance_evaluation(
                        v.video_path,v.cost_cny,
                        c.status AS claim_status,c.amount_cny AS claim_amount,
                        c.operation_id AS claim_operation_id,c.accepted_at,
-                       EXISTS(
-                           SELECT 1 FROM provider_calls pc
-                            WHERE pc.kind='video_create' AND pc.status='OK'
-                              AND pc.operation_id=c.operation_id
-                       ) AS create_call_succeeded
+                       {create_call_succeeded_sql.format(operation="c.operation_id")}
+                           AS create_call_succeeded
                   FROM provider_video_budget_claims c
                   LEFT JOIN jobs j ON j.id=c.job_id
                   LEFT JOIN shot_versions v ON v.id=c.version_id
@@ -529,8 +551,12 @@ def _provider_task_clearance_evaluation(
         if claims_available
         else ""
     )
+    job_project_select = "j.project_id" if "project_id" in job_columns else "NULL"
+    job_episode_select = "j.episode_id" if "episode_id" in job_columns else "NULL"
     rows.extend(db.execute(
-        f"""SELECT j.id AS job_id,j.version_id,j.project_id,j.episode_id,j.shot_id,
+        f"""SELECT j.id AS job_id,j.version_id,
+                   {job_project_select} AS project_id,
+                   {job_episode_select} AS episode_id,j.shot_id,
                    j.id AS live_job_id,
                    j.status AS job_status,
                    j.cancellation_requested,j.abandoned,
@@ -541,11 +567,8 @@ def _provider_task_clearance_evaluation(
                    NULL AS claim_status,NULL AS claim_amount,
                    j.provider_operation_id AS claim_operation_id,
                    NULL AS accepted_at,
-                   EXISTS(
-                       SELECT 1 FROM provider_calls pc
-                        WHERE pc.kind='video_create' AND pc.status='OK'
-                          AND pc.operation_id=j.provider_operation_id
-                   ) AS create_call_succeeded
+                   {create_call_succeeded_sql.format(operation="j.provider_operation_id")}
+                       AS create_call_succeeded
               FROM jobs j
               LEFT JOIN shot_versions v ON v.id=j.version_id
              WHERE ({" OR ".join(f"({clause})" for clause in job_scope_clauses)})
