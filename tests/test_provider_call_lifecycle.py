@@ -754,6 +754,58 @@ def test_long_request_hash_preserves_tail_for_cache_and_retry_linkage(
     ) is None
 
 
+def test_pre_migration_null_hash_unknown_is_resolved_without_false_exact_link(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-legacy-null-hash.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    prefix = "x" * 120_001
+    request = {"messages": [{"role": "user", "content": prefix + "A"}]}
+    legacy = db.start_provider_call(
+        "chat", "m", request_json=request,
+        meta={"operation_id": "old-run-scoped-operation"},
+    )
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE provider_calls SET status='INTERRUPTED',request_hash=NULL,"
+        "recovery_disposition='REQUIRES_EXPLICIT_RETRY' WHERE id=?",
+        (legacy,),
+    )
+    conn.commit()
+
+    retry = db.start_provider_call(
+        "chat", "m", request_json=request,
+        meta={
+            "operation_id": "new-stable-operation",
+            "supersedes_provider_call_id": legacy,
+            "production_grant_id": "grant-new",
+        },
+    )
+    retry_row = conn.execute(
+        "SELECT supersedes_call_id,meta FROM provider_calls WHERE id=?",
+        (retry,),
+    ).fetchone()
+    assert retry_row["supersedes_call_id"] is None
+    assert json.loads(retry_row["meta"])["legacy_unknown_resolution_id"] == legacy
+
+    db.finish_provider_call(
+        retry, "OK", 200, 10,
+        response_json={"choices": [{"message": {"content": "ok"}}]},
+    )
+    legacy_row = conn.execute(
+        "SELECT superseded_by_call_id,recovery_disposition FROM provider_calls WHERE id=?",
+        (legacy,),
+    ).fetchone()
+    assert dict(legacy_row) == {
+        "superseded_by_call_id": retry,
+        "recovery_disposition": (
+            "LEGACY_UNKNOWN_RESOLVED_BY_EXPLICIT_RETRY"
+        ),
+    }
+
+
 def test_late_response_from_old_process_cannot_overwrite_interrupted_call(
     tmp_path, monkeypatch,
 ) -> None:

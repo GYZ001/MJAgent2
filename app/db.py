@@ -2670,6 +2670,7 @@ def _start_provider_call_inner(
         (op_id,),
     ).fetchone()
     explicit_previous_id = int((meta or {}).get("supersedes_provider_call_id") or 0)
+    legacy_unknown_resolution_id = 0
     if previous is None and explicit_previous_id:
         legacy_previous = conn.execute(
             """SELECT id,attempt_no,status,request_hash
@@ -2684,6 +2685,14 @@ def _start_provider_call_inner(
             == provider_request_hash(request_json)
         ):
             previous = legacy_previous
+        elif legacy_previous is not None and not str(
+            legacy_previous["request_hash"] or ""
+        ):
+            # Pre-migration observability kept only a truncated request, so it
+            # can never prove byte identity and must not become a supersedes
+            # edge.  A newly authorized operation may consume this unknown
+            # liability once, after its own result is durable.
+            legacy_unknown_resolution_id = int(legacy_previous["id"])
     attempt_no = int(previous["attempt_no"] or 0) + 1 if previous else 1
     cur = conn.execute(
         """INSERT INTO provider_calls(
@@ -2692,7 +2701,12 @@ def _start_provider_call_inner(
             recovery_disposition
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (now(), kind, model, "RUNNING", None, 0, None, _dump_call_json(request_json),
-         provider_request_hash(request_json), None, _dump_meta_json(meta), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
+         provider_request_hash(request_json), None, _dump_meta_json({
+             **(meta or {}),
+             "legacy_unknown_resolution_id": (
+                 legacy_unknown_resolution_id or None
+             ),
+         }), project_id, trace.run_id, trace.step_run_id, trace.trace_id,
          op_id, attempt_no, previous["id"] if previous else None,
          "RETRYING_INTERRUPTED" if previous and previous["status"] == "INTERRUPTED" else None),
     )
@@ -2837,7 +2851,7 @@ def _finish_provider_call_inner(
         return
     if status in {"OK", "SUCCEEDED", "SUCCESS"}:
         row = conn.execute(
-            "SELECT supersedes_call_id FROM provider_calls WHERE id=?", (call_id,)
+            "SELECT supersedes_call_id,meta FROM provider_calls WHERE id=?", (call_id,)
         ).fetchone()
         if row and row["supersedes_call_id"]:
             conn.execute(
@@ -2846,6 +2860,24 @@ def _finish_provider_call_inner(
                 "WHERE id=? AND status='INTERRUPTED'",
                 (call_id, row["supersedes_call_id"]),
             )
+        if row:
+            try:
+                call_meta = json.loads(row["meta"] or "{}")
+                legacy_unknown_id = int(
+                    call_meta.get("legacy_unknown_resolution_id") or 0
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                legacy_unknown_id = 0
+            if legacy_unknown_id:
+                conn.execute(
+                    """UPDATE provider_calls
+                          SET superseded_by_call_id=?,
+                              recovery_disposition='LEGACY_UNKNOWN_RESOLVED_BY_EXPLICIT_RETRY'
+                        WHERE id=? AND status='INTERRUPTED'
+                          AND request_hash IS NULL
+                          AND superseded_by_call_id IS NULL""",
+                    (call_id, legacy_unknown_id),
+                )
     conn.commit()
 
 
