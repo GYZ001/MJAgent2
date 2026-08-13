@@ -22,6 +22,10 @@ class _ScenePayload(BaseModel):
     scenes: list[_Scene]
 
 
+class _PermissiveReviewPayload(BaseModel):
+    issues: list[dict] = Field(default_factory=list)
+
+
 def test_structured_runner_recovers_complete_trailing_json(monkeypatch) -> None:
     calls = 0
     attempts: list[dict] = []
@@ -54,7 +58,6 @@ def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
     monkeypatch,
 ) -> None:
     calls = 0
-    repair_calls = 0
     attempts: list[dict] = []
     raw = """{"issues":[
     {
@@ -69,40 +72,12 @@ def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
         "message":"时间顺序冲突",
         "required_resolution":"恢复原文顺序"
     }
-],"transport_note":"sample1"}"""
-    recovered = {
-        "issues": [
-            {
-                "code": "state_subject_assignment_conflict",
-                "node_keys": ["S005-E01-S05-N001"],
-                "message": "joint主体与原文冲突",
-                "required_resolution": '修正为["孟浩","王有材"]并保持其余字段',
-            },
-            {
-                "code": "timeline_conflict",
-                "node_keys": ["S004-N001"],
-                "message": "时间顺序冲突",
-                "required_resolution": "恢复原文顺序",
-            },
-        ],
-        "transport_note": "sample1",
-    }
-
-    nested_candidates = model_gateway._json_candidates(raw)
-    assert nested_candidates
-    assert all("issues" not in candidate for candidate in nested_candidates)
+],"transport_note":"production-29805-redacted"}"""
 
     async def fake_chat(*_args, **_kwargs):
         nonlocal calls
         calls += 1
         return raw
-
-    def fake_extract_json(value, *, repair_unescaped_inner_quotes=False):
-        nonlocal repair_calls
-        repair_calls += 1
-        assert value == raw
-        assert repair_unescaped_inner_quotes is True
-        return recovered
 
     def normalize(payload):
         normalized = dict(payload)
@@ -110,13 +85,12 @@ def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
         return normalized
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
-    monkeypatch.setattr(schemas, "extract_json", fake_extract_json)
 
     result = asyncio.run(model_gateway.chat_structured(
         [{"role": "user", "content": "review current blueprint"}],
         model_type=BlueprintSemanticReview,
         validate=None,
-        operation_id="test.review-root-recovery:v1:sample1",
+        operation_id="test.review-root-recovery:v1:production-29805-redacted",
         max_tokens=8192,
         format_retry_limit=0,
         semantic_retry_limit=0,
@@ -129,12 +103,37 @@ def test_structured_runner_repairs_root_after_nested_review_candidates_fail(
         '修正为["孟浩","王有材"]并保持其余字段'
     )
     assert calls == 1
-    assert repair_calls == 1
     assert len(attempts) == 1
     assert attempts[0]["outcome"] == "validated"
     assert attempts[0]["format_attempt"] == 0
     assert attempts[0]["semantic_attempt"] == 0
     assert attempts[0]["local_recovery"] is True
+
+
+def test_structured_runner_does_not_accept_nested_candidate_as_root(
+    monkeypatch,
+) -> None:
+    raw = """{"issues":[
+    {"code":"first","message":"必须保留的问题一"},
+    {"code":"second","message":"必须保留的问题二"}
+],"note":"修正为["甲","乙"]"}"""
+
+    async def fake_chat(*_args, **_kwargs):
+        return raw
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "review"}],
+        model_type=_PermissiveReviewPayload,
+        validate=None,
+        operation_id="test.reject-nested-root:v1:abc",
+        max_tokens=128,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+    ))
+
+    assert [issue["code"] for issue in result.issues] == ["first", "second"]
 
 
 def test_structured_runner_uses_one_format_repair(monkeypatch) -> None:
@@ -191,6 +190,37 @@ def test_format_repair_keeps_outer_candidate_validation_error(
     assert result.scenes[0].story_function == "建立本场冲突"
     assert "String should have at least 6 characters" in prompts[1]
     assert '"story_function":"setup"' in prompts[1]
+    assert "Field required" not in prompts[1]
+
+
+def test_format_repair_uses_distinct_recovered_root_error_and_payload(
+    monkeypatch,
+) -> None:
+    prompts: list[str] = []
+    raw = (
+        '{"value":"bad","note":"修正为["甲","乙"]"}\n'
+        '最终候选 {"other":1}'
+    )
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return raw if len(prompts) == 1 else '{"value":3}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "original"}],
+        model_type=_Payload,
+        validate=None,
+        operation_id="test.recovered-root-format-error:v1:abc",
+        max_tokens=128,
+        format_retry_limit=1,
+    ))
+
+    assert result.value == 3
+    assert "Input should be a valid integer" in prompts[1]
+    assert '"value":"bad"' in prompts[1]
+    assert '"other":1' not in prompts[1]
     assert "Field required" not in prompts[1]
 
 

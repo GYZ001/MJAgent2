@@ -32,12 +32,50 @@ class StructuredProviderRejection(StructuredOutputError):
     """The provider returned an explicit error envelope instead of model output."""
 
 
+def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
+    """Detect objects whose boundaries prove they are container children."""
+    expected_closers: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text[:start]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            expected_closers.append("}")
+        elif char == "[":
+            expected_closers.append("]")
+        elif char in "}]" and expected_closers and expected_closers[-1] == char:
+            expected_closers.pop()
+
+    if in_string or not expected_closers:
+        return in_string
+    prefix = text[:start].rstrip()
+    suffix = text[end:].lstrip()
+    previous_char = prefix[-1] if prefix else ""
+    next_char = suffix[0] if suffix else ""
+    return (
+        bool(previous_char) and previous_char in "[:,"
+    ) or (
+        bool(next_char) and next_char in ",]}"
+    )
+
+
 def _json_candidates(value: str) -> list[dict[str, Any]]:
-    """Return complete JSON objects, preferring a valid trailing response.
+    """Return complete root JSON objects, preferring a trailing response.
 
     Providers occasionally prepend commentary or leave a truncated object
     before emitting a complete corrected object.  ``raw_decode`` lets us find
     complete suffixes without trying to manufacture missing semantic content.
+    Objects with explicit parent-container boundaries are nested values, not
+    substitutes for the requested root payload.
     """
     text = str(value or "").strip()
     decoder = json.JSONDecoder()
@@ -49,8 +87,12 @@ def _json_candidates(value: str) -> list[dict[str, Any]]:
             payload, end = decoder.raw_decode(text[index:])
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict):
-            candidates.append((index + end, payload))
+        end += index
+        if (
+            isinstance(payload, dict)
+            and not _is_nested_json_candidate(text, index, end)
+        ):
+            candidates.append((end, payload))
     return [payload for _end, payload in sorted(candidates, key=lambda item: item[0], reverse=True)]
 
 
@@ -383,10 +425,8 @@ async def chat_structured(
             try:
                 parsed = _coerce_structured(model_type, candidate_payload)
             except (TypeError, ValueError, ValidationError) as exc:
-                # Candidates are ordered from the latest complete outer object
-                # to its nested objects. Preserve the outer object's error;
-                # overwriting it with a nested unit's missing-root-fields error
-                # sends the format repair down the wrong path.
+                # Independent roots are ordered newest first. Keep that root's
+                # error instead of replacing it with an older draft's error.
                 if parse_error is None:
                     parse_error = exc
                     repair_payload = candidate_payload
@@ -403,9 +443,8 @@ async def chat_structured(
                 or direct_payload != candidate_payload
             )
             break
-        # A malformed root may still expose valid nested object candidates.
-        # Preserve trailing-object priority, then repair the root only when no
-        # complete candidate can satisfy the requested model.
+        # Preserve independent trailing-object priority, then conservatively
+        # repair the original root when no complete root satisfies the model.
         if parsed is None:
             try:
                 from app.schemas import extract_json
@@ -431,9 +470,9 @@ async def chat_structured(
                         recovered_payload,
                     )
                 except (TypeError, ValueError, ValidationError) as exc:
-                    if parse_error is None:
-                        parse_error = exc
-                        repair_payload = recovered_payload
+                    parse_error = exc
+                    repair_payload = recovered_payload
+                    local_recovery = True
                 else:
                     local_recovery = True
         if parsed is None:

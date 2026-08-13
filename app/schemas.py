@@ -1672,6 +1672,24 @@ StoryboardOutlineShot.model_rebuild()
 StoryboardOutline.model_rebuild()
 
 
+def _embedded_string_array_end(text: str, start: int) -> int | None:
+    """Return the end of an exact ``list[str]`` fragment inside prose."""
+    previous_index = start - 1
+    while previous_index >= 0 and text[previous_index].isspace():
+        previous_index -= 1
+    if previous_index < 0 or text[previous_index] == '"':
+        return None
+    try:
+        value, end = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    if not value or not isinstance(value, list):
+        return None
+    if any(not isinstance(item, str) for item in value):
+        return None
+    return start + end
+
+
 def _escape_unescaped_inner_quotes(text: str) -> str:
     """只修复能明确判定为 JSON 字符串内容的裸双引号。
 
@@ -1683,6 +1701,7 @@ def _escape_unescaped_inner_quotes(text: str) -> str:
     repaired: list[str] = []
     in_string = False
     escaped = False
+    embedded_string_array_end: int | None = None
     length = len(text)
     for index, char in enumerate(text):
         if not in_string:
@@ -1700,8 +1719,24 @@ def _escape_unescaped_inner_quotes(text: str) -> str:
             continue
         if char != '"':
             repaired.append(char)
+            if char == "[":
+                embedded_string_array_end = _embedded_string_array_end(
+                    text,
+                    index,
+                )
+            elif (
+                embedded_string_array_end is not None
+                and index + 1 >= embedded_string_array_end
+            ):
+                embedded_string_array_end = None
             continue
 
+        if (
+            embedded_string_array_end is not None
+            and index < embedded_string_array_end
+        ):
+            repaired.extend(("\\", char))
+            continue
         next_index = index + 1
         while next_index < length and text[next_index].isspace():
             next_index += 1
