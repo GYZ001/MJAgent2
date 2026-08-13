@@ -4431,7 +4431,7 @@ async def _semantic_review_narrative_blueprint(
             ),
         ).fetchone()
         if existing is None:
-            artifact = evidence_repository.create_artifact(
+            evidence_repository.create_artifact(
                 EvidenceArtifact(
                     type="screenplay_narrative_blueprint",
                     scope_type="episode",
@@ -4450,9 +4450,6 @@ async def _semantic_review_narrative_blueprint(
                 ),
                 step_run_id=trace.step_run_id,
             )
-            artifact_id = str(artifact["id"])
-        else:
-            artifact_id = str(existing["id"])
 
         # Historical unknown provider outcomes are resolved only after this
         # reviewed artifact has been selected as current authority and written
@@ -4467,23 +4464,35 @@ async def _semantic_review_narrative_blueprint(
         ).encode("utf-8")
     ).hexdigest()
     cached_rows = get_conn().execute(
-        """SELECT id,content_json
+        """SELECT id,content_json,model_snapshot_json
              FROM artifacts
             WHERE scope_type='episode' AND scope_id=?
               AND type='screenplay_narrative_blueprint_review_consensus'
               AND status='validated'
+              AND contract_version=? AND prompt_version=?
             ORDER BY created_at DESC LIMIT 20""",
-        (str(episode.get("id") or ""),),
+        (
+            str(episode.get("id") or ""),
+            BLUEPRINT_VERSION,
+            SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        ),
     ).fetchall()
     for row in cached_rows:
         try:
             cached = json.loads(row["content_json"] or "{}")
+            cached_snapshot = json.loads(
+                row["model_snapshot_json"] or "{}"
+            )
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if (
             cached.get("blueprint_hash") == initial_blueprint_hash
             and not cached.get("consensus_issue_keys")
             and cached.get("review_outcome") == "clean"
+            and cached_snapshot.get("review_policy_version")
+            == BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
+            and cached_snapshot.get("authority_fingerprint")
+            == blueprint_authority_validator_fingerprint()
         ):
             persist_reviewed_authority(parent_artifact_ids=[str(row["id"])])
             return blueprint
@@ -4918,6 +4927,14 @@ async def _semantic_review_narrative_blueprint(
                     parent_artifact_ids=review_artifact_ids,
                     contract_version=BLUEPRINT_VERSION,
                     prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                    model_snapshot={
+                        "review_policy_version": (
+                            BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
+                        ),
+                        "authority_fingerprint": (
+                            blueprint_authority_validator_fingerprint()
+                        ),
+                    },
                 ),
                 step_run_id=trace.step_run_id,
             )
@@ -4981,6 +4998,14 @@ async def _semantic_review_narrative_blueprint(
                 parent_artifact_ids=review_artifact_ids,
                 contract_version=BLUEPRINT_VERSION,
                 prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                model_snapshot={
+                    "review_policy_version": (
+                        BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
+                    ),
+                    "authority_fingerprint": (
+                        blueprint_authority_validator_fingerprint()
+                    ),
+                },
             ),
             step_run_id=trace.step_run_id,
         )
@@ -6788,6 +6813,266 @@ def _save_screenplay_generation_checkpoint(
     })
 
 
+def _commit_blueprint_authority_checkpoint(
+    *,
+    episode_id: str,
+    blueprint_artifact_id: str,
+    blueprint_hash: str,
+    source_text: str,
+) -> None:
+    """Atomically checkpoint current Blueprint authority and resolve its receipts."""
+    from app.observability.tracing import current_trace
+
+    trace = current_trace()
+    run_id = str(trace.run_id or "")
+    if not run_id:
+        _save_screenplay_generation_checkpoint(
+            episode_id,
+            "IDENTITY_FREEZE",
+            blueprint_artifact_id=blueprint_artifact_id,
+            blueprint_hash=blueprint_hash,
+            yield_reason=None,
+        )
+        return
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        owner = conn.execute(
+            "SELECT active_screenplay_run_id FROM episodes WHERE id=?",
+            (episode_id,),
+        ).fetchone()
+        if owner is None or str(owner["active_screenplay_run_id"] or "") != run_id:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_AUTHORITY_OWNER_DRIFT] 当前运行已失去剧集写权"],
+            )
+        revision = conn.execute(
+            """SELECT id,checkpoint_json,grant_id FROM production_revisions
+                 WHERE episode_id=? AND kind='screenplay' AND status='active'
+                 ORDER BY updated_at DESC LIMIT 1""",
+            (episode_id,),
+        ).fetchone()
+        if revision is None:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_AUTHORITY_REVISION_MISSING] 缺少active revision"],
+            )
+        artifact = conn.execute(
+            """SELECT content_json,content_hash,model_snapshot_json FROM artifacts
+                 WHERE id=? AND type='screenplay_narrative_blueprint'
+                   AND scope_type='episode' AND scope_id=?
+                   AND status='validated' AND contract_version=?
+                   AND prompt_version=?""",
+            (
+                blueprint_artifact_id,
+                episode_id,
+                BLUEPRINT_VERSION,
+                SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            ),
+        ).fetchone()
+        if artifact is None:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_AUTHORITY_ARTIFACT_INVALID] current Blueprint artifact失效"],
+            )
+        snapshot = json.loads(artifact["model_snapshot_json"] or "{}")
+        artifact_blueprint = NarrativeBlueprint.model_validate(
+            json.loads(artifact["content_json"] or "{}")
+        )
+        if (
+            _narrative_blueprint_content_hash(artifact_blueprint)
+            != blueprint_hash
+            or not _blueprint_authority_snapshot_is_current(
+                snapshot,
+                source_text,
+            )
+        ):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_AUTHORITY_SNAPSHOT_DRIFT] Blueprint authority版本漂移"],
+            )
+        checkpoint = json.loads(revision["checkpoint_json"] or "{}")
+        checkpoint.update({
+            "phase": "IDENTITY_FREEZE",
+            "blueprint_artifact_id": blueprint_artifact_id,
+            "blueprint_hash": blueprint_hash,
+            "yield_reason": None,
+        })
+        changed = conn.execute(
+            "UPDATE production_revisions SET checkpoint_json=?,updated_at=? "
+            "WHERE id=? AND status='active' AND grant_id IS ?",
+            (
+                json.dumps(checkpoint, ensure_ascii=False),
+                time.time(),
+                str(revision["id"]),
+                revision["grant_id"],
+            ),
+        )
+        if changed.rowcount != 1:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_AUTHORITY_CHECKPOINT_CAS] revision authority漂移"],
+            )
+
+        run = conn.execute(
+            "SELECT input_fingerprint,config_snapshot_json FROM workflow_runs "
+            "WHERE id=? AND scope_type='episode' AND scope_id=?",
+            (run_id, episode_id),
+        ).fetchone()
+        config_snapshot = json.loads(run["config_snapshot_json"] or "{}")
+        receipts = config_snapshot.get("blueprint_retry_receipts") or []
+        pinned_hash = str(
+            config_snapshot.get("blueprint_retry_receipts_hash") or ""
+        )
+        grant_id = str(config_snapshot.get("blueprint_retry_grant_id") or "")
+        if not receipts and not pinned_hash and not grant_id:
+            conn.commit()
+            return
+        if (
+            not isinstance(receipts, list)
+            or not receipts
+            or blueprint_retry_receipts_hash(receipts) != pinned_hash
+        ):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_RESOLUTION_RECEIPTS_DRIFT] retry receipts snapshot漂移"],
+            )
+        if str(revision["grant_id"] or "") != grant_id:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_RESOLUTION_GRANT_DRIFT] retry grant authority漂移"],
+            )
+        grant = conn.execute(
+            """SELECT 1 FROM production_grants
+                WHERE id=? AND episode_id=? AND kind='screenplay'
+                  AND production_revision_id=?
+                  AND issued_by='user_retry_approval'
+                  AND input_artifact_hash=? AND consumed_at IS NOT NULL
+                  AND revoked_at IS NULL AND expires_at>?""",
+            (
+                grant_id,
+                episode_id,
+                str(revision["id"]),
+                pinned_hash,
+                time.time(),
+            ),
+        ).fetchone()
+        if grant is None:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_RESOLUTION_GRANT_INVALID] pinned retry grant失效"],
+            )
+        exact_ids = [int(item.get("call_id") or 0) for item in receipts]
+        if any(call_id <= 0 for call_id in exact_ids) or len(exact_ids) != len(set(exact_ids)):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_RESOLUTION_RECEIPTS_INVALID] retry call IDs无效"],
+            )
+        artifact_hash = str(artifact["content_hash"] or "")
+        operation_id = "blueprint-resolution:" + hashlib.sha256(
+            f"{blueprint_artifact_id}:{artifact_hash}:{run_id}:{grant_id}:{pinned_hash}".encode()
+        ).hexdigest()
+        resolution = conn.execute(
+            "SELECT id FROM provider_calls WHERE operation_id=? "
+            "AND kind='blueprint_authority_resolution'",
+            (operation_id,),
+        ).fetchone()
+        resolution_id = int(resolution["id"]) if resolution is not None else 0
+        placeholders = ",".join("?" for _ in exact_ids)
+        rows = conn.execute(
+            f"""SELECT pc.id,pc.status,pc.superseded_by_call_id,
+                       pc.recovery_disposition,pc.operation_id,
+                       pc.request_hash,pc.meta,wr.input_fingerprint
+                  FROM provider_calls pc
+                  JOIN workflow_runs wr ON wr.id=pc.run_id
+                 WHERE pc.id IN ({placeholders})
+                   AND wr.scope_type='episode' AND wr.scope_id=?""",
+            (*exact_ids, episode_id),
+        ).fetchall()
+        by_id = {int(row["id"]): row for row in rows}
+        for receipt in receipts:
+            call_id = int(receipt["call_id"])
+            row = by_id.get(call_id)
+            meta = json.loads(row["meta"] or "{}") if row is not None else {}
+            already_exact = bool(
+                resolution_id
+                and row is not None
+                and int(row["superseded_by_call_id"] or 0) == resolution_id
+                and str(row["recovery_disposition"] or "")
+                == "SUPERSEDED_BY_VALIDATED_BLUEPRINT_REBUILD"
+            )
+            if (
+                row is None
+                or str(row["status"] or "") not in {"INTERRUPTED", "RUNNING"}
+                or (
+                    row["superseded_by_call_id"] is not None
+                    and not already_exact
+                )
+                or str(row["input_fingerprint"] or "")
+                != str(run["input_fingerprint"] or "")
+                or str(meta.get("stage_key") or "")
+                != str(receipt.get("stage_key") or "")
+                or str(row["operation_id"] or "")
+                != str(receipt.get("operation_id") or "")
+                or str(row["request_hash"] or "")
+                != str(receipt.get("request_hash") or "")
+            ):
+                raise StageError(
+                    "剧本时空因果蓝图分片",
+                    [f"[BLUEPRINT_RESOLUTION_RECEIPT_CAS] call {call_id} authority漂移"],
+                )
+        if resolution is None:
+            cursor = conn.execute(
+                """INSERT INTO provider_calls(
+                       ts,kind,model,status,latency_ms,contract_version,
+                       production_grant_id,response_json,meta,run_id,step_run_id,
+                       operation_id,attempt_no,recovery_disposition
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    time.time(), "blueprint_authority_resolution",
+                    "deterministic", "OK", 0, BLUEPRINT_VERSION, grant_id,
+                    json.dumps({
+                        "artifact_id": blueprint_artifact_id,
+                        "artifact_hash": artifact_hash,
+                        "receipts_hash": pinned_hash,
+                    }, sort_keys=True, separators=(",", ":")),
+                    json.dumps({
+                        "stage_key": "screenplay_blueprint_resolution",
+                        "episode_id": episode_id,
+                    }, sort_keys=True, separators=(",", ":")),
+                    run_id, trace.step_run_id, operation_id, 1,
+                    "VALIDATED_BLUEPRINT_AUTHORITY",
+                ),
+            )
+            resolution_id = int(cursor.lastrowid)
+        for call_id in exact_ids:
+            cursor = conn.execute(
+                "UPDATE provider_calls SET superseded_by_call_id=?,"
+                "recovery_disposition='SUPERSEDED_BY_VALIDATED_BLUEPRINT_REBUILD' "
+                "WHERE id=? AND status IN ('INTERRUPTED','RUNNING') "
+                "AND superseded_by_call_id IS NULL",
+                (resolution_id, call_id),
+            )
+            if cursor.rowcount == 0:
+                exact = conn.execute(
+                    "SELECT 1 FROM provider_calls WHERE id=? "
+                    "AND superseded_by_call_id=? "
+                    "AND recovery_disposition="
+                    "'SUPERSEDED_BY_VALIDATED_BLUEPRINT_REBUILD'",
+                    (call_id, resolution_id),
+                ).fetchone()
+                if exact is None:
+                    raise StageError(
+                        "剧本时空因果蓝图分片",
+                        ["[BLUEPRINT_RESOLUTION_PARTIAL] retry receipts未精确终结"],
+                    )
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 async def _run_screenplay_workflow_step(
     step_key: str,
     operation: Callable[[], Any],
@@ -6981,12 +7266,11 @@ async def _generate_screenplay_scene_sharded_baseline(
             step_run_id=trace.step_run_id,
         )
         blueprint_artifact_id = str(artifact["id"])
-    _save_screenplay_generation_checkpoint(
-        episode_id,
-        "IDENTITY_FREEZE",
+    _commit_blueprint_authority_checkpoint(
+        episode_id=episode_id,
         blueprint_artifact_id=blueprint_artifact_id,
         blueprint_hash=blueprint_hash,
-        yield_reason=None,
+        source_text=source_text,
     )
 
     async def freeze_identity() -> tuple[list[Any], list[dict[str, Any]], str, str]:
