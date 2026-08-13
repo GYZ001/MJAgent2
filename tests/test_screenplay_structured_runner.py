@@ -227,6 +227,126 @@ def test_structured_runner_only_validates_latest_complete_root(
     assert attempts[0]["local_recovery"] is True
 
 
+def test_latest_array_blocks_older_valid_root_without_retry(
+    monkeypatch,
+) -> None:
+    attempts: list[dict] = []
+    raw = '{"value":1}\n以下是最新修正版\n[{"value":2}]'
+
+    async def fake_chat(*_args, **_kwargs):
+        return raw
+
+    def unexpected_object_scan(*_args, **_kwargs):
+        raise AssertionError("array authority must not scan its child object")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", unexpected_object_scan)
+
+    with pytest.raises(
+        model_gateway.StructuredFormatError,
+        match="最新顶层 authority 为 array",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "return json"}],
+            model_type=_Payload,
+            validate=None,
+            operation_id="test.latest-array-blocks-old-root:v1:abc",
+            max_tokens=128,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+            on_attempt=attempts.append,
+        ))
+
+    assert attempts[0]["outcome"] == "format_error"
+    assert attempts[0]["local_recovery"] is True
+    assert "最新顶层 authority 为 array" in attempts[0]["validation_errors"][0]
+
+
+def test_latest_array_format_retry_uses_only_array_substring(
+    monkeypatch,
+) -> None:
+    prompts: list[str] = []
+    raw = '{"value":1001}\n以下是最新修正版\n[{"value":2}]'
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return raw if len(prompts) == 1 else '{"value":3}'
+
+    def unexpected_object_scan(*_args, **_kwargs):
+        raise AssertionError("array authority must not scan its child object")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", unexpected_object_scan)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "original"}],
+        model_type=_Payload,
+        validate=None,
+        operation_id="test.latest-array-format-retry:v1:abc",
+        max_tokens=128,
+        format_retry_limit=1,
+        semantic_retry_limit=0,
+    ))
+
+    assert result.value == 3
+    assert "最新顶层 authority 为 array" in prompts[1]
+    assert '[{"value":2}]' in prompts[1]
+    assert '{"value":1001}' not in prompts[1]
+    assert "以下是最新修正版" not in prompts[1]
+
+
+def test_standalone_array_is_root_type_format_error(
+    monkeypatch,
+) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return '[{"value":2}]'
+
+    def unexpected_object_scan(*_args, **_kwargs):
+        raise AssertionError("array authority must not scan its child object")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", unexpected_object_scan)
+
+    with pytest.raises(
+        model_gateway.StructuredFormatError,
+        match="最新顶层 authority 为 array",
+    ):
+        asyncio.run(model_gateway.chat_structured(
+            [{"role": "user", "content": "return json"}],
+            model_type=_Payload,
+            validate=None,
+            operation_id="test.standalone-array-root-type:v1:abc",
+            max_tokens=128,
+            format_retry_limit=0,
+            semantic_retry_limit=0,
+        ))
+
+
+def test_nested_array_does_not_override_outer_object_authority(
+    monkeypatch,
+) -> None:
+    async def fake_chat(*_args, **_kwargs):
+        return '{"value":7,"items":[{"value":1}]}'
+
+    def unexpected_root_repair(*_args, **_kwargs):
+        raise AssertionError("complete outer object must use direct decoding")
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(schemas, "extract_json", unexpected_root_repair)
+
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "return json"}],
+        model_type=_Payload,
+        validate=None,
+        operation_id="test.nested-array-keeps-outer-authority:v1:abc",
+        max_tokens=128,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+    ))
+
+    assert result.value == 7
+
+
 @pytest.mark.parametrize(
     "raw",
     (

@@ -191,13 +191,13 @@ def _json_candidates(value: str) -> list[dict[str, Any]]:
     return [payload for _end, payload in sorted(candidates, key=lambda item: item[0], reverse=True)]
 
 
-def _latest_json_recovery_root(value: str) -> str | None:
-    """Return the latest object-like substring proven not to be a child."""
+def _latest_json_authority_root(value: str) -> tuple[str, str] | None:
+    """Return the latest object/array root proven not to be a child."""
     text = str(value or "").strip()
     decoder = json.JSONDecoder()
-    latest_root: str | None = None
+    latest_root: tuple[str, str] | None = None
     for index, char in enumerate(text):
-        if char != "{":
+        if char not in "{[":
             continue
         try:
             _, candidate_size = decoder.raw_decode(text[index:])
@@ -206,7 +206,9 @@ def _latest_json_recovery_root(value: str) -> str | None:
         else:
             end = index + candidate_size
         if not _is_nested_json_candidate(text, index, end):
-            latest_root = text[index:]
+            root_type = "object" if char == "{" else "array"
+            root_text = text[index:] if root_type == "object" else text[index:end]
+            latest_root = (root_type, root_text)
     return latest_root
 
 
@@ -529,7 +531,8 @@ async def chat_structured(
         parse_error: Exception | None = None
         repair_payload: dict[str, Any] | None = None
         # Only the latest provenance-qualified root may represent this response.
-        recovery_root = _latest_json_recovery_root(last_raw)
+        authority_root = _latest_json_authority_root(last_raw)
+        root_type, recovery_root = authority_root or (None, None)
         repair_candidate_text = recovery_root or last_raw
         payload: dict[str, Any] | None = None
         decoded: Any = None
@@ -539,24 +542,29 @@ async def chat_structured(
                 local_recovery
                 or recovery_root.strip() != last_raw.strip()
             )
-            try:
-                decoded, _ = json.JSONDecoder().raw_decode(recovery_root)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            if root_type == "array":
+                parse_error = ValueError(
+                    "JSON 根节点类型错误：期望 object，最新顶层 authority 为 array"
+                )
+            else:
                 try:
-                    from app.schemas import extract_json
+                    decoded, _ = json.JSONDecoder().raw_decode(recovery_root)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    try:
+                        from app.schemas import extract_json
 
-                    decoded = extract_json(
-                        recovery_root,
-                        repair_unescaped_inner_quotes=True,
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                    parse_error = exc
-                else:
-                    repaired_locally = True
-            if isinstance(decoded, dict):
-                payload = decoded
-            elif parse_error is None:
-                parse_error = ValueError("JSON 根节点不是对象")
+                        decoded = extract_json(
+                            recovery_root,
+                            repair_unescaped_inner_quotes=True,
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        parse_error = exc
+                    else:
+                        repaired_locally = True
+                if isinstance(decoded, dict):
+                    payload = decoded
+                elif parse_error is None:
+                    parse_error = ValueError("JSON 根节点不是对象")
 
         if payload is not None:
             candidate_payload = (
