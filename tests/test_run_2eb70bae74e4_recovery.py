@@ -28,6 +28,7 @@ from app.screenplay_scene_shards import (
     SCREENPLAY_ENVELOPE_VERSION,
     SCREENPLAY_MERGED_IR_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
+    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
     ScreenplayEnvelopeExperience,
     ScreenplayEnvelopeIR,
     ScreenplayEnvelopeMetadata,
@@ -167,6 +168,17 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
         source_hash = f"source:{index}"
         boundary_hash = f"boundary:{index}"
         generation_hash = f"generation:{index}"
+        creative_hash = f"{index:064x}"
+        semantic_review_evidence = {
+            "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+            "initial_creative_hash": creative_hash,
+            "reviewed_creative_hash": creative_hash,
+            "phases": [{
+                "creative_hash": creative_hash,
+                "reviews": [{"issues": []}, {"issues": []}],
+                "consensus": [],
+            }],
+        }
         raw = repository.create_artifact(EvidenceArtifact(
             type="screenplay_scene_shard_raw",
             scope_type="episode",
@@ -177,9 +189,16 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
                 "shard_id": shard_id,
                 "attempts": [],
                 "generation_scaffold_hash": generation_hash,
+                "semantic_review_evidence": semantic_review_evidence,
             },
             parent_artifact_ids=[blueprint["id"], identity["id"]],
             contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+            model_snapshot={
+                "semantic_review_version": (
+                    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                ),
+                "reviewed_creative_hash": creative_hash,
+            },
         ))
         shard = repository.create_artifact(EvidenceArtifact(
             type="screenplay_scene_shard",
@@ -197,6 +216,12 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
             ),
             parent_artifact_ids=[raw["id"]],
             contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+            model_snapshot={
+                "semantic_review_version": (
+                    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+                ),
+                "reviewed_creative_hash": creative_hash,
+            },
         ))
         shards.append(shard)
         shard_rows.append({
@@ -381,8 +406,10 @@ def test_real_run_polluted_working_rebuilds_from_four_shard_merged_ir(
         lambda *_args, **_kwargs: seeded["clean"].model_copy(deep=True),
     )
     eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
-    assert eligibility.reason_code == "WORKING_REVALIDATION_REQUIRED", eligibility
-    assert eligibility.reusable_checkpoint["merged_ir_artifact_id"] == seeded["merged"]["id"]
+    assert eligibility.reason_code == "WORKING_REVALIDATION_REQUIRED"
+    assert eligibility.reusable_checkpoint["merged_ir_artifact_id"] == (
+        seeded["merged"]["id"]
+    )
     assert len(eligibility.reusable_checkpoint["shards"]) == 4
 
     conn = db.get_conn()

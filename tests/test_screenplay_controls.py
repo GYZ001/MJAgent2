@@ -31,6 +31,7 @@ from app.screenplay_scene_shards import (
     SCREENPLAY_ENVELOPE_VERSION,
     SCREENPLAY_MERGED_IR_VERSION,
     SCREENPLAY_SCENE_SHARD_VERSION,
+    SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
     ScreenplayEnvelopeExperience,
     ScreenplayEnvelopeIR,
     ScreenplayEnvelopeMetadata,
@@ -39,7 +40,11 @@ from app.screenplay_scene_shards import (
     blueprint_content_hash,
     persist_identity_registry,
 )
-from app.screenplay_ir import IR_VERSION, ScreenplayGenerationIR
+from app.screenplay_ir import (
+    IR_COMPILER_VERSION,
+    IR_VERSION,
+    ScreenplayGenerationIR,
+)
 from tests.test_narrative_continuity import _screenplay
 
 
@@ -172,6 +177,17 @@ def _current_shard_artifact(
     source_hash: str = "",
     boundary_hash: str = "",
 ):
+    creative_hash = "a" * 64
+    semantic_review_evidence = {
+        "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+        "initial_creative_hash": creative_hash,
+        "reviewed_creative_hash": creative_hash,
+        "phases": [{
+            "creative_hash": creative_hash,
+            "reviews": [{"issues": []}, {"issues": []}],
+            "consensus": [],
+        }],
+    }
     raw = repository.create_artifact(EvidenceArtifact(
         type="screenplay_scene_shard_raw",
         scope_type="episode",
@@ -182,6 +198,7 @@ def _current_shard_artifact(
             "shard_id": shard_id,
             "attempts": [],
             "generation_scaffold_hash": generation_scaffold_hash,
+            "semantic_review_evidence": semantic_review_evidence,
         },
         parent_artifact_ids=[
             authority["blueprint"]["id"],
@@ -205,6 +222,12 @@ def _current_shard_artifact(
         ),
         parent_artifact_ids=[raw["id"]],
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
+        model_snapshot={
+            "semantic_review_version": (
+                SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+            ),
+            "reviewed_creative_hash": creative_hash,
+        },
     ))
 
 
@@ -249,6 +272,10 @@ def _current_working_artifact():
         content=screenplay_artifact_payload(_screenplay()),
         parent_artifact_ids=[merged["id"]],
         contract_version=get_contract("screenplay").version,
+        model_snapshot={
+            "compiler_version": IR_COMPILER_VERSION,
+            "source_merged_content_hash": merged["content_hash"],
+        },
     ))
 
 
@@ -1868,7 +1895,8 @@ def test_recovery_rebases_legacy_working_artifact(
         (artifact["id"],),
     ).fetchone()
     assert stale["status"] == "stale"
-    assert "participant_deliveries" in stale["stale_reason"]
+    assert "compiler snapshot" in stale["stale_reason"]
+    assert IR_COMPILER_VERSION in stale["stale_reason"]
     revisions = conn.execute(
         "SELECT id,status,baseline_generation_count,working_artifact_id "
         "FROM production_revisions WHERE episode_id='e1' ORDER BY created_at",

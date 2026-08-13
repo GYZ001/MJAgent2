@@ -827,8 +827,7 @@ def test_open_audience_stance_is_audited_and_normalized() -> None:
 
 
 def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor() -> None:
-    payload = _ir_payload()
-    payload["format_version"] = "screenplay-generation-ir.v1.5"
+    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
     relation_rows = (
         (("g",), (), ("g",)),
         ((), (), ("g",)),
@@ -842,6 +841,7 @@ def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor()
         for scene in payload["scenes"]
         for unit in scene["units"]
     ]
+    event_subjects = ("g", "g", "friend", "friend", "friend", "friend")
     for index, (unit, (actors, targets, onscreen)) in enumerate(zip(
         units, relation_rows, strict=True,
     )):
@@ -849,6 +849,8 @@ def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor()
         unit["actor_keys"] = list(actors)
         unit["target_keys"] = list(targets)
         unit["onscreen_entity_keys"] = list(onscreen)
+        unit["state_subject_key"] = event_subjects[index]
+        unit["environment_only"] = False
 
     screenplay = compile_screenplay_ir(
         ScreenplayGenerationIR.model_validate(payload),
@@ -870,8 +872,7 @@ def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor()
 
 def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
     replay = json.loads(SS001_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
-    payload = _ir_payload()
-    payload["format_version"] = "screenplay-generation-ir.v2"
+    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
     units = [
         unit
         for scene in payload["scenes"]
@@ -888,7 +889,11 @@ def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
         (("g",), (), ("g",), []),
         (("friend",), ("g",), ("g", "friend"), []),
         (("friend",), (), ("g", "friend"), []),
-        ((), (), (), []),
+        (("friend",), (), ("g",), [{
+            "participant_key": "friend",
+            "observable_claim": "旧友的画外警告清晰可听。",
+            "audible": True,
+        }]),
         (
             ("friend",),
             (),
@@ -908,6 +913,12 @@ def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
         unit["target_keys"] = list(targets)
         unit["onscreen_entity_keys"] = list(onscreen)
         unit["participant_deliveries"] = deliveries
+        unit["state_subject_key"] = (
+            unit.get("speaker_key") or (actors[0] if actors else "")
+        )
+        unit["environment_only"] = not bool(
+            unit["state_subject_key"]
+        )
         unit["narrative_layer"] = "story"
         unit["event_priority"] = "causal"
         unit["render_policy"] = "standalone"
@@ -2821,11 +2832,24 @@ def _participant_delivery_complete_ir_payload(version: str) -> dict:
         for index in range(1, 4)
     }
     for scene in payload["scenes"]:
+        subject_by_event = {
+            unit["event_key"]: unit.get("speaker_key")
+            for unit in scene["units"]
+            if unit.get("speaker_key")
+        }
         for unit in scene["units"]:
             unit["narrative_layer"] = "story"
             unit["event_priority"] = "causal"
             unit["render_policy"] = "standalone"
             unit["participant_deliveries"] = []
+            subject = subject_by_event.get(unit["event_key"], "")
+            unit["actor_keys"] = (
+                [subject] if unit["kind"] == "action" and subject else []
+            )
+            unit["target_keys"] = []
+            unit["onscreen_entity_keys"] = [subject] if subject else []
+            unit["state_subject_key"] = subject
+            unit["environment_only"] = not bool(subject)
     for event in payload["events"]:
         event["narrative_layer"] = "story"
         event["event_priority"] = "causal"
@@ -2905,7 +2929,7 @@ def _persist_recoverable_ir(
 
 def test_current_ir_serialization_declares_participant_delivery_contract() -> None:
     payload = _participant_delivery_complete_ir_payload(
-        "screenplay-generation-ir.v3"
+        stages.IR_VERSION
     )
 
     serialized = ScreenplayGenerationIR.model_validate(payload).model_dump(
@@ -3106,13 +3130,13 @@ def test_source_audit_contract_rejects_invalid_canonical_identity(
 
 
 def test_recovery_accepts_legal_current_ir_artifact() -> None:
-    episode_id = "ep-ir-contract-v3"
+    episode_id = "ep-ir-contract-v4"
     run_id, step_id, artifact = _persist_recoverable_ir(
         episode_id=episode_id,
-        input_fingerprint="ir-contract-v3",
-        contract_version="screenplay-generation-ir.v3",
+        input_fingerprint="ir-contract-v4",
+        contract_version=stages.IR_VERSION,
         payload=_participant_delivery_complete_ir_payload(
-            "screenplay-generation-ir.v3"
+            stages.IR_VERSION
         ),
     )
 

@@ -934,6 +934,65 @@ def test_blueprint_patch_repairs_malformed_provider_json(
     ]
 
 
+def test_blueprint_state_subject_repair_preserves_timeline_and_source_authority(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint()
+    original_order = [node.key for node in blueprint.nodes]
+    original_sources = {
+        node.key: list(node.source_segment_ids) for node in blueprint.nodes
+    }
+    original_projection = {
+        node.key: node.source_semantics().projection_policy
+        for node in blueprint.nodes
+    }
+    node = blueprint.nodes[0]
+    subject = next(
+        evidence for evidence in node.participant_evidence
+        if evidence.usage == "state_subject"
+    ).model_copy(deep=True)
+    node.participant_evidence = [
+        evidence for evidence in node.participant_evidence
+        if evidence.usage != "state_subject"
+    ]
+    replacement = node.model_copy(deep=True)
+    replacement.participant_evidence.append(subject)
+    patch = NarrativeBlueprintPatch.model_validate({
+        "replacements": [{
+            "node_key": node.key,
+            "node": replacement.model_dump(mode="json"),
+        }],
+    })
+    prompts: list[str] = []
+
+    async def fake_structured(messages, **_kwargs):
+        prompts.append(messages[-1]["content"])
+        return patch
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", fake_structured)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda _artifact, **_kwargs: {"id": str(uuid.uuid4())},
+    )
+    repaired = asyncio.run(stages._repair_narrative_blueprint(
+        blueprint,
+        episode={"id": "episode-state-subject-repair"},
+        source_text=SOURCE,
+    ))
+
+    assert "usage=state_subject" in prompts[0]
+    assert "SRC0001:unit:001" in prompts[0]
+    assert [item.key for item in repaired.nodes] == original_order
+    assert {
+        item.key: item.source_segment_ids for item in repaired.nodes
+    } == original_sources
+    assert {
+        item.key: item.source_semantics().projection_policy
+        for item in repaired.nodes
+    } == original_projection
+    assert repaired.nodes[0].environment_source_unit_keys == []
+
+
 def test_blueprint_review_exhaustion_is_quality_gate(
     monkeypatch,
 ) -> None:
