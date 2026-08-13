@@ -11,6 +11,7 @@ from app.errors import ContentGenerationError
 from app.harness import model_gateway
 from app.narrative_blueprint import (
     BlueprintDecision,
+    BlueprintSourceOccurrenceError,
     BlueprintSemanticReview,
     BlueprintSemanticIssue,
     BlueprintStateChange,
@@ -449,6 +450,117 @@ def test_blueprint_rejects_source_assigned_to_multiple_scene_owners() -> None:
         and "bp-sc002" in error
         for error in errors
     )
+
+
+def test_blueprint_rejects_duplicate_picture_source_within_same_scene() -> None:
+    blueprint = _blueprint()
+    duplicate = blueprint.nodes[0].model_copy(deep=True)
+    duplicate.key = "n1-duplicate"
+    duplicate.time_relation = "continuous"
+    duplicate.scene_boundary_before = False
+    duplicate.decision = None
+    duplicate.state_changes = []
+    blueprint.nodes.insert(1, duplicate)
+
+    errors = validate_narrative_blueprint(blueprint, SOURCE)
+
+    assert any(
+        "[BLUEPRINT_PICTURE_SOURCE_DUPLICATE]" in error
+        and "SRC0001" in error
+        and "n1" in error
+        and "n1-duplicate" in error
+        for error in errors
+    )
+    with pytest.raises(
+        BlueprintSourceOccurrenceError,
+        match="SRC0001.*n1.*n1-duplicate",
+    ):
+        derive_blueprint_scene_plans(blueprint)
+
+
+def test_blueprint_shard_rejects_same_scene_and_same_node_duplicates() -> None:
+    first = _blueprint().nodes[0].model_copy(deep=True)
+    duplicate = first.model_copy(deep=True)
+    duplicate.key = "n1-duplicate"
+    duplicate.time_relation = "continuous"
+    duplicate.decision = None
+    duplicate.state_changes = []
+    shard = NarrativeBlueprintShard(
+        episode_no=8,
+        shard_index=1,
+        source_segment_ids=["SRC0001"],
+        nodes=[first, duplicate],
+    )
+
+    errors = validate_narrative_blueprint_shard(
+        shard,
+        expected_episode_no=8,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+    )
+
+    assert any(
+        "[BLUEPRINT_SHARD_PICTURE_SOURCE_DUPLICATE]" in error
+        and "SRC0001" in error
+        for error in errors
+    )
+
+    first.source_segment_ids.append("SRC0001")
+    within_node_errors = validate_narrative_blueprint_shard(
+        NarrativeBlueprintShard(
+            episode_no=8,
+            shard_index=1,
+            source_segment_ids=["SRC0001"],
+            nodes=[first],
+        ),
+        expected_episode_no=8,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+    )
+    assert any(
+        "[BLUEPRINT_SHARD_PICTURE_SOURCE_DUPLICATE]" in error
+        for error in within_node_errors
+    )
+
+
+def test_blueprint_valid_picture_ownership_remains_exactly_once() -> None:
+    blueprint = _blueprint()
+
+    assert not any(
+        "SOURCE_DUPLICATE" in error
+        or "SOURCE_PARTITION_CONFLICT" in error
+        for error in validate_narrative_blueprint(blueprint, SOURCE)
+    )
+
+
+def test_blueprint_rejects_picture_audit_source_partition_conflict() -> None:
+    blueprint = _blueprint()
+    audit = blueprint.nodes[0].model_copy(deep=True)
+    audit.key = "audit-duplicate"
+    audit.narrative_layer = "paratext"
+    audit.event_priority = "connective"
+    audit.render_policy = "exclude_from_spine"
+    audit.participants = []
+    audit.participant_evidence = []
+    audit.environment_source_unit_keys = []
+    audit.source_unit_deliveries = []
+    audit.state_requirements = []
+    audit.state_changes = []
+    audit.decision = None
+    blueprint.nodes.append(audit)
+
+    errors = validate_narrative_blueprint(blueprint, SOURCE)
+
+    assert any(
+        "[BLUEPRINT_SOURCE_PARTITION_CONFLICT]" in error
+        and "SRC0001" in error
+        for error in errors
+    )
+    with pytest.raises(
+        BlueprintSourceOccurrenceError,
+        match="SOURCE_PARTITION_CONFLICT.*SRC0001",
+    ):
+        derive_blueprint_scene_plans(blueprint)
 
 
 def test_blueprint_normalizes_unpadded_source_ids() -> None:

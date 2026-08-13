@@ -255,7 +255,11 @@ def _screenplay_checkpoint_compatibility(
     *,
     conn,
 ) -> tuple[dict[str, Any], dict[str, int], bool]:
-    from app.narrative_blueprint import BLUEPRINT_VERSION, NarrativeBlueprint
+    from app.narrative_blueprint import (
+        BLUEPRINT_VERSION,
+        NarrativeBlueprint,
+        derive_blueprint_scene_plans,
+    )
     from app.screenplay_ir import IR_VERSION, ScreenplayGenerationIR
     from app.screenplay_scene_shards import (
         SCREENPLAY_ENVELOPE_VERSION,
@@ -354,7 +358,11 @@ def _screenplay_checkpoint_compatibility(
     if blueprint_pair and blueprint_hash:
         try:
             blueprint = NarrativeBlueprint.model_validate(blueprint_pair[1])
-            blueprint_valid = blueprint_content_hash(blueprint) == blueprint_hash
+            blueprint_valid = (
+                blueprint_content_hash(blueprint) == blueprint_hash
+            )
+            if blueprint_valid:
+                derive_blueprint_scene_plans(blueprint)
         except (TypeError, ValueError):
             blueprint_valid = False
         if blueprint_valid:

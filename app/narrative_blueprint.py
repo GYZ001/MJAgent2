@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from typing import Any, Literal
 
 from pydantic import (
@@ -434,17 +434,29 @@ class BlueprintSourceOwnershipError(ValueError):
 
 
 class BlueprintSourceOccurrenceError(ValueError):
-    def __init__(self, duplicates: dict[str, list[str]]):
+    def __init__(
+        self,
+        duplicates: dict[str, list[str]],
+        *,
+        partition_conflicts: set[str] | None = None,
+    ):
         self.duplicates = {
             source_id: list(node_keys)
             for source_id, node_keys in duplicates.items()
         }
-        self.errors = [
-            "[BLUEPRINT_SOURCE_OCCURRENCE_DUPLICATE] "
-            f"{source_id} 被 picture/audit timeline nodes 重复拥有："
-            + "、".join(node_keys)
-            for source_id, node_keys in self.duplicates.items()
-        ]
+        conflicts = set(partition_conflicts or ())
+        self.errors = []
+        for source_id, node_keys in self.duplicates.items():
+            code = (
+                "[BLUEPRINT_SOURCE_PARTITION_CONFLICT] "
+                if source_id in conflicts
+                else "[BLUEPRINT_SOURCE_OCCURRENCE_DUPLICATE] "
+            )
+            self.errors.append(
+                code
+                + f"{source_id} 被 picture/audit timeline nodes 重复拥有："
+                + "、".join(node_keys)
+            )
         super().__init__("；".join(self.errors))
 
 
@@ -684,7 +696,10 @@ def validate_narrative_blueprint_shard(
             episode_no=shard.episode_no,
             nodes=shard.nodes,
         ))
-    except BlueprintSourceOwnershipError as exc:
+    except (
+        BlueprintSourceOccurrenceError,
+        BlueprintSourceOwnershipError,
+    ) as exc:
         errors.extend(
             error.replace(
                 "[BLUEPRINT_SOURCE_OWNER_CONFLICT]",
@@ -2006,6 +2021,27 @@ def derive_blueprint_scene_plans(
             )
         ]
 
+    occurrence_nodes: defaultdict[str, list[str]] = defaultdict(list)
+    occurrence_partitions: defaultdict[str, set[str]] = defaultdict(set)
+    for node in blueprint.nodes:
+        projection_policy = node.source_semantics().projection_policy
+        for source_id in node.source_segment_ids:
+            occurrence_nodes[source_id].append(node.key)
+            occurrence_partitions[source_id].add(projection_policy)
+    partition_conflicts = {
+        source_id
+        for source_id, partitions in occurrence_partitions.items()
+        if len(partitions) > 1
+    }
+    if partition_conflicts:
+        raise BlueprintSourceOccurrenceError(
+            {
+                source_id: occurrence_nodes[source_id]
+                for source_id in partition_conflicts
+            },
+            partition_conflicts=partition_conflicts,
+        )
+
     source_semantics: dict[str, BlueprintSourceSemantics] = {}
     for node in blueprint.nodes:
         semantics = node.source_semantics()
@@ -2104,18 +2140,6 @@ def derive_blueprint_scene_plans(
             ),
         ))
 
-    occurrence_owners: defaultdict[str, list[str]] = defaultdict(list)
-    for node in blueprint.nodes:
-        for source_id in node.source_segment_ids:
-            occurrence_owners[source_id].append(node.key)
-    occurrence_duplicates = {
-        source_id: node_keys
-        for source_id, node_keys in occurrence_owners.items()
-        if len(node_keys) > 1
-    }
-    if occurrence_duplicates:
-        raise BlueprintSourceOccurrenceError(occurrence_duplicates)
-
     node_scene_owners: dict[str, str] = {}
     source_scene_owners: dict[str, str] = {}
     conflicts: dict[str, list[str]] = {}
@@ -2137,6 +2161,18 @@ def derive_blueprint_scene_plans(
                     scene_keys.append(plan.key)
     if conflicts:
         raise BlueprintSourceOwnershipError(conflicts)
+
+    occurrence_owners: defaultdict[str, list[str]] = defaultdict(list)
+    for node in blueprint.nodes:
+        for source_id in node.source_segment_ids:
+            occurrence_owners[source_id].append(node.key)
+    occurrence_duplicates = {
+        source_id: node_keys
+        for source_id, node_keys in occurrence_owners.items()
+        if len(node_keys) > 1
+    }
+    if occurrence_duplicates:
+        raise BlueprintSourceOccurrenceError(occurrence_duplicates)
 
     for plan in plans:
         plan.source_segment_ids = [
@@ -2785,7 +2821,10 @@ def validate_narrative_blueprint(
 
     try:
         plans = derive_blueprint_scene_plans(blueprint)
-    except BlueprintSourceOwnershipError as exc:
+    except (
+        BlueprintSourceOccurrenceError,
+        BlueprintSourceOwnershipError,
+    ) as exc:
         errors.extend(exc.errors)
     else:
         errors.extend(validate_blueprint_scene_partition(blueprint, plans))
