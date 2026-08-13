@@ -29,7 +29,7 @@ from app.source_facts import SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v6"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.4"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.5"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -38,9 +38,9 @@ BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # truncated prefix.
 BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
-BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v5"
+BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v6"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
-    "blueprint-shard-local-authority.v2"
+    "blueprint-shard-local-authority.v3"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 
@@ -126,15 +126,32 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
     return normalized
 
 
-def blueprint_shard_provider_schema() -> dict[str, Any]:
+def blueprint_shard_provider_schema(
+    source_payload: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Return the provider schema with explicit delivery evidence surfaces."""
     schema = NarrativeBlueprintShard.model_json_schema()
     definitions = schema.get("$defs", {})
     node_schema = definitions.get("NarrativeNode")
     if not isinstance(node_schema, dict):
         return schema
+    node_properties = node_schema.get("properties", {})
+    for field_name in ("location_key", "location_label"):
+        location_schema = node_properties.get(field_name)
+        if isinstance(location_schema, dict):
+            location_schema["pattern"] = r"^(?!.*(?:、|/|\+|内外)).+$"
+            location_schema["description"] = (
+                "Exactly one primary location; never combine locations."
+            )
     evidence_schema = definitions.get("NarrativeParticipantEvidence")
     if isinstance(evidence_schema, dict):
+        evidence_properties = evidence_schema.get("properties", {})
+        evidence_properties.get("identity_key", {})["minLength"] = 1
+        evidence_properties.get("source_segment_ids", {})["minItems"] = 1
+        evidence_schema["description"] = (
+            "Every participants identity must have at least one matching "
+            "evidence object with owned source_segment_ids."
+        )
         evidence_schema.setdefault("allOf", []).append({
             "if": {
                 "properties": {
@@ -224,6 +241,100 @@ def blueprint_shard_provider_schema() -> dict[str, Any]:
             "required": ["participant_evidence"],
         },
     })
+    node_schema.setdefault("allOf", []).append({
+        "if": {
+            "properties": {
+                "participants": {"minItems": 1},
+            },
+            "required": ["participants"],
+        },
+        "then": {
+            "properties": {
+                "participant_evidence": {"minItems": 1},
+            },
+            "required": ["participant_evidence"],
+        },
+    })
+    for source in source_payload or []:
+        source_id = str(source.get("source_segment_id") or "")
+        if not source_id:
+            continue
+        for fact in source.get("source_facts") or []:
+            if fact.get("projection") != "action":
+                continue
+            source_unit_key = str(fact.get("source_unit_key") or "")
+            if not source_unit_key:
+                continue
+            state_subject_match = {
+                "properties": {
+                    "usage": {"const": "state_subject"},
+                    "source_segment_ids": {
+                        "contains": {"const": source_id},
+                    },
+                    "source_unit_keys": {
+                        "contains": {"const": source_unit_key},
+                    },
+                },
+                "required": [
+                    "identity_key",
+                    "source_segment_ids",
+                    "source_unit_keys",
+                    "usage",
+                ],
+            }
+            node_schema.setdefault("allOf", []).append({
+                "if": {
+                    "properties": {
+                        "source_segment_ids": {
+                            "contains": {"const": source_id},
+                        },
+                        "narrative_layer": {"const": "story"},
+                    },
+                    "required": [
+                        "source_segment_ids",
+                        "narrative_layer",
+                    ],
+                },
+                "then": {
+                    "oneOf": [{
+                        "properties": {
+                            "participant_evidence": {
+                                "contains": state_subject_match,
+                                "minContains": 1,
+                                "maxContains": 1,
+                            },
+                            "environment_source_unit_keys": {
+                                "not": {
+                                    "contains": {
+                                        "const": source_unit_key,
+                                    },
+                                },
+                            },
+                        },
+                        "required": [
+                            "participant_evidence",
+                            "environment_source_unit_keys",
+                        ],
+                    }, {
+                        "properties": {
+                            "participant_evidence": {
+                                "not": {
+                                    "contains": state_subject_match,
+                                },
+                            },
+                            "environment_source_unit_keys": {
+                                "contains": {
+                                    "const": source_unit_key,
+                                },
+                            },
+                        },
+                        "required": [
+                            "participant_evidence",
+                            "environment_source_unit_keys",
+                        ],
+                    }],
+                },
+            })
     paratext_properties: dict[str, Any] = {
         field_name: {"const": []}
         for field_name in _PARATEXT_EMPTY_LIST_FIELDS
@@ -3431,6 +3542,15 @@ def blueprint_prompt_contract() -> dict[str, Any]:
         ],
         "source_ownership": {
             "contract": "each source_id has exactly one scene owner",
+            "node_split_boundary": (
+                "nodes may split only between source_ids; one source_id "
+                "must never be split even when it crosses locations"
+            ),
+            "single_primary_location": (
+                "location_key and location_label identify exactly one primary "
+                "location; movement inside one source_id stays in transition "
+                "semantics and never becomes a composite location"
+            ),
             "cross_scene_context": (
                 "state/setup/transition information uses scene_derivations "
                 "and never consumes the original source_id again"
@@ -3445,6 +3565,11 @@ def blueprint_prompt_contract() -> dict[str, Any]:
             ],
             "usage": ["visible", "voice", "mentioned", "state_subject"],
             "ownership": "source_segment_ids must be owned by the same node",
+            "participant_identity_contract": (
+                "every participants identity has at least one evidence object "
+                "with the exact same identity_key and non-empty owned "
+                "source_segment_ids"
+            ),
             "dialogue_voice_contract": (
                 "every audible source_unit_delivery has exactly one "
                 "usage=voice evidence whose identity_key equals performer_key"

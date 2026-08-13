@@ -5435,6 +5435,9 @@ def _blueprint_shard_prompt(
         "连续动作压缩为一个核心因果进程和一个因果/情绪转折；仅story节点填exit_state。"
         "首分片首节点time_relation=episode_start；其余严格延续boundary_context。"
         "复用有效fact_key、人物位置、时间域和稳定character_key；本分片新key保持唯一。"
+        "participants中的每个identity必须至少有一条identity_key完全相同的"
+        "participant_evidence，source_segment_ids必须非空且只引用本节点owned SRC；"
+        "不得仅把人物写入participants，不得默认补角色。"
         "每节点显式narrative_layer/event_priority/render_policy。故事画面用"
         "story+causal+standalone；旁文本用paratext+connective+exclude_from_spine。"
         "paratext只保留summary/action_logic/opening_image等文字展示；participants、"
@@ -5453,6 +5456,10 @@ def _blueprint_shard_prompt(
         "usage=state_subject；纯环境写environment_source_unit_keys。visible、roster和"
         "content_owner绝非主体默认值。paratext/audit_only无论原文unit是"
         "quoted还是action，都不适用delivery/state-subject规则。"
+        "若地点变化发生在两个SRC之间，才可在该SRC边界拆节点；若同一SRC内部跨越"
+        "多个主要地点，仍必须整段只归一个节点，location_key/location_label只填写"
+        "该SRC核心因果进程实际发生的一个主要地点，移动过程写入transition_cue和"
+        "action_logic，禁止复合地点、禁止拆SRC。"
         "所有描述字段简洁，不复述原文或Schema。"
     )
     compact = lambda value: json.dumps(  # noqa: E731 - local canonical renderer
@@ -5467,7 +5474,7 @@ def _blueprint_shard_prompt(
         f"boundary_context={compact(boundary)}\n"
         f"target_sources={compact(source_payload)}\n"
         "schema="
-        + compact(blueprint_shard_provider_schema())
+        + compact(blueprint_shard_provider_schema(source_payload))
     )
 
 
@@ -6707,7 +6714,10 @@ async def _generate_screenplay_narrative_blueprint(
 3. 每节点只有一个主要 location_key/location_label。人物改变地点时，transition_cue
    必须说明走路、乘车、下车、进入房间、字幕或匹配剪辑，禁止瞬移。
    location_label 禁止使用「/」「、」「+」「内外」合并大堂/房间、里间/外间、
-   车站/车厢等多个空间。同一 SRC 只能归属一个程序分场；其他场需要该信息时，
+   车站/车厢等多个空间。只有地点变化发生在两个 SRC 之间时才能在该 SRC 边界拆节点；
+   同一 SRC 内跨越多个地点时仍保持一个节点，只填写核心因果进程的一个主要地点，
+   移动写入 transition_cue/action_logic，禁止复合地点和拆 SRC。
+   同一 SRC 只能归属一个程序分场；其他场需要该信息时，
    必须通过 state_requirements、decision.setup_node_keys 或 transition_cue 建立
    显式派生关系，不得重复消费原 SRC。
 4. 对后文会复用的持久事实建立 state_changes/state_requirements，包括但不限于：
@@ -6741,6 +6751,9 @@ async def _generate_screenplay_narrative_blueprint(
    usage=state_subject，并用 source_unit_keys 精确绑定该 unit；真正无人物
    状态所有者的环境单元才写入 environment_source_unit_keys。visible、
    scene roster、content_owner 或文本姓名均不能作为主体推断。
+10. participants 中每个 identity 都必须至少有一条 identity_key 完全相同的
+    participant_evidence，且 source_segment_ids 非空并只引用本节点 owned SRC；
+    不得仅列 roster，不得默认角色。
 
 本集概要：{episode.get('synopsis') or '（无）'}
 人物与场景上下文：

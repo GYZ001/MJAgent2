@@ -1,0 +1,200 @@
+{
+  "cases": [
+    {
+      "error_id": "ERR-20260814-02ff53",
+      "provider_call_id": 29671,
+      "raw_artifact_id": "art_a099922e53fa",
+      "expected_error_codes": [
+        "BLUEPRINT_SHARD_STATE_SUBJECT_AMBIGUOUS",
+        "BLUEPRINT_SHARD_STATE_SUBJECT_MISSING"
+      ],
+      "source_facts": [
+        {
+          "contract_version": "source-fact.v2",
+          "source_unit_key": "SRC0003:unit:015",
+          "source_segment_id": "SRC0003",
+          "unit_order": 15,
+          "projection": "action",
+          "surface_form": "prose",
+          "text": "王有材一手抓空，孟浩看到险急后找到藤条并顺下山崖。"
+        },
+        {
+          "contract_version": "source-fact.v2",
+          "source_unit_key": "SRC0003:unit:016",
+          "source_segment_id": "SRC0003",
+          "unit_order": 16,
+          "projection": "action",
+          "surface_form": "prose",
+          "text": "“你还没说，你们到底怎么下去的？"
+        }
+      ],
+      "shard": {
+        "format_version": "screenplay-narrative-blueprint.v6",
+        "episode_no": 1,
+        "shard_index": 3,
+        "source_segment_ids": ["SRC0003"],
+        "nodes": [
+          {
+            "key": "S003-N0001",
+            "source_segment_ids": ["SRC0003"],
+            "summary": "孟浩发现王有材被困并用藤条施救",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "td_ep01_evening",
+            "time_label": "四月黄昏",
+            "time_relation": "continuous",
+            "location_key": "scene_cliff",
+            "location_label": "大青山山崖边",
+            "participants": ["char_孟浩", "char_王有材"],
+            "participant_evidence": [
+              {
+                "identity_key": "char_孟浩",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:015"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "char_王有材",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:015"],
+                "usage": "state_subject"
+              }
+            ],
+            "environment_source_unit_keys": [],
+            "source_unit_deliveries": [],
+            "action_logic": "孟浩发现险情后寻找藤条施救"
+          }
+        ]
+      }
+    },
+    {
+      "error_id": "ERR-20260814-7847f3",
+      "provider_call_id": 29679,
+      "raw_artifact_id": "art_7b2ea71d6fd6",
+      "expected_error_codes": [
+        "BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_MISSING"
+      ],
+      "source_facts": [
+        {
+          "contract_version": "source-fact.v2",
+          "source_unit_key": "SRC0002:unit:001",
+          "source_segment_id": "SRC0002",
+          "unit_order": 1,
+          "projection": "action",
+          "surface_form": "prose",
+          "text": "孟浩、李富贵跟随绿袍男子沿靠山宗山路上山。"
+        }
+      ],
+      "shard": {
+        "format_version": "screenplay-narrative-blueprint.v6",
+        "episode_no": 2,
+        "shard_index": 2,
+        "source_segment_ids": ["SRC0002"],
+        "nodes": [
+          {
+            "key": "S002-N001",
+            "source_segment_ids": ["SRC0002"],
+            "summary": "孟浩与李富贵被带上靠山宗",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "td_kaoshanzong_present",
+            "time_label": "白日",
+            "time_relation": "episode_start",
+            "location_key": "loc_kaoshanzong_path",
+            "location_label": "靠山宗山峦小路",
+            "participants": [
+              "char_menghao",
+              "char_lifugui",
+              "char_lvpao_nanzi",
+              "char_qianguan_qingnian"
+            ],
+            "participant_evidence": [
+              {
+                "identity_key": "char_lifugui",
+                "source_segment_ids": ["SRC0002"],
+                "source_unit_keys": ["SRC0002:unit:001"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "char_lvpao_nanzi",
+                "source_segment_ids": ["SRC0002"],
+                "source_unit_keys": ["SRC0002:unit:001"],
+                "usage": "visible"
+              },
+              {
+                "identity_key": "char_qianguan_qingnian",
+                "source_segment_ids": ["SRC0002"],
+                "source_unit_keys": ["SRC0002:unit:001"],
+                "usage": "visible"
+              }
+            ],
+            "environment_source_unit_keys": [],
+            "source_unit_deliveries": [],
+            "action_logic": "众人沿山路抵达杂役住处"
+          }
+        ]
+      }
+    },
+    {
+      "error_id": "ERR-20260814-8342d8",
+      "provider_call_id": 29686,
+      "raw_artifact_id": "art_906355eb4c8e",
+      "expected_error_codes": [
+        "BLUEPRINT_SHARD_LOCATION_COMPOSITE",
+        "BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_MISSING"
+      ],
+      "source_facts": [
+        {
+          "contract_version": "source-fact.v2",
+          "source_unit_key": "SRC0003:unit:001",
+          "source_segment_id": "SRC0003",
+          "unit_order": 1,
+          "projection": "action",
+          "surface_form": "prose",
+          "text": "虎爷逃出宿舍，孟浩与小胖子睡下并在次日醒来。"
+        }
+      ],
+      "shard": {
+        "format_version": "screenplay-narrative-blueprint.v6",
+        "episode_no": 3,
+        "shard_index": 3,
+        "source_segment_ids": ["SRC0003"],
+        "nodes": [
+          {
+            "key": "S003-N001",
+            "source_segment_ids": ["SRC0003"],
+            "summary": "虎爷逃走后，孟浩与小胖子次日前往荒山砍柴",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "td_ep3_morning",
+            "time_label": "深夜至次日上午",
+            "time_relation": "continuous",
+            "location_key": "LOC-外宗杂役屋、LOC-外宗北区荒山",
+            "location_label": "靠山宗外宗杂役宿舍、外宗北区荒山",
+            "participants": ["CHAR-孟浩", "CHAR-小胖子", "CHAR-虎爷"],
+            "participant_evidence": [
+              {
+                "identity_key": "CHAR-孟浩",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:001"],
+                "usage": "state_subject"
+              },
+              {
+                "identity_key": "CHAR-小胖子",
+                "source_segment_ids": ["SRC0003"],
+                "source_unit_keys": ["SRC0003:unit:001"],
+                "usage": "visible"
+              }
+            ],
+            "environment_source_unit_keys": [],
+            "source_unit_deliveries": [],
+            "action_logic": "宿舍冲突结束后，两人次日前往荒山"
+          }
+        ]
+      }
+    }
+  ]
+}
