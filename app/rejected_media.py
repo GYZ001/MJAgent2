@@ -178,6 +178,13 @@ def _refresh_bible_reference(
 
 
 def _purge_artifact(conn, artifact: Any) -> tuple[int, int]:
+    from app.evidence.repository import protected_release_lineage_ids
+
+    if str(artifact["id"]) in protected_release_lineage_ids(conn=conn):
+        raise ValueError(
+            "Artifact 已被发布指针、production revision 或完成凭证引用，"
+            "禁止物理清理"
+        )
     paths = {str(artifact["file_path"])} if artifact["file_path"] else set()
     portrait_rows = conn.execute(
         "SELECT id FROM character_portraits WHERE artifact_id=?", (artifact["id"],),

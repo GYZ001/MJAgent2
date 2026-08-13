@@ -1290,6 +1290,99 @@ def test_clear_unpublished_ir_preserves_published_lineage() -> None:
     ).fetchone()["output_artifact_id"] is None
 
 
+def test_baseline_rebuild_gc_preserves_stale_published_lineage_recursively() -> None:
+    """Regression for production Ep1 art_11d00cd9a1e9 lineage loss.
+
+    The compatibility audit marks the old release stale before retry cleanup.
+    Its durable episode pointer, rather than that mutable status, must retain
+    the complete Document -> merged IR -> raw evidence chain.
+    """
+    raw = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir_raw",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T1",
+        content={"production_parent": "art_3df7a5c0223d"},
+    ))
+    merged = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T2",
+        content={"merged": True},
+        parent_artifact_ids=[raw["id"]],
+    ))
+    published = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="e1",
+        status="stale",
+        trust_level="T2",
+        content={"production_head": "art_11d00cd9a1e9"},
+        parent_artifact_ids=[merged["id"]],
+    ))
+    retry_only = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir",
+        scope_type="episode",
+        scope_id="e1",
+        status="candidate",
+        trust_level="T1",
+        content={"retry_only": True},
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE episodes SET published_screenplay_artifact_id=? WHERE id='e1'",
+        (published["id"],),
+    )
+    conn.commit()
+
+    assert api._clear_unpublished_screenplay_ir("e1") == 1
+    assert repository.get_artifact(retry_only["id"]) is None
+    assert repository.get_artifact(published["id"]) is not None
+    assert repository.get_artifact(merged["id"]) is not None
+    assert repository.get_artifact(raw["id"]) is not None
+
+
+def test_certificate_ledger_retains_historical_stale_release_lineage() -> None:
+    source = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_generation_ir",
+        scope_type="episode",
+        scope_id="e1",
+        status="validated",
+        trust_level="T2",
+        content={"historical": True},
+    ))
+    historical = repository.create_artifact(EvidenceArtifact(
+        type="screenplay_document",
+        scope_type="episode",
+        scope_id="e1",
+        status="stale",
+        trust_level="T2",
+        content={"historical_release": True},
+        parent_artifact_ids=[source["id"]],
+    ))
+    conn = db.get_conn()
+    conn.execute(
+        """INSERT INTO completion_certificates(
+               id,kind,scope_id,artifact_id,artifact_hash,issued_at
+           ) VALUES('cert-historical','screenplay','e1',?,?,?)""",
+        (historical["id"], historical["content_hash"], db.now()),
+    )
+    conn.commit()
+
+    protected = repository.protected_release_lineage_ids(
+        scope_type="episode",
+        scope_id="e1",
+        conn=conn,
+    )
+    assert historical["id"] in protected
+    assert source["id"] in protected
+    assert api._clear_unpublished_screenplay_ir("e1") == 0
+    assert repository.get_artifact(source["id"]) is not None
+
+
 def test_failed_recovery_run_clears_only_its_ir_lineage() -> None:
     parent_run_id = repository.create_run(
         workflow_type="screenplay",

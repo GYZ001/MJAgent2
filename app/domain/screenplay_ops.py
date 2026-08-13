@@ -88,36 +88,14 @@ def _clear_unpublished_screenplay_ir(
         params,
     ).fetchall()
     candidate_ids = {str(row["id"]) for row in rows}
-    # Protect the complete recursive ancestry of every approved Document.  A
-    # direct-parent check is insufficient once Document -> merged IR -> shards
-    # -> raw evidence spans several generations.
-    scoped_rows = conn.execute(
-        "SELECT id,type,status,parent_artifact_ids_json FROM artifacts "
-        "WHERE scope_type='episode' AND scope_id=?",
-        (episode_id,),
-    ).fetchall()
-    parents_by_id: dict[str, list[str]] = {}
-    published_heads: list[str] = []
-    for row in scoped_rows:
-        artifact_id = str(row["id"])
-        try:
-            parents_by_id[artifact_id] = [
-                str(value)
-                for value in json.loads(row["parent_artifact_ids_json"] or "[]")
-            ]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            parents_by_id[artifact_id] = []
-        if row["type"] == "screenplay_document" and row["status"] == "approved":
-            published_heads.append(artifact_id)
-    protected: set[str] = set(published_heads)
-    pending = list(published_heads)
-    while pending:
-        current = pending.pop()
-        for parent in parents_by_id.get(current, []):
-            if parent in protected:
-                continue
-            protected.add(parent)
-            pending.append(parent)
+    # Status is not release authority: compatibility checks intentionally mark
+    # an old published Document stale before baseline rebuild.  Preserve roots
+    # held by the episode, revision or certificate ledgers and all ancestors.
+    protected = evidence_repository.protected_release_lineage_ids(
+        scope_type="episode",
+        scope_id=episode_id,
+        conn=conn,
+    )
     artifact_ids = sorted(candidate_ids - protected)
     if not artifact_ids:
         return 0

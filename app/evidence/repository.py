@@ -774,6 +774,134 @@ def get_lineage(artifact_id: str) -> dict[str, Any]:
     return {"artifact": by_id.get(artifact_id), "ancestors": ancestors, "descendants": descendants}
 
 
+_RELEASE_HEAD_ARTIFACT_TYPES = {
+    "screenplay_document",
+    "storyboard",
+    "storyboard_document",
+    "delivery_package",
+    "completion_certificate",
+}
+
+
+def protected_release_lineage_ids(
+    *,
+    scope_type: str | None = None,
+    scope_id: str | None = None,
+    conn=None,
+) -> set[str]:
+    """Return release/certificate heads and every still-present ancestor.
+
+    Garbage collection must not infer release authority from ``Artifact.status``
+    alone.  A compatibility audit can legitimately mark a published Artifact
+    stale before a baseline rebuild starts, while the episode pointer,
+    production revision and completion certificate still preserve that release
+    as immutable history.  Those durable references are therefore roots too.
+
+    Explicit project/episode deletion first retires its release ledgers in the
+    same transaction and is intentionally outside this retention policy.
+    """
+    db = conn or get_conn()
+    rows = db.execute(
+        "SELECT id,type,scope_type,scope_id,status,parent_artifact_ids_json "
+        "FROM artifacts"
+    ).fetchall()
+    by_id = {str(row["id"]): row for row in rows}
+    parents_by_id: dict[str, list[str]] = {}
+    roots: set[str] = set()
+    for artifact_id, row in by_id.items():
+        try:
+            decoded = json.loads(row["parent_artifact_ids_json"] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = []
+        parents_by_id[artifact_id] = [
+            str(value) for value in decoded if str(value)
+        ] if isinstance(decoded, list) else []
+        if (
+            str(row["status"] or "") == "approved"
+            and str(row["type"] or "") in _RELEASE_HEAD_ARTIFACT_TYPES
+        ):
+            roots.add(artifact_id)
+
+    table_names = {
+        str(row["name"])
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "completion_certificates" in table_names:
+        roots.update(
+            str(row["artifact_id"])
+            for row in db.execute(
+                "SELECT artifact_id FROM completion_certificates "
+                "WHERE COALESCE(artifact_id,'')<>''"
+            ).fetchall()
+        )
+    if "production_revisions" in table_names:
+        roots.update(
+            str(row["published_artifact_id"])
+            for row in db.execute(
+                "SELECT published_artifact_id FROM production_revisions "
+                "WHERE COALESCE(published_artifact_id,'')<>''"
+            ).fetchall()
+        )
+    if "episodes" in table_names:
+        episode_columns = {
+            str(row["name"])
+            for row in db.execute("PRAGMA table_info(episodes)").fetchall()
+        }
+        pointer_columns = [
+            column
+            for column in (
+                "published_screenplay_artifact_id",
+                "published_storyboard_artifact_id",
+                "delivery_artifact_id",
+            )
+            if column in episode_columns
+        ]
+        if pointer_columns:
+            pointer_rows = db.execute(
+                f"SELECT {','.join(pointer_columns)} FROM episodes"
+            ).fetchall()
+            for row in pointer_rows:
+                roots.update(
+                    str(row[column])
+                    for column in pointer_columns
+                    if str(row[column] or "")
+                )
+
+    if scope_type is not None or scope_id is not None:
+        roots = {
+            artifact_id
+            for artifact_id in roots
+            if artifact_id in by_id
+            and (
+                scope_type is None
+                or str(by_id[artifact_id]["scope_type"] or "") == scope_type
+            )
+            and (
+                scope_id is None
+                or str(by_id[artifact_id]["scope_id"] or "") == scope_id
+            )
+        }
+
+    protected: set[str] = set()
+    pending = list(roots)
+    while pending:
+        artifact_id = pending.pop()
+        if artifact_id in protected:
+            continue
+        protected.add(artifact_id)
+        pending.extend(
+            parent_id
+            for parent_id in parents_by_id.get(artifact_id, [])
+            if parent_id not in protected
+        )
+    # Missing ancestors remain evidence gaps, not invented rows.  Returning
+    # only physical ids makes the helper suitable for deletion-set subtraction
+    # without mutating or concealing legacy damage.
+    return protected.intersection(by_id)
+
+
 def pending_human_gates(*, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     clauses = ["a.status IN ('candidate','validated')"]
     params: list[Any] = []

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import threading
 
+import pytest
+
 from app import db
-from app.rejected_media import purge_rejected_media
+from app.rejected_media import purge_reference_artifact, purge_rejected_media
 
 
 def test_purge_rejected_media_removes_files_records_and_gallery_refs(
@@ -128,3 +130,47 @@ def test_purge_rejected_media_removes_files_records_and_gallery_refs(
         "SELECT bible_json FROM projects WHERE id='p'",
     ).fetchone()["bible_json"])
     assert updated_bible["characters"][0]["ref_image_path"] == str(portrait)
+
+
+def test_reference_purge_refuses_artifact_in_published_lineage(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "release-lineage.db")
+    monkeypatch.setattr(db, "_local", threading.local())
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT INTO projects(id,name,created_at) VALUES('p','P',1)",
+    )
+    conn.execute(
+        "INSERT INTO episodes(id,project_id,episode_no,created_at) "
+        "VALUES('e','p',1,1)",
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_json,content_hash,parent_artifact_ids_json,
+               model_snapshot_json,created_at
+           ) VALUES('reference-parent','character_portrait','reference_asset',
+                    'p:Hero:1',1,'rejected','T1','{}','parent-hash','[]','{}',1)""",
+    )
+    conn.execute(
+        """INSERT INTO artifacts(
+               id,type,scope_type,scope_id,version,status,trust_level,
+               content_json,content_hash,parent_artifact_ids_json,
+               model_snapshot_json,created_at
+           ) VALUES('published','screenplay_document','episode','e',1,'stale',
+                    'T2','{}','published-hash','[\"reference-parent\"]','{}',2)""",
+    )
+    conn.execute(
+        "UPDATE episodes SET published_screenplay_artifact_id='published' "
+        "WHERE id='e'",
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="禁止物理清理"):
+        purge_reference_artifact(conn, "reference-parent")
+
+    assert conn.execute(
+        "SELECT 1 FROM artifacts WHERE id='reference-parent'",
+    ).fetchone() is not None
