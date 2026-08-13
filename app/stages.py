@@ -5470,10 +5470,13 @@ class _BlueprintGenerationBudget:
         params: tuple[Any, ...]
         if episode_id and input_fingerprint:
             query += (
-                " AND json_extract(pc.meta,'$.episode_id')=?"
+                " AND ("
+                "      (wr.scope_type='episode' AND wr.scope_id=?)"
+                "      OR json_extract(pc.meta,'$.episode_id')=?"
+                " )"
                 " AND wr.input_fingerprint=?"
             )
-            params = (episode_id, input_fingerprint)
+            params = (episode_id, episode_id, input_fingerprint)
         else:
             query += " AND pc.run_id=?"
             params = (run_id,)

@@ -1121,6 +1121,60 @@ def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_gran
     allowed.settle(reservation, unreported_outcome="not_sent")
 
 
+def test_production_truncated_meta_is_scoped_by_workflow_episode(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "blueprint-truncated-meta.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    stamp = db.now()
+    for run_id, status in (("run-61453", "FAILED"), ("run-fresh", "RUNNING")):
+        conn.execute(
+            """INSERT INTO workflow_runs(
+                   id,workflow_type,scope_type,scope_id,status,
+                   input_fingerprint,started_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                run_id, "screenplay_production", "episode", "ep-production",
+                status, "same-production-fingerprint", stamp - 1, stamp,
+            ),
+        )
+    # Mirrors the old 800-char summary contract: stage/token data survived,
+    # but episode_id and production_grant_id were absent.
+    truncated_meta = json.dumps({
+        "_truncated": True,
+        "stage_key": "screenplay_blueprint_patch",
+        "requested_max_tokens": 16384,
+        "effective_max_tokens": 16384,
+    })
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition,request_hash
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,NULL)""",
+        (
+            stamp - 1, "chat", "model", "INTERRUPTED", 303769,
+            truncated_meta, "run-61453", "old-run-scoped-op", 1,
+            "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    conn.commit()
+
+    budget = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-fresh",
+        episode_id="ep-production",
+        input_fingerprint="same-production-fingerprint",
+    )
+
+    assert budget.provider_calls == 1
+    assert budget.unknown_output_tokens == 16384
+    assert "screenplay_blueprint_patch" in budget._durable_unknown_stage_calls
+    with pytest.raises(stages.StageError, match="RETRY_GRANT_REQUIRED"):
+        budget.explicit_retry_call_id("screenplay_blueprint_patch")
+
+
 def test_blueprint_wall_budget_does_not_reset_across_fresh_activation(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
