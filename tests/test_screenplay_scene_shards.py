@@ -15,8 +15,11 @@ from app.harness import model_gateway
 from app.narrative_blueprint import (
     BlueprintScenePlan,
     NarrativeBlueprint,
+    NarrativeBlueprintShard,
     NarrativeNode,
     NarrativeParticipantEvidence,
+    apply_blueprint_state_subject_ownership_patch,
+    blueprint_shard_candidate_hash,
     blueprint_state_subject_issues,
     blueprint_voice_identity_issues,
     derive_blueprint_scene_plans,
@@ -4542,6 +4545,111 @@ def test_exact_state_subject_wins_with_multiple_visible_people() -> None:
     assert compiled.state_subject_key == "person_a"
     assert compiled.actor_keys == ["person_a"]
     assert compiled.onscreen_entity_keys == ["person_a", "person_b"]
+
+
+def test_unit074_ownership_patch_adds_visible_before_scene_input() -> None:
+    source = ("环境变化，" * 73) + "孟浩抬头。"
+    target_unit_key = "SRC0001:unit:074"
+    shard = NarrativeBlueprintShard.model_validate({
+        "episode_no": 1,
+        "shard_index": 1,
+        "source_segment_ids": ["SRC0001"],
+        "nodes": [{
+            "key": "unit074-node",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "环境变化后孟浩抬头",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "yard",
+            "location_label": "院中",
+            "participants": ["孟浩", "王有材"],
+            "participant_evidence": [{
+                "identity_key": "王有材",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": ["SRC0001:unit:001"],
+                "usage": "visible",
+            }],
+            "environment_source_unit_keys": [
+                f"SRC0001:unit:{index:03d}"
+                for index in range(1, 74)
+            ],
+            "action_logic": "环境变化后孟浩抬头",
+        }],
+    })
+    existing_visible = (
+        shard.nodes[0].participant_evidence[0].model_dump(mode="json")
+    )
+
+    repaired = apply_blueprint_state_subject_ownership_patch(
+        shard,
+        {
+            "base_candidate_hash": blueprint_shard_candidate_hash(shard),
+            "repairs": {
+                target_unit_key: {
+                    "mode": "single",
+                    "identity_keys": ["孟浩"],
+                },
+            },
+        },
+        target_unit_keys=[target_unit_key],
+        source_text=source,
+    )
+
+    assert (
+        repaired.nodes[0].participant_evidence[0].model_dump(mode="json")
+        == existing_visible
+    )
+    assert [
+        evidence.model_dump(mode="json")
+        for evidence in repaired.nodes[0].participant_evidence
+        if evidence.usage == "visible"
+        and evidence.identity_key == "孟浩"
+    ] == [{
+        "identity_key": "孟浩",
+        "source_segment_ids": ["SRC0001"],
+        "source_unit_keys": [target_unit_key],
+        "usage": "visible",
+    }]
+    blueprint = NarrativeBlueprint(
+        episode_no=1,
+        nodes=repaired.nodes,
+    )
+    assert blueprint_state_subject_issues(blueprint, source) == []
+    derive_blueprint_scene_plans(blueprint)
+    registry = [{
+        "identity_key": identity_key,
+        "authority_id": f"bible:{identity_key}",
+        "canonical_name": identity_key,
+        "source_labels": [identity_key],
+    } for identity_key in ("孟浩", "王有材")]
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source,
+        identity_registry_hash="identity-hash",
+        identity_registry=registry,
+    )[0]
+
+    contracts = build_screenplay_scene_input_contracts(
+        plan=plan,
+        scene_plans=blueprint.scene_plans,
+        source_by_id={"SRC0001": source},
+        identity_registry=registry,
+        blueprint_nodes=blueprint.nodes,
+    )
+    compiled = next(
+        slot
+        for contract in contracts
+        for slot in contract.unit_slots
+        if slot.source_unit_key == target_unit_key
+    )
+
+    assert compiled.actor_keys == ["孟浩"]
+    assert compiled.onscreen_entity_keys == ["孟浩"]
+    assert compiled.participant_deliveries == []
 
 
 def test_joint_state_subject_preserves_all_exact_unit_actors() -> None:

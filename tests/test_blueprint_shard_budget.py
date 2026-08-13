@@ -499,6 +499,21 @@ def test_run_77675349_applies_atomic_52_target_ownership_patch() -> None:
         for assignment in expected_node["state_subject_assignments"]
         if assignment["source_unit_key"] not in repaired_unit_keys
     ] + joint_assignments
+    subject_identities = list(dict.fromkeys([
+        evidence["identity_key"]
+        for evidence in expected_node["participant_evidence"]
+        if evidence["usage"] == "state_subject"
+    ] + [
+        identity_key
+        for assignment in expected_node["state_subject_assignments"]
+        for identity_key in assignment["identity_keys"]
+    ]))
+    expected_node["participant_evidence"].extend({
+        "identity_key": identity_key,
+        "source_segment_ids": ["SRC0005"],
+        "source_unit_keys": [],
+        "usage": "visible",
+    } for identity_key in subject_identities)
     expected = stages.NarrativeBlueprintShard.model_validate(
         stages.normalize_blueprint_provider_payload(expected_payload)
     )
@@ -1327,6 +1342,11 @@ def test_production_src0001_paratext_root_split_validates_without_retry_exhausti
                     "source_segment_ids": [source_id],
                     "source_unit_keys": [f"{source_id}:unit:001"],
                     "usage": "state_subject",
+                }, {
+                    "identity_key": "孟浩",
+                    "source_segment_ids": [source_id],
+                    "source_unit_keys": [f"{source_id}:unit:001"],
+                    "usage": "visible",
                 }],
                 "exit_state": "木门已打开",
                 "action_logic": "孟浩主动推门",
@@ -1448,7 +1468,7 @@ def test_legacy_cached_shard_without_current_policy_is_not_reused(
     assert calls == 1
 
 
-def test_run_2284a14d5f4c_v6_t1_leaf_is_not_current_cache_authority() -> None:
+def test_v8_t1_leaf_is_not_current_cache_authority() -> None:
     segments = index_source_segments(_source(1))
     row = _cached_leaf_row(
         source_ids=["SRC0001"],
@@ -1457,7 +1477,7 @@ def test_run_2284a14d5f4c_v6_t1_leaf_is_not_current_cache_authority() -> None:
     row["id"] = "art_1048276fe8d5"
     snapshot = json.loads(row["model_snapshot_json"])
     snapshot["local_authority_validator_version"] = (
-        "blueprint-shard-local-authority.v6"
+        "blueprint-shard-local-authority.v8"
     )
     row["model_snapshot_json"] = json.dumps(snapshot)
 
@@ -1467,7 +1487,7 @@ def test_run_2284a14d5f4c_v6_t1_leaf_is_not_current_cache_authority() -> None:
     )
 
     assert stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION == (
-        "blueprint-shard-local-authority.v8"
+        "blueprint-shard-local-authority.v9"
     )
     assert [[segment.segment_id for segment in group] for group in plan] == [
         ["SRC0001"],

@@ -40,7 +40,7 @@ BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
 BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v8"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
-    "blueprint-shard-local-authority.v8"
+    "blueprint-shard-local-authority.v9"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 
@@ -1251,6 +1251,7 @@ class BlueprintSemanticIssue(BaseModel):
         "state_subject_environment_invalid",
         "state_subject_environment_conflict",
         "state_subject_environment_non_picture",
+        "state_subject_perception_missing",
         "ending_payoff_gap",
     ]
     node_keys: list[str]
@@ -2291,7 +2292,51 @@ def blueprint_state_subject_issues(
                         "environment_source_unit_keys"
                     ),
                 ))
+            subject_identities: list[str] = []
+            if not environment:
+                if len(claims) == 1 and not assignments:
+                    subject_identities = [claims[0].identity_key]
+                elif len(assignments) == 1 and not claims:
+                    subject_identities = list(assignments[0].identity_keys)
+            for identity_key in subject_identities:
+                if _node_identity_has_perception_evidence(
+                    node,
+                    identity_key=identity_key,
+                    source_unit_key=fact.source_unit_key,
+                ):
+                    continue
+                issues.append(BlueprintSemanticIssue(
+                    code="state_subject_perception_missing",
+                    node_keys=[node.key],
+                    source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
+                    message=(
+                        f"{fact.source_unit_key} 的人物主体 {identity_key} "
+                        "缺少适用的 visible/voice evidence"
+                    ),
+                    required_resolution=(
+                        "补充确定性可感知的 visible/voice evidence；"
+                        "若该 unit 实际无人物主体则改为 environment"
+                    ),
+                ))
     return issues
+
+
+def _node_identity_has_perception_evidence(
+    node: NarrativeNode,
+    *,
+    identity_key: str,
+    source_unit_key: str,
+) -> bool:
+    return any(
+        evidence.identity_key == identity_key
+        and evidence.usage in {"visible", "voice"}
+        and (
+            not evidence.source_unit_keys
+            or source_unit_key in evidence.source_unit_keys
+        )
+        for evidence in node.participant_evidence
+    )
 
 
 def blueprint_shard_candidate_hash(
@@ -2539,14 +2584,30 @@ def apply_blueprint_state_subject_ownership_patch(
         repair = patch_value.repairs[unit_key]
         owner = candidate.nodes[owner_indexes[unit_key]]
         if repair.mode == "single":
+            identity_key = repair.identity_keys[0]
             owner.participant_evidence.append(NarrativeParticipantEvidence(
-                identity_key=repair.identity_keys[0],
+                identity_key=identity_key,
                 source_segment_ids=[
                     target_facts[unit_key].source_segment_id
                 ],
                 source_unit_keys=[unit_key],
                 usage="state_subject",
             ))
+            if not _node_identity_has_perception_evidence(
+                owner,
+                identity_key=identity_key,
+                source_unit_key=unit_key,
+            ):
+                owner.participant_evidence.append(
+                    NarrativeParticipantEvidence(
+                        identity_key=identity_key,
+                        source_segment_ids=[
+                            target_facts[unit_key].source_segment_id
+                        ],
+                        source_unit_keys=[unit_key],
+                        usage="visible",
+                    )
+                )
         elif repair.mode == "joint":
             owner.state_subject_assignments.append(
                 NarrativeStateSubjectAssignment(
@@ -2555,6 +2616,23 @@ def apply_blueprint_state_subject_ownership_patch(
                     identity_keys=list(repair.identity_keys),
                 )
             )
+            for identity_key in repair.identity_keys:
+                if _node_identity_has_perception_evidence(
+                    owner,
+                    identity_key=identity_key,
+                    source_unit_key=unit_key,
+                ):
+                    continue
+                owner.participant_evidence.append(
+                    NarrativeParticipantEvidence(
+                        identity_key=identity_key,
+                        source_segment_ids=[
+                            target_facts[unit_key].source_segment_id
+                        ],
+                        source_unit_keys=[unit_key],
+                        usage="visible",
+                    )
+                )
         else:
             owner.environment_source_unit_keys.append(unit_key)
 
