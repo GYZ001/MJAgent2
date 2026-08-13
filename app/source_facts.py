@@ -95,7 +95,7 @@ def source_segment_facts(
     if divider is not None:
         paratext = text[divider.end():].strip()
         text = text[:divider.start()].strip()
-    if not text and paratext:
+    if not text and (paratext or divider is not None):
         parts = []
     elif not text:
         parts: list[

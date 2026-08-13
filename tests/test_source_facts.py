@@ -88,3 +88,10 @@ def test_structural_divider_with_only_paratext_has_no_empty_action_unit() -> Non
 
     assert [fact.projection for fact in facts] == ["paratext"]
     assert [fact.text for fact in facts] == ["作者附记与更新通知。"]
+
+
+@pytest.mark.parametrize("divider", ["－－－－－－－－", "--------\n"])
+def test_structural_divider_without_body_or_paratext_has_no_fact(
+    divider: str,
+) -> None:
+    assert source_segment_facts("SRC0005", divider) == []

@@ -211,6 +211,25 @@ def _shard_response(*, source_ids: list[str], shard_index: int) -> str:
     }, ensure_ascii=False)
 
 
+def _duplicate_repair_candidates() -> tuple[
+    stages.NarrativeBlueprintShard,
+    stages.NarrativeBlueprintShard,
+]:
+    previous_payload = json.loads(_shard_response(
+        source_ids=["SRC0001"],
+        shard_index=1,
+    ))
+    duplicate = json.loads(json.dumps(previous_payload["nodes"][0]))
+    duplicate["key"] = "N002"
+    previous_payload["nodes"].append(duplicate)
+    candidate_payload = json.loads(json.dumps(previous_payload))
+    candidate_payload["nodes"][1]["source_segment_ids"] = []
+    return (
+        stages.NarrativeBlueprintShard.model_validate(previous_payload),
+        stages.NarrativeBlueprintShard.model_validate(candidate_payload),
+    )
+
+
 def _prompt_source_ids(prompt: str) -> list[str]:
     payload = prompt.split("target_sources=", 1)[1].split("\nschema=", 1)[0]
     return [
@@ -438,6 +457,85 @@ def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
     )
     assert not any("NODE_SIZE" in error for error in errors)
     assert not any("PARTICIPANT_EVIDENCE" in error for error in errors)
+
+
+def test_initial_candidate_keeps_ungrounded_node_for_typed_gate() -> None:
+    payload = json.loads(_shard_response(
+        source_ids=["SRC0001"],
+        shard_index=1,
+    ))
+    payload["nodes"][0]["source_segment_ids"] = []
+    candidate = stages.NarrativeBlueprintShard.model_validate(payload)
+
+    stages._normalize_blueprint_shard_structure(
+        candidate,
+        boundary_context={"active_state_facts": []},
+        attempt=1,
+    )
+
+    assert [node.key for node in candidate.nodes] == ["N001"]
+    errors = stages.validate_narrative_blueprint_shard(
+        candidate,
+        expected_episode_no=1,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+    )
+    assert any("NODE_UNGROUNDED" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "duplicate_error",
+    [
+        "[BLUEPRINT_SHARD_PICTURE_SOURCE_DUPLICATE] SRC0001 duplicated",
+        "[BLUEPRINT_SHARD_AUDIT_SOURCE_DUPLICATE] SRC0001 duplicated",
+        "[BLUEPRINT_SHARD_SOURCE_PARTITION_CONFLICT] SRC0001 duplicated",
+    ],
+)
+def test_duplicate_repair_removes_only_newly_ungrounded_node(
+    duplicate_error: str,
+) -> None:
+    previous, candidate = _duplicate_repair_candidates()
+
+    stages._normalize_blueprint_shard_structure(
+        candidate,
+        boundary_context={"active_state_facts": []},
+        attempt=2,
+        previous_candidate=previous.model_dump(mode="json"),
+        previous_validation_errors=[duplicate_error],
+    )
+
+    assert [node.key for node in candidate.nodes] == ["N001"]
+    assert [
+        source_id
+        for node in candidate.nodes
+        for source_id in node.source_segment_ids
+    ] == ["SRC0001"]
+
+
+def test_non_duplicate_repair_keeps_newly_ungrounded_node() -> None:
+    previous, candidate = _duplicate_repair_candidates()
+
+    stages._normalize_blueprint_shard_structure(
+        candidate,
+        boundary_context={"active_state_facts": []},
+        attempt=2,
+        previous_candidate=previous.model_dump(mode="json"),
+        previous_validation_errors=[
+            "[BLUEPRINT_SHARD_STATE_SUBJECT_MISSING] SRC0001:unit:001"
+        ],
+    )
+
+    assert [node.key for node in candidate.nodes] == ["N001", "N002"]
+    errors = stages.validate_narrative_blueprint_shard(
+        candidate,
+        expected_episode_no=1,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+    )
+    assert any(
+        "NODE_UNGROUNDED" in error and "N002" in error
+        for error in errors
+    )
 
 
 def test_blueprint_node_size_counts_srcs_not_source_fact_units() -> None:
@@ -962,6 +1060,34 @@ def test_legacy_cached_shard_without_current_policy_is_not_reused(
     ))
 
     assert calls == 1
+
+
+def test_run_9d6_v5_t1_leaf_is_not_current_cache_authority() -> None:
+    segments = index_source_segments(_source(1))
+    row = _cached_leaf_row(
+        source_ids=["SRC0001"],
+        shard_index=1,
+    )
+    row["id"] = "art_1048276fe8d5"
+    snapshot = json.loads(row["model_snapshot_json"])
+    snapshot["local_authority_validator_version"] = (
+        "blueprint-shard-local-authority.v5"
+    )
+    row["model_snapshot_json"] = json.dumps(snapshot)
+
+    plan, depths, cached = stages._blueprint_leaf_plan_from_cache(
+        segments,
+        [row],
+    )
+
+    assert stages.BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION == (
+        "blueprint-shard-local-authority.v6"
+    )
+    assert [[segment.segment_id for segment in group] for group in plan] == [
+        ["SRC0001"],
+    ]
+    assert depths == [0]
+    assert cached == {}
 
 
 def test_current_cached_shard_with_local_authority_errors_fails_closed(

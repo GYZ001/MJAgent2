@@ -5184,17 +5184,68 @@ def _namespace_blueprint_shard(
             )
 
 
+def _is_blueprint_duplicate_source_repair(
+    validation_errors: list[str],
+) -> bool:
+    """Return whether the prior typed gate reported duplicate SRC ownership."""
+
+    return any(
+        re.match(
+            r"^\[BLUEPRINT_SHARD_(?:PICTURE|AUDIT)_SOURCE_DUPLICATE\]",
+            error,
+        )
+        or error.startswith(
+            "[BLUEPRINT_SHARD_SOURCE_PARTITION_CONFLICT]"
+        )
+        for error in validation_errors
+    )
+
+
+def _remove_duplicate_repair_orphan_nodes(
+    shard: NarrativeBlueprintShard,
+    *,
+    attempt: int,
+    previous_candidate: dict[str, Any] | None,
+    previous_validation_errors: list[str],
+) -> None:
+    """Remove only nodes orphaned while repairing typed duplicate ownership."""
+
+    if (
+        attempt <= 1
+        or previous_candidate is None
+        or not _is_blueprint_duplicate_source_repair(
+            previous_validation_errors
+        )
+    ):
+        return
+    previous = NarrativeBlueprintShard.model_validate(previous_candidate)
+    previously_grounded_keys = {
+        node.key
+        for node in previous.nodes
+        if node.source_segment_ids
+    }
+    shard.nodes = [
+        node
+        for node in shard.nodes
+        if node.source_segment_ids
+        or node.key not in previously_grounded_keys
+    ]
+
+
 def _normalize_blueprint_shard_structure(
     shard: NarrativeBlueprintShard,
     *,
     boundary_context: dict[str, Any],
+    attempt: int = 1,
+    previous_candidate: dict[str, Any] | None = None,
+    previous_validation_errors: list[str] | None = None,
 ) -> None:
-    # A node without an owned SRC has no narrative authority. Providers can
-    # produce one while removing a duplicate SRC owner on retry; retaining it
-    # would turn a corrected ownership decision into a misleading size error.
-    shard.nodes = [
-        node for node in shard.nodes if node.source_segment_ids
-    ]
+    _remove_duplicate_repair_orphan_nodes(
+        shard,
+        attempt=attempt,
+        previous_candidate=previous_candidate,
+        previous_validation_errors=previous_validation_errors or [],
+    )
     fact_state_keys = {
         str(fact.get("fact_key") or ""): str(
             fact.get("state_key") or ""
@@ -6611,6 +6662,9 @@ async def _generate_sharded_narrative_blueprint(
                 _normalize_blueprint_shard_structure(
                     candidate,
                     boundary_context=boundary,
+                    attempt=attempt,
+                    previous_candidate=previous_candidate,
+                    previous_validation_errors=errors,
                 )
                 _namespace_blueprint_shard(candidate)
                 if previous_candidate is not None:

@@ -4223,6 +4223,29 @@ def test_scene_shard_plan_owns_unique_structural_unit_slots() -> None:
     )
 
 
+def test_structural_divider_only_source_creates_no_executable_slot() -> None:
+    blueprint = _blueprint(split_domain=False)
+    source = "－－－－－－－－\n\n乙接过钥匙并回答。"
+
+    plans = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=source,
+        identity_registry_hash="identity-hash",
+    )
+
+    assert plans
+    assert all(
+        slot.source_segment_ids != ["SRC0001"]
+        for plan in plans
+        for slot in plan.unit_slots
+    )
+    assert [
+        slot.source_segment_ids
+        for plan in plans
+        for slot in plan.unit_slots
+    ] == [["SRC0002"]]
+
+
 def test_slot_content_compiles_by_key_and_rejects_contract_drift() -> None:
     blueprint = _blueprint(split_domain=False)
     plan = build_screenplay_scene_shard_plans(
