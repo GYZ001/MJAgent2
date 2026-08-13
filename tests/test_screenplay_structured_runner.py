@@ -26,14 +26,24 @@ class _PermissiveReviewPayload(BaseModel):
     issues: list[dict] = Field(default_factory=list)
 
 
-def test_structured_runner_recovers_complete_trailing_json(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "raw",
+    (
+        '草稿 {"value":\n最终答案: {"value":7}',
+        '草稿 {"value":\n最终 {"value":7}, 以上为修正版',
+    ),
+)
+def test_structured_runner_recovers_complete_trailing_json(
+    monkeypatch,
+    raw: str,
+) -> None:
     calls = 0
     attempts: list[dict] = []
 
     async def fake_chat(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        return '草稿 {"value":\n最终 {"value":7}'
+        return raw
 
     def unexpected_root_repair(*_args, **_kwargs):
         raise AssertionError("valid trailing object must win before root repair")

@@ -32,8 +32,8 @@ class StructuredProviderRejection(StructuredOutputError):
     """The provider returned an explicit error envelope instead of model output."""
 
 
-def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
-    """Detect objects whose boundaries prove they are container children."""
+def _is_nested_json_candidate(text: str, start: int, _end: int) -> bool:
+    """Detect objects whose prefix proves they are container children."""
     expected_closers: list[str] = []
     in_string = False
     escaped = False
@@ -58,14 +58,26 @@ def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
     if in_string or not expected_closers:
         return in_string
     prefix = text[:start].rstrip()
-    suffix = text[end:].lstrip()
     previous_char = prefix[-1] if prefix else ""
-    next_char = suffix[0] if suffix else ""
-    return (
-        bool(previous_char) and previous_char in "[:,"
-    ) or (
-        bool(next_char) and next_char in ",]}"
-    )
+    if expected_closers[-1] == "]":
+        return previous_char in "[,"
+    if previous_char != ":":
+        return False
+
+    key_prefix = prefix[:-1].rstrip()
+    if not key_prefix.endswith('"'):
+        return False
+    decoder = json.JSONDecoder()
+    for key_start, char in enumerate(key_prefix):
+        if char != '"':
+            continue
+        try:
+            key, key_end = decoder.raw_decode(key_prefix[key_start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(key, str) and key_start + key_end == len(key_prefix):
+            return True
+    return False
 
 
 def _json_candidates(value: str) -> list[dict[str, Any]]:

@@ -1709,6 +1709,14 @@ def _escape_unescaped_inner_quotes(text: str) -> str:
             if char == '"':
                 in_string = True
             continue
+        if (
+            embedded_string_array_end is not None
+            and index < embedded_string_array_end
+        ):
+            if char in {'"', "\\"}:
+                repaired.append("\\")
+            repaired.append(char)
+            continue
         if escaped:
             repaired.append(char)
             escaped = False
@@ -1731,12 +1739,6 @@ def _escape_unescaped_inner_quotes(text: str) -> str:
                 embedded_string_array_end = None
             continue
 
-        if (
-            embedded_string_array_end is not None
-            and index < embedded_string_array_end
-        ):
-            repaired.extend(("\\", char))
-            continue
         next_index = index + 1
         while next_index < length and text[next_index].isspace():
             next_index += 1
