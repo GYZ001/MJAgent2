@@ -1627,6 +1627,127 @@ def test_blueprint_unknown_retry_without_fresh_grant_sends_nothing() -> None:
         budget.claim(max_tokens=100, operation_id="op-unknown")
 
     assert budget.provider_calls == 0
+
+
+def test_blueprint_patch_durable_success_requires_exact_cached_replay(
+    monkeypatch,
+) -> None:
+    observed_meta: dict = {}
+
+    async def cache_miss(*_args, **kwargs):
+        observed_meta.update(kwargs["call_meta"])
+        raise hiagent.ProviderError(
+            "durable replay missing",
+            failure_kind="durable_replay_missing",
+            delivery_state="not_sent",
+            replay_safe=True,
+        )
+
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", cache_miss)
+    monkeypatch.setattr(
+        stages,
+        "_blueprint_structured_operation_id",
+        lambda **_kwargs: ("stable-patch-success", 4096),
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(run_id="run-replay", step_run_id="step-replay"),
+    )
+    blueprint = _blueprint()
+    blueprint.nodes[0].participant_evidence = [
+        evidence
+        for evidence in blueprint.nodes[0].participant_evidence
+        if evidence.usage != "state_subject"
+    ]
+    budget = stages._BlueprintGenerationBudget()
+    budget._durable_successful_operations.add("stable-patch-success")
+
+    with pytest.raises(hiagent.ProviderError, match="durable replay missing"):
+        asyncio.run(stages._repair_narrative_blueprint(
+            blueprint,
+            episode={"id": "ep-replay"},
+            source_text=SOURCE,
+            generation_budget=budget,
+        ))
+
+    assert observed_meta["reuse_successful_operation"] is True
+    assert observed_meta["require_cached_successful_operation"] is True
+    assert budget.provider_calls == 0
+
+
+def test_current_blueprint_selector_prefers_current_same_hash_wrapper() -> None:
+    blueprint = _blueprint()
+    current_snapshot = stages._current_blueprint_authority_snapshot(
+        SOURCE,
+        generation_mode="test",
+    )
+    rows = [{
+        "id": "art-old-same-hash",
+        "content_json": blueprint.model_dump_json(),
+        "contract_version": stages.BLUEPRINT_VERSION,
+        "prompt_version": stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        "model_snapshot_json": "{}",
+    }, {
+        "id": "art-current-wrapper",
+        "content_json": blueprint.model_dump_json(),
+        "contract_version": stages.BLUEPRINT_VERSION,
+        "prompt_version": stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+        "model_snapshot_json": json.dumps(current_snapshot),
+    }]
+
+    selected, legacy = stages._select_current_blueprint_artifact(
+        rows,
+        blueprint,
+        SOURCE,
+    )
+
+    assert selected == "art-current-wrapper"
+    assert legacy == "art-old-same-hash"
+
+
+def test_only_old_same_hash_blueprint_requires_current_wrapper() -> None:
+    blueprint = _blueprint()
+    selected, legacy = stages._select_current_blueprint_artifact(
+        [{
+            "id": "art-old-same-hash",
+            "content_json": blueprint.model_dump_json(),
+            "contract_version": stages.BLUEPRINT_VERSION,
+            "prompt_version": stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            "model_snapshot_json": json.dumps({
+                "shard_policy_version": "blueprint-shard-policy.v2",
+            }),
+        }],
+        blueprint,
+        SOURCE,
+    )
+
+    assert selected is None
+    assert legacy == "art-old-same-hash"
+
+
+def test_semantic_repair_validated_artifact_writes_current_authority_snapshot(
+    monkeypatch,
+) -> None:
+    created: list = []
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a: [])
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda artifact, **_kwargs: created.append(artifact) or {"id": "art-new"},
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-repair-snapshot"),
+    )
+
+    result = asyncio.run(stages._repair_narrative_blueprint(
+        _blueprint(),
+        episode={"id": "ep-repair-snapshot"},
+        source_text=SOURCE,
+    ))
+
+    assert result == _blueprint()
+    snapshot = created[-1].model_snapshot
+    assert stages._blueprint_authority_snapshot_is_current(snapshot, SOURCE)
 def test_targeted_reviewer_conflict_triggers_full_review(monkeypatch) -> None:
     blueprint = _blueprint()
     derive_blueprint_scene_plans(blueprint)

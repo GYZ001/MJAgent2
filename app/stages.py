@@ -292,6 +292,40 @@ def _blueprint_authority_snapshot_is_current(
     )
 
 
+def _select_current_blueprint_artifact(
+    rows: list[Any],
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> tuple[str | None, str | None]:
+    """Prefer a current wrapper; retain an old same-hash id only as lineage."""
+    expected_hash = _narrative_blueprint_content_hash(blueprint)
+    legacy_same_hash_id: str | None = None
+    for row in rows:
+        try:
+            row_blueprint = NarrativeBlueprint.model_validate(
+                json.loads(row["content_json"] or "{}")
+            )
+            if _narrative_blueprint_content_hash(row_blueprint) != expected_hash:
+                continue
+            artifact_id = str(row["id"])
+            if legacy_same_hash_id is None:
+                legacy_same_hash_id = artifact_id
+            snapshot = json.loads(row["model_snapshot_json"] or "{}")
+            if (
+                str(row["contract_version"] or "") == BLUEPRINT_VERSION
+                and str(row["prompt_version"] or "")
+                == SCREENPLAY_BLUEPRINT_PROMPT_VERSION
+                and _blueprint_authority_snapshot_is_current(
+                    snapshot,
+                    source_text,
+                )
+            ):
+                return artifact_id, legacy_same_hash_id
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return None, legacy_same_hash_id
+
+
 def _screenplay_ir_blueprint_snapshot_matches(
     model_snapshot: dict[str, Any],
     expected_blueprint_hash: str,
@@ -6618,28 +6652,13 @@ async def _generate_screenplay_scene_sharded_baseline(
              ORDER BY created_at DESC LIMIT 20""",
         (episode_id,),
     ).fetchall()
-    blueprint_artifact_id = None
-    for row in blueprint_row:
-        try:
-            snapshot = json.loads(row["model_snapshot_json"] or "{}")
-            if (
-                str(row["contract_version"] or "") == BLUEPRINT_VERSION
-                and str(row["prompt_version"] or "")
-                == SCREENPLAY_BLUEPRINT_PROMPT_VERSION
-                and _blueprint_authority_snapshot_is_current(
-                    snapshot,
-                    source_text,
-                )
-                and _narrative_blueprint_content_hash(
-                    NarrativeBlueprint.model_validate(
-                        json.loads(row["content_json"] or "{}")
-                    )
-                ) == blueprint_hash
-            ):
-                blueprint_artifact_id = str(row["id"])
-                break
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
+    blueprint_artifact_id, legacy_same_hash_artifact_id = (
+        _select_current_blueprint_artifact(
+            list(blueprint_row),
+            narrative_blueprint,
+            source_text,
+        )
+    )
     if blueprint_artifact_id is None:
         artifact = evidence_repository.create_artifact(
             EvidenceArtifact(
@@ -6649,6 +6668,10 @@ async def _generate_screenplay_scene_sharded_baseline(
                 status="validated",
                 trust_level="T1",
                 content=narrative_blueprint.model_dump(mode="json"),
+                parent_artifact_ids=(
+                    [legacy_same_hash_artifact_id]
+                    if legacy_same_hash_artifact_id else []
+                ),
                 contract_version=BLUEPRINT_VERSION,
                 prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
                 model_snapshot=_current_blueprint_authority_snapshot(

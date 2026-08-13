@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import hiagent, stages
+from app import db, hiagent, stages
 from app.source_excerpt import index_source_segments
 
 
@@ -1004,6 +1004,84 @@ def test_durable_unknown_blueprint_patch_is_restored_as_budget_liability(
     assert budget.charged_output_tokens == 8192
 
 
+def test_blueprint_budget_lineage_crosses_fresh_activation_and_requires_new_grant(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "blueprint-lineage.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    for run_id in ("run-old", "run-fresh"):
+        conn.execute(
+            """INSERT INTO workflow_runs(
+                   id,workflow_type,scope_type,scope_id,status,
+                   input_fingerprint,started_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                run_id,
+                "screenplay_production",
+                "episode",
+                "ep-lineage",
+                "FAILED" if run_id == "run-old" else "RUNNING",
+                "same-authority-fingerprint",
+                100.0,
+                100.0,
+            ),
+        )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            101.0,
+            "chat",
+            "model",
+            "INTERRUPTED",
+            300000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "episode_id": "ep-lineage",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+                "production_grant_id": "grant-old",
+            }),
+            "run-old",
+            "stable-patch-operation",
+            1,
+            "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    conn.commit()
+
+    blocked = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-fresh",
+        episode_id="ep-lineage",
+        input_fingerprint="same-authority-fingerprint",
+        retry_grant_id="grant-old",
+    )
+    assert blocked.provider_calls == 1
+    assert blocked.unknown_output_tokens == 8192
+    with pytest.raises(stages.StageError, match="RETRY_GRANT_REQUIRED"):
+        blocked.claim(max_tokens=4096, operation_id="stable-patch-operation")
+
+    allowed = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="run-fresh",
+        episode_id="ep-lineage",
+        input_fingerprint="same-authority-fingerprint",
+        retry_grant_id="grant-new",
+    )
+    reservation = allowed.claim(
+        max_tokens=4096,
+        operation_id="stable-patch-operation",
+    )
+    assert allowed.provider_calls == 2
+    assert allowed.unknown_output_tokens == 8192
+    assert allowed.reserved_output_tokens == 4096
+    allowed.settle(reservation, unreported_outcome="not_sent")
+
+
 def test_durable_wall_budget_uses_original_run_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1055,6 +1133,66 @@ def test_blueprint_operation_fingerprint_binds_provider_and_exact_request() -> N
         assert stages._blueprint_provider_operation_id(
             **{**base, key: value},
         ) != original
+
+
+def test_structured_operation_fingerprint_changes_with_provider_payload_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("openrouter", "model", 8192),
+    )
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_semantic_settings",
+        lambda _provider: {"reasoning_effort": "low"},
+    )
+    base, effective = stages._blueprint_structured_operation_id(
+        operation_kind="review",
+        episode_id="ep-op",
+        semantic_input_hash="content-hash",
+        ordinal="1:1:full",
+        messages=[{"role": "user", "content": "review"}],
+        output_schema={"type": "object"},
+        requested_max_tokens=16384,
+        temperature=0.1,
+    )
+    assert effective == 8192
+
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_semantic_settings",
+        lambda _provider: {"reasoning_effort": "high"},
+    )
+    changed_reasoning, _ = stages._blueprint_structured_operation_id(
+        operation_kind="review",
+        episode_id="ep-op",
+        semantic_input_hash="content-hash",
+        ordinal="1:1:full",
+        messages=[{"role": "user", "content": "review"}],
+        output_schema={"type": "object"},
+        requested_max_tokens=16384,
+        temperature=0.1,
+    )
+    assert changed_reasoning != base
+
+    monkeypatch.setattr(
+        stages.hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("openrouter", "model", 4096),
+    )
+    changed_capability, _ = stages._blueprint_structured_operation_id(
+        operation_kind="review",
+        episode_id="ep-op",
+        semantic_input_hash="content-hash",
+        ordinal="1:1:full",
+        messages=[{"role": "user", "content": "review"}],
+        output_schema={"type": "object"},
+        requested_max_tokens=16384,
+        temperature=0.1,
+    )
+    assert changed_capability != changed_reasoning
 
 
 def test_strict_durable_replay_cache_miss_is_not_sent() -> None:

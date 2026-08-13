@@ -612,6 +612,67 @@ def test_interrupted_provider_operation_links_to_successful_retry(tmp_path, monk
     }
 
 
+def test_versioned_operation_migration_links_only_exact_interrupted_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-op-migration.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    request = {"model": "m", "messages": [{"role": "user", "content": "same"}]}
+    first = db.start_provider_call(
+        "chat",
+        "m",
+        request_json=request,
+        meta={"operation_id": "old-run-scoped-operation"},
+    )
+    db.get_conn().execute(
+        "UPDATE provider_calls SET status='INTERRUPTED', "
+        "recovery_disposition='REQUIRES_EXPLICIT_RETRY' WHERE id=?",
+        (first,),
+    )
+    db.get_conn().commit()
+
+    second = db.start_provider_call(
+        "chat",
+        "m",
+        request_json=request,
+        meta={
+            "operation_id": "new-stable-semantic-operation",
+            "supersedes_provider_call_id": first,
+        },
+    )
+    db.finish_provider_call(second, "OK", 200, 10, response_json={"ok": True})
+    linked = db.get_conn().execute(
+        "SELECT supersedes_call_id,attempt_no FROM provider_calls WHERE id=?",
+        (second,),
+    ).fetchone()
+    old = db.get_conn().execute(
+        "SELECT superseded_by_call_id,recovery_disposition FROM provider_calls WHERE id=?",
+        (first,),
+    ).fetchone()
+    assert dict(linked) == {"supersedes_call_id": first, "attempt_no": 2}
+    assert dict(old) == {
+        "superseded_by_call_id": second,
+        "recovery_disposition": "RETRIED_SUCCESSFULLY",
+    }
+
+    mismatch = db.start_provider_call(
+        "chat",
+        "m",
+        request_json={"model": "m", "messages": [{"role": "user", "content": "different"}]},
+        meta={
+            "operation_id": "another-stable-operation",
+            "supersedes_provider_call_id": first,
+        },
+    )
+    mismatch_row = db.get_conn().execute(
+        "SELECT supersedes_call_id,attempt_no FROM provider_calls WHERE id=?",
+        (mismatch,),
+    ).fetchone()
+    assert dict(mismatch_row) == {"supersedes_call_id": None, "attempt_no": 1}
+
+
 def test_late_response_from_old_process_cannot_overwrite_interrupted_call(
     tmp_path, monkeypatch,
 ) -> None:
