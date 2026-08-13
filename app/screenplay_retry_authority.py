@@ -9,31 +9,34 @@ independent values and makes an approved command look untrusted at the facade.
 from __future__ import annotations
 
 import contextvars
+from typing import Any
 
 
-SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL: contextvars.ContextVar[bool] = (
+SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL: contextvars.ContextVar[
+    dict[str, Any] | None
+] = (
     contextvars.ContextVar(
         "screenplay_command_bus_retry_approval",
-        default=False,
+        default=None,
     )
 )
 
 
-def enter_screenplay_command_bus_retry_approval():
-    return SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.set(True)
+def enter_screenplay_command_bus_retry_approval(evidence: dict[str, Any]):
+    return SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.set(dict(evidence))
 
 
 def exit_screenplay_command_bus_retry_approval(token) -> None:
     SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.reset(token)
 
 
-def consume_screenplay_command_bus_retry_approval() -> bool:
+def consume_screenplay_command_bus_retry_approval() -> dict[str, Any] | None:
     """Consume approval exactly once before any background task is created.
 
     ``asyncio.create_task`` copies the caller's context.  Clearing the value in
     the activation task before ``task_registry.spawn`` prevents the privileged
     request context from leaking into the long-running screenplay worker.
     """
-    approved = bool(SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.get())
-    SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.set(False)
+    approved = SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.get()
+    SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL.set(None)
     return approved

@@ -6,6 +6,7 @@ import hmac
 import json
 import secrets
 import time
+from contextvars import ContextVar
 from typing import Any
 
 from app.capabilities.registry import CommandSpec
@@ -23,6 +24,25 @@ DESTRUCTIVE_APPROVAL_TTL_S = 5 * 60
 
 _TOKEN_SECRET = secrets.token_bytes(32)
 _APPROVALS: dict[str, ApprovalTokenPayload] = {}
+_CONSUMED_EXECUTION_APPROVAL: ContextVar[ApprovalTokenPayload | None] = (
+    ContextVar("consumed_execution_approval", default=None)
+)
+
+
+def clear_consumed_execution_approval() -> None:
+    _CONSUMED_EXECUTION_APPROVAL.set(None)
+
+
+def take_consumed_execution_approval(
+    *,
+    command: str,
+) -> ApprovalTokenPayload | None:
+    """Return one exact policy-consumed approval, at most once."""
+    payload = _CONSUMED_EXECUTION_APPROVAL.get()
+    _CONSUMED_EXECUTION_APPROVAL.set(None)
+    if payload is None or payload.command != command:
+        return None
+    return payload
 
 
 def approval_ttl_for(risk: RiskLevel, command_name: str) -> int:
@@ -129,6 +149,7 @@ def consume_approval(
     payload.used_at = time.time()
     payload.decision = ApprovalDecision.APPROVE
     _APPROVALS[approval_id] = payload
+    _CONSUMED_EXECUTION_APPROVAL.set(payload)
     return payload
 
 

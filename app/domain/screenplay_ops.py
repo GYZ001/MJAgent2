@@ -39,8 +39,10 @@ _SCREENPLAY_COMMAND_BUS_RETRY_APPROVAL = (
 )
 
 
-def _enter_screenplay_command_bus_retry_approval():
-    return _retry_authority.enter_screenplay_command_bus_retry_approval()
+def _enter_screenplay_command_bus_retry_approval(evidence: dict[str, Any]):
+    return _retry_authority.enter_screenplay_command_bus_retry_approval(
+        evidence
+    )
 
 
 def _exit_screenplay_command_bus_retry_approval(token) -> None:
@@ -1515,6 +1517,9 @@ def _spawn_screenplay_activation(
     try:
         conn.execute("BEGIN IMMEDIATE")
         activation_stamp = now()
+        retry_approval_evidence = (
+            _retry_authority.consume_screenplay_command_bus_retry_approval()
+        )
         previous_row = conn.execute(
             "SELECT screenplay_status, screenplay_error, screenplay_started_at, "
             "screenplay_updated_at, active_screenplay_run_id, "
@@ -1616,8 +1621,30 @@ def _spawn_screenplay_activation(
         if budget_projection["requires_fresh_retry_grant"]:
             trusted_retry_approval = bool(
                 authorize_blueprint_retry
-                and _retry_authority.consume_screenplay_command_bus_retry_approval()
+                and retry_approval_evidence
             )
+            from app.stages import blueprint_retry_receipts_hash
+
+            if (
+                trusted_retry_approval
+                and str(retry_approval_evidence.get("receipts_hash") or "")
+                != blueprint_retry_receipts_hash(
+                    budget_projection["unknown_receipts"]
+                )
+            ):
+                raise StateConflict(
+                    "blueprint_unknown_retry_approval",
+                    episode_id,
+                    {
+                        str(
+                            retry_approval_evidence.get("receipts_hash")
+                            or ""
+                        )
+                    },
+                    blueprint_retry_receipts_hash(
+                        budget_projection["unknown_receipts"]
+                    ),
+                )
             if not trusted_retry_approval:
                 budget.assert_activation_admissible()
             expected_receipts = expected_blueprint_unknown_receipts or []
@@ -1634,8 +1661,6 @@ def _spawn_screenplay_activation(
                     "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED: 缺少可绑定的 active revision"
                 )
             from app.production.grant import issue_production_grant
-            from app.stages import blueprint_retry_receipts_hash
-
             grant, _token = issue_production_grant(
                 episode_id=episode_id,
                 project_id=project_id,

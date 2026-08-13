@@ -355,6 +355,10 @@ class CommandBus:
         *,
         session_id: str | None,
     ) -> CommandResult | None:
+        # Approval authority is request-local and one-shot.  A command that
+        # does not consume a token must never inherit evidence from an earlier
+        # bus execution in the same asyncio task (notably test/embedded loops).
+        policy.clear_consumed_execution_approval()
         if not preflight.allowed:
             denial_data: dict[str, Any] = {}
             if preflight.denial_code:

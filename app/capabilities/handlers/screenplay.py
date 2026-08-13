@@ -8,14 +8,40 @@ from app.capabilities.schemas import CommandResult
 
 async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
     from app import api
+    from app.capabilities import policy
     from app.domain.screenplay_ops import (
         _enter_screenplay_command_bus_retry_approval,
         _exit_screenplay_command_bus_retry_approval,
-        _screenplay_blueprint_budget_projection,
     )
+    from app.stages import blueprint_retry_receipts_hash
 
-    budget_projection = _screenplay_blueprint_budget_projection(args.episode_id)
-    approval_token = _enter_screenplay_command_bus_retry_approval()
+    approval = policy.take_consumed_execution_approval(
+        command="screenplay.generate"
+    )
+    impact = approval.impact_snapshot if approval is not None else {}
+    affected = impact.get("affected") if isinstance(impact, dict) else {}
+    extra = affected.get("extra") if isinstance(affected, dict) else {}
+    budget_projection = (
+        extra.get("blueprint_budget") if isinstance(extra, dict) else {}
+    )
+    expected_receipts = (
+        budget_projection.get("unknown_receipts")
+        if isinstance(budget_projection, dict)
+        and isinstance(budget_projection.get("unknown_receipts"), list)
+        else []
+    )
+    retry_approved = bool(
+        approval is not None
+        and budget_projection.get("requires_fresh_retry_grant") is True
+        and expected_receipts
+    )
+    approval_token = _enter_screenplay_command_bus_retry_approval({
+        "approval_id": approval.approval_id if approval is not None else "",
+        "state_fingerprint": (
+            approval.state_fingerprint if approval is not None else ""
+        ),
+        "receipts_hash": blueprint_retry_receipts_hash(expected_receipts),
+    })
     try:
         outcome = await call_guarded(
             api.start_screenplay,
@@ -24,11 +50,9 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
             # handler. Public HTTP body fields alone cannot mint a retry grant.
             body={
                 "authorize_blueprint_retry": bool(
-                    budget_projection["requires_fresh_retry_grant"]
+                    retry_approved
                 ),
-                "expected_blueprint_unknown_receipts": (
-                    budget_projection["unknown_receipts"]
-                ),
+                "expected_blueprint_unknown_receipts": expected_receipts,
             },
         )
     finally:
