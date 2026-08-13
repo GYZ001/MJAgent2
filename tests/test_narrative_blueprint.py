@@ -92,6 +92,15 @@ def _blueprint_cross_field_run_fixtures() -> list[dict]:
     )["cases"]
 
 
+def _state_subject_retry_fixture() -> dict:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "run_d67f041a6df4_calls29716_29717_state_subject.json"
+    )
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
 def _replay_source_fact(value: dict) -> SourceFact:
     return SourceFact.model_validate({
         **value,
@@ -1793,6 +1802,76 @@ def test_joint_action_uses_typed_assignment_without_selecting_one_subject() -> N
     })
 
     assert blueprint_state_subject_issues(blueprint, source) == []
+
+
+def test_call29716_ambiguous_resolution_preserves_joint_source_authority(
+    monkeypatch,
+) -> None:
+    fixture = _state_subject_retry_fixture()
+    facts = [
+        SourceFact(
+            source_unit_key=unit_key,
+            source_segment_id=fixture["source_segment_id"],
+            unit_order=int(unit_key.rsplit(":", 1)[1]),
+            projection="action",
+            surface_form="prose",
+            text=value["text"],
+        )
+        for unit_key, value in fixture["ambiguous_units"].items()
+    ]
+    monkeypatch.setattr(
+        "app.narrative_blueprint.source_facts",
+        lambda _source_text: facts,
+    )
+    participants = ["王有材", "虎头少年", "胖少年"]
+    node = {
+        "key": "S004-S001-NODE0003",
+        "source_segment_ids": [fixture["source_segment_id"]],
+        "summary": "三名少年共同后退并颤抖",
+        "narrative_layer": "story",
+        "event_priority": "causal",
+        "render_policy": "standalone",
+        "temporal_domain_key": "TD001",
+        "time_label": "四月黄昏",
+        "time_relation": "continuous",
+        "location_key": "LOC002",
+        "location_label": "大青山山崖裂缝内",
+        "participants": participants,
+        "participant_evidence": [
+            {
+                "identity_key": identity_key,
+                "source_segment_ids": [fixture["source_segment_id"]],
+                "source_unit_keys": [
+                    unit_key
+                    for unit_key, value in fixture["ambiguous_units"].items()
+                    if identity_key in value["identity_keys"]
+                ],
+                "usage": "state_subject",
+            }
+            for identity_key in participants
+        ],
+        "action_logic": "三名少年因许清出现而共同惊恐后退",
+    }
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [node],
+    })
+
+    issues = blueprint_state_subject_issues(blueprint, "fixture")
+
+    assert [issue.code for issue in issues] == [
+        "state_subject_ambiguous",
+    ] * 4
+    assert all(
+        "仅修此报错 unit" in issue.required_resolution
+        and "移除该 unit 的全部 single state_subject claims"
+        in issue.required_resolution
+        and "identity_keys 列出全部有来源共同主体且至少 2 个"
+        in issue.required_resolution
+        and "其他 unit ownership 不得变化"
+        in issue.required_resolution
+        for issue in issues
+    )
 
 
 @pytest.mark.parametrize(

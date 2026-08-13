@@ -5434,6 +5434,7 @@ def _blueprint_shard_prompt(
     bible_context: dict[str, Any],
     boundary: dict[str, Any],
     source_payload: list[dict[str, Any]],
+    previous_candidate: dict[str, Any] | None = None,
 ) -> str:
     """Render the complete Blueprint contract without prose duplication."""
 
@@ -5473,6 +5474,12 @@ def _blueprint_shard_prompt(
         "environment_source_unit_keys。visible、roster和"
         "content_owner绝非主体默认值。paratext/audit_only无论原文unit是"
         "quoted还是action，都不适用delivery/state-subject规则。"
+        "retry必须以previous_candidate为基线，仅修改validation_errors明确"
+        "报错的source_unit_key及对应字段。state_subject_ambiguous中，可拆动作"
+        "只保留唯一single state_subject；结构切分后仍不可拆的共同动作必须移除"
+        "该unit全部single claims，再建立唯一mode=joint且identity_keys列出全部"
+        "有来源共同主体、至少2个。未报错unit的single/joint/environment ownership"
+        "必须逐项保持不变，禁止把正确single改成单元素joint。"
         "若地点变化发生在两个SRC之间，才可在该SRC边界拆节点；若同一SRC内部跨越"
         "多个主要地点，仍必须整段只归一个节点，location_key/location_label只填写"
         "该SRC核心因果进程实际发生的一个主要地点，移动过程写入transition_cue和"
@@ -5489,6 +5496,7 @@ def _blueprint_shard_prompt(
         f"validation_errors={compact(errors)}\n"
         f"characters={compact(bible_context)}\n"
         f"boundary_context={compact(boundary)}\n"
+        f"previous_candidate={compact(previous_candidate)}\n"
         f"target_sources={compact(source_payload)}\n"
         "schema="
         + compact(blueprint_shard_provider_schema(source_payload))
@@ -6294,6 +6302,7 @@ async def _generate_sharded_narrative_blueprint(
             )
         if shard is None:
             errors: list[str] = []
+            previous_candidate: dict[str, Any] | None = None
             split_for_truncation = False
             token_budget = _blueprint_shard_token_budget(shard_segments)
             for attempt in range(1, BLUEPRINT_SHARD_MAX_ATTEMPTS + 1):
@@ -6305,6 +6314,7 @@ async def _generate_sharded_narrative_blueprint(
                     bible_context=bible_context,
                     boundary=boundary,
                     source_payload=source_payload,
+                    previous_candidate=previous_candidate,
                 )
                 provider, model, effective_max_tokens = (
                     hiagent.text_request_token_limits(
@@ -6469,6 +6479,7 @@ async def _generate_sharded_narrative_blueprint(
                     boundary_context=boundary,
                 )
                 _namespace_blueprint_shard(candidate)
+                previous_candidate = candidate.model_dump(mode="json")
                 errors = validate_narrative_blueprint_shard(
                     candidate,
                     expected_episode_no=int(episode["episode_no"]),

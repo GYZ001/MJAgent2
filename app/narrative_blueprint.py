@@ -29,7 +29,7 @@ from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v7"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.7.0"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.7.1"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -2271,7 +2271,11 @@ def blueprint_state_subject_issues(
                         )
                     ),
                     required_resolution=(
-                        "用唯一 usage=state_subject evidence 明确主体"
+                        "仅修此报错 unit：可拆动作保留唯一 "
+                        "usage=state_subject evidence；结构切分后仍不可拆的"
+                        "共同动作移除该 unit 的全部 single state_subject claims，"
+                        "建立唯一 mode=joint assignment，identity_keys 列出全部"
+                        "有来源共同主体且至少 2 个；其他 unit ownership 不得变化"
                     ),
                 ))
             elif not explicit and not assignments and not environment:

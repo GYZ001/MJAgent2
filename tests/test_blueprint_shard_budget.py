@@ -18,6 +18,11 @@ ERR_653AC6_FIXTURE = (
     / "fixtures"
     / "blueprint_shard_err_20260814_653ac6.json"
 )
+STATE_SUBJECT_RETRY_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "run_d67f041a6df4_calls29716_29717_state_subject.json"
+)
 
 
 def _source(count: int) -> str:
@@ -223,7 +228,7 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     )
 
     assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
-        "screenplay-blueprint-1.7.0"
+        "screenplay-blueprint-1.7.1"
     )
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt
@@ -297,6 +302,63 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
         "minLength": 1
     }
     assert "performer_key" in delivery_contract["required"]
+
+
+def test_calls29716_29717_retry_prompt_freezes_unreported_ownership() -> None:
+    replay = json.loads(
+        STATE_SUBJECT_RETRY_FIXTURE.read_text(encoding="utf-8")
+    )
+    reported_units = set(replay["ambiguous_units"])
+    previous_candidate = {
+        "single_claims": replay["unchanged_single_claims"],
+        "environment_units": replay["unchanged_environment_units"],
+    }
+    errors = [
+        f"[BLUEPRINT_SHARD_STATE_SUBJECT_AMBIGUOUS] {unit_key}"
+        for unit_key in reported_units
+    ]
+
+    prompt = stages._blueprint_shard_prompt(
+        episode_no=1,
+        shard_index=4,
+        shard_count=5,
+        errors=errors,
+        bible_context={},
+        boundary={},
+        source_payload=[{
+            "source_segment_id": replay["source_segment_id"],
+            "text": "fixture",
+            "source_facts": [],
+        }],
+        previous_candidate=previous_candidate,
+    )
+    rendered_previous = json.loads(
+        prompt.split("previous_candidate=", 1)[1].split(
+            "\ntarget_sources=", 1,
+        )[0]
+    )
+    expected_joint = {
+        unit_key: value["identity_keys"]
+        for unit_key, value in replay["ambiguous_units"].items()
+    }
+
+    assert replay["run_id"] == "run_d67f041a6df4"
+    assert replay["provider_call_ids"] == [29716, 29717]
+    assert rendered_previous == previous_candidate
+    assert "仅修改validation_errors明确报错的source_unit_key" in prompt
+    assert "未报错unit的single/joint/environment ownership必须逐项保持不变" in prompt
+    assert "禁止把正确single改成单元素joint" in prompt
+    assert len(replay["call29717_single_element_joint_units"]) == 57
+    assert reported_units.isdisjoint(
+        replay["call29717_single_element_joint_units"]
+    )
+    assert all(len(identity_keys) >= 2 for identity_keys in expected_joint.values())
+    assert previous_candidate["single_claims"] == replay[
+        "unchanged_single_claims"
+    ]
+    assert previous_candidate["environment_units"] == replay[
+        "unchanged_environment_units"
+    ]
 
 
 def test_err_653ac6_provider_responses_require_explicit_voice_evidence() -> None:
