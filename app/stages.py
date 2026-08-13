@@ -45,15 +45,20 @@ from app.narrative_blueprint import (
     BlueprintSourceOccurrenceError,
     BlueprintSourceOwnershipError,
     BlueprintSemanticReview,
+    BlueprintStateSubjectOwnershipPatch,
     NarrativeBlueprint,
     NarrativeBlueprintPatch,
     NarrativeBlueprintShard,
+    apply_blueprint_state_subject_ownership_patch,
     apply_narrative_blueprint_patch,
     blueprint_authority_validator_fingerprint,
     blueprint_patch_schema,
+    blueprint_shard_candidate_hash,
     blueprint_source_occurrence_issues,
     blueprint_shard_provider_schema,
     blueprint_semantic_issue_is_resolved,
+    blueprint_state_subject_issues,
+    blueprint_state_subject_ownership_patch_schema,
     filter_blueprint_semantic_review_voice_issues,
     blueprint_prompt_contract,
     blueprint_semantic_review_schema,
@@ -64,6 +69,7 @@ from app.narrative_blueprint import (
     normalize_blueprint_raw_json,
     normalize_blueprint_semantic_review_payload,
     recover_complete_blueprint_prefix,
+    render_blueprint_shard_semantic_issue,
     validate_and_apply_blueprint_scene_contract,
     validate_blueprint_semantic_review,
     validate_blueprint_scene_partition,
@@ -5186,6 +5192,67 @@ def _namespace_blueprint_shard(
             )
 
 
+def _blueprint_node_has_operational_authority(node: Any) -> bool:
+    return bool(
+        node.participants
+        or node.participant_evidence
+        or node.source_unit_deliveries
+        or node.state_subject_assignments
+        or node.environment_source_unit_keys
+        or node.state_requirements
+        or node.state_changes
+        or node.released_constraints_for
+        or node.decision is not None
+        or node.exit_state.strip()
+    )
+
+
+def _collapse_nonoperational_duplicate_source_nodes(
+    shard: NarrativeBlueprintShard,
+) -> None:
+    """Remove only authority-free nodes whose SRCs have one other owner."""
+    owners_by_source: defaultdict[str, list[int]] = defaultdict(list)
+    for index, node in enumerate(shard.nodes):
+        for source_id in dict.fromkeys(node.source_segment_ids):
+            owners_by_source[source_id].append(index)
+
+    removable_indexes = {
+        index
+        for index, node in enumerate(shard.nodes)
+        if (
+            node.source_segment_ids
+            and not _blueprint_node_has_operational_authority(node)
+            and all(
+                len({
+                    owner_index
+                    for owner_index in owners_by_source[source_id]
+                    if owner_index != index
+                }) == 1
+                for source_id in node.source_segment_ids
+            )
+        )
+    }
+    # Two authority-free duplicate nodes do not establish which one is
+    # redundant. Keep both so the source occurrence validator fails closed.
+    removable_indexes = {
+        index
+        for index in removable_indexes
+        if all(
+            next(
+                owner_index
+                for owner_index in owners_by_source[source_id]
+                if owner_index != index
+            ) not in removable_indexes
+            for source_id in shard.nodes[index].source_segment_ids
+        )
+    }
+    shard.nodes = [
+        node
+        for index, node in enumerate(shard.nodes)
+        if index not in removable_indexes
+    ]
+
+
 def _remove_duplicate_repair_orphan_nodes(
     shard: NarrativeBlueprintShard,
     *,
@@ -5224,22 +5291,11 @@ def _remove_duplicate_repair_orphan_nodes(
         for source_id in node.source_segment_ids:
             current_owners[source_id].append(node.key)
 
-    def has_operational_authority(node: Any) -> bool:
-        return bool(
-            node.participants
-            or node.participant_evidence
-            or node.source_unit_deliveries
-            or node.state_subject_assignments
-            or node.environment_source_unit_keys
-            or node.state_requirements
-            or node.state_changes
-            or node.released_constraints_for
-            or node.decision is not None
-            or node.exit_state.strip()
-        )
-
     def removable(node: Any) -> bool:
-        if node.source_segment_ids or has_operational_authority(node):
+        if (
+            node.source_segment_ids
+            or _blueprint_node_has_operational_authority(node)
+        ):
             return False
         previous_matches = previous_nodes_by_key.get(node.key, [])
         if len(previous_matches) != 1:
@@ -5267,6 +5323,7 @@ def _normalize_blueprint_shard_structure(
     previous_candidate: dict[str, Any] | None = None,
     previous_validation_errors: list[str] | None = None,
 ) -> None:
+    _collapse_nonoperational_duplicate_source_nodes(shard)
     _remove_duplicate_repair_orphan_nodes(
         shard,
         attempt=attempt,
@@ -5774,6 +5831,145 @@ def _freeze_unreported_state_subject_ownership(
                 if identity_key.strip()
             ]
         ))
+
+
+def _blueprint_state_subject_repair_target_keys(
+    issues: list[Any],
+) -> list[str]:
+    return list(dict.fromkeys(
+        unit_key
+        for issue in issues
+        for unit_key in issue.source_unit_keys
+    ))
+
+
+def _blueprint_state_subject_repair_issues(
+    candidate: NarrativeBlueprintShard,
+    *,
+    validation_errors: list[str],
+    source_text: str,
+) -> list[Any] | None:
+    """Select repair-only mode only when typed issues equal all shard errors."""
+    issues = blueprint_state_subject_issues(
+        NarrativeBlueprint(
+            episode_no=candidate.episode_no,
+            nodes=candidate.nodes,
+        ),
+        source_text,
+    )
+    if (
+        not issues
+        or any(not issue.source_unit_keys for issue in issues)
+        or validation_errors != [
+            render_blueprint_shard_semantic_issue(issue)
+            for issue in issues
+        ]
+    ):
+        return None
+    target_unit_keys = _blueprint_state_subject_repair_target_keys(issues)
+    try:
+        blueprint_state_subject_ownership_patch_schema(
+            candidate,
+            target_unit_keys,
+            source_text,
+        )
+    except (TypeError, ValueError):
+        return None
+    return issues
+
+
+def _blueprint_state_subject_repair_prompt(
+    *,
+    previous_candidate: dict[str, Any],
+    issues: list[Any],
+    source_payload: list[dict[str, Any]],
+    source_text: str,
+) -> str:
+    """Render the bounded attempt-2 ownership map contract."""
+    candidate = NarrativeBlueprintShard.model_validate(previous_candidate)
+    target_unit_keys = _blueprint_state_subject_repair_target_keys(issues)
+    patch_schema = blueprint_state_subject_ownership_patch_schema(
+        candidate,
+        target_unit_keys,
+        source_text,
+    )
+    facts_by_source = {
+        str(source.get("source_segment_id") or ""): list(
+            source.get("source_facts") or []
+        )
+        for source in source_payload
+    }
+    facts_by_key = {
+        str(fact.get("source_unit_key") or ""): fact
+        for facts in facts_by_source.values()
+        for fact in facts
+    }
+    target_source_context: dict[str, Any] = {}
+    current_claims: dict[str, Any] = {}
+    allowed_identities: dict[str, list[str]] = {}
+    for unit_key in target_unit_keys:
+        fact = facts_by_key[unit_key]
+        source_id = str(fact.get("source_segment_id") or "")
+        source_facts_for_unit = facts_by_source[source_id]
+        fact_index = next(
+            index
+            for index, value in enumerate(source_facts_for_unit)
+            if value.get("source_unit_key") == unit_key
+        )
+        target_source_context[unit_key] = {
+            "source_fact": fact,
+            "adjacent_units": source_facts_for_unit[
+                max(0, fact_index - 1):fact_index
+            ] + source_facts_for_unit[
+                fact_index + 1:fact_index + 2
+            ],
+        }
+        current_claims[unit_key] = {
+            "single": [
+                evidence.identity_key
+                for node in candidate.nodes
+                for evidence in node.participant_evidence
+                if (
+                    evidence.usage == "state_subject"
+                    and unit_key in evidence.source_unit_keys
+                )
+            ],
+            "joint": [
+                list(assignment.identity_keys)
+                for node in candidate.nodes
+                for assignment in node.state_subject_assignments
+                if assignment.source_unit_key == unit_key
+            ],
+            "environment": any(
+                unit_key in node.environment_source_unit_keys
+                for node in candidate.nodes
+            ),
+        }
+        owner = next(
+            node
+            for node in candidate.nodes
+            if source_id in node.source_segment_ids
+        )
+        allowed_identities[unit_key] = list(owner.participants)
+
+    compact = lambda value: json.dumps(  # noqa: E731
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        "仅输出state-subject ownership repair JSON，不得输出完整shard。"
+        "repairs必须逐项覆盖schema中repairs.required的全部properties，"
+        "不得漏项或增加target。single表示唯一人物主体；joint只用于结构上"
+        "不可拆的共同动作；environment只用于无人物状态所有者的环境变化。"
+        "identity_keys只能使用对应target的allowed_identities；"
+        "不要输出source ids，服务端会从source facts派生。\n"
+        f"base_candidate_hash={blueprint_shard_candidate_hash(candidate)}\n"
+        f"target_source_facts={compact(target_source_context)}\n"
+        f"current_claims={compact(current_claims)}\n"
+        f"allowed_identities={compact(allowed_identities)}\n"
+        f"schema={compact(patch_schema)}"
+    )
 
 
 def _blueprint_shard_prompt(
@@ -6660,19 +6856,35 @@ async def _generate_sharded_narrative_blueprint(
         if shard is None:
             errors: list[str] = []
             previous_candidate: dict[str, Any] | None = None
+            ownership_repair_issues: list[Any] | None = None
             split_for_truncation = False
             token_budget = _blueprint_shard_token_budget(shard_segments)
             for attempt in range(1, BLUEPRINT_SHARD_MAX_ATTEMPTS + 1):
-                prompt = _blueprint_shard_prompt(
-                    episode_no=int(episode["episode_no"]),
-                    shard_index=shard_index,
-                    shard_count=len(segment_shards),
-                    errors=errors,
-                    bible_context=bible_context,
-                    boundary=boundary,
-                    source_payload=source_payload,
-                    previous_candidate=previous_candidate,
+                repair_only = bool(
+                    attempt == 2
+                    and previous_candidate is not None
+                    and ownership_repair_issues is not None
                 )
+                if repair_only:
+                    assert previous_candidate is not None
+                    assert ownership_repair_issues is not None
+                    prompt = _blueprint_state_subject_repair_prompt(
+                        previous_candidate=previous_candidate,
+                        issues=ownership_repair_issues,
+                        source_payload=source_payload,
+                        source_text=source_text,
+                    )
+                else:
+                    prompt = _blueprint_shard_prompt(
+                        episode_no=int(episode["episode_no"]),
+                        shard_index=shard_index,
+                        shard_count=len(segment_shards),
+                        errors=errors,
+                        bible_context=bible_context,
+                        boundary=boundary,
+                        source_payload=source_payload,
+                        previous_candidate=previous_candidate,
+                    )
                 provider, model, effective_max_tokens = (
                     hiagent.text_request_token_limits(
                         requested_max_tokens=token_budget,
@@ -6727,6 +6939,11 @@ async def _generate_sharded_narrative_blueprint(
                                 "shard_index": shard_index,
                                 "shard_count": len(segment_shards),
                                 "attempt": attempt,
+                                "response_mode": (
+                                    "ownership_repair"
+                                    if repair_only
+                                    else "full_shard"
+                                ),
                                 "split_depth": split_depth,
                                 "source_count": len(source_ids),
                                 "source_fact_count": sum(
@@ -6799,6 +7016,11 @@ async def _generate_sharded_narrative_blueprint(
                             "raw_output": raw,
                             "shard_index": shard_index,
                             "attempt": attempt,
+                            "response_mode": (
+                                "ownership_repair"
+                                if repair_only
+                                else "full_shard"
+                            ),
                             "source_hash": source_hash,
                             "boundary_hash": boundary_hash,
                             "source_fact_version": SOURCE_FACT_VERSION,
@@ -6819,47 +7041,73 @@ async def _generate_sharded_narrative_blueprint(
                 )
                 try:
                     provider_payload = extract_json(
-                            raw,
-                            repair_unescaped_inner_quotes=True,
-                        )
-                    normalized_payload = normalize_blueprint_provider_payload(
-                        provider_payload,
+                        raw,
+                        repair_unescaped_inner_quotes=True,
                     )
-                    if previous_candidate and isinstance(
-                        normalized_payload,
-                        dict,
-                    ):
-                        normalized_payload = _freeze_unreported_voice_pairs(
-                            normalized_payload,
-                            previous_candidate=previous_candidate,
-                            validation_errors=errors,
+                    if repair_only:
+                        assert previous_candidate is not None
+                        assert ownership_repair_issues is not None
+                        patch = (
+                            BlueprintStateSubjectOwnershipPatch.model_validate(
+                                provider_payload
+                            )
                         )
-                        normalized_payload = normalize_blueprint_provider_payload(
+                        candidate = (
+                            apply_blueprint_state_subject_ownership_patch(
+                                previous_candidate,
+                                patch,
+                                target_unit_keys=(
+                                    _blueprint_state_subject_repair_target_keys(
+                                        ownership_repair_issues
+                                    )
+                                ),
+                                source_text=source_text,
+                            )
+                        )
+                    else:
+                        normalized_payload = (
+                            normalize_blueprint_provider_payload(
+                                provider_payload,
+                            )
+                        )
+                        if previous_candidate and isinstance(
+                            normalized_payload,
+                            dict,
+                        ):
+                            normalized_payload = _freeze_unreported_voice_pairs(
+                                normalized_payload,
+                                previous_candidate=previous_candidate,
+                                validation_errors=errors,
+                            )
+                            normalized_payload = (
+                                normalize_blueprint_provider_payload(
+                                    normalized_payload,
+                                )
+                            )
+                        candidate = NarrativeBlueprintShard.model_validate(
                             normalized_payload,
                         )
-                    candidate = NarrativeBlueprintShard.model_validate(
-                        normalized_payload,
-                    )
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     errors = [f"[BLUEPRINT_SHARD_JSON] {exc}"]
                     continue
-                candidate.source_hash = source_hash
-                candidate.boundary_hash = boundary_hash
-                candidate.source_segment_ids = source_ids
-                _normalize_blueprint_shard_structure(
-                    candidate,
-                    boundary_context=boundary,
-                    attempt=attempt,
-                    previous_candidate=previous_candidate,
-                    previous_validation_errors=errors,
-                )
-                _namespace_blueprint_shard(candidate)
-                if previous_candidate is not None:
-                    _freeze_unreported_state_subject_ownership(
+                if not repair_only:
+                    candidate.source_hash = source_hash
+                    candidate.boundary_hash = boundary_hash
+                    candidate.source_segment_ids = source_ids
+                    _normalize_blueprint_shard_structure(
                         candidate,
+                        boundary_context=boundary,
+                        attempt=attempt,
                         previous_candidate=previous_candidate,
-                        validation_errors=errors,
+                        previous_validation_errors=errors,
                     )
+                    _namespace_blueprint_shard(candidate)
+                    if previous_candidate is not None:
+                        _freeze_unreported_state_subject_ownership(
+                            candidate,
+                            previous_candidate=previous_candidate,
+                            validation_errors=errors,
+                        )
                 previous_candidate = candidate.model_dump(mode="json")
                 errors = validate_narrative_blueprint_shard(
                     candidate,
@@ -6921,6 +7169,14 @@ async def _generate_sharded_narrative_blueprint(
                         step_run_id=trace.step_run_id,
                     )
                     break
+                if attempt == 1:
+                    ownership_repair_issues = (
+                        _blueprint_state_subject_repair_issues(
+                            candidate,
+                            validation_errors=errors,
+                            source_text=source_text,
+                        )
+                    )
             if split_for_truncation:
                 split = _split_blueprint_segments(shard_segments)
                 segment_shards[shard_index - 1:shard_index] = split

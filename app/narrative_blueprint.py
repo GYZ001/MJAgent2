@@ -40,7 +40,7 @@ BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
 BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v8"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
-    "blueprint-shard-local-authority.v7"
+    "blueprint-shard-local-authority.v8"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 
@@ -1176,12 +1176,7 @@ def validate_narrative_blueprint_shard(
             blueprint_voice_identity_issues(local_blueprint, source_text)
             + blueprint_state_subject_issues(local_blueprint, source_text)
         ):
-            errors.append(
-                f"[BLUEPRINT_SHARD_{issue.code.upper()}] "
-                f"{'、'.join(issue.node_keys)} "
-                f"{'、'.join(issue.source_segment_ids)}：{issue.message}；"
-                f"必须：{issue.required_resolution}"
-            )
+            errors.append(render_blueprint_shard_semantic_issue(issue))
     try:
         derive_blueprint_scene_plans(NarrativeBlueprint(
             episode_no=shard.episode_no,
@@ -1260,9 +1255,71 @@ class BlueprintSemanticIssue(BaseModel):
     ]
     node_keys: list[str]
     source_segment_ids: list[str] = Field(default_factory=list)
+    source_unit_keys: list[str] = Field(default_factory=list)
     message: str
     required_resolution: str
     must_fix: bool = True
+
+
+def render_blueprint_shard_semantic_issue(
+    issue: BlueprintSemanticIssue,
+) -> str:
+    """Render typed semantic issues exactly once for shard validation."""
+    return (
+        f"[BLUEPRINT_SHARD_{issue.code.upper()}] "
+        f"{'、'.join(issue.node_keys)} "
+        f"{'、'.join(issue.source_segment_ids)}：{issue.message}；"
+        f"必须：{issue.required_resolution}"
+    )
+
+
+class BlueprintStateSubjectOwnershipRepair(BaseModel):
+    """One exact-unit ownership replacement selected by the model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["single", "joint", "environment"]
+    identity_keys: list[str]
+
+    @model_validator(mode="after")
+    def _validate_mode_identity_shape(
+        self,
+    ) -> BlueprintStateSubjectOwnershipRepair:
+        normalized = [
+            str(identity_key or "").strip()
+            for identity_key in self.identity_keys
+        ]
+        if any(not identity_key for identity_key in normalized):
+            raise ValueError("ownership repair identity_keys 不得含空值")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("ownership repair identity_keys 不得重复")
+        expected = {
+            "single": len(normalized) == 1,
+            "joint": len(normalized) >= 2,
+            "environment": not normalized,
+        }[self.mode]
+        if not expected:
+            raise ValueError(
+                "single 必须恰有一个 identity，joint 必须至少两个唯一 "
+                "identity，environment 必须为空"
+            )
+        self.identity_keys = normalized
+        return self
+
+
+class BlueprintStateSubjectOwnershipPatch(BaseModel):
+    """Atomic repair map bound to one exact normalized shard candidate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_candidate_hash: str
+    repairs: dict[str, BlueprintStateSubjectOwnershipRepair]
+
+    @model_validator(mode="after")
+    def _require_repairs(self) -> BlueprintStateSubjectOwnershipPatch:
+        if not self.repairs:
+            raise ValueError("ownership repair patch 不得为空")
+        return self
 
 
 class BlueprintSemanticReview(BaseModel):
@@ -1786,6 +1843,9 @@ def blueprint_voice_identity_issues(
                     code="state_subject_environment_non_picture",
                     node_keys=[node.key],
                     source_segment_ids=list(node.source_segment_ids),
+                    source_unit_keys=list(
+                        node.environment_source_unit_keys
+                    ),
                     message=(
                         "paratext/audit-only node 不得携带 "
                         "environment_source_unit_keys"
@@ -2038,10 +2098,15 @@ def blueprint_state_subject_issues(
         ]
         environment_keys = list(node.environment_source_unit_keys)
         if len(environment_keys) != len(set(environment_keys)):
+            duplicate_environment_keys = list(dict.fromkeys(
+                key for key in environment_keys
+                if environment_keys.count(key) > 1
+            ))
             issues.append(BlueprintSemanticIssue(
                 code="state_subject_environment_duplicate",
                 node_keys=[node.key],
                 source_segment_ids=list(node.source_segment_ids),
+                source_unit_keys=duplicate_environment_keys,
                 message="environment_source_unit_keys 含重复 source unit",
                 required_resolution="每个环境 source unit 只能显式声明一次",
             ))
@@ -2058,6 +2123,7 @@ def blueprint_state_subject_issues(
                 code="state_subject_environment_invalid",
                 node_keys=[node.key],
                 source_segment_ids=list(node.source_segment_ids),
+                source_unit_keys=list(invalid_environment_keys),
                 message=(
                     "environment_source_unit_keys 引用非本节点 prose unit："
                     + "、".join(invalid_environment_keys)
@@ -2076,6 +2142,7 @@ def blueprint_state_subject_issues(
                     code="state_subject_unit_missing",
                     node_keys=[node.key],
                     source_segment_ids=list(evidence.source_segment_ids),
+                    source_unit_keys=[],
                     message=(
                         f"{evidence.identity_key} 的 state_subject evidence "
                         "缺少精确 source_unit_keys"
@@ -2100,6 +2167,7 @@ def blueprint_state_subject_issues(
                         code="state_subject_unit_invalid",
                         node_keys=[node.key],
                         source_segment_ids=list(evidence.source_segment_ids),
+                        source_unit_keys=[key],
                         message=(
                             f"{evidence.identity_key} 的 state_subject "
                             f"引用非本节点 prose unit {key}"
@@ -2129,6 +2197,7 @@ def blueprint_state_subject_issues(
                     code="state_subject_assignment_invalid",
                     node_keys=[node.key],
                     source_segment_ids=list(node.source_segment_ids),
+                    source_unit_keys=[assignment.source_unit_key],
                     message=(
                         f"{assignment.source_unit_key} 的 joint state subject "
                         "引用非本节点 action unit 或非 participants identity"
@@ -2155,6 +2224,7 @@ def blueprint_state_subject_issues(
                     code="state_subject_assignment_ambiguous",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=(
                         f"{fact.source_unit_key} 存在多个 joint state subject "
                         "assignment"
@@ -2166,6 +2236,7 @@ def blueprint_state_subject_issues(
                     code="state_subject_environment_conflict",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=(
                         f"{fact.source_unit_key} 同时声明人物主体与 environment"
                     ),
@@ -2176,6 +2247,7 @@ def blueprint_state_subject_issues(
                     code="state_subject_assignment_conflict",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=(
                         f"{fact.source_unit_key} 同时声明 single 与 joint "
                         "state subject"
@@ -2190,6 +2262,7 @@ def blueprint_state_subject_issues(
                     code="state_subject_ambiguous",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=(
                         f"{fact.source_unit_key} 存在多个候选状态主体："
                         + "、".join(
@@ -2209,6 +2282,7 @@ def blueprint_state_subject_issues(
                     code="state_subject_missing",
                     node_keys=[node.key],
                     source_segment_ids=[fact.source_segment_id],
+                    source_unit_keys=[fact.source_unit_key],
                     message=f"{fact.source_unit_key} 缺少结构化状态主体",
                     required_resolution=(
                         "人物思考/动作/反应填唯一 state_subject evidence；"
@@ -2218,6 +2292,298 @@ def blueprint_state_subject_issues(
                     ),
                 ))
     return issues
+
+
+def blueprint_shard_candidate_hash(
+    candidate: NarrativeBlueprintShard | dict[str, Any],
+) -> str:
+    """Hash one normalized shard candidate for an atomic ownership patch."""
+    shard = (
+        candidate
+        if isinstance(candidate, NarrativeBlueprintShard)
+        else NarrativeBlueprintShard.model_validate(candidate)
+    )
+    return hashlib.sha256(
+        json.dumps(
+            shard.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _blueprint_state_subject_repair_contract(
+    candidate: NarrativeBlueprintShard | dict[str, Any],
+    target_unit_keys: list[str],
+    source_text: str,
+) -> tuple[
+    NarrativeBlueprintShard,
+    dict[str, SourceFact],
+    dict[str, int],
+    dict[str, list[str]],
+]:
+    shard = (
+        candidate
+        if isinstance(candidate, NarrativeBlueprintShard)
+        else NarrativeBlueprintShard.model_validate(candidate)
+    )
+    targets = [str(key or "").strip() for key in target_unit_keys]
+    if (
+        not targets
+        or any(not key for key in targets)
+        or len(targets) != len(set(targets))
+    ):
+        raise ValueError("ownership repair targets 必须非空且唯一")
+
+    facts_by_key = {
+        fact.source_unit_key: fact
+        for fact in source_facts(source_text)
+    }
+    target_facts: dict[str, SourceFact] = {}
+    owner_indexes: dict[str, int] = {}
+    allowed_identities: dict[str, list[str]] = {}
+    for unit_key in targets:
+        fact = facts_by_key.get(unit_key)
+        if fact is None or fact.projection != "action":
+            raise ValueError(
+                f"ownership repair target 必须是 action unit：{unit_key}"
+            )
+        owners = [
+            index
+            for index, node in enumerate(shard.nodes)
+            if fact.source_segment_id in node.source_segment_ids
+        ]
+        if len(owners) != 1:
+            raise ValueError(
+                f"ownership repair target 必须有唯一 SRC owner：{unit_key}"
+            )
+        owner_index = owners[0]
+        identities = list(dict.fromkeys(
+            identity_key.strip()
+            for identity_key in shard.nodes[owner_index].participants
+            if identity_key.strip()
+        ))
+        target_facts[unit_key] = fact
+        owner_indexes[unit_key] = owner_index
+        allowed_identities[unit_key] = identities
+    return shard, target_facts, owner_indexes, allowed_identities
+
+
+def blueprint_state_subject_ownership_patch_schema(
+    candidate: NarrativeBlueprintShard | dict[str, Any],
+    target_unit_keys: list[str],
+    source_text: str,
+) -> dict[str, Any]:
+    """Build a compact exact-key schema for one ownership repair attempt."""
+    (
+        shard,
+        _target_facts,
+        _owner_indexes,
+        allowed_identities,
+    ) = _blueprint_state_subject_repair_contract(
+        candidate,
+        target_unit_keys,
+        source_text,
+    )
+    targets = list(target_unit_keys)
+    definitions: dict[str, Any] = {}
+    definition_by_identities: dict[tuple[str, ...], str] = {}
+    repair_properties: dict[str, Any] = {}
+    for unit_key in targets:
+        identities = tuple(allowed_identities[unit_key])
+        definition_name = definition_by_identities.get(identities)
+        if definition_name is None:
+            definition_name = f"r{len(definition_by_identities)}"
+            definition_by_identities[identities] = definition_name
+            options: list[dict[str, Any]] = [{
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "mode": {"const": "environment"},
+                    "identity_keys": {
+                        "type": "array",
+                        "maxItems": 0,
+                    },
+                },
+                "required": ["mode", "identity_keys"],
+            }]
+            if identities:
+                identity_items = {"enum": list(identities)}
+                options.insert(0, {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "mode": {"const": "single"},
+                        "identity_keys": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 1,
+                            "uniqueItems": True,
+                            "items": identity_items,
+                        },
+                    },
+                    "required": ["mode", "identity_keys"],
+                })
+            if len(identities) >= 2:
+                options.insert(1, {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "mode": {"const": "joint"},
+                        "identity_keys": {
+                            "type": "array",
+                            "minItems": 2,
+                            "uniqueItems": True,
+                            "items": {"enum": list(identities)},
+                        },
+                    },
+                    "required": ["mode", "identity_keys"],
+                })
+            definitions[definition_name] = {"oneOf": options}
+        repair_properties[unit_key] = {
+            "$ref": f"#/$defs/{definition_name}",
+        }
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "base_candidate_hash": {
+                "const": blueprint_shard_candidate_hash(shard),
+            },
+            "repairs": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": repair_properties,
+                "required": targets,
+            },
+        },
+        "required": ["base_candidate_hash", "repairs"],
+        "$defs": definitions,
+    }
+
+
+def apply_blueprint_state_subject_ownership_patch(
+    previous_candidate: NarrativeBlueprintShard | dict[str, Any],
+    patch: BlueprintStateSubjectOwnershipPatch | dict[str, Any],
+    *,
+    target_unit_keys: list[str],
+    source_text: str,
+) -> NarrativeBlueprintShard:
+    """Apply one exact ownership map without exposing any other shard fields."""
+    patch_value = (
+        patch
+        if isinstance(patch, BlueprintStateSubjectOwnershipPatch)
+        else BlueprintStateSubjectOwnershipPatch.model_validate(patch)
+    )
+    expected_hash = blueprint_shard_candidate_hash(previous_candidate)
+    if patch_value.base_candidate_hash != expected_hash:
+        raise ValueError("ownership repair base_candidate_hash 漂移")
+    targets = list(target_unit_keys)
+    if set(patch_value.repairs) != set(targets) or (
+        len(targets) != len(set(targets))
+    ):
+        raise ValueError("ownership repair target 集合必须完全相等")
+
+    (
+        previous,
+        target_facts,
+        owner_indexes,
+        allowed_identities,
+    ) = _blueprint_state_subject_repair_contract(
+        previous_candidate,
+        targets,
+        source_text,
+    )
+    for unit_key in targets:
+        repair = patch_value.repairs[unit_key]
+        invalid_identities = (
+            set(repair.identity_keys) - set(allowed_identities[unit_key])
+        )
+        if invalid_identities:
+            raise ValueError(
+                f"ownership repair identity 不在 owner participants：{unit_key}"
+            )
+
+    candidate = previous.model_copy(deep=True)
+    target_set = set(targets)
+    for node in candidate.nodes:
+        retained_evidence: list[NarrativeParticipantEvidence] = []
+        for evidence in node.participant_evidence:
+            if evidence.usage != "state_subject":
+                retained_evidence.append(evidence)
+                continue
+            retained_keys = [
+                unit_key
+                for unit_key in evidence.source_unit_keys
+                if unit_key not in target_set
+            ]
+            if retained_keys:
+                retained = evidence.model_copy(deep=True)
+                retained.source_unit_keys = retained_keys
+                retained_evidence.append(retained)
+        node.participant_evidence = retained_evidence
+        node.state_subject_assignments = [
+            assignment
+            for assignment in node.state_subject_assignments
+            if assignment.source_unit_key not in target_set
+        ]
+        node.environment_source_unit_keys = [
+            unit_key
+            for unit_key in node.environment_source_unit_keys
+            if unit_key not in target_set
+        ]
+
+    for unit_key in targets:
+        repair = patch_value.repairs[unit_key]
+        owner = candidate.nodes[owner_indexes[unit_key]]
+        if repair.mode == "single":
+            owner.participant_evidence.append(NarrativeParticipantEvidence(
+                identity_key=repair.identity_keys[0],
+                source_segment_ids=[
+                    target_facts[unit_key].source_segment_id
+                ],
+                source_unit_keys=[unit_key],
+                usage="state_subject",
+            ))
+        elif repair.mode == "joint":
+            owner.state_subject_assignments.append(
+                NarrativeStateSubjectAssignment(
+                    source_unit_key=unit_key,
+                    mode="joint",
+                    identity_keys=list(repair.identity_keys),
+                )
+            )
+        else:
+            owner.environment_source_unit_keys.append(unit_key)
+
+    for node in candidate.nodes:
+        authority_order = list(dict.fromkeys([
+            evidence.identity_key
+            for evidence in node.participant_evidence
+            if evidence.identity_key.strip()
+        ] + [
+            identity_key
+            for assignment in node.state_subject_assignments
+            for identity_key in assignment.identity_keys
+            if identity_key.strip()
+        ]))
+        authority_set = set(authority_order)
+        node.participants = [
+            identity_key
+            for identity_key in node.participants
+            if identity_key in authority_set
+        ]
+        node.participants.extend(
+            identity_key
+            for identity_key in authority_order
+            if identity_key not in node.participants
+        )
+
+    return NarrativeBlueprintShard.model_validate(
+        candidate.model_dump(mode="json")
+    )
 
 
 def normalize_blueprint_source_order(
