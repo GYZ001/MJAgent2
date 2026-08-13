@@ -167,6 +167,8 @@ export interface SettingSchema {
   immediate: boolean;
   experimental: boolean;
   max_length?: number;
+  allow_empty?: boolean;
+  format?: "public_http_url";
 }
 interface SettingsView {
   values: Record<string, string>;
@@ -1133,6 +1135,7 @@ export function normalizeDraft(spec: SettingSchema, raw: string) {
       : String(Number(value.toPrecision(12)));
   }
   if (spec.type === "enum") return spec.options?.includes(raw) ? raw : null;
+  if (!raw.trim() && spec.allow_empty) return "";
   return raw.trim() || null;
 }
 

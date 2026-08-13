@@ -55,6 +55,39 @@ def test_settings_schema_rejects_illegal_values_and_dependency_conflicts(monkeyp
     ).fetchone()["value"] == db.DEFAULT_SETTINGS["video_submit_concurrency"]
 
 
+def test_optional_provider_media_public_base_url_schema_and_health(monkeypatch) -> None:
+    conn = _conn()
+    _patch_conn(monkeypatch, conn)
+
+    key = "provider_media_public_base_url"
+    assert monitoring.normalize_setting(key, "") == ""
+
+    settings_view = system_api.get_settings(include_schema=True)
+    assert settings_view["schema"][key]["allow_empty"] is True
+    assert settings_view["schema"][key]["format"] == "public_http_url"
+    assert settings_view["values"][key] == ""
+    assert settings_view["health"] == "ok"
+    assert all(issue["field"] != key for issue in settings_view["issues"])
+
+
+def test_nonempty_provider_media_public_base_url_uses_public_url_validator(
+    monkeypatch,
+) -> None:
+    checked: list[str] = []
+    monkeypatch.setattr(
+        system_api,
+        "_assert_public_http_url",
+        lambda value: checked.append(value),
+    )
+
+    value = "https://cdn.example.com/project-media"
+    assert monitoring.normalize_setting(
+        "provider_media_public_base_url",
+        f"  {value}  ",
+    ) == value
+    assert checked == [value]
+
+
 def test_settings_save_is_versioned_authoritative_and_atomic(monkeypatch) -> None:
     conn = _conn()
     _patch_conn(monkeypatch, conn)

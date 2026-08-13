@@ -164,6 +164,21 @@ describe("设置规范化与脏状态基础规则", () => {
     expect(normalizeDraft(boolean, "false")).toBe("false");
     expect(normalizeDraft(choice, "unknown")).toBeNull();
   });
+
+  it("可选字符串允许空值，普通字符串仍拒绝空值", () => {
+    const optionalString: SettingSchema = {
+      label: "视频参考媒体公开基址",
+      type: "string",
+      default: "",
+      allow_empty: true,
+      format: "public_http_url",
+      immediate: true,
+      experimental: false,
+    };
+    expect(normalizeDraft(optionalString, "   ")).toBe("");
+    expect(normalizeDraft({ ...optionalString, allow_empty: false }, "   "))
+      .toBeNull();
+  });
 });
 
 describe("系统设置功能分类", () => {

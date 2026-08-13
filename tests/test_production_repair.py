@@ -805,6 +805,7 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
                 {
                     "action_id": "A1",
                     "actor_ids": ["char-a"],
+                    "participant_deliveries": [],
                     "semantic_intent": "Begin changing the state.",
                     "precondition_fact_ids": ["F1"],
                     "effects_add": ["F2"],
@@ -814,6 +815,7 @@ def test_narrative_normalizer_closes_action_facts_and_removes_noop_deltas():
                 {
                     "action_id": "A2",
                     "actor_ids": ["char-a"],
+                    "participant_deliveries": [],
                     "semantic_intent": "Finish changing the state.",
                     "precondition_fact_ids": ["F2"],
                     "effects_add": ["F3"],
@@ -2209,6 +2211,7 @@ def test_narrative_normalizer_closes_unique_effect_and_perceiver_refs():
             "atomic_actions": [{
                 "action_id": "A1",
                 "actor_ids": ["char-a"],
+                "participant_deliveries": [],
                 "semantic_intent": "完成动作",
                 "effects_add": ["F2"],
                 "completion_condition": "动作结果可见",
@@ -2746,6 +2749,7 @@ def test_event_fact_patch_expands_to_its_single_atomic_action():
         "atomic_actions": [{
             "action_id": "A2",
             "actor_ids": ["甲"],
+            "participant_deliveries": [],
             "semantic_intent": "完成动作",
             "effects_add": ["F-5"],
             "completion_condition": "动作完成",

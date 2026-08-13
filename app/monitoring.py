@@ -153,16 +153,23 @@ for _key in (
     "minimax_h3_model_video", "minimax_h3_base_url",
     "openrouter_model_text", "openrouter_model_vlm", "bailian_model_text", "bailian_model_vlm",
     "deepseek_model_text", "zhipu_model_text",
-    "provider_media_public_base_url",
 ):
     SETTINGS_SCHEMA[_key] = {
-        "label": (
-            "视频参考媒体公开基址"
-            if _key == "provider_media_public_base_url" else _key
-        ),
+        "label": _key,
         "type": "string", "default": config.DEFAULT_SETTINGS.get(_key, ""), "max_length": 500,
         "immediate": True, "experimental": False,
     }
+
+SETTINGS_SCHEMA["provider_media_public_base_url"] = {
+    "label": "视频参考媒体公开基址",
+    "type": "string",
+    "default": config.DEFAULT_SETTINGS["provider_media_public_base_url"],
+    "max_length": 500,
+    "allow_empty": True,
+    "format": "public_http_url",
+    "immediate": True,
+    "experimental": False,
+}
 
 
 def public_settings_schema() -> dict[str, dict[str, Any]]:
@@ -221,10 +228,16 @@ def normalize_setting(key: str, value: Any) -> str:
         if raw not in allowed and not (key in {"model_text_provider", "model_vlm_provider"} and _custom_provider_exists(raw)):
             raise HTTPException(422, detail={"field": key, "message": f"只允许：{', '.join(sorted(allowed))}"})
         return raw
+    if not raw and spec.get("allow_empty"):
+        return ""
     if not raw:
         raise HTTPException(422, detail={"field": key, "message": "不能为空"})
     if len(raw) > int(spec.get("max_length") or 1000):
         raise HTTPException(422, detail={"field": key, "message": "内容过长"})
+    if spec.get("format") == "public_http_url":
+        from app.system_api import _assert_public_http_url
+
+        _assert_public_http_url(raw)
     if key == "minimax_h3_base_url" and not re.fullmatch(
         r"https?://(?:\[[0-9A-Fa-f:]+\]|[^\s/:?#]+)(?::\d+)?",
         raw,
