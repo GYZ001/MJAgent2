@@ -195,7 +195,7 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
             "reviewed_creative_hash": creative_hash,
             "phases": [{
                 "creative_hash": creative_hash,
-                "reviews": [{"issues": []}, {"issues": []}],
+                "reviews": [{"findings": []}, {"findings": []}],
                 "consensus": [],
             }],
         }
