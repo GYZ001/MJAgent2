@@ -1852,13 +1852,27 @@ def _screenplay_context_pack(episode_id: str) -> tuple[list[str], dict]:
     mapping_artifact = evidence_repository.latest_artifact(
         "episode_mapping", "project", ep["project_id"]
     )
-    previous_artifact_id = ep["screenplay_artifact_id"]
+    from app.production.revision import resolve_screenplay_resume_eligibility
+
+    eligibility = resolve_screenplay_resume_eligibility(
+        episode_id,
+        conn=conn,
+    )
+    # Published episode pointers remain populated while an incompatible
+    # screenplay is rebuilt. They describe release history, not the input
+    # authority of the new Baseline. Only a resolver-approved finalize path
+    # may expose a working Document as this step's patch/revalidation input.
+    working_artifact_id = (
+        eligibility.working_artifact_id
+        if eligibility.mode == "finalize"
+        else None
+    )
     input_ids = [
         artifact_id
         for artifact_id in (
             bible_artifact["id"] if bible_artifact else None,
             mapping_artifact["id"] if mapping_artifact else None,
-            previous_artifact_id,
+            working_artifact_id,
         )
         if artifact_id
     ]

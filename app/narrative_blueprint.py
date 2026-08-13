@@ -29,7 +29,7 @@ from app.source_facts import SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v6"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.3"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.4"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -38,9 +38,9 @@ BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # truncated prefix.
 BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
-BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v4"
+BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v5"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
-    "blueprint-shard-local-authority.v1"
+    "blueprint-shard-local-authority.v2"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
 
@@ -127,11 +127,57 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
 
 
 def blueprint_shard_provider_schema() -> dict[str, Any]:
-    """Return a provider schema with the paratext empty-state contract encoded."""
+    """Return the provider schema with explicit delivery evidence surfaces."""
     schema = NarrativeBlueprintShard.model_json_schema()
     node_schema = schema.get("$defs", {}).get("NarrativeNode")
     if not isinstance(node_schema, dict):
         return schema
+    required = node_schema.setdefault("required", [])
+    for field_name in (
+        "participants",
+        "participant_evidence",
+        "environment_source_unit_keys",
+        "source_unit_deliveries",
+    ):
+        if field_name not in required:
+            required.append(field_name)
+    node_schema.setdefault("allOf", []).append({
+        "if": {
+            "properties": {
+                "source_unit_deliveries": {
+                    "contains": {
+                        "properties": {
+                            "mode": {
+                                "enum": [
+                                    "spoken_dialogue",
+                                    "offscreen_voice",
+                                ],
+                            },
+                        },
+                        "required": ["mode"],
+                    },
+                },
+            },
+            "required": ["source_unit_deliveries"],
+        },
+        "then": {
+            "properties": {
+                "participant_evidence": {
+                    "contains": {
+                        "properties": {
+                            "usage": {"const": "voice"},
+                        },
+                        "required": [
+                            "identity_key",
+                            "source_unit_keys",
+                            "usage",
+                        ],
+                    },
+                },
+            },
+            "required": ["participant_evidence"],
+        },
+    })
     paratext_properties: dict[str, Any] = {
         field_name: {"const": []}
         for field_name in _PARATEXT_EMPTY_LIST_FIELDS
@@ -623,6 +669,62 @@ class NarrativeBlueprintShard(BaseModel):
             )
         ]
         return normalized
+
+    @model_validator(mode="after")
+    def _require_typed_voice_delivery_evidence(
+        self,
+    ) -> "NarrativeBlueprintShard":
+        """Make audible performer ownership part of the v6 typed response."""
+        for node in self.nodes:
+            voice_claims: defaultdict[
+                str,
+                list[NarrativeParticipantEvidence],
+            ] = defaultdict(list)
+            for evidence in node.participant_evidence:
+                if evidence.usage != "voice":
+                    continue
+                for source_unit_key in dict.fromkeys(
+                    evidence.source_unit_keys
+                ):
+                    voice_claims[source_unit_key].append(evidence)
+
+            deliveries = {
+                delivery.source_unit_key: delivery
+                for delivery in node.source_unit_deliveries
+            }
+            for delivery in node.source_unit_deliveries:
+                claims = voice_claims.get(delivery.source_unit_key, [])
+                audible = delivery.mode in AUDIBLE_SOURCE_DELIVERY_MODES
+                if not audible and claims:
+                    raise ValueError(
+                        f"{delivery.source_unit_key} 非声音 delivery "
+                        "不得包含 usage=voice participant_evidence"
+                    )
+                if not audible:
+                    continue
+                if len(claims) != 1:
+                    raise ValueError(
+                        f"{delivery.source_unit_key} 声音 delivery 必须恰有一条"
+                        "精确 source_unit_key 的 usage=voice "
+                        "participant_evidence；performer_key 不能替代该证据"
+                    )
+                claim = claims[0]
+                if claim.identity_key != delivery.performer_key:
+                    raise ValueError(
+                        f"{delivery.source_unit_key} 的 usage=voice "
+                        "identity_key 必须等于 performer_key"
+                    )
+            for source_unit_key in voice_claims:
+                delivery = deliveries.get(source_unit_key)
+                if (
+                    delivery is None
+                    or delivery.mode not in AUDIBLE_SOURCE_DELIVERY_MODES
+                ):
+                    raise ValueError(
+                        f"{source_unit_key} 的 usage=voice "
+                        "participant_evidence 缺少对应声音 delivery"
+                    )
+        return self
 
 
 def validate_narrative_blueprint_shard(

@@ -586,6 +586,100 @@ def test_baseline_rebuild_records_identity_only_as_reused_input() -> None:
         assert key not in checkpoint
 
 
+@pytest.mark.parametrize(
+    ("error_id", "run_id"),
+    [
+        ("ERR-20260813-36a2c4", "run_eb0c566cd9dc"),
+        ("ERR-20260814-653ac6", "run_9ad1461b9bcf"),
+    ],
+)
+def test_stale_v14_document_is_not_new_baseline_step_authority(
+    error_id: str,
+    run_id: str,
+) -> None:
+    """Replay both production failures that cited the same stale Document."""
+    conn = db.get_conn()
+    stale_artifact_id = "art_48426cfb07d2"
+    stale_payload = {"format_version": "screenplay-generation-ir.v1.4"}
+    conn.execute(
+        """INSERT INTO artifacts(
+            id,type,scope_type,scope_id,version,status,trust_level,
+            content_json,content_hash,parent_artifact_ids_json,
+            contract_version,model_snapshot_json,stale_reason,created_at
+        ) VALUES(?, 'screenplay_document', 'episode', 'e1', 1, 'stale', 'T1',
+                 ?, ?, '[]', '4.0.0', '{}', ?, ?)""",
+        (
+            stale_artifact_id,
+            json.dumps(stale_payload),
+            repository.content_hash(stale_payload),
+            f"{error_id}: legacy IR v1.4 requires rebuild",
+            db.now(),
+        ),
+    )
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint=f"authority:{error_id}",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version="screenplay-qa-gate-3",
+        resume=False,
+    )
+    save_checkpoint(revision.id, {
+        "phase": "BLUEPRINT_GENERATION",
+        "activation_no": 1,
+    })
+    conn.execute(
+        """UPDATE episodes
+              SET screenplay_status='running',
+                  screenplay_artifact_id=?,
+                  published_screenplay_artifact_id=?,
+                  working_screenplay_artifact_id=?,
+                  active_screenplay_run_id=?
+            WHERE id='e1'""",
+        (
+            stale_artifact_id,
+            stale_artifact_id,
+            stale_artifact_id,
+            run_id,
+        ),
+    )
+    conn.commit()
+
+    eligibility = resolve_screenplay_resume_eligibility("e1")
+    input_artifact_ids, manifest = api._screenplay_context_pack("e1")
+
+    assert eligibility.mode == "baseline"
+    assert eligibility.working_artifact_id is None
+    assert stale_artifact_id not in input_artifact_ids
+    assert all(
+        item.get("source_artifact_id") != stale_artifact_id
+        for item in manifest["items"]
+    )
+
+
+def test_finalize_working_document_remains_step_authority() -> None:
+    working = _current_working_artifact()
+    revision = ensure_production_revision(
+        episode_id="e1",
+        kind="screenplay",
+        input_fingerprint="current-authority",
+        contract_version=get_contract("screenplay").version,
+        qa_profile_version="screenplay-qa-gate-3",
+        resume=False,
+    )
+    mark_baseline_generated(
+        revision.id,
+        baseline_artifact_id=working["id"],
+        working_artifact_id=working["id"],
+    )
+
+    eligibility = resolve_screenplay_resume_eligibility("e1")
+    input_artifact_ids, _manifest = api._screenplay_context_pack("e1")
+
+    assert eligibility.mode == "finalize"
+    assert input_artifact_ids == [working["id"]]
+
+
 def test_reused_identity_is_rebound_to_the_new_blueprint_artifact() -> None:
     authority = _current_checkpoint_artifacts()
     blueprint_value = NarrativeBlueprint(episode_no=1, nodes=[])
