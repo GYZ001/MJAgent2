@@ -36,7 +36,10 @@ BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # truncated prefix.
 BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
-BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v2"
+BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v3"
+BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
+    "blueprint-shard-local-authority.v1"
+)
 
 
 def _normalize_source_segment_id(value: Any) -> str:
@@ -543,6 +546,7 @@ def validate_narrative_blueprint_shard(
     expected_source_segment_ids: list[str],
     optional_source_segment_ids: set[str] | None = None,
     boundary_state_facts: list[dict[str, Any]] | None = None,
+    source_text: str | None = None,
 ) -> list[str]:
     errors: list[str] = []
     expected = list(expected_source_segment_ids)
@@ -691,6 +695,52 @@ def validate_narrative_blueprint_shard(
     node_keys = [node.key for node in shard.nodes]
     if len(node_keys) != len(set(node_keys)):
         errors.append("[BLUEPRINT_SHARD_NODE_DUPLICATE] 节点 key 重复")
+    if source_text is not None:
+        local_blueprint = NarrativeBlueprint(
+            episode_no=shard.episode_no,
+            nodes=shard.nodes,
+        )
+        for issue in (
+            blueprint_voice_identity_issues(local_blueprint, source_text)
+            + blueprint_state_subject_issues(local_blueprint, source_text)
+        ):
+            errors.append(
+                f"[BLUEPRINT_SHARD_{issue.code.upper()}] "
+                f"{'、'.join(issue.node_keys)} "
+                f"{'、'.join(issue.source_segment_ids)}：{issue.message}；"
+                f"必须：{issue.required_resolution}"
+            )
+        for node in shard.nodes:
+            participant_keys = set(node.participants)
+            evidence_keys = {
+                evidence.identity_key
+                for evidence in node.participant_evidence
+                if evidence.identity_key
+            }
+            for evidence in node.participant_evidence:
+                escaped_sources = (
+                    set(evidence.source_segment_ids)
+                    - set(node.source_segment_ids)
+                )
+                if escaped_sources:
+                    errors.append(
+                        f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_OUT_OF_SCOPE] "
+                        f"{node.key} {evidence.identity_key} 引用非 owned SRC："
+                        + "、".join(sorted(escaped_sources))
+                    )
+                if evidence.identity_key not in participant_keys:
+                    errors.append(
+                        f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_ORPHAN] "
+                        f"{node.key} {evidence.identity_key} 未列入 participants"
+                    )
+            if node.participant_evidence:
+                missing_evidence = participant_keys - evidence_keys
+                if missing_evidence:
+                    errors.append(
+                        f"[BLUEPRINT_SHARD_PARTICIPANT_EVIDENCE_MISSING] "
+                        f"{node.key} 缺少参与者来源证据："
+                        + "、".join(sorted(missing_evidence))
+                    )
     try:
         derive_blueprint_scene_plans(NarrativeBlueprint(
             episode_no=shard.episode_no,

@@ -299,6 +299,7 @@ async def chat_structured(
     repair_schema: Callable[[T], dict[str, Any]] | None = None,
     normalize_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     on_attempt: Callable[[dict[str, Any]], Any] | None = None,
+    usage_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> T:
     """Run one typed model operation with separate format/semantic budgets.
 
@@ -330,6 +331,7 @@ async def chat_structured(
             temperature=temperature,
             max_tokens=max_tokens,
             call_meta=meta,
+            usage_callback=usage_callback,
         )
         try:
             direct_error = json.loads(last_raw.strip())

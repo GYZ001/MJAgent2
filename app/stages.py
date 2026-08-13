@@ -34,6 +34,7 @@ from app.harness.types import Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.narrative_blueprint import (
     BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE,
+    BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION,
     BLUEPRINT_SHARD_POLICY_VERSION,
     BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD,
     BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD,
@@ -3791,6 +3792,7 @@ async def _repair_narrative_blueprint(
     episode: dict[str, Any],
     source_text: str,
     additional_errors: list[str] | None = None,
+    generation_budget: _BlueprintGenerationBudget | None = None,
 ) -> NarrativeBlueprint:
     from app.evidence import repository as evidence_repository
     from app.harness.types import EvidenceArtifact
@@ -4052,7 +4054,30 @@ async def _repair_narrative_blueprint(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        patch = await model_gateway.chat_structured(
+        logical_run_id = str(getattr(trace, "run_id", "") or "unscoped")
+        operation_id = (
+            f"screenplay.blueprint.patch:{BLUEPRINT_VERSION}:"
+            f"{logical_run_id}:{repair_input_hash}:{round_no}"
+        )
+        requested_max_tokens = 16384
+        reservation_id: int | None = None
+        remaining_seconds: float | None = None
+        if generation_budget is not None:
+            _provider, _model, effective_max_tokens = (
+                hiagent.text_request_token_limits(
+                    requested_max_tokens=requested_max_tokens,
+                )
+            )
+            reservation_id = generation_budget.claim(
+                max_tokens=effective_max_tokens,
+                requested_max_tokens=requested_max_tokens,
+                operation_id=operation_id,
+            )
+            remaining_seconds = (
+                BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+                - (time.monotonic() - generation_budget.started_at)
+            )
+        structured_call = model_gateway.chat_structured(
             [
                 {"role": "system", "content": SYSTEM_PREFIX},
                 {"role": "user", "content": repair_prompt},
@@ -4064,14 +4089,16 @@ async def _repair_narrative_blueprint(
                     blueprint,
                 )
             ),
-            operation_id=(
-                f"screenplay.blueprint.patch:{BLUEPRINT_VERSION}:"
-                f"{repair_input_hash}:{round_no}"
-            ),
+            operation_id=operation_id,
             temperature=0.1,
-            max_tokens=16384,
-            format_retry_limit=int(
-                get_setting("screenplay_format_retry_limit") or 1
+            max_tokens=requested_max_tokens,
+            # A Blueprint patch participates in the same global call/token
+            # budget as its leaves.  An implicit format retry would be a
+            # second paid request without a second reservation.
+            format_retry_limit=(
+                0
+                if generation_budget is not None
+                else int(get_setting("screenplay_format_retry_limit") or 1)
             ),
             semantic_retry_limit=0,
             call_meta={
@@ -4084,6 +4111,9 @@ async def _repair_narrative_blueprint(
                 "contract_version": BLUEPRINT_VERSION,
                 "expected_json": True,
                 "reuse_successful_operation": True,
+                "disable_reasoning_fallback": True,
+                "disable_provider_retries": True,
+                "disable_provider_candidate_fallback": True,
             },
             repair_context=json.dumps(
                 {
@@ -4095,7 +4125,43 @@ async def _repair_narrative_blueprint(
             ),
             output_schema=patch_schema,
             on_attempt=record_patch_attempt,
+            usage_callback=(
+                None
+                if reservation_id is None
+                else lambda usage_event: generation_budget.record_usage(
+                    reservation_id,
+                    usage_event,
+                )
+            ),
         )
+        try:
+            patch = (
+                await structured_call
+                if remaining_seconds is None
+                else await asyncio.wait_for(
+                    structured_call,
+                    timeout=max(0.001, remaining_seconds),
+                )
+            )
+        except hiagent.ProviderError as exc:
+            if reservation_id is not None:
+                generation_budget.settle(
+                    reservation_id,
+                    unreported_outcome=(
+                        "not_sent"
+                        if exc.delivery_state == "not_sent"
+                        and exc.replay_safe
+                        else "unknown"
+                    ),
+                )
+            raise
+        except BaseException:
+            if reservation_id is not None:
+                generation_budget.settle(reservation_id)
+            raise
+        else:
+            if reservation_id is not None:
+                generation_budget.settle(reservation_id)
         changed = apply_narrative_blueprint_patch(
             blueprint,
             patch,
@@ -4175,6 +4241,7 @@ async def _semantic_review_narrative_blueprint(
     *,
     episode: dict[str, Any],
     source_text: str,
+    generation_budget: _BlueprintGenerationBudget | None = None,
 ) -> NarrativeBlueprint:
     from app.evidence import repository as evidence_repository
     from app.harness.types import EvidenceArtifact
@@ -4647,6 +4714,7 @@ async def _semantic_review_narrative_blueprint(
             episode=episode,
             source_text=source_text,
             additional_errors=semantic_errors,
+            generation_budget=generation_budget,
         )
         evidence_repository.create_artifact(
             EvidenceArtifact(
@@ -5182,20 +5250,8 @@ class _BlueprintGenerationBudget:
         }
 
 
-async def _generate_sharded_narrative_blueprint(
-    episode: dict[str, Any],
-    source_text: str,
-    bible_context: dict[str, Any],
-) -> NarrativeBlueprint:
-    from app.evidence import repository as evidence_repository
-    from app.harness.types import EvidenceArtifact
-    from app.observability.tracing import current_trace
-
-    segments = index_source_segments(source_text)
-    segment_shards = _partition_blueprint_segments(segments)
-    shard_split_depths = [0 for _ in segment_shards]
-    trace_at_start = current_trace()
-    run_id = getattr(trace_at_start, "run_id", None)
+def _blueprint_generation_budget_for_trace(trace: Any) -> _BlueprintGenerationBudget:
+    run_id = getattr(trace, "run_id", None)
     run_started_at: float | None = None
     if run_id:
         run_row = get_conn().execute(
@@ -5204,10 +5260,30 @@ async def _generate_sharded_narrative_blueprint(
         ).fetchone()
         if run_row is not None:
             run_started_at = run_row["started_at"]
-    generation_budget = _BlueprintGenerationBudget.from_durable_calls(
+    return _BlueprintGenerationBudget.from_durable_calls(
         run_id=run_id,
         started_at_epoch=run_started_at,
     )
+
+
+async def _generate_sharded_narrative_blueprint(
+    episode: dict[str, Any],
+    source_text: str,
+    bible_context: dict[str, Any],
+    *,
+    generation_budget: _BlueprintGenerationBudget | None = None,
+) -> NarrativeBlueprint:
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+
+    segments = index_source_segments(source_text)
+    segment_shards = _partition_blueprint_segments(segments)
+    shard_split_depths = [0 for _ in segment_shards]
+    if generation_budget is None:
+        generation_budget = _blueprint_generation_budget_for_trace(
+            current_trace(),
+        )
     optional_ids = structural_front_matter_ids(segments)
     merged_nodes: list[Any] = []
     shard_index = 1
@@ -5274,9 +5350,20 @@ async def _generate_sharded_narrative_blueprint(
             if (
                 cached_snapshot.get("shard_policy_version")
                 == BLUEPRINT_SHARD_POLICY_VERSION
+                and cached_snapshot.get("local_authority_validator_version")
+                == BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
                 and cached.shard_index == shard_index
                 and cached.source_hash == source_hash
                 and cached.boundary_hash == boundary_hash
+                and not validate_narrative_blueprint_shard(
+                    cached,
+                    expected_episode_no=int(episode["episode_no"]),
+                    expected_shard_index=shard_index,
+                    expected_source_segment_ids=source_ids,
+                    optional_source_segment_ids=optional_ids,
+                    boundary_state_facts=boundary["active_state_facts"],
+                    source_text=source_text,
+                )
             ):
                 shard = cached
                 log_provider_call(
@@ -5469,6 +5556,7 @@ async def _generate_sharded_narrative_blueprint(
                     boundary_state_facts=boundary[
                         "active_state_facts"
                     ],
+                    source_text=source_text,
                 )
                 if not errors:
                     shard = candidate
@@ -5491,6 +5579,9 @@ async def _generate_sharded_narrative_blueprint(
                                 ),
                                 "shard_policy_version": (
                                     BLUEPRINT_SHARD_POLICY_VERSION
+                                ),
+                                "local_authority_validator_version": (
+                                    BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
                                 ),
                                 "split_depth": split_depth,
                                 "requested_max_tokens": token_budget,
@@ -5549,6 +5640,7 @@ async def _generate_sharded_narrative_blueprint(
             episode=episode,
             source_text=source_text,
             additional_errors=errors,
+            generation_budget=generation_budget,
         )
     derive_blueprint_scene_plans(blueprint)
     trace = current_trace()
@@ -5597,6 +5689,7 @@ async def _generate_screenplay_narrative_blueprint(
     from app.observability.tracing import current_trace
 
     trace = current_trace()
+    generation_budget = _blueprint_generation_budget_for_trace(trace)
     current_run = get_conn().execute(
         "SELECT input_fingerprint FROM workflow_runs WHERE id=?",
         (trace.run_id,),
@@ -5660,12 +5753,14 @@ async def _generate_screenplay_narrative_blueprint(
                     recovered,
                     episode=episode,
                     source_text=source_text,
+                    generation_budget=generation_budget,
                 )
             derive_blueprint_scene_plans(recovered)
             return await _semantic_review_narrative_blueprint(
                 recovered,
                 episode=episode,
                 source_text=source_text,
+                generation_budget=generation_budget,
             )
 
     source_with_ids = render_indexed_source(source_text)
@@ -5681,11 +5776,13 @@ async def _generate_screenplay_narrative_blueprint(
         episode,
         source_text,
         bible_context,
+        generation_budget=generation_budget,
     )
     return await _semantic_review_narrative_blueprint(
         candidate,
         episode=episode,
         source_text=source_text,
+        generation_budget=generation_budget,
     )
 
     prompt = f"""任务：先为第 {episode['episode_no']} 集建立写作前叙事蓝图。

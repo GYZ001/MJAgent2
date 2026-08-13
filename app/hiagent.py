@@ -1634,6 +1634,9 @@ async def _stream_chat_completion(
     """
     merged_meta = _merge_call_meta(meta)
     req_headers = dict(headers if headers is not None else _headers())
+    operation_id = str((merged_meta or {}).get("operation_id") or "").strip()
+    if operation_id:
+        req_headers["Idempotency-Key"] = operation_id
     stream_payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
     request_bytes = _request_size_bytes(stream_payload)
     start = time.time()
