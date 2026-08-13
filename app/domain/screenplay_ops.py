@@ -1700,6 +1700,9 @@ def _spawn_screenplay_activation(
                 "blueprint_retry_receipts_hash": blueprint_retry_receipts_hash(
                     budget_projection["unknown_receipts"]
                 ),
+                "blueprint_retry_receipts": list(
+                    budget_projection["unknown_receipts"]
+                ),
             })
             conn.execute(
                 "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "
@@ -1736,6 +1739,7 @@ def _spawn_screenplay_activation(
                 "blueprint_retry_receipts_hash": (
                     activation_retry_receipts_hash
                 ),
+                "blueprint_retry_receipts": list(budget.unknown_receipts),
             })
             conn.execute(
                 "UPDATE workflow_runs SET config_snapshot_json=?,updated_at=? "

@@ -150,6 +150,7 @@ SYSTEM_PREFIX = (
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
 SCREENPLAY_BLUEPRINT_PROMPT_VERSION = BLUEPRINT_PROMPT_VERSION
+BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION = "blueprint-semantic-review.v2"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
@@ -4389,6 +4390,74 @@ async def _semantic_review_narrative_blueprint(
     from app.harness.types import EvidenceArtifact
     from app.observability.tracing import current_trace
 
+    def persist_reviewed_authority(
+        *,
+        parent_artifact_ids: list[str] | None = None,
+    ) -> None:
+        """Persist the clean authority, then terminalize old unknown retries.
+
+        The artifact commit deliberately happens first.  A crash between the
+        two writes leaves the historical provider outcome unresolved (safe);
+        the inverse state -- resolving without durable reviewed authority --
+        is impossible.
+        """
+        episode_id = str(episode.get("id") or "")
+        trace = current_trace()
+        run_id = str(trace.run_id or "")
+        if not episode_id or not run_id:
+            return
+        content = blueprint.model_dump(mode="json")
+        content_digest = evidence_repository.content_hash(content)
+        source_digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        existing = get_conn().execute(
+            """SELECT id FROM artifacts
+                 WHERE type='screenplay_narrative_blueprint'
+                   AND scope_type='episode' AND scope_id=?
+                   AND status='validated' AND content_hash=?
+                   AND contract_version=? AND prompt_version=?
+                   AND json_extract(
+                       model_snapshot_json,'$.generation_mode'
+                   )='semantic_reviewed'
+                   AND json_extract(
+                       model_snapshot_json,'$.source_corpus_hash'
+                   )=?
+                 ORDER BY created_at DESC LIMIT 1""",
+            (
+                episode_id,
+                content_digest,
+                BLUEPRINT_VERSION,
+                SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                source_digest,
+            ),
+        ).fetchone()
+        if existing is None:
+            artifact = evidence_repository.create_artifact(
+                EvidenceArtifact(
+                    type="screenplay_narrative_blueprint",
+                    scope_type="episode",
+                    scope_id=episode_id,
+                    status="validated",
+                    trust_level="T1",
+                    content=content,
+                    parent_artifact_ids=list(parent_artifact_ids or []),
+                    contract_version=BLUEPRINT_VERSION,
+                    prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                    model_snapshot=_current_blueprint_authority_snapshot(
+                        source_text,
+                        generation_mode="semantic_reviewed",
+                        generation_budget=generation_budget,
+                    ),
+                ),
+                step_run_id=trace.step_run_id,
+            )
+            artifact_id = str(artifact["id"])
+        else:
+            artifact_id = str(existing["id"])
+
+        # Historical unknown provider outcomes are resolved only after this
+        # reviewed artifact has been selected as current authority and written
+        # into the active revision checkpoint by the downstream boundary.
+
     initial_blueprint_hash = hashlib.sha256(
         json.dumps(
             blueprint.model_dump(mode="json"),
@@ -4398,7 +4467,7 @@ async def _semantic_review_narrative_blueprint(
         ).encode("utf-8")
     ).hexdigest()
     cached_rows = get_conn().execute(
-        """SELECT content_json
+        """SELECT id,content_json
              FROM artifacts
             WHERE scope_type='episode' AND scope_id=?
               AND type='screenplay_narrative_blueprint_review_consensus'
@@ -4416,6 +4485,7 @@ async def _semantic_review_narrative_blueprint(
             and not cached.get("consensus_issue_keys")
             and cached.get("review_outcome") == "clean"
         ):
+            persist_reviewed_authority(parent_artifact_ids=[str(row["id"])])
             return blueprint
 
     targeted_review = str(
@@ -4879,7 +4949,7 @@ async def _semantic_review_narrative_blueprint(
             and not consensus_keys
             and non_consensus_issue_count
         )
-        evidence_repository.create_artifact(
+        consensus_artifact = evidence_repository.create_artifact(
             EvidenceArtifact(
                 type="screenplay_narrative_blueprint_review_consensus",
                 scope_type="episode",
@@ -4921,6 +4991,9 @@ async def _semantic_review_narrative_blueprint(
             targeted_review = False
             continue
         if not consensus_issues:
+            persist_reviewed_authority(
+                parent_artifact_ids=[str(consensus_artifact["id"])],
+            )
             return blueprint
         if review_round >= 4:
             raise ContentGenerationError(
