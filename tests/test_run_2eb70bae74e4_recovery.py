@@ -554,6 +554,90 @@ def test_old_state_subject_checkpoint_requires_baseline_rebuild() -> None:
     assert "merged_ir_artifact_id" not in eligibility.reusable_checkpoint
 
 
+def test_current_blueprint_checkpoint_remains_reusable() -> None:
+    seeded = _seed_recovery(polluted_working=False)
+
+    eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
+
+    assert eligibility.reusable_checkpoint["blueprint_artifact_id"] == (
+        seeded["checkpoint"]["blueprint_artifact_id"]
+    )
+    assert eligibility.reusable_checkpoint["blueprint_hash"] == (
+        seeded["checkpoint"]["blueprint_hash"]
+    )
+
+
+def test_same_scene_duplicate_source_checkpoint_requires_baseline_rebuild() -> None:
+    seeded = _seed_recovery(polluted_working=False)
+    duplicate_blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [
+            {
+                "key": node_key,
+                "source_segment_ids": ["SRC0001"],
+                "summary": "空镜建立山谷",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "temporal_domain_key": "present",
+                "time_label": "夜",
+                "time_relation": "episode_start",
+                "location_key": "valley",
+                "location_label": "山谷",
+                "environment_source_unit_keys": ["SRC0001:unit:001"],
+                "action_logic": "月光落在空旷山谷",
+            }
+            for node_key in ("n1", "n1-duplicate")
+        ],
+    })
+    duplicate_content = duplicate_blueprint.model_dump(mode="json")
+    duplicate_blueprint_hash = blueprint_content_hash(duplicate_blueprint)
+    conn = db.get_conn()
+    blueprint_artifact_id = seeded["checkpoint"]["blueprint_artifact_id"]
+    conn.execute(
+        "UPDATE artifacts SET content_json=?,content_hash=? WHERE id=?",
+        (
+            json.dumps(duplicate_content, ensure_ascii=False, sort_keys=True),
+            repository.content_hash(duplicate_content),
+            blueprint_artifact_id,
+        ),
+    )
+    checkpoint = dict(seeded["checkpoint"])
+    checkpoint["blueprint_hash"] = duplicate_blueprint_hash
+    conn.execute(
+        "UPDATE production_revisions SET checkpoint_json=? WHERE id=?",
+        (
+            json.dumps(checkpoint, ensure_ascii=False, sort_keys=True),
+            seeded["revision"].id,
+        ),
+    )
+    conn.commit()
+    artifact_before = conn.execute(
+        "SELECT content_json,content_hash,status FROM artifacts WHERE id=?",
+        (blueprint_artifact_id,),
+    ).fetchone()
+    episode_before = conn.execute(
+        "SELECT screenplay_artifact_id,working_screenplay_artifact_id,"
+        "screenplay_completion_certificate_id,screenplay_production_revision_id "
+        "FROM episodes WHERE id='ep_run_2eb'",
+    ).fetchone()
+
+    eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
+
+    assert eligibility.mode == "baseline_rebuild"
+    assert eligibility.reason_code == "MIXED_CHECKPOINT_REQUIRES_REBUILD"
+    assert "blueprint_artifact_id" not in eligibility.reusable_checkpoint
+    assert conn.execute(
+        "SELECT content_json,content_hash,status FROM artifacts WHERE id=?",
+        (blueprint_artifact_id,),
+    ).fetchone() == artifact_before
+    assert conn.execute(
+        "SELECT screenplay_artifact_id,working_screenplay_artifact_id,"
+        "screenplay_completion_certificate_id,screenplay_production_revision_id "
+        "FROM episodes WHERE id='ep_run_2eb'",
+    ).fetchone() == episode_before
+
+
 @pytest.mark.parametrize(
     "tamper", ["hash", "lineage", "fingerprint", "role", "evaluator"],
 )

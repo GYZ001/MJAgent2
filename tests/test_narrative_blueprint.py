@@ -563,6 +563,49 @@ def test_blueprint_rejects_picture_audit_source_partition_conflict() -> None:
         derive_blueprint_scene_plans(blueprint)
 
 
+def test_blueprint_rejects_duplicate_audit_source_in_full_and_shard() -> None:
+    audit = _blueprint().nodes[1].model_copy(deep=True)
+    audit.narrative_layer = "paratext"
+    audit.event_priority = "connective"
+    audit.render_policy = "exclude_from_spine"
+    audit.participants = []
+    audit.participant_evidence = []
+    audit.environment_source_unit_keys = []
+    audit.source_unit_deliveries = []
+    audit.state_requirements = []
+    audit.state_changes = []
+    audit.decision = None
+    duplicate = audit.model_copy(deep=True)
+    duplicate.key = "audit-duplicate"
+    blueprint = _blueprint()
+    blueprint.nodes[1] = audit
+    blueprint.nodes.append(duplicate)
+
+    full_errors = validate_narrative_blueprint(blueprint, SOURCE)
+    shard_errors = validate_narrative_blueprint_shard(
+        NarrativeBlueprintShard(
+            episode_no=8,
+            shard_index=1,
+            source_segment_ids=["SRC0002"],
+            nodes=[audit, duplicate],
+        ),
+        expected_episode_no=8,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0002"],
+    )
+
+    assert any(
+        "[BLUEPRINT_AUDIT_SOURCE_DUPLICATE]" in error
+        and "SRC0002" in error
+        for error in full_errors
+    )
+    assert any(
+        "[BLUEPRINT_SHARD_AUDIT_SOURCE_DUPLICATE]" in error
+        and "SRC0002" in error
+        for error in shard_errors
+    )
+
+
 def test_blueprint_normalizes_unpadded_source_ids() -> None:
     node = _blueprint().nodes[0].model_dump(mode="json")
     node["source_segment_ids"] = ["SRC1"]
