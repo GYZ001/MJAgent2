@@ -4920,14 +4920,73 @@ def _blueprint_shard_prompt(
 
 
 class _BlueprintGenerationBudget:
-    """Bound provider attempts, output-token exposure, and elapsed wall time."""
+    """Reserve call exposure, then settle against provider-reported usage.
+
+    A requested ``max_tokens`` value is only an upper bound for one active
+    call.  Charging every historical request at that upper bound rejects a
+    later retry even when earlier calls used a small fraction of their
+    reservation.  Unknown outcomes remain conservatively charged at the full
+    reservation so the cost cap never fails open.
+    """
 
     def __init__(self) -> None:
         self.started_at = time.monotonic()
         self.provider_calls = 0
         self.requested_output_tokens = 0
+        self.actual_output_tokens = 0
+        self.unknown_output_tokens = 0
+        self._next_reservation_id = 1
+        self._reservations: dict[int, dict[str, Any]] = {}
 
-    def claim(self, *, max_tokens: int) -> None:
+    @classmethod
+    def from_durable_calls(cls, *, run_id: str | None) -> "_BlueprintGenerationBudget":
+        budget = cls()
+        if not run_id:
+            return budget
+        rows = get_conn().execute(
+            "SELECT response_json,meta,status FROM provider_calls "
+            "WHERE run_id=? AND kind='chat' "
+            "AND json_extract(meta,'$.stage_key')='screenplay_blueprint_shard' "
+            "AND status IN ('OK','SUCCESS','SUCCEEDED')",
+            (run_id,),
+        ).fetchall()
+        seen_operations: set[str] = set()
+        for row in rows:
+            try:
+                meta = json.loads(row["meta"] or "{}")
+                response = json.loads(row["response_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                meta, response = {}, {}
+            operation_id = str(meta.get("operation_id") or "").strip()
+            if not operation_id or operation_id in seen_operations:
+                continue
+            seen_operations.add(operation_id)
+            requested = max(1, int(meta.get("requested_max_tokens") or 1))
+            usage = response.get("usage") if isinstance(response, dict) else None
+            actual = (
+                usage.get("completion_tokens")
+                if isinstance(usage, dict)
+                else None
+            )
+            if isinstance(actual, int) and actual >= 0:
+                budget.actual_output_tokens += actual
+            else:
+                budget.unknown_output_tokens += requested
+            budget.provider_calls += 1
+        return budget
+
+    @property
+    def reserved_output_tokens(self) -> int:
+        return sum(
+            int(item["max_tokens"])
+            for item in self._reservations.values()
+        )
+
+    @property
+    def charged_output_tokens(self) -> int:
+        return self.actual_output_tokens + self.unknown_output_tokens
+
+    def claim(self, *, max_tokens: int) -> int:
         elapsed = time.monotonic() - self.started_at
         if elapsed >= BLUEPRINT_GENERATION_MAX_WALL_SECONDS:
             raise StageError(
@@ -4940,15 +4999,89 @@ class _BlueprintGenerationBudget:
                 ["[BLUEPRINT_GENERATION_CALL_BUDGET] 超过全局调用上限"],
             )
         if (
-            self.requested_output_tokens + max_tokens
+            self.charged_output_tokens
+            + self.reserved_output_tokens
+            + max_tokens
             > BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
         ):
             raise StageError(
                 "剧本时空因果蓝图分片",
                 ["[BLUEPRINT_GENERATION_TOKEN_BUDGET] 超过全局输出 token 上限"],
             )
+        reservation_id = self._next_reservation_id
+        self._next_reservation_id += 1
         self.provider_calls += 1
-        self.requested_output_tokens += max_tokens
+        self.requested_output_tokens += int(max_tokens)
+        self._reservations[reservation_id] = {
+            "max_tokens": int(max_tokens),
+            "actual_tokens": 0,
+            "fresh_responses": 0,
+            "unknown_responses": 0,
+            "reused_responses": 0,
+        }
+        return reservation_id
+
+    def record_usage(
+        self,
+        reservation_id: int,
+        usage_event: dict[str, Any],
+    ) -> None:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None:
+            return
+        if usage_event.get("reused") is True:
+            reservation["reused_responses"] += 1
+            return
+        reservation["fresh_responses"] += 1
+        completion_tokens = usage_event.get("completion_tokens")
+        if isinstance(completion_tokens, int) and completion_tokens >= 0:
+            reservation["actual_tokens"] += completion_tokens
+        else:
+            reservation["unknown_responses"] += 1
+
+    def settle(
+        self,
+        reservation_id: int,
+        *,
+        unreported_outcome: str = "unknown",
+    ) -> dict[str, Any]:
+        reservation = self._reservations.pop(reservation_id, None)
+        if reservation is None:
+            raise RuntimeError("蓝图输出 token 预留已结算或不存在")
+        requested = int(reservation["max_tokens"])
+        fresh_responses = int(reservation["fresh_responses"])
+        unknown_responses = int(reservation["unknown_responses"])
+        actual = int(reservation["actual_tokens"])
+        if fresh_responses == 0 and int(reservation["reused_responses"]) > 0:
+            charged = 0
+            actual_value: int | None = 0
+        elif fresh_responses == 0 and unreported_outcome == "not_sent":
+            charged = 0
+            actual_value = 0
+        elif unknown_responses == 0:
+            if fresh_responses > 0:
+                charged = actual
+                actual_value = actual
+                self.actual_output_tokens += actual
+            else:
+                charged = requested
+                actual_value = None
+                self.unknown_output_tokens += requested
+        else:
+            actual_value = None
+            charged = actual + requested * unknown_responses
+            self.actual_output_tokens += actual
+            self.unknown_output_tokens += requested * unknown_responses
+        return {
+            "requested_max_tokens": requested,
+            "actual_completion_tokens": actual_value,
+            "usage_reported": fresh_responses > 0 and unknown_responses == 0,
+            "fresh_responses": fresh_responses,
+            "reused_responses": int(reservation["reused_responses"]),
+            "unknown_responses": unknown_responses,
+            "charged_output_tokens": charged,
+            "global_charged_output_tokens": self.charged_output_tokens,
+        }
 
 
 async def _generate_sharded_narrative_blueprint(
@@ -4963,7 +5096,9 @@ async def _generate_sharded_narrative_blueprint(
     segments = index_source_segments(source_text)
     segment_shards = _partition_blueprint_segments(segments)
     shard_split_depths = [0 for _ in segment_shards]
-    generation_budget = _BlueprintGenerationBudget()
+    generation_budget = _BlueprintGenerationBudget.from_durable_calls(
+        run_id=getattr(current_trace(), "run_id", None),
+    )
     optional_ids = structural_front_matter_ids(segments)
     merged_nodes: list[Any] = []
     shard_index = 1
@@ -5061,11 +5196,35 @@ async def _generate_sharded_narrative_blueprint(
                     boundary=boundary,
                     source_payload=source_payload,
                 )
-                generation_budget.claim(max_tokens=token_budget)
+                operation_material = {
+                    "contract_version": BLUEPRINT_VERSION,
+                    "prompt_version": SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+                    "shard_policy_version": BLUEPRINT_SHARD_POLICY_VERSION,
+                    "episode_id": str(episode.get("id") or ""),
+                    "shard_index": shard_index,
+                    "attempt": attempt,
+                    "split_depth": split_depth,
+                    "source_hash": source_hash,
+                    "boundary_hash": boundary_hash,
+                    "prompt_hash": hashlib.sha256(
+                        prompt.encode("utf-8")
+                    ).hexdigest(),
+                }
+                operation_id = "blueprint_" + hashlib.sha256(
+                    json.dumps(
+                        operation_material,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                reservation_id = generation_budget.claim(
+                    max_tokens=token_budget,
+                )
                 remaining_seconds = (
                     BLUEPRINT_GENERATION_MAX_WALL_SECONDS
                     - (time.monotonic() - generation_budget.started_at)
                 )
+                settlement: dict[str, Any] | None = None
                 try:
                     raw = await asyncio.wait_for(
                         model_gateway.chat(
@@ -5089,11 +5248,30 @@ async def _generate_sharded_narrative_blueprint(
                                     for item in source_payload
                                 ),
                                 "expected_json": True,
+                                "operation_id": operation_id,
+                                "reuse_successful_operation": True,
+                                "contract_version": BLUEPRINT_VERSION,
+                                "disable_reasoning_fallback": True,
                             },
+                            usage_callback=lambda usage_event: (
+                                generation_budget.record_usage(
+                                    reservation_id,
+                                    usage_event,
+                                )
+                            ),
                         ),
                         timeout=max(0.001, remaining_seconds),
                     )
                 except hiagent.ProviderError as exc:
+                    settlement = generation_budget.settle(
+                        reservation_id,
+                        unreported_outcome=(
+                            "not_sent"
+                            if exc.delivery_state == "not_sent"
+                            and exc.replay_safe
+                            else "unknown"
+                        ),
+                    )
                     if (
                         exc.failure_kind
                         == hiagent.ProviderFailureKind.OUTPUT_TRUNCATED.value
@@ -5104,10 +5282,17 @@ async def _generate_sharded_narrative_blueprint(
                         break
                     raise
                 except asyncio.TimeoutError as exc:
+                    settlement = generation_budget.settle(reservation_id)
                     raise StageError(
                         "剧本时空因果蓝图分片",
                         ["[BLUEPRINT_GENERATION_TIME_BUDGET] provider调用超过全局时间上限"],
                     ) from exc
+                except BaseException:
+                    generation_budget.settle(reservation_id)
+                    raise
+                else:
+                    settlement = generation_budget.settle(reservation_id)
+                assert settlement is not None
                 trace = current_trace()
                 evidence_repository.create_artifact(
                     EvidenceArtifact(
@@ -5127,6 +5312,7 @@ async def _generate_sharded_narrative_blueprint(
                             ),
                             "split_depth": split_depth,
                             "requested_max_tokens": token_budget,
+                            "token_settlement": settlement,
                         },
                         contract_version=BLUEPRINT_VERSION,
                         prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
@@ -5185,6 +5371,18 @@ async def _generate_sharded_narrative_blueprint(
                                 ),
                                 "split_depth": split_depth,
                                 "requested_max_tokens": token_budget,
+                                "actual_completion_tokens": settlement[
+                                    "actual_completion_tokens"
+                                ],
+                                "usage_reported": settlement[
+                                    "usage_reported"
+                                ],
+                                "charged_output_tokens": settlement[
+                                    "charged_output_tokens"
+                                ],
+                                "global_charged_output_tokens": settlement[
+                                    "global_charged_output_tokens"
+                                ],
                             },
                         ),
                         step_run_id=trace.step_run_id,

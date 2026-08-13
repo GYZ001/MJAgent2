@@ -364,7 +364,14 @@ def test_blueprint_generation_budget_caps_calls_tokens_and_time(
         budget.claim(max_tokens=1)
 
     budget = stages._BlueprintGenerationBudget()
-    budget.requested_output_tokens = stages.BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+    reservation = budget.claim(
+        max_tokens=stages.BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS,
+    )
+    budget.record_usage(reservation, {
+        "completion_tokens": None,
+        "reused": False,
+    })
+    budget.settle(reservation)
     with pytest.raises(stages.StageError, match="TOKEN_BUDGET"):
         budget.claim(max_tokens=1)
 
@@ -376,3 +383,113 @@ def test_blueprint_generation_budget_caps_calls_tokens_and_time(
     )
     with pytest.raises(stages.StageError, match="TIME_BUDGET"):
         budget.claim(max_tokens=1)
+
+
+def test_run_bd33_dynamic_split_releases_requested_reservations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    segments = index_source_segments(_source(6))
+    calls: list[tuple[list[str], int]] = []
+    artifacts: list[object] = []
+    validations = 0
+
+    async def fake_chat(messages, **kwargs):
+        source_ids = _prompt_source_ids(messages[1]["content"])
+        calls.append((source_ids, int(kwargs["call_meta"]["attempt"])))
+        kwargs["usage_callback"]({
+            "completion_tokens": 2,
+            "reused": False,
+        })
+        return _shard_response(
+            source_ids=source_ids,
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    def fake_validate(*_args, **_kwargs):
+        nonlocal validations
+        validations += 1
+        if validations == 6:
+            return ["[BLUEPRINT_TEST_RETRY] shard6 attempt1 invalid"]
+        return []
+
+    monkeypatch.setattr(
+        stages,
+        "_partition_blueprint_segments",
+        lambda _segments: [[segment] for segment in segments],
+    )
+    monkeypatch.setattr(stages, "_blueprint_shard_token_budget", lambda _s: 10)
+    monkeypatch.setattr(stages, "BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS", 25)
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint_shard", fake_validate)
+    monkeypatch.setattr(stages, "validate_narrative_blueprint", lambda *_a, **_k: [])
+    monkeypatch.setattr(stages, "derive_blueprint_scene_plans", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda artifact, **_kwargs: artifacts.append(artifact),
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-run-bd33"),
+    )
+
+    result = asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-run-bd33", "episode_no": 1},
+        _source(6),
+        {},
+    ))
+
+    assert calls == [
+        ([segment.segment_id], 1) for segment in segments[:5]
+    ] + [([segments[5].segment_id], 1), ([segments[5].segment_id], 2)]
+    assert len(result.nodes) == 6
+    raw = [
+        artifact for artifact in artifacts
+        if artifact.type == "screenplay_narrative_blueprint_shard_raw"
+    ]
+    validated = [
+        artifact for artifact in artifacts
+        if artifact.type == "screenplay_narrative_blueprint_shard"
+    ]
+    assert len(raw) == 7
+    assert len(validated) == 6
+    assert raw[-1].content["token_settlement"] == {
+        "requested_max_tokens": 10,
+        "actual_completion_tokens": 2,
+        "usage_reported": True,
+        "fresh_responses": 1,
+        "reused_responses": 0,
+        "unknown_responses": 0,
+        "charged_output_tokens": 2,
+        "global_charged_output_tokens": 14,
+    }
+
+
+def test_missing_usage_is_charged_at_full_reservation() -> None:
+    budget = stages._BlueprintGenerationBudget()
+    reservation = budget.claim(max_tokens=10)
+    budget.record_usage(reservation, {
+        "completion_tokens": None,
+        "reused": False,
+    })
+
+    settlement = budget.settle(reservation)
+
+    assert settlement["actual_completion_tokens"] is None
+    assert settlement["charged_output_tokens"] == 10
+    assert budget.charged_output_tokens == 10
+
+
+def test_cached_response_costs_no_new_output_tokens() -> None:
+    budget = stages._BlueprintGenerationBudget()
+    reservation = budget.claim(max_tokens=10)
+    budget.record_usage(reservation, {
+        "completion_tokens": 9,
+        "reused": True,
+    })
+
+    settlement = budget.settle(reservation)
+
+    assert settlement["reused_responses"] == 1
+    assert settlement["charged_output_tokens"] == 0
+    assert budget.charged_output_tokens == 0

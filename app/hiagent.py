@@ -691,7 +691,9 @@ def _reject_truncated_chat_response(data: dict) -> None:
 
 def _notify_completion_usage(
     data: dict,
-    usage_callback: Callable[[int | None], None] | None,
+    usage_callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    reused: bool,
 ) -> None:
     if usage_callback is None:
         return
@@ -701,11 +703,14 @@ def _notify_completion_usage(
         if isinstance(usage, dict)
         else None
     )
-    usage_callback(
-        completion_tokens
-        if isinstance(completion_tokens, int) and completion_tokens >= 0
-        else None
-    )
+    usage_callback({
+        "completion_tokens": (
+            completion_tokens
+            if isinstance(completion_tokens, int) and completion_tokens >= 0
+            else None
+        ),
+        "reused": reused,
+    })
 
 
 def _infer_callsite_meta() -> dict[str, Any]:
@@ -949,16 +954,26 @@ async def _stream_bailian_chat_with_fallback(
 async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, payload: dict, *,
                                      kind: str, model: str, headers: dict | None, key_name: str,
                                      temperature: float, call_meta: dict | None = None,
-                                     usage_callback: Callable[[int | None], None] | None = None) -> str:
+                                     usage_callback: Callable[[dict[str, Any]], None] | None = None) -> str:
     """封装推理模型的降级重试逻辑：若首轮因推理过长导致 content 为空，则关闭推理重试一次。"""
     data = _cached_successful_provider_response(kind, model, payload, call_meta)
+    reused = data is not None
     if data is None:
         data = await _plain_chat_request(
             client, url, payload, kind=kind, model=model,
             headers=headers, key_name=key_name, meta=call_meta,
         )
     content = _chat_content(data, label=kind)
+    _notify_completion_usage(data, usage_callback, reused=reused)
     if not content.strip() and _reasoning_used_all_output_budget(data):
+        if bool((call_meta or {}).get("disable_reasoning_fallback")):
+            raise ProviderError(
+                "模型推理耗尽输出预算，该业务操作禁止隐式第二次付费请求",
+                raw=_empty_content_detail(data),
+                failure_kind=ProviderFailureKind.OUTPUT_TRUNCATED,
+                delivery_state="responded",
+                replay_safe=False,
+            )
         # 思考过长时重试；移除 OpenRouter reasoning 参数，使用普通生成。
         fallback_payload = {**payload, "temperature": temperature}
         # 移除 OpenRouter 风格的 reasoning 参数
@@ -976,8 +991,8 @@ async def _chat_with_reasoning_fallback(client: httpx.AsyncClient, url: str, pay
         }
         data = await _post_json(client, url, fallback_payload, kind=kind, model=model, retries=0,
                                 headers=headers, key_name=key_name, meta=fallback_meta)
+        _notify_completion_usage(data, usage_callback, reused=False)
         content = _chat_content(data, label=f"{kind} reasoning fallback")
-    _notify_completion_usage(data, usage_callback)
     _reject_truncated_chat_response(data)
     if not content.strip():
         raise ProviderError(f"模型返回空内容（content 为空；{_empty_content_detail(data)}）")
@@ -1051,7 +1066,7 @@ async def _plain_chat_request(
 
 async def chat(messages: list[dict], *, model: str | None = None, temperature: float = 0.7,
                max_tokens: int = 65535, call_meta: dict | None = None,
-               usage_callback: Callable[[int | None], None] | None = None) -> str:
+               usage_callback: Callable[[dict[str, Any]], None] | None = None) -> str:
     """文本 LLM 对话，返回 message.content（推理模型的 reasoning 一律丢弃）。
     按设置在火山 HiAgent、OpenRouter、阿里云百炼、DeepSeek、智谱官方 API 之间路由（后两者仅文本，
     图像/视频始终走火山）。"""
@@ -1092,7 +1107,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             data, _ = await _post_bailian_chat_with_fallback(
                 client, payload, fallback_kind="text", log_kind="chat",
                 preferred_model=bailian_model, meta=call_meta)
-            _notify_completion_usage(data, usage_callback)
+            _notify_completion_usage(data, usage_callback, reused=False)
             _reject_truncated_chat_response(data)
             content = _chat_content(data, label="chat")
         elif provider == "deepseek":
@@ -1126,6 +1141,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             data = _cached_successful_provider_response(
                 "chat", custom_model, payload, call_meta,
             )
+            reused = data is not None
             if data is None:
                 data = await _plain_chat_request(
                     client,
@@ -1137,7 +1153,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     key_name=f"model:{custom_model}",
                     meta=call_meta,
                 )
-            _notify_completion_usage(data, usage_callback)
+            _notify_completion_usage(data, usage_callback, reused=reused)
             _reject_truncated_chat_response(data)
             content = _chat_content(data, label="custom chat")
         else:
@@ -1145,6 +1161,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
             base_url, model_headers = _model_connection("hiagent", model, config.HIAGENT_BASE_URL, config.HIAGENT_API_KEY)
             payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
             data = _cached_successful_provider_response("chat", model, payload, call_meta)
+            reused = data is not None
             if data is None:
                 data = await _plain_chat_request(
                     client,
@@ -1156,7 +1173,7 @@ async def chat(messages: list[dict], *, model: str | None = None, temperature: f
                     key_name=f"model:{model}",
                     meta=call_meta,
                 )
-            _notify_completion_usage(data, usage_callback)
+            _notify_completion_usage(data, usage_callback, reused=reused)
             _reject_truncated_chat_response(data)
             content = _chat_content(data, label="chat")
 

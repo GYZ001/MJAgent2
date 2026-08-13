@@ -190,7 +190,7 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 8192,
     call_meta: dict[str, Any] | None = None,
-    usage_callback: Callable[[int | None], None] | None = None,
+    usage_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """The only text-model entry point for business stages.
 
