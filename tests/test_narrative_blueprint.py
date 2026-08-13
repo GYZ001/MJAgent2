@@ -1600,7 +1600,11 @@ def test_blueprint_patch_unknown_keeps_stable_operation_and_retry_lineage(
     retry_budget.provider_calls = first_budget.provider_calls
     retry_budget.unknown_output_tokens = first_budget.unknown_output_tokens
     retry_budget._durable_unknown_operations[operation_ids[0]] = "grant-first"
+    retry_budget._durable_unknown_stage_calls[
+        "screenplay_blueprint_patch"
+    ] = (1, "grant-first")
     retry_budget.retry_grant_id = "grant-explicit-retry"
+    retry_budget.authorize_unknown_retry("grant-explicit-retry")
     with pytest.raises(hiagent.ProviderError, match="outcome unknown"):
         asyncio.run(stages._repair_narrative_blueprint(
             blueprint.model_copy(deep=True),
@@ -1878,7 +1882,13 @@ def test_blueprint_generation_reuses_validated_cached_artifact(
         def execute(sql, _params):
             sql_seen.append(sql)
             if "SELECT started_at" in sql:
-                return QueryResult(one={"started_at": None})
+                return QueryResult(one={
+                    "started_at": None,
+                    "input_fingerprint": "same-input",
+                    "config_snapshot_json": json.dumps({
+                        "blueprint_budget_lineage_fingerprint": "same-input",
+                    }),
+                })
             if "FROM provider_calls" in sql:
                 return QueryResult(many=[])
             if "SELECT input_fingerprint" in sql:
