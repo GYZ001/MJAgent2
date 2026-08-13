@@ -1360,7 +1360,7 @@ async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_gran
     await asyncio.sleep(0)
 
     grants = conn.execute(
-        "SELECT id,issued_by FROM production_grants WHERE episode_id='e1' "
+        "SELECT id,issued_by,consumed_at FROM production_grants WHERE episode_id='e1' "
         "ORDER BY issued_at"
     ).fetchall()
     assert spawned == 1
@@ -1371,6 +1371,7 @@ async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_gran
     assert len(grants) == 2
     assert grants[0]["id"] == old_grant.grant_id
     assert grants[1]["issued_by"] == "user_retry_approval"
+    assert grants[1]["consumed_at"] is not None
     run_snapshot = json.loads(conn.execute(
         "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
         (outcome.data["run_id"],),
@@ -1382,7 +1383,7 @@ async def test_confirmed_unknown_retry_crosses_handler_api_facade_and_mints_gran
         (revision.id,),
     ).fetchone()["grant_id"] == grants[1]["id"]
     replay_projection = api._screenplay_blueprint_budget_projection("e1")
-    assert replay_projection["requires_fresh_retry_grant"] is False
+    assert replay_projection["requires_fresh_retry_grant"] is True
     assert replay_projection["unknown_receipts"] == projection["unknown_receipts"]
     assert conn.execute(
         "SELECT COUNT(*) AS c FROM provider_calls"

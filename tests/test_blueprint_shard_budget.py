@@ -243,6 +243,105 @@ def test_output_truncated_splits_once_without_accepting_prefix(
     ]
 
 
+def test_production_src0001_paratext_root_split_validates_without_retry_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "第一章 书生孟浩\n\n孟浩推开木门。"
+    calls: list[list[str]] = []
+    artifacts: list[object] = []
+
+    async def fake_chat(messages, **kwargs):
+        source_ids = _prompt_source_ids(messages[1]["content"])
+        calls.append(source_ids)
+        if len(source_ids) > 1:
+            raise hiagent.ProviderError(
+                "root needs deterministic split",
+                failure_kind=hiagent.ProviderFailureKind.OUTPUT_TRUNCATED,
+            )
+        source_id = source_ids[0]
+        if source_id == "SRC0001":
+            node = {
+                "key": "TITLE",
+                "source_segment_ids": [source_id],
+                "summary": "第一章 书生孟浩",
+                "narrative_layer": "paratext",
+                "event_priority": "connective",
+                "render_policy": "exclude_from_spine",
+                "temporal_domain_key": "paratext",
+                "time_label": "章节外",
+                "time_relation": "episode_start",
+                "location_key": "title-card",
+                "location_label": "字幕卡",
+                # Exact production failure shape: these provider-authored
+                # fields are deterministically projected empty before the
+                # unchanged strict validator runs.
+                "source_unit_deliveries": [{
+                    "source_unit_key": "SRC0001:unit:001",
+                    "mode": "written_text",
+                }],
+                "exit_state": "标题展示完成，正片即将开始",
+                "action_logic": "展示章节标题",
+            }
+        else:
+            node = {
+                "key": "STORY",
+                "source_segment_ids": [source_id],
+                "summary": "孟浩推开木门",
+                "narrative_layer": "story",
+                "event_priority": "causal",
+                "render_policy": "standalone",
+                "temporal_domain_key": "present",
+                "time_label": "当下",
+                "time_relation": "continuous",
+                "location_key": "door",
+                "location_label": "木门前",
+                "participants": ["孟浩"],
+                "participant_evidence": [{
+                    "identity_key": "孟浩",
+                    "source_segment_ids": [source_id],
+                    "source_unit_keys": [f"{source_id}:unit:001"],
+                    "usage": "state_subject",
+                }],
+                "exit_state": "木门已打开",
+                "action_logic": "孟浩主动推门",
+            }
+        return json.dumps({
+            "format_version": stages.BLUEPRINT_VERSION,
+            "episode_no": 1,
+            "shard_index": int(kwargs["call_meta"]["shard_index"]),
+            "source_segment_ids": source_ids,
+            "nodes": [node],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda artifact, **_kwargs: artifacts.append(artifact),
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-src0001"),
+    )
+
+    result = asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-src0001", "episode_no": 1},
+        source,
+        {},
+    ))
+
+    assert calls == [["SRC0001", "SRC0002"], ["SRC0001"], ["SRC0002"]]
+    title = next(node for node in result.nodes if node.narrative_layer == "paratext")
+    assert title.source_segment_ids == ["SRC0001"]
+    assert title.source_unit_deliveries == []
+    assert title.exit_state == ""
+    assert [
+        artifact for artifact in artifacts
+        if artifact.type == "screenplay_narrative_blueprint_shard"
+    ]
+    assert len(calls) < stages.BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS
+
+
 def test_legacy_cached_shard_without_current_policy_is_not_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1417,6 +1516,10 @@ def test_runtime_budget_restores_exact_retry_grant_and_historical_unknown(
     conn.execute(
         "UPDATE workflow_runs SET config_snapshot_json=? WHERE id='fresh'",
         (json.dumps(snapshot),),
+    )
+    conn.execute(
+        "UPDATE production_grants SET consumed_at=? WHERE id=?",
+        (db.now(), grant.grant_id),
     )
     conn.commit()
 

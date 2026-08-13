@@ -1453,11 +1453,19 @@ def _screenplay_blueprint_budget_projection(
     )
     if current_grant_id and budget.unknown_receipts:
         grant_row = conn.execute(
-            """SELECT issued_by,input_artifact_hash
+            """SELECT issued_by,input_artifact_hash,consumed_at
                  FROM production_grants
                 WHERE id=? AND episode_id=? AND kind='screenplay'
                   AND production_revision_id=?
-                  AND revoked_at IS NULL AND expires_at>?""",
+                  AND revoked_at IS NULL AND expires_at>?
+                  AND consumed_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM workflow_runs wr
+                       WHERE json_extract(
+                           wr.config_snapshot_json,
+                           '$.blueprint_retry_grant_id'
+                       )=production_grants.id
+                  )""",
             (
                 current_grant_id,
                 episode_id,
@@ -1514,6 +1522,9 @@ def _spawn_screenplay_activation(
     previous: dict | None = None
     registered_task = None
     prepared_revision = None
+    activation_retry_grant_id = ""
+    activation_retry_receipts_hash = ""
+    activation_retry_revision_id = ""
     try:
         conn.execute("BEGIN IMMEDIATE")
         activation_stamp = now()
@@ -1625,12 +1636,14 @@ def _spawn_screenplay_activation(
             )
             from app.stages import blueprint_retry_receipts_hash
 
+            current_receipts_hash = blueprint_retry_receipts_hash(
+                budget_projection["unknown_receipts"]
+            )
+
             if (
                 trusted_retry_approval
                 and str(retry_approval_evidence.get("receipts_hash") or "")
-                != blueprint_retry_receipts_hash(
-                    budget_projection["unknown_receipts"]
-                )
+                != current_receipts_hash
             ):
                 raise StateConflict(
                     "blueprint_unknown_retry_approval",
@@ -1641,9 +1654,7 @@ def _spawn_screenplay_activation(
                             or ""
                         )
                     },
-                    blueprint_retry_receipts_hash(
-                        budget_projection["unknown_receipts"]
-                    ),
+                    current_receipts_hash,
                 )
             if not trusted_retry_approval:
                 budget.assert_activation_admissible()
@@ -1674,6 +1685,9 @@ def _spawn_screenplay_activation(
                 commit=False,
             )
             budget.authorize_unknown_retry(grant.grant_id)
+            activation_retry_grant_id = grant.grant_id
+            activation_retry_receipts_hash = current_receipts_hash
+            activation_retry_revision_id = str(revision["id"])
             run_row = conn.execute(
                 "SELECT config_snapshot_json FROM workflow_runs WHERE id=?",
                 (recorder.run_id,),
@@ -1695,6 +1709,20 @@ def _spawn_screenplay_activation(
                     activation_stamp,
                     recorder.run_id,
                 ),
+            )
+        elif budget.unknown_receipts and budget.retry_grant_id:
+            # A legacy unconsumed exact grant may authorize one activation.
+            # It is consumed below only after the task registry accepts the
+            # worker, in the same transaction as the run snapshot and owner.
+            activation_retry_grant_id = budget.retry_grant_id
+            from app.stages import blueprint_retry_receipts_hash
+
+            activation_retry_receipts_hash = blueprint_retry_receipts_hash(
+                budget.unknown_receipts
+            )
+            revision = budget_projection["revision"]
+            activation_retry_revision_id = (
+                str(revision["id"]) if revision is not None else ""
             )
         budget.assert_activation_admissible()
         stamp = activation_stamp
@@ -1737,6 +1765,38 @@ def _spawn_screenplay_activation(
             task_coro,
             project_id=project_id,
         )
+        if activation_retry_grant_id:
+            consumed = conn.execute(
+                "UPDATE production_grants SET consumed_at=? "
+                "WHERE id=? AND episode_id=? AND project_id=? "
+                "AND production_revision_id=? AND kind='screenplay' "
+                "AND issued_by='user_retry_approval' "
+                "AND input_artifact_hash=? "
+                "AND consumed_at IS NULL AND revoked_at IS NULL "
+                "AND expires_at>? AND EXISTS ("
+                " SELECT 1 FROM production_revisions r "
+                "  WHERE r.id=production_grants.production_revision_id "
+                "    AND r.episode_id=production_grants.episode_id "
+                "    AND r.kind='screenplay' AND r.status='active' "
+                "    AND r.grant_id=production_grants.id"
+                ")",
+                (
+                    activation_stamp,
+                    activation_retry_grant_id,
+                    episode_id,
+                    project_id,
+                    activation_retry_revision_id,
+                    activation_retry_receipts_hash,
+                    activation_stamp,
+                ),
+            )
+            if consumed.rowcount != 1:
+                raise StateConflict(
+                    "blueprint_retry_grant_consumption",
+                    episode_id,
+                    {activation_retry_grant_id},
+                    "already_consumed_or_inactive",
+                )
         # ``spawn`` only schedules the coroutine; it cannot run until this
         # synchronous function yields back to the event loop.  Commit after the
         # registry accepts it so a registration failure rolls back the owner

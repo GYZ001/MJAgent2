@@ -19,12 +19,15 @@ from app.narrative_blueprint import (
     NarrativeBlueprint,
     NarrativeBlueprintPatch,
     NarrativeBlueprintShard,
+    NarrativeNode,
     apply_narrative_blueprint_patch,
     blueprint_patch_schema,
+    blueprint_shard_provider_schema,
     blueprint_semantic_issue_is_resolved,
     blueprint_semantic_review_schema,
     derive_blueprint_scene_plans,
     normalize_blueprint_agency_continuity,
+    normalize_blueprint_provider_payload,
     normalize_blueprint_semantic_review_payload,
     recover_complete_blueprint_prefix,
     validate_and_apply_blueprint_scene_contract,
@@ -267,6 +270,103 @@ def test_picture_partition_preserves_mixed_node_order_and_audit_coverage() -> No
         "disposition": "audit_only",
         "projection_policy": "audit_only",
     }]
+
+
+@pytest.mark.parametrize("surface_text", [
+    "第一章 书生孟浩",
+    "【特别推广】后续内容敬请期待",
+    "“卷末附记”",
+])
+def test_paratext_provider_projection_preserves_audit_ownership_but_clears_story_contracts(
+    surface_text: str,
+) -> None:
+    dirty = {
+        "format_version": stages.BLUEPRINT_VERSION,
+        "episode_no": 1,
+        "shard_index": 1,
+        "source_segment_ids": ["SRC0001"],
+        "nodes": [{
+            "key": "audit-1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": surface_text,
+            "narrative_layer": "paratext",
+            "event_priority": "connective",
+            "render_policy": "exclude_from_spine",
+            "temporal_domain_key": "paratext",
+            "time_label": "章节外",
+            "time_relation": "episode_start",
+            "location_key": "paratext-card",
+            "location_label": "字幕卡",
+            "participants": ["person-wrong"],
+            "participant_evidence": [],
+            "environment_source_unit_keys": ["SRC0001:unit:001"],
+            "source_unit_deliveries": [{
+                "source_unit_key": "SRC0001:unit:001",
+                "mode": "written_text",
+            }],
+            "exit_state": "标题展示完成",
+            "state_requirements": [],
+            "state_changes": [],
+            "released_constraints_for": ["person-wrong"],
+            "decision": None,
+            "action_logic": surface_text,
+        }],
+    }
+
+    with pytest.raises(Exception, match="paratext 节点不得承载"):
+        NarrativeBlueprintShard.model_validate(dirty)
+    normalized = normalize_blueprint_provider_payload(dirty)
+    shard = NarrativeBlueprintShard.model_validate(normalized)
+    node = shard.nodes[0]
+
+    assert node.source_segment_ids == ["SRC0001"]
+    assert node.summary == surface_text
+    assert node.action_logic == surface_text
+    assert node.participants == []
+    assert node.source_unit_deliveries == []
+    assert node.environment_source_unit_keys == []
+    assert node.exit_state == ""
+    blueprint = NarrativeBlueprint(episode_no=1, nodes=[node])
+    assert derive_blueprint_scene_plans(blueprint) == []
+    assert blueprint.source_audit_annotations[0].node_key == "audit-1"
+
+
+def test_paratext_provider_schema_and_patch_schema_encode_empty_contract() -> None:
+    schema = blueprint_shard_provider_schema()
+    conditional = schema["$defs"]["NarrativeNode"]["allOf"][-1]
+    assert conditional["if"]["properties"]["narrative_layer"] == {
+        "const": "paratext"
+    }
+    assert conditional["then"]["properties"]["source_unit_deliveries"] == {
+        "const": []
+    }
+    assert conditional["then"]["properties"]["exit_state"] == {
+        "const": ""
+    }
+
+    node = NarrativeNode.model_validate({
+        "key": "audit-1",
+        "source_segment_ids": ["SRC0001"],
+        "summary": "第一章",
+        "narrative_layer": "paratext",
+        "event_priority": "connective",
+        "render_policy": "exclude_from_spine",
+        "temporal_domain_key": "paratext",
+        "time_label": "章节外",
+        "time_relation": "episode_start",
+        "location_key": "paratext-card",
+        "location_label": "字幕卡",
+        "action_logic": "展示标题",
+    })
+    patch = blueprint_patch_schema(
+        NarrativeBlueprint(episode_no=1, nodes=[node]),
+        ["audit-1"],
+    )
+    props = patch["properties"]["replacements"]["items"]["oneOf"][0][
+        "properties"
+    ]["node"]["allOf"][1]["properties"]
+    assert props["source_unit_deliveries"] == {"const": []}
+    assert props["exit_state"] == {"const": ""}
 
 
 def test_partition_gate_rejects_picture_omission_duplicate_and_audit_leak() -> None:
