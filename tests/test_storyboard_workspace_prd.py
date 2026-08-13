@@ -134,8 +134,14 @@ def storyboard_db(tmp_path, monkeypatch):
         ),
     )
     conn.execute("UPDATE episodes SET storyboard_artifact_id=? WHERE id='e1'", (artifact["id"],))
+    workspace.realign_generated_source_binding(
+        "e1",
+        "s1",
+        source,
+        conn=conn,
+        commit=False,
+    )
     conn.commit()
-    workspace.repair_generated_source_bindings("e1")
     yield conn
     conn.close()
 
@@ -1861,6 +1867,26 @@ def test_confirmation_rebuilds_episode_artifact_after_manual_shot_artifact_chang
     assert episode["published_storyboard_artifact_id"] == episode["storyboard_artifact_id"]
     artifact = repository.get_artifact(episode["storyboard_artifact_id"])
     assert current_shot_artifact in artifact["parent_artifact_ids"]
+
+
+def test_confirmation_rejects_missing_source_binding(storyboard_db) -> None:
+    storyboard_db.execute(
+        "DELETE FROM storyboard_source_bindings WHERE shot_id='s1'"
+    )
+    storyboard_db.commit()
+    preview = api.create_storyboard_confirmation_preview("e1")
+
+    with pytest.raises(ValueError, match="第 1 镜缺少 source binding"):
+        api.confirm_episode_core(
+            "e1",
+            preview_token=preview["preview_token"],
+        )
+
+    episode = storyboard_db.execute(
+        "SELECT status,storyboard_completion_certificate_id FROM episodes WHERE id='e1'"
+    ).fetchone()
+    assert episode["status"] == "scripted"
+    assert episode["storyboard_completion_certificate_id"] is None
 
 
 def test_idempotent_confirmation_converges_terminal_runtime_state(storyboard_db):
