@@ -721,7 +721,12 @@ def _participant_case(
             usage="visible",
         )
         for identity_key in first_participants
-    ]
+    ] + [NarrativeParticipantEvidence(
+        identity_key="甲",
+        source_segment_ids=["SRC0001"],
+        source_unit_keys=["SRC0001:unit:001"],
+        usage="state_subject",
+    )]
     blueprint.nodes[1].participants = second_participants
     blueprint.nodes[1].participant_evidence = [
         NarrativeParticipantEvidence(
@@ -730,7 +735,12 @@ def _participant_case(
             usage="visible",
         )
         for identity_key in second_participants
-    ]
+    ] + [NarrativeParticipantEvidence(
+        identity_key="乙",
+        source_segment_ids=["SRC0002"],
+        source_unit_keys=["SRC0002:unit:001"],
+        usage="state_subject",
+    )]
     derive_blueprint_scene_plans(blueprint)
     registry = [
         {
@@ -2589,14 +2599,20 @@ def test_validator_and_merge_accept_source_authored_offscreen_evidence(
         scene_shards_module.ScreenplaySceneActionEvidence(
             node_key=contract.node_keys[0],
             source_segment_ids=["SRC0001"],
-            participants=[
-                scene_shards_module.ScreenplaySceneActionParticipantEvidence(
+                participants=[
+                    scene_shards_module.ScreenplaySceneActionParticipantEvidence(
                     identity_key="person_a",
                     source_segment_ids=["SRC0001"],
                     usage="voice",
-                    perception_channels=[channel],
-                )
-            ],
+                        perception_channels=[channel],
+                    ),
+                    scene_shards_module.ScreenplaySceneActionParticipantEvidence(
+                        identity_key="person_a",
+                        source_segment_ids=["SRC0001"],
+                        source_unit_keys=["SRC0001:unit:001"],
+                        usage="state_subject",
+                    ),
+                ],
             decision_actor_key="person_a",
         )
     ]
@@ -3234,8 +3250,8 @@ def test_scene_contract_allows_identity_explicitly_shared_by_both_scenes() -> No
     assert [
         scene.units[0].actor_keys for scene in merged.scenes
     ] == [
-        ["person_a", "person_shared"],
-        ["person_b", "person_shared"],
+        ["person_a"],
+        ["person_b"],
     ]
 
 
@@ -3344,6 +3360,34 @@ def _ss004_533ac9_compile_context(*, current_contract: bool = True):
                 ]
                 if source_unit_keys:
                     participant["source_unit_keys"] = source_unit_keys
+        # This branch is the explicit current-contract clone used by compiler
+        # positives.  The untouched legacy replay remains invalid.  These
+        # owners are source-unit authority, not inferred from visible roster.
+        state_subjects = {
+            "SRC0054:unit:001": "孟浩",
+            "SRC0055:unit:002": "孟浩",
+            "SRC0056:unit:002": "绿袍执事乙",
+            "SRC0057:unit:002": "绿袍执事甲",
+            "SRC0058:unit:002": "王有材",
+        }
+        for action_evidence in replay["action_evidence"]:
+            for source_unit_key, identity_key in state_subjects.items():
+                source_id = source_unit_key.split(":unit:", 1)[0]
+                if source_id not in action_evidence["source_segment_ids"]:
+                    continue
+                action_evidence["participant_evidence"].append({
+                    "identity_key": identity_key,
+                    "source_segment_ids": [source_id],
+                    "source_unit_keys": [source_unit_key],
+                    "usage": "state_subject",
+                })
+                if source_id in {"SRC0056", "SRC0057", "SRC0058"}:
+                    action_evidence["participant_evidence"].append({
+                        "identity_key": identity_key,
+                        "source_segment_ids": [source_id],
+                        "source_unit_keys": [source_unit_key],
+                        "usage": "visible",
+                    })
     nodes = []
     for index, evidence in enumerate(replay["action_evidence"]):
         participants = list(dict.fromkeys(
@@ -3889,16 +3933,26 @@ def test_compiled_identity_scaffold_round_trip_and_merge_rejects_drift() -> None
     blueprint = _blueprint(split_domain=True)
     blueprint.nodes[0].participants = ["甲"]
     blueprint.nodes[0].participant_evidence = [NarrativeParticipantEvidence(
-        identity_key="甲",
-        source_segment_ids=["SRC0001"],
-        usage="visible",
-    )]
+            identity_key="甲",
+            source_segment_ids=["SRC0001"],
+            source_unit_keys=["SRC0001:unit:001"],
+            usage="state_subject",
+        ), NarrativeParticipantEvidence(
+            identity_key="甲",
+            source_segment_ids=["SRC0001"],
+            usage="visible",
+        )]
     blueprint.nodes[1].participants = ["乙"]
     blueprint.nodes[1].participant_evidence = [NarrativeParticipantEvidence(
-        identity_key="乙",
-        source_segment_ids=["SRC0002"],
-        usage="visible",
-    )]
+            identity_key="乙",
+            source_segment_ids=["SRC0002"],
+            source_unit_keys=["SRC0002:unit:001"],
+            usage="state_subject",
+        ), NarrativeParticipantEvidence(
+            identity_key="乙",
+            source_segment_ids=["SRC0002"],
+            usage="visible",
+        )]
     derive_blueprint_scene_plans(blueprint)
     registry = [
         {
