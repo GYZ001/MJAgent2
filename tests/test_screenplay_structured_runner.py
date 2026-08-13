@@ -69,6 +69,8 @@ def test_structured_runner_uses_one_format_repair(monkeypatch) -> None:
     assert "original large context" not in prompts[1]
     assert [meta["format_attempt"] for meta in metas] == [0, 1]
     assert [meta["semantic_attempt"] for meta in metas] == [0, 0]
+    assert metas[0]["operation_id"] != metas[1]["operation_id"]
+    assert metas[0]["base_operation_id"] == metas[1]["base_operation_id"]
 
 
 def test_format_repair_keeps_outer_candidate_validation_error(
@@ -152,6 +154,8 @@ def test_structured_runner_semantic_retry_has_independent_budget(monkeypatch) ->
     assert "only this context" in prompts[1]
     assert [meta["format_attempt"] for meta in metas] == [0, 0]
     assert [meta["semantic_attempt"] for meta in metas] == [0, 1]
+    assert metas[0]["operation_id"] != metas[1]["operation_id"]
+    assert metas[0]["base_operation_id"] == metas[1]["base_operation_id"]
 
 
 def test_structured_runner_builds_repair_schema_from_failed_candidate(

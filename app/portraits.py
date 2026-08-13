@@ -1165,21 +1165,50 @@ functional 且 canonical_name=""，这是合法终态，不得猜名或补名；
                 errors.append(f"identity_kind 非法：{identity_kind}")
         return errors
 
+    legacy_operation_id = (
+        f"screenplay.identity.future.v6:{episode_no}:"
+        + evidence_repository.content_hash({
+            "unresolved": unresolved,
+            "future_context": future_context,
+        })
+    )
+    identity_provider, identity_model, identity_effective_max = (
+        hiagent.text_request_token_limits(requested_max_tokens=4096)
+    )
+    identity_semantic_settings = hiagent.text_request_semantic_settings(
+        identity_provider
+    )
+    identity_schema = _IdentityCandidateResponse.model_json_schema()
+    operation_id = (
+        "screenplay.identity.future.v7:"
+        + evidence_repository.content_hash({
+            "episode_no": episode_no,
+            "provider": identity_provider,
+            "model": identity_model,
+            "requested_max_tokens": 4096,
+            "effective_max_tokens": identity_effective_max,
+            "temperature": 0.1,
+            "provider_semantic_settings": identity_semantic_settings,
+            "messages": [{"role": "user", "content": prompt}],
+            "output_schema": identity_schema,
+            "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+        })
+    )
+
     response = await model_gateway.chat_structured(
         [{"role": "user", "content": prompt}],
         model_type=_IdentityCandidateResponse,
         validate=validate_response,
-        operation_id=(
-            f"screenplay.identity.future.v6:{episode_no}:"
-            + evidence_repository.content_hash({
-                "unresolved": unresolved,
-                "future_context": future_context,
-            })
-        ),
+        operation_id=operation_id,
         max_tokens=4096,
         temperature=0.1,
         call_meta={
             "contract_version": FUTURE_IDENTITY_DECISION_VERSION,
+            "legacy_success_operation_id": legacy_operation_id,
+            "provider": identity_provider,
+            "model": identity_model,
+            "effective_max_tokens": identity_effective_max,
+            "provider_semantic_settings": identity_semantic_settings,
             "stage": "discover_character_candidates",
             "stage_key": "screenplay_character_discovery",
             "substage": "future_identity",

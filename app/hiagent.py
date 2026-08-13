@@ -87,13 +87,20 @@ def _cached_successful_provider_response(
     # answer merely because its base prompt happens to be byte-identical.
     operation_id = str((meta or {}).get("operation_id") or "").strip() \
         or provider_operation_id(kind, model, payload)
+    operation_ids = [operation_id]
+    legacy_operation_id = str(
+        (meta or {}).get("legacy_success_operation_id") or ""
+    ).strip()
+    if legacy_operation_id and legacy_operation_id != operation_id:
+        operation_ids.append(legacy_operation_id)
     try:
+        marks = ",".join("?" for _ in operation_ids)
         rows = get_conn().execute(
             "SELECT id,response_json,meta,request_json,request_hash FROM provider_calls "
-            "WHERE operation_id=? AND kind=? AND model=? "
+            f"WHERE operation_id IN ({marks}) AND kind=? AND model=? "
             "AND status IN ('OK','SUCCESS','SUCCEEDED') "
             "AND response_json IS NOT NULL ORDER BY id DESC LIMIT 20",
-            (operation_id, kind, model),
+            (*operation_ids, kind, model),
         ).fetchall()
         expected_contract = str((meta or {}).get("contract_version") or "").strip()
         for row in rows:

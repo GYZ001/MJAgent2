@@ -318,9 +318,24 @@ async def chat_structured(
     last_raw = ""
     local_recovery = False
     while True:
+        attempt_operation_id = operation_id
+        if format_attempt or semantic_attempt:
+            attempt_identity = repository.content_hash({
+                "base_operation_id": operation_id,
+                "format_attempt": format_attempt,
+                "semantic_attempt": semantic_attempt,
+                "messages": current_messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "structured_schema": structured_schema,
+            })
+            attempt_operation_id = (
+                f"{operation_id}:structured-attempt:{attempt_identity}"
+            )
         meta = {
             **(call_meta or {}),
-            "operation_id": operation_id,
+            "operation_id": attempt_operation_id,
+            "base_operation_id": operation_id,
             "expected_json": True,
             "format_attempt": format_attempt,
             "semantic_attempt": semantic_attempt,

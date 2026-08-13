@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -942,6 +943,59 @@ def test_future_identity_untraceable_name_falls_back_without_retry(
         (item["source_label"], item["name"], item["identity_kind"])
         for item in candidates
     ] == [("三哥", "三哥", "functional")]
+
+
+def test_future_identity_operation_binds_exact_outbound_semantics(
+    monkeypatch,
+) -> None:
+    bible = Bible(world=World(visual_style_canonical="都市漫画"), characters=[])
+    operations: list[tuple[str, str]] = []
+
+    async def fake_structured(*_args, **kwargs):
+        operations.append((kwargs["operation_id"], kwargs["call_meta"]["model"]))
+        return SimpleNamespace(characters=[{
+            "source_label": "三哥",
+            "canonical_name": "",
+            "identity_kind": "functional",
+            "future_evidence": "",
+        }])
+
+    monkeypatch.setattr(
+        portraits.model_gateway, "chat_structured", fake_structured,
+    )
+    monkeypatch.setattr(
+        portraits.hiagent,
+        "text_request_semantic_settings",
+        lambda _provider: {"uses_temperature": True},
+    )
+    model = "model-a"
+    monkeypatch.setattr(
+        portraits.hiagent,
+        "text_request_token_limits",
+        lambda **_kwargs: ("hiagent", model, 4096),
+    )
+    arguments = dict(
+        candidates=[{
+            "name": "三哥",
+            "source_label": "三哥",
+            "identity_kind": "functional",
+            "identity_group": "current:third-brother",
+            "kind": "onscreen",
+        }],
+        source_text="三哥推门进来。",
+        future_text="后来仍称三哥。",
+        bible=bible,
+        episode_no=7,
+        future_label="后续章节",
+    )
+    asyncio.run(portraits.resolve_future_identity_candidates(**arguments))
+    asyncio.run(portraits.resolve_future_identity_candidates(**arguments))
+    model = "model-b"
+    asyncio.run(portraits.resolve_future_identity_candidates(**arguments))
+
+    assert operations[0][0] == operations[1][0]
+    assert operations[2][0] != operations[0][0]
+    assert [item[1] for item in operations] == ["model-a", "model-a", "model-b"]
 
 
 def test_identity_discovery_aligns_provider_expanded_source_label(monkeypatch) -> None:
