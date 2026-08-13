@@ -259,6 +259,68 @@ def test_stream_total_timeout_covers_keepalive_and_blank_lines(
     assert events[0][4] is None
 
 
+def test_stream_cancellation_finishes_interrupted_and_reraises(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "provider-stream-cancel.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    requests = 0
+
+    async def run() -> None:
+        nonlocal requests
+        stream_started = asyncio.Event()
+
+        class BlockingStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                stream_started.set()
+                await asyncio.Future()
+                yield b""
+
+            async def aclose(self):
+                return None
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            return httpx.Response(
+                200,
+                stream=BlockingStream(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            task = asyncio.create_task(hiagent._stream_chat_completion(
+                client,
+                "https://provider.test/chat/completions",
+                {"model": "m", "messages": []},
+                kind="chat",
+                model="m",
+                headers={},
+            ))
+            await asyncio.wait_for(stream_started.wait(), timeout=1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    monkeypatch.setattr(hiagent, "get_setting", lambda _key: "60")
+    asyncio.run(run())
+
+    assert requests == 1
+    row = db.get_conn().execute(
+        "SELECT status,http_status,error,response_json,recovery_disposition "
+        "FROM provider_calls ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "INTERRUPTED"
+    assert row["http_status"] is None
+    assert "请求被取消" in row["error"]
+    assert "结果未知" in row["error"]
+    assert row["response_json"] is None
+    assert row["recovery_disposition"] == "REQUIRES_EXPLICIT_RETRY"
+
+
 def test_stream_eof_without_done_fails_lifecycle_and_discards_partial_tool_call(
     tmp_path, monkeypatch,
 ) -> None:

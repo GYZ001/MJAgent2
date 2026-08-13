@@ -277,6 +277,12 @@ def _screenplay_status_snapshot(ep, *, shot_count: int, production: dict | None 
             code = "workflow_paused"
             message = f"剧本流程已暂停，可执行：{resume_point}"
         action = "resume_screenplay"
+    elif screenplay_status == "repairing":
+        code, message, action = (
+            "repair_restart_required",
+            "当前无兼容 checkpoint，将重新走生成预检；旧工作副本与证据将保留",
+            "generate_screenplay",
+        )
     elif screenplay_status == "ready" and not screenplay_ready:
         code, message, action = (
             "qa_certificate_invalid",

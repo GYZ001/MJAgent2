@@ -1775,6 +1775,20 @@ async def _stream_chat_completion(
         data = _reconstruct_stream_data(content_parts, reasoning_parts, tool_slots, state)
         finish_provider_call(call_id, "OK", 200, latency, response_json=data)
         return data
+    except asyncio.CancelledError:
+        latency = int((time.time() - start) * 1000)
+        detail = (
+            "流式请求被取消，供应商结果未知 "
+            f"(latency_ms={latency}, received_chars={received_chars})"
+        )
+        finish_provider_call(
+            call_id,
+            "INTERRUPTED",
+            None,
+            latency,
+            error=detail,
+        )
+        raise
     except ProviderError:
         raise
     except (httpx.TimeoutException, asyncio.TimeoutError) as exc:

@@ -843,6 +843,36 @@ def test_resumable_screenplay_status_exposes_actual_stop_reason() -> None:
     assert failed["recommended_action"] == blocked["recommended_action"] == "resume_screenplay"
 
 
+@pytest.mark.parametrize(
+    "reason_code",
+    ["BASELINE_NOT_STARTED", "FUTURE_UNRECOVERABLE_REASON"],
+)
+def test_inactive_unrecoverable_repairing_status_can_regenerate(
+    reason_code: str,
+) -> None:
+    _seed_episode(with_artifact=False)
+    conn = db.get_conn()
+    ep = dict(conn.execute("SELECT * FROM episodes WHERE id='e1'").fetchone())
+    ep["screenplay_status"] = "repairing"
+
+    state = api._screenplay_status_snapshot(ep, shot_count=0, production={
+        "task_active": False,
+        "can_resume_baseline": False,
+        "can_resume_repair": False,
+        "eligibility": {
+            "mode": "none",
+            "reason_code": reason_code,
+        },
+    })
+
+    assert state["code"] == "repair_restart_required"
+    assert state["can_resume"] is False
+    assert state["recommended_action"] == "generate_screenplay"
+    assert "无兼容 checkpoint" in state["message"]
+    assert "重新走生成预检" in state["message"]
+    assert "旧工作副本与证据将保留" in state["message"]
+
+
 def _bind_stale_screenplay_artifact(
     projection: dict,
     artifact_content: dict,
