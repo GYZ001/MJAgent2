@@ -1938,6 +1938,13 @@ def test_state_subject_requires_applicable_perception_evidence() -> None:
         })
     )
     assert blueprint_state_subject_issues(blueprint, source) == []
+    blueprint.nodes[0].participant_evidence[-1].source_segment_ids = [
+        "SRC0002"
+    ]
+    assert [
+        issue.code
+        for issue in blueprint_state_subject_issues(blueprint, source)
+    ] == ["state_subject_perception_missing"]
 
 
 def _ownership_repair_fixture() -> tuple[

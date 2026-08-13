@@ -2328,9 +2328,11 @@ def _node_identity_has_perception_evidence(
     identity_key: str,
     source_unit_key: str,
 ) -> bool:
+    source_segment_id = source_unit_key.split(":unit:", 1)[0]
     return any(
         evidence.identity_key == identity_key
         and evidence.usage in {"visible", "voice"}
+        and source_segment_id in evidence.source_segment_ids
         and (
             not evidence.source_unit_keys
             or source_unit_key in evidence.source_unit_keys
