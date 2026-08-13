@@ -1691,8 +1691,23 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
         or "provider_result_adoptable" not in _column_names(conn, "jobs")
     ):
         return 0
+    has_provider_claim_ledger = _table_exists(
+        conn, "provider_video_budget_claims"
+    )
+    closed_claim_filter = (
+        """AND NOT EXISTS (
+                      SELECT 1 FROM provider_video_budget_claims c
+                       WHERE c.job_id=j.id
+                         AND c.operation_id=j.provider_operation_id
+                         AND c.status IN (
+                           'released','settled','closed_liability'
+                         )
+                    )"""
+        if has_provider_claim_ledger
+        else ""
+    )
     rows = conn.execute(
-        """SELECT j.id,j.shot_id,j.version_id,j.status,j.updated_at,
+        f"""SELECT j.id,j.shot_id,j.version_id,j.status,j.updated_at,
                   j.lease_owner,j.provider_non_cancellable,j.provider_create_state,
                   j.provider_operation_id,j.provider_submitted_at,
                   j.episode_id,j.project_id,j.cancellation_requested,j.abandoned,
@@ -1733,14 +1748,7 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                       (v.provider_task_id IS NOT NULL AND v.provider_task_id!='')
                       OR j.provider_non_cancellable=1
                     )
-                    AND NOT EXISTS (
-                      SELECT 1 FROM provider_video_budget_claims c
-                       WHERE c.job_id=j.id
-                         AND c.operation_id=j.provider_operation_id
-                         AND c.status IN (
-                           'released','settled','closed_liability'
-                         )
-                    )
+                    {closed_claim_filter}
                   )
               )
             ORDER BY j.shot_id,
@@ -1841,6 +1849,8 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                         (operation_id, row["id"]),
                     )
                 if (
+                    has_provider_claim_ledger
+                    and
                     row["project_id"]
                     and row["episode_id"]
                     and row["version_id"]
@@ -1922,7 +1932,11 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                 (stamp, row["id"]),
             )
             reconciled += 1
-            if pre_transport_cancel and row["provider_operation_id"]:
+            if (
+                has_provider_claim_ledger
+                and pre_transport_cancel
+                and row["provider_operation_id"]
+            ):
                 conn.execute(
                     """UPDATE provider_video_budget_claims
                           SET status='released',updated_at=?,released_at=?

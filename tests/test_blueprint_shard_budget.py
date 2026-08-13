@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,11 @@ STATE_SUBJECT_RETRY_FIXTURE = (
     Path(__file__).parent
     / "fixtures"
     / "run_d67f041a6df4_calls29716_29717_state_subject.json"
+)
+THREE_EPISODE_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "three_episode_user_flow.txt"
 )
 
 
@@ -228,8 +234,9 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     )
 
     assert stages.SCREENPLAY_BLUEPRINT_PROMPT_VERSION == (
-        "screenplay-blueprint-1.7.1"
+        "screenplay-blueprint-1.8.0"
     )
+    assert stages.BLUEPRINT_SHARD_POLICY_VERSION == "blueprint-shard-policy.v8"
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt
     assert "连续动作压缩为一个核心因果进程" in prompt
@@ -243,17 +250,29 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     schema = json.loads(prompt.split("\nschema=", 1)[1])
     node_schema = schema["$defs"]["NarrativeNode"]
     assert "participant_evidence" in node_schema["required"]
-    assert any(
-        conditional.get("if", {}).get("properties", {}).get(
-            "source_unit_deliveries", {}
-        ).get("contains", {}).get("properties", {}).get(
-            "source_unit_key"
-        ) == {"const": "SRC0003:unit:002"}
-        and conditional.get("then", {}).get("properties", {}).get(
-            "participant_evidence", {}
-        ).get("not") is not None
-        for conditional in node_schema["allOf"]
-    )
+    assert schema["properties"]["source_segment_ids"]["items"] == {
+        "enum": ["SRC0003"],
+    }
+    assert node_schema["properties"]["source_segment_ids"]["items"] == {
+        "enum": ["SRC0003"],
+    }
+    action_keys = [
+        f"SRC0003:unit:{index:03d}"
+        for index in range(1, 17, 2)
+    ]
+    quoted_keys = [
+        f"SRC0003:unit:{index:03d}"
+        for index in range(2, 17, 2)
+    ]
+    assert node_schema["properties"][
+        "environment_source_unit_keys"
+    ]["items"] == {"enum": action_keys}
+    assert schema["$defs"]["NarrativeStateSubjectAssignment"][
+        "properties"
+    ]["source_unit_key"] == {"enum": action_keys}
+    assert schema["$defs"]["NarrativeSourceUnitDelivery"][
+        "properties"
+    ]["source_unit_key"] == {"enum": quoted_keys}
     assert node_schema["properties"]["location_label"]["pattern"] == (
         r"^(?!.*(?:、|/|\+|内外)).+$"
     )
@@ -272,29 +291,16 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     ]["properties"]
     assert evidence_properties["identity_key"]["minLength"] == 1
     assert evidence_properties["source_segment_ids"]["minItems"] == 1
-    action_contracts = [
-        contract
+    assert evidence_properties["source_segment_ids"]["items"] == {
+        "enum": ["SRC0003"],
+    }
+    assert evidence_properties["source_unit_keys"]["items"] == {
+        "enum": [key for pair in zip(action_keys, quoted_keys) for key in pair],
+    }
+    assert not any(
+        "oneOf" in contract.get("then", {})
         for contract in node_schema["allOf"]
-        if "oneOf" in contract.get("then", {})
-    ]
-    assert len(action_contracts) == 8
-    for contract in action_contracts:
-        assignments = contract["then"]["oneOf"]
-        assert len(assignments) == 3
-        state_subject = assignments[0]["properties"][
-            "participant_evidence"
-        ]
-        assert state_subject["minContains"] == 1
-        assert state_subject["maxContains"] == 1
-        joint = assignments[2]["properties"][
-            "state_subject_assignments"
-        ]
-        assert joint["minContains"] == 1
-        assert joint["maxContains"] == 1
-        assert joint["contains"]["properties"]["identity_keys"] == {
-            "minItems": 2,
-            "uniqueItems": True,
-        }
+    )
     delivery_contract = schema["$defs"]["NarrativeSourceUnitDelivery"][
         "allOf"
     ][0]["then"]
@@ -302,6 +308,87 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
         "minLength": 1
     }
     assert "performer_key" in delivery_contract["required"]
+
+
+def test_blueprint_provider_schema_stays_under_20kb_for_80_units() -> None:
+    source_payload = []
+    for source_index in range(1, 9):
+        source_id = f"SRC{source_index:04d}"
+        source_payload.append({
+            "source_segment_id": source_id,
+            "source_facts": [{
+                "source_unit_key": f"{source_id}:unit:{unit_index:03d}",
+                "projection": (
+                    "action" if unit_index % 2 else "quoted"
+                ),
+            } for unit_index in range(1, 11)],
+        })
+
+    schema = stages.blueprint_shard_provider_schema(source_payload)
+    encoded = json.dumps(
+        schema,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert len(encoded) < 20_000
+    assert encoded.count(b'"oneOf"') == 0
+
+
+def test_real_three_episode_sources_keep_schema_projection_compact() -> None:
+    source = THREE_EPISODE_FIXTURE.read_text(encoding="utf-8")
+    episodes = [
+        episode.strip()
+        for episode in re.split(r"(?=第[一二三]章 )", source)
+        if episode.strip()
+    ]
+
+    assert len(episodes) == 3
+    for episode in episodes:
+        segments = index_source_segments(episode)
+        source_payload = [{
+            "source_segment_id": segment.segment_id,
+            "text": segment.text,
+            "source_facts": [
+                fact.model_dump(mode="json")
+                for fact in stages.source_segment_facts(
+                    segment.segment_id,
+                    segment.text,
+                )
+            ],
+        } for segment in segments]
+        schema = stages.blueprint_shard_provider_schema(source_payload)
+        source_ids = [segment.segment_id for segment in segments]
+        facts = [
+            fact
+            for source_item in source_payload
+            for fact in source_item["source_facts"]
+        ]
+        action_keys = [
+            fact["source_unit_key"]
+            for fact in facts
+            if fact["projection"] == "action"
+        ]
+        quoted_keys = [
+            fact["source_unit_key"]
+            for fact in facts
+            if fact["projection"] == "quoted"
+        ]
+
+        assert schema["properties"]["source_segment_ids"]["items"] == {
+            "enum": source_ids,
+        }
+        assert schema["$defs"]["NarrativeStateSubjectAssignment"][
+            "properties"
+        ]["source_unit_key"] == {"enum": action_keys}
+        assert schema["$defs"]["NarrativeSourceUnitDelivery"][
+            "properties"
+        ]["source_unit_key"] == {"enum": quoted_keys}
+        assert len(json.dumps(
+            schema,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")) < 20_000
 
 
 def test_calls29716_29717_retry_prompt_freezes_unreported_ownership() -> None:

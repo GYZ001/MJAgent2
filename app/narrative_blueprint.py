@@ -29,7 +29,7 @@ from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v7"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.7.1"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.8.0"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -38,7 +38,7 @@ BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # truncated prefix.
 BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
-BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v7"
+BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v8"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
     "blueprint-shard-local-authority.v4"
 )
@@ -176,7 +176,40 @@ def blueprint_shard_provider_schema(
     node_schema = definitions.get("NarrativeNode")
     if not isinstance(node_schema, dict):
         return schema
+    source_ids: list[str] = []
+    source_unit_keys: list[str] = []
+    action_unit_keys: list[str] = []
+    quoted_unit_keys: list[str] = []
+    for source in source_payload or []:
+        source_id = str(source.get("source_segment_id") or "")
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+        for fact in source.get("source_facts") or []:
+            source_unit_key = str(fact.get("source_unit_key") or "")
+            if not source_unit_key or source_unit_key in source_unit_keys:
+                continue
+            source_unit_keys.append(source_unit_key)
+            if fact.get("projection") == "action":
+                action_unit_keys.append(source_unit_key)
+            elif fact.get("projection") == "quoted":
+                quoted_unit_keys.append(source_unit_key)
+
+    if source_ids:
+        schema["properties"]["source_segment_ids"]["items"] = {
+            "enum": source_ids,
+        }
     node_properties = node_schema.get("properties", {})
+    if source_ids:
+        node_properties["source_segment_ids"]["items"] = {
+            "enum": source_ids,
+        }
+    if action_unit_keys:
+        node_properties["environment_source_unit_keys"]["items"] = {
+            "enum": action_unit_keys,
+        }
+    else:
+        node_properties["environment_source_unit_keys"]["maxItems"] = 0
+        node_properties["state_subject_assignments"]["maxItems"] = 0
     node_properties.get("participants", {})["description"] = (
         "Ordered identity roster. Its unique identity set must exactly equal "
         "participant_evidence.identity_key; never add an identity without "
@@ -197,6 +230,16 @@ def blueprint_shard_provider_schema(
         evidence_properties = evidence_schema.get("properties", {})
         evidence_properties.get("identity_key", {})["minLength"] = 1
         evidence_properties.get("source_segment_ids", {})["minItems"] = 1
+        if source_ids:
+            evidence_properties["source_segment_ids"]["items"] = {
+                "enum": source_ids,
+            }
+        if source_unit_keys:
+            evidence_properties["source_unit_keys"]["items"] = {
+                "enum": source_unit_keys,
+            }
+        else:
+            evidence_properties["source_unit_keys"]["maxItems"] = 0
         evidence_schema["description"] = (
             "Every participants identity must have at least one matching "
             "evidence object with owned source_segment_ids."
@@ -223,8 +266,19 @@ def blueprint_shard_provider_schema(
                 ],
             },
         })
+    assignment_schema = definitions.get("NarrativeStateSubjectAssignment")
+    if isinstance(assignment_schema, dict) and action_unit_keys:
+        assignment_schema["properties"]["source_unit_key"] = {
+            "enum": action_unit_keys,
+        }
     delivery_schema = definitions.get("NarrativeSourceUnitDelivery")
     if isinstance(delivery_schema, dict):
+        if quoted_unit_keys:
+            delivery_schema["properties"]["source_unit_key"] = {
+                "enum": quoted_unit_keys,
+            }
+        else:
+            node_properties["source_unit_deliveries"]["maxItems"] = 0
         delivery_schema.setdefault("allOf", []).append({
             "if": {
                 "properties": {
@@ -305,177 +359,6 @@ def blueprint_shard_provider_schema(
             "required": ["participant_evidence"],
         },
     })
-    for source in source_payload or []:
-        source_id = str(source.get("source_segment_id") or "")
-        if not source_id:
-            continue
-        for fact in source.get("source_facts") or []:
-            projection = fact.get("projection")
-            if projection not in {"action", "quoted"}:
-                continue
-            source_unit_key = str(fact.get("source_unit_key") or "")
-            if not source_unit_key:
-                continue
-            if projection == "quoted":
-                non_audible_match = {
-                    "properties": {
-                        "source_unit_key": {"const": source_unit_key},
-                        "mode": {
-                            "enum": [
-                                "written_text",
-                                "sound_effect",
-                                "unspoken_reference",
-                            ],
-                        },
-                    },
-                    "required": ["source_unit_key", "mode"],
-                }
-                voice_match = {
-                    "properties": {
-                        "usage": {"const": "voice"},
-                        "source_unit_keys": {
-                            "contains": {"const": source_unit_key},
-                        },
-                    },
-                    "required": ["source_unit_keys", "usage"],
-                }
-                node_schema.setdefault("allOf", []).append({
-                    "if": {
-                        "properties": {
-                            "source_unit_deliveries": {
-                                "contains": non_audible_match,
-                            },
-                        },
-                        "required": ["source_unit_deliveries"],
-                    },
-                    "then": {
-                        "properties": {
-                            "participant_evidence": {
-                                "not": {"contains": voice_match},
-                            },
-                        },
-                        "required": ["participant_evidence"],
-                    },
-                })
-                continue
-            state_subject_match = {
-                "properties": {
-                    "usage": {"const": "state_subject"},
-                    "source_segment_ids": {
-                        "contains": {"const": source_id},
-                    },
-                    "source_unit_keys": {
-                        "contains": {"const": source_unit_key},
-                    },
-                },
-                "required": [
-                    "identity_key",
-                    "source_segment_ids",
-                    "source_unit_keys",
-                    "usage",
-                ],
-            }
-            joint_subject_match = {
-                "properties": {
-                    "source_unit_key": {"const": source_unit_key},
-                    "mode": {"const": "joint"},
-                    "identity_keys": {
-                        "minItems": 2,
-                        "uniqueItems": True,
-                    },
-                },
-                "required": [
-                    "source_unit_key",
-                    "mode",
-                    "identity_keys",
-                ],
-            }
-            node_schema.setdefault("allOf", []).append({
-                "if": {
-                    "properties": {
-                        "source_segment_ids": {
-                            "contains": {"const": source_id},
-                        },
-                        "narrative_layer": {"const": "story"},
-                    },
-                    "required": [
-                        "source_segment_ids",
-                        "narrative_layer",
-                    ],
-                },
-                "then": {
-                    "oneOf": [{
-                        "properties": {
-                            "participant_evidence": {
-                                "contains": state_subject_match,
-                                "minContains": 1,
-                                "maxContains": 1,
-                            },
-                            "environment_source_unit_keys": {
-                                "not": {
-                                    "contains": {
-                                        "const": source_unit_key,
-                                    },
-                                },
-                            },
-                            "state_subject_assignments": {
-                                "not": {"contains": joint_subject_match},
-                            },
-                        },
-                        "required": [
-                            "participant_evidence",
-                            "state_subject_assignments",
-                            "environment_source_unit_keys",
-                        ],
-                    }, {
-                        "properties": {
-                            "participant_evidence": {
-                                "not": {
-                                    "contains": state_subject_match,
-                                },
-                            },
-                            "environment_source_unit_keys": {
-                                "contains": {
-                                    "const": source_unit_key,
-                                },
-                            },
-                            "state_subject_assignments": {
-                                "not": {"contains": joint_subject_match},
-                            },
-                        },
-                        "required": [
-                            "participant_evidence",
-                            "state_subject_assignments",
-                            "environment_source_unit_keys",
-                        ],
-                    }, {
-                        "properties": {
-                            "participant_evidence": {
-                                "not": {
-                                    "contains": state_subject_match,
-                                },
-                            },
-                            "state_subject_assignments": {
-                                "contains": joint_subject_match,
-                                "minContains": 1,
-                                "maxContains": 1,
-                            },
-                            "environment_source_unit_keys": {
-                                "not": {
-                                    "contains": {
-                                        "const": source_unit_key,
-                                    },
-                                },
-                            },
-                        },
-                        "required": [
-                            "participant_evidence",
-                            "state_subject_assignments",
-                            "environment_source_unit_keys",
-                        ],
-                    }],
-                },
-            })
     paratext_properties: dict[str, Any] = {
         field_name: {"const": []}
         for field_name in _PARATEXT_EMPTY_LIST_FIELDS
