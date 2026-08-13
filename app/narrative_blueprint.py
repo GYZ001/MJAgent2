@@ -29,6 +29,13 @@ from app.source_facts import SourceFact, source_facts
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v6"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
+# Provider-facing Blueprint shards are deliberately smaller than the final
+# scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
+# tokens before closing its JSON object; 14 sequential SRCs leaves enough
+# bounded headroom for the full typed node contract without accepting a
+# truncated prefix.
+BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
+BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
 
 
 def _normalize_source_segment_id(value: Any) -> str:

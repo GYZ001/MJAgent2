@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -33,6 +34,8 @@ from app.harness.types import Issue, IssueSeverity
 from app.loops import AgentLoop, AgentLoopFailure, AgentLoopPolicy
 from app.narrative_blueprint import (
     BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE,
+    BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD,
+    BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD,
     BLUEPRINT_VERSION,
     BlueprintSemanticReview,
     NarrativeBlueprint,
@@ -139,13 +142,21 @@ SYSTEM_PREFIX = (
 )
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
-SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.0"
+SCREENPLAY_BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.6.1"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
 SCREENPLAY_STRUCTURAL_BOOTSTRAP_ITERATIONS = 1
 SCREENPLAY_IR_MIN_TOKENS = 20480
 SCREENPLAY_IR_MAX_TOKENS = 36864
+
+BLUEPRINT_SHARD_MIN_TOKENS = 6144
+BLUEPRINT_SHARD_MAX_TOKENS = 16384
+BLUEPRINT_SHARD_MAX_ATTEMPTS = 2
+BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS = 12
+BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS = 131072
+BLUEPRINT_GENERATION_MAX_WALL_SECONDS = 1800.0
+BLUEPRINT_GENERATION_MAX_SPLIT_DEPTH = 4
 
 
 def screenplay_ir_token_budget(source_text: str) -> int:
@@ -4806,6 +4817,139 @@ def _normalize_blueprint_shard_structure(
                     requirement.assumed_prior = True
 
 
+def _blueprint_segment_output_weight(segment: Any) -> int:
+    """Estimate typed output pressure without asking the model to plan itself."""
+
+    facts = source_segment_facts(segment.segment_id, segment.text)
+    return max(1, len(facts))
+
+
+def _partition_blueprint_segments(segments: list[Any]) -> list[list[Any]]:
+    """Create stable sequential shards bounded by SRC and source-fact pressure."""
+
+    shards: list[list[Any]] = []
+    current: list[Any] = []
+    current_weight = 0
+    for segment in segments:
+        weight = _blueprint_segment_output_weight(segment)
+        if current and (
+            len(current) >= BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD
+            or current_weight + weight
+            > BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD
+        ):
+            shards.append(current)
+            current = []
+            current_weight = 0
+        current.append(segment)
+        current_weight += weight
+    if current:
+        shards.append(current)
+    return shards
+
+
+def _split_blueprint_segments(segments: list[Any]) -> list[list[Any]]:
+    """Split one failed shard at the deterministic nearest weight midpoint."""
+
+    if len(segments) < 2:
+        return [segments]
+    weights = [_blueprint_segment_output_weight(segment) for segment in segments]
+    total = sum(weights)
+    prefix = 0
+    best_index = 1
+    best_distance: int | None = None
+    for index, weight in enumerate(weights[:-1], start=1):
+        prefix += weight
+        distance = abs(total - 2 * prefix)
+        if best_distance is None or distance < best_distance:
+            best_index = index
+            best_distance = distance
+    return [segments[:best_index], segments[best_index:]]
+
+
+def _blueprint_shard_token_budget(segments: list[Any]) -> int:
+    weight = sum(_blueprint_segment_output_weight(segment) for segment in segments)
+    estimated = BLUEPRINT_SHARD_MIN_TOKENS + weight * 512
+    return min(
+        BLUEPRINT_SHARD_MAX_TOKENS,
+        max(BLUEPRINT_SHARD_MIN_TOKENS, estimated),
+    )
+
+
+def _blueprint_shard_prompt(
+    *,
+    episode_no: int,
+    shard_index: int,
+    shard_count: int,
+    errors: list[str],
+    bible_context: dict[str, Any],
+    boundary: dict[str, Any],
+    source_payload: list[dict[str, Any]],
+) -> str:
+    """Render the complete Blueprint contract without prose duplication."""
+
+    rules = (
+        "仅处理target_sources；每个SRC只归一个节点，节点按源顺序且最多"
+        f"{BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE}个连续SRC。每节点只写一个核心动作、"
+        "一个因果/情绪转折和一个exit_state；跨时空或过载则拆节点。"
+        "首分片首节点time_relation=episode_start；其余严格延续boundary_context。"
+        "复用有效fact_key、人物位置、时间域和稳定character_key；本分片新key保持唯一。"
+        "每节点显式narrative_layer/event_priority/render_policy。故事画面用"
+        "story+causal+standalone；旁文本用paratext+connective+exclude_from_spine，"
+        "不得按SRC编号、位置、空人物或词表猜分类。quoted单元逐一给"
+        "source_unit_deliveries；quoted_span不等于开口。spoken/offscreen声音须唯一"
+        "usage=voice并精确绑定source_unit_key；content_owner不是performer。action单元"
+        "不写delivery，但必须精确二选一：人物动作/思考/反应/发问写唯一"
+        "usage=state_subject；纯环境写environment_source_unit_keys。visible、roster和"
+        "content_owner绝非主体默认值。所有描述字段简洁，不复述原文或Schema。"
+    )
+    compact = lambda value: json.dumps(  # noqa: E731 - local canonical renderer
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        f"生成第{episode_no}集Blueprint分片{shard_index}/{shard_count}。{rules}\n"
+        f"validation_errors={compact(errors)}\n"
+        f"characters={compact(bible_context)}\n"
+        f"boundary_context={compact(boundary)}\n"
+        f"target_sources={compact(source_payload)}\n"
+        "schema="
+        + compact(NarrativeBlueprintShard.model_json_schema())
+    )
+
+
+class _BlueprintGenerationBudget:
+    """Bound provider attempts, output-token exposure, and elapsed wall time."""
+
+    def __init__(self) -> None:
+        self.started_at = time.monotonic()
+        self.provider_calls = 0
+        self.requested_output_tokens = 0
+
+    def claim(self, *, max_tokens: int) -> None:
+        elapsed = time.monotonic() - self.started_at
+        if elapsed >= BLUEPRINT_GENERATION_MAX_WALL_SECONDS:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_GENERATION_TIME_BUDGET] 超过全局时间上限"],
+            )
+        if self.provider_calls >= BLUEPRINT_GENERATION_MAX_PROVIDER_CALLS:
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_GENERATION_CALL_BUDGET] 超过全局调用上限"],
+            )
+        if (
+            self.requested_output_tokens + max_tokens
+            > BLUEPRINT_GENERATION_MAX_OUTPUT_TOKENS
+        ):
+            raise StageError(
+                "剧本时空因果蓝图分片",
+                ["[BLUEPRINT_GENERATION_TOKEN_BUDGET] 超过全局输出 token 上限"],
+            )
+        self.provider_calls += 1
+        self.requested_output_tokens += max_tokens
+
+
 async def _generate_sharded_narrative_blueprint(
     episode: dict[str, Any],
     source_text: str,
@@ -4816,64 +4960,15 @@ async def _generate_sharded_narrative_blueprint(
     from app.observability.tracing import current_trace
 
     segments = index_source_segments(source_text)
-    shard_size = 28
-    source_position = {
-        segment.segment_id: index
-        for index, segment in enumerate(segments)
-    }
-    layout_candidates: dict[int, set[int]] = {}
-    layout_rows = get_conn().execute(
-        """SELECT content_json
-             FROM artifacts
-            WHERE scope_type='episode' AND scope_id=?
-              AND type='screenplay_narrative_blueprint_shard'
-                  AND contract_version=?
-              AND prompt_version=? AND status='validated'
-            ORDER BY created_at DESC LIMIT 200""",
-        (
-            str(episode.get("id") or ""),
-                BLUEPRINT_VERSION,
-            SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
-        ),
-    ).fetchall()
-    for layout_row in layout_rows:
-        try:
-            prior_shard = NarrativeBlueprintShard.model_validate(
-                json.loads(layout_row["content_json"] or "{}"),
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if not prior_shard.source_segment_ids:
-            continue
-        start = source_position.get(prior_shard.source_segment_ids[0])
-        if start is None:
-            continue
-        expected_ids = [
-            segment.segment_id
-            for segment in segments[
-                start:start + len(prior_shard.source_segment_ids)
-            ]
-        ]
-        if expected_ids == prior_shard.source_segment_ids:
-            layout_candidates.setdefault(start, set()).add(
-                len(expected_ids)
-            )
-    segment_shards: list[list[Any]] = []
-    cursor = 0
-    while cursor < len(segments):
-        reusable_lengths = layout_candidates.get(cursor, set())
-        length = (
-            max(reusable_lengths)
-            if reusable_lengths
-            else min(shard_size, len(segments) - cursor)
-        )
-        segment_shards.append(segments[cursor:cursor + length])
-        cursor += length
+    segment_shards = _partition_blueprint_segments(segments)
+    shard_split_depths = [0 for _ in segment_shards]
+    generation_budget = _BlueprintGenerationBudget()
     optional_ids = structural_front_matter_ids(segments)
     merged_nodes: list[Any] = []
     shard_index = 1
     while shard_index <= len(segment_shards):
         shard_segments = segment_shards[shard_index - 1]
+        split_depth = shard_split_depths[shard_index - 1]
         source_ids = [segment.segment_id for segment in shard_segments]
         source_payload = [
             {
