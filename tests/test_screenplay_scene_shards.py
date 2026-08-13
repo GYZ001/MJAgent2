@@ -72,6 +72,7 @@ from app.screenplay_scene_shards import (
     validate_screenplay_scene_shard,
 )
 from app.source_excerpt import index_source_segments
+from app.source_facts import source_segment_facts
 from app.narrative_priority import picture_screenplay_projection
 
 
@@ -499,7 +500,10 @@ def test_scene_shard_semantic_prompt_reads_action_source_facts_for_production_dr
         scene_input_contracts=[contract],
         identity_registry=[],
     )
-    assert all(text in prompt for _source_id, text in source_rows)
+    assert all(
+        source_segment_facts(source_id, text)[0].text in prompt
+        for source_id, text in source_rows
+    )
     assert all(f'"source_unit_key":"{source_id}:unit:001"' in prompt for source_id, _ in source_rows)
     assert all(slot.source_text == "" for slot in slots)
 
@@ -933,11 +937,18 @@ def test_written_quote_keeps_owner_out_of_executable_scene_identity() -> None:
                     {
                         "identity_key": "孟浩",
                         "source_segment_ids": ["SRC0001"],
-                        "source_unit_keys": [f"SRC0001:unit:{index:03d}"],
+                        "source_unit_keys": [fact.source_unit_key],
                         "usage": "state_subject",
                     }
-                    for index in range(1, 4)
+                    for fact in source_segment_facts("SRC0001", source_text)
+                    if fact.projection == "action"
                 ],
+                    {
+                        "identity_key": "孟浩",
+                        "source_segment_ids": ["SRC0001"],
+                        "source_unit_keys": ["SRC0001:unit:002"],
+                        "usage": "state_subject",
+                    },
                 {
                     "identity_key": "靠山老祖",
                     "source_segment_ids": ["SRC0001"],
@@ -1600,10 +1611,16 @@ def test_midstream_audit_only_source_never_enters_creative_or_picture_projection
         ],
     })
     blueprint.nodes[0].environment_source_unit_keys = [
-        "SRC0001:unit:001"
+        fact.source_unit_key
+        for fact in source_segment_facts(
+            "SRC0001", "暴雨冲开沟渠，水位越过石阶。",
+        )
     ]
     blueprint.nodes[2].environment_source_unit_keys = [
-        "SRC0003:unit:001"
+        fact.source_unit_key
+        for fact in source_segment_facts(
+            "SRC0003", "雨势减弱，沟渠水位退回警戒线下。",
+        )
     ]
     derive_blueprint_scene_plans(blueprint)
     plans = build_screenplay_scene_shard_plans(
@@ -1740,6 +1757,22 @@ def test_run_e65d871ad2a0_sc16_projects_fifteen_story_scenes() -> None:
         "episode_no": 1,
         "nodes": nodes,
     })
+    source_by_id = {
+        segment.segment_id: segment.text
+        for segment in index_source_segments(source)
+    }
+    for node in blueprint.nodes:
+        if node.narrative_layer != "story":
+            continue
+        node.environment_source_unit_keys = [
+            fact.source_unit_key
+            for source_id in node.source_segment_ids
+            for fact in source_segment_facts(
+                source_id,
+                source_by_id[source_id],
+            )
+            if fact.projection == "action"
+        ]
     derive_blueprint_scene_plans(blueprint)
     identities, registry, registry_hash = build_frozen_identity_registry(
         Bible(
@@ -1759,10 +1792,6 @@ def test_run_e65d871ad2a0_sc16_projects_fifteen_story_scenes() -> None:
         source_text=source,
         identity_registry=registry,
     )
-    source_by_id = {
-        segment.segment_id: segment.text
-        for segment in index_source_segments(source)
-    }
     shards = []
     for plan in plans:
         creative = ScreenplaySceneShardCreativeIR.model_validate({
@@ -3363,12 +3392,21 @@ def _ss004_533ac9_compile_context(*, current_contract: bool = True):
         # This branch is the explicit current-contract clone used by compiler
         # positives.  The untouched legacy replay remains invalid.  These
         # owners are source-unit authority, not inferred from visible roster.
+        state_subject_by_source = {
+            "SRC0054": "孟浩",
+            "SRC0055": "孟浩",
+            "SRC0056": "绿袍执事乙",
+            "SRC0057": "绿袍执事甲",
+            "SRC0058": "王有材",
+        }
         state_subjects = {
-            "SRC0054:unit:001": "孟浩",
-            "SRC0055:unit:002": "孟浩",
-            "SRC0056:unit:002": "绿袍执事乙",
-            "SRC0057:unit:002": "绿袍执事甲",
-            "SRC0058:unit:002": "王有材",
+            fact.source_unit_key: identity_key
+            for source_id, identity_key in state_subject_by_source.items()
+            for fact in source_segment_facts(
+                source_id,
+                source_by_id[source_id],
+            )
+            if fact.projection == "action"
         }
         for action_evidence in replay["action_evidence"]:
             for source_unit_key, identity_key in state_subjects.items():
@@ -4476,6 +4514,30 @@ def test_exact_state_subject_wins_with_multiple_visible_people() -> None:
     assert compiled.onscreen_entity_keys == ["person_a", "person_b"]
 
 
+def test_joint_state_subject_preserves_all_exact_unit_actors() -> None:
+    slot, contract = _state_subject_contract(participants=[
+        {"identity_key": "person_a", "usage": "visible"},
+        {"identity_key": "person_b", "usage": "visible"},
+    ])
+    contract.action_evidence[0].state_subject_assignments = [
+        scene_shards_module.ScreenplaySceneStateSubjectAssignment(
+            source_unit_key=slot.source_unit_key,
+            mode="joint",
+            identity_keys=["person_a", "person_b"],
+        )
+    ]
+
+    compiled, errors = scene_shards_module._compile_unit_identity_scaffold(
+        slot,
+        contract=contract,
+    )
+
+    assert errors == []
+    assert compiled.state_subject_key == ""
+    assert compiled.state_subject_keys == ["person_a", "person_b"]
+    assert compiled.actor_keys == ["person_a", "person_b"]
+
+
 def test_unique_visible_person_is_not_an_implicit_state_subject() -> None:
     slot, contract = _state_subject_contract(participants=[
         {"identity_key": "person_a", "usage": "visible"},
@@ -4489,7 +4551,7 @@ def test_unique_visible_person_is_not_an_implicit_state_subject() -> None:
     assert compiled.actor_keys == []
     assert compiled.state_subject_key == ""
     assert compiled.onscreen_entity_keys == ["person_a"]
-    assert any("缺少唯一 state_subject" in error for error in errors)
+    assert any("缺少 single/joint state_subject" in error for error in errors)
 
 
 def test_explicit_environment_keeps_visible_people_out_of_actor_relation() -> None:

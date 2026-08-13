@@ -875,6 +875,48 @@ def test_v15_unit_relations_do_not_turn_a_mentioned_absent_identity_into_actor()
     assert first_event.onscreen_entity_ids == ["bible:谷言"]
 
 
+def test_joint_state_subject_creates_one_state_fact_per_exact_actor() -> None:
+    payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)
+    units = [
+        unit
+        for scene in payload["scenes"]
+        for unit in scene["units"]
+    ]
+    for index, unit in enumerate(units):
+        unit["source_segment_ids"] = [f"SRC{index // 2 + 1:04d}"]
+    first = units[0]
+    first.update({
+        "actor_keys": ["g", "friend"],
+        "onscreen_entity_keys": ["g", "friend"],
+        "state_subject_key": "",
+        "state_subject_keys": ["g", "friend"],
+        "environment_only": False,
+    })
+
+    screenplay = compile_screenplay_ir(
+        ScreenplayGenerationIR.model_validate(payload),
+        episode={
+            "id": "ep-ir-joint-subject",
+            "episode_no": 1,
+            "authorized_source_chapters": {"chapter-1": SOURCE},
+        },
+        source_text=SOURCE,
+        bible=_bible(),
+    )
+
+    first_event = screenplay.narrative_plan.events[0]
+    joint_facts = [
+        fact
+        for fact in screenplay.narrative_plan.state_facts
+        if fact.fact_id in first_event.effects_add
+    ]
+    assert len(first_event.effects_add) == 2
+    assert {fact.subject_id for fact in joint_facts} == {
+        "bible:谷言",
+        "reference:旧友",
+    }
+
+
 def test_v2_ss001_title_action_preserves_empty_identity_relations() -> None:
     replay = json.loads(SS001_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
     payload = _participant_delivery_complete_ir_payload(stages.IR_VERSION)

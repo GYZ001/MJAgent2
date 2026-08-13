@@ -3269,12 +3269,11 @@ def compile_screenplay_ir(
                 )
             if typed_visual_unit_contract and (
                 "state_subject_key" not in unit.model_fields_set
-                or "state_subject_keys" not in unit.model_fields_set
                 or "environment_only" not in unit.model_fields_set
             ):
                 raise ScreenplayIRFidelityError(
                     f"IR {format_version} {scene.key}.{event_key} 缺少显式 "
-                    "state_subject_key/state_subject_keys/environment_only "
+                    "state_subject_key/environment_only "
                     "状态归属合同，"
                     "旧 IR 必须重建"
                 )

@@ -25,6 +25,7 @@ from app.narrative_blueprint import (
     blueprint_authority_validator_fingerprint,
     blueprint_patch_schema,
     blueprint_shard_provider_schema,
+    blueprint_state_subject_issues,
     blueprint_semantic_issue_is_resolved,
     blueprint_semantic_review_schema,
     derive_blueprint_scene_plans,
@@ -1321,16 +1322,17 @@ def test_blueprint_state_subject_repair_preserves_timeline_and_source_authority(
         for node in blueprint.nodes
     }
     node = blueprint.nodes[0]
-    subject = next(
-        evidence for evidence in node.participant_evidence
+    subjects = [
+        evidence.model_copy(deep=True)
+        for evidence in node.participant_evidence
         if evidence.usage == "state_subject"
-    ).model_copy(deep=True)
+    ]
     node.participant_evidence = [
         evidence for evidence in node.participant_evidence
         if evidence.usage != "state_subject"
     ]
     replacement = node.model_copy(deep=True)
-    replacement.participant_evidence.append(subject)
+    replacement.participant_evidence.extend(subjects)
     patch = NarrativeBlueprintPatch.model_validate({
         "replacements": [{
             "node_key": node.key,
@@ -1756,6 +1758,41 @@ def test_shard_gate_rejects_local_state_subject_and_participant_authority() -> N
         and "白洁" in error
         for error in errors
     )
+
+
+def test_joint_action_uses_typed_assignment_without_selecting_one_subject() -> None:
+    source = "孟浩与小胖子走出了屋舍。"
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 3,
+        "nodes": [{
+            "key": "joint-node",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "两人共同离开屋舍",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "morning",
+            "time_label": "清晨",
+            "time_relation": "episode_start",
+            "location_key": "dorm",
+            "location_label": "杂役屋",
+            "participants": ["孟浩", "小胖子"],
+            "participant_evidence": [{
+                "identity_key": identity_key,
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": ["SRC0001:unit:001"],
+                "usage": "visible",
+            } for identity_key in ("孟浩", "小胖子")],
+            "state_subject_assignments": [{
+                "source_unit_key": "SRC0001:unit:001",
+                "mode": "joint",
+                "identity_keys": ["孟浩", "小胖子"],
+            }],
+            "action_logic": "两人共同走出屋舍",
+        }],
+    })
+
+    assert blueprint_state_subject_issues(blueprint, source) == []
 
 
 @pytest.mark.parametrize(

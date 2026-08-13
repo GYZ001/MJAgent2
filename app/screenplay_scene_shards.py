@@ -1997,22 +1997,36 @@ def build_screenplay_scene_input_contracts(
                         f"{scene_plan.key} decision actor 未冻结："
                         f"{node.decision.actor_key}"
                     )
-            action_evidence.append(ScreenplaySceneActionEvidence(
-                node_key=node.key,
-                source_segment_ids=list(node.source_segment_ids),
-                participants=participants,
-                state_subject_assignments=[
+            state_subject_assignments: list[
+                ScreenplaySceneStateSubjectAssignment
+            ] = []
+            for assignment in node.state_subject_assignments:
+                unresolved_assignment_identities = [
+                    identity_key
+                    for identity_key in assignment.identity_keys
+                    if identity_key not in aliases
+                ]
+                if unresolved_assignment_identities:
+                    errors.append(
+                        f"{scene_plan.key} joint state subject identity 未冻结："
+                        + ",".join(unresolved_assignment_identities)
+                    )
+                    continue
+                state_subject_assignments.append(
                     ScreenplaySceneStateSubjectAssignment(
                         source_unit_key=assignment.source_unit_key,
                         mode=assignment.mode,
                         identity_keys=[
                             aliases[identity_key]
                             for identity_key in assignment.identity_keys
-                            if identity_key in aliases
                         ],
                     )
-                    for assignment in node.state_subject_assignments
-                ],
+                )
+            action_evidence.append(ScreenplaySceneActionEvidence(
+                node_key=node.key,
+                source_segment_ids=list(node.source_segment_ids),
+                participants=participants,
+                state_subject_assignments=state_subject_assignments,
                 decision_actor_key=decision_actor_key or None,
                 environment_source_unit_keys=list(
                     node.environment_source_unit_keys
@@ -3261,6 +3275,7 @@ def _scene_shard_semantic_authority_payload(
             "source_text": slot.source_text,
             "source_fact": source_facts_by_key.get(slot.source_unit_key),
             "state_subject_key": slot.state_subject_key,
+            "state_subject_keys": slot.state_subject_keys,
             "environment_only": slot.environment_only,
             "actor_keys": slot.actor_keys,
             "target_keys": slot.target_keys,
@@ -3285,6 +3300,10 @@ def _scene_shard_semantic_authority_payload(
         str(slot.get("state_subject_key") or "")
         for slot in authority_slots.values()
         if str(slot.get("state_subject_key") or "")
+    } | {
+        str(identity_key)
+        for slot in authority_slots.values()
+        for identity_key in slot.get("state_subject_keys") or []
     }
     identity_labels = {
         str(item.get("identity_key") or ""): {

@@ -4068,7 +4068,8 @@ async def _repair_narrative_blueprint(
             "每个 replacement 必须保持修复前 projection_policy；audit_only "
             "节点与来源只能保留在来源审计，不得改成 story 或放入 scene。"
             "paratext/audit_only replacement 必须把 participants、"
-            "participant_evidence、environment_source_unit_keys、"
+            "participant_evidence、state_subject_assignments、"
+            "environment_source_unit_keys、"
             "source_unit_deliveries、state_requirements、state_changes、"
             "released_constraints_for 全部保持为空列表，decision=null，"
             "exit_state=空字符串；标题卡可见文字只写入 summary/"
@@ -4096,9 +4097,11 @@ async def _repair_narrative_blueprint(
             " projection=action 正文以及节点的"
             "summary/action_logic 即使写有‘旁白’或‘介绍’，也不得被提升为 dialogue "
             "或伪造 voice evidence；不得删除、拆分、合并或重排节点来规避。\n\n"
-            "每个story/picture节点中 projection=action 的 prose source unit 必须二选一："
+            "每个story/picture节点中 projection=action 的 prose source unit 必须三选一："
             "人物思考、反应、发问或动作使用一条 usage=state_subject "
             "participant_evidence，并用 source_unit_keys 精确绑定该 unit；"
+            "结构标点切分后仍不可拆的共同动作使用一条 mode=joint 的"
+            "state_subject_assignments，identity_keys列出全部共同主体；"
             "真正无人物状态所有者的环境变化才把该 unit 写入 "
             "environment_source_unit_keys。visible 、场次 roster、文本姓名和"
             "content_owner 均不能推断状态主体。repair 只允许补此证据，"
@@ -5450,7 +5453,8 @@ def _blueprint_shard_prompt(
         "每节点显式narrative_layer/event_priority/render_policy。故事画面用"
         "story+causal+standalone；旁文本用paratext+connective+exclude_from_spine。"
         "paratext只保留summary/action_logic/opening_image等文字展示；participants、"
-        "participant_evidence、environment_source_unit_keys、source_unit_deliveries、"
+        "participant_evidence、state_subject_assignments、"
+        "environment_source_unit_keys、source_unit_deliveries、"
         "state_requirements、state_changes、released_constraints_for必须全为[]，"
         "decision必须null，exit_state必须空字符串。"
         "不得按SRC编号、位置、空人物或词表猜分类。仅story/picture节点的quoted单元逐一给"
@@ -5463,8 +5467,10 @@ def _blueprint_shard_prompt(
         "delivery在同一source_unit_key上不得有usage=voice。content_owner可以是"
         "文字、物件或概念的归属，不要求列入participants，也绝不等于performer。"
         "仅story/picture的action单元"
-        "不写delivery，但必须精确二选一：人物动作/思考/反应/发问写唯一"
-        "usage=state_subject；纯环境写environment_source_unit_keys。visible、roster和"
+        "不写delivery，但必须精确三选一：单主体动作/思考/反应/发问写唯一"
+        "usage=state_subject；结构切分后仍不可拆的共同动作写唯一mode=joint的"
+        "state_subject_assignments并列出全部identity_keys；纯环境写"
+        "environment_source_unit_keys。visible、roster和"
         "content_owner绝非主体默认值。paratext/audit_only无论原文unit是"
         "quoted还是action，都不适用delivery/state-subject规则。"
         "若地点变化发生在两个SRC之间，才可在该SRC边界拆节点；若同一SRC内部跨越"
@@ -6761,9 +6767,11 @@ async def _generate_screenplay_narrative_blueprint(
    且不补桥就无法成片时，才可使用 adaptation_kind=logic_bridge，并在
    bridge_rationale 中说明必要性及如何保持核心事件/结果；普通视觉过桥使用
    transition_cue，不能冒充剧情事实。
-9. 每个 projection=action 的 prose source unit 必须有唯一状态归属。
-   人物思考、反应、发问或动作在 participant_evidence 中填一条
-   usage=state_subject，并用 source_unit_keys 精确绑定该 unit；真正无人物
+9. 每个 projection=action 的 prose source unit 必须有 typed 状态归属。
+   单主体思考、反应、发问或动作在 participant_evidence 中填一条
+   usage=state_subject，并用 source_unit_keys 精确绑定该 unit；结构标点切分后
+   仍不可拆的共同动作填一条 mode=joint 的 state_subject_assignments，
+   identity_keys 列出全部共同主体；真正无人物
    状态所有者的环境单元才写入 environment_source_unit_keys。visible、
    scene roster、content_owner 或文本姓名均不能作为主体推断。
 10. participants 中每个 identity 都必须至少有一条 identity_key 完全相同的
