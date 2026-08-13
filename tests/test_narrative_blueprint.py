@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import hashlib
 import json
@@ -106,6 +107,63 @@ def _replay_source_fact(value: dict) -> SourceFact:
         **value,
         "contract_version": SOURCE_FACT_VERSION,
     })
+
+
+def test_semantic_issue_producer_codes_are_declared_in_literal() -> None:
+    module_path = Path(__file__).parents[1] / "app" / "narrative_blueprint.py"
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    producer_codes: set[str] = set()
+    unresolved_expressions: list[str] = []
+
+    for scope in (
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ):
+        local_constants: dict[str, set[str]] = {}
+        for node in ast.walk(scope):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        local_constants.setdefault(target.id, set()).add(
+                            node.value.value
+                        )
+
+        for node in ast.walk(scope):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "BlueprintSemanticIssue"
+            ):
+                continue
+            code_keyword = next(
+                keyword for keyword in node.keywords
+                if keyword.arg == "code"
+            )
+            if (
+                isinstance(code_keyword.value, ast.Constant)
+                and isinstance(code_keyword.value.value, str)
+            ):
+                producer_codes.add(code_keyword.value.value)
+            elif isinstance(code_keyword.value, ast.Name):
+                values = local_constants.get(code_keyword.value.id, set())
+                producer_codes.update(values)
+                if not values:
+                    unresolved_expressions.append(code_keyword.value.id)
+            else:
+                unresolved_expressions.append(ast.dump(code_keyword.value))
+
+    declared_codes = set(
+        BlueprintSemanticIssue.model_json_schema()["properties"]["code"]["enum"]
+    )
+    assert unresolved_expressions == []
+    assert producer_codes <= declared_codes, (
+        f"BlueprintSemanticIssue producer codes missing from Literal: "
+        f"{sorted(producer_codes - declared_codes)}"
+    )
 
 
 def _blueprint() -> NarrativeBlueprint:
