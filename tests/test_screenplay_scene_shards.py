@@ -343,6 +343,7 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
         }],
         operation_id="scene-semantic-fixture",
         shard_id=plan.shard_id,
+        validate_draft=lambda _candidate: [],
     ))
 
     assert repaired.slots[flagged_key].text == "甲推门进入。"
@@ -388,6 +389,7 @@ def test_scene_shard_semantic_single_reviewer_finding_does_not_repair(
         identity_registry=[],
         operation_id="scene-semantic-single",
         shard_id=plan.shard_id,
+        validate_draft=lambda _candidate: [],
     ))
     assert result == draft
     assert calls == 2
@@ -424,6 +426,7 @@ def test_scene_shard_semantic_unknown_finding_is_hard_failure(
             identity_registry=[],
             operation_id="scene-semantic-unknown",
             shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
         ))
 
 
@@ -460,6 +463,7 @@ def test_scene_shard_semantic_post_repair_consensus_failure_is_hard(
             identity_registry=[],
             operation_id="scene-semantic-post-fail",
             shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
         ))
 
 
@@ -555,7 +559,139 @@ def test_scene_shard_semantic_repair_rejects_unflagged_slot_rewrite(
             identity_registry=[],
             operation_id="scene-semantic-overreach",
             shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
         ))
+
+
+def test_scene_shard_semantic_clean_dual_review_uses_real_structured_signature(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    reviewer_calls: list[dict] = []
+
+    async def fake_chat(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        reviewer_calls.append(meta)
+        return ScreenplaySceneShardSemanticReview().model_dump_json()
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        operation_id="scene-semantic-real-clean",
+        shard_id=plan.shard_id,
+        validate_draft=lambda _candidate: [],
+    ))
+
+    assert result == draft
+    assert len(reviewer_calls) == 2
+    assert {item["reviewer_no"] for item in reviewer_calls} == {1, 2}
+    assert all(item["semantic_attempt"] == 0 for item in reviewer_calls)
+    assert audit[0]["consensus"] == []
+
+
+def test_scene_shard_semantic_unknown_unit_fails_in_real_structured_validator(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    unknown_review = ScreenplaySceneShardSemanticReview(findings=[
+        ScreenplaySceneShardSemanticFinding(
+            unit_key="UNKNOWN-SLOT",
+            code="source_semantic_drift",
+            message="unknown",
+        ),
+    ])
+
+    async def fake_chat(*_args, **_kwargs):
+        return unknown_review.model_dump_json()
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="语义审查引用未知 unit_key：UNKNOWN-SLOT",
+    ):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-real-unknown",
+            shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
+        ))
+
+
+def test_scene_shard_semantic_repair_overreach_fails_in_real_validator(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    unit_keys = list(draft.slots)
+    finding = ScreenplaySceneShardSemanticFinding(
+        unit_key=unit_keys[0],
+        code="source_semantic_drift",
+        message="source drift",
+    )
+    overreaching = draft.model_copy(deep=True)
+    overreaching.slots[unit_keys[0]].text = "甲推门进入。"
+    overreaching.slots[unit_keys[1]].text = "越权修改"
+    repair_attempts = 0
+    business_validations: list[ScreenplaySceneShardCreativeIR] = []
+
+    async def fake_chat(*_args, **kwargs):
+        nonlocal repair_attempts
+        meta = kwargs["call_meta"]
+        if meta["stage_key"] == "screenplay_scene_shard_semantic_review":
+            if meta["substage"] != "initial":
+                raise AssertionError("invalid repair must not reach post review")
+            return ScreenplaySceneShardSemanticReview(
+                findings=[finding],
+            ).model_dump_json()
+        repair_attempts += 1
+        return overreaching.model_dump_json()
+
+    def validate_draft(
+        candidate: ScreenplaySceneShardCreativeIR,
+    ) -> list[str]:
+        business_validations.append(candidate)
+        return []
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredSemanticError,
+        match="越权改写未被 consensus 标记的 slot",
+    ):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-real-overreach",
+            shard_id=plan.shard_id,
+            validate_draft=validate_draft,
+        ))
+
+    assert repair_attempts == 2
+    assert len(business_validations) == 2
 
 
 def _identities() -> list[IRIdentity]:

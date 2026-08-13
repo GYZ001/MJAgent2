@@ -3354,6 +3354,7 @@ async def _semantic_review_scene_shard_draft(
     identity_registry: list[dict[str, Any]],
     operation_id: str,
     shard_id: str,
+    validate_draft: Callable[[ScreenplaySceneShardCreativeIR], list[str]],
 ) -> tuple[ScreenplaySceneShardCreativeIR, list[dict[str, Any]]]:
     """Consensus-review creative prose without allowing structural rewrites."""
 
@@ -3362,6 +3363,23 @@ async def _semantic_review_scene_shard_draft(
         reviewer_no: int,
         phase: str,
     ) -> ScreenplaySceneShardSemanticReview:
+        known_unit_keys = set(candidate.slots)
+
+        def validate_review(
+            value: ScreenplaySceneShardSemanticReview,
+        ) -> list[str]:
+            unknown_finding_keys = {
+                finding.unit_key
+                for finding in value.findings
+                if finding.unit_key not in known_unit_keys
+            }
+            if not unknown_finding_keys:
+                return []
+            return [
+                "语义审查引用未知 unit_key："
+                + ",".join(sorted(unknown_finding_keys))
+            ]
+
         return await model_gateway.chat_structured(
             [{"role": "user", "content": _scene_shard_semantic_review_prompt(
                 draft=candidate,
@@ -3369,6 +3387,7 @@ async def _semantic_review_scene_shard_draft(
                 identity_registry=identity_registry,
             )}],
             model_type=ScreenplaySceneShardSemanticReview,
+            validate=validate_review,
             operation_id=(
                 f"{operation_id}:semantic:{phase}:reviewer-{reviewer_no}:"
                 f"{_hash(candidate.model_dump(mode='json'))}"
@@ -3430,6 +3449,31 @@ async def _semantic_review_scene_shard_draft(
     if not findings:
         return draft, audit
 
+    flagged_unit_keys = {item.unit_key for item in findings}
+
+    def validate_repair(
+        candidate: ScreenplaySceneShardCreativeIR,
+    ) -> list[str]:
+        errors = list(validate_draft(candidate))
+        if set(candidate.slots) != set(draft.slots):
+            errors.append("语义 repair 改变了 generation slot 集合")
+        rewritten_unflagged = [
+            unit_key
+            for unit_key in draft.slots
+            if (
+                unit_key in candidate.slots
+                and unit_key not in flagged_unit_keys
+                and candidate.slots[unit_key].model_dump(mode="json")
+                != draft.slots[unit_key].model_dump(mode="json")
+            )
+        ]
+        if rewritten_unflagged:
+            errors.append(
+                "语义 repair 越权改写未被 consensus 标记的 slot："
+                + ",".join(rewritten_unflagged)
+            )
+        return errors
+
     frozen_slots, identity_labels = _scene_shard_semantic_authority_payload(
         scene_input_contracts=scene_input_contracts,
         identity_registry=identity_registry,
@@ -3455,6 +3499,7 @@ async def _semantic_review_scene_shard_draft(
     repaired = await model_gateway.chat_structured(
         [{"role": "user", "content": repair_prompt}],
         model_type=ScreenplaySceneShardCreativeIR,
+        validate=validate_repair,
         operation_id=(
             f"{operation_id}:semantic:repair:"
             f"{_hash(draft.model_dump(mode='json'))}"
@@ -3475,7 +3520,6 @@ async def _semantic_review_scene_shard_draft(
             shard_id,
             ["语义 repair 改变了 generation slot 集合"],
         )
-    flagged_unit_keys = {item.unit_key for item in findings}
     rewritten_unflagged = [
         unit_key
         for unit_key in draft.slots
@@ -3804,6 +3848,7 @@ async def generate_screenplay_scene_shards(
             identity_registry=identity_registry,
             operation_id=operation_id,
             shard_id=plan.shard_id,
+            validate_draft=validate_draft,
         )
         reviewed_creative_hash = _hash(draft.model_dump(mode="json"))
         if (
