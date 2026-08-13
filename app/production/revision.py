@@ -641,10 +641,22 @@ def resolve_screenplay_resume_eligibility(
         (rev.checkpoint_json or {}).get("resume_mode") or ""
     ) == "baseline_rebuild"
     working_id = str(rev.working_artifact_id or "")
+    if incompatible_checkpoint:
+        return ScreenplayResumeEligibility(
+            mode="baseline_rebuild",
+            label="按新合同重建剧本",
+            revision_id=rev.id,
+            revision_action="rebase",
+            working_artifact_id=working_id or None,
+            working_compatible=False,
+            reusable_checkpoint=reusable,
+            reason_code="MIXED_CHECKPOINT_REQUIRES_REBUILD",
+            reason="pre-Document checkpoint 混合了当前与不兼容合同产物",
+        )
     if rev.baseline_done and working_id:
         row = db.execute(
             "SELECT id,type,scope_type,scope_id,status,contract_version,"
-            "content_json,content_hash,parent_artifact_ids_json "
+            "content_json,content_hash,parent_artifact_ids_json,model_snapshot_json "
             "FROM artifacts WHERE id=?",
             (working_id,),
         ).fetchone()
@@ -663,6 +675,23 @@ def resolve_screenplay_resume_eligibility(
             known_incompatibility = bool(
                 content is None or not _artifact_hash_is_valid(artifact, content)
             )
+            if not known_incompatibility:
+                from app.screenplay_ir import IR_COMPILER_VERSION
+                try:
+                    snapshot = json.loads(
+                        artifact.get("model_snapshot_json") or "{}"
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    snapshot = {}
+                known_incompatibility = (
+                    str(snapshot.get("compiler_version") or "")
+                    != IR_COMPILER_VERSION
+                )
+                if known_incompatibility:
+                    incompatibility_reason = (
+                        "working Artifact compiler snapshot 不兼容当前 "
+                        f"{IR_COMPILER_VERSION}"
+                    )
         if not known_incompatibility:
             try:
                 screenplay_from_artifact_record({
@@ -739,18 +768,6 @@ def resolve_screenplay_resume_eligibility(
             reason=incompatibility_reason,
         )
 
-    if incompatible_checkpoint:
-        return ScreenplayResumeEligibility(
-            mode="baseline_rebuild",
-            label="按新合同重建剧本",
-            revision_id=rev.id,
-            revision_action="rebase",
-            working_artifact_id=None,
-            working_compatible=False,
-            reusable_checkpoint=reusable,
-            reason_code="MIXED_CHECKPOINT_REQUIRES_REBUILD",
-            reason="pre-Document checkpoint 混合了当前与不兼容合同产物",
-        )
     if rebuild_transition:
         return ScreenplayResumeEligibility(
             mode="baseline_rebuild",

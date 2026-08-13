@@ -3953,6 +3953,13 @@ async def _repair_narrative_blueprint(
             "一致；引号只是句法边界，不得自动视为对白。projection=action 的正文、章节标题，以及节点的"
             "summary/action_logic 即使写有‘旁白’或‘介绍’，也不得被提升为 dialogue "
             "或伪造 voice evidence；不得删除、拆分、合并或重排节点来规避。\n\n"
+            "每个 projection=action 的 prose source unit 必须二选一："
+            "人物思考、反应、发问或动作使用一条 usage=state_subject "
+            "participant_evidence，并用 source_unit_keys 精确绑定该 unit；"
+            "真正无人物状态所有者的环境变化才把该 unit 写入 "
+            "environment_source_unit_keys。visible 、场次 roster、文本姓名和"
+            "content_owner 均不能推断状态主体。repair 只允许补此证据，"
+            "不得改 timeline/node/source ownership/audit_only 语义。\n\n"
             "硬门禁：\n"
             + "\n".join(f"- {error}" for error in errors)
             + "\n\n相关节点及前后文：\n"
@@ -4330,6 +4337,11 @@ async def _semantic_review_narrative_blueprint(
             "delivery mode，不能为其伪造 speaker。projection=action 的正文、章节标题及 Blueprint 的 summary/"
             "action_logic 即使出现‘旁白’‘介绍’等自然语言，也不需要 voice，禁止"
             "将其提升为 dialogue 或要求伪造旁白 identity。\n"
+            "9. 每个 projection=action 的 prose source unit 必须拥有唯一"
+            " exact-unit usage=state_subject evidence，或在 "
+            "environment_source_unit_keys 中显式标记为纯环境。visible、"
+            "scene roster、content_owner 不是主体证据；缺失、多主体或"
+            "人物主体与环境标记冲突必须作为 must_fix 报告。\n"
             "连续剧可继承前序集已经建立的人物和关系；原文在当前节点明确揭示的"
             "既有关系，只要该节点先以可见/可听内容建立再引用，也不属于"
             " setup_missing。不得要求删除原文明确写出的关系来修复 setup。\n"
@@ -4966,7 +4978,12 @@ async def _generate_sharded_narrative_blueprint(
                     "精确引用该 source_unit_key，identity_key 与 performer_key 一致；"
                     "内容作者放 content_owner_key，不得自动变成 performer。"
                     "同一 identity 可分别声明 visible、voice 或 mentioned；action 单元"
-                    "不要求 source_unit_delivery。"
+                    "不要求 source_unit_delivery。但每个 projection=action 的 prose "
+                    "source unit 必须二选一：人物思考/反应/发问/动作在 "
+                    "participant_evidence 中填唯一 usage=state_subject 并以 "
+                    "source_unit_keys 精确绑定；纯环境单元才写入 "
+                    "environment_source_unit_keys。visible、scene roster、content_owner "
+                    "绝非状态主体默认值。"
                     "只输出 JSON，不要解释。\n\n"
                     f"上次校验错误：{json.dumps(errors, ensure_ascii=False)}\n"
                     f"人物上下文：{json.dumps(bible_context, ensure_ascii=False, separators=(',', ':'))}\n"
@@ -5263,6 +5280,11 @@ async def _generate_screenplay_narrative_blueprint(
    且不补桥就无法成片时，才可使用 adaptation_kind=logic_bridge，并在
    bridge_rationale 中说明必要性及如何保持核心事件/结果；普通视觉过桥使用
    transition_cue，不能冒充剧情事实。
+9. 每个 projection=action 的 prose source unit 必须有唯一状态归属。
+   人物思考、反应、发问或动作在 participant_evidence 中填一条
+   usage=state_subject，并用 source_unit_keys 精确绑定该 unit；真正无人物
+   状态所有者的环境单元才写入 environment_source_unit_keys。visible、
+   scene roster、content_owner 或文本姓名均不能作为主体推断。
 
 本集概要：{episode.get('synopsis') or '（无）'}
 人物与场景上下文：

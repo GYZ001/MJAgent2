@@ -894,7 +894,7 @@ def _compile_unit_identity_scaffold(
             visible_reaction="visible_reaction" in channels,
         ))
 
-        return ScreenplaySceneCompiledUnitSlot(
+    return ScreenplaySceneCompiledUnitSlot(
         **slot.model_dump(
             mode="python",
             exclude={"state_subject_key", "environment_only"},

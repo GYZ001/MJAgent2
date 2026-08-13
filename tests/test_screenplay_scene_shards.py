@@ -448,6 +448,34 @@ def test_scene_input_contracts_align_source_and_frozen_participants_per_scene() 
     blueprint = _blueprint(split_domain=False)
     blueprint.nodes[0].participants = ["甲"]
     blueprint.nodes[1].participants = ["乙"]
+    blueprint.nodes[0].participant_evidence = [
+        NarrativeParticipantEvidence(
+            identity_key="甲",
+            source_segment_ids=["SRC0001"],
+            source_unit_keys=["SRC0001:unit:001"],
+            usage="state_subject",
+        ),
+        NarrativeParticipantEvidence(
+            identity_key="甲",
+            source_segment_ids=["SRC0001"],
+            source_unit_keys=["SRC0001:unit:001"],
+            usage="visible",
+        ),
+    ]
+    blueprint.nodes[1].participant_evidence = [
+        NarrativeParticipantEvidence(
+            identity_key="乙",
+            source_segment_ids=["SRC0002"],
+            source_unit_keys=["SRC0002:unit:001"],
+            usage="state_subject",
+        ),
+        NarrativeParticipantEvidence(
+            identity_key="乙",
+            source_segment_ids=["SRC0002"],
+            source_unit_keys=["SRC0002:unit:001"],
+            usage="visible",
+        ),
+    ]
     derive_blueprint_scene_plans(blueprint)
     plan = build_screenplay_scene_shard_plans(
         blueprint,
@@ -478,6 +506,7 @@ def test_scene_input_contracts_align_source_and_frozen_participants_per_scene() 
             for segment in index_source_segments(SOURCE)
         },
         identity_registry=registry,
+        blueprint_nodes=blueprint.nodes,
     )
 
     assert [contract.scene_plan_key for contract in contracts] == [

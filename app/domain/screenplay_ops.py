@@ -309,7 +309,7 @@ def _published_screenplay_revalidation_eligibility(
     from app.errors import ArtifactNeedsRebuildError
     from app.production.patch import screenplay_from_artifact_record
     from app.production.screenplay_authority import (
-        assert_screenplay_matches_validated_v6_source,
+        assert_screenplay_matches_validated_v7_source,
         published_stale_screenplay_rebuild_error,
     )
 
@@ -389,7 +389,7 @@ def _published_screenplay_revalidation_eligibility(
             error=exc,
         )
     try:
-        assert_screenplay_matches_validated_v6_source(
+        assert_screenplay_matches_validated_v7_source(
             episode_id=episode_id,
             artifact=artifact,
             screenplay=screenplay,

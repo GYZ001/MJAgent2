@@ -505,6 +505,25 @@ def test_dynamic_shard_parent_set_must_match_exactly(tamper: str) -> None:
     assert "merged_ir_artifact_id" not in eligibility.reusable_checkpoint
 
 
+def test_old_state_subject_checkpoint_requires_baseline_rebuild() -> None:
+    seeded = _seed_recovery(polluted_working=False)
+    conn = db.get_conn()
+    old_shard_id = seeded["shards"][0]["id"]
+    conn.execute(
+        "UPDATE artifacts SET contract_version=? WHERE id=?",
+        ("screenplay-scene-shard.v9", old_shard_id),
+    )
+    conn.commit()
+
+    eligibility = resolve_screenplay_resume_eligibility("ep_run_2eb")
+
+    assert eligibility.mode == "baseline_rebuild"
+    assert eligibility.revision_action == "rebase"
+    assert eligibility.reason_code == "MIXED_CHECKPOINT_REQUIRES_REBUILD"
+    assert eligibility.working_compatible is False
+    assert "merged_ir_artifact_id" not in eligibility.reusable_checkpoint
+
+
 @pytest.mark.parametrize(
     "tamper", ["hash", "lineage", "fingerprint", "role", "evaluator"],
 )

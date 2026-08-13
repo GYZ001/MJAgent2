@@ -128,7 +128,7 @@ def publish_screenplay(
         raise ValueError("只能发布完整 screenplay_document，禁止发布 IR/scene shard")
     from app.evidence import repository as evidence_repository
     from app.production.screenplay_authority import (
-        assert_screenplay_matches_validated_v6_source,
+        assert_screenplay_matches_validated_v7_source,
     )
 
     artifact_record = evidence_repository.get_artifact(
@@ -137,7 +137,7 @@ def publish_screenplay(
     )
     if artifact_record is None:
         raise ValueError("待发布 working Artifact 不存在")
-    assert_screenplay_matches_validated_v6_source(
+    assert_screenplay_matches_validated_v7_source(
         episode_id=episode_id,
         artifact=artifact_record,
         screenplay=script,

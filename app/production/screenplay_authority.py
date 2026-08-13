@@ -1137,12 +1137,16 @@ def _artifact_ancestors_by_depth(
     return ancestors
 
 
-def _validated_v6_source_artifacts(
+def _validated_v7_source_artifacts(
     artifact: dict[str, Any],
     *,
     conn: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-    from app.screenplay_scene_shards import SCREENPLAY_SCENE_SHARD_VERSION
+    from app.screenplay_scene_shards import (
+        SCREENPLAY_MERGED_IR_VERSION,
+        SCREENPLAY_SCENE_SHARD_VERSION,
+    )
+    from app.errors import ArtifactNeedsRebuildError
 
     for _depth, candidate in _artifact_ancestors_by_depth(
         artifact,
@@ -1161,14 +1165,26 @@ def _validated_v6_source_artifacts(
             and parent.get("type") == "screenplay_scene_shard"
         ]
         if not shard_parents:
+            if str(candidate.get("contract_version") or "") == (
+                SCREENPLAY_MERGED_IR_VERSION
+            ):
+                raise ArtifactNeedsRebuildError(
+                    artifact_id=str(artifact.get("id") or ""),
+                    artifact_type=str(artifact.get("type") or ""),
+                    reason="当前 merged IR lineage 缺少 validated scene shard 父链",
+                )
             continue
-        has_v6_source = any(
+        has_current_source = any(
             str(parent.get("contract_version") or "")
             == SCREENPLAY_SCENE_SHARD_VERSION
             for parent in shard_parents
         )
-        if not has_v6_source:
-            continue
+        if not has_current_source:
+            raise ArtifactNeedsRebuildError(
+                artifact_id=str(artifact.get("id") or ""),
+                artifact_type=str(artifact.get("type") or ""),
+                reason="scene shard lineage 仍使用旧 state-subject 合同",
+            )
         invalid = [
             parent
             for parent in shard_parents
@@ -1179,8 +1195,6 @@ def _validated_v6_source_artifacts(
             )
         ]
         if invalid or candidate.get("status") != "validated":
-            from app.errors import ArtifactNeedsRebuildError
-
             raise ArtifactNeedsRebuildError(
                 artifact_id=str(artifact.get("id") or ""),
                 artifact_type=str(artifact.get("type") or ""),
@@ -1193,13 +1207,13 @@ def _validated_v6_source_artifacts(
     return None
 
 
-def _compile_validated_v6_source_projection(
+def _compile_validated_v7_source_projection(
     *,
     episode_id: str,
     artifact: dict[str, Any],
     conn: Any,
 ) -> tuple[EpisodeScreenplay, str, tuple[str, ...]] | None:
-    source_artifacts = _validated_v6_source_artifacts(
+    source_artifacts = _validated_v7_source_artifacts(
         artifact,
         conn=conn,
     )
@@ -1321,7 +1335,7 @@ def _compile_validated_v6_source_projection(
     )
 
 
-def assert_screenplay_matches_validated_v6_source(
+def assert_screenplay_matches_validated_v7_source(
     *,
     episode_id: str,
     artifact: dict[str, Any],
@@ -1332,7 +1346,7 @@ def assert_screenplay_matches_validated_v6_source(
     """Fail closed when the current shard-derived attribution drifts."""
     db = conn or get_conn()
     try:
-        source = _compile_validated_v6_source_projection(
+        source = _compile_validated_v7_source_projection(
             episode_id=episode_id,
             artifact=artifact,
             conn=db,
@@ -1395,6 +1409,13 @@ def assert_screenplay_matches_validated_v6_source(
             )
             db.commit()
         raise
+
+
+# Compatibility import for callers migrating with the compiler v7 contract.
+# It resolves to the current-version gate and never accepts a v6 artifact.
+assert_screenplay_matches_validated_v6_source = (
+    assert_screenplay_matches_validated_v7_source
+)
 
 
 def episode_requires_immutable_screenplay_authority(
@@ -1482,7 +1503,7 @@ def published_stale_screenplay_rebuild_error(
         return None
     try:
         screenplay = screenplay_from_artifact_record(artifact)
-        assert_screenplay_matches_validated_v6_source(
+        assert_screenplay_matches_validated_v7_source(
             episode_id=episode_id,
             artifact=artifact,
             screenplay=screenplay,
@@ -1622,7 +1643,7 @@ def resolve_current_screenplay_authority(
     from app.production.patch import load_screenplay_from_artifact
 
     screenplay = load_screenplay_from_artifact(artifact_id)
-    assert_screenplay_matches_validated_v6_source(
+    assert_screenplay_matches_validated_v7_source(
         episode_id=episode_id,
         artifact=artifact,
         screenplay=screenplay,
