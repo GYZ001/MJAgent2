@@ -34,6 +34,11 @@ THREE_EPISODE_FIXTURE = (
     / "fixtures"
     / "three_episode_user_flow.txt"
 )
+RUN_77675349_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "run_77675349e49f_blueprint_src0005.json"
+)
 
 
 def _source(count: int) -> str:
@@ -245,12 +250,18 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     assert "每个SRC必须整体且只归一个节点" in prompt
     assert "节点只能在SRC边界拆分" in prompt
     assert "连续动作压缩为一个核心因果进程" in prompt
-    assert "identity_key集合完全相等" in prompt
+    assert (
+        "identity_key集合及exact-unit joint assignment "
+        "identity_keys的并集完全相等"
+    ) in prompt
     assert "禁止删除角色、合并多个身份或改用默认身份" in prompt
     assert "同一SRC内部跨越多个主要地点" in prompt
     assert "performer_key不能替代这条typed voice evidence" in prompt
     assert "source_unit_keys只含该delivery的source_unit_key" in prompt
     assert "跨时空或过载则拆节点" not in prompt
+    assert "动作目标、被观察者、同场者" in prompt
+    assert "非人物力量或环境状态作用于人物时归environment" in prompt
+    assert "source_segment_ids=[]的无来源node" in prompt
     assert _prompt_source_ids(prompt) == ["SRC0003"]
     schema = json.loads(prompt.split("\nschema=", 1)[1])
     node_schema = schema["$defs"]["NarrativeNode"]
@@ -261,6 +272,8 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
     assert node_schema["properties"]["source_segment_ids"]["items"] == {
         "enum": ["SRC0003"],
     }
+    assert node_schema["properties"]["source_segment_ids"]["minItems"] == 1
+    assert node_schema["properties"]["source_segment_ids"]["maxItems"] == 8
     action_keys = [
         f"SRC0003:unit:{index:03d}"
         for index in range(1, 17, 2)
@@ -313,6 +326,137 @@ def test_blueprint_prompt_keeps_multi_action_src_under_one_node() -> None:
         "minLength": 1
     }
     assert "performer_key" in delivery_contract["required"]
+
+
+def test_run_77675349_real_src0005_structure_and_classifications() -> None:
+    replay = json.loads(RUN_77675349_FIXTURE.read_text(encoding="utf-8"))
+    facts = stages.source_segment_facts(
+        replay["source_segment_id"],
+        replay["source_text"],
+    )
+    facts_by_key = {fact.source_unit_key: fact for fact in facts}
+
+    assert replay["run_id"] == "run_77675349e49f"
+    assert replay["step_run_id"] == "step_1076ebbe770b"
+    assert replay["provider_call_ids"] == [29743, 29744]
+    assert replay["raw_artifact_ids"] == [
+        "art_0f6ffbdadf83",
+        "art_bbde10824d0b",
+    ]
+    assert facts_by_key["SRC0005:unit:004"].text == (
+        "呼啸卷起孟浩以及王有材等人，"
+    )
+    assert facts_by_key["SRC0005:unit:028"].text == (
+        "他身边王有材以及另外两个少年，"
+    )
+    assert facts_by_key["SRC0005:unit:029"].text == "此刻都已苏醒过来，"
+    assert facts_by_key["SRC0005:unit:030"].text == (
+        "正身颤抖惊恐的望着前方背对着四人的女。"
+    )
+    assert replay["attempts"][0]["node_source_ids"] == [
+        ["SRC0005"],
+        ["SRC0005"],
+    ]
+    assert replay["attempts"][1]["node_source_ids"] == [["SRC0005"], []]
+    assert replay["expected_classifications"] == {
+        "SRC0005:unit:004": {
+            "mode": "environment",
+            "identity_keys": [],
+        },
+        "SRC0005:unit:028": {
+            "mode": "joint",
+            "identity_keys": ["王有材", "虎头少年", "白净胖少年"],
+        },
+        "SRC0005:unit:029": {
+            "mode": "joint",
+            "identity_keys": ["王有材", "虎头少年", "白净胖少年"],
+        },
+        "SRC0005:unit:030": {
+            "mode": "joint",
+            "identity_keys": ["王有材", "虎头少年", "白净胖少年"],
+        },
+    }
+    paratext = [fact for fact in facts if fact.projection == "paratext"]
+    assert paratext
+    assert paratext[0].source_unit_key == "SRC0005:unit:067"
+    assert all(fact.surface_form == "paratext_span" for fact in paratext)
+
+
+def test_run_77675349_joint_authority_survives_retry_normalization() -> None:
+    payload = json.loads(_shard_response(
+        source_ids=["SRC0005"],
+        shard_index=5,
+    ))
+    story = payload["nodes"][0]
+    story["key"] = "S005-node_001"
+    story["participants"] = ["许清", "王有材", "虎头少年", "白净胖少年"]
+    story["participant_evidence"] = [{
+        "identity_key": "许清",
+        "source_segment_ids": ["SRC0005"],
+        "source_unit_keys": ["SRC0005:unit:001"],
+        "usage": "state_subject",
+    }]
+    story["state_subject_assignments"] = [{
+        "source_unit_key": "SRC0005:unit:029",
+        "mode": "joint",
+        "identity_keys": ["王有材", "虎头少年", "白净胖少年"],
+    }]
+    payload["nodes"].append({
+        "key": "S005-node_002",
+        "source_segment_ids": [],
+        "summary": "无来源作者附言节点",
+        "narrative_layer": "paratext",
+        "event_priority": "connective",
+        "render_policy": "exclude_from_spine",
+        "temporal_domain_key": "paratext",
+        "time_label": "正文外",
+        "time_relation": "jump",
+        "location_key": "audit",
+        "location_label": "审计卡",
+        "action_logic": "无来源节点不得保留",
+    })
+
+    normalized = stages.normalize_blueprint_provider_payload(payload)
+    candidate = stages.NarrativeBlueprintShard.model_validate(normalized)
+    stages._normalize_blueprint_shard_structure(
+        candidate,
+        boundary_context={"active_state_facts": []},
+    )
+
+    assert [node.key for node in candidate.nodes] == ["S005-node_001"]
+    assert candidate.nodes[0].participants == [
+        "许清",
+        "王有材",
+        "虎头少年",
+        "白净胖少年",
+    ]
+    errors = stages.validate_narrative_blueprint_shard(
+        candidate,
+        expected_episode_no=1,
+        expected_shard_index=5,
+        expected_source_segment_ids=["SRC0005"],
+    )
+    assert not any("NODE_SIZE" in error for error in errors)
+    assert not any("PARTICIPANT_EVIDENCE" in error for error in errors)
+
+
+def test_blueprint_node_size_counts_srcs_not_source_fact_units() -> None:
+    payload = json.loads(_shard_response(
+        source_ids=["SRC0001"],
+        shard_index=1,
+    ))
+    payload["nodes"][0]["source_segment_ids"] = []
+    ungrounded = stages.NarrativeBlueprintShard.model_validate(payload)
+
+    errors = stages.validate_narrative_blueprint_shard(
+        ungrounded,
+        expected_episode_no=1,
+        expected_shard_index=1,
+        expected_source_segment_ids=["SRC0001"],
+    )
+
+    assert any("NODE_UNGROUNDED" in error for error in errors)
+    assert not any("NODE_SIZE" in error for error in errors)
 
 
 def test_blueprint_provider_schema_stays_under_20kb_for_80_units() -> None:

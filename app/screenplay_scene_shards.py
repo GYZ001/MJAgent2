@@ -1567,6 +1567,8 @@ def _build_group_unit_slots(
                 source_id,
                 source_by_id.get(source_id, ""),
             ):
+                if fact.projection == "paratext":
+                    continue
                 unit_order += 1
                 scene_unit_order += 1
                 source_part_order = fact.unit_order

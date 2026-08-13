@@ -78,3 +78,13 @@ def test_closing_quote_does_not_open_a_new_quoted_span() -> None:
 
     assert len(facts) == 1
     assert facts[0].projection == "action"
+
+
+def test_structural_divider_with_only_paratext_has_no_empty_action_unit() -> None:
+    facts = source_segment_facts(
+        "SRC0005",
+        "－－－－－－－－\n作者附记与更新通知。",
+    )
+
+    assert [fact.projection for fact in facts] == ["paratext"]
+    assert [fact.text for fact in facts] == ["作者附记与更新通知。"]

@@ -50,8 +50,8 @@ class SourceFactQuotationError(ValueError):
 class SourceFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # v2 remains readable for historical failure audits. All newly derived
-    # facts use v3, and cache authority fingerprints require the current value.
+    # Older versions remain readable for historical failure audits. All newly
+    # derived facts use v4, and cache fingerprints require the current value.
     contract_version: Literal[
         "source-fact.v2",
         "source-fact.v3",
@@ -95,7 +95,9 @@ def source_segment_facts(
     if divider is not None:
         paratext = text[divider.end():].strip()
         text = text[:divider.start()].strip()
-    if not text:
+    if not text and paratext:
+        parts = []
+    elif not text:
         parts: list[
             tuple[
                 Literal["action", "quoted", "paratext"],

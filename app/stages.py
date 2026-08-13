@@ -5189,6 +5189,12 @@ def _normalize_blueprint_shard_structure(
     *,
     boundary_context: dict[str, Any],
 ) -> None:
+    # A node without an owned SRC has no narrative authority. Providers can
+    # produce one while removing a duplicate SRC owner on retry; retaining it
+    # would turn a corrected ownership decision into a misleading size error.
+    shard.nodes = [
+        node for node in shard.nodes if node.source_segment_ids
+    ]
     fact_state_keys = {
         str(fact.get("fact_key") or ""): str(
             fact.get("state_key") or ""
@@ -5533,9 +5539,17 @@ def _freeze_unreported_state_subject_ownership(
 
     for node in candidate.nodes:
         node.participants = list(dict.fromkeys(
-            evidence.identity_key
-            for evidence in node.participant_evidence
-            if evidence.identity_key.strip()
+            [
+                evidence.identity_key
+                for evidence in node.participant_evidence
+                if evidence.identity_key.strip()
+            ]
+            + [
+                identity_key
+                for assignment in node.state_subject_assignments
+                for identity_key in assignment.identity_keys
+                if identity_key.strip()
+            ]
         ))
 
 
@@ -5561,7 +5575,8 @@ def _blueprint_shard_prompt(
         "首分片首节点time_relation=episode_start；其余严格延续boundary_context。"
         "复用有效fact_key、人物位置、时间域和稳定character_key；本分片新key保持唯一。"
         "participants去重后的identity集合必须与participant_evidence中非空"
-        "identity_key集合完全相等；每个identity至少有一条来源证据，"
+        "identity_key集合及exact-unit joint assignment identity_keys的并集完全相等；"
+        "每个identity至少有一条来源证据，"
         "source_segment_ids必须非空且只引用本节点owned SRC。修复缺证据时必须保留"
         "原文已有角色并补同identity_key的participant_evidence，禁止删除角色、"
         "合并多个身份或改用默认身份。"
@@ -5585,8 +5600,11 @@ def _blueprint_shard_prompt(
         "不写delivery，但必须精确三选一：单主体动作/思考/反应/发问写唯一"
         "usage=state_subject；结构切分后仍不可拆的共同动作写唯一mode=joint的"
         "state_subject_assignments并列出全部identity_keys；纯环境写"
-        "environment_source_unit_keys。visible、roster和"
-        "content_owner绝非主体默认值。paratext/audit_only无论原文unit是"
+        "environment_source_unit_keys。主体是执行动作或经历状态变化者，不得把"
+        "动作目标、被观察者、同场者或unit中出现的所有姓名默认加入主体；"
+        "非人物力量或环境状态作用于人物时归environment，不把受影响人物写成joint。"
+        "source-fact unit可能是逗号切开的句法片段，必须结合相邻unit判断共享谓语；"
+        "visible、roster和content_owner绝非主体默认值。paratext/audit_only无论原文unit是"
         "quoted还是action，都不适用delivery/state-subject规则。"
         "retry必须以previous_candidate为基线，仅修改validation_errors明确"
         "报错的source_unit_key及对应字段。state_subject_ambiguous中，可拆动作"
@@ -5594,6 +5612,8 @@ def _blueprint_shard_prompt(
         "该unit全部single claims，再建立唯一mode=joint且identity_keys列出全部"
         "有来源共同主体、至少2个。未报错unit的single/joint/environment ownership"
         "必须逐项保持不变，禁止把正确single改成单元素joint。"
+        "修复SRC重复owner时必须省略失去来源的冗余node，禁止输出"
+        "source_segment_ids=[]的无来源node。"
         "若地点变化发生在两个SRC之间，才可在该SRC边界拆节点；若同一SRC内部跨越"
         "多个主要地点，仍必须整段只归一个节点，location_key/location_label只填写"
         "该SRC核心因果进程实际发生的一个主要地点，移动过程写入transition_cue和"
