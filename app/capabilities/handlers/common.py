@@ -93,7 +93,12 @@ async def call_guarded(
             data=exc.http_detail(),
         )
     except ValueError as exc:
-        return failed(str(exc), error_code="invalid_state")
+        detail = getattr(exc, "detail", None)
+        return failed(
+            str(exc),
+            error_code="invalid_state",
+            data=detail if isinstance(detail, dict) else None,
+        )
     except KeyError as exc:
         message = str(exc) or "关联对象不存在"
         return failed(message, error_code="not_found")

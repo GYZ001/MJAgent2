@@ -23,6 +23,8 @@ def _fp(parts: dict[str, Any]) -> str:
 
 
 def project_delete(args) -> PreflightResult:
+    from app.completion_grant import provider_task_clearance_snapshot
+
     conn = get_conn()
     row = conn.execute("SELECT id, name, status FROM projects WHERE id=?", (args.project_id,)).fetchone()
     if not row:
@@ -45,6 +47,39 @@ def project_delete(args) -> PreflightResult:
            JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?""",
         (args.project_id,),
     ).fetchone()["c"]
+    clearance = provider_task_clearance_snapshot(
+        project_id=args.project_id,
+        conn=conn,
+    )
+    if not clearance["safe_to_clear"]:
+        return PreflightResult(
+            command="project.delete",
+            allowed=False,
+            risk=RiskLevel.R3_DESTRUCTIVE,
+            summary="供应商付费任务尚未终态，项目未删除",
+            affected=AffectedScope(
+                projects=[args.project_id],
+                shot_count=int(shot_count or 0),
+                extra={
+                    "episode_count": int(ep_count or 0),
+                    **clearance,
+                },
+            ),
+            warnings=["保留任务句柄与费用账本，待供应商状态收敛后可重试"],
+            state_fingerprint=_fp({
+                "project_id": args.project_id,
+                "status": row["status"],
+                "episodes": ep_count,
+                "shots": shot_count,
+                "provider_clearance": clearance,
+            }),
+            requires_confirmation=False,
+            confirmation_policy=ConfirmationPolicy.ALWAYS,
+            denial_code="PROVIDER_TASKS_NOT_TERMINAL",
+            denial_message=(
+                "供应商付费任务尚未终态；请按恢复状态继续轮询或核对创建结果"
+            ),
+        )
     return PreflightResult(
         command="project.delete",
         allowed=True,
@@ -61,6 +96,7 @@ def project_delete(args) -> PreflightResult:
             "status": row["status"],
             "episodes": ep_count,
             "shots": shot_count,
+            "provider_clearance": clearance,
         }),
         requires_confirmation=True,
         confirmation_policy=ConfirmationPolicy.ALWAYS,

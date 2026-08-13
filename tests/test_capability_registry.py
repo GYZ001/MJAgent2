@@ -227,6 +227,66 @@ def test_domain_preflight_reads_project_state() -> None:
     assert "删除" in bus_pf.summary or "永久" in bus_pf.summary
 
 
+def test_project_delete_preflight_returns_project_scoped_provider_blocker() -> None:
+    from app import db
+    from app.capabilities.inputs import ProjectDeleteInput
+    from app.capabilities.preflight import project_delete
+    from app.completion_grant import ensure_video_budget_authority_tables
+
+    conn = db.get_conn()
+    ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('proj-pf-block','P','created',1)"
+    )
+    conn.execute(
+        """INSERT INTO episodes(id,project_id,episode_no,status,created_at)
+           VALUES('ep-pf-block','proj-pf-block',1,'confirmed',1)"""
+    )
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('shot-pf-block','ep-pf-block',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,provider_task_id,status,created_at
+           ) VALUES(
+               'ver-pf-block','shot-pf-block',1,'p','i','provider-task','running',1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,shot_id,version_id,episode_id,project_id,status,
+               provider_non_cancellable,provider_operation_id,
+               provider_create_state,created_at,updated_at
+           ) VALUES(
+               'job-pf-block','video','shot-pf-block','ver-pf-block',
+               'ep-pf-block','proj-pf-block','waiting_provider',
+               1,'op-pf-block','accepted',1,1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at,accepted_at
+           ) VALUES(
+               'op-pf-block','proj-pf-block','ep-pf-block','shot-pf-block',
+               'job-pf-block','ver-pf-block','ep-pf-block','shot-pf-block',
+               'job-pf-block','ver-pf-block',4,'accepted',1,1,1
+           )"""
+    )
+    conn.commit()
+
+    result = project_delete(ProjectDeleteInput(project_id="proj-pf-block"))
+
+    assert result.allowed is False
+    assert result.denial_code == "PROVIDER_TASKS_NOT_TERMINAL"
+    blocker = result.affected.extra["blockers"][0]
+    assert blocker["project_id"] == "proj-pf-block"
+    assert blocker["episode_id"] == "ep-pf-block"
+    assert blocker["shot_id"] == "shot-pf-block"
+    assert blocker["recovery_action"] == "continue_provider_poll"
+
+
 def test_video_batch_preflight_quotes_exact_pending_shot_cost() -> None:
     from app import db
 

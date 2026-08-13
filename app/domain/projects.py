@@ -1286,19 +1286,44 @@ async def delete_episode(episode_id: str):
 
 async def _delete_project_core(project_id: str) -> dict:
     """删除项目的领域逻辑，供 REST 路由与 ``project.delete`` Command Handler 共用。"""
+    from app.completion_grant import (
+        assert_provider_tasks_clearable,
+        prepare_provider_tasks_for_clear,
+    )
+
     _project_or_404(project_id)
+    # Fast preflight before cancelling any producer. The authoritative check is
+    # repeated inside the deletion transaction after all local writers stop.
+    assert_provider_tasks_clearable(
+        project_id=project_id,
+        conn=get_conn(),
+    )
     # 先停止并等待所有项目级后台协程退出，防止删库后任务继续回写孤儿版本/参考图。
     cancelled_tasks = await task_registry.cancel_project(project_id)
     conn = get_conn()
-    evidence_removed = _delete_project_evidence(conn, project_id)
-    # 文件和衍生产物由同一权威清理函数处理；数据库级联负责关系完整性。
-    worker.delete_project_episodes(project_id)
-    conn.execute("DELETE FROM chapters WHERE project_id=?", (project_id,))
-    conn.execute("DELETE FROM jobs WHERE project_id=?", (project_id,))
-    conn.execute("DELETE FROM character_portraits WHERE project_id=?", (project_id,))
-    conn.execute("DELETE FROM scene_references WHERE project_id=?", (project_id,))
-    conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
-    conn.commit()
+    try:
+        prepare_provider_tasks_for_clear(
+            project_id=project_id,
+            conn=conn,
+        )
+        evidence_removed = _delete_project_evidence(conn, project_id)
+        # 文件和衍生产物由同一权威清理函数处理；数据库级联负责关系完整性。
+        worker.delete_project_episodes(
+            project_id,
+            conn=conn,
+            commit=False,
+            check_provider=False,
+        )
+        conn.execute("DELETE FROM chapters WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM jobs WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM character_portraits WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM scene_references WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     import shutil
     from app.config import PROJECTS_DIR
     shutil.rmtree(PROJECTS_DIR / project_id, ignore_errors=True)

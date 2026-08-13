@@ -1867,6 +1867,15 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                 continue
             if is_owner:
                 continue
+            pre_transport_cancel = bool(
+                not row["provider_non_cancellable"]
+                and not row["provider_task_id"]
+                and row["provider_create_state"] in {
+                    "",
+                    "not_started",
+                    "submitting",
+                }
+            )
             message = (
                 "数据库同镜活动槽迁移：未提交供应商的历史重复任务已关闭，"
                 f"活动所有者为 {owner['id'] if owner is not None else 'none'}"
@@ -1876,10 +1885,20 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                       SET status='cancelled',video_slot_active=0,
                           provider_poll_required=0,provider_result_adoptable=0,
                           cancellation_requested=1,abandoned=0,
+                          provider_create_state=CASE WHEN ? THEN 'not_started'
+                                                     ELSE provider_create_state END,
+                          provider_non_cancellable=CASE WHEN ? THEN 0
+                                                        ELSE provider_non_cancellable END,
                           lease_owner=NULL,lease_expires_at=NULL,
                           next_retry_at=NULL,error=?,updated_at=?
                     WHERE id=?""",
-                (message, stamp, row["id"]),
+                (
+                    int(pre_transport_cancel),
+                    int(pre_transport_cancel),
+                    message,
+                    stamp,
+                    row["id"],
+                ),
             )
             if row["version_id"]:
                 conn.execute(
@@ -1895,6 +1914,20 @@ def _reconcile_video_slot_activity(conn: sqlite3.Connection) -> int:
                 (stamp, row["id"]),
             )
             reconciled += 1
+            if pre_transport_cancel and row["provider_operation_id"]:
+                conn.execute(
+                    """UPDATE provider_video_budget_claims
+                          SET status='released',updated_at=?,released_at=?
+                        WHERE operation_id=? AND job_id=? AND status='reserved'
+                          AND accepted_at IS NULL""",
+                    (
+                        stamp,
+                        stamp,
+                        row["provider_operation_id"],
+                        row["id"],
+                    ),
+                )
+    return reconciled
     return reconciled
 
 

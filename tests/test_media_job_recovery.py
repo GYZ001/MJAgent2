@@ -1277,6 +1277,78 @@ def test_manual_retry_recovers_persisted_provider_handle_before_queueing(monkeyp
     ).fetchone()["provider_task_id"] == "provider-task-recovered"
 
 
+def test_manual_retry_recovers_abandoned_provider_task_as_isolated_poll(
+    monkeypatch,
+) -> None:
+    import app.monitoring as monitoring
+    import app.system_api as system_api
+
+    conn = _conn()
+    _seed_retry_episode(conn)
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) "
+        "VALUES('s-abandoned','e1',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v-abandoned','s-abandoned',1,'p','i-abandoned','abandoned',1)"""
+    )
+    conn.execute(
+        """INSERT INTO jobs(
+               id,kind,status,shot_id,version_id,episode_id,project_id,
+               provider_operation_id,provider_create_state,
+               provider_non_cancellable,cancellation_requested,abandoned,
+               provider_poll_required,provider_result_adoptable,video_slot_active,
+               created_at,updated_at
+           ) VALUES(
+               'j-abandoned','video','abandoned','s-abandoned','v-abandoned',
+               'e1','p1','video-create-v-abandoned','submitting',
+               1,1,1,1,1,0,1,1
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,status,operation_id,response_json
+           ) VALUES(100,'video_create','OK','video-create-v-abandoned',?)""",
+        (json.dumps({"id": "provider-task-abandoned"}),),
+    )
+    conn.commit()
+    monkeypatch.setattr(system_api, "get_conn", lambda: conn)
+    monkeypatch.setattr(monitoring, "get_conn", lambda: conn)
+    monkeypatch.setattr(worker, "_enqueue_for_current_status", lambda _job_id: None)
+
+    result = system_api.retry_job(
+        "j-abandoned",
+        {"isolate_provider_result": True},
+    )
+
+    assert result["retryability"]["action"] == "continue_poll"
+    assert result["retryability"]["result_isolated"] is True
+    job = conn.execute(
+        """SELECT status,cancellation_requested,abandoned,video_slot_active,
+                  provider_poll_required,provider_result_adoptable
+             FROM jobs WHERE id='j-abandoned'"""
+    ).fetchone()
+    assert dict(job) == {
+        "status": "waiting_provider",
+        "cancellation_requested": 0,
+        "abandoned": 0,
+        "video_slot_active": 0,
+        "provider_poll_required": 1,
+        "provider_result_adoptable": 0,
+    }
+    version = conn.execute(
+        """SELECT provider_task_id,status,video_slot_active
+             FROM shot_versions WHERE id='v-abandoned'"""
+    ).fetchone()
+    assert dict(version) == {
+        "provider_task_id": "provider-task-abandoned",
+        "status": "waiting_provider",
+        "video_slot_active": 0,
+    }
+
+
 def test_manual_retry_requires_confirmation_for_unresolved_provider_create(monkeypatch) -> None:
     import app.monitoring as monitoring
     import app.system_api as system_api

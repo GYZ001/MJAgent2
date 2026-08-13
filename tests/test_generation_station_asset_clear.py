@@ -356,6 +356,9 @@ def _assert_provider_clear_blocked(
     assert detail["resume_supported"] is True
     assert detail["blockers"] == [
         {
+            "project_id": "p",
+            "episode_id": "e",
+            "shot_id": "s",
             "job_id": "j-provider",
             "version_id": "v-provider",
             "provider_operation_id": "op-provider",
@@ -440,6 +443,37 @@ def test_resource_clear_blocks_unsettled_paid_provider_tasks_without_type_rules(
     assert conn.execute(
         "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-provider'"
     ).fetchone()[0] == claim_status
+
+
+def test_cancelled_pre_transport_provider_claim_is_released_before_clear() -> None:
+    conn = _database()
+    _seed_unsettled_provider_task(
+        conn,
+        create_state="submitting",
+        claim_status="reserved",
+        provider_task_id=None,
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET status='cancelled',cancellation_requested=1,abandoned=0,
+                  provider_non_cancellable=0
+            WHERE id='j-provider'"""
+    )
+    conn.commit()
+
+    clearance = completion_grant.prepare_provider_tasks_for_clear(
+        project_id="p",
+        conn=conn,
+    )
+
+    assert clearance["safe_to_clear"] is True
+    claim = conn.execute(
+        """SELECT status,released_at
+             FROM provider_video_budget_claims
+            WHERE operation_id='op-provider'"""
+    ).fetchone()
+    assert claim["status"] == "released"
+    assert claim["released_at"] is not None
 
 
 def test_video_only_clear_preserves_unsettled_provider_handle_and_claim(

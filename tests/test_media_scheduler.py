@@ -284,6 +284,64 @@ def test_recovery_keeps_future_retry_and_cancel_marks_provider_work_abandoned(mo
     assert tuple(row) == (1, 1)
 
 
+def test_cancel_before_provider_transport_releases_both_budget_claims(monkeypatch) -> None:
+    conn = _conn()
+    monkeypatch.setattr(media_scheduler, "get_conn", lambda: conn)
+    monkeypatch.setattr(media_scheduler, "now", lambda: 100.0)
+    completion_grant.ensure_video_budget_authority_tables(conn)
+    conn.execute(
+        "INSERT INTO shots(id,episode_id,shot_no,duration_s) VALUES('s-pre','e',1,5)"
+    )
+    conn.execute(
+        """INSERT INTO shot_versions(
+               id,shot_id,version_no,prompt_text,idem_key,status,created_at
+           ) VALUES('v-pre','s-pre',1,'p','i-pre','running',1)"""
+    )
+    conn.execute(
+        """UPDATE jobs
+              SET shot_id='s-pre',version_id='v-pre',status='running',
+                  provider_operation_id='op-pre',provider_create_state='submitting',
+                  provider_non_cancellable=0,reserved_cost_cny=4
+            WHERE id='j1'"""
+    )
+    conn.execute(
+        """INSERT INTO budget_reservations(
+               id,job_id,scope_type,scope_id,amount_cny,status,created_at
+           ) VALUES('br-pre','j1','episode','e',4,'reserved',1)"""
+    )
+    conn.execute(
+        """INSERT INTO provider_video_budget_claims(
+               operation_id,project_id,episode_id,shot_id,job_id,version_id,
+               origin_episode_id,origin_shot_id,origin_job_id,origin_version_id,
+               amount_cny,status,created_at,updated_at
+           ) VALUES(
+               'op-pre','p','e','s-pre','j1','v-pre',
+               'e','s-pre','j1','v-pre',4,'reserved',1,1
+           )"""
+    )
+    conn.commit()
+
+    result = media_scheduler.request_cancel("j1")
+
+    assert result["status"] == "cancelled"
+    assert result["provider_claim_released"] is True
+    job = conn.execute(
+        """SELECT provider_create_state,provider_non_cancellable,reserved_cost_cny
+             FROM jobs WHERE id='j1'"""
+    ).fetchone()
+    assert dict(job) == {
+        "provider_create_state": "not_started",
+        "provider_non_cancellable": 0,
+        "reserved_cost_cny": 0.0,
+    }
+    assert conn.execute(
+        "SELECT status FROM provider_video_budget_claims WHERE operation_id='op-pre'"
+    ).fetchone()["status"] == "released"
+    assert conn.execute(
+        "SELECT status FROM budget_reservations WHERE job_id='j1'"
+    ).fetchone()["status"] == "released"
+
+
 def test_cancelled_job_cannot_be_written_back_to_running_version(monkeypatch) -> None:
     from app import worker
 

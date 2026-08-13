@@ -134,10 +134,11 @@ def _purge_shots(
     shots: list[dict],
     *,
     preserve_video_audit: bool = False,
+    check_provider: bool = True,
 ) -> tuple[int, set[str]]:
     """删除给定镜头的全部版本、关键帧、任务与采用标记。
     返回 (删除版本数, 受影响剧集 id 集合)。"""
-    if shots:
+    if shots and check_provider:
         _assert_provider_clear_scope(
             conn,
             shot_ids=[str(shot["id"]) for shot in shots],
@@ -211,21 +212,34 @@ def purge_character_video_artifacts(project_id: str, character_names: list[str])
     return {"shots": len(affected_shots), "versions": versions_removed, "episodes": len(affected_eps)}
 
 
-def delete_project_episodes(project_id: str) -> int:
+def delete_project_episodes(
+    project_id: str,
+    *,
+    conn=None,
+    commit: bool = True,
+    check_provider: bool = True,
+) -> int:
     """重新分集时整体清空本项目所有剧集及其衍生数据（镜头/版本/视频/任务/成片目录）。
     旧逻辑只删 status='planned' 的剧集，导致已进入分镜/确认的旧集残留、与新集 episode_no 撞号，
     前端就出现“同一集号有两三条、剧情重复”。重新分集应是干净替换。"""
-    conn = get_conn()
+    conn = conn or get_conn()
     eps = conn.execute("SELECT id, episode_no FROM episodes WHERE project_id=?", (project_id,)).fetchall()
-    for episode in eps:
-        _assert_provider_clear_scope(conn, episode_id=str(episode["id"]))
+    if check_provider:
+        from app.completion_grant import prepare_provider_tasks_for_clear
+
+        prepare_provider_tasks_for_clear(project_id=project_id, conn=conn)
     shots = rows_to_dicts(conn.execute(
         "SELECT s.id, s.episode_id FROM shots s JOIN episodes e ON e.id=s.episode_id WHERE e.project_id=?",
         (project_id,)).fetchall())
-    _purge_shots(conn, shots)  # 删版本文件/尾帧、jobs、清采用标记
+    _purge_shots(
+        conn,
+        shots,
+        check_provider=False,
+    )  # 删版本文件/尾帧、jobs、清采用标记
     conn.execute("DELETE FROM shots WHERE episode_id IN (SELECT id FROM episodes WHERE project_id=?)", (project_id,))
     conn.execute("DELETE FROM episodes WHERE project_id=?", (project_id,))
-    conn.commit()
+    if commit:
+        conn.commit()
     ep_dir = config.PROJECTS_DIR / project_id / "episodes"
     if ep_dir.exists():
         shutil.rmtree(ep_dir, ignore_errors=True)
