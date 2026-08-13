@@ -155,12 +155,7 @@ def _is_nested_json_candidate(text: str, start: int, end: int) -> bool:
             break
         index = token_end
 
-    suffix = text[end:].lstrip()
-    return bool(
-        containers
-        or damaged_root
-        or (suffix and suffix[0] in "]}")
-    )
+    return bool(containers or damaged_root)
 
 
 def _json_candidates(value: str) -> list[dict[str, Any]]:

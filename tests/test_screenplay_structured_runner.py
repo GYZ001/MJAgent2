@@ -30,6 +30,8 @@ class _PermissiveReviewPayload(BaseModel):
     ("raw", "expected_values"),
     (
         ('{"value":1}', [1]),
+        ('{"value":8}]', [8]),
+        ('{"value":9}}', [9]),
         (
             '{"value":1}\n明确说明：以下是修正版\n{"value":2}',
             [2, 1],
@@ -47,6 +49,8 @@ class _PermissiveReviewPayload(BaseModel):
     ),
     ids=(
         "direct-root",
+        "root-before-extra-array-closer",
+        "root-before-extra-object-closer",
         "root-after-explicitly-completed-root",
         "root-after-explanation-with-no-active-root",
         "nested-object",
@@ -227,11 +231,11 @@ def test_structured_runner_only_validates_latest_complete_root(
     assert attempts[0]["local_recovery"] is True
 
 
-def test_latest_array_blocks_older_valid_root_without_retry(
+def test_latest_array_with_extra_closer_blocks_old_root_without_retry(
     monkeypatch,
 ) -> None:
     attempts: list[dict] = []
-    raw = '{"value":1}\n以下是最新修正版\n[{"value":2}]'
+    raw = '{"value":1}\n以下是最新修正版\n[{"value":2}]]'
 
     async def fake_chat(*_args, **_kwargs):
         return raw
@@ -262,11 +266,11 @@ def test_latest_array_blocks_older_valid_root_without_retry(
     assert "最新顶层 authority 为 array" in attempts[0]["validation_errors"][0]
 
 
-def test_latest_array_format_retry_uses_only_array_substring(
+def test_latest_array_with_extra_closer_retries_only_array_substring(
     monkeypatch,
 ) -> None:
     prompts: list[str] = []
-    raw = '{"value":1001}\n以下是最新修正版\n[{"value":2}]'
+    raw = '{"value":1001}\n以下是最新修正版\n[{"value":2}]]'
 
     async def fake_chat(messages, **_kwargs):
         prompts.append(messages[0]["content"])
@@ -290,7 +294,7 @@ def test_latest_array_format_retry_uses_only_array_substring(
 
     assert result.value == 3
     assert "最新顶层 authority 为 array" in prompts[1]
-    assert '[{"value":2}]' in prompts[1]
+    assert prompts[1].endswith('\n完整候选：\n[{"value":2}]')
     assert '{"value":1001}' not in prompts[1]
     assert "以下是最新修正版" not in prompts[1]
 
