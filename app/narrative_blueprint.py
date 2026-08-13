@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Literal
 
 from pydantic import (
@@ -433,6 +433,51 @@ class BlueprintSourceOwnershipError(ValueError):
         super().__init__("；".join(self.errors))
 
 
+class BlueprintSourceOccurrenceError(ValueError):
+    def __init__(self, duplicates: dict[str, list[str]]):
+        self.duplicates = {
+            source_id: list(node_keys)
+            for source_id, node_keys in duplicates.items()
+        }
+        self.errors = [
+            "[BLUEPRINT_SOURCE_OCCURRENCE_DUPLICATE] "
+            f"{source_id} 被 picture/audit timeline nodes 重复拥有："
+            + "、".join(node_keys)
+            for source_id, node_keys in self.duplicates.items()
+        ]
+        super().__init__("；".join(self.errors))
+
+
+def _blueprint_source_occurrence_errors(
+    nodes: list[NarrativeNode],
+    *,
+    prefix: str = "BLUEPRINT",
+) -> list[str]:
+    owners: defaultdict[str, list[str]] = defaultdict(list)
+    partitions: defaultdict[str, list[str]] = defaultdict(list)
+    for node in nodes:
+        partition = node.source_semantics().projection_policy
+        for source_id in node.source_segment_ids:
+            owners[source_id].append(node.key)
+            partitions[source_id].append(partition)
+    errors: list[str] = []
+    for source_id, node_keys in owners.items():
+        if len(node_keys) <= 1:
+            continue
+        partition_names = set(partitions[source_id])
+        if len(partition_names) > 1:
+            code = f"{prefix}_SOURCE_PARTITION_CONFLICT"
+        elif partition_names == {"audit_only"}:
+            code = f"{prefix}_AUDIT_SOURCE_DUPLICATE"
+        else:
+            code = f"{prefix}_PICTURE_SOURCE_DUPLICATE"
+        errors.append(
+            f"[{code}] {source_id} 必须恰由一个 timeline node 拥有，"
+            "实际：" + "、".join(node_keys)
+        )
+    return errors
+
+
 class NarrativeBlueprint(BaseModel):
     format_version: Literal["screenplay-narrative-blueprint.v6"] = (
         BLUEPRINT_VERSION
@@ -502,6 +547,12 @@ def validate_narrative_blueprint_shard(
         for node in shard.nodes
         for source_id in node.source_segment_ids
     ]
+    errors.extend(
+        _blueprint_source_occurrence_errors(
+            shard.nodes,
+            prefix="BLUEPRINT_SHARD",
+        )
+    )
     escaped = set(owned) - expected_set
     if escaped:
         errors.append(
@@ -2053,6 +2104,18 @@ def derive_blueprint_scene_plans(
             ),
         ))
 
+    occurrence_owners: defaultdict[str, list[str]] = defaultdict(list)
+    for node in blueprint.nodes:
+        for source_id in node.source_segment_ids:
+            occurrence_owners[source_id].append(node.key)
+    occurrence_duplicates = {
+        source_id: node_keys
+        for source_id, node_keys in occurrence_owners.items()
+        if len(node_keys) > 1
+    }
+    if occurrence_duplicates:
+        raise BlueprintSourceOccurrenceError(occurrence_duplicates)
+
     node_scene_owners: dict[str, str] = {}
     source_scene_owners: dict[str, str] = {}
     conflicts: dict[str, list[str]] = {}
@@ -2325,6 +2388,8 @@ def validate_narrative_blueprint(
             "[BLUEPRINT_SOURCE_UNKNOWN] 节点引用未知来源段："
             + "、".join(sorted(unknown_source_ids)[:20])
         )
+
+    errors.extend(_blueprint_source_occurrence_errors(blueprint.nodes))
 
     owned_source_ids = {
         source_id
