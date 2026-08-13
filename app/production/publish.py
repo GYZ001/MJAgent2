@@ -17,6 +17,50 @@ from app.production.revision import get_production_revision, set_published_artif
 from app.production.structured_issues import blocker_count, must_fix_count
 
 
+def _screenplay_qa_authority_evidence(
+    conn,
+    *,
+    evaluation_ids: list[str],
+    artifact_id: str,
+    qa_profile_version: str,
+) -> list[dict[str, Any]]:
+    if not evaluation_ids:
+        return []
+    marks = ",".join("?" for _ in evaluation_ids)
+    rows = conn.execute(
+        f"""SELECT artifact_id,evaluator_type,evaluator_name,evaluator_version,
+                   status,hard_gate_passed,evidence_json,evaluation_role,
+                   runtime_blocking
+              FROM evaluations WHERE id IN ({marks})""",
+        evaluation_ids,
+    ).fetchall()
+    evidence: list[dict[str, Any]] = []
+    for row in rows:
+        score_only = (
+            row["evaluation_role"] == "score_only"
+            and not bool(row["runtime_blocking"])
+        )
+        legacy_runtime_gate = (
+            row["evaluation_role"] == "runtime_gate"
+            and bool(row["runtime_blocking"])
+        )
+        if (
+            row["artifact_id"] != artifact_id
+            or row["evaluator_type"] != "deterministic"
+            or row["evaluator_name"] != "screenplay_production_qa"
+            or row["evaluator_version"] != qa_profile_version
+            or row["status"] != "passed"
+            or not bool(row["hard_gate_passed"])
+            or not (score_only or legacy_runtime_gate)
+        ):
+            continue
+        try:
+            evidence.append(json.loads(row["evidence_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            evidence.append({})
+    return evidence
+
+
 def publish_screenplay(
     *,
     episode_id: str,
@@ -63,32 +107,12 @@ def publish_screenplay(
             raise ValueError("剧本 revision 未绑定当前原文/Bible/人物决议/改编约束指纹")
         if not evaluation_ids:
             raise ValueError("叙事剧本发布缺少当前 QA Evaluation")
-        marks = ",".join("?" for _ in evaluation_ids)
-        qa_rows = conn.execute(
-            f"""SELECT evaluator_name,evidence_json,evaluation_role,runtime_blocking
-                   FROM evaluations WHERE id IN ({marks})""",
-            evaluation_ids,
-        ).fetchall()
-        authority_evidence = []
-        for row in qa_rows:
-            if (
-                row["evaluator_name"] != "screenplay_production_qa"
-                or not (
-                    (
-                        row["evaluation_role"] == "score_only"
-                        and not bool(row["runtime_blocking"])
-                    )
-                    or (
-                        row["evaluation_role"] == "runtime_gate"
-                        and bool(row["runtime_blocking"])
-                    )
-                )
-            ):
-                continue
-            try:
-                authority_evidence.append(json.loads(row["evidence_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                authority_evidence.append({})
+        authority_evidence = _screenplay_qa_authority_evidence(
+            conn,
+            evaluation_ids=evaluation_ids,
+            artifact_id=artifact_id,
+            qa_profile_version=qa_profile_version or rev.qa_profile_version,
+        )
         if len(authority_evidence) != 1 or authority_evidence[0].get(
             "authority_input_fingerprint"
         ) != authority_fingerprint:
@@ -172,7 +196,9 @@ def publish_screenplay(
     conn.execute("BEGIN IMMEDIATE")
     try:
         current_revision = conn.execute(
-            "SELECT status,working_artifact_id FROM production_revisions WHERE id=?",
+            """SELECT status,working_artifact_id,input_fingerprint,
+                      contract_version,qa_profile_version
+                 FROM production_revisions WHERE id=?""",
             (revision_id,),
         ).fetchone()
         if (
@@ -259,6 +285,51 @@ def publish_screenplay(
                 episode_id,
                 conn=conn,
             )
+
+        # Downstream retirement can legitimately normalize mutable episode
+        # authority fields (notably storyboard-owned duration).  Recompute only
+        # after those writes while holding the SQLite writer lock.  The QA,
+        # revision and certificate must all bind this exact post-cleanup value;
+        # otherwise rolling back is safer than publishing a certificate that
+        # is invalid the instant it commits.
+        if script.narrative_plan is not None:
+            post_cleanup_fingerprint = screenplay_authority_fingerprint(
+                episode_id,
+                conn=conn,
+                contract_version=effective_contract_version,
+                qa_profile_version=(
+                    qa_profile_version or current_revision["qa_profile_version"]
+                ),
+            )
+            expected_fingerprint = str(
+                input_fingerprint or current_revision["input_fingerprint"] or ""
+            )
+            if (
+                post_cleanup_fingerprint != expected_fingerprint
+                or str(current_revision["input_fingerprint"] or "")
+                != post_cleanup_fingerprint
+                or str(current_revision["contract_version"] or "")
+                != effective_contract_version
+                or str(current_revision["qa_profile_version"] or "")
+                != (qa_profile_version or rev.qa_profile_version)
+            ):
+                raise ValueError(
+                    "剧本发布事务中权威输入已变化，必须重新 QA 与签证",
+                )
+            locked_evidence = _screenplay_qa_authority_evidence(
+                conn,
+                evaluation_ids=evaluation_ids,
+                artifact_id=artifact_id,
+                qa_profile_version=(
+                    qa_profile_version or current_revision["qa_profile_version"]
+                ),
+            )
+            if (
+                len(locked_evidence) != 1
+                or locked_evidence[0].get("authority_input_fingerprint")
+                != post_cleanup_fingerprint
+            ):
+                raise ValueError("剧本质量评分未绑定发布事务的最终权威指纹")
 
         conn.execute(
             "UPDATE artifacts SET status='approved', trust_level='T2' WHERE id=?",

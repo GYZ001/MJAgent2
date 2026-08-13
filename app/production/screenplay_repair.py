@@ -3648,14 +3648,32 @@ async def run_screenplay_production(
         )
         duration_expanded = required_target > current_target
         if duration_expanded:
-            conn.execute(
-                "UPDATE episodes SET target_duration_s=?,"
-                "screenplay_snapshot_version=screenplay_snapshot_version+1 "
-                "WHERE id=?",
-                (required_target, episode_id),
+            duration_cursor = conn.execute(
+                """UPDATE episodes
+                      SET target_duration_s=?,
+                          planning_target_duration_s=CASE
+                            WHEN target_duration_authority='planning_estimate'
+                            THEN ?
+                            ELSE planning_target_duration_s
+                          END,
+                          screenplay_snapshot_version=screenplay_snapshot_version+1
+                    WHERE id=? AND target_duration_s=?""",
+                (
+                    required_target,
+                    required_target,
+                    episode_id,
+                    current_target,
+                ),
             )
+            if duration_cursor.rowcount != 1:
+                conn.rollback()
+                raise StateConflict(
+                    "剧本时长权威在 Baseline 生成期间发生变化，请按当前输入重试",
+                )
             conn.commit()
             episode["target_duration_s"] = required_target
+            if episode.get("target_duration_authority") == "planning_estimate":
+                episode["planning_target_duration_s"] = required_target
             if run_id:
                 evidence_repository.append_event(
                     run_id,
