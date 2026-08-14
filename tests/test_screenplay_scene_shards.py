@@ -3914,6 +3914,131 @@ def test_err_20260810_b66dda_semantic_retry_uses_60895_bound_schema(
     assert "Extra inputs are not permitted" in prompts[1]
 
 
+def test_ss004_scene_format_retry_keeps_exact_source_authority(
+    monkeypatch,
+) -> None:
+    replay_input = json.loads(SS004_REPLAY_INPUT.read_text(encoding="utf-8"))
+    plan, scene_plans, contracts, _identity_keys = (
+        _ss004_replay_validation_context()
+    )
+    identity_registry = [
+        {
+            **item,
+            "authority_id": f"bible:{item['identity_key']}",
+        }
+        for item in replay_input["identity_registry"]
+    ]
+    blueprint = NarrativeBlueprint(
+        episode_no=1,
+        nodes=[],
+        scene_plans=list(scene_plans.values()),
+        source_scene_owners=dict(plan.source_scene_owners),
+        source_semantics=_story_source_semantics(
+            plan.source_segment_ids
+        ),
+    )
+    source_facts = {
+        fact.source_unit_key: fact.text
+        for contract in contracts
+        for segment in contract.source_segments
+        for fact in source_segment_facts(
+            segment.source_segment_id,
+            segment.text,
+        )
+    }
+    valid_payload = {
+        "contract_version": SCREENPLAY_SCENE_CREATIVE_VERSION,
+        "slots": {
+            slot.unit_key: {
+                "text": (
+                    slot.source_text
+                    if slot.kind == "dialogue"
+                    else source_facts[slot.source_unit_key]
+                ),
+            }
+            for slot in plan.unit_slots
+        },
+    }
+    drift_slot = next(
+        slot for slot in plan.unit_slots if slot.kind == "action"
+    )
+    drift_payload = deepcopy(valid_payload)
+    drift_payload["slots"][drift_slot.unit_key]["text"] = (
+        "王有材凭空改写来源并杀死孟浩"
+    )
+    malformed_drift = json.dumps(
+        drift_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )[:-1]
+    prompts: list[list[dict[str, str]]] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages)
+        if len(prompts) == 1:
+            return malformed_drift
+        retry_prompt = messages[0]["content"]
+        assert "格式修复权威上下文" in retry_prompt
+        assert '"exact_slot_authority":' in retry_prompt
+        assert '"source_fact":' in retry_prompt
+        assert source_facts[drift_slot.source_unit_key] in retry_prompt
+        assert '"identity_authority":' in retry_prompt
+        assert '"final_gate_contract":' in retry_prompt
+        assert drift_payload["slots"][drift_slot.unit_key]["text"] in (
+            retry_prompt
+        )
+        return json.dumps(
+            valid_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    source_text = "\n\n".join([
+        *[f"结构占位 {index}" for index in range(1, 49)],
+        *[
+            segment["text"]
+            for scene_input in replay_input["scene_inputs"]
+            for segment in scene_input["source_segments"]
+        ],
+    ])
+    identities = [
+        IRIdentity(
+            key=item["identity_key"],
+            display_name=item["canonical_name"],
+            authority_id=item["authority_id"],
+            source_names=item["source_labels"],
+            visual_policy="canonical",
+            asset_requirement="required",
+            role_type="named_character",
+        )
+        for item in identity_registry
+    ]
+
+    shards, _artifact_ids, rows = asyncio.run(
+        generate_screenplay_scene_shards(
+            episode={
+                "id": f"ep-ss004-format-authority-{uuid.uuid4()}",
+                "episode_no": 1,
+            },
+            source_text=source_text,
+            blueprint=blueprint,
+            identity_registry=identity_registry,
+            identities=identities,
+            plans=[plan],
+            scene_input_contracts={plan.shard_id: contracts},
+        )
+    )
+
+    assert len(prompts) == 2
+    assert [message["role"] for message in prompts[1]] == ["user"]
+    assert "任务：只填写程序预声明 generation slot" not in (
+        prompts[1][0]["content"]
+    )
+    assert [shard.shard_id for shard in shards] == ["SS004"]
+    assert [row["status"] for row in rows] == ["validated"]
+
+
 @pytest.mark.parametrize(
     "channel",
     ["audible", "visible_effect", "visible_reaction"],
@@ -4977,6 +5102,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     )
     prompts: dict[str, str] = {}
     repair_contexts: dict[str, dict] = {}
+    format_repair_contexts: dict[str, dict] = {}
     operation_ids: dict[str, str] = {}
     output_schemas: dict[str, dict] = {}
     repair_schema_builders: dict[str, object] = {}
@@ -5006,6 +5132,10 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
             repair_schema_builders[prompt_key] = kwargs["repair_schema"]
         if kwargs.get("repair_context"):
             repair_contexts[prompt_key] = json.loads(kwargs["repair_context"])
+        if kwargs.get("format_repair_context"):
+            format_repair_contexts[prompt_key] = json.loads(
+                kwargs["format_repair_context"]
+            )
         if meta["stage_key"] == "screenplay_envelope":
             return _envelope(blueprint)
         plan = next(item for item in plans if item.shard_id == meta["shard_id"])
@@ -5053,6 +5183,9 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     first_repair_context = repair_contexts[
         "screenplay_scene_shards:SS001"
     ]
+    assert format_repair_contexts[
+        "screenplay_scene_shards:SS001"
+    ] == first_repair_context
     first_authority = first_repair_context["exact_slot_authority"]
     first_unit_key = plans[0].unit_slots[0].unit_key
     assert first_authority[first_unit_key]["source_fact"]["text"] == (

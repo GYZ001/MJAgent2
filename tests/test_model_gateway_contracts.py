@@ -8,6 +8,15 @@ import subprocess
 from app.harness import model_gateway
 
 
+def test_format_repair_context_is_optional_keyword_only() -> None:
+    parameter = inspect.signature(
+        model_gateway.chat_structured
+    ).parameters["format_repair_context"]
+
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default == ""
+
+
 def test_direct_chat_structured_calls_pass_required_keyword_only_arguments() -> None:
     root = Path(__file__).resolve().parents[1]
     tracked = subprocess.run(

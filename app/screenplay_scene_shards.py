@@ -4240,6 +4240,37 @@ async def generate_screenplay_scene_shards(
                 identity_registry=identity_registry,
             )
         )
+        creative_repair_context = json.dumps({
+            "root_contract": {
+                "contract_version": SCREENPLAY_SCENE_CREATIVE_VERSION,
+                "required_root_fields": [
+                    "contract_version", "slots",
+                ],
+                "structural_fields_owned_by": (
+                    "deterministic_generation_scaffold"
+                ),
+                "generation_scaffold_hash": generation_scaffold_hash,
+            },
+            "scene_input_contracts": repair_contracts,
+            "exact_slot_authority": exact_slot_authority,
+            "identity_authority": identity_labels,
+            "action_participant_delivery_contract": (
+                ScreenplayActionParticipantDeliveryContract()
+                .model_dump(mode="json")
+            ),
+            "final_gate_contract": [
+                "slot keys must exactly equal the declared unit_key set",
+                "missing or extra slots are generation_contract failures",
+                "structural and identity fields are forbidden in slot content",
+                "dialogue text must equal scaffold source_text",
+                "action_agency, agency_kind, text_provenance and identity_keys are compiler-owned additional properties",
+                "required_text, prop_text and on_screen_text are content fields and never create identity relations",
+                "compiler derives agency and provenance from scaffold relations and source IDs",
+                "empty action source_text does not authorize free rewriting; use only that slot's source_fact.text",
+                "each slot may rewrite only its own source_fact and may not borrow adjacent units",
+                "cross-slot content is attributed to the earliest overreaching slot",
+            ],
+        }, ensure_ascii=False, separators=(",", ":"))
         output_schema = build_screenplay_scene_shard_repair_schema(
             plan=plan,
             scene_input_contracts=plan_scene_input_contracts,
@@ -4343,41 +4374,8 @@ async def generate_screenplay_scene_shards(
                         "input_chars": len(prompt),
                         **budget_meta,
                     },
-                    repair_context=json.dumps({
-                        "root_contract": {
-                            "contract_version": (
-                                SCREENPLAY_SCENE_CREATIVE_VERSION
-                            ),
-                            "required_root_fields": [
-                                "contract_version", "slots",
-                            ],
-                            "structural_fields_owned_by": (
-                                "deterministic_generation_scaffold"
-                            ),
-                            "generation_scaffold_hash": (
-                                generation_scaffold_hash
-                            ),
-                        },
-                        "scene_input_contracts": repair_contracts,
-                        "exact_slot_authority": exact_slot_authority,
-                        "identity_authority": identity_labels,
-                        "action_participant_delivery_contract": (
-                            ScreenplayActionParticipantDeliveryContract()
-                            .model_dump(mode="json")
-                        ),
-                        "final_gate_contract": [
-                            "slot keys must exactly equal the declared unit_key set",
-                            "missing or extra slots are generation_contract failures",
-                            "structural and identity fields are forbidden in slot content",
-                            "dialogue text must equal scaffold source_text",
-                            "action_agency, agency_kind, text_provenance and identity_keys are compiler-owned additional properties",
-                            "required_text, prop_text and on_screen_text are content fields and never create identity relations",
-                            "compiler derives agency and provenance from scaffold relations and source IDs",
-                            "empty action source_text does not authorize free rewriting; use only that slot's source_fact.text",
-                            "each slot may rewrite only its own source_fact and may not borrow adjacent units",
-                            "cross-slot content is attributed to the earliest overreaching slot",
-                        ],
-                    }, ensure_ascii=False, separators=(",", ":")),
+                    repair_context=creative_repair_context,
+                    format_repair_context=creative_repair_context,
                     output_schema=output_schema,
                     repair_schema=repair_schema,
                     on_attempt=attempts.append,

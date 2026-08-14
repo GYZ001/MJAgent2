@@ -594,10 +594,38 @@ def test_structured_runner_uses_one_format_repair(monkeypatch) -> None:
     assert "Schema" in prompts[1]
     assert "not-json" in prompts[1]
     assert "original large context" not in prompts[1]
+    assert "格式修复权威上下文" not in prompts[1]
     assert [meta["format_attempt"] for meta in metas] == [0, 1]
     assert [meta["semantic_attempt"] for meta in metas] == [0, 0]
     assert metas[0]["operation_id"] != metas[1]["operation_id"]
     assert metas[0]["base_operation_id"] == metas[1]["base_operation_id"]
+
+
+def test_structured_runner_format_retry_includes_explicit_authority(
+    monkeypatch,
+) -> None:
+    prompts: list[str] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        return "not-json" if len(prompts) == 1 else '{"value":3}'
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    result = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "original large context"}],
+        model_type=_Payload,
+        validate=None,
+        operation_id="test.format-repair-authority:v1:abc",
+        max_tokens=128,
+        format_retry_limit=1,
+        format_repair_context='{"exact_authority":"source fact"}',
+    ))
+
+    assert result.value == 3
+    assert len(prompts) == 2
+    assert "格式修复权威上下文" in prompts[1]
+    assert '{"exact_authority":"source fact"}' in prompts[1]
+    assert "original large context" not in prompts[1]
 
 
 def test_format_repair_keeps_outer_candidate_validation_error(

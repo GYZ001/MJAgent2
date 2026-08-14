@@ -448,6 +448,7 @@ async def chat_structured(
     temperature: float = 0.1,
     call_meta: dict[str, Any] | None = None,
     repair_context: str = "",
+    format_repair_context: str = "",
     output_schema: dict[str, Any] | None = None,
     repair_schema: Callable[[T], dict[str, Any]] | None = None,
     normalize_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -624,6 +625,12 @@ async def chat_structured(
                         + json.dumps(structured_schema, ensure_ascii=False)
                         + "\nSchema 校验错误：\n"
                         + str(parse_error or "找不到完整 JSON 对象")
+                        + (
+                            "\n格式修复权威上下文：\n"
+                            + format_repair_context
+                            if format_repair_context
+                            else ""
+                        )
                         + "\n完整候选：\n"
                         + candidate_text
                     ),
