@@ -4402,7 +4402,6 @@ def _blueprint_exact_ownership_claims(
     target_unit_keys: list[str],
 ) -> dict[str, dict[str, Any]]:
     """Project only the ownership fields protected by exact-unit repair."""
-    targets = set(target_unit_keys)
     return {
         unit_key: {
             "single": [
@@ -4438,7 +4437,6 @@ def _blueprint_exact_ownership_claims(
             ],
         }
         for unit_key in target_unit_keys
-        if unit_key in targets
     }
 
 
@@ -4499,7 +4497,20 @@ async def _repair_reviewed_blueprint_state_subject_ownership(
                 ] + source_group[fact_index + 1:fact_index + 2]
             ],
         }
-        allowed_identities[unit_key] = list(owner.participants)
+        allowed_identities[unit_key] = [
+            identity_key
+            for identity_key in owner.participants
+            if any(
+                evidence.identity_key == identity_key
+                and evidence.usage in {"visible", "voice"}
+                and fact.source_segment_id in evidence.source_segment_ids
+                and (
+                    not evidence.source_unit_keys
+                    or unit_key in evidence.source_unit_keys
+                )
+                for evidence in owner.participant_evidence
+            )
+        ]
         node_context[owner.key] = owner.model_dump(mode="json")
 
     compact = lambda value: json.dumps(  # noqa: E731
@@ -5324,7 +5335,14 @@ async def _semantic_review_narrative_blueprint(
                 type="screenplay_narrative_blueprint_review_consensus",
                 scope_type="episode",
                 scope_id=str(episode.get("id") or ""),
-                status="needs_revision" if needs_full_fallback else "validated",
+                status=(
+                    "needs_revision"
+                    if (
+                        needs_full_fallback
+                        or full_review_has_one_sided_residual
+                    )
+                    else "validated"
+                ),
                 trust_level="T1",
                 content={
                     "review_round": review_round,
@@ -5369,9 +5387,9 @@ async def _semantic_review_narrative_blueprint(
             step_run_id=trace.step_run_id,
         )
         if needs_full_fallback:
-            # Conflicting targeted opinions are the only reason to pay for a
-            # full Blueprint review.  The next bounded round switches inputs;
-            # no patch is attempted from non-consensus findings.
+            # A targeted one-sided result cannot establish clean authority.
+            # The next bounded round switches to the complete Blueprint; no
+            # patch is attempted from non-consensus findings.
             if review_round >= 4:
                 raise ContentGenerationError(
                     "蓝图定向语义复审仍有单侧必须修复问题，已按非 clean 停止"

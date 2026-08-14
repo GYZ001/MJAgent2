@@ -702,6 +702,7 @@ def test_reviewer_and_repair_schemas_bind_projection_authority() -> None:
     review_schema = blueprint_semantic_review_schema(
         ["n1", "n2"],
         ["SRC0001", "SRC0002"],
+        ["SRC0001:unit:001", "SRC0002:unit:001"],
     )
     issue_properties = review_schema["$defs"][
         "BlueprintSemanticIssue"
@@ -710,6 +711,14 @@ def test_reviewer_and_repair_schemas_bind_projection_authority() -> None:
     assert issue_properties["source_segment_ids"]["items"]["enum"] == [
         "SRC0001", "SRC0002",
     ]
+    assert issue_properties["source_unit_keys"]["items"]["enum"] == [
+        "SRC0001:unit:001", "SRC0002:unit:001",
+    ]
+    misclassified_contract = review_schema["$defs"][
+        "BlueprintSemanticIssue"
+    ]["allOf"][-1]["then"]["properties"]
+    assert misclassified_contract["node_keys"]["maxItems"] == 1
+    assert misclassified_contract["source_unit_keys"]["minItems"] == 1
 
     schema = blueprint_patch_schema(blueprint, ["n1", "n2"])
     alternatives = schema["properties"]["replacements"]["items"]["oneOf"]
@@ -2248,6 +2257,405 @@ def _ownership_repair_fixture() -> tuple[
         }],
     })
     return source, shard, action_keys
+
+
+def _environment_misclassification_fixture() -> tuple[
+    str,
+    NarrativeBlueprint,
+    list[str],
+]:
+    source = "甲推门，乙抬桌，雨落下。\n\n丙关窗。"
+    facts = source_facts(source)
+    first_source_keys = [
+        fact.source_unit_key
+        for fact in facts
+        if fact.source_segment_id == "SRC0001"
+    ]
+    second_source_key = next(
+        fact.source_unit_key
+        for fact in facts
+        if fact.source_segment_id == "SRC0002"
+    )
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "misclassified-owner",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "甲推门，乙抬桌，随后下雨",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "room",
+            "location_label": "房间",
+            "participants": ["甲", "乙", "旁观者"],
+            "participant_evidence": [{
+                "identity_key": "甲",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [first_source_keys[0]],
+                "usage": "visible",
+            }, {
+                "identity_key": "乙",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": first_source_keys[:2],
+                "usage": "visible",
+            }, {
+                "identity_key": "旁观者",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [],
+                "usage": "mentioned",
+            }, {
+                "identity_key": "乙",
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [first_source_keys[1]],
+                "usage": "state_subject",
+            }],
+            "environment_source_unit_keys": [
+                first_source_keys[0],
+                first_source_keys[2],
+            ],
+            "state_changes": [{
+                "fact_key": "door-open",
+                "state_key": "door",
+                "value": "open",
+                "reason": "保留非 ownership 字段",
+            }],
+            "exit_state": "门已打开",
+            "action_logic": "按来源顺序交付动作",
+        }, {
+            "key": "frozen-neighbor",
+            "source_segment_ids": ["SRC0002"],
+            "summary": "丙关窗",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "continuous",
+            "location_key": "room",
+            "location_label": "房间",
+            "participants": ["丙"],
+            "participant_evidence": [{
+                "identity_key": "丙",
+                "source_segment_ids": ["SRC0002"],
+                "source_unit_keys": [second_source_key],
+                "usage": "visible",
+            }, {
+                "identity_key": "丙",
+                "source_segment_ids": ["SRC0002"],
+                "source_unit_keys": [second_source_key],
+                "usage": "state_subject",
+            }],
+            "action_logic": "丙关窗",
+        }],
+    })
+    return source, blueprint, first_source_keys
+
+
+def test_environment_misclassification_review_contract_has_semantic_authority() -> None:
+    source, blueprint, action_keys = _environment_misclassification_fixture()
+    issue = BlueprintSemanticIssue(
+        code="state_subject_environment_misclassified",
+        node_keys=["misclassified-owner"],
+        source_segment_ids=["SRC0001"],
+        source_unit_keys=[action_keys[0]],
+        message="该 exact unit 的环境归属遮蔽了人物状态主体",
+        required_resolution="仅替换该 unit 的 ownership",
+    )
+
+    review = BlueprintSemanticReview(issues=[issue])
+    assert validate_blueprint_semantic_review(
+        review,
+        blueprint,
+        source,
+    ) == []
+    assert blueprint_environment_subject_issue_has_exact_authority(
+        issue,
+        blueprint,
+        source,
+    )
+
+    invalid_issues = [
+        issue.model_copy(update={
+            "node_keys": ["misclassified-owner", "frozen-neighbor"],
+        }),
+        issue.model_copy(update={"node_keys": ["missing-node"]}),
+        issue.model_copy(update={"source_unit_keys": []}),
+        issue.model_copy(update={"source_unit_keys": [action_keys[1]]}),
+        issue.model_copy(update={"source_segment_ids": []}),
+        issue.model_copy(update={
+            "source_unit_keys": ["SRC0001:unit:999"],
+        }),
+    ]
+    for invalid_issue in invalid_issues:
+        invalid_review = BlueprintSemanticReview(issues=[invalid_issue])
+        assert validate_blueprint_semantic_review(
+            invalid_review,
+            blueprint,
+            source,
+        )
+        assert not blueprint_environment_subject_issue_has_exact_authority(
+            invalid_issue,
+            blueprint,
+            source,
+        )
+
+
+def test_full_blueprint_misclassification_schema_exposes_only_authorized_owners() -> None:
+    source, blueprint, action_keys = _environment_misclassification_fixture()
+    target = action_keys[0]
+
+    schema = blueprint_state_subject_ownership_patch_schema(
+        blueprint,
+        [target],
+        source,
+    )
+    assert schema == blueprint_state_subject_misclassification_patch_schema(
+        blueprint,
+        [target],
+        source,
+    )
+    assert schema["properties"]["base_candidate_hash"]["const"] == (
+        blueprint_candidate_hash(blueprint)
+    )
+    definition = next(iter(schema["$defs"].values()))
+    modes = {
+        option["properties"]["mode"]["const"]
+        for option in definition["oneOf"]
+    }
+    identity_enums = {
+        identity
+        for option in definition["oneOf"]
+        for identity in option["properties"]["identity_keys"]["items"]["enum"]
+    }
+
+    assert modes == {"single", "joint"}
+    assert "environment" not in json.dumps(schema)
+    assert identity_enums == {"甲", "乙"}
+    assert "旁观者" not in identity_enums
+
+
+def test_full_blueprint_misclassification_patch_freezes_non_targets() -> None:
+    source, blueprint, action_keys = _environment_misclassification_fixture()
+    target = action_keys[0]
+    before = blueprint.model_dump(mode="json")
+
+    repaired = apply_blueprint_state_subject_ownership_patch(
+        blueprint,
+        {
+            "base_candidate_hash": blueprint_candidate_hash(blueprint),
+            "repairs": {
+                target: {
+                    "mode": "single",
+                    "identity_keys": ["甲"],
+                },
+            },
+        },
+        target_unit_keys=[target],
+        source_text=source,
+    )
+    assert isinstance(repaired, NarrativeBlueprint)
+    after = repaired.model_dump(mode="json")
+
+    assert blueprint.model_dump(mode="json") == before
+    assert after["nodes"][1] == before["nodes"][1]
+    for field_name in before["nodes"][0]:
+        if field_name not in {
+            "participant_evidence",
+            "state_subject_assignments",
+            "environment_source_unit_keys",
+        }:
+            assert after["nodes"][0][field_name] == (
+                before["nodes"][0][field_name]
+            )
+    assert [
+        evidence
+        for evidence in after["nodes"][0]["participant_evidence"]
+        if evidence["usage"] != "state_subject"
+    ] == [
+        evidence
+        for evidence in before["nodes"][0]["participant_evidence"]
+        if evidence["usage"] != "state_subject"
+    ]
+    assert [
+        evidence
+        for evidence in after["nodes"][0]["participant_evidence"]
+        if (
+            evidence["usage"] == "state_subject"
+            and target not in evidence["source_unit_keys"]
+        )
+    ] == [
+        evidence
+        for evidence in before["nodes"][0]["participant_evidence"]
+        if (
+            evidence["usage"] == "state_subject"
+            and target not in evidence["source_unit_keys"]
+        )
+    ]
+    assert repaired.nodes[0].environment_source_unit_keys == [action_keys[2]]
+    assert any(
+        evidence.identity_key == "甲"
+        and evidence.usage == "state_subject"
+        and evidence.source_unit_keys == [target]
+        for evidence in repaired.nodes[0].participant_evidence
+    )
+    assert validate_narrative_blueprint(repaired, source) == []
+
+
+def test_full_blueprint_misclassification_patch_supports_joint() -> None:
+    source, blueprint, action_keys = _environment_misclassification_fixture()
+    target = action_keys[0]
+
+    repaired = apply_blueprint_state_subject_misclassification_patch(
+        blueprint,
+        {
+            "base_candidate_hash": blueprint_candidate_hash(blueprint),
+            "repairs": {
+                target: {
+                    "mode": "joint",
+                    "identity_keys": ["甲", "乙"],
+                },
+            },
+        },
+        target_unit_keys=[target],
+        source_text=source,
+    )
+
+    assert repaired.nodes[0].environment_source_unit_keys == [action_keys[2]]
+    assert [
+        assignment.model_dump(mode="json")
+        for assignment in repaired.nodes[0].state_subject_assignments
+    ] == [{
+        "source_unit_key": target,
+        "mode": "joint",
+        "identity_keys": ["甲", "乙"],
+    }]
+    assert validate_narrative_blueprint(repaired, source) == []
+
+
+def test_true_environment_and_patch_drift_fail_closed() -> None:
+    source = "雨落下。"
+    target = "SRC0001:unit:001"
+    blueprint = NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "weather",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "雨落下",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "yard",
+            "location_label": "院中",
+            "environment_source_unit_keys": [target],
+            "action_logic": "雨落下",
+        }],
+    })
+    issue = BlueprintSemanticIssue(
+        code="state_subject_environment_misclassified",
+        node_keys=["weather"],
+        source_segment_ids=["SRC0001"],
+        source_unit_keys=[target],
+        message="语义审稿判断由双 reviewer 提供",
+        required_resolution="只能使用已有感知 authority",
+    )
+
+    assert blueprint_environment_subject_issue_has_exact_authority(
+        issue,
+        blueprint,
+        source,
+    )
+    with pytest.raises(ValueError, match="visible/voice authority"):
+        blueprint_state_subject_ownership_patch_schema(
+            blueprint,
+            [target],
+            source,
+        )
+
+    source, blueprint, action_keys = _environment_misclassification_fixture()
+    target = action_keys[0]
+    base_hash = blueprint_candidate_hash(blueprint)
+    with pytest.raises(ValueError, match="不允许 environment"):
+        apply_blueprint_state_subject_misclassification_patch(
+            blueprint,
+            {
+                "base_candidate_hash": base_hash,
+                "repairs": {
+                    target: {
+                        "mode": "environment",
+                        "identity_keys": [],
+                    },
+                },
+            },
+            target_unit_keys=[target],
+            source_text=source,
+        )
+    with pytest.raises(ValueError, match="hash 漂移"):
+        apply_blueprint_state_subject_misclassification_patch(
+            blueprint,
+            {
+                "base_candidate_hash": "stale",
+                "repairs": {
+                    target: {
+                        "mode": "single",
+                        "identity_keys": ["甲"],
+                    },
+                },
+            },
+            target_unit_keys=[target],
+            source_text=source,
+        )
+    with pytest.raises(ValueError, match="target 集合"):
+        apply_blueprint_state_subject_misclassification_patch(
+            blueprint,
+            {
+                "base_candidate_hash": base_hash,
+                "repairs": {
+                    target: {
+                        "mode": "single",
+                        "identity_keys": ["甲"],
+                    },
+                    action_keys[2]: {
+                        "mode": "single",
+                        "identity_keys": ["甲"],
+                    },
+                },
+            },
+            target_unit_keys=[target],
+            source_text=source,
+        )
+    with pytest.raises(ValueError, match="visible/voice authority"):
+        apply_blueprint_state_subject_misclassification_patch(
+            blueprint,
+            {
+                "base_candidate_hash": base_hash,
+                "repairs": {
+                    target: {
+                        "mode": "single",
+                        "identity_keys": ["旁观者"],
+                    },
+                },
+            },
+            target_unit_keys=[target],
+            source_text=source,
+        )
+
+    duplicate_owner = blueprint.model_copy(deep=True)
+    duplicate_node = duplicate_owner.nodes[1].model_copy(deep=True)
+    duplicate_node.key = "duplicate-src-owner"
+    duplicate_node.source_segment_ids = ["SRC0001"]
+    duplicate_owner.nodes.append(duplicate_node)
+    with pytest.raises(ValueError, match="唯一 SRC owner"):
+        blueprint_state_subject_misclassification_patch_schema(
+            duplicate_owner,
+            [target],
+            source,
+        )
 
 
 def test_ownership_patch_schema_has_exact_53_targets_and_stays_compact() -> None:

@@ -1766,6 +1766,9 @@ def _blueprint_environment_subject_issue_contract_errors(
         None,
     )
     if node is None:
+        errors.append(
+            "state_subject_environment_misclassified 必须引用现有节点"
+        )
         return errors
 
     unit_keys = list(issue.source_unit_keys)
