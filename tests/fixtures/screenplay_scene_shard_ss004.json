@@ -16,7 +16,9 @@
   },
   "exact_authority_budget": {
     "prompt_chars": 36185,
-    "prompt_increment_chars": 1452
+    "prompt_increment_chars": 1452,
+    "repair_context_chars": 23114,
+    "repair_context_increment_chars": 2205
   },
   "recorded_attempts": [
     {

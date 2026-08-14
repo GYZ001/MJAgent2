@@ -291,9 +291,17 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
     assert math.ceil(len(captured["prompt"]) / 1.5 * 1.2) < (
         recorded["model_context_window_tokens"]
     )
-    assert len(captured["repair_context"]) < case["recorded_attempts"][2][
-        "request_chars"
+    assert len(captured["repair_context"]) == authority_budget[
+        "repair_context_chars"
     ]
+    assert (
+        len(captured["repair_context"])
+        - case["recorded_attempts"][2]["request_chars"]
+        == authority_budget["repair_context_increment_chars"]
+    )
+    assert math.ceil(len(captured["repair_context"]) / 1.5 * 1.2) < (
+        recorded["model_context_window_tokens"]
+    )
     assert [row["status"] for row in rows] == ["validated"]
 
     expected_sources = plan.source_segment_ids
