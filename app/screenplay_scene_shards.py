@@ -62,10 +62,10 @@ SCREENPLAY_ENVELOPE_VERSION = "screenplay-envelope.v1"
 SCREENPLAY_SCENE_SHARD_VERSION = "screenplay-scene-shard.v10"
 SCREENPLAY_SHARD_PLAN_VERSION = "screenplay-scene-shard-plan.v6"
 SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
-SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v6"
+SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v7"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v4"
+    "screenplay-scene-semantic-review.v5"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
@@ -389,7 +389,7 @@ class ScreenplaySceneShardCreativeUnit(BaseModel):
 class ScreenplaySceneShardCreativeIR(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["screenplay-scene-creative.v6"] = (
+    contract_version: Literal["screenplay-scene-creative.v7"] = (
         SCREENPLAY_SCENE_CREATIVE_VERSION
     )
     slots: dict[str, ScreenplaySceneShardCreativeUnit]
@@ -403,17 +403,32 @@ class ScreenplaySceneShardSemanticFinding(BaseModel):
         "state_subject_semantic_drift",
         "source_semantic_drift",
     ]
-    violation_kind: Literal[
-        "wrong_subject",
-        "unsupported_action",
-        "source_contradiction",
-        "cross_slot_duplication",
-        "environment_personification",
-    ]
+    violation_kinds: list[
+        Literal[
+            "wrong_subject",
+            "unsupported_action",
+            "source_contradiction",
+            "cross_slot_duplication",
+            "environment_personification",
+        ]
+    ] = Field(min_length=1, max_length=5)
     message: str = Field(
         min_length=1,
         max_length=SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS,
     )
+
+    @model_validator(mode="after")
+    def _canonicalize_violation_kinds(
+        self,
+    ) -> "ScreenplaySceneShardSemanticFinding":
+        if len(self.violation_kinds) != len(set(self.violation_kinds)):
+            raise ValueError("violation_kinds 不得重复")
+        self.violation_kinds = [
+            kind
+            for kind in SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
+            if kind in self.violation_kinds
+        ]
+        return self
 
 
 class ScreenplaySceneShardSemanticReview(BaseModel):
@@ -434,19 +449,49 @@ class ScreenplaySceneShardSemanticReview(BaseModel):
         return self
 
 
+def screenplay_scene_semantic_consensus(
+    reviewer1: ScreenplaySceneShardSemanticReview,
+    reviewer2: ScreenplaySceneShardSemanticReview,
+) -> list[ScreenplaySceneShardSemanticFinding]:
+    """Intersect typed reviewer kinds by finding identity."""
+    finding_maps = [
+        {
+            (finding.unit_key, finding.code): finding
+            for finding in review.findings
+        }
+        for review in (reviewer1, reviewer2)
+    ]
+    consensus: list[ScreenplaySceneShardSemanticFinding] = []
+    for key in sorted(set(finding_maps[0]).intersection(finding_maps[1])):
+        shared_kinds = (
+            set(finding_maps[0][key].violation_kinds)
+            & set(finding_maps[1][key].violation_kinds)
+        )
+        canonical_kinds = [
+            kind
+            for kind in SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
+            if kind in shared_kinds
+        ]
+        if canonical_kinds:
+            consensus.append(
+                finding_maps[0][key].model_copy(
+                    update={"violation_kinds": canonical_kinds},
+                )
+            )
+    return consensus
+
+
 def screenplay_scene_semantic_review_worst_case_payload(
     unit_keys: list[str],
 ) -> str:
     """Build the largest valid compact review for the declared slots."""
-    longest_violation_kind = max(
-        SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS,
-        key=len,
-    )
     findings = [
         {
             "unit_key": unit_key,
             "code": code,
-            "violation_kind": longest_violation_kind,
+            "violation_kinds": list(
+                SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS
+            ),
             "message": (
                 "冲"
                 * SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS
@@ -699,23 +744,12 @@ def _scene_shard_semantic_review_compatibility(
         ]
         if any(len(keys) != len(set(keys)) for keys in finding_keys):
             return False, "semantic_review_duplicate_finding"
-        finding_maps = [
-            {
-                (
-                    finding.unit_key,
-                    finding.code,
-                    finding.violation_kind,
-                ): finding
-                for finding in review.findings
-            }
-            for review in validated_reviews
-        ]
-        shared_keys = sorted(
-            set(finding_maps[0]).intersection(finding_maps[1])
-        )
         expected_consensus = [
-            finding_maps[0][key].model_dump(mode="json")
-            for key in shared_keys
+            finding.model_dump(mode="json")
+            for finding in screenplay_scene_semantic_consensus(
+                validated_reviews[0],
+                validated_reviews[1],
+            )
         ]
         if phase.get("consensus") != expected_consensus:
             return False, "semantic_review_consensus"
@@ -3423,6 +3457,12 @@ def _scene_shard_prompt(
         for identity_key in dict.fromkeys(bound_identity_keys)
         if identity_key in registry_by_key
     ]
+    exact_slot_authority, identity_labels = (
+        _scene_shard_semantic_authority_payload(
+            scene_input_contracts=scene_input_contracts,
+            identity_registry=identity_registry,
+        )
+    )
     generation_scaffold_hash = (
         screenplay_scene_generation_scaffold_hash(
             plan,
@@ -3449,7 +3489,11 @@ def _scene_shard_prompt(
         "不得用数组位置匹配，不得增加、"
         "删除、重命名或重排结构主键。dialogue slot 的 text 已由 Schema 固定为"
         "来源原文。任何缺失 slot、多余 slot 或越权字段都会明确作为 "
-        "generation_contract 失败，不会静默改写。\nShard plan：\n"
+        "generation_contract 失败，不会静默改写。逐 slot exact authority 是"
+        "唯一创作权限：action slot 即使 source_text 为空也不授权自由改写，"
+        "必须只展开自身 source_fact.text；每个 slot 只能改写自身 source_fact，"
+        "不得借用相邻 unit 的事实。cross-slot 内容必须归因到最早越界 slot，"
+        "不得提前或重复承载其他 slot 的来源事实。\nShard plan：\n"
         + json.dumps(
             plan_payload,
             ensure_ascii=False,
@@ -3471,6 +3515,18 @@ def _scene_shard_prompt(
         + "\n逐场输入合同（来源正文不得跨 scene_plan_key 使用）：\n"
         + json.dumps(
             contract_payloads,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n逐 slot exact authority：\n"
+        + json.dumps(
+            exact_slot_authority,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\nexact authority 身份标签：\n"
+        + json.dumps(
+            identity_labels,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -3564,16 +3620,18 @@ def _scene_shard_semantic_review_prompt(
         "程序冻结的 exact-unit state_subject/actor/speaker，检查 creative text、"
         "performance、resulting_state 是否把主体 A 改写成主体 B，或加入来源中"
         "不存在/相反的人物行为与反应。不能从姓名词面、visible、scene roster 猜主体；"
-        "environment_only 也不能承载人物思考、发问、反应或动作。每个 finding 必须"
-        "选择一个精确 violation_kind：wrong_subject、unsupported_action、"
-        "source_contradiction、cross_slot_duplication 或 "
-        "environment_personification。finding 只能归因到 creative fields 与该 slot"
-        " 自身 source_fact/冻结权威发生明确冲突的 slot，不能借用其他 slot 的"
-        " source_fact 给当前 slot 定罪。跨 slot 重复时，标记最早越界或没有自身来源"
-        "承载该内容的 slot；不得标记后来正确承载其自身 source_fact 的 slot。若较早"
-        "slot 正确、后来 slot 无来源重复，则标记后来的重复 slot。每个 (unit_key,"
-        " code) 最多一个 finding，但必须报告全部明确冲突。不得建议改结构、主体、"
-        "时间线、source ownership 或 audit。"
+        "environment_only 也不能承载人物思考、发问、反应或动作。同一 (unit_key,"
+        " code) 的全部适用类型必须放入同一个 violation_kinds 数组，只能从 "
+        "wrong_subject、unsupported_action、source_contradiction、"
+        "cross_slot_duplication、environment_personification 中选择，不得重复 "
+        "kind 或为同一 pair 输出重复 finding；message 必须覆盖数组中的全部 kinds。"
+        "finding 只能归因到 creative fields 与该 slot 自身 source_fact/冻结权威"
+        "发生明确冲突的 slot，不能借用其他 slot 的 source_fact 给当前 slot 定罪。"
+        "跨 slot 重复时，标记最早越界或没有自身来源承载该内容的 slot；不得标记后来"
+        "正确承载其自身 source_fact 的 slot。若较早 slot 正确、后来 slot 无来源"
+        "重复，则标记后来的重复 slot。每个 (unit_key, code) 最多一个 finding，"
+        "但必须报告全部明确冲突。不得建议改结构、主体、时间线、source ownership "
+        "或 audit。"
         '无问题时只输出合法 JSON 对象 {"findings":[]}。不得输出 Markdown、解释或'
         "任何对象外文本。\n冻结 slot 权威：\n"
         + json.dumps(authority_slots, ensure_ascii=False, separators=(",", ":"))
@@ -3848,20 +3906,8 @@ async def _semantic_review_scene_shard_draft(
                     + ",".join(sorted(unknown_finding_keys))
                 ],
             )
-        maps = [
-            {
-                (
-                    finding.unit_key,
-                    finding.code,
-                    finding.violation_kind,
-                ): finding
-                for finding in item.findings
-            }
-            for item in reviews
-        ]
-        shared = sorted(set(maps[0]).intersection(maps[1]))
         return (
-            [maps[0][key] for key in shared],
+            screenplay_scene_semantic_consensus(reviews[0], reviews[1]),
             [item.model_dump(mode="json") for item in reviews],
         )
 
@@ -4172,6 +4218,12 @@ async def generate_screenplay_scene_shards(
                 for source_id in contract.source_segment_ids
             }
             repair_contracts.append(payload)
+        exact_slot_authority, identity_labels = (
+            _scene_shard_semantic_authority_payload(
+                scene_input_contracts=plan_scene_input_contracts,
+                identity_registry=identity_registry,
+            )
+        )
         output_schema = build_screenplay_scene_shard_repair_schema(
             plan=plan,
             scene_input_contracts=plan_scene_input_contracts,
@@ -4291,6 +4343,8 @@ async def generate_screenplay_scene_shards(
                             ),
                         },
                         "scene_input_contracts": repair_contracts,
+                        "exact_slot_authority": exact_slot_authority,
+                        "identity_authority": identity_labels,
                         "action_participant_delivery_contract": (
                             ScreenplayActionParticipantDeliveryContract()
                             .model_dump(mode="json")
@@ -4303,6 +4357,9 @@ async def generate_screenplay_scene_shards(
                             "action_agency, agency_kind, text_provenance and identity_keys are compiler-owned additional properties",
                             "required_text, prop_text and on_screen_text are content fields and never create identity relations",
                             "compiler derives agency and provenance from scaffold relations and source IDs",
+                            "empty action source_text does not authorize free rewriting; use only that slot's source_fact.text",
+                            "each slot may rewrite only its own source_fact and may not borrow adjacent units",
+                            "cross-slot content is attributed to the earliest overreaching slot",
                         ],
                     }, ensure_ascii=False, separators=(",", ":")),
                     output_schema=output_schema,
@@ -4361,6 +4418,9 @@ async def generate_screenplay_scene_shards(
                     "generation_scaffold_hash": (
                         generation_scaffold_hash
                     ),
+                    "creative_contract_version": (
+                        SCREENPLAY_SCENE_CREATIVE_VERSION
+                    ),
                     "attempts": attempts,
                     "semantic_review_evidence": {
                         "contract_version": (
@@ -4396,6 +4456,9 @@ async def generate_screenplay_scene_shards(
                     "identity_scaffold_hash": identity_scaffold_hash,
                     "generation_scaffold_hash": (
                         generation_scaffold_hash
+                    ),
+                    "creative_contract_version": (
+                        SCREENPLAY_SCENE_CREATIVE_VERSION
                     ),
                     "semantic_review_version": (
                         SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION

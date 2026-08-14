@@ -1,0 +1,58 @@
+{
+  "run_id": "run_b0659b64b548",
+  "shard_id": "SS001",
+  "semantic_review_version": "screenplay-scene-semantic-review.v5",
+  "reviewer1": {
+    "findings": [
+      {
+        "unit_key": "SS001:SRC0004:unit:071",
+        "code": "source_semantic_drift",
+        "violation_kinds": [
+          "unsupported_action",
+          "source_contradiction"
+        ],
+        "message": "071 同时加入无来源动作并与来源事实冲突。"
+      },
+      {
+        "unit_key": "SS001:SRC0004:unit:072",
+        "code": "source_semantic_drift",
+        "violation_kinds": [
+          "wrong_subject"
+        ],
+        "message": "072 reviewer1 判定主体错误。"
+      }
+    ]
+  },
+  "reviewer2": {
+    "findings": [
+      {
+        "unit_key": "SS001:SRC0004:unit:071",
+        "code": "source_semantic_drift",
+        "violation_kinds": [
+          "source_contradiction",
+          "cross_slot_duplication"
+        ],
+        "message": "071 reviewer2 判定来源冲突并跨 slot 重复。"
+      },
+      {
+        "unit_key": "SS001:SRC0004:unit:072",
+        "code": "source_semantic_drift",
+        "violation_kinds": [
+          "unsupported_action"
+        ],
+        "message": "072 reviewer2 仅判定无来源动作。"
+      }
+    ]
+  },
+  "expected_consensus": [
+    {
+      "unit_key": "SS001:SRC0004:unit:071",
+      "code": "source_semantic_drift",
+      "violation_kinds": [
+        "source_contradiction"
+      ],
+      "message": "071 同时加入无来源动作并与来源事实冲突。"
+    }
+  ],
+  "empty_intersection_unit_key": "SS001:SRC0004:unit:072"
+}

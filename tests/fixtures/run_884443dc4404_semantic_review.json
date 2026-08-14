@@ -1,7 +1,7 @@
 {
   "run_id": "run_884443dc4404",
   "shard_id": "SS002",
-  "semantic_review_version": "screenplay-scene-semantic-review.v4",
+  "semantic_review_version": "screenplay-scene-semantic-review.v5",
   "budget_unit_counts": [24, 64, 79],
   "partial_review": {
     "unit_count": 79,
@@ -24,7 +24,7 @@
     "expected_finding": {
       "unit_key": "SS002:SRC0004:unit:045",
       "code": "source_semantic_drift",
-      "violation_kind": "cross_slot_duplication",
+      "violation_kinds": ["cross_slot_duplication"],
       "message": "045 越界提前承载 051 的来源事实；051 正确承载自身来源，不应标记。"
     },
     "forbidden_finding_unit_key": "SS002:SRC0004:unit:051"
