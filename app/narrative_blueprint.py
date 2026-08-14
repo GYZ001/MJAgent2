@@ -29,7 +29,7 @@ from app.source_facts import SOURCE_FACT_VERSION, SourceFact, source_facts
 
 
 BLUEPRINT_VERSION = "screenplay-narrative-blueprint.v7"
-BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.8.0"
+BLUEPRINT_PROMPT_VERSION = "screenplay-blueprint-1.9.0"
 BLUEPRINT_MAX_SOURCE_SEGMENTS_PER_NODE = 8
 # Provider-facing Blueprint shards are deliberately smaller than the final
 # scene/node ownership limit.  A production 28-SRC shard exhausted 10K output
@@ -40,9 +40,12 @@ BLUEPRINT_TARGET_SOURCE_SEGMENTS_PER_SHARD = 14
 BLUEPRINT_TARGET_SOURCE_FACTS_PER_SHARD = 18
 BLUEPRINT_SHARD_POLICY_VERSION = "blueprint-shard-policy.v8"
 BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION = (
-    "blueprint-shard-local-authority.v10"
+    "blueprint-shard-local-authority.v11"
 )
 BLUEPRINT_SPLIT_MANIFEST_VERSION = "blueprint-split-manifest.v1"
+STATE_SUBJECT_ADJUDICATION_VERSION = (
+    "blueprint-state-subject-adjudication.v1"
+)
 
 
 def blueprint_authority_validator_fingerprint() -> str:
@@ -55,6 +58,9 @@ def blueprint_authority_validator_fingerprint() -> str:
             BLUEPRINT_SHARD_LOCAL_AUTHORITY_VERSION
         ),
         "split_manifest_version": BLUEPRINT_SPLIT_MANIFEST_VERSION,
+        "state_subject_adjudication_version": (
+            STATE_SUBJECT_ADJUDICATION_VERSION
+        ),
     }
     return hashlib.sha256(
         json.dumps(
@@ -92,6 +98,7 @@ _PARATEXT_EMPTY_LIST_FIELDS = (
     "participant_evidence",
     "state_subject_assignments",
     "environment_source_unit_keys",
+    "state_subject_adjudicated_unit_keys",
     "source_unit_deliveries",
     "state_requirements",
     "state_changes",
@@ -165,6 +172,9 @@ def normalize_blueprint_provider_payload(payload: Any) -> Any:
                 if identity_key and identity_key not in evidence_identities:
                     evidence_identities.append(identity_key)
         node["participant_evidence"] = evidence_values
+        # This proof is compiler-owned and can only be created by the bounded
+        # exact-unit ownership adjudication path.
+        node["state_subject_adjudicated_unit_keys"] = []
         # Evidence rows and exact-unit joint assignments are the two typed
         # source-backed identity authorities. An independently authored roster
         # would create a third truth that can survive into downstream IR.
@@ -221,6 +231,15 @@ def blueprint_shard_provider_schema(
     else:
         node_properties["environment_source_unit_keys"]["maxItems"] = 0
         node_properties["state_subject_assignments"]["maxItems"] = 0
+    node_properties["state_subject_adjudicated_unit_keys"] = {
+        "type": "array",
+        "maxItems": 0,
+        "items": {"type": "string"},
+        "description": (
+            "Compiler-owned exact-unit adjudication proof; providers must "
+            "always return an empty list."
+        ),
+    }
     node_properties.get("participants", {})["description"] = (
         "Ordered identity roster. Its unique identity set must exactly equal "
         "the union of participant_evidence.identity_key and "
@@ -647,6 +666,12 @@ class NarrativeNode(BaseModel):
     # Absence is never interpreted as environment: that used to turn missing
     # character attribution into a synthetic environment state silently.
     environment_source_unit_keys: list[str] = Field(default_factory=list)
+    # Proof that a bounded ownership adjudicator independently resolved the
+    # exact unit. It prevents a confirmed environment classification from
+    # being raised again by later semantic review rounds.
+    state_subject_adjudicated_unit_keys: list[str] = Field(
+        default_factory=list,
+    )
     source_unit_deliveries: list[NarrativeSourceUnitDelivery] = Field(
         default_factory=list,
     )
@@ -705,6 +730,7 @@ class NarrativeNode(BaseModel):
             self.participant_evidence,
             self.state_subject_assignments,
             self.environment_source_unit_keys,
+            self.state_subject_adjudicated_unit_keys,
             self.source_unit_deliveries,
             self.exit_state.strip(),
             self.state_requirements,
@@ -1251,6 +1277,8 @@ class BlueprintSemanticIssue(BaseModel):
         "state_subject_environment_invalid",
         "state_subject_environment_conflict",
         "state_subject_environment_non_picture",
+        "state_subject_environment_misclassified",
+        "state_subject_adjudication_invalid",
         "state_subject_perception_missing",
         "ending_payoff_gap",
     ]
@@ -1729,6 +1757,12 @@ def blueprint_semantic_voice_issue_has_dialogue_authority(
     source_text: str,
 ) -> bool:
     """Require exact deterministic support for contract-shaped findings."""
+    if issue.code == "state_subject_environment_misclassified":
+        return blueprint_environment_subject_issue_has_exact_authority(
+            issue,
+            blueprint,
+            source_text,
+        )
     if issue.code.startswith(("voice_identity_", "source_delivery_")):
         candidate_issues = blueprint_voice_identity_issues(
             blueprint,
@@ -1770,6 +1804,55 @@ def blueprint_semantic_voice_issue_has_dialogue_authority(
     return bool(issue.source_segment_ids) and set(
         issue.source_segment_ids
     ).issubset(supported_source_ids)
+
+
+def blueprint_environment_subject_issue_has_exact_authority(
+    issue: BlueprintSemanticIssue,
+    blueprint: NarrativeBlueprint,
+    source_text: str,
+) -> bool:
+    """Bind a semantic environment finding to one unresolved exact unit.
+
+    This check proves scope only. It deliberately does not infer a subject
+    from punctuation, text, visibility, or the participant roster; two
+    independent semantic reviewers remain responsible for the classification.
+    """
+    if (
+        issue.code != "state_subject_environment_misclassified"
+        or len(issue.node_keys) != 1
+        or len(issue.source_unit_keys) != 1
+    ):
+        return False
+    node = next(
+        (item for item in blueprint.nodes if item.key == issue.node_keys[0]),
+        None,
+    )
+    if node is None:
+        return False
+    unit_key = issue.source_unit_keys[0]
+    if (
+        unit_key not in node.environment_source_unit_keys
+        or unit_key in node.state_subject_adjudicated_unit_keys
+    ):
+        return False
+    fact = next(
+        (
+            item
+            for item in source_facts(source_text)
+            if item.source_unit_key == unit_key
+        ),
+        None,
+    )
+    if (
+        fact is None
+        or fact.projection != "action"
+        or fact.source_segment_id not in node.source_segment_ids
+    ):
+        return False
+    return (
+        not issue.source_segment_ids
+        or issue.source_segment_ids == [fact.source_segment_id]
+    )
 
 
 def filter_blueprint_semantic_review_voice_issues(
