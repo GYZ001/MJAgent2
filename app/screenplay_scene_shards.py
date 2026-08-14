@@ -23,6 +23,7 @@ from pydantic import (
     model_validator,
 )
 
+from app import hiagent
 from app.character_policy import functional_extra_anchor
 from app.db import get_conn, get_setting
 from app.evidence import repository as evidence_repository
@@ -64,11 +65,25 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v6"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v3"
+    "screenplay-scene-semantic-review.v4"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
     "不得返回 Markdown、解释或对象外文本。"
+)
+SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS = 2048
+SCREENPLAY_SCENE_SEMANTIC_REVIEW_CONTEXT_RESERVE_TOKENS = 1024
+SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS = 160
+SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES = (
+    "state_subject_semantic_drift",
+    "source_semantic_drift",
+)
+SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS = (
+    "wrong_subject",
+    "unsupported_action",
+    "source_contradiction",
+    "cross_slot_duplication",
+    "environment_personification",
 )
 SCREENPLAY_SCENE_SHARD_MIN_OUTPUT_TOKENS = 4096
 SCREENPLAY_SCENE_SHARD_MAX_OUTPUT_TOKENS = 16384
@@ -386,7 +401,17 @@ class ScreenplaySceneShardSemanticFinding(BaseModel):
         "state_subject_semantic_drift",
         "source_semantic_drift",
     ]
-    message: str
+    violation_kind: Literal[
+        "wrong_subject",
+        "unsupported_action",
+        "source_contradiction",
+        "cross_slot_duplication",
+        "environment_personification",
+    ]
+    message: str = Field(
+        min_length=1,
+        max_length=SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS,
+    )
 
 
 class ScreenplaySceneShardSemanticReview(BaseModel):
@@ -405,6 +430,50 @@ class ScreenplaySceneShardSemanticReview(BaseModel):
         if len(finding_keys) != len(set(finding_keys)):
             raise ValueError("findings 中 (unit_key, code) 必须唯一")
         return self
+
+
+def screenplay_scene_semantic_review_worst_case_payload(
+    unit_keys: list[str],
+) -> str:
+    """Build the largest valid compact review for the declared slots."""
+    longest_violation_kind = max(
+        SCREENPLAY_SCENE_SEMANTIC_VIOLATION_KINDS,
+        key=len,
+    )
+    findings = [
+        {
+            "unit_key": unit_key,
+            "code": code,
+            "violation_kind": longest_violation_kind,
+            "message": (
+                "冲"
+                * SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS
+            ),
+        }
+        for unit_key in unit_keys
+        for code in SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES
+    ]
+    return json.dumps(
+        {"findings": findings},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _screenplay_scene_semantic_token_estimate(chars: int) -> int:
+    return math.ceil(max(0, chars) / 1.5 * 1.2)
+
+
+def screenplay_scene_semantic_review_required_tokens(
+    unit_keys: list[str],
+) -> int:
+    payload = screenplay_scene_semantic_review_worst_case_payload(
+        unit_keys
+    )
+    return max(
+        SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS,
+        _screenplay_scene_semantic_token_estimate(len(payload)),
+    )
 
 
 class ScreenplaySceneShardUnit(IRSceneUnit):
@@ -612,7 +681,11 @@ def _scene_shard_semantic_review_compatibility(
             return False, "semantic_review_duplicate_finding"
         finding_maps = [
             {
-                (finding.unit_key, finding.code): finding
+                (
+                    finding.unit_key,
+                    finding.code,
+                    finding.violation_kind,
+                ): finding
                 for finding in review.findings
             }
             for review in validated_reviews
@@ -3466,12 +3539,21 @@ def _scene_shard_semantic_review_prompt(
     )
     review_schema = ScreenplaySceneShardSemanticReview.model_json_schema()
     return (
-        "你是剧本场次分片的独立语义审查员。逐 slot 对照原始 source_text 与"
+        "你是剧本场次分片的独立语义审查员。必须逐 slot 穷举审查，不得抽样、"
+        "提前停止或只报告部分冲突。逐 slot 对照原始 source_text 与"
         "程序冻结的 exact-unit state_subject/actor/speaker，检查 creative text、"
         "performance、resulting_state 是否把主体 A 改写成主体 B，或加入来源中"
         "不存在/相反的人物行为与反应。不能从姓名词面、visible、scene roster 猜主体；"
-        "environment_only 也不能承载人物思考、发问、反应或动作。只报告有明确来源"
-        "冲突的 finding；不得建议改结构、主体、时间线、source ownership 或 audit。"
+        "environment_only 也不能承载人物思考、发问、反应或动作。每个 finding 必须"
+        "选择一个精确 violation_kind：wrong_subject、unsupported_action、"
+        "source_contradiction、cross_slot_duplication 或 "
+        "environment_personification。finding 只能归因到 creative fields 与该 slot"
+        " 自身 source_fact/冻结权威发生明确冲突的 slot，不能借用其他 slot 的"
+        " source_fact 给当前 slot 定罪。跨 slot 重复时，标记最早越界或没有自身来源"
+        "承载该内容的 slot；不得标记后来正确承载其自身 source_fact 的 slot。若较早"
+        "slot 正确、后来 slot 无来源重复，则标记后来的重复 slot。每个 (unit_key,"
+        " code) 最多一个 finding，但必须报告全部明确冲突。不得建议改结构、主体、"
+        "时间线、source ownership 或 audit。"
         '无问题时只输出合法 JSON 对象 {"findings":[]}。不得输出 Markdown、解释或'
         "任何对象外文本。\n冻结 slot 权威：\n"
         + json.dumps(authority_slots, ensure_ascii=False, separators=(",", ":"))
@@ -3486,6 +3568,54 @@ def _scene_shard_semantic_review_prompt(
             separators=(",", ":"),
         )
     )
+
+
+def _scene_shard_semantic_review_budget(
+    *,
+    unit_keys: list[str],
+    review_prompt: str,
+) -> dict[str, int | str]:
+    provider = hiagent.active_provider("text")
+    model = hiagent.active_model("text", provider)
+    limits = hiagent.active_model_token_limits(
+        provider,
+        model,
+        get_setting,
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
+        },
+        {"role": "user", "content": review_prompt},
+    ]
+    input_chars = len(json.dumps(
+        messages,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ))
+    input_estimate = _screenplay_scene_semantic_token_estimate(input_chars)
+    required = screenplay_scene_semantic_review_required_tokens(unit_keys)
+    context_ceiling = max(
+        0,
+        int(limits["context_window_tokens"])
+        - input_estimate
+        - SCREENPLAY_SCENE_SEMANTIC_REVIEW_CONTEXT_RESERVE_TOKENS,
+    )
+    ceiling = min(
+        int(limits["max_output_tokens"]),
+        context_ceiling,
+    )
+    return {
+        "provider": provider,
+        "model": model,
+        "unit_count": len(unit_keys),
+        "input_estimate": input_estimate,
+        "required": required,
+        "ceiling": ceiling,
+        "context_window": int(limits["context_window_tokens"]),
+        "max_output": int(limits["max_output_tokens"]),
+    }
 
 
 async def _semantic_review_scene_shard_draft(
@@ -3505,6 +3635,8 @@ async def _semantic_review_scene_shard_draft(
         candidate: ScreenplaySceneShardCreativeIR,
         reviewer_no: int,
         phase: str,
+        review_prompt: str,
+        budget: dict[str, int | str],
     ) -> ScreenplaySceneShardSemanticReview:
         known_unit_keys = set(candidate.slots)
 
@@ -3531,11 +3663,7 @@ async def _semantic_review_scene_shard_draft(
                 },
                 {
                     "role": "user",
-                    "content": _scene_shard_semantic_review_prompt(
-                        draft=candidate,
-                        scene_input_contracts=scene_input_contracts,
-                        identity_registry=identity_registry,
-                    ),
+                    "content": review_prompt,
                 },
             ],
             model_type=ScreenplaySceneShardSemanticReview,
@@ -3546,7 +3674,7 @@ async def _semantic_review_scene_shard_draft(
                 f"reviewer-{reviewer_no}:"
                 f"{_hash(candidate.model_dump(mode='json'))}"
             ),
-            max_tokens=2048,
+            max_tokens=int(budget["required"]),
             temperature=0.0,
             format_retry_limit=1,
             semantic_retry_limit=0,
@@ -3559,6 +3687,12 @@ async def _semantic_review_scene_shard_draft(
                 "contract_version": (
                     SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
                 ),
+                "provider": budget["provider"],
+                "model": budget["model"],
+                "unit_count": budget["unit_count"],
+                "input_estimate": budget["input_estimate"],
+                "required": budget["required"],
+                "ceiling": budget["ceiling"],
             },
             output_schema=review_schema,
         )
@@ -3567,9 +3701,31 @@ async def _semantic_review_scene_shard_draft(
         candidate: ScreenplaySceneShardCreativeIR,
         phase: str,
     ) -> tuple[list[ScreenplaySceneShardSemanticFinding], list[dict[str, Any]]]:
+        review_prompt = _scene_shard_semantic_review_prompt(
+            draft=candidate,
+            scene_input_contracts=scene_input_contracts,
+            identity_registry=identity_registry,
+        )
+        unit_keys = list(candidate.slots)
+        budget = _scene_shard_semantic_review_budget(
+            unit_keys=unit_keys,
+            review_prompt=review_prompt,
+        )
+        if int(budget["required"]) > int(budget["ceiling"]):
+            raise ScreenplaySceneShardError(
+                shard_id,
+                [
+                    "语义审查输出预算不足，provider 调用已阻断："
+                    f"unit_count={budget['unit_count']}，"
+                    f"required={budget['required']}，"
+                    f"ceiling={budget['ceiling']}，"
+                    f"provider={budget['provider']}，"
+                    f"model={budget['model']}"
+                ],
+            )
         reviews = await asyncio.gather(
-            review(candidate, 1, phase),
-            review(candidate, 2, phase),
+            review(candidate, 1, phase, review_prompt, budget),
+            review(candidate, 2, phase, review_prompt, budget),
         )
         known_unit_keys = set(candidate.slots)
         unknown_finding_keys = {
@@ -3587,7 +3743,14 @@ async def _semantic_review_scene_shard_draft(
                 ],
             )
         maps = [
-            {(finding.unit_key, finding.code): finding for finding in item.findings}
+            {
+                (
+                    finding.unit_key,
+                    finding.code,
+                    finding.violation_kind,
+                ): finding
+                for finding in item.findings
+            }
             for item in reviews
         ]
         shared = sorted(set(maps[0]).intersection(maps[1]))

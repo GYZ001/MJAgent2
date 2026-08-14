@@ -1,0 +1,32 @@
+{
+  "run_id": "run_884443dc4404",
+  "shard_id": "SS002",
+  "semantic_review_version": "screenplay-scene-semantic-review.v4",
+  "budget_unit_counts": [24, 64, 79],
+  "partial_review": {
+    "unit_count": 79,
+    "finding_count": 24,
+    "message": "partial evidence"
+  },
+  "cross_slot_duplication": {
+    "early_slot": {
+      "unit_key": "SS002:SRC0004:unit:045",
+      "source_segment_id": "SRC0045",
+      "source_fact": "孟浩抬头观察四周。",
+      "creative": "孟浩抬头观察四周，又发现前方石台上的银色小剑。"
+    },
+    "later_source_slot": {
+      "unit_key": "SS002:SRC0004:unit:051",
+      "source_segment_id": "SRC0051",
+      "source_fact": "孟浩发现前方石台上的银色小剑。",
+      "creative": "孟浩发现前方石台上的银色小剑。"
+    },
+    "expected_finding": {
+      "unit_key": "SS002:SRC0004:unit:045",
+      "code": "source_semantic_drift",
+      "violation_kind": "cross_slot_duplication",
+      "message": "045 越界提前承载 051 的来源事实；051 正确承载自身来源，不应标记。"
+    },
+    "forbidden_finding_unit_key": "SS002:SRC0004:unit:051"
+  }
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import json
+import math
 from pathlib import Path
 import uuid
 
@@ -117,6 +118,11 @@ ERR_20260810_48009F_REPLAY = (
     Path(__file__).parent
     / "fixtures"
     / "screenplay_scene_shard_err_20260810_48009f.json"
+)
+RUN_884443DC4404_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "run_884443dc4404_semantic_review.json"
 )
 SS004_REPLAY_INPUT = (
     Path(__file__).parent
@@ -284,7 +290,7 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
     schema = ScreenplaySceneShardSemanticReview.model_json_schema()
 
     assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION == (
-        "screenplay-scene-semantic-review.v3"
+        "screenplay-scene-semantic-review.v4"
     )
     assert schema["required"] == ["findings"]
     assert "default" not in schema["properties"]["findings"]
@@ -300,10 +306,100 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
         })
 
 
+def test_scene_shard_semantic_finding_kind_and_message_are_bounded() -> None:
+    finding = {
+        "unit_key": "unit-1",
+        "code": "source_semantic_drift",
+        "violation_kind": "source_contradiction",
+        "message": "明确冲突",
+    }
+
+    assert ScreenplaySceneShardSemanticFinding.model_validate(
+        finding
+    ).violation_kind == "source_contradiction"
+    with pytest.raises(ValidationError, match="Field required"):
+        ScreenplaySceneShardSemanticFinding.model_validate({
+            key: value
+            for key, value in finding.items()
+            if key != "violation_kind"
+        })
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        ScreenplaySceneShardSemanticFinding.model_validate({
+            **finding,
+            "message": "",
+        })
+    with pytest.raises(ValidationError, match="at most 160 characters"):
+        ScreenplaySceneShardSemanticFinding.model_validate({
+            **finding,
+            "message": "冲" * 161,
+        })
+
+
+def test_run_884443dc4404_semantic_budget_covers_worst_payload() -> None:
+    case = json.loads(
+        RUN_884443DC4404_REPLAY.read_text(encoding="utf-8")
+    )
+    budgets: list[int] = []
+    payloads: dict[int, str] = {}
+
+    for unit_count in case["budget_unit_counts"]:
+        unit_keys = [
+            f"{case['shard_id']}:unit:{index:03d}"
+            for index in range(1, unit_count + 1)
+        ]
+        payload = (
+            scene_shards_module
+            .screenplay_scene_semantic_review_worst_case_payload(unit_keys)
+        )
+        review = ScreenplaySceneShardSemanticReview.model_validate_json(
+            payload
+        )
+        required = (
+            scene_shards_module
+            .screenplay_scene_semantic_review_required_tokens(unit_keys)
+        )
+
+        assert len(review.findings) == 2 * unit_count
+        assert len({
+            (finding.unit_key, finding.code)
+            for finding in review.findings
+        }) == 2 * unit_count
+        assert all(
+            finding.violation_kind == "environment_personification"
+            for finding in review.findings
+        )
+        assert all(len(finding.message) == 160 for finding in review.findings)
+        assert required == max(
+            2048,
+            math.ceil(len(payload) / 1.5 * 1.2),
+        )
+        budgets.append(required)
+        payloads[unit_count] = payload
+
+    assert budgets[0] < budgets[1] < budgets[2]
+    partial = case["partial_review"]
+    partial_payload = json.dumps({
+        "findings": [
+            {
+                "unit_key": f"{case['shard_id']}:partial:{index:03d}",
+                "code": "source_semantic_drift",
+                "violation_kind": "source_contradiction",
+                "message": partial["message"],
+            }
+            for index in range(partial["finding_count"])
+        ],
+    }, ensure_ascii=False, separators=(",", ":"))
+    partial_need = math.ceil(len(partial_payload) / 1.5 * 1.2)
+    assert partial["unit_count"] == case["budget_unit_counts"][-1]
+    assert budgets[-1] > partial_need
+    assert len(payloads[partial["unit_count"]]) > len(partial_payload)
+
+
 def test_scene_shard_semantic_review_rejects_duplicate_finding_keys() -> None:
     finding = {
         "unit_key": "unit-1",
         "code": "source_semantic_drift",
+        "violation_kind": "source_contradiction",
         "message": "first",
     }
 
@@ -367,6 +463,7 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
                     ScreenplaySceneShardSemanticFinding(
                         unit_key=flagged_key,
                         code="state_subject_semantic_drift",
+                        violation_kind="wrong_subject",
                         message="冻结主体为甲，creative 却写成乙的动作",
                     )
                 ])
@@ -455,6 +552,20 @@ def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
         == SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
         for kwargs in review_calls + repair_calls
     )
+    assert all(
+        kwargs["max_tokens"] == kwargs["call_meta"]["required"]
+        for kwargs in review_calls
+    )
+    assert all(
+        kwargs["call_meta"]["unit_count"] == len(unit_keys)
+        for kwargs in review_calls
+    )
+    assert all(
+        kwargs["call_meta"]["required"] >= 2048
+        and kwargs["call_meta"]["ceiling"]
+        >= kwargs["call_meta"]["required"]
+        for kwargs in review_calls
+    )
 
 
 def test_scene_shard_semantic_single_reviewer_finding_does_not_repair(
@@ -477,6 +588,7 @@ def test_scene_shard_semantic_single_reviewer_finding_does_not_repair(
             [ScreenplaySceneShardSemanticFinding(
                 unit_key=flagged_key,
                 code="source_semantic_drift",
+                violation_kind="source_contradiction",
                 message="single reviewer only",
             )] if calls == 1 else []
         ))
@@ -498,6 +610,114 @@ def test_scene_shard_semantic_single_reviewer_finding_does_not_repair(
     assert audit[0]["consensus"] == []
 
 
+def test_scene_shard_semantic_same_key_code_different_kind_is_not_consensus(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    flagged_key = next(iter(draft.slots))
+    calls = 0
+
+    async def fake_structured(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["model_type"] is ScreenplaySceneShardSemanticReview
+        violation_kind = (
+            "wrong_subject"
+            if kwargs["call_meta"]["reviewer_no"] == 1
+            else "unsupported_action"
+        )
+        return ScreenplaySceneShardSemanticReview(findings=[
+            ScreenplaySceneShardSemanticFinding(
+                unit_key=flagged_key,
+                code="source_semantic_drift",
+                violation_kind=violation_kind,
+                message=f"reviewer classified {violation_kind}",
+            ),
+        ])
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    result, audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        operation_id="scene-semantic-kind-disagreement",
+        shard_id=plan.shard_id,
+        validate_draft=lambda _candidate: [],
+    ))
+
+    assert result == draft
+    assert calls == 2
+    assert audit[0]["consensus"] == []
+
+
+def test_scene_shard_semantic_insufficient_ceiling_blocks_provider(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    provider_calls = 0
+
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_provider",
+        lambda _kind: "budget-test-provider",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "budget-test-model",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model_token_limits",
+        lambda *_args: {
+            "context_window_tokens": 1024,
+            "max_output_tokens": 32768,
+            "token_limits_source": "configured",
+        },
+    )
+
+    async def forbidden_structured(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("budget gate must run before provider")
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        forbidden_structured,
+    )
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match=r"required=\d+，ceiling=0",
+    ):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-budget-block",
+            shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
+        ))
+
+    assert provider_calls == 0
+
+
 def test_scene_shard_semantic_unknown_finding_is_hard_failure(
     monkeypatch,
 ) -> None:
@@ -513,6 +733,7 @@ def test_scene_shard_semantic_unknown_finding_is_hard_failure(
             ScreenplaySceneShardSemanticFinding(
                 unit_key="UNKNOWN-SRC0031",
                 code="source_semantic_drift",
+                violation_kind="source_contradiction",
                 message="unknown",
             ),
         ])
@@ -549,6 +770,7 @@ def test_scene_shard_semantic_post_repair_consensus_failure_is_hard(
                 ScreenplaySceneShardSemanticFinding(
                     unit_key=flagged_key,
                     code="state_subject_semantic_drift",
+                    violation_kind="wrong_subject",
                     message="F43/F47/F60 drift remains",
                 ),
             ])
@@ -626,6 +848,73 @@ def test_scene_shard_semantic_prompt_reads_action_source_facts_for_production_dr
     assert all(slot.source_text == "" for slot in slots)
 
 
+def test_run_884443dc4404_prompt_attributes_051_duplication_to_045() -> None:
+    case = json.loads(
+        RUN_884443DC4404_REPLAY.read_text(encoding="utf-8")
+    )
+    duplicate_case = case["cross_slot_duplication"]
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    base_contract = _contracts([plan], blueprint)[plan.shard_id][0]
+    base_slot = base_contract.unit_slots[0]
+    fixture_slots = [
+        duplicate_case["early_slot"],
+        duplicate_case["later_source_slot"],
+    ]
+    slots = [
+        base_slot.model_copy(update={
+            "unit_key": fixture_slot["unit_key"],
+            "source_unit_key": (
+                f"{fixture_slot['source_segment_id']}:unit:001"
+            ),
+            "source_segment_ids": [
+                fixture_slot["source_segment_id"],
+            ],
+            "source_text": "",
+        })
+        for fixture_slot in fixture_slots
+    ]
+    contract = base_contract.model_copy(update={
+        "source_segments": [
+            ScreenplaySceneSourceSegment(
+                source_segment_id=fixture_slot["source_segment_id"],
+                text=fixture_slot["source_fact"],
+            )
+            for fixture_slot in fixture_slots
+        ],
+        "unit_slots": slots,
+    })
+    draft = ScreenplaySceneShardCreativeIR(slots={
+        fixture_slot["unit_key"]: ScreenplaySceneShardCreativeUnit(
+            text=fixture_slot["creative"],
+        )
+        for fixture_slot in fixture_slots
+    })
+
+    prompt = scene_shards_module._scene_shard_semantic_review_prompt(
+        draft=draft,
+        scene_input_contracts=[contract],
+        identity_registry=[],
+    )
+    expected = ScreenplaySceneShardSemanticFinding.model_validate(
+        duplicate_case["expected_finding"]
+    )
+
+    assert "必须逐 slot 穷举审查" in prompt
+    assert "finding 只能归因到 creative fields 与该 slot 自身 source_fact" in prompt
+    assert "标记最早越界或没有自身来源承载该内容的 slot" in prompt
+    assert "不得标记后来正确承载其自身 source_fact 的 slot" in prompt
+    assert all(slot["unit_key"] in prompt for slot in fixture_slots)
+    assert all(slot["source_fact"] in prompt for slot in fixture_slots)
+    assert expected.unit_key == duplicate_case["early_slot"]["unit_key"]
+    assert expected.violation_kind == "cross_slot_duplication"
+    assert expected.unit_key != duplicate_case["forbidden_finding_unit_key"]
+
+
 def test_scene_shard_semantic_repair_rejects_unflagged_slot_rewrite(
     monkeypatch,
 ) -> None:
@@ -648,6 +937,7 @@ def test_scene_shard_semantic_repair_rejects_unflagged_slot_rewrite(
                 ScreenplaySceneShardSemanticFinding(
                     unit_key=unit_keys[0],
                     code="source_semantic_drift",
+                    violation_kind="wrong_subject",
                     message="production F43/F47/F60 型来源主体漂移",
                 )
             ])
@@ -743,6 +1033,7 @@ def test_scene_shard_semantic_real_reviewer_rejects_duplicate_finding_keys(
     finding = {
         "unit_key": unit_key,
         "code": "source_semantic_drift",
+        "violation_kind": "source_contradiction",
         "message": "first",
     }
 
@@ -791,6 +1082,7 @@ def test_scene_shard_semantic_unknown_unit_fails_in_real_structured_validator(
         ScreenplaySceneShardSemanticFinding(
             unit_key="UNKNOWN-SLOT",
             code="source_semantic_drift",
+            violation_kind="source_contradiction",
             message="unknown",
         ),
     ])
@@ -828,6 +1120,7 @@ def test_scene_shard_semantic_repair_overreach_fails_in_real_validator(
     finding = ScreenplaySceneShardSemanticFinding(
         unit_key=unit_keys[0],
         code="source_semantic_drift",
+        violation_kind="source_contradiction",
         message="source drift",
     )
     overreaching = draft.model_copy(deep=True)
@@ -888,6 +1181,7 @@ def test_scene_shard_semantic_retry_keeps_authority_and_rejects_fabrication(
     finding = ScreenplaySceneShardSemanticFinding(
         unit_key=flagged_key,
         code="source_semantic_drift",
+        violation_kind="source_contradiction",
         message="creative 与冻结来源事实冲突",
     )
     repair_messages: list[list[dict[str, str]]] = []
@@ -3220,6 +3514,7 @@ def _scene_shard_cache_compatibility_case(
     first_finding = {
         "unit_key": unit_key,
         "code": "source_semantic_drift",
+        "violation_kind": "source_contradiction",
         "message": "第一 reviewer 的 finding",
     }
     second_finding = {
@@ -3317,6 +3612,42 @@ def test_scene_shard_cache_accepts_exact_semantic_review_evidence(
 ) -> None:
     artifact, _raw_artifact, compatibility_kwargs = (
         _scene_shard_cache_compatibility_case(with_repair=with_repair)
+    )
+
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+
+    assert compatible is True, reason
+
+
+def test_scene_shard_cache_does_not_consensus_different_violation_kinds() -> None:
+    artifact, raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=False)
+    )
+    unit_key = artifact["content"]["scenes"][0]["units"][0]["unit_key"]
+    first_finding = {
+        "unit_key": unit_key,
+        "code": "source_semantic_drift",
+        "violation_kind": "wrong_subject",
+        "message": "reviewer one",
+    }
+    second_finding = {
+        **first_finding,
+        "violation_kind": "unsupported_action",
+        "message": "reviewer two",
+    }
+    phase = raw_artifact["content"]["semantic_review_evidence"][
+        "phases"
+    ][0]
+    phase["reviews"] = [
+        {"findings": [first_finding]},
+        {"findings": [second_finding]},
+    ]
+    phase["consensus"] = []
+    raw_artifact["content_hash"] = evidence_repository.content_hash(
+        raw_artifact["content"]
     )
 
     compatible, reason = screenplay_scene_shard_artifact_compatibility(
@@ -3780,6 +4111,7 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         finding = {
             "unit_key": unit_key,
             "code": "source_semantic_drift",
+            "violation_kind": "source_contradiction",
             "message": "仍未 clean",
         }
         evidence["phases"][-1]["reviews"] = [
@@ -3794,6 +4126,7 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         finding = {
             "unit_key": unit_key,
             "code": "source_semantic_drift",
+            "violation_kind": "source_contradiction",
             "message": "被伪装成 clean",
         }
         evidence["phases"][0]["reviews"] = [
@@ -3808,11 +4141,13 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
             {
                 "unit_key": unit_key,
                 "code": "state_subject_semantic_drift",
+                "violation_kind": "wrong_subject",
                 "message": "排序后应位于第二",
             },
             {
                 "unit_key": unit_key,
                 "code": "source_semantic_drift",
+                "violation_kind": "source_contradiction",
                 "message": "排序后应位于第一",
             },
         ]
@@ -3828,6 +4163,7 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         first_finding = {
             "unit_key": unit_key,
             "code": "source_semantic_drift",
+            "violation_kind": "source_contradiction",
             "message": "第一 reviewer",
         }
         second_finding = {**first_finding, "message": "第二 reviewer"}
@@ -3843,6 +4179,7 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         finding = {
             "unit_key": unit_key,
             "code": "source_semantic_drift",
+            "violation_kind": "source_contradiction",
             "message": "重复 finding",
         }
         evidence["phases"][0]["reviews"][0]["findings"] = [
@@ -3863,12 +4200,14 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         evidence["phases"][0]["reviews"][0]["findings"] = [{
             "unit_key": unit_key,
             "code": "unsupported_code",
+            "violation_kind": "source_contradiction",
             "message": "伪 finding",
         }]
     else:
         evidence["phases"][0]["reviews"][0]["findings"] = [{
             "unit_key": "UNKNOWN-V2-UNIT",
             "code": "source_semantic_drift",
+            "violation_kind": "source_contradiction",
             "message": "引用不存在的 unit",
         }]
     raw["content_hash"] = evidence_repository.content_hash(
