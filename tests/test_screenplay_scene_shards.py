@@ -3918,8 +3918,8 @@ def test_ss004_scene_format_retry_keeps_exact_source_authority(
     monkeypatch,
 ) -> None:
     replay_input = json.loads(SS004_REPLAY_INPUT.read_text(encoding="utf-8"))
-    plan, scene_plans, contracts, _identity_keys = (
-        _ss004_replay_validation_context()
+    _replay, plan, scene_plans, contracts = (
+        _ss004_533ac9_compile_context()
     )
     identity_registry = [
         {
@@ -3970,7 +3970,7 @@ def test_ss004_scene_format_retry_keeps_exact_source_authority(
         drift_payload,
         ensure_ascii=False,
         separators=(",", ":"),
-    )[:-1]
+    ).replace('","slots":', '" "slots":', 1)
     prompts: list[list[dict[str, str]]] = []
 
     async def fake_chat(messages, **_kwargs):
@@ -3995,11 +3995,11 @@ def test_ss004_scene_format_retry_keeps_exact_source_authority(
 
     monkeypatch.setattr(model_gateway, "chat", fake_chat)
     source_text = "\n\n".join([
-        *[f"结构占位 {index}" for index in range(1, 49)],
+        *[f"结构占位 {index}" for index in range(1, 54)],
         *[
-            segment["text"]
-            for scene_input in replay_input["scene_inputs"]
-            for segment in scene_input["source_segments"]
+            segment.text
+            for contract in contracts
+            for segment in contract.source_segments
         ],
     ])
     identities = [
