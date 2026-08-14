@@ -394,6 +394,18 @@ class ScreenplaySceneShardSemanticReview(BaseModel):
 
     findings: list[ScreenplaySceneShardSemanticFinding]
 
+    @model_validator(mode="after")
+    def _validate_unique_finding_keys(
+        self,
+    ) -> "ScreenplaySceneShardSemanticReview":
+        finding_keys = [
+            (finding.unit_key, finding.code)
+            for finding in self.findings
+        ]
+        if len(finding_keys) != len(set(finding_keys)):
+            raise ValueError("findings 中 (unit_key, code) 必须唯一")
+        return self
+
 
 class ScreenplaySceneShardUnit(IRSceneUnit):
     model_config = ConfigDict(extra="forbid")
@@ -532,10 +544,37 @@ def _scene_shard_semantic_review_compatibility(
         for scene in validated_shard.scenes
         for unit in scene.units
     }
+    recomputed_consensus: list[list[dict[str, Any]]] = []
     for phase in phases:
         reviews = phase.get("reviews")
         if not isinstance(reviews, list) or len(reviews) != 2:
             return False, "semantic_review_artifacts_missing"
+        for review in reviews:
+            findings = (
+                review.get("findings")
+                if isinstance(review, dict)
+                else None
+            )
+            try:
+                validated_findings = (
+                    [
+                        ScreenplaySceneShardSemanticFinding.model_validate(
+                            finding
+                        )
+                        for finding in findings
+                    ]
+                    if isinstance(findings, list)
+                    else []
+                )
+            except ValidationError:
+                validated_findings = []
+            if validated_findings:
+                finding_keys = [
+                    (finding.unit_key, finding.code)
+                    for finding in validated_findings
+                ]
+                if len(finding_keys) != len(set(finding_keys)):
+                    return False, "semantic_review_duplicate_finding"
         validated_reviews: list[ScreenplaySceneShardSemanticReview] = []
         for review in reviews:
             try:
@@ -572,8 +611,18 @@ def _scene_shard_semantic_review_compatibility(
         ]
         if phase.get("consensus") != expected_consensus:
             return False, "semantic_review_consensus"
-    if phases[-1].get("consensus") != []:
-        return False, "semantic_review_not_clean"
+        recomputed_consensus.append(expected_consensus)
+    if (
+        phase_names == ["initial"]
+        and recomputed_consensus[0]
+    ) or (
+        phase_names == ["initial", "post_repair"]
+        and (
+            not recomputed_consensus[0]
+            or recomputed_consensus[1]
+        )
+    ):
+        return False, "semantic_review_phase_contract"
     return True, ""
 
 

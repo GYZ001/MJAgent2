@@ -300,6 +300,22 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
         })
 
 
+def test_scene_shard_semantic_review_rejects_duplicate_finding_keys() -> None:
+    finding = {
+        "unit_key": "unit-1",
+        "code": "source_semantic_drift",
+        "message": "first",
+    }
+
+    with pytest.raises(ValidationError, match="必须唯一"):
+        ScreenplaySceneShardSemanticReview.model_validate({
+            "findings": [
+                finding,
+                {**finding, "message": "duplicate key"},
+            ],
+        })
+
+
 def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
     monkeypatch,
 ) -> None:
@@ -709,6 +725,55 @@ def test_scene_shard_semantic_clean_dual_review_uses_real_structured_signature(
         for messages in reviewer_messages
     )
     assert audit[0]["consensus"] == []
+
+
+def test_scene_shard_semantic_real_reviewer_rejects_duplicate_finding_keys(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    unit_key = next(iter(draft.slots))
+    call_meta: list[dict] = []
+    finding = {
+        "unit_key": unit_key,
+        "code": "source_semantic_drift",
+        "message": "first",
+    }
+
+    async def fake_chat(*_args, **kwargs):
+        call_meta.append(kwargs["call_meta"])
+        return json.dumps({
+            "findings": [
+                finding,
+                {**finding, "message": "duplicate key"},
+            ],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    with pytest.raises(
+        model_gateway.StructuredFormatError,
+        match="必须唯一",
+    ):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-real-duplicate",
+            shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
+        ))
+
+    assert len(call_meta) == 4
+    assert {item["reviewer_no"] for item in call_meta} == {1, 2}
+    assert sorted(item["format_attempt"] for item in call_meta) == [
+        0, 0, 1, 1,
+    ]
 
 
 def test_scene_shard_semantic_unknown_unit_fails_in_real_structured_validator(
@@ -3257,6 +3322,54 @@ def test_scene_shard_cache_accepts_exact_semantic_review_evidence(
     assert compatible is True, reason
 
 
+@pytest.mark.parametrize(
+    ("with_repair", "mutation"),
+    [
+        (False, "unreachable_two_clean"),
+        (True, "post_repair_not_clean"),
+    ],
+)
+def test_scene_shard_cache_rejects_invalid_semantic_review_phase_contract(
+    with_repair: bool,
+    mutation: str,
+) -> None:
+    artifact, raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=with_repair)
+    )
+    evidence = raw_artifact["content"]["semantic_review_evidence"]
+    if mutation == "unreachable_two_clean":
+        evidence["phases"].append({
+            "phase": "post_repair",
+            "creative_hash": evidence["reviewed_creative_hash"],
+            "reviews": [{"findings": []}, {"findings": []}],
+            "consensus": [],
+        })
+    else:
+        finding = evidence["phases"][0]["consensus"][0]
+        evidence["phases"][-1]["reviews"] = [
+            {"findings": [finding]},
+            {
+                "findings": [{
+                    **finding,
+                    "message": "post-repair second reviewer",
+                }],
+            },
+        ]
+        evidence["phases"][-1]["consensus"] = [finding]
+    raw_artifact["content_hash"] = evidence_repository.content_hash(
+        raw_artifact["content"],
+        raw_artifact.get("file_path"),
+    )
+
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+
+    assert compatible is False
+    assert reason == "semantic_review_phase_contract"
+
+
 def test_envelope_cache_binds_raw_artifact_content_hash() -> None:
     blueprint = _blueprint(split_domain=False)
     envelope_content = _envelope(blueprint).model_dump(mode="json")
@@ -3457,7 +3570,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         ("reordered_phases", "semantic_review_phase"),
         ("duplicate_phase", "semantic_review_phase"),
         ("initial_candidate", "semantic_review_initial_candidate"),
-        ("not_clean", "semantic_review_not_clean"),
+        ("not_clean", "semantic_review_phase_contract"),
         ("fake_clean", "semantic_review_consensus"),
         ("consensus_order", "semantic_review_consensus"),
         ("second_reviewer_consensus", "semantic_review_consensus"),
