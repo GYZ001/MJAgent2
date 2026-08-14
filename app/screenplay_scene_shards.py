@@ -65,7 +65,7 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v7"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v5"
+    "screenplay-scene-semantic-review.v6"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
@@ -449,6 +449,16 @@ class ScreenplaySceneShardSemanticReview(BaseModel):
         return self
 
 
+def _screenplay_scene_semantic_consensus_message(
+    code: str,
+    canonical_kinds: list[str],
+) -> str:
+    return (
+        f"{code}：仅修复双审共识类型"
+        f"[{','.join(canonical_kinds)}]；依据冻结来源。"
+    )
+
+
 def screenplay_scene_semantic_consensus(
     reviewer1: ScreenplaySceneShardSemanticReview,
     reviewer2: ScreenplaySceneShardSemanticReview,
@@ -474,8 +484,14 @@ def screenplay_scene_semantic_consensus(
         ]
         if canonical_kinds:
             consensus.append(
-                finding_maps[0][key].model_copy(
-                    update={"violation_kinds": canonical_kinds},
+                ScreenplaySceneShardSemanticFinding(
+                    unit_key=key[0],
+                    code=key[1],
+                    violation_kinds=canonical_kinds,
+                    message=_screenplay_scene_semantic_consensus_message(
+                        key[1],
+                        canonical_kinds,
+                    ),
                 )
             )
     return consensus

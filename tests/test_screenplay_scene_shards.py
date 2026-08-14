@@ -295,7 +295,7 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
     schema = ScreenplaySceneShardSemanticReview.model_json_schema()
 
     assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION == (
-        "screenplay-scene-semantic-review.v5"
+        "screenplay-scene-semantic-review.v6"
     )
     assert schema["required"] == ["findings"]
     assert "default" not in schema["properties"]["findings"]
@@ -367,6 +367,10 @@ def test_scene_shard_semantic_finding_kind_and_message_are_bounded() -> None:
 def test_run_884443dc4404_semantic_budget_covers_worst_payload() -> None:
     case = json.loads(
         RUN_884443DC4404_REPLAY.read_text(encoding="utf-8")
+    )
+    assert (
+        case["semantic_review_version"]
+        == SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
     )
     budgets: list[int] = []
     payloads: dict[int, str] = {}
@@ -464,6 +468,25 @@ def test_run_b0659b64b548_multi_kind_consensus_is_canonical() -> None:
 
     assert case["run_id"] == "run_b0659b64b548"
     assert case["shard_id"] == "SS001"
+    assert (
+        case["semantic_review_version"]
+        == SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
+    )
+    assert case["reviewer1"]["findings"][0]["violation_kinds"] == [
+        "source_contradiction",
+        "unsupported_action",
+    ]
+    assert all(
+        kind in case["reviewer1"]["findings"][0]["message"]
+        for kind in ("source_contradiction", "unsupported_action")
+    )
+    assert case["reviewer2"]["findings"][0]["violation_kinds"] == [
+        "source_contradiction",
+    ]
+    assert (
+        "unsupported_action"
+        not in case["reviewer2"]["findings"][0]["message"]
+    )
     assert [
         finding.model_dump(mode="json") for finding in consensus
     ] == case["expected_consensus"]
@@ -471,7 +494,12 @@ def test_run_b0659b64b548_multi_kind_consensus_is_canonical() -> None:
         finding.unit_key != case["empty_intersection_unit_key"]
         for finding in consensus
     )
-    assert consensus[0].message == reviewer1.findings[0].message
+    assert "source_contradiction" in consensus[0].message
+    assert "unsupported_action" not in consensus[0].message
+    assert consensus[0].message not in {
+        reviewer1.findings[0].message,
+        reviewer2.findings[0].message,
+    }
 
 
 def test_run_b0659b64b548_runtime_uses_multi_kind_consensus(
@@ -505,6 +533,11 @@ def test_run_b0659b64b548_runtime_uses_multi_kind_consensus(
         assert repair_context["consensus_findings"] == (
             case["expected_consensus"]
         )
+        consensus_message = repair_context["consensus_findings"][0][
+            "message"
+        ]
+        assert "source_contradiction" in consensus_message
+        assert "unsupported_action" not in consensus_message
         assert {
             finding["unit_key"]
             for finding in repair_context["consensus_findings"]
@@ -575,6 +608,11 @@ def test_scene_shard_semantic_repair_allows_exact_ceiling(
         violation_kinds=["source_contradiction"],
         message="来源主体漂移",
     )
+    review = ScreenplaySceneShardSemanticReview(findings=[finding])
+    finding = scene_shards_module.screenplay_scene_semantic_consensus(
+        review,
+        review,
+    )[0]
     frozen_slots, identity_labels = (
         scene_shards_module._scene_shard_semantic_authority_payload(
             scene_input_contracts=contracts,
@@ -4090,6 +4128,19 @@ def _scene_shard_cache_compatibility_case(
         **first_finding,
         "message": "第二 reviewer 的同键 finding",
     }
+    reviews = [
+        ScreenplaySceneShardSemanticReview.model_validate(
+            {"findings": [first_finding]}
+        ),
+        ScreenplaySceneShardSemanticReview.model_validate(
+            {"findings": [second_finding]}
+        ),
+    ]
+    consensus = [
+        finding.model_dump(mode="json")
+        for finding in scene_shards_module
+        .screenplay_scene_semantic_consensus(*reviews)
+    ]
     phases = [{
         "phase": "initial",
         "creative_hash": initial_hash,
@@ -4098,7 +4149,7 @@ def _scene_shard_cache_compatibility_case(
             if with_repair
             else [{"findings": []}, {"findings": []}]
         ),
-        "consensus": [first_finding] if with_repair else [],
+        "consensus": consensus if with_repair else [],
     }]
     if with_repair:
         phases.append({
@@ -4608,6 +4659,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         ("missing", "semantic_review_evidence_missing"),
         ("evidence_version", "semantic_review_version"),
         ("legacy_v4", "semantic_review_version"),
+        ("legacy_v5", "semantic_review_version"),
         ("snapshot_version", "semantic_review_version"),
         ("missing_shard_hash", "semantic_review_shard_hash"),
         ("missing_snapshot_shard_hash", "semantic_review_shard_hash"),
@@ -4718,6 +4770,8 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         evidence["contract_version"] = "screenplay-scene-semantic-review.v2"
     elif mutation == "legacy_v4":
         evidence["contract_version"] = "screenplay-scene-semantic-review.v4"
+    elif mutation == "legacy_v5":
+        evidence["contract_version"] = "screenplay-scene-semantic-review.v5"
     elif mutation == "snapshot_version":
         artifact["model_snapshot"]["semantic_review_version"] = (
             "screenplay-scene-semantic-review.v1"
@@ -4746,7 +4800,10 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
             "unit_key": unit_key,
             "code": "source_semantic_drift",
             "violation_kinds": ["source_contradiction"],
-            "message": "仍未 clean",
+            "message": (
+                "source_semantic_drift：仅修复双审共识类型"
+                "[source_contradiction]；依据冻结来源。"
+            ),
         }
         evidence["phases"][-1]["reviews"] = [
             {"findings": [finding]},

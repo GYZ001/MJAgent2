@@ -1,17 +1,17 @@
 {
   "run_id": "run_b0659b64b548",
   "shard_id": "SS001",
-  "semantic_review_version": "screenplay-scene-semantic-review.v5",
+  "semantic_review_version": "screenplay-scene-semantic-review.v6",
   "reviewer1": {
     "findings": [
       {
         "unit_key": "SS001:SRC0004:unit:071",
         "code": "source_semantic_drift",
         "violation_kinds": [
-          "unsupported_action",
-          "source_contradiction"
+          "source_contradiction",
+          "unsupported_action"
         ],
-        "message": "071 同时加入无来源动作并与来源事实冲突。"
+        "message": "071 reviewer1 判定 source_contradiction 与 unsupported_action。"
       },
       {
         "unit_key": "SS001:SRC0004:unit:072",
@@ -29,10 +29,9 @@
         "unit_key": "SS001:SRC0004:unit:071",
         "code": "source_semantic_drift",
         "violation_kinds": [
-          "source_contradiction",
-          "cross_slot_duplication"
+          "source_contradiction"
         ],
-        "message": "071 reviewer2 判定来源冲突并跨 slot 重复。"
+        "message": "071 reviewer2 仅判定 source_contradiction。"
       },
       {
         "unit_key": "SS001:SRC0004:unit:072",
@@ -51,7 +50,7 @@
       "violation_kinds": [
         "source_contradiction"
       ],
-      "message": "071 同时加入无来源动作并与来源事实冲突。"
+      "message": "source_semantic_drift：仅修复双审共识类型[source_contradiction]；依据冻结来源。"
     }
   ],
   "empty_intersection_unit_key": "SS001:SRC0004:unit:072"
