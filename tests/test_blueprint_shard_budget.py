@@ -2828,3 +2828,419 @@ def test_effective_model_cap_controls_unknown_exposure() -> None:
     assert settlement["charged_output_tokens"] == 8
     assert budget.requested_output_tokens == 16
     assert budget.unknown_output_tokens == 8
+
+
+def _semantic_review_environment_fixture() -> tuple[
+    str,
+    stages.NarrativeBlueprint,
+    list[str],
+]:
+    source = "\n\n".join([
+        "甲走进院子。",
+        "乙坐在桌边。",
+        "丙想起约定。",
+        "丁推开窗户。",
+        "戊离开院子。",
+    ])
+    unit_keys = [
+        fact.source_unit_key for fact in stages.source_facts(source)
+    ]
+    identities = ["甲", "乙", "丙", "丁", "戊"]
+    nodes: list[dict] = []
+    for index, (identity, unit_key) in enumerate(
+        zip(identities, unit_keys),
+        start=1,
+    ):
+        source_id = f"SRC{index:04d}"
+        participant_evidence = [{
+            "identity_key": identity,
+            "source_segment_ids": [source_id],
+            "source_unit_keys": [unit_key],
+            "usage": "visible",
+        }]
+        environment_source_unit_keys: list[str] = []
+        if index == 3:
+            environment_source_unit_keys = [unit_key]
+        else:
+            participant_evidence.append({
+                "identity_key": identity,
+                "source_segment_ids": [source_id],
+                "source_unit_keys": [unit_key],
+                "usage": "state_subject",
+            })
+        nodes.append({
+            "key": f"n{index}",
+            "source_segment_ids": [source_id],
+            "summary": f"节点{index}",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start" if index == 1 else "continuous",
+            "location_key": "yard",
+            "location_label": "院子",
+            "participants": [identity],
+            "participant_evidence": participant_evidence,
+            "environment_source_unit_keys": environment_source_unit_keys,
+            "action_logic": f"交付节点{index}的来源动作",
+        })
+    return (
+        source,
+        stages.NarrativeBlueprint.model_validate({
+            "episode_no": 1,
+            "nodes": nodes,
+        }),
+        unit_keys,
+    )
+
+
+def _semantic_review_two_unit_fixture() -> tuple[
+    str,
+    stages.NarrativeBlueprint,
+    list[str],
+]:
+    source = "甲推门，乙抬桌。"
+    unit_keys = [
+        fact.source_unit_key for fact in stages.source_facts(source)
+    ]
+    blueprint = stages.NarrativeBlueprint.model_validate({
+        "episode_no": 1,
+        "nodes": [{
+            "key": "n1",
+            "source_segment_ids": ["SRC0001"],
+            "summary": "两人先后行动",
+            "narrative_layer": "story",
+            "event_priority": "causal",
+            "render_policy": "standalone",
+            "temporal_domain_key": "present",
+            "time_label": "当下",
+            "time_relation": "episode_start",
+            "location_key": "room",
+            "location_label": "房间",
+            "participants": ["甲", "乙"],
+            "participant_evidence": [{
+                "identity_key": identity,
+                "source_segment_ids": ["SRC0001"],
+                "source_unit_keys": [unit_key],
+                "usage": "visible",
+            } for identity, unit_key in zip(["甲", "乙"], unit_keys)],
+            "environment_source_unit_keys": unit_keys,
+            "action_logic": "按来源顺序交付两个动作",
+        }],
+    })
+    return source, blueprint, unit_keys
+
+
+def _install_semantic_review_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    created: list,
+) -> None:
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(
+        stages,
+        "get_setting",
+        lambda key: (
+            "true"
+            if key == "screenplay_targeted_blueprint_review_enabled"
+            else "1"
+        ),
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda artifact, **_kwargs: (
+            created.append(artifact)
+            or {"id": f"artifact-{len(created)}"}
+        ),
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(
+            run_id="",
+            step_run_id="step-semantic-review",
+            trace_id="trace-semantic-review",
+        ),
+    )
+
+
+def test_targeted_review_includes_environment_nodes_and_exact_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, blueprint, unit_keys = _semantic_review_environment_fixture()
+    created: list = []
+    calls: list[tuple[list[dict], dict]] = []
+
+    async def clean_review(messages, **kwargs):
+        calls.append((messages, kwargs))
+        return BlueprintSemanticReview(issues=[])
+
+    _install_semantic_review_harness(monkeypatch, created)
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        clean_review,
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "ep-targeted-environment", "episode_no": 1},
+        source_text=source,
+    ))
+
+    assert result is blueprint
+    assert len(calls) == 2
+    messages, first_call = calls[0]
+    schema = first_call["output_schema"]
+    assert schema["x-canonical-timeline-node-keys"] == ["n2", "n3", "n4"]
+    assert schema["x-canonical-source-unit-keys"] == unit_keys[1:4]
+    assert all(
+        call["format_retry_limit"] == 0
+        and call["semantic_retry_limit"] == 0
+        for _messages, call in calls
+    )
+    assert all(
+        call["call_meta"]["substage"] == "risk_nodes"
+        for _messages, call in calls
+    )
+    assert "canonical_source_unit_keys" in first_call["repair_context"]
+    reviewer_prompt = messages[1]["content"]
+    assert "code=state_subject_environment_misclassified" in reviewer_prompt
+    assert "source_unit_keys 中精确列出" in reviewer_prompt
+    assert first_call["call_meta"]["source_count"] == 3
+
+
+def test_semantic_consensus_is_source_unit_sensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, blueprint, unit_keys = _semantic_review_two_unit_fixture()
+    created: list = []
+    call_modes: list[str] = []
+
+    async def review(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        call_modes.append(meta["substage"])
+        if meta["substage"] == "full":
+            return BlueprintSemanticReview(issues=[])
+        unit_key = unit_keys[meta["review_sample"] - 1]
+        return BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+            code="state_subject_environment_misclassified",
+            node_keys=["n1"],
+            source_segment_ids=["SRC0001"],
+            source_unit_keys=[unit_key],
+            message="当前 environment ownership 遮蔽人物主体",
+            required_resolution="只裁决该 exact unit",
+        )])
+
+    _install_semantic_review_harness(monkeypatch, created)
+    monkeypatch.setattr(stages.model_gateway, "chat_structured", review)
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "ep-unit-sensitive-consensus", "episode_no": 1},
+        source_text=source,
+    ))
+
+    assert result is blueprint
+    assert call_modes == ["risk_nodes", "risk_nodes", "full", "full"]
+    consensus_artifacts = [
+        artifact
+        for artifact in created
+        if artifact.type == (
+            "screenplay_narrative_blueprint_review_consensus"
+        )
+    ]
+    assert consensus_artifacts[0].status == "needs_revision"
+    assert consensus_artifacts[0].content["consensus_issue_keys"] == []
+    assert consensus_artifacts[0].content[
+        "non_consensus_issue_count"
+    ] == 2
+    assert not any(
+        artifact.type
+        == "screenplay_narrative_blueprint_ownership_patch"
+        for artifact in created
+    )
+
+
+def test_post_ownership_repair_one_sided_full_residual_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, blueprint, unit_keys = _semantic_review_environment_fixture()
+    target_unit_key = unit_keys[2]
+    created: list = []
+    call_modes: list[str] = []
+
+    async def review_or_patch(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        if meta.get("repair_mode") == "exact_state_subject_ownership":
+            call_modes.append("ownership_patch")
+            schema = kwargs["output_schema"]
+            return BlueprintStateSubjectOwnershipPatch.model_validate({
+                "base_candidate_hash": schema["properties"][
+                    "base_candidate_hash"
+                ]["const"],
+                "repairs": {
+                    target_unit_key: {
+                        "mode": "single",
+                        "identity_keys": ["丙"],
+                    },
+                },
+            })
+        call_modes.append(meta["substage"])
+        if meta["substage"] == "risk_nodes":
+            return BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+                code="state_subject_environment_misclassified",
+                node_keys=["n3"],
+                source_segment_ids=["SRC0003"],
+                source_unit_keys=[target_unit_key],
+                message="该 exact unit 实际存在人物主体",
+                required_resolution="仅替换该 unit ownership",
+            )])
+        if meta["review_sample"] == 1:
+            return BlueprintSemanticReview(issues=[BlueprintSemanticIssue(
+                code="timeline_conflict",
+                node_keys=["n3"],
+                source_segment_ids=["SRC0003"],
+                message="完整复审仍发现单侧残留",
+                required_resolution="不得把单侧残留记为 clean",
+            )])
+        return BlueprintSemanticReview(issues=[])
+
+    _install_semantic_review_harness(monkeypatch, created)
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        review_or_patch,
+    )
+
+    with pytest.raises(
+        stages.ContentGenerationError,
+        match="完整双审仍有单侧必须修复问题",
+    ):
+        asyncio.run(stages._semantic_review_narrative_blueprint(
+            blueprint,
+            episode={"id": "ep-post-ownership-residual", "episode_no": 1},
+            source_text=source,
+        ))
+
+    assert call_modes == [
+        "risk_nodes",
+        "risk_nodes",
+        "ownership_patch",
+        "full",
+        "full",
+    ]
+    consensus_artifacts = [
+        artifact
+        for artifact in created
+        if artifact.type == (
+            "screenplay_narrative_blueprint_review_consensus"
+        )
+    ]
+    assert consensus_artifacts[0].content["consensus_issue_keys"] == [{
+        "code": "state_subject_environment_misclassified",
+        "node_keys": ["n3"],
+        "source_unit_keys": [target_unit_key],
+    }]
+    assert consensus_artifacts[-1].status == "needs_revision"
+    assert consensus_artifacts[-1].content["review_mode"] == "full"
+    assert consensus_artifacts[-1].content["review_outcome"] == (
+        "one_sided_residual"
+    )
+    assert not any(
+        artifact.type == "screenplay_narrative_blueprint"
+        and (artifact.model_snapshot or {}).get("generation_mode")
+        == "semantic_reviewed"
+        for artifact in created
+    )
+
+
+def test_mixed_consensus_uses_node_repair_then_exact_ownership_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, blueprint, unit_keys = _semantic_review_environment_fixture()
+    target_unit_key = unit_keys[2]
+    created: list = []
+    mixed_errors: list[str] = []
+    call_modes: list[str] = []
+
+    environment_issue = BlueprintSemanticIssue(
+        code="state_subject_environment_misclassified",
+        node_keys=["n3"],
+        source_segment_ids=["SRC0003"],
+        source_unit_keys=[target_unit_key],
+        message="该 exact unit 实际存在人物主体",
+        required_resolution="仅替换该 unit ownership",
+    )
+    timeline_issue = BlueprintSemanticIssue(
+        code="timeline_conflict",
+        node_keys=["n3"],
+        source_segment_ids=["SRC0003"],
+        message="同一节点还有时间语义问题",
+        required_resolution="使用现有节点修复",
+    )
+
+    async def review_or_patch(*_args, **kwargs):
+        meta = kwargs["call_meta"]
+        if meta.get("repair_mode") == "exact_state_subject_ownership":
+            call_modes.append("ownership_patch")
+            schema = kwargs["output_schema"]
+            return BlueprintStateSubjectOwnershipPatch.model_validate({
+                "base_candidate_hash": schema["properties"][
+                    "base_candidate_hash"
+                ]["const"],
+                "repairs": {
+                    target_unit_key: {
+                        "mode": "single",
+                        "identity_keys": ["丙"],
+                    },
+                },
+            })
+        call_modes.append(meta["substage"])
+        if meta["substage"] == "risk_nodes":
+            return BlueprintSemanticReview(issues=[
+                environment_issue.model_copy(deep=True),
+                timeline_issue.model_copy(deep=True),
+            ])
+        return BlueprintSemanticReview(issues=[])
+
+    async def existing_node_repair(value, **kwargs):
+        mixed_errors.extend(kwargs["additional_errors"])
+        return value
+
+    _install_semantic_review_harness(monkeypatch, created)
+    monkeypatch.setattr(
+        stages.model_gateway,
+        "chat_structured",
+        review_or_patch,
+    )
+    monkeypatch.setattr(
+        stages,
+        "_repair_narrative_blueprint",
+        existing_node_repair,
+    )
+
+    result = asyncio.run(stages._semantic_review_narrative_blueprint(
+        blueprint,
+        episode={"id": "ep-mixed-consensus-routing", "episode_no": 1},
+        source_text=source,
+    ))
+
+    assert call_modes == [
+        "risk_nodes",
+        "risk_nodes",
+        "ownership_patch",
+        "full",
+        "full",
+    ]
+    assert len(mixed_errors) == 1
+    assert "TIMELINE_CONFLICT" in mixed_errors[0]
+    assert "ENVIRONMENT_MISCLASSIFIED" not in mixed_errors[0]
+    assert target_unit_key not in (
+        result.nodes[2].environment_source_unit_keys
+    )
+    assert any(
+        evidence.identity_key == "丙"
+        and evidence.usage == "state_subject"
+        and evidence.source_unit_keys == [target_unit_key]
+        for evidence in result.nodes[2].participant_evidence
+    )
