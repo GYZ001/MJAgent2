@@ -1031,6 +1031,7 @@ async def test_baseline_rebuild_resume_requires_same_session_single_use_approval
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.capabilities.bus import get_command_bus
+    from app.capabilities.dispatch import result_http_payload
     from app.capabilities.schemas import CommandStatus
 
     _incompatible_working_revision()
@@ -1087,6 +1088,9 @@ async def test_baseline_rebuild_resume_requires_same_session_single_use_approval
         "已按当前合同启动剧本基线重建；"
         "仅复用兼容输入，旧工作副本不会继续执行"
     )
+    receipt = result_http_payload(approved)
+    assert receipt["mode"] == "baseline_rebuild"
+    assert receipt["summary"] == approved.summary
     assert launches == ["e1"]
 
     replay = await bus.execute_async(

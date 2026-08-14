@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Episode, StoryboardStatus } from './api'
-import { episodeBusy } from './App'
+import { episodeBusy, screenplayStatusPollInterval } from './App'
 
 function storyboardStatus(state: StoryboardStatus['state']): StoryboardStatus {
   return {
@@ -54,5 +54,12 @@ describe('分集轮询终态同步', () => {
     } as Episode
 
     expect(episodeBusy(partial)).toBe(false)
+  })
+})
+
+describe('剧本台轻量状态轮询', () => {
+  it('运行中高频、终态低频刷新以修正陈旧的重建按钮', () => {
+    expect(screenplayStatusPollInterval({ id: 'e1', active: true })).toBe(2000)
+    expect(screenplayStatusPollInterval({ id: 'e1', active: false })).toBe(15000)
   })
 })

@@ -1427,6 +1427,17 @@ def compile_screenplay_scene_shard_draft(
             "[GENERATION_CONTRACT] 多余 slot："
             + ",".join(extra_slot_keys)
         )
+    for planned_slot in plan.unit_slots:
+        creative_unit = draft.slots.get(planned_slot.unit_key)
+        if (
+            creative_unit is not None
+            and planned_slot.kind == "dialogue"
+            and creative_unit.text.strip() != planned_slot.source_text.strip()
+        ):
+            errors.append(
+                f"{planned_slot.unit_key} dialogue.text 必须等于 "
+                "scaffold source_text"
+            )
 
     contracts_by_scene = {
         contract.scene_plan_key: contract
@@ -1497,15 +1508,6 @@ def compile_screenplay_scene_shard_draft(
                     "on_screen_text": "",
                 })
             text = creative_unit.text.strip()
-            if (
-                planned_slot.kind == "dialogue"
-                and text != planned_slot.source_text.strip()
-            ):
-                errors.append(
-                    f"{planned_slot.unit_key} dialogue.text 必须等于 "
-                    "scaffold source_text"
-                )
-                continue
             text_provenance, agency_kind = _compile_text_provenance(
                 creative_unit=creative_unit,
                 compiled_slot=compiled_slot,
