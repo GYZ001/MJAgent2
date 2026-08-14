@@ -64,7 +64,7 @@ SCREENPLAY_SCENE_INPUT_VERSION = "screenplay-scene-input.v10"
 SCREENPLAY_SCENE_CREATIVE_VERSION = "screenplay-scene-creative.v6"
 SCREENPLAY_MERGED_IR_VERSION = "screenplay-generation-ir-merged.v9"
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION = (
-    "screenplay-scene-semantic-review.v2"
+    "screenplay-scene-semantic-review.v3"
 )
 SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
     "只返回一个符合用户消息内 JSON Schema 的 JSON 对象。"
@@ -496,6 +496,8 @@ def _artifact_model_snapshot(
 def _scene_shard_semantic_review_compatibility(
     artifact: dict[str, Any],
     raw_artifact: dict[str, Any] | None,
+    *,
+    current_shard_content_hash: str,
 ) -> tuple[bool, str]:
     """Bind a reusable shard to a clean review of the exact creative root."""
     if raw_artifact is None:
@@ -514,6 +516,11 @@ def _scene_shard_semantic_review_compatibility(
         != SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
     ):
         return False, "semantic_review_version"
+    if (
+        str(evidence.get("reviewed_shard_content_hash") or "")
+        != current_shard_content_hash
+    ):
+        return False, "semantic_review_shard_hash"
     initial_hash = str(evidence.get("initial_creative_hash") or "")
     reviewed_hash = str(evidence.get("reviewed_creative_hash") or "")
     if len(initial_hash) != 64 or len(reviewed_hash) != 64:
@@ -720,9 +727,14 @@ def screenplay_scene_shard_artifact_compatibility(
         return False, "artifact_contract_version"
     if not isinstance(content, dict):
         return False, "artifact_content"
-    if evidence_repository.content_hash(content) != str(
-        artifact.get("content_hash") or ""
-    ):
+    try:
+        current_shard_content_hash = evidence_repository.content_hash(
+            content,
+            artifact.get("file_path"),
+        )
+    except (OSError, TypeError, ValueError):
+        return False, "artifact_content_hash"
+    if current_shard_content_hash != str(artifact.get("content_hash") or ""):
         return False, "artifact_content_hash"
     if str(content.get("contract_version") or "") != SCREENPLAY_SCENE_SHARD_VERSION:
         return False, "content_contract_version"
@@ -760,6 +772,7 @@ def screenplay_scene_shard_artifact_compatibility(
         return _scene_shard_semantic_review_compatibility(
             artifact,
             raw_artifact,
+            current_shard_content_hash=current_shard_content_hash,
         )
     return True, ""
 
@@ -4039,6 +4052,10 @@ async def generate_screenplay_scene_shards(
             scene_plans=scene_plan_map,
             scene_input_contracts=plan_scene_input_contracts,
         )
+        shard_payload = shard.model_dump(mode="json")
+        reviewed_shard_content_hash = evidence_repository.content_hash(
+            shard_payload
+        )
         _assert_episode_owner(episode_id)
         trace = current_trace()
         parents = [
@@ -4065,6 +4082,9 @@ async def generate_screenplay_scene_shards(
                         ),
                         "initial_creative_hash": initial_creative_hash,
                         "reviewed_creative_hash": reviewed_creative_hash,
+                        "reviewed_shard_content_hash": (
+                            reviewed_shard_content_hash
+                        ),
                         "phases": semantic_reviews,
                     },
                 },
@@ -4080,7 +4100,7 @@ async def generate_screenplay_scene_shards(
                 scope_id=episode_id,
                 status="validated",
                 trust_level="T1",
-                content=shard.model_dump(mode="json"),
+                content=shard_payload,
                 parent_artifact_ids=[raw_artifact["id"]],
                 contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
                 model_snapshot={
