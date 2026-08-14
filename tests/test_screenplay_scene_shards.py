@@ -284,7 +284,7 @@ def test_scene_shard_semantic_review_json_contract_is_strict() -> None:
     schema = ScreenplaySceneShardSemanticReview.model_json_schema()
 
     assert SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION == (
-        "screenplay-scene-semantic-review.v2"
+        "screenplay-scene-semantic-review.v3"
     )
     assert schema["required"] == ["findings"]
     assert "default" not in schema["properties"]["findings"]
@@ -3243,6 +3243,19 @@ def _scene_shard_cache_compatibility_case(
             "reviews": [{"findings": []}, {"findings": []}],
             "consensus": [],
         })
+    shard = compile_screenplay_scene_shard_draft(
+        reviewed_creative,
+        episode_no=1,
+        plan=plan,
+        scene_plans={
+            scene.key: scene for scene in blueprint.scene_plans
+        },
+        scene_input_contracts=contracts,
+    )
+    artifact_content = shard.model_dump(mode="json")
+    reviewed_shard_content_hash = evidence_repository.content_hash(
+        artifact_content
+    )
     raw_content = {
         "shard_id": plan.shard_id,
         "attempts": [],
@@ -3250,6 +3263,7 @@ def _scene_shard_cache_compatibility_case(
             "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
             "initial_creative_hash": initial_hash,
             "reviewed_creative_hash": reviewed_hash,
+            "reviewed_shard_content_hash": reviewed_shard_content_hash,
             "phases": phases,
         },
     }
@@ -3265,16 +3279,6 @@ def _scene_shard_cache_compatibility_case(
         "parent_artifact_ids": ["blueprint-artifact", "identity-artifact"],
         "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
     }
-    shard = compile_screenplay_scene_shard_draft(
-        reviewed_creative,
-        episode_no=1,
-        plan=plan,
-        scene_plans={
-            scene.key: scene for scene in blueprint.scene_plans
-        },
-        scene_input_contracts=contracts,
-    )
-    artifact_content = shard.model_dump(mode="json")
     artifact = {
         "id": f"scene-shard-{with_repair}",
         "type": "screenplay_scene_shard",
@@ -3320,6 +3324,31 @@ def test_scene_shard_cache_accepts_exact_semantic_review_evidence(
     )
 
     assert compatible is True, reason
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["performance", "resulting_state", "function"],
+)
+def test_scene_shard_cache_rejects_reviewed_content_mutation(
+    field: str,
+) -> None:
+    artifact, _raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=False)
+    )
+    artifact["content"]["scenes"][0]["units"][0][field] += " 篡改"
+    artifact["content_hash"] = evidence_repository.content_hash(
+        artifact["content"],
+        artifact.get("file_path"),
+    )
+
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+
+    assert compatible is False
+    assert reason == "semantic_review_shard_hash"
 
 
 @pytest.mark.parametrize(
@@ -3477,6 +3506,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
     cached_ids: list[str] = []
     for plan in plans:
         shard = _shard(plan, blueprint)
+        shard_payload = shard.model_dump(mode="json")
         creative = _creative_shard(
             plan,
             blueprint,
@@ -3500,6 +3530,9 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
                     ),
                     "initial_creative_hash": creative_hash,
                     "reviewed_creative_hash": creative_hash,
+                    "reviewed_shard_content_hash": (
+                        evidence_repository.content_hash(shard_payload)
+                    ),
                     "phases": [{
                         "phase": "initial",
                         "creative_hash": creative_hash,
@@ -3522,7 +3555,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
             scope_id=episode_id,
             status="validated",
             trust_level="T1",
-            content=shard.model_dump(mode="json"),
+            content=shard_payload,
             parent_artifact_ids=[raw["id"]],
             contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
             model_snapshot={
@@ -3565,6 +3598,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         ("missing", "semantic_review_evidence_missing"),
         ("evidence_version", "semantic_review_version"),
         ("snapshot_version", "semantic_review_version"),
+        ("missing_shard_hash", "semantic_review_shard_hash"),
         ("reviewed_hash", "semantic_review_hash_binding"),
         ("wrong_phase", "semantic_review_phase"),
         ("reordered_phases", "semantic_review_phase"),
@@ -3665,11 +3699,13 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
     if mutation == "missing":
         raw["content"].pop("semantic_review_evidence")
     elif mutation == "evidence_version":
-        evidence["contract_version"] = "screenplay-scene-semantic-review.v1"
+        evidence["contract_version"] = "screenplay-scene-semantic-review.v2"
     elif mutation == "snapshot_version":
         artifact["model_snapshot"]["semantic_review_version"] = (
             "screenplay-scene-semantic-review.v1"
         )
+    elif mutation == "missing_shard_hash":
+        evidence.pop("reviewed_shard_content_hash")
     elif mutation == "reviewed_hash":
         artifact["model_snapshot"]["reviewed_creative_hash"] = "0" * 64
     elif mutation == "wrong_phase":

@@ -189,10 +189,21 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
         boundary_hash = f"boundary:{index}"
         generation_hash = f"generation:{index}"
         creative_hash = f"{index:064x}"
+        shard_payload = _shard_content(
+            shard_id=shard_id,
+            blueprint_hash=blueprint_hash,
+            identity_hash=identity_hash,
+            source_hash=source_hash,
+            boundary_hash=boundary_hash,
+            generation_hash=generation_hash,
+        )
         semantic_review_evidence = {
             "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
             "initial_creative_hash": creative_hash,
             "reviewed_creative_hash": creative_hash,
+            "reviewed_shard_content_hash": repository.content_hash(
+                shard_payload
+            ),
             "phases": [{
                 "phase": "initial",
                 "creative_hash": creative_hash,
@@ -227,14 +238,7 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
             scope_id="ep_run_2eb",
             status="validated",
             trust_level="T1",
-            content=_shard_content(
-                shard_id=shard_id,
-                blueprint_hash=blueprint_hash,
-                identity_hash=identity_hash,
-                source_hash=source_hash,
-                boundary_hash=boundary_hash,
-                generation_hash=generation_hash,
-            ),
+            content=shard_payload,
             parent_artifact_ids=[raw["id"]],
             contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
             model_snapshot={

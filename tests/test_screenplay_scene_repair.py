@@ -306,6 +306,20 @@ def _create_working_artifact(
         contract_version=SCREENPLAY_ENVELOPE_VERSION,
     ))
     creative_hash = "a" * 64
+    shard_payload = {
+        "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
+        "episode_no": 1,
+        "shard_id": "SS001",
+        "scene_plan_keys": [],
+        "scenes": [],
+        "consumed_source_ids": [],
+        "unresolved_participants": [],
+        "blueprint_hash": blueprint_hash,
+        "identity_registry_hash": identity_hash,
+        "source_ownership_hash": "ownership",
+        "identity_scaffold_hash": "identity",
+        "generation_scaffold_hash": "generation",
+    }
     shard_raw = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_scene_shard_raw", scope_type="episode",
         scope_id="ep_scene", status="candidate", trust_level="T0",
@@ -313,7 +327,11 @@ def _create_working_artifact(
             "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
             "initial_creative_hash": creative_hash,
             "reviewed_creative_hash": creative_hash,
+            "reviewed_shard_content_hash": (
+                evidence_repository.content_hash(shard_payload)
+            ),
             "phases": [{
+                "phase": "initial",
                 "creative_hash": creative_hash,
                 "reviews": [{"findings": []}, {"findings": []}],
                 "consensus": [],
@@ -325,17 +343,7 @@ def _create_working_artifact(
     shard = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_scene_shard", scope_type="episode",
         scope_id="ep_scene", status="validated", trust_level="T1",
-        content={
-            "contract_version": SCREENPLAY_SCENE_SHARD_VERSION,
-            "episode_no": 1, "shard_id": "SS001",
-            "scene_plan_keys": [], "scenes": [],
-            "consumed_source_ids": [], "unresolved_participants": [],
-            "blueprint_hash": blueprint_hash,
-            "identity_registry_hash": identity_hash,
-            "source_ownership_hash": "ownership",
-            "identity_scaffold_hash": "identity",
-            "generation_scaffold_hash": "generation",
-        },
+        content=shard_payload,
         parent_artifact_ids=[shard_raw["id"]],
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
         model_snapshot={

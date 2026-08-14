@@ -200,10 +200,19 @@ def _current_shard_artifact(
     boundary_hash: str = "",
 ):
     creative_hash = "a" * 64
+    shard_payload = _v8_shard_content(
+        shard_id=shard_id,
+        generation_scaffold_hash=generation_scaffold_hash,
+        source_hash=source_hash,
+        boundary_hash=boundary_hash,
+        blueprint_hash=str(authority["blueprint_hash"]),
+        identity_registry_hash=str(authority["identity_hash"]),
+    )
     semantic_review_evidence = {
         "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
         "initial_creative_hash": creative_hash,
         "reviewed_creative_hash": creative_hash,
+        "reviewed_shard_content_hash": repository.content_hash(shard_payload),
         "phases": [{
             "phase": "initial",
             "creative_hash": creative_hash,
@@ -235,14 +244,7 @@ def _current_shard_artifact(
         scope_id="e1",
         status="validated",
         trust_level="T1",
-        content=_v8_shard_content(
-            shard_id=shard_id,
-            generation_scaffold_hash=generation_scaffold_hash,
-            source_hash=source_hash,
-            boundary_hash=boundary_hash,
-            blueprint_hash=str(authority["blueprint_hash"]),
-            identity_registry_hash=str(authority["identity_hash"]),
-        ),
+        content=shard_payload,
         parent_artifact_ids=[raw["id"]],
         contract_version=SCREENPLAY_SCENE_SHARD_VERSION,
         model_snapshot={
