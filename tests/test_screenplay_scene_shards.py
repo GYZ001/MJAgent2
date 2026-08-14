@@ -6462,6 +6462,110 @@ def test_slot_content_compiles_by_key_and_rejects_contract_drift() -> None:
         ScreenplaySceneShardCreativeIR.model_validate({"slots": overreach})
 
 
+def test_run_961abd54eb1c_structural_repair_receives_dialogue_mismatch(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    dialogue_slot = plan.unit_slots[0]
+    dialogue_slot.kind = "dialogue"
+    dialogue_slot.source_text = "“来源原文”"
+    dialogue_slot.source_surface = "quoted_span"
+    dialogue_slot.delivery_mode = "spoken_dialogue"
+    compiled_dialogue_slot = next(
+        slot
+        for contract in contracts
+        for slot in contract.unit_slots
+        if slot.unit_key == dialogue_slot.unit_key
+    )
+    compiled_dialogue_slot.kind = dialogue_slot.kind
+    compiled_dialogue_slot.source_text = dialogue_slot.source_text
+    compiled_dialogue_slot.source_surface = dialogue_slot.source_surface
+    compiled_dialogue_slot.delivery_mode = dialogue_slot.delivery_mode
+
+    valid_draft = _creative_shard(plan, blueprint)
+    invalid_payload = valid_draft.model_dump(mode="json")
+    dialogue_key = dialogue_slot.unit_key
+    missing_key = plan.unit_slots[1].unit_key
+    extra_key = f"unexpected:{missing_key}"
+    invalid_payload["slots"][dialogue_key]["text"] = "“模型改写”"
+    invalid_payload["slots"][extra_key] = invalid_payload["slots"].pop(
+        missing_key
+    )
+    invalid_draft = ScreenplaySceneShardCreativeIR.model_validate(
+        invalid_payload
+    )
+    scene_plans = {
+        scene.key: scene for scene in blueprint.scene_plans
+    }
+    expected_errors = [
+        f"[GENERATION_CONTRACT] 缺失 slot：{missing_key}",
+        f"[GENERATION_CONTRACT] 多余 slot：{extra_key}",
+        (
+            f"{dialogue_key} dialogue.text 必须等于 "
+            "scaffold source_text"
+        ),
+    ]
+
+    def validate_draft(
+        draft: ScreenplaySceneShardCreativeIR,
+    ) -> list[str]:
+        try:
+            compile_screenplay_scene_shard_draft(
+                draft,
+                episode_no=1,
+                plan=plan,
+                scene_plans=scene_plans,
+                scene_input_contracts=contracts,
+            )
+        except ScreenplaySceneShardError as exc:
+            return list(exc.errors)
+        return []
+
+    with pytest.raises(ScreenplaySceneShardError) as caught:
+        compile_screenplay_scene_shard_draft(
+            invalid_draft,
+            episode_no=1,
+            plan=plan,
+            scene_plans=scene_plans,
+            scene_input_contracts=contracts,
+        )
+    assert caught.value.errors == expected_errors
+    assert invalid_draft.slots[dialogue_key].text == "“模型改写”"
+
+    prompts: list[str] = []
+    attempts: list[dict] = []
+
+    async def fake_chat(messages, **_kwargs):
+        prompts.append(messages[0]["content"])
+        draft = invalid_draft if len(prompts) == 1 else valid_draft
+        return json.dumps(draft.model_dump(mode="json"), ensure_ascii=False)
+
+    monkeypatch.setattr(model_gateway, "chat", fake_chat)
+    repaired = asyncio.run(model_gateway.chat_structured(
+        [{"role": "user", "content": "SS002 run replay"}],
+        model_type=ScreenplaySceneShardCreativeIR,
+        validate=validate_draft,
+        operation_id="test.run-961abd54eb1c.ss002:v1",
+        max_tokens=1024,
+        format_retry_limit=0,
+        semantic_retry_limit=1,
+        on_attempt=attempts.append,
+    ))
+
+    assert repaired == valid_draft
+    assert len(prompts) == 2
+    assert all(error in prompts[1] for error in expected_errors)
+    assert [attempt["semantic_attempt"] for attempt in attempts] == [0, 1]
+    assert attempts[0]["validation_errors"] == expected_errors
+    assert attempts[1]["validation_errors"] == []
+
+
 def test_generation_scaffold_fingerprint_binds_slot_structure() -> None:
     blueprint = _blueprint(split_domain=False)
     plan = build_screenplay_scene_shard_plans(
