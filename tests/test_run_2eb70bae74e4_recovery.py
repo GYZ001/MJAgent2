@@ -197,13 +197,12 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
             boundary_hash=boundary_hash,
             generation_hash=generation_hash,
         )
+        reviewed_shard_content_hash = repository.content_hash(shard_payload)
         semantic_review_evidence = {
             "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
             "initial_creative_hash": creative_hash,
             "reviewed_creative_hash": creative_hash,
-            "reviewed_shard_content_hash": repository.content_hash(
-                shard_payload
-            ),
+            "reviewed_shard_content_hash": reviewed_shard_content_hash,
             "phases": [{
                 "phase": "initial",
                 "creative_hash": creative_hash,
@@ -230,6 +229,7 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
                     SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
                 ),
                 "reviewed_creative_hash": creative_hash,
+                "reviewed_shard_content_hash": reviewed_shard_content_hash,
             },
         ))
         shard = repository.create_artifact(EvidenceArtifact(
@@ -246,6 +246,7 @@ def _seed_recovery(*, polluted_working: bool, shard_count: int = 4) -> dict:
                     SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
                 ),
                 "reviewed_creative_hash": creative_hash,
+                "reviewed_shard_content_hash": reviewed_shard_content_hash,
             },
         ))
         shards.append(shard)

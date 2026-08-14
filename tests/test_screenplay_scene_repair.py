@@ -320,6 +320,9 @@ def _create_working_artifact(
         "identity_scaffold_hash": "identity",
         "generation_scaffold_hash": "generation",
     }
+    reviewed_shard_content_hash = evidence_repository.content_hash(
+        shard_payload
+    )
     shard_raw = evidence_repository.create_artifact(EvidenceArtifact(
         type="screenplay_scene_shard_raw", scope_type="episode",
         scope_id="ep_scene", status="candidate", trust_level="T0",
@@ -327,9 +330,7 @@ def _create_working_artifact(
             "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
             "initial_creative_hash": creative_hash,
             "reviewed_creative_hash": creative_hash,
-            "reviewed_shard_content_hash": (
-                evidence_repository.content_hash(shard_payload)
-            ),
+            "reviewed_shard_content_hash": reviewed_shard_content_hash,
             "phases": [{
                 "phase": "initial",
                 "creative_hash": creative_hash,
@@ -349,6 +350,7 @@ def _create_working_artifact(
         model_snapshot={
             "semantic_review_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
             "reviewed_creative_hash": creative_hash,
+            "reviewed_shard_content_hash": reviewed_shard_content_hash,
         },
     ))
     merged = evidence_repository.create_artifact(EvidenceArtifact(

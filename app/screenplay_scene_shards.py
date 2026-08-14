@@ -516,9 +516,17 @@ def _scene_shard_semantic_review_compatibility(
         != SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
     ):
         return False, "semantic_review_version"
+    reviewed_shard_content_hash = str(
+        evidence.get("reviewed_shard_content_hash") or ""
+    )
+    snapshot_shard_content_hash = str(
+        snapshot.get("reviewed_shard_content_hash") or ""
+    )
     if (
-        str(evidence.get("reviewed_shard_content_hash") or "")
-        != current_shard_content_hash
+        not reviewed_shard_content_hash
+        or not snapshot_shard_content_hash
+        or reviewed_shard_content_hash != snapshot_shard_content_hash
+        or reviewed_shard_content_hash != current_shard_content_hash
     ):
         return False, "semantic_review_shard_hash"
     initial_hash = str(evidence.get("initial_creative_hash") or "")
@@ -4115,6 +4123,9 @@ async def generate_screenplay_scene_shards(
                         SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
                     ),
                     "reviewed_creative_hash": reviewed_creative_hash,
+                    "reviewed_shard_content_hash": (
+                        reviewed_shard_content_hash
+                    ),
                 },
             ),
             step_run_id=trace.step_run_id,

@@ -3294,6 +3294,7 @@ def _scene_shard_cache_compatibility_case(
                 SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
             ),
             "reviewed_creative_hash": reviewed_hash,
+            "reviewed_shard_content_hash": reviewed_shard_content_hash,
         },
     }
     compatibility_kwargs = {
@@ -3341,6 +3342,51 @@ def test_scene_shard_cache_rejects_reviewed_content_mutation(
         artifact["content"],
         artifact.get("file_path"),
     )
+
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+
+    assert compatible is False
+    assert reason == "semantic_review_shard_hash"
+
+
+def test_scene_shard_cache_rejects_coordinated_content_and_raw_hash_mutation(
+) -> None:
+    artifact, raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=False)
+    )
+    artifact["content"]["scenes"][0]["units"][0][
+        "performance"
+    ] += " 协同篡改"
+    tampered_hash = evidence_repository.content_hash(
+        artifact["content"],
+        artifact.get("file_path"),
+    )
+    artifact["content_hash"] = tampered_hash
+    raw_artifact["content"]["semantic_review_evidence"][
+        "reviewed_shard_content_hash"
+    ] = tampered_hash
+    raw_artifact["content_hash"] = evidence_repository.content_hash(
+        raw_artifact["content"],
+        raw_artifact.get("file_path"),
+    )
+
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+
+    assert compatible is False
+    assert reason == "semantic_review_shard_hash"
+
+
+def test_scene_shard_cache_rejects_snapshot_shard_hash_mutation() -> None:
+    artifact, _raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=False)
+    )
+    artifact["model_snapshot"]["reviewed_shard_content_hash"] = "0" * 64
 
     compatible, reason = screenplay_scene_shard_artifact_compatibility(
         artifact,
@@ -3515,6 +3561,9 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         creative_hash = scene_shards_module._hash(
             creative.model_dump(mode="json")
         )
+        reviewed_shard_content_hash = evidence_repository.content_hash(
+            shard_payload
+        )
         raw = evidence_repository.create_artifact(EvidenceArtifact(
             type="screenplay_scene_shard_raw",
             scope_type="episode",
@@ -3530,9 +3579,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
                     ),
                     "initial_creative_hash": creative_hash,
                     "reviewed_creative_hash": creative_hash,
-                    "reviewed_shard_content_hash": (
-                        evidence_repository.content_hash(shard_payload)
-                    ),
+                    "reviewed_shard_content_hash": reviewed_shard_content_hash,
                     "phases": [{
                         "phase": "initial",
                         "creative_hash": creative_hash,
@@ -3563,6 +3610,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
                     SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION
                 ),
                 "reviewed_creative_hash": creative_hash,
+                "reviewed_shard_content_hash": reviewed_shard_content_hash,
             },
         ))
         cached_ids.append(str(artifact["id"]))
@@ -3599,6 +3647,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
         ("evidence_version", "semantic_review_version"),
         ("snapshot_version", "semantic_review_version"),
         ("missing_shard_hash", "semantic_review_shard_hash"),
+        ("missing_snapshot_shard_hash", "semantic_review_shard_hash"),
         ("reviewed_hash", "semantic_review_hash_binding"),
         ("wrong_phase", "semantic_review_phase"),
         ("reordered_phases", "semantic_review_phase"),
@@ -3674,6 +3723,10 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
     )
     artifact = evidence_repository.get_artifact(artifact_ids[0])
     assert artifact is not None
+    assert (
+        artifact["model_snapshot"]["reviewed_shard_content_hash"]
+        == artifact["content_hash"]
+    )
     raw_id = artifact["parent_artifact_ids"][0]
     raw = evidence_repository.get_artifact(raw_id)
     assert raw is not None
@@ -3706,6 +3759,8 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         )
     elif mutation == "missing_shard_hash":
         evidence.pop("reviewed_shard_content_hash")
+    elif mutation == "missing_snapshot_shard_hash":
+        artifact["model_snapshot"].pop("reviewed_shard_content_hash")
     elif mutation == "reviewed_hash":
         artifact["model_snapshot"]["reviewed_creative_hash"] = "0" * 64
     elif mutation == "wrong_phase":
