@@ -410,6 +410,7 @@ def test_run_884443dc4404_semantic_budget_covers_worst_payload() -> None:
         payloads[unit_count] = payload
 
     assert budgets[0] < budgets[1] < budgets[2]
+    assert budgets[-1] < case["model_max_output_tokens"]
     partial = case["partial_review"]
     partial_payload = json.dumps({
         "findings": [
@@ -500,6 +501,14 @@ def test_run_b0659b64b548_runtime_uses_multi_kind_consensus(
             return ScreenplaySceneShardSemanticReview.model_validate(
                 case[f"reviewer{kwargs['call_meta']['reviewer_no']}"]
             )
+        repair_context = json.loads(kwargs["repair_context"])
+        assert repair_context["consensus_findings"] == (
+            case["expected_consensus"]
+        )
+        assert {
+            finding["unit_key"]
+            for finding in repair_context["consensus_findings"]
+        } == {"SS001:SRC0004:unit:071"}
         return draft
 
     monkeypatch.setattr(
@@ -1351,6 +1360,128 @@ def test_run_884443dc4404_prompt_attributes_051_duplication_to_045() -> None:
     assert expected.unit_key == duplicate_case["early_slot"]["unit_key"]
     assert expected.violation_kinds == ["cross_slot_duplication"]
     assert expected.unit_key != duplicate_case["forbidden_finding_unit_key"]
+
+
+def test_ss004_generation_prompt_contains_representative_exact_facts() -> None:
+    blueprint = _blueprint(split_domain=False)
+    base_plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    base_contract = _contracts([base_plan], blueprint)[
+        base_plan.shard_id
+    ][0]
+    source_text = "".join(
+        f"精确来源事实{index:03d}，"
+        for index in range(1, 62)
+    )
+    facts = source_segment_facts("SRC0004", source_text)
+    selected_orders = (1, 21, 52, 61)
+    selected_facts = {
+        fact.unit_order: fact
+        for fact in facts
+        if fact.unit_order in selected_orders
+    }
+    base_slot = base_contract.unit_slots[0]
+    slots = []
+    for order in selected_orders:
+        environment_only = order in {21, 61}
+        identity_key = "person_甲" if order == 1 else "person_乙"
+        slots.append(base_slot.model_copy(update={
+            "unit_key": f"SS004:SRC0004:unit:{order:03d}",
+            "source_segment_ids": ["SRC0004"],
+            "source_unit_key": selected_facts[order].source_unit_key,
+            "source_text": "",
+            "state_subject_key": (
+                "" if environment_only else identity_key
+            ),
+            "state_subject_keys": (
+                [] if environment_only else [identity_key]
+            ),
+            "environment_only": environment_only,
+            "actor_keys": (
+                [] if environment_only else [identity_key]
+            ),
+            "target_keys": [],
+            "speaker_key": None,
+            "onscreen_entity_keys": (
+                [] if environment_only else [identity_key]
+            ),
+        }))
+    source_owners = {"SRC0004": base_contract.scene_plan_key}
+    contract = base_contract.model_copy(update={
+        "source_segment_ids": ["SRC0004"],
+        "source_semantics": {
+            "SRC0004": next(iter(base_contract.source_semantics.values())),
+        },
+        "source_segments": [
+            ScreenplaySceneSourceSegment(
+                source_segment_id="SRC0004",
+                text=source_text,
+            )
+        ],
+        "source_scene_owners": source_owners,
+        "unit_slots": slots,
+    })
+    plan = base_plan.model_copy(update={
+        "shard_id": "SS004",
+        "source_segment_ids": ["SRC0004"],
+        "source_scene_owners": source_owners,
+        "unit_slots": slots,
+        "estimated_units": len(slots),
+    })
+    identity_registry = [
+        {
+            "identity_key": f"person_{label}",
+            "authority_id": f"bible:{label}",
+            "canonical_name": label,
+            "source_labels": [label],
+        }
+        for label in ("甲", "乙")
+    ]
+
+    prompt = scene_shards_module._scene_shard_prompt(
+        episode_no=1,
+        plan=plan,
+        blueprint_scene_plans=[],
+        blueprint_nodes=[],
+        scene_input_contracts=[contract],
+        identity_registry=identity_registry,
+        output_schema={},
+    )
+    authority, identity_labels = (
+        scene_shards_module._scene_shard_semantic_authority_payload(
+            scene_input_contracts=[contract],
+            identity_registry=identity_registry,
+        )
+    )
+
+    assert "action slot 即使 source_text 为空也不授权自由改写" in prompt
+    assert "每个 slot 只能改写自身 source_fact" in prompt
+    assert "cross-slot 内容必须归因到最早越界 slot" in prompt
+    assert json.dumps(
+        authority,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) in prompt
+    assert json.dumps(
+        identity_labels,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) in prompt
+    for order in selected_orders:
+        unit_key = f"SS004:SRC0004:unit:{order:03d}"
+        assert authority[unit_key]["source_fact"]["text"] == (
+            selected_facts[order].text
+        )
+        assert selected_facts[order].text in prompt
+    assert authority["SS004:SRC0004:unit:021"][
+        "environment_only"
+    ] is True
+    assert authority["SS004:SRC0004:unit:052"]["actor_keys"] == [
+        "person_乙"
+    ]
 
 
 def test_scene_shard_semantic_repair_rejects_unflagged_slot_rewrite(
@@ -4476,6 +4607,7 @@ def test_validated_scene_shard_is_reused_without_provider_call(monkeypatch) -> N
     [
         ("missing", "semantic_review_evidence_missing"),
         ("evidence_version", "semantic_review_version"),
+        ("legacy_v4", "semantic_review_version"),
         ("snapshot_version", "semantic_review_version"),
         ("missing_shard_hash", "semantic_review_shard_hash"),
         ("missing_snapshot_shard_hash", "semantic_review_shard_hash"),
@@ -4584,6 +4716,8 @@ def test_scene_shard_review_evidence_is_exact_cache_authority(
         raw["content"].pop("semantic_review_evidence")
     elif mutation == "evidence_version":
         evidence["contract_version"] = "screenplay-scene-semantic-review.v2"
+    elif mutation == "legacy_v4":
+        evidence["contract_version"] = "screenplay-scene-semantic-review.v4"
     elif mutation == "snapshot_version":
         artifact["model_snapshot"]["semantic_review_version"] = (
             "screenplay-scene-semantic-review.v1"
@@ -4789,7 +4923,20 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     operation_ids: dict[str, str] = {}
     output_schemas: dict[str, dict] = {}
     repair_schema_builders: dict[str, object] = {}
-    scene_input_contracts = _contracts(plans, blueprint)
+    identity_registry = [
+        {
+            "identity_key": f"person_{label}",
+            "authority_id": f"bible:{label}",
+            "canonical_name": label,
+            "source_labels": [label],
+        }
+        for label in ("甲", "乙")
+    ]
+    scene_input_contracts = _contracts(
+        plans,
+        blueprint,
+        identity_registry,
+    )
 
     async def fake_structured(messages, **kwargs):
         meta = kwargs["call_meta"]
@@ -4822,7 +4969,7 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         episode={"id": episode_id, "episode_no": 1},
         source_text=SOURCE,
         blueprint=blueprint,
-        identity_registry=[],
+        identity_registry=identity_registry,
         identities=_identities(),
         plans=plans,
         scene_input_contracts=scene_input_contracts,
@@ -4845,6 +4992,30 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
     assert (
         "identity_registry"
         not in repair_contexts["screenplay_scene_shards:SS001"]
+    )
+    first_repair_context = repair_contexts[
+        "screenplay_scene_shards:SS001"
+    ]
+    first_authority = first_repair_context["exact_slot_authority"]
+    first_unit_key = plans[0].unit_slots[0].unit_key
+    assert first_authority[first_unit_key]["source_fact"]["text"] == (
+        "甲推门进入。"
+    )
+    assert first_authority[first_unit_key]["state_subject_key"] == (
+        "person_甲"
+    )
+    assert first_authority[first_unit_key]["actor_keys"] == ["person_甲"]
+    assert first_authority[first_unit_key]["environment_only"] is False
+    assert first_repair_context["identity_authority"]["person_甲"][
+        "authority_id"
+    ] == "bible:甲"
+    assert first_repair_context["root_contract"]["contract_version"] == (
+        "screenplay-scene-creative.v7"
+    )
+    assert (
+        "empty action source_text does not authorize free rewriting; "
+        "use only that slot's source_fact.text"
+        in first_repair_context["final_gate_contract"]
     )
     first_contracts = repair_contexts[
         "screenplay_scene_shards:SS001"
@@ -4883,11 +5054,41 @@ def test_envelope_never_receives_full_source_and_shards_receive_only_owned_src(
         f"screenplay.scene-shard:{SCREENPLAY_SCENE_SHARD_VERSION}:"
         f"{SCREENPLAY_SCENE_INPUT_VERSION}:"
     )
+    assert operation_ids["screenplay_scene_shards:SS001"].endswith(
+        screenplay_scene_generation_scaffold_hash(
+            plans[0],
+            scene_input_contracts[plans[0].shard_id],
+        )
+    )
+    assert "逐 slot exact authority" in first_prompt
+    assert "action slot 即使 source_text 为空也不授权自由改写" in (
+        first_prompt
+    )
+    assert '"source_fact":' in first_prompt
+    assert '"authority_id":"bible:甲"' in first_prompt
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
     assert "甲推门进入。" in first_prompt
     assert "乙接过钥匙并回答。" not in first_prompt
     assert "乙接过钥匙并回答。" in second_prompt
     assert "甲推门进入。" not in second_prompt
+    latest_raw = evidence_repository.latest_artifact(
+        "screenplay_scene_shard_raw",
+        "episode",
+        episode_id,
+    )
+    latest_shard = evidence_repository.latest_artifact(
+        "screenplay_scene_shard",
+        "episode",
+        episode_id,
+    )
+    assert latest_raw is not None
+    assert latest_shard is not None
+    assert latest_raw["content"]["creative_contract_version"] == (
+        SCREENPLAY_SCENE_CREATIVE_VERSION
+    )
+    assert latest_shard["model_snapshot"][
+        "creative_contract_version"
+    ] == SCREENPLAY_SCENE_CREATIVE_VERSION
 
 
 def test_generation_rejects_identity_fields_as_explicit_format_error(
@@ -5383,9 +5584,60 @@ def test_err_533ac9_replay_compiles_identity_scaffold_without_unit_injection() -
     assert location_answer.participant_deliveries[0].audible is True
 
 
-def test_scene_shard_contract_fingerprint_is_upgraded() -> None:
+def test_scene_shard_contract_fingerprint_is_upgraded(
+    monkeypatch,
+) -> None:
     assert SCREENPLAY_SCENE_SHARD_VERSION == "screenplay-scene-shard.v10"
     assert SCREENPLAY_SCENE_INPUT_VERSION == "screenplay-scene-input.v10"
+    assert SCREENPLAY_SCENE_CREATIVE_VERSION == (
+        "screenplay-scene-creative.v7"
+    )
+    with pytest.raises(ValidationError, match="screenplay-scene-creative.v7"):
+        ScreenplaySceneShardCreativeIR.model_validate({
+            "contract_version": "screenplay-scene-creative.v6",
+            "slots": {},
+        })
+
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    current_hash = screenplay_scene_generation_scaffold_hash(
+        plan,
+        contracts,
+    )
+    monkeypatch.setattr(
+        scene_shards_module,
+        "SCREENPLAY_SCENE_CREATIVE_VERSION",
+        "screenplay-scene-creative.v6",
+    )
+    legacy_hash = screenplay_scene_generation_scaffold_hash(
+        plan,
+        contracts,
+    )
+    monkeypatch.setattr(
+        scene_shards_module,
+        "SCREENPLAY_SCENE_CREATIVE_VERSION",
+        SCREENPLAY_SCENE_CREATIVE_VERSION,
+    )
+
+    assert legacy_hash != current_hash
+    artifact, _raw_artifact, compatibility_kwargs = (
+        _scene_shard_cache_compatibility_case(with_repair=False)
+    )
+    artifact["content"]["generation_scaffold_hash"] = legacy_hash
+    artifact["content_hash"] = evidence_repository.content_hash(
+        artifact["content"]
+    )
+    compatible, reason = screenplay_scene_shard_artifact_compatibility(
+        artifact,
+        **compatibility_kwargs,
+    )
+    assert compatible is False
+    assert reason == "generation_scaffold_hash"
 
 
 def test_run_195a691_replays_ten_ownership_overreaches() -> None:

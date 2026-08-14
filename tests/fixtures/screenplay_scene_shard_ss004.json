@@ -14,6 +14,10 @@
     "scene_count": 3,
     "source_count": 11
   },
+  "exact_authority_budget": {
+    "prompt_chars": 36185,
+    "prompt_increment_chars": 1452
+  },
   "recorded_attempts": [
     {
       "format_attempt": 0,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -281,7 +282,15 @@ def test_ss004_budget_replay_preserves_all_sources_and_events(
     assert captured["call_meta"]["required_output_tokens"] == 9118
     assert captured["call_meta"]["output_budget_tokens"] == 9118
     assert captured["call_meta"]["output_budget_limited"] is False
-    assert len(captured["prompt"]) < recorded["input_chars"]
+    authority_budget = case["exact_authority_budget"]
+    assert len(captured["prompt"]) == authority_budget["prompt_chars"]
+    assert (
+        len(captured["prompt"]) - recorded["input_chars"]
+        == authority_budget["prompt_increment_chars"]
+    )
+    assert math.ceil(len(captured["prompt"]) / 1.5 * 1.2) < (
+        recorded["model_context_window_tokens"]
+    )
     assert len(captured["repair_context"]) < case["recorded_attempts"][2][
         "request_chars"
     ]

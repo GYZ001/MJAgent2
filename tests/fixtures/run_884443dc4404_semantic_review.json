@@ -2,6 +2,7 @@
   "run_id": "run_884443dc4404",
   "shard_id": "SS002",
   "semantic_review_version": "screenplay-scene-semantic-review.v5",
+  "model_max_output_tokens": 49152,
   "budget_unit_counts": [24, 64, 79],
   "partial_review": {
     "unit_count": 79,
