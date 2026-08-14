@@ -81,6 +81,34 @@ export function screenplayResumeActionLabel(
     : '继续完整剧本校验'
 }
 
+export function screenplayResumeOutcomeSummary(
+  outcome: { summary?: string; mode?: ScreenplayProduction['operation'] },
+): string {
+  if (outcome.summary?.trim()) return outcome.summary
+  if (outcome.mode === 'baseline_rebuild') return '已按当前合同启动剧本基线重建'
+  if (outcome.mode === 'baseline') return '已从安全检查点继续首版场次生成'
+  return '完整剧本工作副本已继续执行结构校验、评分与发布'
+}
+
+export function ScreenplayResumeButton({
+  production,
+  busy,
+  onResume,
+}: {
+  production: ScreenplayProduction | null | undefined
+  busy: boolean
+  onResume: () => void
+}) {
+  const label = screenplayResumeActionLabel(production)
+  return (
+    <button type="button" className="btn primary" disabled={busy}
+      aria-label={busy ? `${label}，暂不可用：正在处理上一项操作` : label}
+      title={busy ? '正在处理上一项操作' : undefined} onClick={onResume}>
+      {label}
+    </button>
+  )
+}
+
 function StructuredListActions({
   index,
   length,
@@ -398,11 +426,12 @@ export default function ScriptPage() {
 
   const resumeRepair = async () => {
     if (!ep) return
-    screenplayTimer.start()
-    await run(() => api.post(`/episodes/${ep.id}/screenplay/resume`, {
+    const result = await run(() => api.post(`/episodes/${ep.id}/screenplay/resume`, {
       idempotency_key: stableKey(`screenplay-resume:${ep.id}`),
-    }), '已使用任务详情中的锁定约束版本继续修复')
-      .catch(() => screenplayTimer.clear())
+    })).catch(() => null)
+    if (!result) return
+    screenplayTimer.start()
+    toast(screenplayResumeOutcomeSummary(result))
   }
 
   const stopScreenplay = async () => {
@@ -575,14 +604,12 @@ export default function ScriptPage() {
         return <button className="btn ghost danger" disabled={busy}
           aria-label={busy ? '停止剧本任务，暂不可用：正在处理上一项操作' : '停止剧本任务'}
           title={busy ? '正在处理上一项操作' : '停止前会说明费用和保留范围'} onClick={() => setStopConfirmOpen(true)}>停止剧本任务</button>
-      case 'resume_screenplay': {
-        const resumeLabel = screenplayResumeActionLabel(ep.screenplay_production)
-        return <button className="btn primary" disabled={busy}
-          aria-label={busy ? `${resumeLabel}，暂不可用：正在处理上一项操作` : resumeLabel}
-          title={busy ? '正在处理上一项操作' : undefined} onClick={resumeRepair}>
-          {resumeLabel}
-        </button>
-      }
+      case 'resume_screenplay':
+        return <ScreenplayResumeButton
+          production={ep.screenplay_production}
+          busy={busy}
+          onResume={() => void resumeRepair()}
+        />
       case 'generate_storyboard':
       case 'resume_storyboard':
       case 'view_storyboard':

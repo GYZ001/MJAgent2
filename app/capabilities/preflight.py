@@ -1131,13 +1131,20 @@ def screenplay_resume(args) -> PreflightResult:
     can_baseline = bool(state.get("can_resume_baseline"))
     can_repair = bool(state.get("can_resume_repair"))
     allowed = bool((can_baseline or can_repair) and not state.get("task_active"))
-    mode = "baseline" if can_baseline else "finalize" if can_repair else "none"
+    mode = (
+        str(state.get("mode") or state.get("operation") or "baseline")
+        if can_baseline
+        else "finalize"
+        if can_repair
+        else "none"
+    )
     return PreflightResult(
         command="screenplay.resume",
         allowed=allowed,
         risk=RiskLevel.R2_MATERIAL,
         summary=(
-            "继续首版场次生成" if mode == "baseline"
+            "按当前合同重建剧本基线" if mode == "baseline_rebuild"
+            else "继续首版场次生成" if mode == "baseline"
             else "继续完整剧本校验" if mode == "finalize"
             else "当前没有可继续的剧本流程"
         ),
@@ -1151,8 +1158,8 @@ def screenplay_resume(args) -> PreflightResult:
             },
         ),
         state_fingerprint=_fp({"episode": dict(ep), "production": state}),
-        requires_confirmation=False,
-        confirmation_policy=ConfirmationPolicy.WHEN_IMPACT,
+        requires_confirmation=allowed,
+        confirmation_policy=ConfirmationPolicy.ALWAYS,
         denial_code=None if allowed else "SCREENPLAY_NOT_RESUMABLE",
         denial_message=None if allowed else "当前没有可继续的剧本流程，或任务仍在运行",
     )

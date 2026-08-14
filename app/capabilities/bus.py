@@ -76,6 +76,15 @@ def _is_domain_operation_in_progress(result: CommandResult) -> bool:
     )
 
 
+def _approval_replay_rejection(name: str) -> CommandResult:
+    return CommandResult(
+        status=CommandStatus.REJECTED,
+        summary="approval_token already used",
+        command=name,
+        error_code="approval_invalid",
+    )
+
+
 class CommandBus:
     def __init__(self, registry: CapabilityRegistry | None = None) -> None:
         self.registry = registry or get_registry()
@@ -172,6 +181,8 @@ class CommandBus:
                 request_fingerprint=request_fingerprint,
             )
             if cached is not None:
+                if args.approval_token:
+                    return _approval_replay_rejection(name)
                 return cached
 
         preflight = self.preflight(name, args)
@@ -269,6 +280,8 @@ class CommandBus:
                 request_fingerprint=request_fingerprint,
             )
             if cached is not None:
+                if args.approval_token:
+                    return _approval_replay_rejection(name)
                 return cached
 
         preflight = await self.preflight_async(name, args)

@@ -68,6 +68,14 @@ async def generate(args: I.ScreenplayGenerateInput) -> CommandResult:
     )
 
 
+def screenplay_resume_summary(mode: str) -> str:
+    if mode == "baseline_rebuild":
+        return "已按当前合同启动剧本基线重建；仅复用兼容输入，旧工作副本不会继续执行"
+    if mode == "baseline":
+        return "已从安全检查点继续首版场次生成；validated 分片不会重复调用"
+    return "完整剧本工作副本已继续执行结构校验、评分与发布"
+
+
 async def resume(args: I.ScreenplayResumeInput) -> CommandResult:
     from app import api
 
@@ -76,11 +84,7 @@ async def resume(args: I.ScreenplayResumeInput) -> CommandResult:
         return outcome
     run_id = outcome.get("run_id")
     return succeeded(
-        (
-            "已从安全检查点继续首版场次生成；validated 分片不会重复调用"
-            if outcome.get("mode") == "baseline"
-            else "完整剧本工作副本已继续执行结构校验、评分与发布"
-        ),
+        screenplay_resume_summary(str(outcome.get("mode") or "")),
         data=outcome,
         run_id=run_id,
         resource_uris=[f"manju://runs/{run_id}"] if run_id else [],

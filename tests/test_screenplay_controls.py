@@ -1011,12 +1011,93 @@ def test_production_state_requires_expected_shard_authority_hashes() -> None:
 
 
 def test_resume_route_has_a_distinct_capability() -> None:
+    from app.capabilities.schemas import ConfirmationPolicy, RiskLevel
+
     ensure_catalog_loaded()
     registry = get_registry()
     assert registry.rest_bindings[
         "POST /api/episodes/{episode_id}/screenplay/resume"
     ] == "screenplay.resume"
     assert registry.commands["screenplay.resume"].title == "继续剧本流程"
+    assert registry.commands["screenplay.resume"].risk == RiskLevel.R2_MATERIAL
+    assert (
+        registry.commands["screenplay.resume"].confirmation
+        == ConfirmationPolicy.ALWAYS
+    )
+
+
+@pytest.mark.asyncio
+async def test_baseline_rebuild_resume_requires_same_session_single_use_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.capabilities.bus import get_command_bus
+    from app.capabilities.schemas import CommandStatus
+
+    _incompatible_working_revision()
+    ensure_catalog_loaded()
+    launches: list[str] = []
+
+    async def observe_launch(episode_id: str, body: dict | None = None) -> dict:
+        launches.append(episode_id)
+        return {
+            "status": "queued",
+            "run_id": "run-approved-rebuild",
+            "revision_id": "rev-approved-rebuild",
+            "mode": "baseline_rebuild",
+        }
+
+    monkeypatch.setattr(api, "resume_screenplay", observe_launch)
+    bus = get_command_bus()
+    args = {
+        "episode_id": "e1",
+        "idempotency_key": "resume-approved-rebuild",
+    }
+
+    waiting = await bus.execute_async(
+        "screenplay.resume",
+        args,
+        session_id="session-a",
+    )
+
+    assert waiting.status == CommandStatus.WAITING_APPROVAL
+    assert waiting.preflight is not None
+    assert waiting.preflight.summary == "按当前合同重建剧本基线"
+    assert waiting.preflight.affected.extra["resume_mode"] == "baseline_rebuild"
+    assert launches == []
+
+    token = waiting.data["approval_token"]
+    wrong_session = await bus.execute_async(
+        "screenplay.resume",
+        {**args, "approval_token": token},
+        session_id="session-b",
+    )
+    assert wrong_session.status == CommandStatus.REJECTED
+    assert wrong_session.error_code == "approval_invalid"
+    assert "session mismatch" in wrong_session.summary
+    assert launches == []
+
+    approved = await bus.execute_async(
+        "screenplay.resume",
+        {**args, "approval_token": token},
+        session_id="session-a",
+    )
+    assert approved.status == CommandStatus.SUCCEEDED
+    assert approved.data["mode"] == "baseline_rebuild"
+    assert approved.summary == (
+        "已按当前合同启动剧本基线重建；"
+        "仅复用兼容输入，旧工作副本不会继续执行"
+    )
+    assert launches == ["e1"]
+
+    replay = await bus.execute_async(
+        "screenplay.resume",
+        {**args, "approval_token": token},
+        session_id="session-a",
+    )
+    assert replay.status == CommandStatus.REJECTED
+    assert replay.error_code == "approval_invalid"
+    assert replay.summary == "approval_token already used"
+    assert launches == ["e1"]
 
 
 @pytest.mark.asyncio

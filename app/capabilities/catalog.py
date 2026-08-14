@@ -693,7 +693,7 @@ def _register_commands(registry) -> None:
             description="恢复未完成的首版场次分片，或从完整 working Artifact 继续校验与原子发布",
             input_model=I.ScreenplayResumeInput,
             risk=RiskLevel.R2_MATERIAL,
-            confirmation=ConfirmationPolicy.WHEN_IMPACT,
+            confirmation=ConfirmationPolicy.ALWAYS,
             idempotency=IdempotencyPolicy.RECOMMENDED,
             scopes={"manju:generation-text"},
             side_effect="resumes_working_revision_finalization",

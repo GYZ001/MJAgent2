@@ -1283,15 +1283,21 @@ export const useEpisode = (
 
 type ScreenplayLightStatus = Partial<Episode> & { id: string; active: boolean };
 
+export function screenplayStatusPollInterval(
+  value: ScreenplayLightStatus | null,
+): number {
+  return value?.active ? 2000 : 15000;
+}
+
 /**
- * 剧本台初始/终态拉详情，运行中只轮询轻量快照。
+ * 剧本台初始/终态拉详情，运行中高频、终态低频轮询轻量快照。
  * 1646 集项目不再每 2s 重复传输正文和全部台词。
  */
 export function useScriptEpisode(episodeId: string) {
   const detail = useEpisode(episodeId, "script", 0);
   const status = usePoll<ScreenplayLightStatus>(
     () => api.get(`/episodes/${episodeId}/screenplay/status`),
-    (value) => (value?.active ? 2000 : 0),
+    screenplayStatusPollInterval,
     [episodeId],
   );
   const lastTerminalRef = useRef("");
