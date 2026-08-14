@@ -166,7 +166,7 @@ SYSTEM_PREFIX = (
 
 SCREENPLAY_BASELINE_PROMPT_VERSION = "screenplay-compact-ir-5.5.1"
 SCREENPLAY_BLUEPRINT_PROMPT_VERSION = BLUEPRINT_PROMPT_VERSION
-BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION = "blueprint-semantic-review.v3"
+BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION = "blueprint-semantic-review.v4"
 # IR shape drift is normalized locally. A second AgentLoop iteration would
 # resend the entire chapter and candidate for a few field-level corrections,
 # erasing the latency/token savings of the compact contract.
@@ -4397,6 +4397,303 @@ async def _repair_narrative_blueprint(
     return blueprint
 
 
+def _blueprint_exact_ownership_claims(
+    blueprint: NarrativeBlueprint,
+    target_unit_keys: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Project only the ownership fields protected by exact-unit repair."""
+    targets = set(target_unit_keys)
+    return {
+        unit_key: {
+            "single": [
+                {
+                    "node_key": node.key,
+                    "identity_key": evidence.identity_key,
+                }
+                for node in blueprint.nodes
+                for evidence in node.participant_evidence
+                if (
+                    evidence.usage == "state_subject"
+                    and unit_key in evidence.source_unit_keys
+                )
+            ],
+            "joint": [
+                {
+                    "node_key": node.key,
+                    "identity_keys": list(assignment.identity_keys),
+                }
+                for node in blueprint.nodes
+                for assignment in node.state_subject_assignments
+                if assignment.source_unit_key == unit_key
+            ],
+            "environment_node_keys": [
+                node.key
+                for node in blueprint.nodes
+                if unit_key in node.environment_source_unit_keys
+            ],
+            "adjudicated_node_keys": [
+                node.key
+                for node in blueprint.nodes
+                if unit_key in node.state_subject_adjudicated_unit_keys
+            ],
+        }
+        for unit_key in target_unit_keys
+        if unit_key in targets
+    }
+
+
+async def _repair_reviewed_blueprint_state_subject_ownership(
+    blueprint: NarrativeBlueprint,
+    *,
+    issues: list[Any],
+    episode: dict[str, Any],
+    source_text: str,
+    generation_budget: _BlueprintGenerationBudget | None = None,
+) -> tuple[NarrativeBlueprint, str]:
+    """Adjudicate consensus environment findings through one exact-only call."""
+    from app.evidence import repository as evidence_repository
+    from app.harness.types import EvidenceArtifact
+    from app.observability.tracing import current_trace
+
+    target_unit_keys = list(dict.fromkeys(
+        unit_key
+        for issue in issues
+        for unit_key in issue.source_unit_keys
+    ))
+    if not target_unit_keys:
+        raise ValueError("environment ownership consensus 缺少 exact unit keys")
+
+    patch_schema = blueprint_state_subject_ownership_patch_schema(
+        blueprint,
+        target_unit_keys,
+        source_text,
+    )
+    facts = source_facts(source_text)
+    facts_by_source: defaultdict[str, list[Any]] = defaultdict(list)
+    for fact in facts:
+        facts_by_source[fact.source_segment_id].append(fact)
+    facts_by_key = {fact.source_unit_key: fact for fact in facts}
+    nodes_by_source = {
+        source_id: node
+        for node in blueprint.nodes
+        for source_id in node.source_segment_ids
+    }
+    source_context: dict[str, Any] = {}
+    allowed_identities: dict[str, list[str]] = {}
+    node_context: dict[str, Any] = {}
+    for unit_key in target_unit_keys:
+        fact = facts_by_key[unit_key]
+        source_group = facts_by_source[fact.source_segment_id]
+        fact_index = next(
+            index
+            for index, candidate in enumerate(source_group)
+            if candidate.source_unit_key == unit_key
+        )
+        owner = nodes_by_source[fact.source_segment_id]
+        source_context[unit_key] = {
+            "source_fact": fact.model_dump(mode="json"),
+            "adjacent_source_units": [
+                candidate.model_dump(mode="json")
+                for candidate in source_group[
+                    max(0, fact_index - 1):fact_index
+                ] + source_group[fact_index + 1:fact_index + 2]
+            ],
+        }
+        allowed_identities[unit_key] = list(owner.participants)
+        node_context[owner.key] = owner.model_dump(mode="json")
+
+    compact = lambda value: json.dumps(  # noqa: E731
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    repair_prompt = (
+        "仅输出 exact-unit state-subject ownership patch JSON，不得输出或改写"
+        "完整 Blueprint。repairs 必须恰好覆盖 schema 要求的全部 source unit key。"
+        "对每个 target 只依据 source_fact、相邻 source units 与 owning node 的完整"
+        "语义，独立选择 single、joint 或 environment；不得按文本关键词、姓名、"
+        "内容类别或固定列表判断。single 必须是唯一人物主体，joint 只用于语义上"
+        "不可拆的共同主体，environment 只用于确实没有人物状态主体的环境变化。"
+        "identity_keys 只能取对应 allowed_identities。除这些 exact target 的"
+        "single/joint/environment ownership 外不得修改任何字段。本调用不重试。\n"
+        f"base_candidate_hash={patch_schema['properties']['base_candidate_hash']['const']}\n"
+        f"review_consensus={compact([issue.model_dump(mode='json') for issue in issues])}\n"
+        f"target_source_context={compact(source_context)}\n"
+        f"current_ownership={compact(_blueprint_exact_ownership_claims(blueprint, target_unit_keys))}\n"
+        f"allowed_identities={compact(allowed_identities)}\n"
+        f"owning_nodes={compact(node_context)}\n"
+        f"schema={compact(patch_schema)}"
+    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PREFIX},
+        {"role": "user", "content": repair_prompt},
+    ]
+    semantic_input_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "blueprint_hash": _narrative_blueprint_content_hash(blueprint),
+                "target_unit_keys": target_unit_keys,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    requested_max_tokens = 8192
+    operation_id, effective_max_tokens = _blueprint_structured_operation_id(
+        operation_kind="review_ownership_patch",
+        episode_id=str(episode.get("id") or ""),
+        semantic_input_hash=semantic_input_hash,
+        ordinal="exact",
+        messages=messages,
+        output_schema=patch_schema,
+        requested_max_tokens=requested_max_tokens,
+        temperature=0.1,
+    )
+
+    def validate_patch(
+        patch: BlueprintStateSubjectOwnershipPatch,
+    ) -> list[str]:
+        try:
+            apply_blueprint_state_subject_ownership_patch(
+                blueprint,
+                patch,
+                target_unit_keys=target_unit_keys,
+                source_text=source_text,
+            )
+        except (TypeError, ValueError) as exc:
+            return [str(exc)]
+        return []
+
+    reservation_id: int | None = None
+    remaining_seconds: float | None = None
+    legacy_retry_call_id: int | None = None
+    if generation_budget is not None:
+        legacy_retry_call_id = generation_budget.explicit_retry_call_id(
+            "screenplay_blueprint_patch"
+        )
+        reservation_id = generation_budget.claim(
+            max_tokens=effective_max_tokens,
+            requested_max_tokens=requested_max_tokens,
+            operation_id=operation_id,
+        )
+        remaining_seconds = (
+            BLUEPRINT_GENERATION_MAX_WALL_SECONDS
+            - (time.monotonic() - generation_budget.started_at)
+        )
+
+    patch_call = model_gateway.chat_structured(
+        messages,
+        model_type=BlueprintStateSubjectOwnershipPatch,
+        validate=validate_patch,
+        operation_id=operation_id,
+        temperature=0.1,
+        max_tokens=requested_max_tokens,
+        format_retry_limit=0,
+        semantic_retry_limit=0,
+        call_meta={
+            "stage": "剧本蓝图精确主体归属裁决",
+            "stage_key": "screenplay_blueprint_patch",
+            "call_role": "stage_repair",
+            "call_role_label": "蓝图精确主体归属裁决",
+            "supersedes_provider_call_id": legacy_retry_call_id,
+            "episode_id": str(episode.get("id") or ""),
+            "production_grant_id": (
+                generation_budget.retry_grant_id
+                if generation_budget is not None else ""
+            ),
+            "contract_version": BLUEPRINT_VERSION,
+            "expected_json": True,
+            "repair_mode": "exact_state_subject_ownership",
+            "reuse_successful_operation": True,
+            "require_cached_successful_operation": bool(
+                generation_budget is not None
+                and operation_id
+                in generation_budget._durable_successful_operations
+            ),
+            "disable_reasoning_fallback": True,
+            "disable_provider_retries": True,
+            "disable_provider_candidate_fallback": True,
+        },
+        repair_context=compact({
+            "target_source_unit_keys": target_unit_keys,
+            "allowed_identities": allowed_identities,
+        }),
+        output_schema=patch_schema,
+        usage_callback=(
+            None
+            if reservation_id is None
+            else lambda usage_event: generation_budget.record_usage(
+                reservation_id,
+                usage_event,
+            )
+        ),
+    )
+    try:
+        patch = (
+            await patch_call
+            if remaining_seconds is None
+            else await asyncio.wait_for(
+                patch_call,
+                timeout=max(0.001, remaining_seconds),
+            )
+        )
+    except hiagent.ProviderError as exc:
+        if reservation_id is not None:
+            generation_budget.settle(
+                reservation_id,
+                unreported_outcome=(
+                    "not_sent"
+                    if exc.delivery_state == "not_sent" and exc.replay_safe
+                    else "unknown"
+                ),
+            )
+        raise
+    except BaseException:
+        if reservation_id is not None:
+            generation_budget.settle(reservation_id)
+        raise
+    else:
+        if reservation_id is not None:
+            generation_budget.settle(reservation_id)
+
+    repaired = apply_blueprint_state_subject_ownership_patch(
+        blueprint,
+        patch,
+        target_unit_keys=target_unit_keys,
+        source_text=source_text,
+    )
+    if not isinstance(repaired, NarrativeBlueprint):
+        repaired = NarrativeBlueprint.model_validate(
+            repaired.model_dump(mode="json")
+        )
+    trace = current_trace()
+    artifact = evidence_repository.create_artifact(
+        EvidenceArtifact(
+            type="screenplay_narrative_blueprint_ownership_patch",
+            scope_type="episode",
+            scope_id=str(episode.get("id") or ""),
+            status="validated",
+            trust_level="T1",
+            content={
+                "target_source_unit_keys": target_unit_keys,
+                "patch": patch.model_dump(mode="json"),
+            },
+            contract_version=BLUEPRINT_VERSION,
+            prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
+            model_snapshot={
+                "review_policy_version": (
+                    BLUEPRINT_SEMANTIC_REVIEW_POLICY_VERSION
+                ),
+                "authority_fingerprint": (
+                    blueprint_authority_validator_fingerprint()
+                ),
+            },
+        ),
+        step_run_id=trace.step_run_id,
+    )
+    return repaired, str(artifact["id"])
+
+
 async def _semantic_review_narrative_blueprint(
     blueprint: NarrativeBlueprint,
     *,
@@ -4553,6 +4850,7 @@ async def _semantic_review_narrative_blueprint(
                 or (node.decision is not None and node.decision.impact == "major")
                 or bool(node.released_constraints_for)
                 or bool(node.state_requirements)
+                or bool(node.environment_source_unit_keys)
                 or node.dramatic_load >= 3
             ):
                 risky.add(index)
@@ -4633,18 +4931,27 @@ async def _semantic_review_narrative_blueprint(
             if node.key in set(projected_node_keys)
             for source_id in node.source_segment_ids
         ))
+        projected_source_facts = [
+            fact
+            for fact in source_facts(source_text)
+            if fact.source_segment_id in set(projected_source_ids)
+        ]
+        projected_source_unit_keys = [
+            fact.source_unit_key for fact in projected_source_facts
+        ]
         source_reference_contract = {
             "contract_version": "blueprint-semantic-source-reference.v1",
             "canonical_source_segment_ids": projected_source_ids,
+            "canonical_source_unit_keys": projected_source_unit_keys,
             "structured_source_units": [
                 fact.model_dump(mode="json")
-                for fact in source_facts(source_text)
-                if fact.source_segment_id in set(projected_source_ids)
+                for fact in projected_source_facts
             ],
         }
         review_schema = blueprint_semantic_review_schema(
             projected_node_keys,
             projected_source_ids,
+            projected_source_unit_keys,
         )
         prompt = (
             "你是漫剧叙事蓝图的独立语义审稿人。只找会导致观众理解错误、"
@@ -4681,6 +4988,13 @@ async def _semantic_review_narrative_blueprint(
             "environment_source_unit_keys 中显式标记为纯环境。visible、"
             "scene roster、content_owner 不是主体证据；缺失、多主体或"
             "人物主体与环境标记冲突必须作为 must_fix 报告。"
+            "若且仅若当前 environment_source_unit_keys 中的 action unit 在本轮"
+            "完整语义中实际是人物的思考、反应、发问或动作，必须只输出"
+            " code=state_subject_environment_misclassified；每条 issue 恰好引用"
+            "一个 owning node，并在 source_unit_keys 中精确列出该 issue 涉及的"
+            "全部 canonical exact units，在 source_segment_ids 中列出这些 units"
+            "精确对应的 SRC。不得为真正的环境变化输出该 code，不得用文本关键词、"
+            "姓名或内容列表判断。"
             "paratext/audit_only的quoted/action unit不适用delivery或state-subject要求，"
             "其所有剧情合同字段必须为空。\n"
             "连续剧可继承前序集已经建立的人物和关系；原文在当前节点明确揭示的"
@@ -4789,16 +5103,8 @@ async def _semantic_review_narrative_blueprint(
                 operation_id=operation_id,
                 temperature=0.1,
                 max_tokens=8192,
-                format_retry_limit=(
-                    0 if generation_budget is not None else int(
-                        get_setting("screenplay_format_retry_limit") or 1
-                    )
-                ),
-                semantic_retry_limit=(
-                    0 if generation_budget is not None else int(
-                        get_setting("screenplay_semantic_retry_limit") or 1
-                    )
-                ),
+                format_retry_limit=0,
+                semantic_retry_limit=0,
                 call_meta={
                     "stage": "剧本蓝图语义审稿",
                     "stage_key": "screenplay_blueprint_review",
@@ -4987,6 +5293,7 @@ async def _semantic_review_narrative_blueprint(
                 (
                     issue.code,
                     tuple(sorted(issue.node_keys)),
+                    tuple(sorted(issue.source_unit_keys)),
                 ): issue
                 for issue in review.issues
                 if issue.must_fix
@@ -5001,8 +5308,14 @@ async def _semantic_review_narrative_blueprint(
             sum(len(issue_map) for issue_map in issue_maps)
             - 2 * len(consensus_keys)
         )
+        reviews_are_clean = not issue_maps[0] and not issue_maps[1]
         needs_full_fallback = bool(
             targeted_review
+            and not consensus_keys
+            and non_consensus_issue_count
+        )
+        full_review_has_one_sided_residual = bool(
+            not targeted_review
             and not consensus_keys
             and non_consensus_issue_count
         )
@@ -5020,8 +5333,10 @@ async def _semantic_review_narrative_blueprint(
                         {
                             "code": code,
                             "node_keys": list(node_keys),
+                            "source_unit_keys": list(source_unit_keys),
                         }
-                        for code, node_keys in sorted(consensus_keys)
+                        for code, node_keys, source_unit_keys
+                        in sorted(consensus_keys)
                     ],
                     "non_consensus_issue_count": non_consensus_issue_count,
                     "dropped_unsupported_voice_issue_count": sum(
@@ -5031,6 +5346,8 @@ async def _semantic_review_narrative_blueprint(
                     "review_outcome": (
                         "full_fallback_required"
                         if needs_full_fallback else
+                        "one_sided_residual"
+                        if full_review_has_one_sided_residual else
                         "consensus_issues"
                         if consensus_keys else "clean"
                     ),
@@ -5055,13 +5372,25 @@ async def _semantic_review_narrative_blueprint(
             # Conflicting targeted opinions are the only reason to pay for a
             # full Blueprint review.  The next bounded round switches inputs;
             # no patch is attempted from non-consensus findings.
+            if review_round >= 4:
+                raise ContentGenerationError(
+                    "蓝图定向语义复审仍有单侧必须修复问题，已按非 clean 停止"
+                )
             targeted_review = False
             continue
-        if not consensus_issues:
+        if reviews_are_clean:
             persist_reviewed_authority(
                 parent_artifact_ids=[str(consensus_artifact["id"])],
             )
             return blueprint
+        if full_review_has_one_sided_residual:
+            raise ContentGenerationError(
+                "蓝图完整双审仍有单侧必须修复问题，已按非 clean 停止"
+            )
+        if not consensus_issues:
+            raise ContentGenerationError(
+                "蓝图双审存在未解决问题，但没有可安全修复的共识"
+            )
         if review_round >= 4:
             raise ContentGenerationError(
                 "蓝图语义共识复审仍有必须修复问题："
@@ -5073,18 +5402,66 @@ async def _semantic_review_narrative_blueprint(
             (
                 f"[BLUEPRINT_SEMANTIC_{issue.code.upper()}] "
                 f"{'、'.join(issue.node_keys)} "
-                f"{'、'.join(issue.source_segment_ids)}："
+                f"{'、'.join(issue.source_segment_ids)} "
+                f"{'、'.join(issue.source_unit_keys)}："
                 f"{issue.message}；必须：{issue.required_resolution}"
             )
             for issue in consensus_issues
         ]
-        blueprint = await _repair_narrative_blueprint(
-            blueprint,
-            episode=episode,
-            source_text=source_text,
-            additional_errors=semantic_errors,
-            generation_budget=generation_budget,
-        )
+        ownership_issues = [
+            issue
+            for issue in consensus_issues
+            if issue.code == "state_subject_environment_misclassified"
+        ]
+        mixed_issues = [
+            issue
+            for issue in consensus_issues
+            if issue.code != "state_subject_environment_misclassified"
+        ]
+        ownership_artifact_ids: list[str] = []
+        if mixed_issues:
+            protected_unit_keys = list(dict.fromkeys(
+                unit_key
+                for issue in ownership_issues
+                for unit_key in issue.source_unit_keys
+            ))
+            protected_claims = _blueprint_exact_ownership_claims(
+                blueprint,
+                protected_unit_keys,
+            )
+            blueprint = await _repair_narrative_blueprint(
+                blueprint,
+                episode=episode,
+                source_text=source_text,
+                additional_errors=[
+                    error
+                    for error, issue in zip(semantic_errors, consensus_issues)
+                    if issue.code
+                    != "state_subject_environment_misclassified"
+                ],
+                generation_budget=generation_budget,
+            )
+            if protected_claims != _blueprint_exact_ownership_claims(
+                blueprint,
+                protected_unit_keys,
+            ):
+                raise ContentGenerationError(
+                    "蓝图普通节点修复越权改写 exact-unit ownership"
+                )
+        if ownership_issues:
+            blueprint, ownership_artifact_id = (
+                await _repair_reviewed_blueprint_state_subject_ownership(
+                    blueprint,
+                    issues=ownership_issues,
+                    episode=episode,
+                    source_text=source_text,
+                    generation_budget=generation_budget,
+                )
+            )
+            ownership_artifact_ids.append(ownership_artifact_id)
+            targeted_review = False
+        elif non_consensus_issue_count:
+            targeted_review = False
         evidence_repository.create_artifact(
             EvidenceArtifact(
                 type="screenplay_narrative_blueprint_review_repair_link",
@@ -5095,8 +5472,17 @@ async def _semantic_review_narrative_blueprint(
                 content={
                     "review_artifact_ids": review_artifact_ids,
                     "repaired_issue_count": len(consensus_issues),
+                    "ownership_repaired_issue_count": len(ownership_issues),
+                    "mixed_repaired_issue_count": len(mixed_issues),
+                    "ownership_source_unit_keys": list(dict.fromkeys(
+                        unit_key
+                        for issue in ownership_issues
+                        for unit_key in issue.source_unit_keys
+                    )),
                 },
-                parent_artifact_ids=review_artifact_ids,
+                parent_artifact_ids=(
+                    review_artifact_ids + ownership_artifact_ids
+                ),
                 contract_version=BLUEPRINT_VERSION,
                 prompt_version=SCREENPLAY_BLUEPRINT_PROMPT_VERSION,
             ),
