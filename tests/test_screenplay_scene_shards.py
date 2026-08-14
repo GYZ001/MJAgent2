@@ -412,6 +412,336 @@ def test_scene_shard_semantic_review_rejects_duplicate_finding_keys() -> None:
         })
 
 
+def test_scene_shard_semantic_repair_budget_reaches_13121_token_root() -> None:
+    seed = ScreenplaySceneShardCreativeIR(slots={
+        "SS003:unit:001": ScreenplaySceneShardCreativeUnit(text="根"),
+    })
+    target_serialized_chars = 13120 * 3 // 2 + 1
+    fixed_chars = len(seed.model_dump_json()) - 1
+    draft = ScreenplaySceneShardCreativeIR(slots={
+        "SS003:unit:001": ScreenplaySceneShardCreativeUnit(
+            text="根" * (target_serialized_chars - fixed_chars),
+        ),
+    })
+    draft_json = draft.model_dump_json()
+    root_tokens = math.ceil(len(draft_json) / 1.5)
+
+    required = (
+        scene_shards_module
+        .screenplay_scene_semantic_repair_required_tokens(
+            draft_json=draft_json,
+            repair_prompt="",
+        )
+    )
+
+    assert len(draft_json) == target_serialized_chars
+    assert root_tokens == 13121
+    assert required == math.ceil(root_tokens * 1.2)
+    assert required > 12288
+
+
+def test_scene_shard_semantic_repair_allows_exact_ceiling(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    flagged_key = next(iter(draft.slots))
+    finding = ScreenplaySceneShardSemanticFinding(
+        unit_key=flagged_key,
+        code="source_semantic_drift",
+        violation_kind="source_contradiction",
+        message="来源主体漂移",
+    )
+    frozen_slots, identity_labels = (
+        scene_shards_module._scene_shard_semantic_authority_payload(
+            scene_input_contracts=contracts,
+            identity_registry=[],
+        )
+    )
+    draft_json = draft.model_dump_json()
+    repair_prompt = scene_shards_module._scene_shard_semantic_repair_prompt(
+        findings_payload=[finding.model_dump(mode="json")],
+        frozen_slots=frozen_slots,
+        identity_labels=identity_labels,
+        draft_json=draft_json,
+        creative_schema=ScreenplaySceneShardCreativeIR.model_json_schema(),
+    )
+    generous_limits = {
+        "context_window_tokens": 256 * 1024,
+        "max_output_tokens": 64 * 1024,
+        "token_limits_source": "configured",
+    }
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_provider",
+        lambda _kind: "budget-test-provider",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "budget-test-model",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model_token_limits",
+        lambda *_args: generous_limits,
+    )
+    preview = scene_shards_module._scene_shard_semantic_repair_budget(
+        draft_json=draft_json,
+        repair_prompt=repair_prompt,
+        unit_count=len(draft.slots),
+    )
+    critical_limits = {
+        "context_window_tokens": (
+            int(preview["input"])
+            + scene_shards_module
+            .SCREENPLAY_SCENE_SEMANTIC_REVIEW_CONTEXT_RESERVE_TOKENS
+            + int(preview["required"])
+        ),
+        "max_output_tokens": int(preview["required"]),
+        "token_limits_source": "configured",
+    }
+    budget_calls = 0
+
+    def staged_limits(*_args):
+        nonlocal budget_calls
+        budget_calls += 1
+        return critical_limits if budget_calls == 2 else generous_limits
+
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model_token_limits",
+        staged_limits,
+    )
+    repair_calls: list[dict] = []
+
+    async def fake_structured(*_args, **kwargs):
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            return ScreenplaySceneShardSemanticReview(
+                findings=(
+                    [finding]
+                    if kwargs["call_meta"]["substage"] == "initial"
+                    else []
+                ),
+            )
+        repair_calls.append(kwargs)
+        return draft
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    repaired, _audit = asyncio.run(_REAL_SEMANTIC_REVIEW(
+        draft=draft,
+        scene_input_contracts=contracts,
+        identity_registry=[],
+        operation_id="scene-semantic-repair-critical-ceiling",
+        shard_id=plan.shard_id,
+        validate_draft=lambda _candidate: [],
+    ))
+
+    assert repaired == draft
+    assert len(repair_calls) == 1
+    repair_call = repair_calls[0]
+    meta = repair_call["call_meta"]
+    assert meta["required"] == meta["ceiling"] == preview["required"]
+    assert meta["input"] == preview["input"]
+    assert meta["unit_count"] == len(draft.slots)
+    assert repair_call["max_tokens"] == meta["required"]
+
+
+def test_production_ss003_79_slot_semantic_repair_uses_actual_root_budget(
+    monkeypatch,
+) -> None:
+    slots = {
+        f"SS003:unit:{index:03d}": ScreenplaySceneShardCreativeUnit(
+            text=(
+                f"第{index}个来源动作按既定主体、空间和先后关系完整展开，"
+                + "不省略动作承接与可见结果。" * 5
+            ),
+            performance=(
+                "表演保持身体重心、视线、手部动作和对手反应连续。" * 4
+            ),
+            resulting_state=(
+                "本单元结束状态完整交给下一来源单元继续承接。" * 4
+            ),
+            function="交付来源事件并推进场内因果",
+        )
+        for index in range(1, 80)
+    }
+    draft = ScreenplaySceneShardCreativeIR(slots=slots)
+    flagged_key = next(iter(slots))
+    finding = ScreenplaySceneShardSemanticFinding(
+        unit_key=flagged_key,
+        code="source_semantic_drift",
+        violation_kind="source_contradiction",
+        message="SS003 生产语义漂移",
+    )
+    draft_json = draft.model_dump_json()
+    frozen_slots = {
+        unit_key: {
+            "kind": "action",
+            "source_unit_key": f"SRC{index:04d}:unit:001",
+            "source_text": (
+                f"SS003 第 {index} 个来源单元的原始动作、主体与结果。"
+            ),
+            "source_fact": {
+                "projection": "action",
+                "actor_mentions": ["孟浩"],
+                "action_claims": [f"完成第 {index} 个来源动作"],
+            },
+            "state_subject_key": "person_孟浩",
+            "state_subject_keys": ["person_孟浩"],
+            "environment_only": False,
+            "actor_keys": ["person_孟浩"],
+            "target_keys": [],
+            "speaker_key": None,
+            "onscreen_entity_keys": ["person_孟浩"],
+        }
+        for index, unit_key in enumerate(slots, start=1)
+    }
+    repair_prompt = scene_shards_module._scene_shard_semantic_repair_prompt(
+        findings_payload=[finding.model_dump(mode="json")],
+        frozen_slots=frozen_slots,
+        identity_labels={
+            "person_孟浩": {
+                "canonical_name": "孟浩",
+                "source_labels": ["孟浩"],
+                "authority_id": "bible:孟浩",
+            },
+        },
+        draft_json=draft_json,
+        creative_schema=ScreenplaySceneShardCreativeIR.model_json_schema(),
+    )
+    limits = {
+        "context_window_tokens": 256 * 1024,
+        "max_output_tokens": 64 * 1024,
+        "token_limits_source": "configured",
+    }
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_provider",
+        lambda _kind: "production-provider",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "production-model",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model_token_limits",
+        lambda *_args: limits,
+    )
+
+    budget = scene_shards_module._scene_shard_semantic_repair_budget(
+        draft_json=draft_json,
+        repair_prompt=repair_prompt,
+        unit_count=len(draft.slots),
+    )
+    root_tokens = math.ceil(len(draft_json) / 1.5)
+    root_with_reserve = math.ceil(root_tokens * 1.2)
+
+    assert budget["unit_count"] == 79
+    assert budget["required"] == max(
+        4096,
+        root_with_reserve,
+        len(repair_prompt) // 2,
+    )
+    assert budget["required"] > 12288
+    assert budget["ceiling"] >= budget["required"]
+    assert budget["input"] > 0
+
+
+def test_scene_shard_semantic_repair_insufficient_ceiling_is_zero_call(
+    monkeypatch,
+) -> None:
+    blueprint = _blueprint(split_domain=False)
+    plan = build_screenplay_scene_shard_plans(
+        blueprint,
+        source_text=SOURCE,
+        identity_registry_hash="identity-hash",
+    )[0]
+    contracts = _contracts([plan], blueprint)[plan.shard_id]
+    draft = _creative_shard(plan, blueprint, contracts)
+    flagged_key = next(iter(draft.slots))
+    finding = ScreenplaySceneShardSemanticFinding(
+        unit_key=flagged_key,
+        code="source_semantic_drift",
+        violation_kind="source_contradiction",
+        message="来源主体漂移",
+    )
+    limits_calls = 0
+
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_provider",
+        lambda _kind: "budget-test-provider",
+    )
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model",
+        lambda _kind, _provider=None: "budget-test-model",
+    )
+
+    def staged_limits(*_args):
+        nonlocal limits_calls
+        limits_calls += 1
+        if limits_calls == 1:
+            return {
+                "context_window_tokens": 256 * 1024,
+                "max_output_tokens": 64 * 1024,
+                "token_limits_source": "configured",
+            }
+        return {
+            "context_window_tokens": 1024,
+            "max_output_tokens": 64 * 1024,
+            "token_limits_source": "configured",
+        }
+
+    monkeypatch.setattr(
+        scene_shards_module.hiagent,
+        "active_model_token_limits",
+        staged_limits,
+    )
+    review_calls = 0
+    repair_calls = 0
+
+    async def fake_structured(*_args, **kwargs):
+        nonlocal review_calls, repair_calls
+        if kwargs["model_type"] is ScreenplaySceneShardSemanticReview:
+            review_calls += 1
+            return ScreenplaySceneShardSemanticReview(findings=[finding])
+        repair_calls += 1
+        raise AssertionError("repair budget gate must run before provider")
+
+    monkeypatch.setattr(
+        "app.screenplay_scene_shards.model_gateway.chat_structured",
+        fake_structured,
+    )
+    with pytest.raises(
+        ScreenplaySceneShardError,
+        match=r"语义 repair 输出预算不足.*required=\d+，ceiling=0",
+    ):
+        asyncio.run(_REAL_SEMANTIC_REVIEW(
+            draft=draft,
+            scene_input_contracts=contracts,
+            identity_registry=[],
+            operation_id="scene-semantic-repair-budget-block",
+            shard_id=plan.shard_id,
+            validate_draft=lambda _candidate: [],
+        ))
+
+    assert review_calls == 2
+    assert repair_calls == 0
+
+
 def test_scene_shard_semantic_consensus_repairs_only_flagged_creative_slot(
     monkeypatch,
 ) -> None:

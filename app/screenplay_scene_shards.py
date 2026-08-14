@@ -73,6 +73,8 @@ SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT = (
 )
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS = 2048
 SCREENPLAY_SCENE_SEMANTIC_REVIEW_CONTEXT_RESERVE_TOKENS = 1024
+SCREENPLAY_SCENE_SEMANTIC_REPAIR_MIN_OUTPUT_TOKENS = 4096
+SCREENPLAY_SCENE_SEMANTIC_REPAIR_ROOT_RESERVE_PERCENT = 20
 SCREENPLAY_SCENE_SEMANTIC_FINDING_MESSAGE_MAX_CHARS = 160
 SCREENPLAY_SCENE_SEMANTIC_FINDING_CODES = (
     "state_subject_semantic_drift",
@@ -473,6 +475,24 @@ def screenplay_scene_semantic_review_required_tokens(
     return max(
         SCREENPLAY_SCENE_SEMANTIC_REVIEW_MIN_OUTPUT_TOKENS,
         _screenplay_scene_semantic_token_estimate(len(payload)),
+    )
+
+
+def screenplay_scene_semantic_repair_required_tokens(
+    *,
+    draft_json: str,
+    repair_prompt: str,
+) -> int:
+    root_tokens = math.ceil(len(draft_json) / 1.5)
+    root_with_reserve = math.ceil(
+        root_tokens
+        * (100 + SCREENPLAY_SCENE_SEMANTIC_REPAIR_ROOT_RESERVE_PERCENT)
+        / 100
+    )
+    return max(
+        SCREENPLAY_SCENE_SEMANTIC_REPAIR_MIN_OUTPUT_TOKENS,
+        root_with_reserve,
+        len(repair_prompt) // 2,
     )
 
 
@@ -3618,6 +3638,92 @@ def _scene_shard_semantic_review_budget(
     }
 
 
+def _scene_shard_semantic_repair_prompt(
+    *,
+    findings_payload: list[dict[str, Any]],
+    frozen_slots: dict[str, dict[str, Any]],
+    identity_labels: dict[str, dict[str, Any]],
+    draft_json: str,
+    creative_schema: dict[str, Any],
+) -> str:
+    return (
+        "只修复下列 consensus finding 对应 slot 的 creative fields：text、"
+        "performance、resulting_state、function、required_text、prop_text、"
+        "on_screen_text。必须忠于 source_text 与 exact state_subject/actor/speaker；"
+        "不得增加删除 slot，不得输出或改变任何结构、身份、timeline、source ownership"
+        "或 audit 字段。返回完整 creative root。\nfindings：\n"
+        + json.dumps(
+            findings_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n冻结 slots：\n"
+        + json.dumps(frozen_slots, ensure_ascii=False, separators=(",", ":"))
+        + "\n冻结身份最小映射：\n"
+        + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
+        + "\n当前 creative：\n"
+        + draft_json
+        + "\n完整 creative 输出 JSON Schema：\n"
+        + json.dumps(
+            creative_schema,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _scene_shard_semantic_repair_budget(
+    *,
+    draft_json: str,
+    repair_prompt: str,
+    unit_count: int,
+) -> dict[str, int | str]:
+    provider = hiagent.active_provider("text")
+    model = hiagent.active_model("text", provider)
+    limits = hiagent.active_model_token_limits(
+        provider,
+        model,
+        get_setting,
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
+        },
+        {"role": "user", "content": repair_prompt},
+    ]
+    input_chars = len(json.dumps(
+        messages,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ))
+    input_estimate = _screenplay_scene_semantic_token_estimate(input_chars)
+    required = screenplay_scene_semantic_repair_required_tokens(
+        draft_json=draft_json,
+        repair_prompt=repair_prompt,
+    )
+    context_ceiling = max(
+        0,
+        int(limits["context_window_tokens"])
+        - input_estimate
+        - SCREENPLAY_SCENE_SEMANTIC_REVIEW_CONTEXT_RESERVE_TOKENS,
+    )
+    ceiling = min(
+        int(limits["max_output_tokens"]),
+        context_ceiling,
+    )
+    return {
+        "provider": provider,
+        "model": model,
+        "unit_count": unit_count,
+        "input": input_estimate,
+        "required": required,
+        "ceiling": ceiling,
+        "context_window": int(limits["context_window_tokens"]),
+        "max_output": int(limits["max_output_tokens"]),
+    }
+
+
 async def _semantic_review_scene_shard_draft(
     *,
     draft: ScreenplaySceneShardCreativeIR,
@@ -3803,6 +3909,7 @@ async def _semantic_review_scene_shard_draft(
         item.model_dump(mode="json")
         for item in findings
     ]
+    draft_json = draft.model_dump_json()
     original_draft_payload = draft.model_dump(mode="json")
     repair_context = json.dumps(
         {
@@ -3815,38 +3922,40 @@ async def _semantic_review_scene_shard_draft(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    repair_prompt = (
-        "只修复下列 consensus finding 对应 slot 的 creative fields：text、"
-        "performance、resulting_state、function、required_text、prop_text、"
-        "on_screen_text。必须忠于 source_text 与 exact state_subject/actor/speaker；"
-        "不得增加删除 slot，不得输出或改变任何结构、身份、timeline、source ownership"
-        "或 audit 字段。返回完整 creative root。\nfindings：\n"
-        + json.dumps(
-            findings_payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        + "\n冻结 slots：\n"
-        + json.dumps(frozen_slots, ensure_ascii=False, separators=(",", ":"))
-        + "\n冻结身份最小映射：\n"
-        + json.dumps(identity_labels, ensure_ascii=False, separators=(",", ":"))
-        + "\n当前 creative：\n"
-        + draft.model_dump_json()
-        + "\n完整 creative 输出 JSON Schema：\n"
-        + json.dumps(
-            creative_schema,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+    repair_prompt = _scene_shard_semantic_repair_prompt(
+        findings_payload=findings_payload,
+        frozen_slots=frozen_slots,
+        identity_labels=identity_labels,
+        draft_json=draft_json,
+        creative_schema=creative_schema,
     )
+    repair_messages = [
+        {
+            "role": "system",
+            "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
+        },
+        {"role": "user", "content": repair_prompt},
+    ]
+    repair_budget = _scene_shard_semantic_repair_budget(
+        draft_json=draft_json,
+        repair_prompt=repair_prompt,
+        unit_count=len(draft.slots),
+    )
+    if int(repair_budget["required"]) > int(repair_budget["ceiling"]):
+        raise ScreenplaySceneShardError(
+            shard_id,
+            [
+                "语义 repair 输出预算不足，provider 调用已阻断："
+                f"unit_count={repair_budget['unit_count']}，"
+                f"input={repair_budget['input']}，"
+                f"required={repair_budget['required']}，"
+                f"ceiling={repair_budget['ceiling']}，"
+                f"provider={repair_budget['provider']}，"
+                f"model={repair_budget['model']}"
+            ],
+        )
     repaired = await model_gateway.chat_structured(
-        [
-            {
-                "role": "system",
-                "content": SCREENPLAY_SCENE_JSON_ONLY_SYSTEM_PROMPT,
-            },
-            {"role": "user", "content": repair_prompt},
-        ],
+        repair_messages,
         model_type=ScreenplaySceneShardCreativeIR,
         validate=validate_repair,
         operation_id=(
@@ -3854,7 +3963,7 @@ async def _semantic_review_scene_shard_draft(
             f"{SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION}:repair:"
             f"{_hash(draft.model_dump(mode='json'))}"
         ),
-        max_tokens=max(4096, min(12288, len(repair_prompt) // 2)),
+        max_tokens=int(repair_budget["required"]),
         temperature=0.2,
         format_retry_limit=1,
         semantic_retry_limit=1,
@@ -3864,6 +3973,12 @@ async def _semantic_review_scene_shard_draft(
             "substage": "consensus_repair",
             "shard_id": shard_id,
             "contract_version": SCREENPLAY_SCENE_SEMANTIC_REVIEW_VERSION,
+            "provider": repair_budget["provider"],
+            "model": repair_budget["model"],
+            "required": repair_budget["required"],
+            "ceiling": repair_budget["ceiling"],
+            "input": repair_budget["input"],
+            "unit_count": repair_budget["unit_count"],
         },
         repair_context=repair_context,
         output_schema=creative_schema,
