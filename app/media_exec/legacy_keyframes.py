@@ -5,10 +5,6 @@ try:
 except NameError:  # pragma: no cover - used when importing this module directly
     from app.media_exec.common import *
 
-def enqueue_scene(shot_id: str, *, kinds: list[str] | None = None) -> dict:
-    """已下线的旧关键帧入口；保留函数名只为旧调用方得到明确错误。"""
-    raise ValueError("关键帧功能已下线；请从参考图视频入口直接生成本镜视频")
-
 def decommission_legacy_keyframe_jobs() -> int:
     """取消升级前遗留的关键帧任务并清掉镜头的假运行状态。
 

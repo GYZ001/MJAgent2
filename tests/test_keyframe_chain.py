@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from app import api, worker
+from app import api
 
 
 def test_keyframe_http_routes_are_removed() -> None:
@@ -15,11 +15,6 @@ def test_keyframe_http_routes_are_removed() -> None:
     assert "/api/shots/{shot_id}/scene/approve" not in paths
     assert "/api/scenes/{scene_id}" not in paths
     assert "/api/episodes/{episode_id}/scenes-all" not in paths
-
-
-def test_legacy_keyframe_enqueue_is_rejected_with_video_guidance() -> None:
-    with pytest.raises(ValueError, match="参考图视频入口"):
-        worker.enqueue_scene("legacy-shot")
 
 
 def test_legacy_mode_plan_cannot_bypass_episode_planning() -> None:
