@@ -2055,6 +2055,59 @@ def test_non_truncation_provider_error_is_not_split(
     assert calls == 1
 
 
+def test_timeout_with_zero_received_chars_retries_fresh_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def fake_chat(messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise hiagent.ProviderError(
+                "read timeout before any char",
+                retryable=True,
+                failure_kind="request_outcome_unknown",
+                delivery_state="unknown",
+                requires_explicit_retry=True,
+                received_chars=0,
+            )
+        source_ids = _prompt_source_ids(messages[1]["content"])
+        return _shard_response(
+            source_ids=source_ids,
+            shard_index=int(kwargs["call_meta"]["shard_index"]),
+        )
+
+    monkeypatch.setattr(stages, "get_conn", lambda: _NoCacheConnection())
+    monkeypatch.setattr(stages.model_gateway, "chat", fake_chat)
+    monkeypatch.setattr(
+        stages, "validate_narrative_blueprint_shard", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        stages, "validate_narrative_blueprint", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        stages, "derive_blueprint_scene_plans", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr(
+        "app.evidence.repository.create_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.observability.tracing.current_trace",
+        lambda: SimpleNamespace(step_run_id="step-timeout-retry"),
+    )
+
+    result = asyncio.run(stages._generate_sharded_narrative_blueprint(
+        {"id": "ep-timeout-retry", "episode_no": 1},
+        _source(1),
+        {},
+    ))
+
+    assert calls == 2
+    assert len(result.nodes) == 1
+
+
 def test_invalid_single_segment_stops_at_bounded_attempt_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

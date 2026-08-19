@@ -7492,6 +7492,19 @@ async def _generate_sharded_narrative_blueprint(
                     ):
                         split_for_truncation = True
                         break
+                    if (
+                        attempt < BLUEPRINT_SHARD_MAX_ATTEMPTS
+                        and getattr(exc, "received_chars", 0) == 0
+                        and exc.failure_kind
+                        in {"request_outcome_unknown", "stream_interrupted"}
+                    ):
+                        # A read/total timeout before any streamed character is
+                        # most likely a transport stall rather than a completed
+                        # generation.  Give the shard one more fresh attempt;
+                        # the new attempt has a different operation id, so the
+                        # budget does not treat it as replaying the same unknown
+                        # outcome.
+                        continue
                     raise
                 except asyncio.TimeoutError as exc:
                     settlement = generation_budget.settle(reservation_id)

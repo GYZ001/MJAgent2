@@ -323,6 +323,7 @@ class ProviderError(Exception):
                  delivery_state: str = "unknown", replay_safe: bool = False,
                  requires_explicit_retry: bool = False,
                  create_not_accepted: bool = False,
+                 received_chars: int = 0,
                  failure: ProviderFailure | None = None):
         super().__init__(message)
         if failure is None:
@@ -342,6 +343,7 @@ class ProviderError(Exception):
         self.replay_safe = replay_safe
         self.requires_explicit_retry = requires_explicit_retry
         self.create_not_accepted = bool(create_not_accepted)
+        self.received_chars = int(received_chars or 0)
 
 
 def _channel_semaphore(
@@ -1861,6 +1863,7 @@ async def _stream_chat_completion(
                 failure_kind="stream_interrupted",
                 delivery_state="unknown",
                 requires_explicit_retry=True,
+                received_chars=received_chars,
             )
         data = _reconstruct_stream_data(content_parts, reasoning_parts, tool_slots, state)
         finish_provider_call(call_id, "OK", 200, latency, response_json=data)
@@ -1896,6 +1899,7 @@ async def _stream_chat_completion(
                 raw=detail,
                 timeout_phase=phase,
             )
+            err.received_chars = received_chars
         else:
             err = ProviderError(
                 f"流式调用{phase}阶段超时（{latency}ms）；"
@@ -1906,6 +1910,7 @@ async def _stream_chat_completion(
                 failure_kind="request_outcome_unknown",
                 delivery_state="unknown",
                 requires_explicit_retry=True,
+                received_chars=received_chars,
             )
         finish_provider_call(
             call_id,
