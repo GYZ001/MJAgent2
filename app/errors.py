@@ -28,6 +28,13 @@ CATEGORIES: dict[str, dict[str, Any]] = {
                    "hint": "大模型/外部服务调用失败，可稍后重试；若持续失败请把错误码反馈给技术人员。"},
     "generation": {"label": "内容生成", "technical": True,
                    "hint": "内容生成未通过格式或业务校验，可点击重试；若持续失败，请先按错误码检查具体原因，再决定是否调整「修复重试上限」。"},
+    "generation_retry_grant": {
+        "label": "内容生成",
+        "technical": True,
+        "hint": "本集有一次被中断的上游调用结果未确认，蓝图分片在准入阶段被安全拦截。"
+                "普通重试与「修复重试上限」对此无效，需先清理该未确认调用后再重新生成；"
+                "请把错误码反馈给技术人员。",
+    },
     "generation_contract": {
         "label": "生成合同",
         "technical": True,
@@ -122,6 +129,11 @@ def classify(exc: BaseException | None, http_status: int | None = None) -> tuple
         return "generation_contract", "GEN-CONTRACT"
     if name == "StageError" and "JSON 解析失败" in _extract_message(exc):
         return "generation", "JSON"
+    if (
+        name == "StageError"
+        and "BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED" in _extract_message(exc)
+    ):
+        return "generation_retry_grant", "GEN-RETRY-GRANT"
     if name in {
         "StageError",
         "CompileError",

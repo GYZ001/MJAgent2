@@ -7125,14 +7125,24 @@ def _blueprint_generation_budget_for_trace(
     )
     if retry_grant_id and budget.unknown_receipts:
         try:
+            # Authorize on the authority facts frozen atomically at activation,
+            # NOT on whether the grant's original revision is still the head.
+            # ``_spawn_screenplay_activation`` mints this ``user_retry_approval``
+            # grant, consumes it, and freezes ``blueprint_retry_grant_id`` /
+            # ``blueprint_retry_receipts_hash`` into the run snapshot in one
+            # transaction. The baseline task legitimately supersedes that
+            # revision (unstable ``input_fingerprint``), which is orthogonal to
+            # authority. Requiring ``r.status='active'`` here deadlocked every
+            # retry (BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED). Run-scope, the
+            # covered receipt set and the input lineage are each frozen and
+            # re-verified below; revocation/TTL and single-use (``consumed_at``)
+            # stay enforced, so dropping the revision-head join is safe.
             grant_row = get_conn().execute(
                 """SELECT g.issued_by,g.input_artifact_hash
                      FROM production_grants g
-                     JOIN production_revisions r
-                       ON r.id=g.production_revision_id
                     WHERE g.id=? AND g.episode_id=? AND g.kind='screenplay'
-                      AND r.episode_id=g.episode_id AND r.kind='screenplay'
-                      AND r.status='active' AND r.grant_id=g.id
+                      AND g.issued_by='user_retry_approval'
+                      AND g.consumed_at IS NOT NULL
                       AND g.revoked_at IS NULL AND g.expires_at>?""",
                 (retry_grant_id, episode_id, time.time()),
             ).fetchone()

@@ -2852,6 +2852,114 @@ def test_runtime_budget_restores_exact_retry_grant_and_historical_unknown(
     assert revoked.requires_fresh_retry_grant is True
 
 
+def test_runtime_budget_authorizes_retry_after_revision_superseded(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a consumed user_retry_approval grant must still authorize
+    the unknown retry even after the baseline task supersedes the revision it
+    was bound to (production deadlock BLUEPRINT_PROVIDER_RETRY_GRANT_REQUIRED).
+    """
+    from app.production.grant import issue_production_grant
+    from app.production.revision import ensure_production_revision
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "runtime-superseded.db")
+    monkeypatch.setattr(db._local, "conn", None, raising=False)
+    db.init_db()
+    conn = db.get_conn()
+    stamp = db.now()
+    conn.execute(
+        "INSERT INTO projects(id,name,status,created_at) VALUES('p','p','created',?)",
+        (stamp,),
+    )
+    conn.execute(
+        """INSERT INTO episodes(
+               id,project_id,episode_no,title,status,screenplay_status,created_at
+           ) VALUES('e','p',1,'e','planned','pending',?)""",
+        (stamp,),
+    )
+    for run_id, status, config in (
+        ("old", "FAILED", {}),
+        ("fresh", "RUNNING", {
+            "blueprint_budget_lineage_fingerprint": "authority",
+        }),
+    ):
+        conn.execute(
+            """INSERT INTO workflow_runs(
+                   id,workflow_type,scope_type,scope_id,status,input_fingerprint,
+                   config_snapshot_json,started_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                run_id, "screenplay", "episode", "e", status, "authority",
+                json.dumps(config), stamp - 1, stamp,
+            ),
+        )
+    conn.execute(
+        """INSERT INTO provider_calls(
+               ts,kind,model,status,latency_ms,meta,run_id,operation_id,
+               attempt_no,recovery_disposition
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            stamp - 1, "chat", "model", "INTERRUPTED", 300000,
+            json.dumps({
+                "stage_key": "screenplay_blueprint_patch",
+                "requested_max_tokens": 16384,
+                "effective_max_tokens": 8192,
+            }),
+            "old", "stable-op", 1, "REQUIRES_EXPLICIT_RETRY",
+        ),
+    )
+    conn.commit()
+    liability = stages._BlueprintGenerationBudget.from_durable_calls(
+        run_id="fresh", episode_id="e", input_fingerprint="authority",
+    )
+    receipts_hash = stages.blueprint_retry_receipts_hash(
+        liability.unknown_receipts
+    )
+    # Activation mints + consumes the retry grant against the then-active revision.
+    retry_revision = ensure_production_revision(
+        episode_id="e", kind="screenplay", input_fingerprint="authority",
+        resume=False,
+    )
+    grant, _ = issue_production_grant(
+        episode_id="e", project_id="p", production_revision_id=retry_revision.id,
+        kind="screenplay", issued_by="user_retry_approval",
+        input_artifact_hash=receipts_hash,
+    )
+    snapshot = {
+        "blueprint_budget_lineage_fingerprint": "authority",
+        "blueprint_retry_grant_id": grant.grant_id,
+        "blueprint_retry_receipts_hash": receipts_hash,
+    }
+    conn.execute(
+        "UPDATE workflow_runs SET config_snapshot_json=? WHERE id='fresh'",
+        (json.dumps(snapshot),),
+    )
+    conn.execute(
+        "UPDATE production_grants SET consumed_at=? WHERE id=?",
+        (db.now(), grant.grant_id),
+    )
+    conn.commit()
+
+    # The baseline task recomputes an unstable fingerprint and supersedes the
+    # retry grant's revision, binding a fresh plain 'user' grant to the new head.
+    ensure_production_revision(
+        episode_id="e", kind="screenplay", input_fingerprint="drifted",
+        resume=False,
+    )
+    assert conn.execute(
+        "SELECT status FROM production_revisions WHERE id=?",
+        (retry_revision.id,),
+    ).fetchone()["status"] == "superseded"
+
+    budget = stages._blueprint_generation_budget_for_trace(
+        SimpleNamespace(run_id="fresh"), episode_id="e",
+    )
+    assert budget.unknown_output_tokens == 8192
+    # Authority is preserved despite the superseded revision.
+    assert budget.requires_fresh_retry_grant is False
+
+
 @pytest.mark.parametrize("snapshot", ["{bad", "{}"])
 def test_runtime_budget_rejects_missing_or_corrupt_activation_snapshot(
     snapshot: str,
